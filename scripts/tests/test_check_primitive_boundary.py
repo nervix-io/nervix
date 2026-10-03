@@ -869,7 +869,13 @@ class LoomModelTests(CheckTestCase):
                     "    }\n"
                     "}\n"
                 )
-            }
+            },
+            blocking_permissions=BLOCKING_PERMISSION + (
+                '\n[[permission]]\npath = "crates/engine/src/lib.rs"\n'
+                'items = ["thread::spawn"]\nowner = "The engine model."\n'
+                'reason = "A model needs scheduler-visible participants."\n'
+                'bound = "One participant per finite model execution."\n'
+            ),
         )
         self.assertEqual(status, 0, report)
 
@@ -1290,10 +1296,225 @@ class BlockingItemTests(CheckTestCase):
                 )
                 self.assertEqual(status, 1)
                 self.assertIn(
-                    "; a blocking permission declares only `task::block_in_place` or "
-                    "`task::spawn_blocking`",
+                    "; a blocking permission declares only",
                     report,
                 )
+
+
+class ThreadCreationTests(CheckTestCase):
+    """Thread creation needs an exact owner even in tests, models and harnesses."""
+
+    PATH = "crates/engine/src/threads.rs"
+    ITEMS = (
+        "thread::spawn",
+        "thread::Builder",
+        "thread::scope",
+        "thread::spawn_detached",
+        "unmodeled::thread::Builder",
+    )
+
+    def permission(self, path: str, items: tuple[str, ...]) -> str:
+        names = ", ".join(f'"{item}"' for item in items)
+        return (
+            "\n[[permission]]\n"
+            f'path = "{path}"\nitems = [{names}]\n'
+            'owner = "The finite thread fixture."\n'
+            'reason = "The fixture tests participants outside a node executor."\n'
+            'bound = "Two participants joined before the fixture returns."\n'
+        )
+
+    def sources(self, item: str) -> tuple[str, ...]:
+        module, name = item.rsplit("::", 1)
+        prefix = f"nervix_primitives::{module}"
+        forms = (
+            f"fn f() {{ {prefix}::{name}(work); }}\n",
+            f"use {prefix}::{name};\n",
+            f"use {prefix}::{{{name} as participant}};\n",
+            f"use {prefix}::{name} as participant;\n",
+            f"use nervix_primitives::{{{module}::{{{name}}}}};\n",
+        )
+        if module == "thread":
+            forms += (
+                f"use {prefix};\nfn f() {{ thread::{name}(work); }}\n",
+                f"use {prefix} as threads;\nfn f() {{ threads::{name}(work); }}\n",
+            )
+        return forms
+
+    def unmodeled_permission(self, item: str, path: str) -> str:
+        if item != "unmodeled::thread::Builder":
+            return PERMISSION
+        return PERMISSION + (
+            "\n[[permission]]\n"
+            f'path = "{path}"\nitems = ["thread::Builder"]\n'
+            'owner = "The finite thread fixture."\n'
+            'reason = "This participant runs outside every model."\n'
+            'limit = "No protocol assertion relies on this thread."\n'
+        )
+
+    def test_each_item_requires_a_declaration_in_every_import_form(self) -> None:
+        for item in self.ITEMS:
+            for source in self.sources(item):
+                with self.subTest(item=item, source=source):
+                    status, report = self.check(
+                        {self.PATH: source}, permissions=self.unmodeled_permission(item, self.PATH)
+                    )
+                    self.assertEqual(status, 1, report)
+                    self.assertIn(f"{self.PATH}:", report)
+                    self.assertIn("primitive boundary:", report)
+                    self.assertIn(f"`nervix_primitives::{item}`", report)
+                    self.assertIn("owner, reason and bound", report)
+
+    def test_each_declared_item_passes_in_every_import_form(self) -> None:
+        for item in self.ITEMS:
+            for source in self.sources(item):
+                with self.subTest(item=item, source=source):
+                    status, report = self.check(
+                        {self.PATH: source},
+                        permissions=self.unmodeled_permission(item, self.PATH),
+                        blocking_permissions=BLOCKING_PERMISSION + self.permission(self.PATH, (item,)),
+                    )
+                    self.assertEqual(status, 0, report)
+
+    def test_a_glob_names_every_thread_creating_item(self) -> None:
+        source = "use nervix_primitives::thread::*;\n"
+        status, report = self.check({self.PATH: source})
+        self.assertEqual(status, 1, report)
+        for item in self.ITEMS[:-1]:
+            self.assertIn(f"`nervix_primitives::{item}`", report)
+        status, report = self.check(
+            {self.PATH: source},
+            blocking_permissions=BLOCKING_PERMISSION + self.permission(self.PATH, self.ITEMS[:-1]),
+        )
+        self.assertEqual(status, 0, report)
+
+    def test_the_real_builder_needs_both_permissions(self) -> None:
+        status, report = self.check(
+            {self.PATH: "use nervix_primitives::unmodeled::thread::Builder;\n"},
+            blocking_permissions=BLOCKING_PERMISSION
+            + self.permission(self.PATH, ("unmodeled::thread::Builder",)),
+        )
+        self.assertEqual(status, 1, report)
+        self.assertIn("unmodeled items need a permission", report)
+
+    def test_parent_globs_and_reimported_module_aliases_keep_confinement(self) -> None:
+        sources = (
+            "use nervix_primitives::thread as threads;\nuse threads::spawn as participant;\n",
+            "use threads::spawn;\nuse nervix_primitives::thread as threads;\n",
+            "use actors::spawn;\nuse threads as actors;\nuse nervix_primitives::thread as threads;\n",
+            "use nervix_primitives::thread as threads;\nuse self::threads::spawn;\n",
+            "use nervix_primitives::thread as threads;\nfn f() { self::threads::spawn(work); }\n",
+            "use nervix_primitives::thread as threads;\nuse super::threads as actors;\nuse actors::spawn;\n",
+            "use nervix_primitives::thread as threads;\nuse crate::threads::spawn;\n",
+            "use nervix_primitives::thread as threads;\nfn f() { crate::threads::spawn(work); }\n",
+        )
+        for source in sources:
+            with self.subTest(source=source):
+                status, report = self.check({self.PATH: source})
+                self.assertEqual(status, 1, report)
+                self.assertIn("primitive boundary: `nervix_primitives::thread::spawn`", report)
+                status, report = self.check(
+                    {self.PATH: source},
+                    blocking_permissions=BLOCKING_PERMISSION + self.permission(self.PATH, ("thread::spawn",)),
+                )
+                self.assertEqual(status, 0, report)
+
+    def test_a_root_glob_cannot_hide_selected_or_real_thread_creation(self) -> None:
+        for path in ("thread::spawn", "unmodeled::thread::Builder::new"):
+            with self.subTest(path=path):
+                status, report = self.check(
+                    {self.PATH: f"use nervix_primitives::*;\nfn f() {{ {path}(); }}\n"}
+                )
+                self.assertEqual(status, 1, report)
+                self.assertIn("primitive boundary: import boundary modules and items by name", report)
+
+    def test_local_module_globs_keep_their_own_namespace(self) -> None:
+        for source in ("mod tests { use super::*; }\n", "mod inner { use super::super::*; }\n", "mod inner { use crate::*; }\n"):
+            with self.subTest(source=source):
+                status, report = self.check({self.PATH: source})
+                self.assertEqual(status, 0, report)
+
+    def test_a_reimported_thread_glob_names_all_its_confined_items(self) -> None:
+        source = "use threads::*;\nuse nervix_primitives::thread as threads;\n"
+        status, report = self.check({self.PATH: source})
+        self.assertEqual(status, 1, report)
+        for item in self.ITEMS[:-1]:
+            self.assertIn(f"`nervix_primitives::{item}`", report)
+        status, report = self.check(
+            {self.PATH: source},
+            blocking_permissions=BLOCKING_PERMISSION + self.permission(self.PATH, self.ITEMS[:-1]),
+        )
+        self.assertEqual(status, 0, report)
+
+    def test_tests_models_and_harnesses_declare_each_file(self) -> None:
+        contexts = (
+            (self.PATH, "#[cfg(test)]\nmod tests { %s }\n"),
+            (self.PATH, '#[cfg(all(test, feature = "loom"))]\nmod models { %s }\n'),
+            (self.PATH, '#[cfg(all(test, feature = "shuttle"))]\nmod checks { %s }\n'),
+            ("crates/harness/src/lib.rs", "%s\n"),
+            ("tests/participants.rs", "%s\n"),
+            ("benches/participants.rs", "%s\n"),
+            ("examples/participants.rs", "%s\n"),
+            (self.PATH, "#[cfg(any())]\nmod inactive { %s }\n"),
+            (self.PATH, "macro_rules! participants { () => { %s } }\n"),
+        )
+        for path, context in contexts:
+            with self.subTest(path=path, context=context):
+                source = context % "use nervix_primitives::thread::spawn;"
+                status, report = self.check({path: source})
+                self.assertEqual(status, 1, report)
+                self.assertIn("primitive boundary: `nervix_primitives::thread::spawn`", report)
+                status, report = self.check(
+                    {path: source},
+                    blocking_permissions=BLOCKING_PERMISSION + self.permission(path, ("thread::spawn",)),
+                )
+                self.assertEqual(status, 0, report)
+
+    def test_a_permission_declares_only_its_exact_file_and_items(self) -> None:
+        status, report = self.check(
+            {
+                self.PATH: "use nervix_primitives::thread::{spawn, Builder};\n",
+                "crates/execution/src/workers.rs": "use nervix_primitives::thread::spawn;\n",
+            },
+            blocking_permissions=BLOCKING_PERMISSION + self.permission(self.PATH, ("thread::spawn",)),
+        )
+        self.assertEqual(status, 1, report)
+        self.assertIn(f"{self.PATH}:1: primitive boundary: `nervix_primitives::thread::Builder`", report)
+        self.assertIn("crates/execution/src/workers.rs:1: primitive boundary:", report)
+
+    def test_stale_thread_permissions_fail_for_every_item(self) -> None:
+        for item in self.ITEMS:
+            for sources in ({self.PATH: "fn f() {}\n"}, {}):
+                with self.subTest(item=item, sources=sources):
+                    status, report = self.check(
+                        sources,
+                        blocking_permissions=BLOCKING_PERMISSION + self.permission(self.PATH, (item,)),
+                    )
+                    self.assertEqual(status, 1, report)
+                    self.assertIn(
+                        f"stale permission: {self.PATH} does not name `nervix_primitives::{item}`",
+                        report,
+                    )
+
+    def test_thread_permissions_require_owner_reason_and_bound(self) -> None:
+        for field in ("owner", "reason", "bound"):
+            with self.subTest(field=field):
+                permission = self.permission(self.PATH, ("thread::spawn",))
+                permission = "\n".join(line for line in permission.splitlines() if not line.startswith(field))
+                status, report = self.check(
+                    {self.PATH: "use nervix_primitives::thread::spawn;\n"},
+                    blocking_permissions=BLOCKING_PERMISSION + permission,
+                )
+                self.assertEqual(status, 1, report)
+                self.assertIn(f"needs a non-empty `{field}`", report)
+
+    def test_thread_permissions_cover_one_rust_file(self) -> None:
+        for path in ("crates/engine/src", "crates/engine/src/*.rs", "../participant.rs", "/participant.rs"):
+            with self.subTest(path=path):
+                status, report = self.check(
+                    {}, blocking_permissions=BLOCKING_PERMISSION + self.permission(path, ("thread::spawn",))
+                )
+                self.assertEqual(status, 1, report)
+                self.assertIn("a permission covers one Rust file", report)
 
 
 class TurmoilManifestTests(CheckTestCase):
