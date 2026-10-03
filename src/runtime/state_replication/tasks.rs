@@ -261,23 +261,14 @@ impl Runtime {
                 |state: &ReplicatedBranchAggregatedState,
                  metrics: &RuntimeMetrics,
                  store: &RuntimeStateStore| {
-                    if !state.dirty.load(Ordering::SeqCst) {
+                    let Some(snapshot) = state.snapshot_to_persist(metrics)? else {
                         return Ok(None);
-                    }
-                    let snapshot = state.latest_snapshot(metrics)?;
-                    if snapshot.lsm <= state.last_persisted_lsm.load(Ordering::SeqCst) {
-                        return Ok(None);
-                    }
-                    store.persist_latest_snapshot(
-                        &state.placement,
-                        snapshot.lsm,
-                        &snapshot.payload,
-                    )?;
-                    state
-                        .last_persisted_lsm
-                        .store(snapshot.lsm, Ordering::SeqCst);
-                    state.dirty.store(false, Ordering::SeqCst);
-                    Ok::<Option<u64>, RuntimePersistenceError>(Some(snapshot.lsm))
+                    };
+                    store
+                        .persist_latest_snapshot(&state.placement, snapshot.lsm, &snapshot.payload)
+                        .map_err(Report::new)?;
+                    state.persisted(snapshot.lsm);
+                    Ok::<Option<u64>, Report<RuntimePersistenceError>>(Some(snapshot.lsm))
                 };
             loop {
                 nervix_primitives::task::consume_budget().await;
