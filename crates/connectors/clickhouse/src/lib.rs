@@ -490,13 +490,12 @@ mod connection_tests;
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc as StdArc;
-
     use arrow_array::{
         Array as _, BinaryArray, FixedSizeListArray, Float32Array, Int64Array, ListArray,
         RecordBatch, StringArray, TimestampNanosecondArray,
     };
     use arrow_schema::{DataType, Field, Schema, TimeUnit};
+    use nervix_primitives::sync::StdArc;
 
     use super::*;
     use crate::connection_tests::Fixture;

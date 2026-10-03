@@ -1,9 +1,8 @@
-use std::sync::Arc;
-
 use arrow_array::{
     Array, ArrayRef, BooleanArray, Float32Array, Float64Array, Int32Array, StringArray,
     TimestampNanosecondArray, UInt8Array,
 };
+use nervix_primitives::sync::StdArc;
 
 use super::{Extremum, clamp};
 use crate::{batch::TypedArray, operand::Operand};
@@ -233,8 +232,8 @@ fn clamp_reports_invalid_bounds_only_where_every_argument_is_present() {
     assert_eq!(clamped.nan_bound.count_set_bits(), 0);
 
     let text = TypedArray::Utf8(StringArray::from(vec!["apple", "mango", "zebra"]));
-    let low: ArrayRef = Arc::new(StringArray::from(vec!["banana"]));
-    let high: ArrayRef = Arc::new(StringArray::from(vec!["peach"]));
+    let low: ArrayRef = StdArc::new(StringArray::from(vec!["banana"]));
+    let high: ArrayRef = StdArc::new(StringArray::from(vec!["peach"]));
     let clamped = clamp(
         &text,
         Operand::Scalar(low.as_ref()),

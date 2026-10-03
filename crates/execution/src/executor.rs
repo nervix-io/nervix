@@ -1,17 +1,15 @@
 //! The executor: every worker class and memory budget of a node behind one shared handle.
 
-use std::sync::Arc as StdArc;
-
 use arch_into::ArchInto as _;
 use error_stack::Report;
 use meticulous::ResultExt as _;
+use nervix_primitives::sync::{Arc, StdArc};
 use thiserror::Error;
-use triomphe::Arc;
 
 use crate::{
     AdmissionError, Cancellation, ChargedBytes, CpuClass, ExecutionConfig, ExecutionConfigError,
-    ExecutionError, MemoryBudgetSnapshot, MemoryClass, OperationLimits, Reservation, StorageClass,
-    WorkerClassSnapshot, memory::MemoryBudget, workers::WorkerPool,
+    ExecutionError, MemoryBudgetSnapshot, MemoryClass, OperationLimits, QueueAdmission,
+    Reservation, StorageClass, WorkerClassSnapshot, memory::MemoryBudget, workers::WorkerPool,
 };
 
 /// The node's execution and memory admission, shared by every owner that runs variable-size work.
@@ -195,6 +193,9 @@ impl Executor {
     /// handed the reservation it allocates under, and a [`Cancellation`] to check between its own
     /// bounded units: when the caller stops awaiting, the flag is raised, but the charge stays held
     /// until the job returns, because its allocation is still live.
+    ///
+    /// A class whose wait queue is full refuses the job, which is what work answering a request
+    /// needs; [`Self::run_cpu_with`] states another [`QueueAdmission`].
     pub async fn run_cpu<T>(
         &self,
         class: CpuClass,
@@ -204,7 +205,23 @@ impl Executor {
     where
         T: Send + 'static,
     {
-        self.cpu_pool(class).run(reservation, job).await
+        self.run_cpu_with(class, QueueAdmission::RefuseWhenFull, reservation, job)
+            .await
+    }
+
+    /// Run one CPU job like [`Self::run_cpu`], with `admission` saying what a full wait queue does
+    /// with it.
+    pub async fn run_cpu_with<T>(
+        &self,
+        class: CpuClass,
+        admission: QueueAdmission,
+        reservation: Reservation,
+        job: impl FnOnce(Reservation, &Cancellation) -> T + Send + 'static,
+    ) -> Result<T, Report<ExecutionError>>
+    where
+        T: Send + 'static,
+    {
+        self.cpu_pool(class).run(admission, reservation, job).await
     }
 
     /// Run one storage job on `class`'s workers. The consensus class has a single worker, so its
@@ -218,7 +235,9 @@ impl Executor {
     where
         T: Send + 'static,
     {
-        self.storage_pool(class).run(reservation, job).await
+        self.storage_pool(class)
+            .run(QueueAdmission::RefuseWhenFull, reservation, job)
+            .await
     }
 
     /// Submit one storage job and return once it is running off the async workers.

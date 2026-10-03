@@ -19,6 +19,7 @@ use nervix_models::{
 };
 use nervix_primitives::{
     sync::{
+        Arc,
         atomic::{AtomicBool, Ordering},
         mpsc, watch,
     },
@@ -26,11 +27,11 @@ use nervix_primitives::{
 };
 use nonzero_ext::nonzero;
 use tempfile::tempdir;
-use triomphe::Arc;
 
 use super::*;
 use crate::{
     metrics::RuntimeMetrics,
+    runtime::branch_checkpoint_catalog::{CatalogedCheckpoint, CheckpointListing},
     runtime_schema::{RuntimeValue, test_runtime_row},
 };
 
@@ -1526,7 +1527,7 @@ fn a_window_state_publication_proceeds_while_a_snapshot_reads_the_previous_one()
     assert!(snapshot_read.value.is_some());
     assert_eq!(latest.revision, 2);
     assert!(
-        !std::sync::Arc::ptr_eq(&snapshot_read, &latest),
+        !nervix_primitives::sync::StdArc::ptr_eq(&snapshot_read, &latest),
         "publishing replaced the window a snapshot was reading in place"
     );
 }
@@ -1630,54 +1631,6 @@ fn runtime_state_store_purges_only_stale_schema_fingerprints() {
             .expect("current snapshot should remain")
             .payload,
         b"current".to_vec()
-    );
-}
-
-#[test]
-fn runtime_state_store_purges_only_the_requested_domain() {
-    let dir = tempdir().expect("temp dir should open");
-    let db = Database::builder(dir.path())
-        .open()
-        .expect("db should open");
-    let store =
-        RuntimeStateStore::from_database(db, Executor::default()).expect("state store should open");
-    let stopped = RuntimeStatePlacement {
-        domain: domain("stopped"),
-        state: RuntimeState::Deduplicator {
-            schema: SchemaFingerprint::from_digest([1; 32]),
-        },
-        kind: ModelKind::Deduplicator,
-        identifier: named("dedup_orders"),
-        branch_key: None,
-    };
-    let running = RuntimeStatePlacement {
-        domain: domain("running"),
-        ..stopped.clone()
-    };
-    store
-        .persist_latest_snapshot(&stopped, 1, b"stopped")
-        .expect("stopped-domain snapshot should persist");
-    store
-        .persist_latest_snapshot(&running, 2, b"running")
-        .expect("running-domain snapshot should persist");
-
-    store
-        .purge_domain(&stopped.domain)
-        .expect("stopped-domain snapshots should purge");
-
-    assert!(
-        store
-            .latest_snapshot(&stopped)
-            .expect("stopped-domain snapshot lookup should succeed")
-            .is_none()
-    );
-    assert_eq!(
-        store
-            .latest_snapshot(&running)
-            .expect("running-domain snapshot lookup should succeed")
-            .expect("running-domain snapshot should remain")
-            .payload,
-        b"running".to_vec()
     );
 }
 
@@ -1923,6 +1876,178 @@ async fn state_sync_request_returns_latest_snapshot_only_when_lsm_advances() {
         .await
         .expect("state sync request should succeed");
     assert!(none.is_none());
+}
+
+/// A placement of `state` of the deduplicator or window processor `identifier` for `branch`.
+fn owned_placement(
+    state: RuntimeState,
+    kind: ModelKind,
+    identifier: &str,
+    branch: Option<BranchKey>,
+) -> RuntimeStatePlacement {
+    RuntimeStatePlacement {
+        domain: domain("default"),
+        state,
+        kind,
+        identifier: named(identifier),
+        branch_key: branch,
+    }
+}
+
+/// The owner answers a replica from the registry that keeps the placement's kind of state, and
+/// reads its storage only for a placement it holds no state for: a window branch with nothing
+/// newer than the replica's revision is answered with nothing even while storage holds a newer
+/// revision, and so is a branch lifecycle the owner holds.
+#[nervix_primitives::test]
+async fn an_owner_reads_storage_only_for_a_placement_it_holds_no_state_for() {
+    let dir = tempdir().expect("temporary runtime state directory should open");
+    let db = Database::builder(dir.path())
+        .open()
+        .expect("runtime state database should open");
+    let runtime = Runtime::with_persistence(Some(db), Duration::from_secs(3_600))
+        .expect("runtime should open persisted state");
+    let store = runtime
+        .inner
+        .state_store
+        .clone()
+        .expect("the runtime has a state store");
+    let window = RuntimeState::WindowProcessor {
+        schema: unchanged_schema_fingerprint(),
+    };
+    let held = owned_placement(
+        window,
+        ModelKind::WindowProcessor,
+        "window_orders",
+        string_branch_key("tenant", "acme"),
+    );
+    runtime
+        .replicated_window_processor_state(held.clone())
+        .expect("window state should initialize");
+    store
+        .persist_latest_snapshot(&held, 5, &[5])
+        .expect("a newer checkpoint persists");
+    let unheld = owned_placement(
+        window,
+        ModelKind::WindowProcessor,
+        "window_orders",
+        string_branch_key("tenant", "beta"),
+    );
+    store
+        .persist_latest_snapshot(&unheld, 3, &[3])
+        .expect("a checkpoint of a branch without state persists");
+
+    let answered = runtime
+        .handle_state_sync_request(&held, Some(0))
+        .await
+        .expect("a held window answers");
+    assert_eq!(
+        answered, None,
+        "a placement with state is answered from that state, not from storage"
+    );
+    let stored = runtime
+        .handle_state_sync_request(&unheld, Some(1))
+        .await
+        .expect("a stored checkpoint answers")
+        .expect("storage holds a newer checkpoint of a placement without state");
+    assert_eq!(stored.lsm, 3);
+    let nothing_newer = runtime
+        .handle_state_sync_request(&unheld, Some(3))
+        .await
+        .expect("a stored checkpoint answers");
+    assert_eq!(nothing_newer, None);
+
+    let lifecycle = owned_placement(
+        RuntimeState::BranchLru {
+            schema: unchanged_schema_fingerprint(),
+        },
+        ModelKind::WindowProcessor,
+        "window_orders",
+        None,
+    );
+    runtime
+        .replicated_branch_lifecycle(&lifecycle)
+        .publish(PersistedRuntimeStateEntry {
+            lsm: 2,
+            payload: encode_branch_lru_snapshot(&[]).expect("an empty lifecycle encodes"),
+        });
+    store
+        .persist_latest_snapshot(&lifecycle, 7, &[7])
+        .expect("a newer lifecycle persists");
+    let held_lifecycle = runtime
+        .handle_state_sync_request(&lifecycle, Some(2))
+        .await
+        .expect("a held lifecycle answers");
+    assert_eq!(
+        held_lifecycle, None,
+        "a held lifecycle is answered from memory, not from storage"
+    );
+}
+
+/// The owner lists the branch checkpoints of the branch states it owns for an entity, and answers
+/// that it holds none for an entity whose branch state it never held.
+#[test]
+fn an_owner_lists_the_branch_checkpoints_of_the_states_it_owns() {
+    let runtime = Runtime::default();
+    let deduplicator = RuntimeState::Deduplicator {
+        schema: unchanged_schema_fingerprint(),
+    };
+    let lifecycle = owned_placement(
+        RuntimeState::BranchLru {
+            schema: unchanged_schema_fingerprint(),
+        },
+        ModelKind::Deduplicator,
+        "dedup_orders",
+        None,
+    );
+    assert_eq!(
+        runtime.branch_checkpoint_listing(&lifecycle, None),
+        OwnerCheckpointListing::Absent
+    );
+
+    let acme = string_branch_key("tenant", "acme");
+    let acme_placement = owned_placement(
+        deduplicator,
+        ModelKind::Deduplicator,
+        "dedup_orders",
+        acme.clone(),
+    );
+    let acme_state = runtime
+        .replicated_deduplicator_state(acme_placement)
+        .expect("deduplicator state should initialize");
+    let OwnerCheckpointListing::Listed(CheckpointListing::Restarted(first)) =
+        runtime.branch_checkpoint_listing(&lifecycle, None)
+    else {
+        panic!("a first read lists the catalog from its beginning");
+    };
+    assert_eq!(
+        first.revised,
+        vec![CatalogedCheckpoint {
+            branch: acme.clone(),
+            state: deduplicator,
+            lsm: 0,
+        }]
+    );
+
+    let mut keyspace = ReplicatedDeduplicatorState::keyspace(&acme_state);
+    assert!(keyspace.reserve_new_key(
+        DeduplicatorKey::new(vec![ReorderKeyPart::Utf8("txn-1".to_string())]),
+        Timestamp::from_unix_nanos(1),
+        Duration::from_secs(600),
+    ));
+    keyspace.publish();
+    let OwnerCheckpointListing::Listed(CheckpointListing::Continued(next)) =
+        runtime.branch_checkpoint_listing(&lifecycle, Some(first.cursor))
+    else {
+        panic!("a read from the previous cursor lists what changed after it");
+    };
+    assert_eq!(
+        next.revised,
+        vec![CatalogedCheckpoint {
+            branch: acme,
+            state: deduplicator,
+            lsm: acme_state.generations.load().revision,
+        }]
+    );
 }
 
 #[test]

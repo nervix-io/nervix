@@ -11,10 +11,9 @@
 //! schemas with it and the client library builds the batches it submits with it, so the two can
 //! never disagree about the representation of a type.
 
-use std::sync::Arc as StdArc;
-
 use arrow_schema::{DataType, Field, Schema, TimeUnit};
 use meticulous::ResultExt as _;
+use nervix_primitives::sync::StdArc;
 
 use crate::{ParseAsType, SchemaField};
 

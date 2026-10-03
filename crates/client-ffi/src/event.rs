@@ -19,7 +19,7 @@ use nervix_client_core::{
     SubscriptionEvent,
     wire::{CellView, CellsView, RowBatchView},
 };
-use triomphe::Arc;
+use nervix_primitives::sync::Arc;
 
 use crate::{
     abi,
@@ -46,6 +46,21 @@ pub enum CellState {
     Value,
     Null,
     Redacted,
+}
+
+impl CellState {
+    /// Reads a state a host passed as a byte.
+    pub(crate) fn from_host(state: u8) -> Result<Self, Failure> {
+        match state {
+            1 => Ok(Self::Value),
+            2 => Ok(Self::Null),
+            3 => Ok(Self::Redacted),
+            _ => Err(Failure::invalid_argument(
+                "states",
+                "holds a byte that is not an nx_cell_state",
+            )),
+        }
+    }
 }
 
 impl From<CellState> for u8 {

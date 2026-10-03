@@ -157,6 +157,9 @@ impl EndpointIngestorStartPlan {
             // them. What the endpoint buffer retained replays one request per ingest group.
             buffered_intake: false,
             flush_each_intake: true,
+            // The request path answers a body the extension workers cannot unfold now with a
+            // refusal its sender retries, so no request reaches the loop's live intake.
+            unacknowledged_admission: QueueAdmission::RefuseWhenFull,
             client_mounts: Vec::new(),
             connector_label: "endpoint",
         })
@@ -164,9 +167,10 @@ impl EndpointIngestorStartPlan {
 }
 
 #[cfg(test)]
-mod tests {
+pub(super) mod tests {
     use std::collections::BTreeMap;
 
+    use futures_util::FutureExt as _;
     use nervix_connector::NoIngestHeaders;
     use nervix_execution::CpuClass;
     use nervix_models::{
@@ -202,7 +206,7 @@ mod tests {
 
     /// Starts, on `runtime`, a running domain whose one endpoint ingestor reads `/events` on
     /// `edge.example.com` through a codec of `wire_format`.
-    async fn start_endpoint_ingestor(
+    pub(in crate::runtime::ingestors) async fn start_endpoint_ingestor(
         runtime: Runtime,
         domain: &DomainName,
         ingestor: &IngestorName,
@@ -508,6 +512,19 @@ mod tests {
         assert!(!outcome.is_accepted());
     }
 
+    /// A JSON codec whose `ON INGESTION` transformation passes each payload through, so every
+    /// payload is unfolded on the node's extension workers.
+    pub(in crate::runtime::ingestors) fn unfolding_wire_format() -> CodecWireFormat {
+        CodecWireFormat::JaqNative {
+            format: CodecJaqFormat::Json,
+            transformations: CodecJaqTransformations {
+                on_ingestion: Some(".".to_string()),
+                on_emitting: None,
+                on_emitting_batch: None,
+            },
+        }
+    }
+
     #[nervix_primitives::test]
     async fn endpoint_rejects_a_body_whose_unfolding_the_node_cannot_take_now() {
         let domain = domain("default");
@@ -517,14 +534,7 @@ mod tests {
             Runtime::with_executor(executor.clone()),
             &domain,
             &ingestor,
-            CodecWireFormat::JaqNative {
-                format: CodecJaqFormat::Json,
-                transformations: CodecJaqTransformations {
-                    on_ingestion: Some(".".to_string()),
-                    on_emitting: None,
-                    on_emitting_batch: None,
-                },
-            },
+            unfolding_wire_format(),
         )
         .await;
 
@@ -559,6 +569,166 @@ mod tests {
                 retry_after: None,
             }
         );
+        runtime.shutdown().await;
+    }
+
+    /// A body its codec rejects as it drains after resume is reported and leaves the buffer, as any
+    /// retained body that fails after its 202 does.
+    #[nervix_primitives::test]
+    async fn a_retained_body_its_codec_rejects_is_reported_and_leaves_the_buffer() {
+        let domain = domain("default");
+        let ingestor = named::<IngestorName>("event_source");
+        let runtime = runtime_with_endpoint_ingestor(&domain, &ingestor).await;
+        let mut errors = runtime.events().subscribe();
+        let quiesce = runtime
+            .ingestor_quiesce_control(&domain, &ingestor)
+            .assured("a running ingestor holds its quiesce control");
+        let route = runtime
+            .resolve_endpoint("edge.example.com", "/events")
+            .assured("the fixture installs its endpoint route");
+
+        quiesce.engage(IngestorQuiesceCause::EntityHold);
+        let outcome = route
+            .dispatch(&runtime, br#"{"user_id":"seven"}"#, &NoIngestHeaders)
+            .await;
+        assert!(
+            outcome.is_accepted(),
+            "the quiesced ingestor retains the body"
+        );
+        assert_eq!(quiesce.counters().buffered_records, 1);
+        quiesce.release(IngestorQuiesceCause::EntityHold);
+
+        let RuntimeEvent::Error(message) =
+            nervix_primitives::time::timeout(Duration::from_secs(10), errors.recv())
+                .await
+                .expect("the drain reports the body its codec rejected")
+                .expect("the node keeps its observers while it runs");
+        assert!(
+            message.contains(
+                "codec 'event_json' failed to parse field 'user_id': expected Integer, found a \
+                 JSON string"
+            ),
+            "the report names the codec's own failure: {message}"
+        );
+        assert_eq!(
+            quiesce.counters(),
+            IngestorQuiesceCounters::default(),
+            "the rejected body leaves the buffer"
+        );
+        runtime.shutdown().await;
+    }
+
+    /// A body `BUFFER` retained was already answered 202, so when the extension workers cannot
+    /// take its unfolding as it drains after resume, it waits for them in the buffer, still counted
+    /// there, instead of being reported and lost. Once they have room it is delivered, in order
+    /// with the bodies retained after it.
+    #[nervix_primitives::test]
+    async fn a_retained_body_waits_for_the_extension_workers_when_it_drains() {
+        let domain = domain("default");
+        let ingestor = named::<IngestorName>("event_source");
+        let executor = single_worker_executor();
+        let runtime = Runtime::with_executor(executor.clone());
+        // The fixture places its relay on node-1, so the runtime joins as node-1 to own it and hand
+        // what the ingestor delivers to the relay's subscribers.
+        attach_loopback_cluster(
+            &runtime,
+            &ClusterNodeName::parse("node-1").expect("valid name"),
+        )
+        .await;
+        let runtime =
+            start_endpoint_ingestor(runtime, &domain, &ingestor, unfolding_wire_format()).await;
+        let subscriber = RelaySubscriptionDefinition::new(
+            Arc::new(compile_schema(&CreateSchema {
+                name: named("event"),
+                fields: vec![SchemaField {
+                    name: named("user_id"),
+                    ty: ParseAsType::I64,
+                    optional: false,
+                    sensitive: false,
+                }],
+            })),
+            ResolvedBranching::unbranched(),
+        );
+        let mut delivered = runtime
+            .subscribe_stream(&domain, &named("events"), &subscriber)
+            .await
+            .expect("the fixture's relay accepts a subscriber that describes its rows");
+        let mut errors = runtime.events().subscribe();
+        let quiesce = runtime
+            .ingestor_quiesce_control(&domain, &ingestor)
+            .assured("a running ingestor holds its quiesce control");
+        let route = runtime
+            .resolve_endpoint("edge.example.com", "/events")
+            .assured("the fixture installs its endpoint route");
+
+        quiesce.engage(IngestorQuiesceCause::EntityHold);
+        for user_id in 1..=3 {
+            let body = format!(r#"{{"user_id":{user_id}}}"#);
+            let outcome = route
+                .dispatch(&runtime, body.as_bytes(), &NoIngestHeaders)
+                .await;
+            assert!(
+                outcome.is_accepted(),
+                "the quiesced ingestor retains body {user_id}"
+            );
+        }
+        let retained = quiesce.counters();
+        assert_eq!(retained.buffered_records, 3);
+
+        let filled = FilledCpuClass::fill(&executor, CpuClass::Extension).await;
+        quiesce.release(IngestorQuiesceCause::EntityHold);
+        // The drain reaches the first body's unfolding, which charges the payload's memory before
+        // it asks the extension class for a place.
+        nervix_primitives::time::timeout(Duration::from_secs(10), async {
+            loop {
+                let snapshot = executor.snapshot();
+                if snapshot.extension_cpu.refused > 0 || snapshot.relay_memory.reserved_bytes > 0 {
+                    return;
+                }
+                nervix_primitives::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("the resumed ingestor drains its buffer into the saturated extension class");
+        assert_eq!(
+            quiesce.counters(),
+            retained,
+            "a body waiting for the extension workers stays retained with its bytes"
+        );
+        assert!(
+            errors.recv().now_or_never().is_none(),
+            "a body waiting for the extension workers is not reported as an ingestor error"
+        );
+
+        filled.release().await;
+        // The relay may carry several bodies in one batch, so the rows are read across batches.
+        let mut user_ids = Vec::new();
+        while user_ids.len() < 3 {
+            nervix_primitives::task::consume_budget().await;
+            let batch = nervix_primitives::time::timeout(Duration::from_secs(10), delivered.recv())
+                .await
+                .expect("a retained body is delivered once the extension workers have room")
+                .expect("the relay keeps its subscriber while the ingestor runs");
+            for row in 0..batch.batch.batch().num_rows() {
+                user_ids.push(
+                    batch
+                        .batch
+                        .value(row, "user_id")
+                        .expect("a delivered row reads its own field"),
+                );
+            }
+        }
+        assert_eq!(
+            user_ids,
+            vec![
+                Some(RuntimeValue::I64(1)),
+                Some(RuntimeValue::I64(2)),
+                Some(RuntimeValue::I64(3)),
+            ],
+            "every retained body is delivered once, in the order it arrived"
+        );
+        assert_eq!(quiesce.counters().buffered_records, 0);
+        assert_eq!(quiesce.counters().buffered_bytes, 0);
         runtime.shutdown().await;
     }
 }

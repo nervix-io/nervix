@@ -14,6 +14,7 @@ Usage:
   just chaos run pause-resume --image IMAGE [--records N]
   just chaos run partition-recovery --image IMAGE [--case CASE] [--partition-seconds N] [--records N]
   just chaos run degraded-links --image IMAGE [--profile PROFILE] [--records N]
+  just chaos run backup --image IMAGE [--nodes 1|3] [--records N]
   just chaos cleanup --run-id RUN_ID
   just chaos self-test
 
@@ -41,6 +42,8 @@ partition-recovery  Verified Pumba network partitions, healing and quorum recove
                     cases: follower, asymmetric, leader, quorum-loss (--case, default all)
 degraded-links  Measured delay, jitter, random and burst loss, rate limits, and combined effects
                 against one directed cluster link (three-node; --profile, default all)
+backup  Quiesced domain backup during acknowledged Kafka traffic, verified offline
+        topologies: one-node (--nodes 1), three-node (--nodes 3, default)
 EOF
 }
 
@@ -82,6 +85,9 @@ case "${command_name}" in
                 ;;
             degraded-links)
                 exec "${script_dir}/run-degraded-links.sh" "$@"
+                ;;
+            backup)
+                exec "${script_dir}/run-backup.sh" "$@"
                 ;;
             *)
                 printf 'unknown chaos scenario: %s\n' "${scenario}" >&2

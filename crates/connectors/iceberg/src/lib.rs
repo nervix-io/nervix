@@ -18,7 +18,7 @@
 
 mod storage;
 
-use std::{fs::File, path::PathBuf, sync::Arc as StdArc, time::Duration};
+use std::{fs::File, path::PathBuf, time::Duration};
 
 use ::iceberg::{
     Catalog, CatalogBuilder, Error as IcebergError, ErrorKind as IcebergErrorKind, NamespaceIdent,
@@ -66,6 +66,7 @@ use nervix_connector::{
 use nervix_dns::DnsResolver;
 use nervix_execution::{Executor, MemoryClass, StorageClass};
 use nervix_models::{ClientConfigEntry, IcebergStorageBackend, TableName, Timestamp};
+use nervix_primitives::sync::StdArc;
 use parquet::file::properties::WriterProperties;
 use storage::DnsStorageFactory;
 use tempfile::TempDir;

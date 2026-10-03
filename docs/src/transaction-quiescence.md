@@ -45,6 +45,11 @@ that same run can make it valid. An intervening lifecycle, domain, resource-cata
 ends the run, so a later run cannot repair the earlier one. An incomplete candidate is never a
 complete empty scope, and `COMMIT` requires every step to plan completely.
 
+Planning captures the restored domain's installation gate with its authoritative control inputs.
+An incomplete restore refuses a queued or standalone `START` before lifecycle admission, naming
+the restore execution responsible for the gate. Consensus revalidates the gate at activation;
+releasing a failed restore's mutation lease does not make that domain startable.
+
 ```mermaid
 stateDiagram-v2
     [*] --> OPEN: BEGIN for one domain
@@ -269,6 +274,13 @@ across report revisions. A finished transaction retains its frozen report with i
 the configured retention period, **15 minutes by default**, including after subsequent graph
 changes. Retention cleanup removes the transaction's report records and topology content no other
 retained report references. Once its tombstone is reclaimed, inspection by id returns unknown.
+
+Transaction positions and operation numbers, commit-plan step counts, accepted and applied
+operation counts, report operation and execution-step counts, and topology node and edge counts
+use fixed-width 64-bit archives with checked native decoding. Durable record replay and snapshots
+retain every bit of those counts. Their representation is owned by
+[Archived Counts](./typed-states.md#archived-counts), and their current storage namespace is defined
+in [Consensus Storage And Replication](./consensus-storage-and-replication.md).
 
 These are control-plane facts. Arrow record batches, payload attempts, relay or connector buffers,
 handoff data, ACK guards, tokens, and maps remain volatile data-plane state. Inspection cannot

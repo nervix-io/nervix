@@ -4,10 +4,9 @@ use std::{collections::BTreeSet, pin::pin};
 
 use nervix_models::ClusterNodeName;
 use nervix_primitives::sync::{
-    Notify,
+    Arc, Notify,
     blocking::{Mutex, MutexGuard},
 };
-use triomphe::Arc;
 
 use crate::ReplicaProgress;
 

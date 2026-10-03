@@ -20,10 +20,19 @@ path = "src/main.rs"
 default = []
 # Exposes opaque benchmark drivers without making runtime internals part of the normal API.
 benchmarks = []
-# Selects Loom's primitives for the whole graph, so a Loom model of a server owner runs on them.
+# Builds a diagnostic node: the thread-blocking locks of the whole graph are tracked by the deadlock
+# detector, which the binary installs at start-up, and the first active deadlock it reports is
+# recorded and ends the process. A diagnostic artifact, never a release product.
+deloxide = [
+  "dep:nervix-deadlock",
+  "nervix-deadlock/deloxide",
+  "nervix-primitives/deloxide",
+]
+# Selects Loom's primitives for the whole graph, including the backup cut's atomic owner.
 loom = [
   "nervix-consensus/loom",
   "nervix-execution/loom",
+  "nervix-model-harness/loom",
   "nervix-primitives/loom",
 ]
 # Selects Shuttle's primitives for the whole graph through nervix-primitives. Sockets and the edge
@@ -52,6 +61,7 @@ shuttle = [
   "nervix-consensus/shuttle",
   "nervix-execution/shuttle",
   "nervix-interconnect/shuttle",
+  "nervix-model-harness/shuttle",
   "nervix-primitives/shuttle",
   "nervix-wasm/shuttle",
 ]
@@ -100,6 +110,7 @@ hyper-util = { workspace = true, features = [
   "tokio",
   "http1",
 ] }
+imbl = { workspace = true }
 indexmap = { workspace = true }
 meticulous = { workspace = true }
 multer = { workspace = true }
@@ -133,6 +144,7 @@ nervix-connector-websockets = { workspace = true }
 nervix-connector-zeromq = { workspace = true }
 nervix-consensus = { workspace = true }
 nervix-dataflow-graph = { workspace = true }
+nervix-deadlock = { workspace = true, optional = true }
 nervix-dns = { workspace = true }
 nervix-execution = { workspace = true }
 nervix-expiry-map = { workspace = true }
@@ -192,7 +204,6 @@ tower-service = { workspace = true }
 tracing = { workspace = true }
 tracing-opentelemetry = { workspace = true }
 tracing-subscriber = { workspace = true, features = ["env-filter", "fmt"] }
-triomphe = { workspace = true }
 typed-builder = { workspace = true }
 ubyte = { workspace = true }
 upon = { workspace = true }
@@ -222,9 +233,13 @@ lapin = { workspace = true }
 mongodb = { workspace = true }
 # This is mysql_async's AWS-LC-backed Rustls feature; do not use default-rustls-ring.
 mysql_async = { workspace = true, features = ["default-rustls"] }
+nervix-arbitrary = { workspace = true }
 nervix-client-core = { workspace = true, features = ["arrow"] }
 nervix-client-ffi = { workspace = true }
+# The scenarios read the deadlock evidence diagnostic nodes record.
+nervix-deadlock = { workspace = true }
 # The runtime's timer tests advance a paused clock.
+nervix-model-harness = { workspace = true }
 nervix-primitives = { workspace = true, features = ["native", "test-util"] }
 nervix-test-environment = { workspace = true }
 nix = { workspace = true, features = ["fs", "signal", "term"] }
@@ -331,6 +346,7 @@ members = [
   "crates/connectors/zeromq",
   "crates/consensus",
   "crates/dataflow-graph",
+  "crates/deadlock",
   "crates/dns",
   "crates/execution",
   "crates/expiry-map",
@@ -352,6 +368,7 @@ members = [
   "crates/simd-kernels",
   "crates/test-environment",
   "crates/nervix-cli",
+  "examples/paced-simulation/rust",
 ]
 
 [workspace.package]
@@ -444,6 +461,9 @@ console_error_panic_hook = "0.1"
 criterion = "0.5"
 cucumber = "0.22"
 dashmap = "6"
+# The deadlock detector of the `deloxide` diagnostic mode. Pinned to the exact release its adapter
+# in nervix-primitives was qualified against: a later release may change what it tracks or reports.
+deloxide = { version = "=1.1.0", default-features = false }
 error-stack = "0.5"
 faster-hex = "0.10"
 fastrand = "2.4.1"
@@ -509,6 +529,7 @@ libc = "0.2"
 # so no ordinary dependency graph contains it.
 loom = "0.7.2"
 md5 = "0.8"
+memchr = "2.8"
 # `disallow-todo-on-release` is not enabled: the published crate gates the `todo` method on the
 # trait implementations but not on the trait declarations, so the feature fails every release build
 # with E0046 rather than only the builds that call `todo()`.
@@ -553,6 +574,7 @@ nervix-connector-websockets = { package = "nervix-connector-websockets", path = 
 nervix-connector-zeromq = { package = "nervix-connector-zeromq", path = "crates/connectors/zeromq" }
 nervix-consensus = { package = "nervix-consensus", path = "crates/consensus" }
 nervix-dataflow-graph = { package = "nervix-dataflow-graph", path = "crates/dataflow-graph" }
+nervix-deadlock = { package = "nervix-deadlock", path = "crates/deadlock" }
 nervix-dns = { package = "nervix-dns", path = "crates/dns" }
 nervix-execution = { package = "nervix-execution", path = "crates/execution" }
 nervix-expiry-map = { package = "nervix-expiry-map", path = "crates/expiry-map" }
@@ -679,6 +701,7 @@ shuttle-tokio-stream = { package = "shuttle-tokio-stream", version = "0.1" }
 shuttle-tokio-util = { package = "shuttle-tokio-util", version = "0.7" }
 signal-hook = "0.4"
 simd-json = { version = "0.17.0", features = ["known-key"] }
+simdutf8 = "0.1.5"
 sorted-vec = "0.8"
 sqlx = { version = "0.9", default-features = false, features = [
   "postgres",
@@ -745,6 +768,14 @@ proc-macro-error2 = { git = "https://github.com/fgardt/proc-macro-error-2.git", 
 
 [profile.release]
 panic = "unwind"
+
+# Loom's coordinator has a fixed coroutine stack before it can start our larger model stacks.
+# Reduce instrumented allocation frames while retaining the dev profile's diagnostics and checks.
+[profile.loom]
+debug-assertions = true
+inherits = "dev"
+opt-level = 1
+overflow-checks = true
 
 [profile.fuzz]
 codegen-units = 1

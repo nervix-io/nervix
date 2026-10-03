@@ -95,12 +95,17 @@ Nervix records these raw metric families:
 - `nervix_branch_evictions_total`: total concrete branches evicted on the physical node, split by
   `reason="lru"` or `reason="ttl"`
 - `nervix_ingestor_quiesce_buffered_records`: raw payloads currently retained in an ingestor's
-  per-instance quiesce buffers
+  per-instance quiesce buffers, including a payload that is draining until its messages enter
+  their ingest group
 - `nervix_ingestor_quiesce_buffered_bytes`: raw payload bytes currently retained in those buffers
 - `nervix_ingestor_quiesce_dropped_total`: payloads deliberately discarded by `DROP`, buffer
   overflow, memory-pressure zero-capacity behavior, or an interrupting termination
 - `nervix_ingestor_quiesce_rejected_total`: endpoint requests or connections refused while an
   ingestor cannot accept them
+- `nervix_ingestor_unfolding_refused_total`: payloads a source handed over without an
+  acknowledgement that an ingestor did not deliver because the node's extension workers had no room
+  to unfold them, for a source whose transport would not survive a held loop; see
+  [When The Extension Workers Are Full](./ingestors.md#when-the-extension-workers-are-full)
 - `nervix_session_subscriptions`: open session subscriptions the node delivers from a relay. The
   node advertises interest in the relay to the cluster exactly while this is above zero, and the
   series stays at `0` once the relay's last subscription on the node closes
@@ -130,11 +135,12 @@ Histograms follow Prometheus conventions and include `_bucket`, `_sum`, and `_co
 
 Prometheus receives raw values only. The `/metrics` endpoint is encoded by the Prometheus client registry, not by Nervix internal summary state. Prometheus should compute external queries, alerts, and dashboards with normal PromQL aggregation.
 
-The four ingestor-quiesce families use `domain`, `ingestor`, and `physical_node_id` labels. Buffer
-families are gauges; dropped and rejected families are monotonic counters. They are process-local:
-quiesce buffers do not migrate during termination or failover.
+The four ingestor-quiesce families and `nervix_ingestor_unfolding_refused_total` use `domain`,
+`ingestor`, and `physical_node_id` labels. Buffer families are gauges; dropped, rejected and refused
+families are monotonic counters. They are process-local: quiesce buffers do not migrate during
+termination or failover.
 
-Quiesce children are registered when the ingestor starts. Client-ingestor outcome children are
+Quiesce and refusal children are registered when the ingestor starts. Client-ingestor outcome children are
 registered when its endpoint starts, and subscription loss counters when delivery starts. These
 bounded series may therefore appear at zero before their first observation. Their labels and
 counting contracts are unchanged.

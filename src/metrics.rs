@@ -41,6 +41,7 @@ use nervix_models::{
 use nervix_primitives::{
     collections::{DashMap, dash_map::Entry},
     sync::{
+        Arc,
         atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering as AtomicOrdering},
         blocking::Mutex,
     },
@@ -57,7 +58,6 @@ use prometheus::{
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 use strum::{AsRefStr, EnumIter, IntoEnumIterator};
 use tikv_jemalloc_ctl::{epoch, epoch_mib, stats};
-use triomphe::Arc;
 
 mod interconnection;
 
@@ -80,6 +80,7 @@ const INGESTOR_QUIESCE_BUFFERED_RECORDS: &str = "ingestor_quiesce_buffered_recor
 const INGESTOR_QUIESCE_BUFFERED_BYTES: &str = "ingestor_quiesce_buffered_bytes";
 const INGESTOR_QUIESCE_DROPPED_TOTAL: &str = "ingestor_quiesce_dropped_total";
 const INGESTOR_QUIESCE_REJECTED_TOTAL: &str = "ingestor_quiesce_rejected_total";
+const INGESTOR_UNFOLDING_REFUSED_TOTAL: &str = "ingestor_unfolding_refused_total";
 const SESSION_SUBSCRIPTIONS: &str = "session_subscriptions";
 const CLIENT_INGESTOR_PRODUCERS: &str = "client_ingestor_producers";
 const CLIENT_INGESTOR_FORWARDED_PRODUCERS: &str = "client_ingestor_forwarded_producers";
@@ -1607,6 +1608,7 @@ struct PrometheusMetrics {
     ingestor_quiesce_buffered_bytes: IntGaugeVec,
     ingestor_quiesce_dropped_total: IntCounterVec,
     ingestor_quiesce_rejected_total: IntCounterVec,
+    ingestor_unfolding_refused_total: IntCounterVec,
     session_subscriptions: IntGaugeVec,
     session_subscription_dropped_rows_total: IntCounterVec,
     client_ingestor_producers: IntGaugeVec,
@@ -1831,6 +1833,19 @@ impl PrometheusMetrics {
             "the metric name, help text and label names are constants that satisfy Prometheus \
              naming rules",
         );
+        let ingestor_unfolding_refused_total = IntCounterVec::new(
+            Opts::new(
+                INGESTOR_UNFOLDING_REFUSED_TOTAL,
+                "Total unacknowledged source payloads an ingestor did not deliver because the \
+                 node's extension workers had no room to unfold them.",
+            )
+            .namespace("nervix"),
+            INGESTOR_QUIESCE_PROMETHEUS_LABELS,
+        )
+        .assured(
+            "the metric name, help text and label names are constants that satisfy Prometheus \
+             naming rules",
+        );
 
         registry.register(Box::new(messages_total.clone())).assured(
             "this registry is built here and each metric is registered once under a distinct name",
@@ -1891,6 +1906,12 @@ impl PrometheusMetrics {
             );
         registry
             .register(Box::new(ingestor_quiesce_rejected_total.clone()))
+            .assured(
+                "this registry is built here and each metric is registered once under a distinct \
+                 name",
+            );
+        registry
+            .register(Box::new(ingestor_unfolding_refused_total.clone()))
             .assured(
                 "this registry is built here and each metric is registered once under a distinct \
                  name",
@@ -2129,6 +2150,7 @@ impl PrometheusMetrics {
             ingestor_quiesce_buffered_bytes,
             ingestor_quiesce_dropped_total,
             ingestor_quiesce_rejected_total,
+            ingestor_unfolding_refused_total,
             session_subscriptions,
             session_subscription_dropped_rows_total,
             client_ingestor_producers,
@@ -3244,6 +3266,25 @@ impl RuntimeMetrics {
         count: u64,
     ) {
         metrics.series.rejected.inc_by(count);
+    }
+
+    /// The count of `ingestor`'s unacknowledged payloads that `physical_node_id` did not deliver
+    /// because its extension workers had no room to unfold them. The series exists from the first
+    /// time a source host of the ingestor asks for it.
+    pub(crate) fn ingestor_unfolding_refused(
+        &self,
+        domain: &DomainName,
+        ingestor: &IngestorName,
+        physical_node_id: Option<&ClusterNodeName>,
+    ) -> IntCounter {
+        self.series
+            .prometheus
+            .ingestor_unfolding_refused_total
+            .with_label_values(&[
+                domain.as_str(),
+                ingestor.as_str(),
+                physical_node_label(physical_node_id),
+            ])
     }
 
     pub(crate) fn register_branch(

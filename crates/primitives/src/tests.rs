@@ -5,11 +5,13 @@
 //! [`exercise_the_atomic_surface`] and the same scripts of the native families, so a backend that
 //! lacks an operation fails to compile here and a backend that answers one differently fails here,
 //! rather than in the first owner that uses it. The Shuttle checks also show that the scheduler
-//! reaches the races its adapters exist for, and the Turmoil check that sockets, name lookup,
-//! timers and admitted CPU jobs belong to the simulated host that uses them.
+//! reaches the races its adapters exist for, the Turmoil check that sockets, name lookup, timers
+//! and admitted CPU jobs belong to the simulated host that uses them, and the `deloxide` checks
+//! that the tracked locks keep the contracts of the locks they replace.
 
 #[cfg(all(feature = "native", not(feature = "loom")))]
 mod families;
+mod findings;
 #[cfg(all(feature = "native", not(feature = "loom")))]
 mod notification;
 #[cfg(all(feature = "native", feature = "shuttle", not(feature = "loom")))]
@@ -24,6 +26,12 @@ mod tasks;
     not(feature = "loom")
 ))]
 mod timers;
+#[cfg(all(
+    feature = "native",
+    feature = "deloxide",
+    not(any(feature = "loom", feature = "shuttle", feature = "turmoil"))
+))]
+mod tracked_locks;
 #[cfg(all(feature = "native", not(feature = "loom")))]
 mod watch_channel;
 
@@ -137,6 +145,28 @@ fn exercise_threads() {
     assert_eq!(result, 5);
 }
 
+/// Shared ownership is the library's own type in every mode and on every target: no model checker
+/// counts references, so no mode substitutes a type of its own.
+#[test]
+fn shared_ownership_is_the_same_library_type_in_every_mode() {
+    assert!(is_same_type::<crate::sync::Arc<u8>, triomphe::Arc<u8>>());
+    assert!(is_same_type::<crate::sync::StdArc<u8>, std::sync::Arc<u8>>());
+    assert!(is_same_type::<crate::sync::StdWeak<u8>, std::sync::Weak<u8>>());
+}
+
+/// The `futures` families the unmodeled surface offers the browser console are that crate's own.
+#[test]
+fn the_unmodeled_futures_families_are_the_futures_crates_own() {
+    assert!(is_same_type::<
+        crate::unmodeled::futures::mpsc::UnboundedSender<u8>,
+        futures_channel::mpsc::UnboundedSender<u8>,
+    >());
+    assert!(is_same_type::<
+        crate::unmodeled::futures::AbortHandle,
+        futures_util::future::AbortHandle,
+    >());
+}
+
 #[cfg(not(any(feature = "loom", feature = "shuttle")))]
 mod ordinary {
     use std::sync::atomic as standard;
@@ -189,6 +219,10 @@ mod ordinary {
     #[test]
     fn ordinary_execution_selects_each_librarys_own_items() {
         assert!(is_same_type::<crate::sync::Notify, tokio::sync::Notify>());
+        assert!(is_same_type::<
+            crate::sync::AtomicWaker,
+            futures_util::task::AtomicWaker,
+        >());
         assert!(is_same_type::<crate::sync::Semaphore, tokio::sync::Semaphore>());
         assert!(is_same_type::<
             crate::sync::watch::Sender<u8>,
@@ -201,14 +235,6 @@ mod ordinary {
         assert!(is_same_type::<
             crate::sync::CancellationToken,
             tokio_util::sync::CancellationToken,
-        >());
-        assert!(is_same_type::<
-            crate::sync::blocking::Mutex<u8>,
-            parking_lot::Mutex<u8>,
-        >());
-        assert!(is_same_type::<
-            crate::sync::blocking::Condvar,
-            parking_lot::Condvar,
         >());
         assert!(is_same_type::<
             crate::sync::blocking::OnceLock<u8>,
@@ -253,6 +279,20 @@ mod ordinary {
         assert!(is_same_type::<crate::time::Instant, tokio::time::Instant>());
         assert!(is_same_type::<crate::time::Sleep, tokio::time::Sleep>());
         assert!(is_same_type::<crate::time::Interval, tokio::time::Interval>());
+    }
+
+    /// Outside the `deloxide` diagnostic mode the thread-blocking locks are `parking_lot`'s own.
+    #[cfg(all(feature = "native", not(feature = "deloxide")))]
+    #[test]
+    fn ordinary_execution_selects_parking_lots_locks() {
+        assert!(is_same_type::<
+            crate::sync::blocking::Mutex<u8>,
+            parking_lot::Mutex<u8>,
+        >());
+        assert!(is_same_type::<
+            crate::sync::blocking::Condvar,
+            parking_lot::Condvar,
+        >());
     }
 
     /// Outside Turmoil the sockets are Tokio's, over the operating system's network.
@@ -305,6 +345,8 @@ mod ordinary {
     #[cfg(feature = "native")]
     #[test]
     fn the_other_native_families_keep_their_contracts() {
+        #[cfg(feature = "deloxide")]
+        super::tracked_locks::detector_installed();
         super::families::keep_their_contracts();
     }
 
@@ -516,14 +558,15 @@ mod shuttle_mode {
         );
     }
 
-    /// Each registration and notification of `Notify`, and each read of the watch channel's version
-    /// that registers or decides, lets the scheduler choose the next task. A drop does not.
+    /// Each registration and notification of `Notify`, each registration, take and wake of an
+    /// atomic waker, and each read of the watch channel's version that registers or decides, lets
+    /// the scheduler choose the next task. A drop does not.
     #[cfg(feature = "native")]
     #[test]
     fn every_registration_and_notification_is_a_scheduling_point() {
         use std::pin::pin;
 
-        use crate::sync::{Notify, watch};
+        use crate::sync::{AtomicWaker, Notify, watch};
 
         shuttle::check_random(
             || {
@@ -544,6 +587,17 @@ mod shuttle_mode {
                 let before = context_switches();
                 drop(unregistered);
                 assert_eq!(context_switches(), before);
+
+                let registration = AtomicWaker::new();
+                let before = context_switches();
+                registration.register(std::task::Waker::noop());
+                assert!(context_switches() > before);
+                let before = context_switches();
+                assert!(registration.take().is_some());
+                assert!(context_switches() > before);
+                let before = context_switches();
+                registration.wake();
+                assert!(context_switches() > before);
 
                 let (sender, receiver) = watch::channel(0_u8);
                 let before = context_switches();
@@ -609,6 +663,10 @@ mod loom_mode {
         >());
         assert!(is_same_type::<crate::thread::Builder, loom::thread::Builder>());
         assert!(is_same_type::<crate::sync::Notify, tokio::sync::Notify>());
+        assert!(is_same_type::<
+            crate::sync::AtomicWaker,
+            futures_util::task::AtomicWaker,
+        >());
         assert!(is_same_type::<
             crate::sync::watch::Sender<u8>,
             tokio::sync::watch::Sender<u8>,

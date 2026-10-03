@@ -1,5 +1,3 @@
-use std::sync::Arc;
-
 use arch_into::ArchInto as _;
 use arrow_array::{
     Array, ArrayRef, BinaryArray, BooleanArray, Float32Array, Float64Array, Int8Array, Int16Array,
@@ -10,6 +8,7 @@ use arrow_buffer::BooleanBuffer;
 use arrow_schema::{DataType, Schema, TimeUnit};
 use error_stack::Report;
 use meticulous::OptionExt as _;
+use nervix_primitives::sync::StdArc;
 
 use crate::{RowErrors, RuntimeError};
 
@@ -64,8 +63,8 @@ macro_rules! declare_typed_arrays {
 
             pub fn to_array_ref(&self) -> ArrayRef {
                 match self {
-                    $(Self::$Variant(array) => Arc::new(array.clone()),)+
-                    Self::Datetime(array) => Arc::new(array.clone()),
+                    $(Self::$Variant(array) => StdArc::new(array.clone()),)+
+                    Self::Datetime(array) => StdArc::new(array.clone()),
                     Self::Generic(array) => array.clone(),
                     Self::Uninitialized { data_type, len } => new_null_array(data_type, *len),
                 }
@@ -96,8 +95,8 @@ macro_rules! declare_typed_arrays {
 
             pub(crate) fn into_array_ref(self) -> ArrayRef {
                 match self {
-                    $(Self::$Variant(array) => Arc::new(array),)+
-                    Self::Datetime(array) => Arc::new(array),
+                    $(Self::$Variant(array) => StdArc::new(array),)+
+                    Self::Datetime(array) => StdArc::new(array),
                     Self::Generic(array) => array,
                     Self::Uninitialized { data_type, len } => new_null_array(&data_type, len),
                 }
@@ -169,7 +168,7 @@ with_typed_registers!(declare_typed_array_conversions);
 /// descriptions agree once, when the batch is built.
 #[derive(Debug, Clone, PartialEq)]
 pub struct TypedBatch {
-    schema: Arc<Schema>,
+    schema: StdArc<Schema>,
     columns: Vec<TypedArray>,
     errors: RowErrors,
     row_count: usize,
@@ -177,7 +176,7 @@ pub struct TypedBatch {
 
 impl TypedBatch {
     pub fn try_new(
-        schema: Arc<Schema>,
+        schema: StdArc<Schema>,
         columns: Vec<TypedArray>,
     ) -> error_stack::Result<Self, RuntimeError> {
         let row_count = validate_batch(&schema, &columns)?;
@@ -194,7 +193,7 @@ impl TypedBatch {
     /// Arrow permits zero-column batches with a non-zero row count. The VM needs the
     /// same representation for programs made entirely from constants.
     pub fn try_new_with_row_count(
-        schema: Arc<Schema>,
+        schema: StdArc<Schema>,
         columns: Vec<TypedArray>,
         row_count: usize,
     ) -> error_stack::Result<Self, RuntimeError> {
@@ -216,7 +215,7 @@ impl TypedBatch {
     }
 
     pub fn with_errors(
-        schema: Arc<Schema>,
+        schema: StdArc<Schema>,
         columns: Vec<TypedArray>,
         errors: RowErrors,
     ) -> error_stack::Result<Self, RuntimeError> {
@@ -238,7 +237,7 @@ impl TypedBatch {
         })
     }
 
-    pub fn schema(&self) -> &Arc<Schema> {
+    pub fn schema(&self) -> &StdArc<Schema> {
         &self.schema
     }
 
@@ -388,15 +387,14 @@ fn validate_batch(
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
-
     use arrow_array::{BooleanArray, Float64Array, Int64Array, StringArray};
     use arrow_schema::{DataType, Field, Schema};
+    use nervix_primitives::sync::StdArc;
 
     use super::*;
 
-    fn sample_schema() -> Arc<Schema> {
-        Arc::new(Schema::new(vec![
+    fn sample_schema() -> StdArc<Schema> {
+        StdArc::new(Schema::new(vec![
             Field::new("ints", DataType::Int64, true),
             Field::new("floats", DataType::Float64, true),
             Field::new("flags", DataType::Boolean, true),
@@ -436,7 +434,7 @@ mod tests {
 
     #[test]
     fn required_rows_without_values_are_the_or_of_the_required_columns_nulls() {
-        let schema = Arc::new(Schema::new(vec![
+        let schema = StdArc::new(Schema::new(vec![
             Field::new("optional", DataType::Int64, true),
             Field::new("first", DataType::Int64, false),
             Field::new("second", DataType::Utf8, false),
@@ -473,7 +471,7 @@ mod tests {
             TypedBatch::try_new(sample_schema(), sample_columns()).expect("batch must build");
         assert!(batch.rows_missing_required_values().is_none());
 
-        let schema = Arc::new(Schema::new(vec![
+        let schema = StdArc::new(Schema::new(vec![
             Field::new("ints", DataType::Int64, false),
             Field::new("names", DataType::Utf8, true),
         ]));
@@ -490,7 +488,7 @@ mod tests {
 
     #[test]
     fn an_uninitialized_required_column_misses_every_row() {
-        let schema = Arc::new(Schema::new(vec![
+        let schema = StdArc::new(Schema::new(vec![
             Field::new("ints", DataType::Int64, false),
             Field::new("unset", DataType::Utf8, false),
         ]));
@@ -533,7 +531,7 @@ mod tests {
 
     #[test]
     fn typed_batch_preserves_explicit_row_count_without_columns() {
-        let batch = TypedBatch::try_new_with_row_count(Arc::new(Schema::empty()), Vec::new(), 3)
+        let batch = TypedBatch::try_new_with_row_count(StdArc::new(Schema::empty()), Vec::new(), 3)
             .expect("zero-column batch must build");
 
         assert_eq!(batch.row_count(), 3);
@@ -562,7 +560,7 @@ mod tests {
 
     #[test]
     fn typed_batch_rejects_wrong_column_type() {
-        let schema = Arc::new(Schema::new(vec![Field::new("ints", DataType::Int64, true)]));
+        let schema = StdArc::new(Schema::new(vec![Field::new("ints", DataType::Int64, true)]));
         let columns = vec![TypedArray::Boolean(BooleanArray::from(vec![Some(true)]))];
 
         let error = TypedBatch::try_new(schema, columns).expect_err("batch must reject wrong type");
@@ -579,7 +577,7 @@ mod tests {
 
     #[test]
     fn optional_uninitialized_column_materializes_as_typed_nulls() {
-        let schema = Arc::new(Schema::new(vec![Field::new(
+        let schema = StdArc::new(Schema::new(vec![Field::new(
             "value",
             DataType::Int64,
             true,
@@ -598,7 +596,7 @@ mod tests {
 
     #[test]
     fn required_uninitialized_column_fails_materialization() {
-        let schema = Arc::new(Schema::new(vec![Field::new(
+        let schema = StdArc::new(Schema::new(vec![Field::new(
             "value",
             DataType::Int64,
             false,
@@ -620,7 +618,7 @@ mod tests {
 
     #[test]
     fn written_null_in_required_column_fails_materialization() {
-        let schema = Arc::new(Schema::new(vec![Field::new(
+        let schema = StdArc::new(Schema::new(vec![Field::new(
             "value",
             DataType::Int64,
             false,
@@ -642,7 +640,7 @@ mod tests {
 
     #[test]
     fn typed_batch_rejects_wrong_column_length() {
-        let schema = Arc::new(Schema::new(vec![
+        let schema = StdArc::new(Schema::new(vec![
             Field::new("ints", DataType::Int64, true),
             Field::new("names", DataType::Utf8, true),
         ]));

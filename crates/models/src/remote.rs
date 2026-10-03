@@ -54,8 +54,20 @@ pub struct RemoteAckResolution {
 )]
 pub enum RemoteAckOutcome {
     Alive,
+    /// Nonterminal progress of one remote ACK root. Its sequence fences a delayed status update
+    /// from changing the upstream root after a newer park or resume was observed.
+    Progress {
+        sequence: u64,
+        parked: bool,
+    },
     Ack,
     NoAck(String),
+}
+
+impl RemoteAckOutcome {
+    pub fn is_progress(&self) -> bool {
+        matches!(self, Self::Alive | Self::Progress { .. })
+    }
 }
 
 #[derive(

@@ -26,7 +26,10 @@ use error_stack::{Report, ResultExt as _};
 use meticulous::OptionExt as _;
 use nervix_primitives::{
     runtime::{Builder as TokioRuntimeBuilder, Runtime as TokioRuntime},
-    sync::atomic::{AtomicBool, Ordering},
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
     thread,
 };
 use signal_hook::{
@@ -35,7 +38,6 @@ use signal_hook::{
     low_level,
 };
 use tracing::{info, warn};
-use triomphe::Arc;
 
 use super::{
     error::AppError,
@@ -687,16 +689,14 @@ mod tests {
 #[cfg(all(test, feature = "shuttle"))]
 mod shuttle_tests {
     use meticulous::ResultExt as _;
+    use nervix_model_harness::shuttle::{check_pct, check_random};
     use nervix_primitives::sync::watch;
     use shuttle::future::block_on;
 
     use super::*;
-    use crate::{
-        application::{
-            shutdown::{ShutdownOutcome, ShutdownRequest},
-            test_fixtures::{FAR_FUTURE_SHUTDOWN_TIMEOUT, shut_down_in_phase_order},
-        },
-        shuttle_test::{check_pct, check_random},
+    use crate::application::{
+        shutdown::{ShutdownOutcome, ShutdownRequest},
+        test_fixtures::{FAR_FUTURE_SHUTDOWN_TIMEOUT, shut_down_in_phase_order},
     };
 
     const MODEL_THREAD_JOINS: &str =

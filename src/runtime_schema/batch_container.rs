@@ -169,7 +169,7 @@ impl CompiledCodecBatchEncoder<'_> {
                     MemberValue::Value(value),
                 )))
             }
-            CompiledWireSchema::Syslog => {
+            CompiledWireSchema::Syslog(_) => {
                 self.check_row(row_index)?;
                 let row = ArrowCodecRow::new(codec, self.batch, row_index);
                 let member = SyslogBatchMember::from_row(&row)?;
@@ -316,7 +316,7 @@ impl CompiledCodec {
                     .write_value_into(&value, output)
                     .map_err(|_| Report::new(BatchContainerError::Unwritable { encoding }))
             }
-            CompiledWireSchema::Syslog => {
+            CompiledWireSchema::Syslog(_) => {
                 let mut syslog_members = Vec::with_capacity(members.len());
                 for member in members.iter().copied() {
                     let MemberValue::Syslog(member) = &member.0 else {
@@ -346,7 +346,7 @@ impl CompiledCodec {
             CompiledWireSchema::Json(_)
             | CompiledWireSchema::Cbor(_)
             | CompiledWireSchema::Avro(_)
-            | CompiledWireSchema::Syslog => None,
+            | CompiledWireSchema::Syslog(_) => None,
         }
     }
 }
@@ -488,10 +488,10 @@ mod tests {
         CodecWireFormat, CreateCodec, CreateSchema, CreateWireSchema, JsonType, ParseAsType,
         ResolvedCodecWireFormat, SchemaField, WireSchemaField,
     };
+    use nervix_primitives::sync::Arc;
     use prost::Message as _;
     use prost_reflect::DynamicMessage;
     use serde_json::json;
-    use triomphe::Arc;
 
     use super::*;
     use crate::runtime_schema::{
@@ -1048,9 +1048,9 @@ mod tests {
         .expect("the SYSLOG codec should compile");
         let arrow_schema = compiled_schema.arrow_schema();
         let columns: Vec<arrow_array::ArrayRef> = vec![
-            std::sync::Arc::new(arrow_array::UInt8Array::from(vec![16, 16, 16])),
-            std::sync::Arc::new(arrow_array::UInt8Array::from(vec![6, 6, 3])),
-            std::sync::Arc::new(
+            nervix_primitives::sync::StdArc::new(arrow_array::UInt8Array::from(vec![16, 16, 16])),
+            nervix_primitives::sync::StdArc::new(arrow_array::UInt8Array::from(vec![6, 6, 3])),
+            nervix_primitives::sync::StdArc::new(
                 arrow_array::TimestampNanosecondArray::from(vec![
                     946_684_800_000_000_000,
                     946_684_801_000_000_000,
@@ -1058,8 +1058,8 @@ mod tests {
                 ])
                 .with_timezone("+00:00"),
             ),
-            std::sync::Arc::new(arrow_array::StringArray::from(vec!["app-01"; 3])),
-            std::sync::Arc::new(arrow_array::StringArray::from(vec![
+            nervix_primitives::sync::StdArc::new(arrow_array::StringArray::from(vec!["app-01"; 3])),
+            nervix_primitives::sync::StdArc::new(arrow_array::StringArray::from(vec![
                 "order accepted",
                 "say \"hi\"",
                 "order failed",

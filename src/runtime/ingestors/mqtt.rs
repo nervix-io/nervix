@@ -68,6 +68,10 @@ impl MqttIngestorStartPlan {
             acknowledgement: mode.acknowledgement(),
             buffered_intake: true,
             flush_each_intake: mode.is_ack(),
+            // The client sends its keep-alive only while the loop reads, so a held loop would let
+            // the broker close the connection once one and a half keep-alive intervals pass
+            // without a packet from it, and lose what was published until the source reconnects.
+            unacknowledged_admission: QueueAdmission::RefuseWhenFull,
             client_mounts,
             connector_label: "mqtt",
         }

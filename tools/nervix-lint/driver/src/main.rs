@@ -28,7 +28,7 @@ use std::{
 use anyhow::{Context as _, bail};
 use meticulous::ResultExt as _;
 use nervix_lint_report::{CompilerReport, Expansion, Finding, SiteId, SourceSpan, rules};
-use nervix_primitives::sync::blocking::Mutex;
+use nervix_primitives::sync::{Arc, blocking::Mutex};
 use rustc_data_structures::marker::IntoDynSyncSend;
 use rustc_driver::{Callbacks, Compilation};
 use rustc_hir::{Expr, ExprKind};
@@ -40,7 +40,6 @@ mod contracts;
 use contracts::{Flow, INVALID_CONTRACT, LIFECYCLE_CALL, SYNC_ACQUISITION, UNKNOWN_EFFECT};
 use rustc_middle::ty::{self, Ty, TyCtxt};
 use rustc_span::Span;
-use triomphe::Arc;
 
 struct AcquisitionPass {
     flow: Flow,

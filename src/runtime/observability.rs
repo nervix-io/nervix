@@ -775,8 +775,8 @@ mod tests {
     use fjall::Database;
     use futures_util::FutureExt as _;
     use nervix_models::{ClusterNodeName, IngestorName, ModelKind, ModelName, ParseAsType};
+    use nervix_primitives::sync::Arc;
     use tempfile::tempdir;
-    use triomphe::Arc;
 
     use super::*;
     use crate::metrics::RuntimeMetrics;

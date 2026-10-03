@@ -1567,9 +1567,9 @@ mod tests {
         FieldPath, MessageErrorCode, MessageErrorOperation, ModelName, ParseAsType,
         ProcessorInputs, RetryPolicy, Timestamp,
     };
+    use nervix_primitives::sync::Arc;
     use nonzero_ext::nonzero;
     use ordered_float::OrderedFloat;
-    use triomphe::Arc;
 
     use super::*;
     use crate::{

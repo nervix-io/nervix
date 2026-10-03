@@ -19,9 +19,11 @@ use nervix_interconnect::{
     HttpsListenerInstallation, HttpsListenerInstallationRequest, Transport,
 };
 use nervix_models::{ClusterNodeIdentity, ClusterNodeName};
-use nervix_primitives::{sync::CancellationToken, task::JoinHandle};
+use nervix_primitives::{
+    sync::{Arc, CancellationToken},
+    task::JoinHandle,
+};
 use thiserror::Error;
-use triomphe::Arc;
 
 use super::{
     scheduling::RUNTIME_REVISION_READINESS_PROPAGATION_BOUND, session_service::SessionServiceImpl,
@@ -589,9 +591,8 @@ impl SessionServiceImpl {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::BTreeSet;
+    use std::{collections::BTreeSet, time::Duration};
 
-    use futures_util::FutureExt as _;
     use meticulous::ResultExt as _;
     use nervix_interconnect::ApplicationCompletionPeersResponse;
     use nervix_models::{
@@ -649,20 +650,28 @@ mod tests {
 
     #[nervix_primitives::test]
     async fn the_https_listener_barrier_waits_until_the_listener_installs_the_revision() {
-        let TestService { service, path, .. } = build_test_service(false).await;
+        let bound = Duration::from_secs(30);
+        let TestService { service, path, .. } =
+            nervix_primitives::time::timeout(bound, build_test_service(false))
+                .await
+                .assured("the listener barrier fixture starts within its test deadline");
         let certificates = service.inner.https_certificates.clone();
         let mut barrier = Box::pin(service.wait_for_https_listener_installation(4));
 
         assert!(
-            barrier.as_mut().now_or_never().is_none(),
+            futures_util::poll!(barrier.as_mut()).is_pending(),
             "no listener installed revision 4 yet"
         );
-        certificates
-            .install(4, &ClusterSchedule::default())
+        nervix_primitives::time::timeout(
+            bound,
+            certificates.install(4, &ClusterSchedule::default()),
+        )
+        .await
+        .assured("the listener installs within its test deadline")
+        .expect("a runtime state without TLS VHOSTs installs");
+        nervix_primitives::time::timeout(bound, barrier)
             .await
-            .expect("a runtime state without TLS VHOSTs installs");
-        barrier
-            .await
+            .assured("the listener barrier completes within its test deadline")
             .expect("the barrier completes once the listener installed revision 4");
 
         drop(service);

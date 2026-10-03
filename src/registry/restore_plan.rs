@@ -596,6 +596,7 @@ mod tests {
                 domain: domain(name),
                 revision: 7,
                 raft_log: RaftLogPosition { term: 1, index: 7 },
+                cut: nervix_models::BackupCut::ConfigurationOnly,
             },
             record: DomainRecord {
                 domain: domain(name),
@@ -618,6 +619,8 @@ mod tests {
                 digest: digest(9),
             },
             resource_versions: versions,
+            state: Vec::new(),
+            skipped_state: Vec::new(),
         }
     }
 
@@ -677,6 +680,7 @@ mod tests {
             },
             source: "cluster.nvxb".to_string(),
             mode: nervix_models::RestoreMode::Apply,
+            state: nervix_models::RestoreState::All,
         }
     }
 
@@ -688,6 +692,7 @@ mod tests {
             },
             source: "domain.nvxb".to_string(),
             mode: nervix_models::RestoreMode::Apply,
+            state: nervix_models::RestoreState::All,
         }
     }
 

@@ -1,4 +1,4 @@
-use std::{collections::BTreeMap, num::NonZeroU64, sync::Arc as StdArc, time::Duration};
+use std::{collections::BTreeMap, num::NonZeroU64, time::Duration};
 
 use ahash::HashMap;
 #[cfg(test)]
@@ -12,11 +12,13 @@ use nervix_models::ClusterNodeName;
 use nervix_models::KafkaPartitionSchedule;
 use nervix_primitives::{
     publication::ArcSwap,
-    sync::atomic::{AtomicI64, AtomicU64, Ordering},
+    sync::{
+        Arc, StdArc,
+        atomic::{AtomicI64, AtomicU64, Ordering},
+    },
     time::{Instant, timeout_at},
 };
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
-use triomphe::Arc;
 
 #[cfg(test)]
 use super::KafkaDomainOffsetDescribe;
@@ -610,13 +612,44 @@ impl KafkaOffsetTable {
     }
 }
 
+/// Convert the internal offset checkpoint into typed partition positions for an archive. The
+/// scheduling cache is recomputed at START and therefore does not cross the archive boundary.
+pub(in crate::runtime) fn backup_offset_positions(
+    payload: &[u8],
+) -> error_stack::Result<Vec<(String, i32, i64)>, RuntimePersistenceError> {
+    let table = KafkaOffsetTable::decode(payload).map_err(Report::new)?;
+    let mut offsets = Vec::new();
+    for (topic, partitions) in table.topics {
+        for (partition, slot) in partitions {
+            offsets.push((topic.clone(), partition, slot.load(Ordering::SeqCst)));
+        }
+    }
+    offsets.sort_by(|left, right| (&left.0, left.1).cmp(&(&right.0, right.1)));
+    Ok(offsets)
+}
+
+pub(in crate::runtime) fn restore_offset_payload(
+    offsets: Vec<(String, i32, i64)>,
+) -> error_stack::Result<Vec<u8>, RuntimePersistenceError> {
+    let positions = offsets
+        .into_iter()
+        .map(|(topic, partition, offset)| KafkaOffsetPosition {
+            topic,
+            partition,
+            offset,
+        })
+        .collect();
+    KafkaOffsetTable::from_offsets(positions, HashMap::default())
+        .encode()
+        .map_err(Report::new)
+}
+
 #[cfg(test)]
 mod tests {
     use ahash::HashMap;
     use meticulous::ResultExt as _;
     use nervix_models::{ClusterNodeName, DomainName, ModelKind, ModelName};
-    use nervix_primitives::sync::oneshot;
-    use triomphe::Arc;
+    use nervix_primitives::sync::{Arc, oneshot};
 
     use super::*;
     use crate::runtime::{RuntimeState, StateReplicationRoles};
@@ -715,10 +748,10 @@ mod tests {
 
     #[cfg(feature = "shuttle")]
     mod shuttle_checks {
+        use nervix_model_harness::shuttle::check_interleavings;
         use nervix_primitives::{sync::blocking::mpsc, thread};
 
         use super::*;
-        use crate::shuttle_test::check_interleavings;
 
         /// The owner commits a recorded partition's offset and checks its replica quorum while
         /// another thread holds the assignment barrier, which that thread releases only after both

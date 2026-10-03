@@ -17,6 +17,7 @@ use futures_util::{FutureExt as _, Stream, StreamExt as _, stream};
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_execution::{Executor, MemoryClass, Reservation, StorageClass};
 use nervix_primitives::sync::{
+    Arc,
     atomic::{AtomicBool, AtomicU64, Ordering},
     blocking::{Mutex, RwLock},
     watch,
@@ -34,7 +35,6 @@ use openraft::{
 };
 use rkyv::{Archive, Deserialize, Serialize};
 use thiserror::Error;
-use triomphe::Arc;
 
 #[cfg(test)]
 use crate::apply_consensus_command;
@@ -86,10 +86,10 @@ const KEY_INSTALLING: &[u8] = b"installing";
 const KEY_VOTE: &[u8] = b"vote";
 const KEY_COMMITTED: &[u8] = b"committed";
 const KEY_LAST_PURGED: &[u8] = b"last_purged";
-const KEYSPACE_LOGS: &str = "raft_logs";
-const KEYSPACE_META: &str = "raft_meta";
-const KEYSPACE_STATE_MACHINE: &str = "raft_state_machine";
-const KEYSPACE_SNAPSHOT: &str = "raft_snapshot";
+const KEYSPACE_LOGS: &str = "raft_count_logs";
+const KEYSPACE_META: &str = "raft_count_meta";
+const KEYSPACE_STATE_MACHINE: &str = "raft_count_state";
+const KEYSPACE_SNAPSHOT: &str = "raft_count_snapshots";
 /// Working memory reserved for ordinary metadata and log storage relative to its operation unit.
 const STORAGE_RESERVATION_MULTIPLIER: u64 = 4;
 
@@ -122,7 +122,7 @@ const KEYSPACE_NAMES: [&str; 4] = [
 #[derive(Debug, Clone, Archive, Serialize, Deserialize)]
 #[repr(u8)]
 enum StateEncoding {
-    TypedCommandOutcomes = 5,
+    RestoreCounts = 7,
 }
 
 #[derive(Debug)]
@@ -177,7 +177,7 @@ impl TryFrom<StateMetadataRecord> for StateMetadata {
 impl From<&StateMachineData> for StateMetadata {
     fn from(state: &StateMachineData) -> Self {
         Self {
-            encoding: StateEncoding::TypedCommandOutcomes,
+            encoding: StateEncoding::RestoreCounts,
             last_applied_log_id: state.last_applied_log_id.clone(),
             last_membership: state.last_membership.clone(),
             runtime_revision: state.runtime_revision,
@@ -206,7 +206,7 @@ impl StateMetadata {
 impl StateMachineData {
     fn load(sm: &Keyspace, metadata: StateMetadata) -> io::Result<Self> {
         let StateMetadata {
-            encoding: StateEncoding::TypedCommandOutcomes,
+            encoding: StateEncoding::RestoreCounts,
             last_applied_log_id,
             last_membership,
             runtime_revision,
@@ -231,6 +231,7 @@ impl StateMachineData {
             cordoned_node_ids: Records::load(b'n', sm)?,
             node_admission_fences: Records::load(b'f', sm)?,
             domain_mutations: Records::load(b'x', sm)?,
+            domain_restore_installations: Records::load(b'I', sm)?,
             transactions: Records::load(b't', sm)?,
             transaction_commit_plans: crate::transaction_plan::TransactionCommitPlanRecords::load(
                 sm,
@@ -335,6 +336,12 @@ impl StateMachineData {
         )?;
         self.domain_mutations
             .write_changes(&preceding.domain_mutations, b'x', batch, sm)?;
+        self.domain_restore_installations.write_changes(
+            &preceding.domain_restore_installations,
+            b'I',
+            batch,
+            sm,
+        )?;
         self.transactions
             .write_changes(&preceding.transactions, b't', batch, sm)?;
         self.transaction_commit_plans.write_changes(
@@ -601,6 +608,22 @@ impl GenerationSeal {
 impl StoreInner {
     pub(super) fn state(&self) -> StateMachineData {
         self.state_machine.read().clone()
+    }
+
+    pub(super) fn with_restore_state_installation<T>(
+        &self,
+        domain: &nervix_models::DomainName,
+        authority: &nervix_models::RestoreStateAuthority,
+        tenure: impl FnOnce() -> Option<crate::LeaderTenure>,
+        publish: impl FnOnce() -> T,
+    ) -> error_stack::Result<T, crate::RestoreStateInstallationError> {
+        crate::restore::with_restore_state_installation(
+            &self.state_machine,
+            domain,
+            authority,
+            tenure,
+            publish,
+        )
     }
 
     async fn run<T: Send + 'static>(

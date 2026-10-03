@@ -31,11 +31,13 @@ use arch_into::ArchInto as _;
 use error_stack::Report;
 use futures_util::Stream;
 use meticulous::OptionExt as _;
+use nervix_backup::DescribedRuntimeState;
 use nervix_consensus::{CommandExecution, RestoreExecution};
 use nervix_models::{
-    CommandExecutionReference, DomainName, Restore, RestoreArchive, RestoreMode, RestoreReport,
-    RestoreScope, RestoreStep, RestoreStepOutcome, RestoreStepReport, RestoredDomain,
-    RestoredUsers, Timestamp, UserName,
+    ClusterSchedule, CommandExecutionReference, DomainName, ModelKind, NodeRef, Restore,
+    RestoreArchive, RestoreMode, RestoreReport, RestoreScope, RestoreState, RestoreStep,
+    RestoreStepOutcome, RestoreStepReport, RestoredDomain, RestoredUsers, SchemaFingerprint,
+    Timestamp, UserName,
 };
 use tracing::info;
 
@@ -491,6 +493,7 @@ impl SessionServiceImpl {
             execution,
             plan: &plan,
             archive: &archive,
+            state: restore.restore.state,
         };
         let run = run_restore_steps(&steps, restore.completed_steps(), &effects).await;
         let outcomes = run.steps;
@@ -505,6 +508,8 @@ impl SessionServiceImpl {
         }
         let restored = self.restored_users(&execution.reference).await;
         let report = restore_report(&restore, &plan, &archive, restored, outcomes);
+        let schedule = self.inner.consensus.current_schedule().await;
+        let warnings = restore_state_warnings(&plan, &archive, &schedule, restore.restore.state);
         let message = restore_message(&restore.restore, &report);
         info!(
             execution_reference = %execution.reference,
@@ -513,6 +518,7 @@ impl SessionServiceImpl {
         );
         CommandResult {
             restore: Some(Box::new(report)),
+            diagnostics: warnings,
             ..command_ok(message)
         }
     }
@@ -564,6 +570,80 @@ fn restore_report(
         users,
         domains,
         steps: outcomes,
+    }
+}
+
+/// Skips are a successful restore outcome, but the operator must see which state was not
+/// installed. Derive the diagnostics from the verified archive and published schedule so a
+/// resumed command reports the same warnings even when its state step was already recorded.
+fn restore_state_warnings(
+    plan: &RestorePlan,
+    archive: &VerifiedArchive,
+    schedule: &ClusterSchedule,
+    state: RestoreState,
+) -> Vec<CommandDiagnostic> {
+    if state == RestoreState::ConfigurationOnly {
+        return Vec::new();
+    }
+    let mut warnings = Vec::new();
+    for domain in plan.domains.values() {
+        for skipped in archive.skipped_state_for(&domain.source) {
+            if state == RestoreState::WithoutSourceOffsets
+                && skipped.path.as_str().contains("/state/kafka_offset/")
+            {
+                continue;
+            }
+            warnings.push(CommandDiagnostic::unlocated(format!(
+                "warning: skipped state section '{}' while restoring domain '{}': {}",
+                skipped.path, domain.target, skipped.reason,
+            )));
+        }
+        for archived in archive.states_for(&domain.source) {
+            let (kind, entity, schema) = match archived {
+                DescribedRuntimeState::Wasm { descriptor, .. } => (
+                    ModelKind::WasmProcessor,
+                    &descriptor.entity,
+                    Some(descriptor.schema),
+                ),
+                DescribedRuntimeState::KafkaOffsets { offsets, .. } => {
+                    if state == RestoreState::WithoutSourceOffsets {
+                        continue;
+                    }
+                    (ModelKind::Ingestor, &offsets.entity, Some(offsets.schema))
+                }
+                DescribedRuntimeState::BranchLifecycle { lifecycle, .. } => (
+                    lifecycle.owner_kind,
+                    &lifecycle.entity,
+                    Some(lifecycle.schema),
+                ),
+            };
+            let node = schedule
+                .domain(&domain.target)
+                .and_then(|scheduled| scheduled.nodes.get(&NodeRef::new(kind, entity.clone())));
+            let reason = state_skip_reason(schema, node.map(|node| node.schema_fingerprint));
+            if let Some(reason) = reason {
+                warnings.push(CommandDiagnostic::unlocated(format!(
+                    "warning: skipped {} state '{}' in domain '{}': {reason}",
+                    kind.as_str(),
+                    entity,
+                    domain.target,
+                )));
+            }
+        }
+    }
+    warnings
+}
+
+fn state_skip_reason(
+    archived: Option<SchemaFingerprint>,
+    published: Option<SchemaFingerprint>,
+) -> Option<&'static str> {
+    match published {
+        None => Some("the entity is absent from the restored schedule"),
+        Some(published) if archived.is_some_and(|archived| archived != published) => {
+            Some("the archived schema fingerprint does not match the restored schedule")
+        }
+        Some(_) => None,
     }
 }
 
@@ -652,4 +732,25 @@ fn dry_run_message(restore: &Restore, report: &RestoreReport) -> String {
         restore.source,
         report_counts(report)
     )
+}
+
+#[cfg(test)]
+mod backup_state_warning_tests {
+    use super::*;
+
+    #[test]
+    fn a_restore_reports_only_state_the_schedule_will_skip() {
+        let archived = SchemaFingerprint::from_digest([1; 32]);
+        let published = SchemaFingerprint::from_digest([2; 32]);
+        assert_eq!(
+            state_skip_reason(Some(archived), None),
+            Some("the entity is absent from the restored schedule")
+        );
+        assert_eq!(
+            state_skip_reason(Some(archived), Some(published)),
+            Some("the archived schema fingerprint does not match the restored schedule")
+        );
+        assert_eq!(state_skip_reason(Some(archived), Some(archived)), None);
+        assert_eq!(state_skip_reason(None, Some(published)), None);
+    }
 }

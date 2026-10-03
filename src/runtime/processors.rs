@@ -1,4 +1,4 @@
-use std::{collections::VecDeque, num::NonZeroUsize, sync::Arc as StdArc, time::Duration};
+use std::{collections::VecDeque, num::NonZeroUsize, time::Duration};
 
 use ahash::HashMap;
 use error_stack::{Report, ResultExt as _};
@@ -9,6 +9,7 @@ use nervix_models::{
     MessageErrorPolicy, ModelKind, ModelName, RelayName, ResourceName, RouteConstruction,
     StructuredMessageError, Timestamp,
 };
+use nervix_primitives::sync::{Arc, StdArc};
 use nervix_roto::UdfExecutor;
 use nervix_vm::{
     CompileBinding as VmCompileBinding, CompileOptions as VmCompileOptions,
@@ -20,7 +21,6 @@ use nervix_vm::{
 };
 use nervix_wasm::CompiledWasmProcessor;
 use ordered_float::OrderedFloat;
-use triomphe::Arc;
 
 use super::{
     BranchBufferDeadline, BranchBufferTimer, BranchBufferTimingResult, BranchKey, BranchRuntime,

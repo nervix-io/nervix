@@ -8,8 +8,7 @@
 use std::collections::BTreeSet;
 
 use nervix_models::ClusterNodeName;
-use nervix_primitives::publication::ArcSwapOption;
-use triomphe::Arc;
+use nervix_primitives::{publication::ArcSwapOption, sync::Arc};
 
 use super::ScheduledStateIdentity;
 

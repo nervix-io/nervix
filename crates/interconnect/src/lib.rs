@@ -26,6 +26,7 @@ use strum::IntoStaticStr;
 use thiserror::Error;
 
 mod authentication;
+pub mod backup;
 mod connection;
 mod entropy;
 mod identity;
@@ -36,8 +37,6 @@ mod peer_target;
 mod pool;
 mod request;
 mod runtime_state;
-#[cfg(all(test, feature = "shuttle"))]
-mod shuttle_test;
 #[cfg(all(test, feature = "turmoil"))]
 #[path = "../tests/simulation/runner.rs"]
 mod simulation_runner;
@@ -69,6 +68,8 @@ pub use request::{
 };
 use request::{RequestEnvelope, RequestState, ResponseEnvelope};
 pub use runtime_state::{
+    BranchCheckpointCursor, BranchCheckpointListing, BranchCheckpointListingRequest,
+    BranchCheckpointListingResponse, BranchCheckpointPage, BranchCheckpointRevision,
     OwnershipHandoffCheckpoint, RuntimeState, RuntimeStateKind, StateCheckpointAvailable,
     StatePlacementEnvelope, StateReplicationAck, StateSchema, StateSnapshotEnvelope,
     StateSyncRequest, StateSyncResponse,

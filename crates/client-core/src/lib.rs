@@ -32,8 +32,6 @@ mod outcome;
 mod producer;
 mod restoration;
 mod restore;
-#[cfg(all(test, feature = "shuttle"))]
-mod shuttle_test;
 mod subscriptions;
 mod upload;
 

@@ -41,3 +41,117 @@ fn bolero_models_and_statements_round_trip_through_their_archives() {
             assert_eq!(crate::archive_round_trip!(&statement, Statement), statement);
         });
 }
+
+/// Every pointer-sized count in the vocabulary is exercised through its actual owning record.
+fn assert_archived_count_records(count: usize) {
+    use std::num::NonZeroUsize;
+
+    use meticulous::ResultExt as _;
+    use nervix_models::{
+        AlterRelay, AlterRelayOperation, CreateRelay, ImpactPlanningBasis, RelayBranching,
+        RelayName, ResourceName, SchemaName, TransactionCommitPlanHeader,
+        TransactionOperationNumber, TransactionPosition, TransactionPreviewIdentity,
+        WasmCheckpointCounts, WasmStateGeneration, WasmStateInspection,
+    };
+
+    let capacity = match NonZeroUsize::new(count) {
+        Some(capacity) => capacity,
+        None => NonZeroUsize::MIN,
+    };
+    let relay = CreateRelay {
+        name: RelayName::parse("notifications").assured("the literal follows the name rule"),
+        schema: SchemaName::parse("notification").assured("the literal follows the name rule"),
+        buffer: capacity,
+        branching: RelayBranching::Unbranched,
+        materialized_state: None,
+    };
+    assert_eq!(crate::archive_round_trip!(&relay, CreateRelay), relay);
+    let alter = AlterRelay {
+        relay: relay.name.clone(),
+        operations: vec![AlterRelayOperation::SetCapacity { capacity }],
+    };
+    assert_eq!(crate::archive_round_trip!(&alter, AlterRelay), alter);
+    let operation = TransactionOperationNumber::new(capacity);
+    assert_eq!(
+        crate::archive_round_trip!(&operation, TransactionOperationNumber),
+        operation
+    );
+    let position = TransactionPosition::new(count);
+    assert_eq!(
+        crate::archive_round_trip!(&position, TransactionPosition),
+        position
+    );
+    let header = TransactionCommitPlanHeader {
+        preview: TransactionPreviewIdentity {
+            transaction_id: "transaction-counts".to_string(),
+            position,
+            planning_basis: ImpactPlanningBasis::new([7; 32]),
+        },
+        step_count: count,
+    };
+    assert_eq!(
+        crate::archive_round_trip!(&header, TransactionCommitPlanHeader),
+        header
+    );
+
+    for stage in 0..6 {
+        let mut counts = WasmCheckpointCounts {
+            total: count,
+            ..Default::default()
+        };
+        match stage {
+            0 => counts.empty = count,
+            1 => counts.captured = count,
+            2 => counts.locally_durable = count,
+            3 => counts.awaiting_replicas = count,
+            4 => counts.replica_confirmed = count,
+            _ => counts.failed = count,
+        }
+        assert_eq!(
+            crate::archive_round_trip!(&counts, WasmCheckpointCounts),
+            counts
+        );
+        let inspection = WasmStateInspection {
+            resource: ResourceName::parse("processor").assured("the literal follows the name rule"),
+            resource_version: 1,
+            file: "processor.wasm".to_string(),
+            default_generation: WasmStateGeneration::FIRST,
+            reset: None,
+            reset_readiness: None,
+            recoveries: Vec::new(),
+            omitted_recoveries: count,
+            checkpoint_counts: counts,
+            checkpoints: Vec::new(),
+            omitted_checkpoints: count,
+        };
+        assert_eq!(
+            crate::archive_round_trip!(&inspection, WasmStateInspection),
+            inspection
+        );
+    }
+}
+
+#[test]
+fn archived_counts_preserve_their_boundaries() {
+    use meticulous::ResultExt as _;
+
+    for count in [0, u64::from(u32::MAX) + 1, u64::MAX] {
+        let count = usize::try_from(count).assured("the native test target addresses 64 bits");
+        assert_archived_count_records(count);
+    }
+}
+
+#[test]
+fn bolero_archived_counts_round_trip() {
+    use meticulous::ResultExt as _;
+    use nervix_arbitrary::Entropy;
+
+    bolero::check!()
+        .with_iterations(256)
+        .with_max_len(16)
+        .for_each(|bytes: &[u8]| {
+            let count = Entropy::new(bytes).any_u64();
+            let count = usize::try_from(count).assured("the native test target addresses 64 bits");
+            assert_archived_count_records(count);
+        });
+}

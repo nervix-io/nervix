@@ -22,7 +22,7 @@ use nervix_client_core::{
     AttachedDomainClock, DomainAdmissionWindow, DomainClockObservedState,
     DomainClockTickObservation, DomainName, PacedDomainClock, Timestamp,
 };
-use triomphe::Arc;
+use nervix_primitives::sync::Arc;
 
 use crate::{
     abi,

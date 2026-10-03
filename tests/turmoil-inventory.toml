@@ -1,0 +1,85 @@
+# The tests of the Turmoil suite, by the invocation of `just test-turmoil` that runs them.
+#
+# `just test-turmoil` saves each invocation's output under target/turmoil-suite and holds it to its
+# entry here: a registered test that did not run, or ran ignored, fails the suite, and so does a test
+# that ran without being registered, or a test registered as ignored that ran. An invocation that
+# also runs tests which are not Turmoil invariants names the marker its invariants carry, and only a
+# test whose name contains it must be registered. A renamed test is renamed here in the same change,
+# and a new scenario joins its invocation's list.
+
+[[invocation]]
+name = "primitives"
+tests = [
+  "tests::simulated_host::sockets_names_timers_and_cpu_jobs_belong_to_the_simulated_host",
+  "tests::turmoil_mode::turmoil_selects_simulated_sockets_and_tokios_timers",
+]
+
+[[invocation]]
+marker = "simulation_checks"
+name = "execution"
+tests = [
+  "workers::simulation_checks::cancelled_running_job_keeps_its_charge_until_exit",
+  "workers::simulation_checks::queued_jobs_take_the_worker_in_admission_order",
+  "workers::simulation_checks::saturation_and_dropped_waiters_restore_the_queue_and_charge",
+]
+
+[[invocation]]
+ignored = ["authentication::simulation_tests::replay_trace_in_fresh_process"]
+name = "interconnect-library"
+tests = [
+  "authentication::simulation_tests::a_server_certificate_for_another_node_is_rejected",
+  "authentication::simulation_tests::certificate_clock_without_a_simulated_host_has_no_time",
+  "authentication::simulation_tests::certificate_validity_and_expiry_deadlines_follow_simulated_time_on_both_peers",
+  "authentication::simulation_tests::client_rustls_verification_reads_the_bundle_clock",
+  "authentication::simulation_tests::clock_skew_behind_the_unix_epoch_has_no_time",
+  "authentication::simulation_tests::outcome_names_the_failure_without_payload",
+  "authentication::simulation_tests::semantic_trace_replays_in_fresh_processes",
+  "authentication::simulation_tests::semantic_trace_replays_within_one_process",
+  "authentication::simulation_tests::server_rustls_verification_reads_the_bundle_clock",
+  "authentication::simulation_tests::skewed_clocks_accept_current_certificates",
+  "authentication::simulation_tests::stalled_handshake_times_out_after_the_simulated_setup_deadline",
+  "wire::simulation_checks::seeded_wire_round_trips_use_the_execution_owner",
+]
+
+[[invocation]]
+ignored = ["failing_check_after_the_simulation", "process_dependent_trace"]
+name = "interconnect-simulation"
+tests = [
+  "bounded_cpu_job_runs_on_the_simulated_scheduler",
+  "diverged_and_panicked_runs_leave_records",
+  "injected_failure_is_recorded_and_replayed_in_a_fresh_process",
+  "peer_resolution_uses_simulated_dns",
+  "scenario::tests::a_divergence_names_both_runs_first_differing_events",
+  "scenario::tests::a_replay_takes_only_its_recorded_inputs",
+  "scenario::tests::an_attempt_process_reports_to_its_driver",
+  "scenario::tests::an_attempt_process_that_never_reports_is_named_by_its_ending",
+  "scenario::tests::exploring_runs_committed_seeds_or_one_sweep_range",
+  "scenario::tests::first_difference_names_changed_missing_and_extra_events",
+  "scenario::tests::malformed_sweeps_and_injections_are_refused",
+  "scenario::tests::records_round_trip_and_leave_nothing_once_their_seed_passes",
+  "scenario::tests::replay_reports_every_way_its_build_and_plan_differ",
+  "scenario::tests::replay_reports_its_verdict",
+  "scenario::tests::slugs_keep_letters_and_digits_and_collapse_the_rest",
+  "semantic_trace_records_hosts_in_simulated_order",
+  "simulated_entropy_replays_each_seed_and_separates_streams",
+  "simulated_hosts_keep_their_own_names_sockets_and_clocks",
+  "simulated_utc_is_the_epoch_plus_simulated_elapsed_time",
+  "simulation_cleanup_panic_fails_a_completed_run",
+  "simulation_host_task_panic_reports_its_own_message",
+  "simulation_ipv6_topology",
+  "simulation_rejects_invalid_bounds_and_epoch",
+  "simulation_scheduler_panic_reaches_result",
+  "simulation_step_limit_names_scenario_and_seed",
+  "simulation_supervised_host_failure_reaches_result",
+  "simulation_timer_smoke",
+  "simulation_wall_bound_is_outside_simulated_time",
+  "simulation_wall_bound_reports_where_simulated_time_stopped",
+  "transport::backup::backup_section_fetch_is_fenced_and_recovers_after_partition",
+  "transport::backup::restart_during_backup_transfer_discards_the_process_stage",
+  "transport::isolation::stalled_peer_cannot_consume_unrelated_capacity_or_leak_reservations",
+  "transport::multiple_peers_keep_remote_failure_classes_and_reject_invalid_authentication",
+  "transport::network_disruption_respects_deadlines_and_repairs_authenticated_service",
+  "transport::production_transport_exchanges_typed_arrow_batch_over_simulated_tcp",
+  "transport::relay::relay_reconciliation_and_cancellation_survive_lost_replies",
+  "transport::relay::relay_restart_fences_unresolved_delivery_and_accepts_fresh_work",
+]

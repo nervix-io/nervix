@@ -137,7 +137,7 @@ def load_inventory(path: pathlib.Path = INVENTORY) -> Inventory:
             raise BoleroError(f"{item['id']}: invalid cargo test target")
         if not isinstance(item["features"], list) or any(
             not isinstance(feature, str)
-            or feature in {"loom", "shuttle", "turmoil"}
+            or feature in {"loom", "shuttle", "turmoil", "deloxide"}
             for feature in item["features"]
         ):
             raise BoleroError(f"{item['id']}: invalid or modeled feature")
@@ -229,10 +229,11 @@ def package_rust_sources(manifest: pathlib.Path) -> Iterator[pathlib.Path]:
     for directory, children, files in os.walk(manifest.parent):
         parent = pathlib.Path(directory)
         # Nested Cargo packages own their Rust, including a workspace's qualification crate.
-        # Build output and Git metadata are not authored sources of the package being checked.
+        # Build output, hidden metadata and dependency trees are not package-authored sources.
         children[:] = sorted(
             child for child in children
-            if child not in {".git", "target"}
+            if not child.startswith(".")
+            and child not in {"target", "node_modules", "__fuzz__"}
             and not (parent / child / "Cargo.toml").is_file()
         )
         for name in sorted(files):
@@ -665,6 +666,19 @@ def build_instrumented(
     return matches[0]
 
 
+def prepare_target(inventory: Inventory, target: Target) -> None:
+    verify_tool(inventory)
+    path = run_dir(target)
+    started = time.monotonic()
+    result = "failed preparation"
+    try:
+        binary = build_instrumented(inventory, target, path)
+        result = "instrumented preparation"
+    finally:
+        metadata(path, target, bolero_args(inventory, target), result, time.monotonic() - started)
+    print(f"{target.id}: prepared {binary}; artifacts: {path}")
+
+
 def run_instrumented(
     binary: pathlib.Path,
     target: Target,
@@ -790,8 +804,9 @@ def replay(target: Target, failure: pathlib.Path) -> int:
         r"test result: FAILED\. 0 passed; 1 failed", output
     ):
         raise BoleroError(f"{target.id}: replay failed outside the selected property")
+    # Bolero omits zero counters: corpus-only completion ends after the corpus count.
     if result.returncode == 0 and not re.search(
-        r"corpus inputs: [1-9]\d* \| rng inputs: 0", output
+        r"corpus inputs: [1-9]\d*(?:\r?\n|$)", output
     ):
         raise BoleroError(f"{target.id}: saved input was not replayed")
     print(output[-4000:])
@@ -984,6 +999,8 @@ def main() -> int:
     subparsers.add_parser("validate")
     subparsers.add_parser("list")
     subparsers.add_parser("qualify")
+    prepare = subparsers.add_parser("prepare")
+    prepare.add_argument("target")
     test = subparsers.add_parser("test")
     test.add_argument("filter", nargs="?")
     fuzz = subparsers.add_parser("fuzz")
@@ -1006,6 +1023,9 @@ def main() -> int:
         return 0
     if args.action == "qualify":
         qualify(inventory)
+        return 0
+    if args.action == "prepare":
+        prepare_target(inventory, exact_target(inventory, args.target))
         return 0
     if args.action == "test":
         test_targets(inventory, select(inventory, args.filter))

@@ -38,7 +38,7 @@ use nervix_interconnect::{
 };
 use nervix_primitives::{
     sync::{
-        CancellationToken,
+        Arc, CancellationToken,
         atomic::{AtomicU64, Ordering},
         blocking::RwLock,
     },
@@ -50,7 +50,6 @@ use prometheus::{
     proto::{Counter, Gauge, LabelPair, Metric, MetricFamily, MetricType},
 };
 use strum::IntoEnumIterator as _;
-use triomphe::Arc;
 
 /// How often the reactor delay probe asks to be woken. Short enough that one blocked poll is
 /// visible in a scrape interval, long enough that the probe itself is not the load.

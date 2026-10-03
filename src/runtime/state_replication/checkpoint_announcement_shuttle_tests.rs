@@ -4,17 +4,20 @@
 //! - **Owns.** The ordering invariants of one placement's announcement and replica reports: an
 //!   offered revision always has an announcer, a retired replication ends its announcer, and an
 //!   owner's announcement wakes the replica task that keeps that replica's copy current.
-//! - **Depends on.** The production checkpoint replication and the server Shuttle runner.
+//! - **Depends on.** The production checkpoint replication and the Shuttle runner of the model
+//!   harness.
 //! - **Must not know.** What a checkpoint holds, the interconnect, or stable storage.
 
-use std::{collections::BTreeSet, sync::Arc as StdArc};
+use std::collections::BTreeSet;
 
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_checkpoint_replication::{Announcer, AnnouncerStep, CheckpointReplication};
+use nervix_model_harness::shuttle::check_interleavings;
 use nervix_models::ClusterNodeName;
-use nervix_primitives::sync::atomic::{AtomicU64, Ordering};
-
-use crate::shuttle_test::check_interleavings;
+use nervix_primitives::sync::{
+    StdArc,
+    atomic::{AtomicU64, Ordering},
+};
 
 const MODEL_TASK_JOINS: &str =
     "Shuttle fails the whole execution when a model task panics, so no join observes one";

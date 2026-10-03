@@ -30,6 +30,187 @@ use crate::{
 
 type TestResult = Result<(), Box<dyn std::error::Error>>;
 
+#[nervix_primitives::test]
+async fn restore_installation_authority_and_start_gate_survive_restart() -> TestResult {
+    use nervix_models::{
+        ArchiveDigest, Restore, RestoreArchive, RestoreMode, RestoreScope, RestoreState,
+        RestoreStep,
+    };
+
+    use crate::{
+        CommandExecution, CommandExecutionEffect, LeaderTenure, RestoreExecution, RestoreStepEffect,
+    };
+    let mut harness = Harness::new().await?;
+    let domain = DomainName::parse("restored")?;
+    let reference = Harness::command_reference(1);
+    let execution = CommandExecution::applying(
+        reference.clone(),
+        nervix_models::UserName::parse("operator")?,
+        None,
+        [1; 32],
+        nervix_models::Timestamp::from_unix_nanos(1_700_000_010_000_000_000),
+        CommandExecutionEffect::Restore(Box::new(RestoreExecution::new(
+            Restore {
+                scope: RestoreScope::Domain {
+                    domain: domain.clone(),
+                    target: None,
+                },
+                source: "archive.nvxb".into(),
+                mode: RestoreMode::Apply,
+                state: RestoreState::All,
+            },
+            RestoreArchive {
+                total_bytes: NonZeroU64::MIN,
+                digest: ArchiveDigest::from_bytes([1; 32]),
+            },
+        ))),
+    );
+    harness
+        .apply(
+            1,
+            ConsensusCommand::AdmitCommandExecution {
+                execution: Box::new(execution),
+                mutation_domains: BTreeSet::from([domain.clone()]),
+                policy: Harness::command_policy(),
+            },
+        )
+        .await?;
+    harness
+        .apply(
+            2,
+            ConsensusCommand::ApplyRestoreStep {
+                reference: reference.clone(),
+                step: RestoreStep::CreateDomain(domain.clone()),
+                effect: Box::new(RestoreStepEffect::Domain {
+                    state: Box::new(Harness::domain("restored")),
+                    resources: vec![],
+                }),
+            },
+        )
+        .await?;
+    harness
+        .apply(
+            3,
+            ConsensusCommand::ApplyRestoreStep {
+                reference: reference.clone(),
+                step: RestoreStep::ImportResources(domain.clone()),
+                effect: Box::new(RestoreStepEffect::Completion),
+            },
+        )
+        .await?;
+    let tenure = LeaderTenure {
+        leader_id: Harness::node(),
+        term: 3,
+    };
+    harness
+        .apply(
+            4,
+            ConsensusCommand::BeginRestoreStateInstallation {
+                reference: reference.clone(),
+                domain: domain.clone(),
+                tenure: tenure.clone(),
+            },
+        )
+        .await?;
+    let mut harness = harness.reopen().await?;
+    let state = harness.store.inner.state();
+    let Some(crate::restore::DomainRestoreInstallation::Installing(authority)) =
+        state.domain_restore_installations.get(&domain)
+    else {
+        panic!("installation authority must recover");
+    };
+    let authority = authority.clone();
+    assert_eq!(authority.generation, 4);
+    assert!(crate::restore::validate_restored_domain_start(&state, &domain).is_err());
+    harness
+        .store
+        .inner
+        .with_restore_state_installation(&domain, &authority, || Some(tenure.clone()), || ())
+        .assured("current authority enters mutation boundary");
+    assert!(
+        harness
+            .store
+            .inner
+            .with_restore_state_installation(
+                &domain,
+                &authority,
+                || None,
+                || panic!("no leader cannot mutate")
+            )
+            .is_err()
+    );
+    let successor = LeaderTenure {
+        leader_id: ClusterNodeName::parse("node-2")?,
+        term: 4,
+    };
+    assert!(
+        harness
+            .store
+            .inner
+            .with_restore_state_installation(
+                &domain,
+                &authority,
+                || Some(successor),
+                || panic!("stale tenure cannot mutate")
+            )
+            .is_err()
+    );
+    harness
+        .apply(
+            5,
+            ConsensusCommand::BeginRestoreStateInstallation {
+                reference: reference.clone(),
+                domain: domain.clone(),
+                tenure: tenure.clone(),
+            },
+        )
+        .await?;
+    assert!(
+        harness
+            .store
+            .inner
+            .with_restore_state_installation(
+                &domain,
+                &authority,
+                || Some(tenure.clone()),
+                || panic!("stale generation cannot mutate")
+            )
+            .is_err()
+    );
+    let state = harness.store.inner.state();
+    let Some(crate::restore::DomainRestoreInstallation::Installing(current)) =
+        state.domain_restore_installations.get(&domain)
+    else {
+        panic!("new authority was admitted");
+    };
+    harness
+        .apply(
+            6,
+            ConsensusCommand::ApplyRestoreStep {
+                reference,
+                step: RestoreStep::ApplyModels(domain.clone()),
+                effect: Box::new(RestoreStepEffect::InstalledState(current.clone())),
+            },
+        )
+        .await?;
+    let harness = harness.reopen().await?;
+    crate::restore::validate_restored_domain_start(&harness.store.inner.state(), &domain)
+        .assured("completed installation releases durable start gate");
+    assert!(
+        harness
+            .store
+            .inner
+            .with_restore_state_installation(
+                &domain,
+                &authority,
+                || Some(tenure),
+                || panic!("completed installation cannot mutate")
+            )
+            .is_err()
+    );
+    Ok(())
+}
+
 struct Harness {
     directory: TempDir,
     store: FjallStore,
@@ -2303,5 +2484,29 @@ async fn current_record_storage_requires_its_metadata() -> TestResult {
     let result =
         FjallStore::from_database(Database::builder(directory.path()).open()?, executor).await;
     assert!(matches!(result, Err(error) if error.to_string().contains("recreate")));
+    Ok(())
+}
+
+#[nervix_primitives::test]
+async fn current_consensus_storage_rejects_an_unknown_keyspace() -> TestResult {
+    let directory = TempDir::new()?;
+    let database = Database::builder(directory.path()).open()?;
+    database.keyspace("unrecognized", KeyspaceCreateOptions::default)?;
+    let result = FjallStore::from_database(database, Executor::default()).await;
+    let Err(error) = result else {
+        panic!("an unknown keyspace cannot supply the current consensus storage contract");
+    };
+    let cause = error
+        .get_ref()
+        .assured("the opening error retains its typed storage cause");
+    assert!(matches!(
+        cause.downcast_ref::<StorageFailure>(),
+        Some(StorageFailure::InvalidState)
+    ));
+    assert!(
+        error
+            .to_string()
+            .contains("recreate the node's stored state")
+    );
     Ok(())
 }

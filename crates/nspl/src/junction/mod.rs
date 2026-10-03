@@ -261,24 +261,139 @@ mod tests {
     }
 
     #[test]
-    fn a_bare_operation_keyword_after_a_comma_still_begins_the_next_operation() {
-        assert!(
-            parse_alter_junction(
-                "ALTER JUNCTION project_events SET FILTER WHERE concat(input.kind, replace);"
+    fn names_spelled_like_keywords_read_in_every_junction_region() {
+        let parsed = parse_create_junction(
+            "CREATE JUNCTION route_trips FROM trips WHERE to > on AND input.end > 0, stops WHERE \
+             by(input.to) > 0 FILTER WHERE output.to != max UNBRANCHED USING MATERIALIZED STATE \
+             limits DEFAULT { to = 1, `end` = 2 } TO routed INHERIT to, on SET flush = \
+             input.flush, `from` = input.from WHERE flush > 0 FLUSH IMMEDIATE ON MESSAGE ERROR \
+             LOG;",
+        )
+        .expect("names spelled like keywords stay in their expressions");
+
+        let expression = |text: &str| crate::parse_expression(text).expect("valid expression");
+        assert_eq!(
+            parsed.from.where_clauses()[0].where_clause,
+            expression("to > on AND input.end > 0")
+        );
+        assert_eq!(
+            parsed.from.where_clauses()[1].where_clause,
+            expression("by(input.to) > 0")
+        );
+        assert_eq!(parsed.filter_where, Some(expression("output.to != max")));
+        assert_eq!(
+            parsed.materialized_state[0].policy,
+            nervix_models::MaterializedStatePolicy::Default(
+                crate::parse_route_construction("SET to = 1, `end` = 2")
+                    .expect("valid assignments")
+                    .assignments
             )
-            .is_err(),
-            "a bare replace after a comma heads a REPLACE operation, not a field"
+        );
+        assert_eq!(
+            parsed.output_routes.routes[0].construction,
+            crate::parse_route_construction(
+                "INHERIT to, on SET flush = input.flush, `from` = input.from WHERE flush > 0"
+            )
+            .expect("valid route construction")
         );
     }
 
     #[test]
-    fn alter_expression_documents_operation_head_field_corner() {
+    fn a_reserved_word_standing_bare_in_a_junction_is_rejected() {
+        for source in [
+            "CREATE JUNCTION j FROM trips WHERE end > 0 UNBRANCHED TO routed INHERIT ALL FLUSH \
+             IMMEDIATE ON MESSAGE ERROR LOG;",
+            "CREATE JUNCTION j FROM trips UNBRANCHED TO routed SET from = input.from FLUSH \
+             IMMEDIATE ON MESSAGE ERROR LOG;",
+            "CREATE JUNCTION j FROM trips UNBRANCHED TO routed INHERIT all, to FLUSH IMMEDIATE ON \
+             MESSAGE ERROR LOG;",
+        ] {
+            assert!(
+                parse_create_junction(source).is_err(),
+                "{source} must be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn completion_after_a_keyword_named_field_offers_the_clauses_that_follow() {
+        let input = "CREATE JUNCTION route_trips FROM trips WHERE input.total > to ";
+        let suggestions = suggest_create_junction(input, input.len());
+        for expected in ["FILTER", "UNBRANCHED", "BRANCHED BY", ","] {
+            assert!(
+                suggestions.contains(&expected.to_string()),
+                "{expected} missing from {suggestions:?}"
+            );
+        }
+
+        let input = "CREATE JUNCTION route_trips FROM trips UNBRANCHED TO routed SET to = on ";
+        let suggestions = suggest_create_junction(input, input.len());
+        for expected in ["FLUSH EACH", "FLUSH IMMEDIATE"] {
+            assert!(
+                suggestions.contains(&expected.to_string()),
+                "{expected} missing from {suggestions:?}"
+            );
+        }
+
+        let input = "CREATE JUNCTION route_trips FROM trips WHERE ";
+        let suggestions = suggest_create_junction(input, input.len());
+        assert_eq!(suggestions, vec!["where_expression".to_string()]);
+    }
+
+    #[test]
+    fn an_alter_route_keeps_keyword_named_targets_before_the_next_operation() {
+        let parsed = parse_alter_junction(
+            "ALTER JUNCTION route_trips ADD ROUTE TO archive SET to = input.to, on = 1 FLUSH \
+             IMMEDIATE ON MESSAGE ERROR LOG, SET DETACHED;",
+        )
+        .expect("the route ends before the next operation");
+        assert_eq!(parsed.operations.len(), 2);
+        let AlterProcessorOperation::AddRoute { route } = &parsed.operations[0] else {
+            panic!("the first operation adds a route");
+        };
+        assert_eq!(
+            route.construction,
+            crate::parse_route_construction("SET to = input.to, on = 1")
+                .expect("valid route construction")
+        );
+    }
+
+    #[test]
+    fn a_comma_inside_a_call_never_begins_the_next_operation() {
+        let parsed = parse_alter_junction(
+            "ALTER JUNCTION project_events SET FILTER WHERE concat(input.kind, replace), SET \
+             DETACHED;",
+        )
+        .expect("the arguments of a call hold the bare replace");
+        assert_eq!(
+            parsed.operations[0],
+            AlterProcessorOperation::SetFilterWhere {
+                where_clause: crate::parse_expression("concat(input.kind, replace)")
+                    .expect("valid expression"),
+            }
+        );
+        assert_eq!(parsed.operations.len(), 2);
+    }
+
+    #[test]
+    fn a_reserved_word_names_a_field_only_between_backticks() {
         assert!(
             parse_alter_junction(
                 "ALTER JUNCTION project_events SET FILTER WHERE concat(input.add, set);"
             )
             .is_err(),
-            "an operation-head field immediately after a comma is an intentional grammar boundary"
+            "SET is reserved in an expression, so it names nothing bare"
+        );
+        let parsed = parse_alter_junction(
+            "ALTER JUNCTION project_events SET FILTER WHERE concat(input.add, `set`);",
+        )
+        .expect("a quoted set is a field");
+        assert_eq!(
+            parsed.operations[0],
+            AlterProcessorOperation::SetFilterWhere {
+                where_clause: crate::parse_expression("concat(input.add, `set`)")
+                    .expect("valid expression"),
+            }
         );
     }
 

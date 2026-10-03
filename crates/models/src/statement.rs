@@ -5031,6 +5031,7 @@ pub struct CreateRelay {
     pub name: RelayName,
     pub schema: SchemaName,
     #[serde(default = "default_relay_buffer")]
+    #[rkyv(with = crate::CountAsU64)]
     pub buffer: NonZeroUsize,
     pub branching: RelayBranching,
     #[serde(default)]
@@ -5093,9 +5094,16 @@ pub struct AlterRelay {
     Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
 )]
 pub enum AlterRelayOperation {
-    SetCapacity { capacity: NonZeroUsize },
-    SetSchema { schema: SchemaName },
-    SetBranching { branching: RelayBranching },
+    SetCapacity {
+        #[rkyv(with = crate::CountAsU64)]
+        capacity: NonZeroUsize,
+    },
+    SetSchema {
+        schema: SchemaName,
+    },
+    SetBranching {
+        branching: RelayBranching,
+    },
     SetMaterializedState,
     DropMaterializedState,
 }

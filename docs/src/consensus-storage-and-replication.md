@@ -315,12 +315,17 @@ The databases have independent journals, memtables, rotation, and synchronizatio
 `SyncAll` neither flushes runtime journal bytes nor waits behind a runtime journal write. Both use
 the bounded storage executor, but consensus has its own single ordered worker.
 
-This layout has one current shape. A node database containing the earlier shared `raft_*` keyspaces
-fails startup with `consensus storage shares the node database; recreate the node's stored state for
-the dedicated consensus database layout`. A consensus database containing an unknown keyspace, a
-malformed current archive, or incomplete current state fails with `invalid consensus record
-storage; recreate the node's stored state`. Nervix does not migrate, reinterpret, or default those
-records; recreate the node's stored state and let it rejoin from the cluster.
+The dedicated database owns exactly four current keyspaces: `raft_count_logs`, `raft_count_meta`,
+`raft_count_state`, and `raft_count_snapshots`. Opening it validates the complete keyspace namespace
+before reading any records. Its state metadata requires the current `RestoreCounts` encoding,
+including the durable restore installation gate. Native counts in commands, queued transactions, progress, outcomes, and plan, report and topology headers
+are archived as fixed-width 64-bit values with checked native decoding. Log replay, state recovery
+and snapshot installation therefore retain their complete magnitudes. See
+[Archived Counts](./typed-states.md#archived-counts).
+
+This layout has one current shape. A consensus database containing an unknown keyspace, a malformed
+current archive, or incomplete current state fails with `invalid consensus record storage; recreate
+the node's stored state`. Recreate the node's stored state and let it rejoin from the cluster.
 
 ## Shutdown And Forced Endings
 
@@ -401,3 +406,16 @@ transfer snapshots more often; smaller covered suffixes make a lagging follower 
 sooner. Larger thresholds and suffixes retain more log and require a retained-log cap large enough
 for the working set. The cap should leave room for entries newer than the latest completed snapshot,
 because those entries cannot be purged regardless of the covered-log settings.
+
+## Restored Domain Installation Gate
+
+The consensus state machine persists each restored domain's pending or installing state alongside
+its restore execution and mutation lease. Creating the domain establishes a pending start gate;
+admitting state installation records leader tenure, execution, lease revision and the committed
+log index as its generation. Recording the model step removes the gate only for that exact
+authority. The record is included in snapshots and restored after restart, independently of lease
+release or terminal execution failure. Runtime state bytes remain in the node-owned state store.
+A local storage mutation holds the applied-state read guard through its authority validation,
+checkpoint mutation and handle clearing; a newer applied authority or start-gate release cannot
+cross that boundary. The current state encoding requires these records and rejects a database
+whose encoding does not match, requiring recreation under the alpha persistence contract.

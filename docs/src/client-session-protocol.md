@@ -70,7 +70,7 @@ over the interconnect, and that node encodes Row frames for its own sessions.
 | Control plane | Session subscriptions | Creation and deletion, the generation each subscription opens with, its lifecycle, its filter and sampling, the delivery of one generation to its session, and the interest lease it holds on its relay. |
 | Data plane | Relay subscription fan-out | The subscribers of one relay, the definition they were attached under, and ending every subscriber before a batch of another definition can reach it. |
 | Edges | The Rust client, `nervix-client-core` | Connecting, TLS selection, the dispatcher that pairs replies with requests, execution identity across retries, redirect and reconnect, transaction binding and previews, desired subscriptions and their restoration, followed domain clocks, uploads, and backup downloads verified against their summary. |
-| Edges | The shared binding, `nervix-client-ffi` | The C ABI through which C, C++, Python, JVM and Ruby hosts drive the Rust client's state machine, with borrowed frame access, bulk column copies, retained domain clock events, and retained reads of the clock of each followed domain with its projections. |
+| Edges | The shared binding, `nervix-client-ffi` | The C ABI through which C, C++, Python, JVM and Ruby hosts drive the Rust client's state machine, with borrowed frame access, bulk column copies, retained domain clock events, retained reads of the clock of each followed domain with its projections, and the Rust client's producers and consumers with their typed outcomes, settlements and Arrow batches built and read one column level at a time. |
 | Edges | The web console and the CLI | Consumers of the same protocol with bounded buffers of their own. The console speaks it over the WebSocket; the CLI uses the Rust client. |
 
 The server is the composition root: it is the only crate that names the wire crate, the command
@@ -1296,6 +1296,12 @@ outcomes stops receiving room for new batches. The credit therefore bounds what 
 the serving node, whatever the graph does, while commands, subscriptions, and clock frames keep
 moving beside it.
 
+The ingestor admits a producer's batches in the order they reach it. A batch refused as `Busy` or
+`Suspended` reaches it again only when the client sends it again after the backoff, behind every
+batch the client sent in the meantime, so batches outstanding at the same time can be admitted,
+and their output delivered, in another order than they were first sent. A client that needs
+submission order keeps one batch outstanding.
+
 ### Forwarding To The Executing Node
 
 A client may open a producer through any live node. When the serving node does not execute the
@@ -1324,8 +1330,9 @@ and grant with the first open, then publishes the new attachment to the same pro
 different generation or contract, a removed or stopped endpoint, or an incompatible schema makes
 the handle require an explicit new open. Temporary owner and capacity refusals are retried with
 bounded physical backoff while the new exchange lives. Closing or dropping the handle fences a
-late open and releases any attachment it created. The shared binding and the web console do not
-open producers.
+late open and releases any attachment it created. The shared binding opens producers through these
+same Rust client handles, so its hosts restore them the same way; the web console does not open
+producers.
 
 A serving node whose runtime has not yet passed its process-start linearizable catch-up barrier
 refuses producer and consumer opens as `EndpointUnavailable`. Its local domain snapshot may still
@@ -1363,6 +1370,14 @@ acknowledges it.
 for that confirmation. ACK is idempotent while its bounded result remains; a reference revoked by
 retry, timeout, detach, or reassignment cannot settle a newer attempt. The emitter's physical
 backoff controls retry. `CloseEmitterRequest` detaches and answers `Closed` or `NotOpen`.
+
+A read the server answers with a batch assigns that attempt to its consumer, so a reply nobody
+waits for would strand the attempt until its ACK timeout. A caller of the Rust client that stops
+waiting for a read therefore leaves the read with its consumer, and the next read of the same
+attachment receives its reply instead of sending a read of its own; a read of an attachment that
+has since ended is dropped with it. Closing a consumer, like closing a producer, sends the close
+from a task of its own, so a caller that stops waiting still releases the attachment, and a second
+close, or a close while the handle waits to be restored, finds nothing attached and returns at once.
 
 Consumer and producer operations can share one session. A read awaiting output runs beside
 commands, producer submissions and their outcomes, clock observations, and consumer settlement.
@@ -1439,11 +1454,12 @@ under its execution reference like every other persistent command, while its arc
 call of its own, `DownloadBackup`, keyed by that reference. [Backup And
 Restore](./backup-and-restore.md) owns what an archive holds and how it is laid out.
 
-The leader runs the backup. It reads every section from one applied revision, assembles the archive
-in its staging area, and only then completes the command. The `CommandCompleted` outcome carries the
+The leader runs the backup. Each domain is captured at its own applied revision and records whether
+its cut was quiesced, live, stopped, or configuration-only. The leader assembles the archive in its
+staging area, and only then completes the command. The `CommandCompleted` outcome carries the
 archive's summary: its size and BLAKE3 digest, the capture time, the instant the node stops
 retaining the archive, whether resource bytes are included, the number of users, and each domain's
-revision, section count, and bytes. The summary is part of the recorded outcome, so repeating the
+revision, cut kind and quiesce counters, section count, and bytes. The summary is part of the recorded outcome, so repeating the
 command under its reference returns the same summary and never assembles a second archive.
 
 A download call carries exactly one `BackupDownloadRequest`, which names the backup's execution
@@ -1532,6 +1548,12 @@ A restore that failed at a step is `RequestFailed`, and its report names the ste
 steps before it as `Applied`, and those after it as `NotAttempted`. A dry run reports every step as
 `Planned`, and is never admitted or recorded.
 
+A domain whose restore has not published its complete runtime-state generation refuses `START`
+with a definitive command failure naming the incomplete installation. Planning rejects it before
+admitting a lifecycle step, and consensus checks the same gate at activation. Failure of the
+restore, release of its mutation lease, and node restart do not release this gate. Only completion
+of the whole installation does.
+
 The call is not bounded by the request deadline, because an archive can take far longer to send
 than a command takes to run; the Rust client bounds each frame by it, and then the wait for the
 reply once the last frame was sent. Once the leader has received the whole archive, the restore is
@@ -1616,7 +1638,8 @@ separate SDK per language would have to reimplement each of those decisions and 
 The binding's lifecycle follows from that choice:
 
 - **Handles.** A host opens a session with `nx_session_connect` and releases it with
-  `nx_session_free`; outcomes and events read from a session stay valid after it is freed. Every
+  `nx_session_free`; outcomes, events and batches read from a session stay valid after it is freed,
+  and its producers, consumers and deliveries keep it running until they are released too. Every
   object a function hands out is owned by the caller and has exactly one release function, and a
   borrowed pointer stays valid only until the object it was read from is released.
 - **Execution identity.** `nx_session_prepare` captures one command and its durable execution
@@ -1652,21 +1675,42 @@ The binding's lifecycle follows from that choice:
   accessors expose the domain, generation, state, paced mapping and newest tick, and its
   projections answer logical time, physical waits and admission with the Rust client's arithmetic.
   A read never changes; retain and release share it across threads.
+- **Producers and consumers.** `nx_session_open_ingestor` and `nx_session_subscribe_emitter` open
+  the Rust client's producer and consumer with the host's exact fields, built with `nx_fields`, and
+  the credit it asks for; a refusal carries its typed `nx_open_refusal`. A producer submits a batch
+  and waits for credit, and its outcome is taken with `nx_producer_rejoin`, listed with
+  `nx_producer_pending` and let go with `nx_producer_release`, each with the Rust producer's
+  semantics: a cancelled wait leaves the submission and its outcome with the producer. A consumer
+  hands out reference-counted `nx_delivery` handles; releasing one settles nothing, and
+  `nx_delivery_ack`, `nx_delivery_retry` and `nx_delivery_reject` return the server's typed
+  settlement. Both keep the Rust client's restoration: a consumer reports `NX_ERROR_INTERRUPTED`
+  once per gap, and a handle whose endpoint changed reports `NX_ERROR_REOPEN_REQUIRED` with its
+  typed reason. The binding keeps no acknowledgement, credit or reconnect state of its own.
+- **Batches.** A producer's batch is built with `nx_batch_builder` from the host's columns, one
+  level of a column's type at a time, and every buffer is copied before the call returns. A
+  delivered batch is decoded the first time it is read, held to the consumer's schema and member
+  count, and read the same way. Every batch is its canonical Arrow IPC stream, which
+  `nx_batch_ipc` and `nx_delivery_ipc` borrow and `nx_producer_submit_ipc` accepts from a host's
+  own Arrow tooling, so the binding encodes nothing a second way and the observation API stays
+  free of Arrow.
 - **Typed failures.** A failing call returns an `nx_error` whose kind separates an invalid argument,
-  a failed connection, a failed session, an uncertain outcome that carries the execution reference,
-  a server refusal, a deadline, a cancellation, a protocol violation, a type mismatch, and a session
-  that ended.
+  a failed connection, a failed session, an uncertain outcome that carries the execution reference
+  or leaves a settlement unconfirmed, a server refusal, a deadline, a cancellation, a protocol
+  violation, a type mismatch, a session or handle that ended, an interrupted consumer, and an
+  endpoint that has to be opened again.
 
 The binding connects with the Rust client's default options. It exposes no seeds, timeouts, or
 certificate authority, so it reaches a node over plaintext and connects to it directly. It exposes
 commands, completion, subscriptions and their events, domain clock events and attached clocks,
-and bulk row access, but not the typed transaction status, inspection, choice lookups, notices, or
-leadership. A host executes `ATTACH DOMAIN CLOCK;`, reads the clock the reply carried with
-`nx_session_domain_clock`, and reads later observations and ticks through the clock-event wait; the
-Rust client restores the attachment after reconnect. An attach reports a refusal as a failed
-disposition carrying the server's reason, not as a typed refusal. Its column accessors cover
-scalar, string, and bytes fields; a list field reports whether it is fixed-length or variable, and
-its values are read from the borrowed frame with generated code.
+bulk row access, and producers and consumers of client endpoints with their batches, but not the
+typed transaction status, inspection, choice lookups, notices, or leadership. A host executes
+`ATTACH DOMAIN CLOCK;`, reads the clock the reply carried with `nx_session_domain_clock`, and
+reads later observations and ticks through the clock-event wait; the Rust client restores the
+attachment after reconnect. An attach reports a refusal as a failed
+disposition carrying the server's reason, not as a typed refusal. Its Row column accessors cover
+scalar, string, and bytes fields; a list field of a subscription reports its levels, and its values
+are read from the borrowed frame with generated code, while an endpoint batch's lists are read one
+level at a time.
 
 Independent implementations exist as qualification clients rather than supported SDKs. The Go client
 speaks native gRPC with `flatc --go` output and `google.golang.org/grpc`, and the TypeScript client
@@ -1850,7 +1894,7 @@ counts are exported by the node that executes the client ingestor, not per sessi
 A subscription generation retains its domain lifecycle when delivery starts. Filtered batches read
 the currently installed clock through that capability, including a domain started after the
 subscription opened. Unavailable-clock skipped-row outcomes remain unchanged.
-Predicate execution receives the serving node's bounded executor separately from the retained clock.
+It also retains the node's executor and passes it to predicate evaluation for bounded execution.
 Its dropped-row counter is resolved with the generation. A native ingestor endpoint resolves every
 public batch-outcome metric child at startup and retains its execution's acknowledgement trackers.
 These internal ownership rules change neither session framing nor client recovery behavior.

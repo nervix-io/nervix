@@ -380,13 +380,22 @@ impl Runtime {
         }))
     }
 
+    /// Spawn the replica task that keeps one branch-keyed entity current on this node: the
+    /// entity's branch lifecycle and, for a deduplicator, window or WASM processor, the state of
+    /// each of its branches.
+    ///
+    /// The task retains the entity's lifecycle handle and owns everything it learns of the
+    /// entity's branch checkpoints, so each round asks the owner only what changed since the
+    /// previous one. It runs a round when it starts, when the owner announces a checkpoint, and
+    /// once every replication poll interval, which catches up a checkpoint whose announcement was
+    /// lost.
     pub(in crate::runtime) fn spawn_branch_state_replica_poll_task(
         &self,
         shutdown_tx: &watch::Sender<bool>,
         domain: &DomainName,
         node: &ExecutionNode,
     ) -> error_stack::Result<Option<JoinHandle<()>>, StateIdentityError> {
-        let state_kind = match node.kind() {
+        let branch_states = match node.kind() {
             ModelKind::Deduplicator => Some(RuntimeStateKind::Deduplicator),
             ModelKind::WasmProcessor => Some(RuntimeStateKind::WasmProcessor),
             ModelKind::WindowProcessor => Some(RuntimeStateKind::WindowProcessor),
@@ -413,6 +422,11 @@ impl Runtime {
         let runtime = self.clone();
         let mut shutdown_rx = shutdown_tx.subscribe();
         Ok(Some(nervix_primitives::task::spawn(async move {
+            if let Err(error) = runtime.restore_replica_branch_lifecycle(&branch_lru, &lifecycle) {
+                warn!(error = %error, "failed to read the stored replicated branch lifecycle");
+            }
+            let owner = RemoteStateOwner::new(runtime.clone(), primary_node, poll_interval);
+            let mut checkpoints = ReplicaBranchCheckpoints::default();
             let mut initial_sync_pending = true;
             loop {
                 nervix_primitives::task::consume_budget().await;
@@ -428,106 +442,15 @@ impl Runtime {
                     break;
                 }
                 initial_sync_pending = false;
-                let after_lsm = match runtime.passive_state_replica_lsm(&branch_lru) {
-                    Ok(lsm) => lsm,
-                    Err(error) => {
-                        warn!(error = %error, "failed to read replicated branch lifecycle progress");
-                        None
-                    }
-                };
-                match runtime
-                    .request_state_sync_with_timeout(
-                        &primary_node,
+                runtime
+                    .catch_up_replica_branches(
+                        &owner,
                         &branch_lru,
-                        after_lsm,
-                        poll_interval,
+                        &lifecycle,
+                        &mut checkpoints,
+                        branch_states,
                     )
-                    .await
-                {
-                    Ok(Some(snapshot)) => {
-                        if let Err(error) = runtime
-                            .install_passive_state_replica_snapshot(
-                                &primary_node,
-                                &branch_lru,
-                                snapshot,
-                            )
-                            .await
-                        {
-                            warn!(error = %error, "failed to install replicated branch lifecycle checkpoint");
-                            continue;
-                        }
-                    }
-                    Ok(None) => {}
-                    Err(error) => {
-                        warn!(error = %error, "failed to sync replicated branch lifecycle state");
-                        continue;
-                    }
-                }
-                let Some(state_kind) = state_kind else {
-                    continue;
-                };
-                let Some(held) = lifecycle.latest() else {
-                    continue;
-                };
-                let branches = match held.branches() {
-                    Ok(branches) => branches.keys(),
-                    Err(error) => {
-                        warn!(
-                            error = %error,
-                            "failed to decode replicated branch lifecycle checkpoint"
-                        );
-                        continue;
-                    }
-                };
-                for branch in branches {
-                    nervix_primitives::task::consume_budget().await;
-                    let placement = match runtime.state_placement(
-                        &branch_lru.domain,
-                        state_kind,
-                        branch_lru.kind,
-                        branch_lru.identifier.clone(),
-                        branch,
-                    ) {
-                        Ok(placement) => placement,
-                        Err(error) => {
-                            warn!(error = %error, "failed to place replicated branch state");
-                            continue;
-                        }
-                    };
-                    let after_lsm = match runtime.passive_state_replica_lsm(&placement) {
-                        Ok(lsm) => lsm,
-                        Err(error) => {
-                            warn!(error = %error, "failed to read replicated branch state progress");
-                            continue;
-                        }
-                    };
-                    match runtime
-                        .request_state_sync_with_timeout(
-                            &primary_node,
-                            &placement,
-                            after_lsm,
-                            poll_interval,
-                        )
-                        .await
-                    {
-                        Ok(Some(snapshot)) => {
-                            if let Err(error) = runtime
-                                .install_passive_state_replica_snapshot(
-                                    &primary_node,
-                                    &placement,
-                                    snapshot,
-                                )
-                                .await
-                            {
-                                warn!(error = %error, "failed to install replicated branch state checkpoint");
-                            }
-                        }
-                        Ok(None) => {}
-                        Err(error) => {
-                            warn!(error = %error, "failed to sync replicated branch state");
-                        }
-                    }
-                }
+                    .await;
             }
         })))
     }
@@ -1155,9 +1078,6 @@ impl Runtime {
             .retain(|placement, _| &placement.domain != domain);
         self.inner
             .passive_runtime_state_snapshots
-            .retain(|placement, _| &placement.domain != domain);
-        self.inner
-            .pending_state_replica_syncs
             .retain(|placement, _| &placement.domain != domain);
     }
 }

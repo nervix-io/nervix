@@ -33,6 +33,32 @@ jobs:
           ignoreCommits: 'true'
           commitlintRulesPath: ./commitlint.config.js
 
+  onnxruntime-artifacts:
+    name: onnxruntime-${{ matrix.platform }}-${{ matrix.variant }}
+    runs-on: blacksmith-2vcpu-ubuntu-2404
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        platform: [linux/amd64, linux/arm64]
+        variant: [portable, docker]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install uv for ONNX Runtime artifacts
+        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+        with:
+          version: "0.11.31"
+
+      - name: Install just
+        uses: taiki-e/install-action@v2
+        with:
+          tool: just@latest
+
+      - name: Fetch and validate the pinned public artifact
+        run: just fetch-onnxruntime '${{ matrix.platform }}' --variant '${{ matrix.variant }}'
+
   checks:
     name: checks
     runs-on: blacksmith-8vcpu-ubuntu-2404
@@ -87,7 +113,7 @@ jobs:
             amd64|arm64) ;;
             *) echo "unsupported TinyGo CI architecture: ${arch}" >&2; exit 1 ;;
           esac
-          curl -fsSLo /tmp/tinygo.deb "https://github.com/tinygo-org/tinygo/releases/download/v${TINYGO_VERSION}/tinygo_${TINYGO_VERSION}_${arch}.deb"
+          curl --retry 3 --retry-delay 2 --retry-max-time 120 --connect-timeout 20 --max-time 120 -fsSLo /tmp/tinygo.deb "https://github.com/tinygo-org/tinygo/releases/download/v${TINYGO_VERSION}/tinygo_${TINYGO_VERSION}_${arch}.deb"
           sudo dpkg -i /tmp/tinygo.deb
           tinygo version
 
@@ -225,7 +251,7 @@ jobs:
             amd64|arm64) ;;
             *) echo "unsupported TinyGo CI architecture: ${arch}" >&2; exit 1 ;;
           esac
-          curl -fsSLo /tmp/tinygo.deb "https://github.com/tinygo-org/tinygo/releases/download/v${TINYGO_VERSION}/tinygo_${TINYGO_VERSION}_${arch}.deb"
+          curl --retry 3 --retry-delay 2 --retry-max-time 120 --connect-timeout 20 --max-time 120 -fsSLo /tmp/tinygo.deb "https://github.com/tinygo-org/tinygo/releases/download/v${TINYGO_VERSION}/tinygo_${TINYGO_VERSION}_${arch}.deb"
           sudo dpkg -i /tmp/tinygo.deb
           tinygo version
 
@@ -403,7 +429,7 @@ jobs:
             amd64|arm64) ;;
             *) echo "unsupported TinyGo CI architecture: ${arch}" >&2; exit 1 ;;
           esac
-          curl -fsSLo /tmp/tinygo.deb "https://github.com/tinygo-org/tinygo/releases/download/v${TINYGO_VERSION}/tinygo_${TINYGO_VERSION}_${arch}.deb"
+          curl --retry 3 --retry-delay 2 --retry-max-time 120 --connect-timeout 20 --max-time 120 -fsSLo /tmp/tinygo.deb "https://github.com/tinygo-org/tinygo/releases/download/v${TINYGO_VERSION}/tinygo_${TINYGO_VERSION}_${arch}.deb"
           sudo dpkg -i /tmp/tinygo.deb
           tinygo version
 
@@ -677,7 +703,7 @@ jobs:
             amd64|arm64) ;;
             *) echo "unsupported TinyGo CI architecture: ${arch}" >&2; exit 1 ;;
           esac
-          curl -fsSLo /tmp/tinygo.deb "https://github.com/tinygo-org/tinygo/releases/download/v${TINYGO_VERSION}/tinygo_${TINYGO_VERSION}_${arch}.deb"
+          curl --retry 3 --retry-delay 2 --retry-max-time 120 --connect-timeout 20 --max-time 120 -fsSLo /tmp/tinygo.deb "https://github.com/tinygo-org/tinygo/releases/download/v${TINYGO_VERSION}/tinygo_${TINYGO_VERSION}_${arch}.deb"
           sudo dpkg -i /tmp/tinygo.deb
           tinygo version
 
@@ -838,7 +864,7 @@ jobs:
             amd64|arm64) ;;
             *) echo "unsupported TinyGo CI architecture: ${arch}" >&2; exit 1 ;;
           esac
-          curl -fsSLo /tmp/tinygo.deb "https://github.com/tinygo-org/tinygo/releases/download/v${TINYGO_VERSION}/tinygo_${TINYGO_VERSION}_${arch}.deb"
+          curl --retry 3 --retry-delay 2 --retry-max-time 120 --connect-timeout 20 --max-time 120 -fsSLo /tmp/tinygo.deb "https://github.com/tinygo-org/tinygo/releases/download/v${TINYGO_VERSION}/tinygo_${TINYGO_VERSION}_${arch}.deb"
           sudo dpkg -i /tmp/tinygo.deb
           tinygo version
 
@@ -1088,10 +1114,15 @@ jobs:
           s3-access-key-id: ${{ secrets.KACHE_BUCKET_ACCESS_KEY_ID }}
           s3-secret-access-key: ${{ secrets.KACHE_BUCKET_SECRET_ACCESS_KEY }}
 
+      # Every registered Shuttle check under its exploration and under the nondeterminism detector,
+      # each in its own process, then the proof that a failing schedule persists and replays.
       - name: Shuttle concurrency checks
         run: |
           just toolchains-install
           just test-shuttle
+
+      - name: Shuttle schedule replay
+        run: just test-shuttle-replay-check
 
       - name: Publish kache report
         if: always()
@@ -1228,5 +1259,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: turmoil-failures
-          path: target/turmoil-failures
+          path: |
+            target/turmoil-failures
+            target/turmoil-suite
           if-no-files-found: ignore

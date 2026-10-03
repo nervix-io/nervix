@@ -14,6 +14,8 @@
     )
 )]
 
+use std::future::Future;
+
 use nervix_connector::{IngestMetadataRow, RetainedIngestHeaders};
 use nervix_models::parse_duration_text;
 
@@ -473,6 +475,11 @@ impl BufferedIngestPayload {
     }
 }
 
+/// One instance's retained payloads, oldest first.
+///
+/// The oldest payload may be out for delivery. It is then no longer in `payloads`, but it is still
+/// retained: it stays counted in `bytes`, overflow cannot evict it, and nothing behind it is handed
+/// out until its delivery ends, so payloads drain in the order they arrived.
 #[derive(Debug, Default)]
 #[cfg_attr(
     nervix_lint,
@@ -484,7 +491,10 @@ impl BufferedIngestPayload {
 )]
 pub(super) struct IngestorQuiesceBuffer {
     pub(super) payloads: VecDeque<BufferedIngestPayload>,
+    /// Every retained payload's bytes, including those of a payload out for delivery.
     pub(super) bytes: usize,
+    /// The bytes of the oldest payload while it is out for delivery.
+    delivering: Option<usize>,
 }
 
 impl IngestorQuiesceBuffer {
@@ -496,6 +506,18 @@ impl IngestorQuiesceBuffer {
     /// buffer has no room left until it drains.
     pub(super) fn remaining_capacity(&self, max_size: usize) -> usize {
         max_size.saturating_sub(self.bytes)
+    }
+
+    /// Whether `payload_bytes` would fit within `max_size` once overflow evicted every payload it
+    /// may evict, which is every one but a payload out for delivery.
+    fn fits_after_eviction(&self, payload_bytes: usize, max_size: usize) -> bool {
+        let needed = match self.delivering {
+            Some(delivering) => payload_bytes
+                .checked_add(delivering)
+                .assured("both operands count bytes of payloads this node holds in memory"),
+            None => payload_bytes,
+        };
+        needed <= max_size
     }
 
     pub(super) fn admit(&mut self, payload: BufferedIngestPayload, payload_bytes: usize) {
@@ -511,6 +533,133 @@ impl IngestorQuiesceBuffer {
             .bytes
             .checked_sub(payload_bytes)
             .verified("the released payload's bytes were added when it was admitted");
+    }
+
+    /// Takes the oldest payload out for delivery, unless one already is.
+    fn take_oldest(&mut self) -> Option<BufferedIngestPayload> {
+        if self.delivering.is_some() {
+            return None;
+        }
+        let payload = self.payloads.pop_front()?;
+        self.delivering = Some(payload.byte_len());
+        Some(payload)
+    }
+
+    /// Ends the delivery of the payload out for delivery with the payload leaving, and answers its
+    /// bytes, or `None` when this buffer counts no delivery because the ingestor's termination
+    /// replaced the buffer that did.
+    fn finish_delivery(&mut self) -> Option<usize> {
+        let bytes = self.delivering.take()?;
+        self.release(bytes);
+        Some(bytes)
+    }
+
+    /// Ends the delivery of the payload out for delivery by putting `payload` back at the front,
+    /// unless this buffer counts no delivery, in which case the payload is discarded with the
+    /// buffer that counted it.
+    fn return_delivery(&mut self, payload: BufferedIngestPayload) {
+        if self.delivering.take().is_some() {
+            self.payloads.push_front(payload);
+        }
+    }
+
+    /// Every payload this buffer retains, a payload out for delivery included.
+    fn retained_records(&self) -> usize {
+        match self.delivering {
+            Some(_) => self
+                .payloads
+                .len()
+                .checked_add(1)
+                .assured("the retained payloads are held in this node's memory"),
+            None => self.payloads.len(),
+        }
+    }
+}
+
+/// How the delivery of a retained payload ended.
+#[derive(Debug)]
+enum DeliveryEnd {
+    /// Its messages were accepted, or its codec rejected it: it leaves the buffer.
+    Left,
+    /// It could not be delivered now: it goes back to the front of the buffer.
+    Returned(BufferedIngestPayload),
+}
+
+/// What a buffer does with a payload that does not fit.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RetentionOverflow {
+    /// Refuse the payload, as an endpoint buffer does: its sender was not answered yet.
+    Reject,
+    /// Apply the declared `ON OVERFLOW` side.
+    Declared(IngestQuiesceOverflow),
+}
+
+/// The oldest payload one instance retained, out for delivery.
+///
+/// The buffer keeps counting the payload, with its bytes, while it is out, and hands out nothing
+/// behind it. [`Self::finish`] ends the delivery with the payload leaving the buffer; a delivery
+/// dropped before then returns it to the front, so a delivery that was interrupted, refused, or
+/// ended with its task leaves the buffer exactly as it was.
+#[derive(Debug)]
+#[cfg_attr(
+    nervix_lint,
+    nervix::context(
+        recurring,
+        reason = "the source task delivers one retained payload on each loop turn while its \
+                  buffer drains"
+    )
+)]
+pub(in crate::runtime) struct RetainedDelivery<'control> {
+    control: &'control IngestorQuiesceControl,
+    instance: u64,
+    /// Present until [`Self::finish`] takes it or the drop returns it.
+    payload: Option<BufferedIngestPayload>,
+}
+
+impl RetainedDelivery<'_> {
+    pub(in crate::runtime) fn payload(&self) -> &BufferedIngestPayload {
+        self.payload
+            .as_ref()
+            .verified("only finishing or dropping the delivery takes its payload")
+    }
+
+    /// Runs `delivery`, the work that brings the payload to its ingest group, unless `shutdown`
+    /// stops the ingestor or the ingestor is quiesced before it completes. Either ends `delivery`
+    /// wherever it waits and answers `None`; the payload stays out until the caller ends its
+    /// delivery.
+    pub(in crate::runtime) async fn run_until_interrupted<T>(
+        &self,
+        shutdown: &watch::Receiver<bool>,
+        delivery: impl Future<Output = T>,
+    ) -> Option<T> {
+        // A clone watches the stop, so the receiver the caller keeps, and the acknowledgements it
+        // hands on, still see the change.
+        let mut stopping = shutdown.clone();
+        nervix_primitives::select! {
+            biased;
+            output = delivery => Some(output),
+            _ = stopping.wait_for(|stop| *stop) => None,
+            () = self.control.wait_until_quiesced() => None,
+        }
+    }
+
+    /// Ends the delivery with the payload leaving the buffer, and hands it over.
+    pub(in crate::runtime) fn finish(mut self) -> BufferedIngestPayload {
+        let payload = self
+            .payload
+            .take()
+            .verified("only finishing or dropping the delivery takes its payload");
+        self.control.end_delivery(self.instance, DeliveryEnd::Left);
+        payload
+    }
+}
+
+impl Drop for RetainedDelivery<'_> {
+    fn drop(&mut self) {
+        if let Some(payload) = self.payload.take() {
+            self.control
+                .end_delivery(self.instance, DeliveryEnd::Returned(payload));
+        }
     }
 }
 
@@ -528,7 +677,8 @@ pub(in crate::runtime) enum IngestorQuiesceIntake {
     nervix::context(
         bounded,
         key = "source instance and retained payload",
-        bound = "configured MAX SIZE per source instance; replay and termination fences",
+        bound = "configured MAX SIZE per source instance, counting a payload out for delivery; \
+                 replay and termination fences; no guard across an await",
         reason = "the source retains its quiescence control for the exact intake lifetime"
     )
 )]
@@ -557,6 +707,25 @@ pub(in crate::runtime) struct IngestorQuiesceControl {
 #[derive(Debug, Clone)]
 pub(in crate::runtime) struct IngestorQuiesceObservation {
     publication: StdArc<IngestorQuiescePublication>,
+}
+
+impl IngestorQuiesceObservation {
+    /// Whether the observed publication quiesces the ingestor.
+    pub(in crate::runtime) fn is_quiesced(&self) -> bool {
+        self.publication.decision.cause().is_some()
+    }
+}
+
+/// How the wait of a live payload on its way to its ingest group ended.
+#[derive(Debug)]
+pub(in crate::runtime) enum LiveDeliveryEnd<T> {
+    /// The delivery completed with its output.
+    Completed(T),
+    /// The ingestor stopped first.
+    Stopped,
+    /// A quiesce publication newer than the decision the payload was taken in under arrived first,
+    /// so the payload is decided again.
+    Redecide,
 }
 
 impl IngestorQuiesceControl {
@@ -716,52 +885,69 @@ impl IngestorQuiesceControl {
                 IngestorQuiesceIntake::Rejected { retry_after }
             }
             IngestorQuiesceHandling::EndpointBuffer { max_size } => {
-                let payload_bytes = payload.byte_len();
-                let mut buffers = self.buffers.lock();
-                let buffer = buffers.entry(instance).or_default();
-                if payload_bytes > buffer.remaining_capacity(max_size) {
+                self.retain(instance, payload, max_size, RetentionOverflow::Reject)
+            }
+            IngestorQuiesceHandling::Buffer { max_size, overflow } => self.retain(
+                instance,
+                payload,
+                max_size,
+                RetentionOverflow::Declared(overflow),
+            ),
+        }
+    }
+
+    /// Retains `payload` for `instance` within `max_size` bytes, applying `overflow` when it does
+    /// not fit.
+    ///
+    /// A payload out for delivery keeps its bytes and cannot be evicted, so when evicting every
+    /// other retained payload would still leave no room, the new payload is the one discarded.
+    fn retain(
+        &self,
+        instance: u64,
+        payload: BufferedIngestPayload,
+        max_size: usize,
+        overflow: RetentionOverflow,
+    ) -> IngestorQuiesceIntake {
+        let payload_bytes = payload.byte_len();
+        let mut buffers = self.buffers.lock();
+        let buffer = buffers.entry(instance).or_default();
+        let fits = payload_bytes <= buffer.remaining_capacity(max_size);
+        match overflow {
+            RetentionOverflow::Reject => {
+                if !fits {
                     self.record_rejected(1);
                     return IngestorQuiesceIntake::Rejected { retry_after: None };
                 }
-                buffer.admit(payload, payload_bytes);
-                self.buffered_records.fetch_add(1, Ordering::SeqCst);
-                self.buffered_bytes
-                    .fetch_add(payload_bytes, Ordering::Relaxed);
-                self.sync_buffered_metrics();
-                IngestorQuiesceIntake::Buffered
             }
-            IngestorQuiesceHandling::Buffer { max_size, overflow } => {
-                let payload_bytes = payload.byte_len();
-                let mut buffers = self.buffers.lock();
-                let buffer = buffers.entry(instance).or_default();
-                if payload_bytes > max_size {
+            RetentionOverflow::Declared(IngestQuiesceOverflow::DropNewest) => {
+                if !fits {
                     self.record_dropped(1);
                     return IngestorQuiesceIntake::Dropped;
                 }
-                if overflow == IngestQuiesceOverflow::DropNewest
-                    && payload_bytes > buffer.remaining_capacity(max_size)
-                {
+            }
+            RetentionOverflow::Declared(IngestQuiesceOverflow::DropOldest) => {
+                if !buffer.fits_after_eviction(payload_bytes, max_size) {
                     self.record_dropped(1);
                     return IngestorQuiesceIntake::Dropped;
                 }
                 while payload_bytes > buffer.remaining_capacity(max_size) {
-                    let Some(dropped) = buffer.payloads.pop_front() else {
-                        break;
-                    };
+                    let dropped = buffer.payloads.pop_front().verified(
+                        "the capacity check above leaves room once every evictable payload is gone",
+                    );
                     buffer.release(dropped.byte_len());
                     self.buffered_records.fetch_sub(1, Ordering::SeqCst);
                     self.buffered_bytes
                         .fetch_sub(dropped.byte_len(), Ordering::Relaxed);
                     self.record_dropped(1);
                 }
-                buffer.admit(payload, payload_bytes);
-                self.buffered_records.fetch_add(1, Ordering::SeqCst);
-                self.buffered_bytes
-                    .fetch_add(payload_bytes, Ordering::Relaxed);
-                self.sync_buffered_metrics();
-                IngestorQuiesceIntake::Buffered
             }
         }
+        buffer.admit(payload, payload_bytes);
+        self.buffered_records.fetch_add(1, Ordering::SeqCst);
+        self.buffered_bytes
+            .fetch_add(payload_bytes, Ordering::Relaxed);
+        self.sync_buffered_metrics();
+        IngestorQuiesceIntake::Buffered
     }
 
     pub(super) fn endpoint_admission(&self) -> Result<(), Option<Duration>> {
@@ -775,7 +961,43 @@ impl IngestorQuiesceControl {
         Err(handling.retry_after())
     }
 
-    pub(in crate::runtime) fn pop_buffered(&self, instance: u64) -> Option<BufferedIngestPayload> {
+    /// Waits until this ingestor is quiesced, which a delivery of a retained payload must not
+    /// outlast.
+    pub(in crate::runtime) async fn wait_until_quiesced(&self) {
+        let mut observation = self.observation();
+        loop {
+            nervix_primitives::task::consume_budget().await;
+            if observation.publication.decision.cause().is_some() {
+                return;
+            }
+            self.wait_for_change_since(&mut observation).await;
+        }
+    }
+
+    /// Runs `delivery`, the work that brings a live payload to its ingest group, until it
+    /// completes, `stop` turns true, or a publication newer than `decided` replaces the decision
+    /// the payload was taken in under. A new decision leaves `decided` observing it, and ends
+    /// `delivery` wherever it waits so that the payload can be decided again.
+    ///
+    /// `stop` is a receiver the caller keeps for this race alone: the wait marks the stop as seen
+    /// on it.
+    pub(in crate::runtime) async fn run_until_redecided<T>(
+        &self,
+        decided: &mut IngestorQuiesceObservation,
+        stop: &mut watch::Receiver<bool>,
+        delivery: impl Future<Output = T>,
+    ) -> LiveDeliveryEnd<T> {
+        nervix_primitives::select! {
+            biased;
+            output = delivery => LiveDeliveryEnd::Completed(output),
+            _ = stop.wait_for(|stop| *stop) => LiveDeliveryEnd::Stopped,
+            () = self.wait_for_change_since(decided) => LiveDeliveryEnd::Redecide,
+        }
+    }
+
+    /// Takes the oldest payload `instance` retained out for delivery, unless this ingestor is
+    /// quiesced or that payload is already out.
+    pub(in crate::runtime) fn take_buffered(&self, instance: u64) -> Option<RetainedDelivery<'_>> {
         if self.is_quiesced() {
             return None;
         }
@@ -785,15 +1007,37 @@ impl IngestorQuiesceControl {
         if self.buffered_records.load(Ordering::SeqCst) == 0 {
             return None;
         }
+        let payload = {
+            let mut buffers = self.buffers.lock();
+            let buffer = buffers.get_mut(&instance)?;
+            buffer.take_oldest()?
+        };
+        Some(RetainedDelivery {
+            control: self,
+            instance,
+            payload: Some(payload),
+        })
+    }
+
+    /// Ends the delivery of the payload `instance` has out, as `end` says. A payload that leaves
+    /// stops being counted; one returned is counted as it was. A buffer that no longer counts the
+    /// delivery, because the ingestor's termination discarded it, is left as it is.
+    fn end_delivery(&self, instance: u64, end: DeliveryEnd) {
         let mut buffers = self.buffers.lock();
-        let buffer = buffers.get_mut(&instance)?;
-        let payload = buffer.payloads.pop_front()?;
-        buffer.release(payload.byte_len());
-        self.buffered_records.fetch_sub(1, Ordering::SeqCst);
-        self.buffered_bytes
-            .fetch_sub(payload.byte_len(), Ordering::Relaxed);
-        self.sync_buffered_metrics();
-        Some(payload)
+        let Some(buffer) = buffers.get_mut(&instance) else {
+            return;
+        };
+        match end {
+            DeliveryEnd::Left => {
+                let Some(bytes) = buffer.finish_delivery() else {
+                    return;
+                };
+                self.buffered_records.fetch_sub(1, Ordering::SeqCst);
+                self.buffered_bytes.fetch_sub(bytes, Ordering::Relaxed);
+                self.sync_buffered_metrics();
+            }
+            DeliveryEnd::Returned(payload) => buffer.return_delivery(payload),
+        }
     }
 
     pub(super) fn counters(&self) -> IngestorQuiesceCounters {
@@ -810,7 +1054,7 @@ impl IngestorQuiesceControl {
             let mut buffers = self.buffers.lock();
             let dropped = buffers
                 .values()
-                .map(|buffer| buffer.payloads.len())
+                .map(IngestorQuiesceBuffer::retained_records)
                 .sum::<usize>();
             buffers.clear();
             self.buffered_records.store(0, Ordering::SeqCst);
@@ -1239,10 +1483,10 @@ impl Runtime {
 mod tests {
     use nervix_models::{IngestQuiesceMode, IngestQuiesceOverflow, IngestorName, ModelKind};
     use nervix_primitives::sync::{
+        Arc,
         atomic::{AtomicBool, Ordering},
         watch,
     };
-    use triomphe::Arc;
 
     use super::*;
 
@@ -1361,8 +1605,9 @@ mod tests {
 
         control.release(IngestorQuiesceCause::EntityHold);
         let retained = control
-            .pop_buffered(0)
-            .assured("drop-oldest intake retains the newest payload");
+            .take_buffered(0)
+            .assured("drop-oldest intake retains the newest payload")
+            .finish();
         assert_eq!(retained.payload(), b"two");
         assert_eq!(retained.observed_at(), Timestamp::from_unix_nanos(2));
     }
@@ -1413,8 +1658,9 @@ mod tests {
         control.release(IngestorQuiesceCause::EntityHold);
         assert_eq!(
             control
-                .pop_buffered(0)
+                .take_buffered(0)
                 .expect("the acknowledged payload must remain buffered")
+                .finish()
                 .payload(),
             b"kept"
         );
@@ -1490,11 +1736,224 @@ mod tests {
         control.release(IngestorQuiesceCause::EntityHold);
         assert_eq!(
             control
-                .pop_buffered(0)
+                .take_buffered(0)
                 .expect("pre-pressure payload should remain")
+                .finish()
                 .payload(),
             b"retained"
         );
+    }
+
+    /// Retain `payloads` for instance 0 of `control` while it is quiesced, then release it.
+    fn retain_while_quiesced(control: &IngestorQuiesceControl, payloads: &[&[u8]]) {
+        control.engage(IngestorQuiesceCause::EntityHold);
+        for (arrival, payload) in (1_i64..).zip(payloads) {
+            let intake = control.intake(
+                0,
+                BufferedIngestPayload::new(
+                    payload,
+                    BufferedIngestMetadata::without_headers(),
+                    Timestamp::from_unix_nanos(arrival),
+                ),
+                false,
+            );
+            assert!(matches!(intake, IngestorQuiesceIntake::Buffered));
+        }
+        control.release(IngestorQuiesceCause::EntityHold);
+    }
+
+    #[test]
+    fn a_payload_out_for_delivery_stays_counted_until_it_leaves_the_buffer() {
+        let runtime = Runtime::default();
+        let control = test_ingestor_quiesce_control(
+            &runtime,
+            &domain("default"),
+            &named("source"),
+            IngestQuiesceMode::Buffer {
+                max_size: "1MiB".to_string(),
+                overflow: IngestQuiesceOverflow::DropOldest,
+            },
+        );
+        retain_while_quiesced(&control, &[b"one", b"two"]);
+        let retained = control.counters();
+        assert_eq!(retained.buffered_records, 2);
+        assert_eq!(retained.buffered_bytes, 6);
+
+        let delivery = control
+            .take_buffered(0)
+            .assured("a released control hands out its oldest retained payload");
+        assert_eq!(delivery.payload().payload(), b"one");
+        assert_eq!(control.counters(), retained);
+        assert!(
+            control.take_buffered(0).is_none(),
+            "nothing behind a payload out for delivery is handed out"
+        );
+
+        drop(delivery);
+        assert_eq!(
+            control.counters(),
+            retained,
+            "a delivery that ends without the payload leaving returns it counted as it was"
+        );
+        let delivered = control
+            .take_buffered(0)
+            .assured("a returned payload is back at the front")
+            .finish();
+        assert_eq!(delivered.payload(), b"one");
+        assert_eq!(control.counters().buffered_records, 1);
+        assert_eq!(control.counters().buffered_bytes, 3);
+
+        let delivered = control
+            .take_buffered(0)
+            .assured("the next payload is handed out once the first left")
+            .finish();
+        assert_eq!(delivered.payload(), b"two");
+        assert_eq!(control.counters(), IngestorQuiesceCounters::default());
+    }
+
+    #[test]
+    fn overflow_never_evicts_a_payload_out_for_delivery() {
+        let runtime = Runtime::default();
+        let control = test_ingestor_quiesce_control(
+            &runtime,
+            &domain("default"),
+            &named("source"),
+            IngestQuiesceMode::Buffer {
+                max_size: "5B".to_string(),
+                overflow: IngestQuiesceOverflow::DropOldest,
+            },
+        );
+        retain_while_quiesced(&control, &[b"abc"]);
+        let delivery = control
+            .take_buffered(0)
+            .assured("a released control hands out its retained payload");
+
+        // A quiesce that engages while the payload is out retains behind it, within the bytes it
+        // still holds.
+        control.engage(IngestorQuiesceCause::EntityHold);
+        let behind = |payload: &[u8]| {
+            control.intake(
+                0,
+                BufferedIngestPayload::new(
+                    payload,
+                    BufferedIngestMetadata::without_headers(),
+                    Timestamp::from_unix_nanos(2),
+                ),
+                false,
+            )
+        };
+        assert!(matches!(behind(b"de"), IngestorQuiesceIntake::Buffered));
+        assert!(
+            matches!(behind(b"fgh"), IngestorQuiesceIntake::Dropped),
+            "evicting every payload but the one out for delivery leaves no room, so the newest \
+             goes"
+        );
+        assert!(
+            matches!(behind(b"f"), IngestorQuiesceIntake::Buffered),
+            "evicting the payload behind the delivery makes room"
+        );
+        let counters = control.counters();
+        assert_eq!(counters.buffered_records, 2);
+        assert_eq!(counters.buffered_bytes, 4);
+        assert_eq!(counters.dropped_total, 2);
+
+        drop(delivery);
+        control.release(IngestorQuiesceCause::EntityHold);
+        let first = control
+            .take_buffered(0)
+            .assured("the returned payload is still the oldest")
+            .finish();
+        assert_eq!(first.payload(), b"abc");
+        let second = control
+            .take_buffered(0)
+            .assured("the payload retained behind it follows")
+            .finish();
+        assert_eq!(second.payload(), b"f");
+        assert!(control.take_buffered(0).is_none());
+        assert_eq!(control.counters().buffered_bytes, 0);
+    }
+
+    #[test]
+    fn termination_discards_a_payload_out_for_delivery_once() {
+        let runtime = Runtime::default();
+        let control = test_ingestor_quiesce_control(
+            &runtime,
+            &domain("default"),
+            &named("source"),
+            IngestQuiesceMode::EndpointBuffer {
+                max_size: "1MiB".to_string(),
+            },
+        );
+        retain_while_quiesced(&control, &[b"one", b"two"]);
+        let delivery = control
+            .take_buffered(0)
+            .assured("a released control hands out its oldest retained payload");
+
+        control.terminate();
+        assert_eq!(
+            control.counters(),
+            IngestorQuiesceCounters {
+                buffered_records: 0,
+                buffered_bytes: 0,
+                dropped_total: 2,
+                rejected_total: 0,
+            }
+        );
+        drop(delivery);
+        assert_eq!(
+            control.counters().dropped_total,
+            2,
+            "a delivery that ends after termination changes nothing the termination counted"
+        );
+        assert!(control.take_buffered(0).is_none());
+    }
+
+    #[nervix_primitives::test]
+    async fn a_delivery_ends_when_its_ingestor_is_quiesced_or_stopped_first() {
+        let runtime = Runtime::default();
+        let control = test_ingestor_quiesce_control(
+            &runtime,
+            &domain("default"),
+            &named("source"),
+            IngestQuiesceMode::EndpointBuffer {
+                max_size: "1MiB".to_string(),
+            },
+        );
+        retain_while_quiesced(&control, &[b"retained"]);
+        let (shutdown_tx, shutdown) = watch::channel(false);
+
+        let delivery = control
+            .take_buffered(0)
+            .assured("a released control hands out its retained payload");
+        assert_eq!(
+            delivery.run_until_interrupted(&shutdown, async { 7 }).await,
+            Some(7),
+            "work that completes first is the delivery's outcome"
+        );
+
+        let interrupted = delivery.run_until_interrupted(&shutdown, async {
+            control.engage(IngestorQuiesceCause::EntityHold);
+            std::future::pending::<()>().await;
+        });
+        assert_eq!(interrupted.await, None, "a new quiesce ends the delivery");
+        drop(delivery);
+        control.release(IngestorQuiesceCause::EntityHold);
+
+        let delivery = control
+            .take_buffered(0)
+            .assured("an interrupted delivery leaves its payload at the front");
+        let stopped = delivery.run_until_interrupted(&shutdown, async {
+            shutdown_tx.send_replace(true);
+            std::future::pending::<()>().await;
+        });
+        assert_eq!(stopped.await, None, "a shutdown ends the delivery");
+        assert!(
+            shutdown
+                .has_changed()
+                .assured("the test keeps the shutdown sender"),
+            "the delivery watched a clone, so the host's receiver still sees the stop as new"
+        );
+        assert_eq!(delivery.finish().payload(), b"retained");
     }
 
     #[test]
@@ -1674,10 +2133,11 @@ mod tests {
 
     #[cfg(feature = "shuttle")]
     mod shuttle_checks {
+        use nervix_execution::{CpuClass, MemoryClass};
+        use nervix_model_harness::shuttle::check_interleavings;
         use nervix_primitives::{sync::blocking::mpsc, thread};
 
         use super::*;
-        use crate::shuttle_test::check_interleavings;
 
         /// What a control answers to each intake check an ingestor makes.
         #[derive(Debug, PartialEq, Eq)]
@@ -1704,7 +2164,7 @@ mod tests {
                     ),
                     false,
                 );
-                let replays = control.pop_buffered(0).is_some();
+                let replays = control.take_buffered(0).is_some();
                 Self {
                     suspends_intake,
                     skips_poll,
@@ -1779,6 +2239,344 @@ mod tests {
         #[test]
         fn shuttle_an_open_control_answers_intake_without_waiting_on_retained_payloads() {
             check_interleavings(open_control_intake_under_held_retention);
+        }
+
+        /// What ends a delivery whose unfolding waits for a place the extension class never frees.
+        #[derive(Debug, Clone, Copy)]
+        enum Interruption {
+            Quiesce,
+            Shutdown,
+        }
+
+        /// Runs `job` until its first poll leaves it pending, reports that through `pending`, and
+        /// then finishes it. A job the executor admits is pending once it holds its place in the
+        /// queue and waits for a worker.
+        async fn announce_once_pending<F>(
+            job: F,
+            pending: nervix_primitives::sync::oneshot::Sender<()>,
+        ) -> F::Output
+        where
+            F: Future,
+        {
+            let mut job = std::pin::pin!(job);
+            std::future::poll_fn(|context| match job.as_mut().poll(context) {
+                std::task::Poll::Ready(_) => {
+                    panic!(
+                        "the class's only worker was expected to stay held while this job queued"
+                    )
+                }
+                std::task::Poll::Pending => std::task::Poll::Ready(()),
+            })
+            .await;
+            pending
+                .send(())
+                .assured("the check waits for the job to hold its place");
+            job.await
+        }
+
+        /// The only extension worker of a [`single_worker_executor`] and the only place in its
+        /// wait queue, each held by a job until [`Self::release`]. Shuttle's semaphores refuse a
+        /// charge of no bytes, so each job is charged one.
+        struct HeldExtensionQueue {
+            release: nervix_primitives::sync::oneshot::Sender<()>,
+            running: nervix_primitives::task::JoinHandle<()>,
+            queued: nervix_primitives::task::JoinHandle<()>,
+        }
+
+        impl HeldExtensionQueue {
+            async fn hold(executor: &Executor) -> Self {
+                let (started, has_started) = nervix_primitives::sync::oneshot::channel::<()>();
+                let (release, released) = nervix_primitives::sync::oneshot::channel::<()>();
+                let holder = executor.clone();
+                let holding_charge = executor
+                    .try_reserve(MemoryClass::Relay, 1)
+                    .assured("the untouched relay class has room for one byte");
+                let running = nervix_primitives::task::spawn(async move {
+                    holder
+                        .run_cpu(
+                            CpuClass::Extension,
+                            holding_charge,
+                            move |_charge, _cancellation| {
+                                started
+                                    .send(())
+                                    .assured("the check waits for the holding job to run");
+                                released
+                                    .blocking_recv()
+                                    .assured("the check releases the worker before it ends");
+                            },
+                        )
+                        .await
+                        .assured("the holding job takes the class's only worker");
+                });
+                // The job runs only after it gave up its place in the queue, so the queue is free
+                // for the next job once it reports.
+                has_started
+                    .await
+                    .assured("the holding job reports once it holds the worker");
+
+                let (queued_in, is_queued) = nervix_primitives::sync::oneshot::channel::<()>();
+                let waiter = executor.clone();
+                let queued_charge = executor
+                    .try_reserve(MemoryClass::Relay, 1)
+                    .assured("the relay class has room for one more byte");
+                let queued = nervix_primitives::task::spawn(async move {
+                    announce_once_pending(
+                        waiter.run_cpu(
+                            CpuClass::Extension,
+                            queued_charge,
+                            |_charge, _cancellation| (),
+                        ),
+                        queued_in,
+                    )
+                    .await
+                    .assured("the queued job runs once the worker frees");
+                });
+                is_queued
+                    .await
+                    .assured("the queued job reports once it holds the queue's only place");
+                Self {
+                    release,
+                    running,
+                    queued,
+                }
+            }
+
+            async fn release(self) {
+                self.release
+                    .send(())
+                    .assured("the holding job waits for its release");
+                self.running
+                    .await
+                    .assured("the holding job ends once released");
+                self.queued
+                    .await
+                    .assured("the queued job ends once it had the worker");
+            }
+        }
+
+        /// A delivery waits for a place on a full extension class while another task quiesces or
+        /// stops the ingestor. Only that interruption can end the wait, so a waiter that registered
+        /// after reading the state it waits on would never wake, which Shuttle reports as a
+        /// deadlock. Once it ends, the payload is back at the front of its buffer, counted as it
+        /// was.
+        fn interrupted_delivery_keeps_its_payload(interruption: Interruption) {
+            shuttle::future::block_on(async move {
+                let metrics = RuntimeMetrics::default();
+                let metric_labels =
+                    metrics.register_ingestor_quiesce(&domain("default"), &named("source"), None);
+                let control = Arc::new(IngestorQuiesceControl::new(
+                    IngestQuiesceMode::EndpointBuffer {
+                        max_size: "1MiB".to_string(),
+                    },
+                    metrics,
+                    metric_labels,
+                ));
+                control.engage(IngestorQuiesceCause::EntityHold);
+                let intake = control.intake(
+                    0,
+                    BufferedIngestPayload::new(
+                        b"retained",
+                        BufferedIngestMetadata::without_headers(),
+                        Timestamp::from_unix_nanos(1),
+                    ),
+                    true,
+                );
+                assert!(matches!(intake, IngestorQuiesceIntake::Buffered));
+                control.release(IngestorQuiesceCause::EntityHold);
+                let retained = control.counters();
+
+                let executor = single_worker_executor();
+                let held = HeldExtensionQueue::hold(&executor).await;
+                let (shutdown_tx, shutdown) = watch::channel(false);
+                let delivery = control
+                    .take_buffered(0)
+                    .assured("a released control hands out its retained payload");
+                let interrupter = nervix_primitives::task::spawn({
+                    let control = control.clone();
+                    async move {
+                        match interruption {
+                            Interruption::Quiesce => {
+                                control.engage(IngestorQuiesceCause::EntityHold);
+                            }
+                            Interruption::Shutdown => {
+                                shutdown_tx.send_replace(true);
+                            }
+                        }
+                        // The sender outlives the delivery either way, so a dropped sender never
+                        // stands in for the interruption under check.
+                        shutdown_tx
+                    }
+                });
+
+                let charge = executor
+                    .try_reserve(MemoryClass::Relay, 1)
+                    .assured("the relay class has room for one more byte");
+                let unfolding = executor.run_cpu_with(
+                    CpuClass::Extension,
+                    QueueAdmission::WaitForPlace,
+                    charge,
+                    |_charge, _cancellation| (),
+                );
+                let outcome = delivery.run_until_interrupted(&shutdown, unfolding).await;
+                assert!(
+                    outcome.is_none(),
+                    "only the interruption ends a wait for a place that never frees"
+                );
+                assert_eq!(
+                    control.counters(),
+                    retained,
+                    "a payload out for delivery stays counted"
+                );
+                drop(delivery);
+                assert_eq!(
+                    control.counters(),
+                    retained,
+                    "an interrupted delivery returns its payload counted as it was"
+                );
+                let _shutdown_tx = interrupter
+                    .await
+                    .assured("the interrupting task returns the shutdown sender");
+
+                if let Interruption::Quiesce = interruption {
+                    control.release(IngestorQuiesceCause::EntityHold);
+                }
+                let returned = control
+                    .take_buffered(0)
+                    .assured("the returned payload is back at the front of the buffer")
+                    .finish();
+                assert_eq!(returned.payload(), b"retained");
+                assert_eq!(control.counters().buffered_records, 0);
+                held.release().await;
+            });
+        }
+
+        #[test]
+        fn shuttle_a_new_quiesce_ends_a_delivery_waiting_for_extension_room() {
+            check_interleavings(|| interrupted_delivery_keeps_its_payload(Interruption::Quiesce));
+        }
+
+        #[test]
+        fn shuttle_a_shutdown_ends_a_delivery_waiting_for_extension_room() {
+            check_interleavings(|| interrupted_delivery_keeps_its_payload(Interruption::Shutdown));
+        }
+
+        /// What ends the wait of a live payload for a place the extension class never frees.
+        #[derive(Debug, Clone, Copy)]
+        enum LiveInterruption {
+            BufferingQuiesce,
+            Stop,
+        }
+
+        /// A live payload the open control let dispatch waits for a place on a full extension
+        /// class while another task quiesces the ingestor under `BUFFER` or stops it. Only that
+        /// interruption can end the wait, so a waiter that registered after reading the decision
+        /// it watches would never wake, which Shuttle reports as a deadlock. A new decision is the
+        /// one the payload is decided under next, and the buffer retains it, counted with its
+        /// bytes; a stop leaves nothing retained.
+        fn interrupted_live_delivery(interruption: LiveInterruption) {
+            shuttle::future::block_on(async move {
+                let metrics = RuntimeMetrics::default();
+                let metric_labels =
+                    metrics.register_ingestor_quiesce(&domain("default"), &named("source"), None);
+                let control = Arc::new(IngestorQuiesceControl::new(
+                    IngestQuiesceMode::Buffer {
+                        max_size: "1MiB".to_string(),
+                        overflow: IngestQuiesceOverflow::DropOldest,
+                    },
+                    metrics,
+                    metric_labels,
+                ));
+                let mut decided = control.observation();
+                let intake = control.intake(
+                    0,
+                    BufferedIngestPayload::new(
+                        b"live",
+                        BufferedIngestMetadata::without_headers(),
+                        Timestamp::from_unix_nanos(1),
+                    ),
+                    false,
+                );
+                let IngestorQuiesceIntake::Dispatch(live) = intake else {
+                    panic!("an open control lets a live payload dispatch");
+                };
+
+                let executor = single_worker_executor();
+                let held = HeldExtensionQueue::hold(&executor).await;
+                let (stop_tx, mut stop) = watch::channel(false);
+                let interrupter = nervix_primitives::task::spawn({
+                    let control = control.clone();
+                    async move {
+                        match interruption {
+                            LiveInterruption::BufferingQuiesce => {
+                                control.engage(IngestorQuiesceCause::EntityHold);
+                            }
+                            LiveInterruption::Stop => {
+                                stop_tx.send_replace(true);
+                            }
+                        }
+                        // The sender outlives the delivery either way, so a dropped sender never
+                        // stands in for the interruption under check.
+                        stop_tx
+                    }
+                });
+
+                let charge = executor
+                    .try_reserve(MemoryClass::Relay, 1)
+                    .assured("the relay class has room for one more byte");
+                let unfolding = executor.run_cpu_with(
+                    CpuClass::Extension,
+                    QueueAdmission::WaitForPlace,
+                    charge,
+                    |_charge, _cancellation| (),
+                );
+                let end = control
+                    .run_until_redecided(&mut decided, &mut stop, unfolding)
+                    .await;
+                let _stop_tx = interrupter
+                    .await
+                    .assured("the interrupting task returns the stop sender");
+
+                match interruption {
+                    LiveInterruption::BufferingQuiesce => {
+                        assert!(
+                            matches!(end, LiveDeliveryEnd::Redecide),
+                            "only the new decision ends a wait for a place that never frees: \
+                             {end:?}"
+                        );
+                        assert!(
+                            decided.is_quiesced(),
+                            "the payload is decided next under the decision that ended its wait"
+                        );
+                        assert!(matches!(
+                            control.intake(0, live, false),
+                            IngestorQuiesceIntake::Buffered
+                        ));
+                        assert_eq!(control.counters().buffered_records, 1);
+                        assert_eq!(control.counters().buffered_bytes, b"live".len());
+                        control.release(IngestorQuiesceCause::EntityHold);
+                    }
+                    LiveInterruption::Stop => {
+                        assert!(
+                            matches!(end, LiveDeliveryEnd::Stopped),
+                            "only the stop ends a wait for a place that never frees: {end:?}"
+                        );
+                        assert_eq!(control.counters(), IngestorQuiesceCounters::default());
+                    }
+                }
+                held.release().await;
+            });
+        }
+
+        #[test]
+        fn shuttle_a_new_quiesce_decides_again_on_a_live_payload_waiting_for_extension_room() {
+            check_interleavings(|| {
+                interrupted_live_delivery(LiveInterruption::BufferingQuiesce);
+            });
+        }
+
+        #[test]
+        fn shuttle_a_stop_ends_a_live_payload_waiting_for_extension_room() {
+            check_interleavings(|| interrupted_live_delivery(LiveInterruption::Stop));
         }
     }
 }

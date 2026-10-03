@@ -16,10 +16,10 @@ use crate::{
     AlterGenerator, AlterGeneratorOperation, AlterIngestor, AlterIngestorOperation, AlterJunction,
     AlterPlacement, AlterPlacementOperation, AlterProcessorOperation, AlterReingestor, AlterRelay,
     AlterRelayOperation, AlterReorderer, AlterReordererOperation, AlterSchema,
-    AlterSchemaOperation, AlterWireSchema, AlterWireSchemaOperation, AssignmentTargetScope,
-    AvroType, Backup, BackupResources, BackupScope, BinaryOperator, BranchEviction,
-    BranchSelection, ClickHouseValueMapping, ClientConfigEntry, ClientIngestMode,
-    ClientIngestSource, ClientResourceMount, CodecEncoding, CodecEncodingRule,
+    AlterSchemaOperation, AlterWireSchema, AlterWireSchemaOperation, AssignmentTarget,
+    AssignmentTargetScope, AvroType, Backup, BackupCapture, BackupResources, BackupScope,
+    BinaryOperator, BranchEviction, BranchSelection, ClickHouseValueMapping, ClientConfigEntry,
+    ClientIngestMode, ClientIngestSource, ClientResourceMount, CodecEncoding, CodecEncodingRule,
     CodecJaqTransformations, CodecName, CodecWireFormat, CorrelationTimeoutAction, CreateBranch,
     CreateClientAzureBlob, CreateClientClickHouse, CreateClientGcs, CreateClientHttp,
     CreateClientIcebergRest, CreateClientKafka, CreateClientMongoDb, CreateClientMqtt,
@@ -32,20 +32,20 @@ use crate::{
     CreateSchema, CreateSignalingProtocol, CreateUdf, CreateVhost, CreateWasmProcessor,
     CreateWindowProcessor, CreateWireSchema, DescribeBackup, DescribeTransaction, DomainPace,
     DomainStartPoint, EmitSink, EmitterBatchPolicy, EmitterBody, EmitterPublishingMode,
-    EndpointIngestMode, ExistingUserPolicy, Expression, FieldName, FieldScope, Float64Literal,
-    FlushPolicy, GeneralErrorPolicy, IcebergCatalog, InferencerTensorDeclaration,
-    InferencerTensorDimension, InferencerTensorMapping, IngestSource, IngestTimestampSource,
-    IngestorInput, Inheritance, InputCollectPolicy, InspectionFormat, JsonType, KafkaIngestMode,
-    KafkaOffsetMode, Literal, MaterializedStateDependency, MaterializedStatePolicy,
-    MembershipOperator, MessageErrorPolicy, Model, ModelName, MongoDbConflictAction,
-    MqttIngestMode, MqttQos, MqttSession, MySqlConflictAction, NatsIngestMode, OtelMetricKind,
-    OtelSignal, OutputBranch, ParseAsType, PlacementPolicy, PostgresConflictAction,
-    ProcessorInputWhere, ProcessorInputs, ProcessorOutputs, PulsarIngestMode, RabbitMqIngestMode,
-    RangeOperator, RedisPubSubIngestMode, RelayBranching, RelayName, Restore, RestoreMode,
-    RestoreScope, RetryPolicy, RouteConstruction, SchemaField, SignalingProtocolName,
-    SignalingStep, SignalingWaitStep, SignalingWireFormat, SqsFifoGroup, SqsIngestMode, Statement,
-    SubscriptionLiteral, TopicName, TransactionInspectionTarget, UnaryOperator,
-    WebsocketsIngestMode, WindowBound, WindowStateLimit, WireSchemaField, ZeroMqIngestMode,
+    EndpointIngestMode, ExistingUserPolicy, Expression, FieldScope, Float64Literal, FlushPolicy,
+    GeneralErrorPolicy, IcebergCatalog, InferencerTensorDeclaration, InferencerTensorDimension,
+    InferencerTensorMapping, IngestSource, IngestTimestampSource, IngestorInput, Inheritance,
+    InputCollectPolicy, InspectionFormat, JsonType, KafkaIngestMode, KafkaOffsetMode, Literal,
+    MaterializedStateDependency, MaterializedStatePolicy, MembershipOperator, MessageErrorPolicy,
+    Model, ModelName, MongoDbConflictAction, MqttIngestMode, MqttQos, MqttSession,
+    MySqlConflictAction, NamePosition, NatsIngestMode, OtelMetricKind, OtelSignal, OutputBranch,
+    ParseAsType, PlacementPolicy, PostgresConflictAction, ProcessorInputWhere, ProcessorInputs,
+    ProcessorOutputs, PulsarIngestMode, RabbitMqIngestMode, RangeOperator, RedisPubSubIngestMode,
+    RelayBranching, RelayName, Restore, RestoreMode, RestoreScope, RestoreState, RetryPolicy,
+    RouteConstruction, SchemaField, SignalingProtocolName, SignalingStep, SignalingWaitStep,
+    SignalingWireFormat, SqsFifoGroup, SqsIngestMode, Statement, SubscriptionLiteral, TopicName,
+    TransactionInspectionTarget, UnaryOperator, WebsocketsIngestMode, WindowBound,
+    WindowStateLimit, WireSchemaField, ZeroMqIngestMode,
 };
 
 /// The NSPL release canonical rendering writes.
@@ -262,14 +262,18 @@ pub fn expression_to_nspl(
                 FieldScope::Branch => Some("branch".to_string()),
                 FieldScope::Left => Some("left".to_string()),
                 FieldScope::Right => Some("right".to_string()),
-                FieldScope::RelayState { relay } => Some(format!("relay_state.{}", relay.as_str())),
+                FieldScope::RelayState { relay } => Some(format!(
+                    "relay_state.{}",
+                    NamePosition::Qualified.spell(relay.as_str())
+                )),
                 FieldScope::Metadata => Some("metadata".to_string()),
                 FieldScope::PartialOutput => Some("partial_output".to_string()),
                 FieldScope::Error => Some("error".to_string()),
             };
+            let field = reference.field.as_str();
             Ok(match prefix {
-                Some(prefix) => format!("{prefix}.{}", reference.field.as_str()),
-                None => reference.field.as_str().to_string(),
+                Some(prefix) => format!("{prefix}.{}", NamePosition::Qualified.spell(field)),
+                None => NamePosition::Bare.spell(field).into_owned(),
             })
         }
         Expression::Unary {
@@ -383,7 +387,7 @@ pub fn expression_to_nspl(
             arguments,
         } => Ok(format!(
             "{}({})",
-            function.as_str(),
+            NamePosition::Called.spell(function.as_str()),
             arguments
                 .iter()
                 .map(expression_to_nspl)
@@ -395,7 +399,7 @@ pub fn expression_to_nspl(
             arguments,
         } => Ok(format!(
             "udf::{}({})",
-            function.as_str(),
+            NamePosition::Qualified.spell(function.as_str()),
             arguments
                 .iter()
                 .map(expression_to_nspl)
@@ -460,6 +464,22 @@ fn route_construction_to_nspl(
         .join(" "))
 }
 
+/// The field an assignment writes, as `SET` and `DEFAULT` spell it: the bare field, or its scope
+/// and the field.
+fn assignment_target_to_nspl(target: &AssignmentTarget) -> String {
+    let field = target.field.as_str();
+    let scope = match target.scope {
+        AssignmentTargetScope::Bare => None,
+        AssignmentTargetScope::Message => Some("message"),
+        AssignmentTargetScope::Output => Some("output"),
+        AssignmentTargetScope::Branch => Some("branch"),
+    };
+    match scope {
+        Some(scope) => format!("{scope}.{}", NamePosition::Qualified.spell(field)),
+        None => NamePosition::Bare.spell(field).into_owned(),
+    }
+}
+
 /// The clauses of a route's construction, in the order they must be written.
 fn route_construction_clauses(
     construction: &RouteConstruction,
@@ -472,7 +492,7 @@ fn route_construction_clauses(
                 "INHERIT ALL EXCEPT {}",
                 fields
                     .iter()
-                    .map(FieldName::as_str)
+                    .map(|field| NamePosition::Bare.spell(field.as_str()))
                     .collect::<Vec<_>>()
                     .join(", ")
             ),
@@ -482,7 +502,7 @@ fn route_construction_clauses(
                     .iter()
                     .map(|field| format!(
                         "{}{}",
-                        field.field.as_str(),
+                        NamePosition::Bare.spell(field.field.as_str()),
                         if field.leak_sensitive {
                             " LEAK SENSITIVE"
                         } else {
@@ -502,15 +522,9 @@ fn route_construction_clauses(
                 .assignments
                 .iter()
                 .map(|assignment| {
-                    let prefix = match assignment.target.scope {
-                        AssignmentTargetScope::Bare => "",
-                        AssignmentTargetScope::Message => "message.",
-                        AssignmentTargetScope::Output => "output.",
-                        AssignmentTargetScope::Branch => "branch.",
-                    };
                     Ok(format!(
-                        "{prefix}{} = {}",
-                        assignment.target.field.as_str(),
+                        "{} = {}",
+                        assignment_target_to_nspl(&assignment.target),
                         expression_to_nspl(&assignment.value)?
                     ))
                 })
@@ -531,7 +545,7 @@ fn route_construction_clauses(
                 .iter()
                 .map(|invocation| Ok(format!(
                     "{}({})",
-                    invocation.function.as_str(),
+                    NamePosition::Called.spell(invocation.function.as_str()),
                     invocation
                         .arguments
                         .iter()
@@ -684,8 +698,8 @@ impl Statement {
                     DomainPace::Paced { period, skew } => format!(
                         "PACED DOMAIN {} WITH PERIOD {} SKEW {}",
                         create.body.id.as_str(),
-                        clock_duration_literal(period.as_nanos()),
-                        clock_duration_literal(skew.as_nanos())
+                        duration_literal(period.as_nanos()),
+                        duration_literal(skew.as_nanos())
                     ),
                     DomainPace::Unpaced => {
                         format!("UNPACED DOMAIN {}", create.body.id.as_str())
@@ -935,8 +949,16 @@ impl Backup {
             BackupResources::Included => "",
             BackupResources::Omitted => " WITHOUT RESOURCES",
         };
+        let capture = match self.capture {
+            BackupCapture::Quiesced { timeout: None } => String::new(),
+            BackupCapture::Quiesced {
+                timeout: Some(timeout),
+            } => format!(" TIMEOUT {}", duration_literal(timeout.as_nanos())),
+            BackupCapture::Live => " WITHOUT PAUSE".to_string(),
+            BackupCapture::ConfigurationOnly => " WITHOUT STATE".to_string(),
+        };
         format!(
-            "BACKUP {scope} TO {}{resources};",
+            "BACKUP {scope} TO {}{resources}{capture};",
             string_literal(&self.destination)
         )
     }
@@ -967,6 +989,11 @@ impl Restore {
         match self.mode {
             RestoreMode::Apply => {}
             RestoreMode::DryRun => statement.push_str(" DRY RUN"),
+        }
+        match self.state {
+            RestoreState::All => {}
+            RestoreState::WithoutSourceOffsets => statement.push_str(" WITHOUT SOURCE OFFSETS"),
+            RestoreState::ConfigurationOnly => statement.push_str(" WITHOUT STATE"),
         }
         statement.push(';');
         statement
@@ -1775,10 +1802,7 @@ impl CreateGenerator {
                 "USING MATERIALIZED STATE {}",
                 self.materialized_relay.as_str()
             )),
-            Clause::line(format!(
-                "EACH {}",
-                clock_duration_literal(self.each.as_nanos())
-            )),
+            Clause::line(format!("EACH {}", duration_literal(self.each.as_nanos()))),
             Clause::line(branch_selection_to_nspl(&self.branched_by)),
         ];
         clauses.extend(processor_outputs_clauses(&self.output_routes)?);
@@ -1865,7 +1889,7 @@ fn message_error_policy_to_nspl(
                 .map(|assignment| {
                     Ok(format!(
                         "{} = {}",
-                        assignment.target.field.as_str(),
+                        assignment_target_to_nspl(&assignment.target),
                         expression_to_nspl(&assignment.value)?
                     ))
                 })
@@ -1893,7 +1917,7 @@ fn materialized_state_policy_to_nspl(
                 .map(|assignment| {
                     Ok(format!(
                         "{} = {}",
-                        assignment.target.field.as_str(),
+                        assignment_target_to_nspl(&assignment.target),
                         expression_to_nspl(&assignment.value)?
                     ))
                 })
@@ -2501,10 +2525,9 @@ fn alter_generator_operation_to_nspl(
         AlterGeneratorOperation::SetMaterializedState { relay } => {
             Ok(format!("SET MATERIALIZED STATE {}", relay.as_str()))
         }
-        AlterGeneratorOperation::SetEach { each } => Ok(format!(
-            "SET EACH {}",
-            clock_duration_literal(each.as_nanos())
-        )),
+        AlterGeneratorOperation::SetEach { each } => {
+            Ok(format!("SET EACH {}", duration_literal(each.as_nanos())))
+        }
         AlterGeneratorOperation::SetBranching { branching } => {
             Ok(format!("SET {}", branch_selection_to_nspl(branching)))
         }
@@ -2903,7 +2926,7 @@ fn ingest_source_to_nspl(source: &IngestSource) -> String {
         } => format!(
             "HTTP {} EVERY {} ON QUIESCE {}",
             client.as_str(),
-            clock_duration_literal(every.as_nanos()),
+            duration_literal(every.as_nanos()),
             ingest_quiesce_to_nspl(quiesce)
         ),
         IngestSource::Kafka {
@@ -3022,7 +3045,7 @@ fn ingest_source_to_nspl(source: &IngestSource) -> String {
             "PROMETHEUS {} QUERY {} EVERY {} ON QUIESCE {}",
             client.as_str(),
             string_literal(query),
-            clock_duration_literal(every.as_nanos()),
+            duration_literal(every.as_nanos()),
             ingest_quiesce_to_nspl(quiesce)
         ),
         IngestSource::ZeroMq {
@@ -3767,14 +3790,14 @@ fn float_literal(literal: Float64Literal) -> error_stack::Result<String, Canonic
     }
 }
 
-/// Renders a domain-clock duration as one whole number of the largest unit that divides it
+/// Renders a duration as one whole number of the largest unit that divides it
 /// exactly, the only form an NSPL duration literal reads.
 ///
-/// A period's `Display` spells every component, as in `1s 500ms`, which a duration literal cannot
-/// hold, so `1500ms` would otherwise render as text that no longer parses. Zero, which only a skew
-/// can be, is written in seconds.
-fn clock_duration_literal(nanos: u64) -> String {
-    const UNITS: [(u64, &str); 6] = [
+/// A duration's `Display` spells every component, as in `1s 500ms`, which a duration literal cannot
+/// hold, so `1500ms` would otherwise render as text that no longer parses. Zero is written in seconds.
+fn duration_literal(nanos: impl Into<u128>) -> String {
+    let nanos = nanos.into();
+    const UNITS: [(u128, &str); 6] = [
         (86_400_000_000_000, "d"),
         (3_600_000_000_000, "h"),
         (60_000_000_000, "m"),

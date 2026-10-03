@@ -6,8 +6,6 @@
 //! - **Depends on.** The committed emitter schedule, node-local delivery owner and session wire.
 //! - **Must not know.** Arrow batch encoding, graph execution, or transport framing.
 
-use std::sync::{Arc as StdArc, Weak};
-
 use ahash::HashMap;
 use nervix_client_wire::{
     CloseEmitterOutcome, CloseEmitterRequest, ConsumerId, EmitterBatchDecision,
@@ -21,12 +19,11 @@ use nervix_models::{
     FlushPolicy, MAX_CLIENT_CONSUMERS_PER_SESSION, SchemaField,
 };
 use nervix_primitives::sync::{
-    Mutex as AsyncMutex,
+    Arc, Mutex as AsyncMutex, StdArc, StdWeak,
     atomic::{AtomicBool, Ordering},
     blocking::Mutex,
     mpsc,
 };
-use triomphe::Arc;
 
 use super::{QueuedReply, SessionShared};
 use crate::{
@@ -61,7 +58,7 @@ impl Drop for AttachedConsumer {
 }
 
 struct ConsumerCapacityReservation {
-    state: Weak<Mutex<ConsumerState>>,
+    state: StdWeak<Mutex<ConsumerState>>,
     bytes: u64,
 }
 

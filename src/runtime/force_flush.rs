@@ -19,8 +19,7 @@
 
 use std::collections::BTreeMap;
 
-use nervix_primitives::sync::{atomic::AtomicU8, blocking::Mutex, watch};
-use triomphe::Arc;
+use nervix_primitives::sync::{Arc, atomic::AtomicU8, blocking::Mutex, watch};
 
 use super::*;
 
@@ -546,7 +545,7 @@ impl Runtime {
         DomainForceFlush::subscribe(&coordinator, Some(counters))
     }
 
-    pub(in crate::runtime) fn force_flush_domain(&self, domain: &DomainName) -> u64 {
+    pub(crate) fn force_flush_domain(&self, domain: &DomainName) -> u64 {
         self.inner
             .force_flush_by_domain
             .entry(domain.clone())
@@ -797,8 +796,9 @@ mod tests {
 mod shuttle_tests {
     use std::{future::Future, task::Poll};
 
+    use nervix_model_harness::shuttle::{check_dfs, check_pct, check_random};
+
     use super::*;
-    use crate::shuttle_test::{check_dfs, check_pct, check_random};
 
     const DFS_ITERATIONS: usize = 1_000;
     const PCT_DEPTH: usize = 3;

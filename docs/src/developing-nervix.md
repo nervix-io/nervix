@@ -493,7 +493,10 @@ Clippy uses `clippy/<package>/<configuration_hash>` beneath `CARGO_TARGET_DIR`, 
 so each configuration has its own build directory lock. `just cargo-clippy-package <package>
 [arguments ...]` runs a focused check of all targets through the same recipe. The compiler driver
 builds keep their separate `typed-ratchet/driver` directory. All builds retain the configured kache
-wrapper. Cargo's compiler job limit applies separately within each invocation.
+wrapper. Cargo's compiler job limit applies separately within each invocation. On CI, where nothing
+reads a build directory after its lint and the runner's disk cannot hold every configuration's at
+once, a target that passed deletes its own; a failed target keeps its directory, and a local run
+keeps them all for the next one.
 
 `just validate-nspl-docs` scans `docs/src` and parses every exact `nspl` code fence directly with
 the parser crate. Use `nspl,ignore` only for loose grammar synopses and statement fragments that
@@ -581,34 +584,40 @@ the runtime examples require the `testing` feature, which the recipe enables.
 
 ### Deterministic concurrency checks
 
-Run the in-process scheduling checks for the execution, interconnect, and server crates with:
+Run every registered Shuttle check of the execution, interconnect, Rust client and server crates
+with:
 
 ```bash
 just test-shuttle
 ```
 
-Each check runs in its own process under bounded Shuttle schedules, then runs through the
-uncontrolled-nondeterminism detector. A substring selects a focused check or protocol family:
+Each check runs in its own process under the exploration it declares, then again under the
+uncontrolled-nondeterminism detector. `crates/model-harness/shuttle-inventory.toml` registers every
+check by package and test name, and the run fails when a registered check is missing, ignored or did
+not complete its exploration, and when a `shuttle_` test is not registered; add a new check to its
+package's list, and rename a renamed one there, in the same change. The command reports how many
+checks it discovered, selected, executed and saw complete. A substring selects a focused check or
+protocol family in every package, and a substring that selects nothing fails:
 
 ```bash
 just test-shuttle force_flush
 ```
 
-On failure, the runner writes a schedule below
-`target/shuttle-failures/<package>/<fully-qualified-test-name>/`. Pass the resulting schedule file
-to the replay recipe; its parent directories identify the exact package and check:
+On failure, the runner keeps the schedule Shuttle persisted, the run's output and its metadata below
+`target/shuttle-failures/<package>/<fully-qualified-test-name>/`. Pass the schedule file to the
+replay recipe; its parent directories identify the exact package and check:
 
 ```bash
 just test-shuttle-replay target/shuttle-failures/<package>/<fully-qualified-test-name>/<schedule-file>
 ```
 
 Keep the schedule with the failure report while fixing the owning protocol, then run the focused
-check and the full suite. To verify schedule persistence and replay without changing a protocol,
-set `SHUTTLE_FORCE_FAILURE=1` for a focused run, which deliberately fails after its invariant has
-completed, and replay the written schedule with the same variable set. Remove the variable for
-normal verification. Use `SHUTTLE_REPORT_STEPS=1` to inspect the highest explored step count when
-setting a check's iteration and step budgets. [Data-Plane Concurrency](./data-plane-concurrency.md)
-defines what these checks model, their limits, and the invariant held by each protocol.
+check and the full suite. `just test-shuttle-replay-check` proves persistence and replay without
+changing a protocol: it fails one check deliberately after its invariant held, through
+`SHUTTLE_FORCE_FAILURE=1`, and requires the one schedule it persisted to reproduce the failure in a
+fresh process. Use `SHUTTLE_REPORT_STEPS=1` to inspect the highest explored step count when setting
+a check's iteration and step budgets. [Data-Plane Concurrency](./data-plane-concurrency.md) defines
+what these checks model, their limits, and the invariant held by each protocol.
 
 ### Memory-ordering models
 
@@ -637,7 +646,19 @@ just test-loom-replay target/loom-failures/<package>/<test>
 `just test-loom-qualification` applies each registered weakening to a copy of the working tree and
 requires its model to fail.
 
-### Primitive boundary
+### Primitive boundary and execution modes
+
+Every execution-sensitive primitive comes from `nervix-primitives`, and every mode is its own build.
+`just validate` runs the checks that keep it that way: `just validate-primitive-boundary` for import
+origin, permissions, manifests, global cfgs, the analysis cfg and release binaries, over every
+authored source including the isolated analysis workspace,
+`just validate-execution-mode-dependencies` for the ordinary and portable dependency graphs of the
+workspace and of every package, and `just validate-execution-mode-conflicts` for the diagnostics of
+combined modes, of a mode or the native capability requested for the browser's target, of the
+diagnostic mode requested without the native capability, and of a product binary built in a mode it
+does not declare. `just lint` lints each mode in its own build, including the Shuttle builds and
+checks in `just cargo-clippy-shuttle`, the Loom builds in `just cargo-clippy-loom` and the
+diagnostic builds in `just cargo-clippy-deloxide`.
 
 `just test-primitives` builds `nervix-primitives` once per execution mode and runs its conformance
 checks: which backend each mode selects, the same contract scripts of every family against the
@@ -645,19 +666,49 @@ ordinary libraries and against the Shuttle adapters, the Shuttle checks that a p
 a read and a waiter's registration is reached, and the check that a Loom build takes the ordinary
 libraries for the families Loom does not model. The timer checks measure every timer on a paused
 clock in ordinary execution and show that Shuttle's timers are scheduling points whose timeouts a
-check triggers, and the Turmoil check shows that sockets, name lookup, timers and admitted CPU jobs
-belong to the simulated host that uses them. Run it after changing an adapter or the families a
-mode provides:
+check triggers, the Turmoil check shows that sockets, name lookup, timers and admitted CPU jobs
+belong to the simulated host that uses them, and the Deloxide checks show that the tracked locks keep
+the contracts of the locks they replace, including their non-blocking `Debug` and the exact count of
+waiters a notification wakes. Run it after changing an adapter or the families a mode provides:
 
 ```bash
 just test-primitives
 ```
 
 It runs `just test-primitives-ordinary`, the checks in ordinary native execution, then
-`just test-primitives-modeled`, the checks under each model checker's backend, then
+`just test-primitives-modeled`, the checks under each other mode's backend, then
 `just test-primitives-compile`, the checks that compile rather than run; each also runs alone.
 [Data-Plane Concurrency](./data-plane-concurrency.md) defines the primitive boundary, what each
 mode observes, and every model's claim.
+
+### Deadlock diagnostics
+
+A diagnostic node is the server built in the `deloxide` mode: every thread-blocking lock is tracked
+by a deadlock detector, and the first active deadlock it reports is described on standard error,
+recorded as evidence and ends the process with status `3`. Build one, in its own target directory so
+it never replaces the ordinary binary, and run it with an evidence directory that already exists:
+
+```bash
+just build-diagnostic-server
+target/deloxide/debug/nervix-server --deadlock-evidence /var/tmp/nervix-deadlocks ...
+```
+
+Run the diagnostic mode's checks with:
+
+```bash
+just test-deloxide
+```
+
+It builds under `target/deloxide` and runs the deadlock probes, each workload in a disposable
+process that must report its real cycle or end cleanly, then the `@deadlock_diagnostics` scenarios
+on in-process nodes and real diagnostic server processes of one and three nodes, without retries. It
+fails when an invocation executed no check or a scenario did not run and pass, keeps every
+invocation's output and the scenario binary's evidence under `target/deloxide/test-deloxide`, and
+exits with `124` once its budget, 2,400 seconds by default, expires. Run it after any change that adds
+or alters blocking synchronization, a lock's acquisition order, or a lifecycle or ownership path that
+uses tracked locks, and record what it covered and what it cannot see.
+[Data-Plane Concurrency](./data-plane-concurrency.md#diagnostic-deadlock-detection) describes the
+detector, its evidence and the locks it does not track.
 
 ### Deterministic network simulation
 
@@ -682,10 +733,16 @@ replays it in a fresh process with exactly its recorded inputs:
 just test-turmoil-replay target/turmoil-failures/<test>/<case>-seed-<seed>.json
 ```
 
-`just test-turmoil-sweep` runs every scenario over sixty-four seeds from 1000 in place of its
-committed seeds, and `just test-turmoil-replay-check` proves the record and replay path end to end.
-[Deterministic Interconnect Simulation](./interconnect-simulation.md) defines what the simulation
-controls, its fault model and limits, the scenario matrix, and how to investigate a failure.
+The suite reports how many tests each of its invocations and the whole suite discovered, selected,
+executed and completed, and keeps each invocation's output under `target/turmoil-suite`.
+`tests/turmoil-inventory.toml` registers the tests each invocation runs and leaves ignored: the
+suite fails when a registered test did not run or ran ignored, when a simulation test ran
+unregistered, and when an invocation executed no test, and a `just test-turmoil-simulation`
+selection that matches nothing fails too. `just test-turmoil-sweep` runs every scenario over
+sixty-four seeds from 1000 in place of its committed seeds, and `just test-turmoil-replay-check`
+proves the record and replay path end to end. [Deterministic Interconnect
+Simulation](./interconnect-simulation.md) defines what the simulation controls, its fault model and
+limits, the scenario matrix, and how to investigate a failure.
 
 ### Source coverage of the native extra checks
 

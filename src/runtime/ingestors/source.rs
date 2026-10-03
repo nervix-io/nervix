@@ -36,7 +36,7 @@ use super::{
     },
     IngestorStartError, SourceStartError,
 };
-use crate::runtime::ingestor_quiesce::IngestorQuiesceObservation;
+use crate::runtime::ingestor_quiesce::{IngestorQuiesceObservation, LiveDeliveryEnd};
 
 const SOURCE_ERROR_RETRY: Duration = Duration::from_millis(100);
 
@@ -124,6 +124,12 @@ pub(super) struct SourceStart {
     pub(super) buffered_intake: bool,
     /// Whether every accepted batch flushes its ingest group at once.
     pub(super) flush_each_intake: bool,
+    /// What a payload the source hands over without an acknowledgement does when the node's
+    /// extension workers have no room for its `ON INGESTION` unfolding. The source cannot present
+    /// it again, so the choice turns on what holding the source's loop costs the transport:
+    /// `WaitForPlace` holds the loop until a place frees, and `RefuseWhenFull` refuses the payload
+    /// and counts it.
+    pub(super) unacknowledged_admission: QueueAdmission,
     /// The resource mounts the connector's resolved configuration reads its files from, held for
     /// as long as an instance runs.
     pub(super) client_mounts: Vec<Arc<ClientResourceMounts>>,
@@ -138,6 +144,7 @@ pub(super) struct BrokerSourceStart<'a, P> {
     pub(super) acknowledgement: IngestAcknowledgement<'a>,
     pub(super) buffered_intake: bool,
     pub(super) flush_each_intake: bool,
+    pub(super) unacknowledged_admission: QueueAdmission,
     pub(super) client_mounts: Vec<Arc<ClientResourceMounts>>,
     pub(super) connector_label: &'static str,
 }
@@ -160,6 +167,7 @@ impl<P> BrokerSourceStart<'_, P> {
             acknowledgement,
             buffered_intake,
             flush_each_intake,
+            unacknowledged_admission,
             client_mounts,
             connector_label,
         } = self;
@@ -199,6 +207,7 @@ impl<P> BrokerSourceStart<'_, P> {
             companions: Vec::new(),
             buffered_intake,
             flush_each_intake,
+            unacknowledged_admission,
             client_mounts,
             connector_label,
         })
@@ -281,6 +290,9 @@ impl<P> PacedSourceStart<P> {
             companions: Vec::new(),
             buffered_intake: false,
             flush_each_intake: false,
+            // The source has already moved past the poll it hands over, and holding its loop only
+            // delays the next poll, whose missed occurrences the domain cadence coalesces.
+            unacknowledged_admission: QueueAdmission::WaitForPlace,
             client_mounts,
             connector_label,
         })
@@ -327,6 +339,7 @@ impl Runtime {
             companions,
             buffered_intake,
             flush_each_intake,
+            unacknowledged_admission,
             client_mounts,
             connector_label,
         } = source;
@@ -374,6 +387,7 @@ impl Runtime {
                 metadata_kind: ingestor.metadata_kind(),
                 buffered_intake,
                 flush_each_intake,
+                unacknowledged_admission,
             });
             let run = instance.start(host, shutdown_tx.subscribe());
             let task_domain = domain.clone();
@@ -445,6 +459,7 @@ pub(super) struct RuntimeSourceHostSpec {
     pub(super) metadata_kind: IngestMetadataKind,
     pub(super) buffered_intake: bool,
     pub(super) flush_each_intake: bool,
+    pub(super) unacknowledged_admission: QueueAdmission,
 }
 
 pub(super) struct RuntimeSourceHost {
@@ -463,10 +478,18 @@ pub(super) struct RuntimeSourceHost {
     quiesce_observation: IngestorQuiesceObservation,
     ack_root_trackers: IngestorAckRootTrackers,
     shutdown: watch::Receiver<bool>,
+    /// Watches the same stop as `shutdown`, for the waits of live payloads alone: a wait marks the
+    /// stop as seen on the receiver it watches, and the acknowledgements this host hands on clone
+    /// `shutdown`.
+    delivery_stop: watch::Receiver<bool>,
     instance_index: u64,
     collector: IngestRouteCollector,
     buffered_intake: bool,
     flush_each_intake: bool,
+    unacknowledged_admission: QueueAdmission,
+    /// Counts the unacknowledged payloads this host did not deliver because the node's extension
+    /// workers had no room to unfold them.
+    unfolding_refused: prometheus::IntCounter,
 }
 
 impl RuntimeSourceHost {
@@ -486,6 +509,13 @@ impl RuntimeSourceHost {
             spec.metrics.clone(),
         );
         let quiesce_observation = spec.quiesce.observation();
+        let dispatcher = spec.runtime.inner.remote_dispatcher.load();
+        let unfolding_refused = spec.runtime.inner.metrics.ingestor_unfolding_refused(
+            &spec.domain,
+            &spec.ingestor,
+            dispatcher.as_deref().map(RemoteDispatcher::local_node_id),
+        );
+        let delivery_stop = spec.shutdown.clone();
         Self {
             handles: spec.handles,
             status,
@@ -502,10 +532,13 @@ impl RuntimeSourceHost {
             quiesce_observation,
             ack_root_trackers,
             shutdown: spec.shutdown,
+            delivery_stop,
             instance_index: spec.instance_index,
             collector,
             buffered_intake: spec.buffered_intake,
             flush_each_intake: spec.flush_each_intake,
+            unacknowledged_admission: spec.unacknowledged_admission,
+            unfolding_refused,
         }
     }
 
@@ -530,44 +563,7 @@ impl RuntimeSourceHost {
             })
             .collect();
         let payload = BufferedIngestPayload::batch(entries, poll.observed_at);
-        let payload = match self.quiesce.intake(self.instance_index, payload, false) {
-            IngestorQuiesceIntake::Dispatch(payload) => payload,
-            IngestorQuiesceIntake::Buffered
-            | IngestorQuiesceIntake::Dropped
-            | IngestorQuiesceIntake::Rejected { .. } => return Ok(false),
-        };
-        self.dispatch_polled_payload(&payload).await?;
-        Ok(true)
-    }
-
-    async fn replay_buffered_poll(&mut self) -> SourceIntakeResult<bool> {
-        let Some(payload) = self.quiesce.pop_buffered(self.instance_index) else {
-            return Ok(false);
-        };
-        self.dispatch_polled_payload(&payload).await?;
-        Ok(true)
-    }
-
-    async fn dispatch_polled_payload(
-        &mut self,
-        payload: &BufferedIngestPayload,
-    ) -> SourceIntakeResult<()> {
-        self.runtime
-            .dispatch_raw_ingest_payload(RawIngestDispatch {
-                handles: &self.handles,
-                domain: &self.domain,
-                ingestor: &self.ingestor,
-                timestamp_source: self.timestamp_source.as_ref(),
-                output_routes: &self.output_routes,
-                filter_where: self.filter_where.as_ref(),
-                branched_senders: &self.branched_senders,
-                codec: self.codec.clone(),
-                payload,
-                collector: &mut self.collector,
-                flush: false,
-            })
-            .await
-            .change_context(SourceIntakeError::Dispatch)
+        self.intake_unacknowledged_payload(payload).await
     }
 
     /// The intake a request-scoped source binds its routes to.
@@ -652,8 +648,9 @@ impl RuntimeSourceHost {
         }
     }
 
-    /// Unacknowledged input read while the ingestor is quiesced enters the quiesce control as one
-    /// payload, which buffers it, drops it, or admits it for dispatch.
+    /// Unacknowledged input the quiesce control decides on as one payload, which it buffers,
+    /// drops, or lets dispatch: input read while the ingestor is quiesced, or a batch whose
+    /// decision changed while it waited for the node's extension workers.
     #[cfg_attr(
         nervix_lint,
         nervix::context(
@@ -672,11 +669,7 @@ impl RuntimeSourceHost {
             entries.push((message.payload.to_vec(), metadata));
         }
         let payload = BufferedIngestPayload::batch(entries, actual_utc_now());
-        if let IngestorQuiesceIntake::Dispatch(payload) =
-            self.quiesce.intake(self.instance_index, payload, false)
-        {
-            self.dispatch_buffered_payload(&payload).await?;
-        }
+        self.intake_unacknowledged_payload(payload).await?;
         Ok(SourceIntakeOutcome {
             acknowledgements: Vec::new(),
         })
@@ -719,12 +712,7 @@ impl RuntimeSourceHost {
         }
         let mut dispatched = Vec::new();
         if !admitted.is_empty() {
-            let outcome = self
-                .dispatch_batch(SourceIntakeBatch {
-                    messages: admitted,
-                    mode: SourceIntakeMode::Acknowledged,
-                })
-                .await?;
+            let outcome = self.dispatch_acknowledged(admitted).await?;
             dispatched = outcome.acknowledgements;
         }
         let mut dispatched = dispatched.into_iter();
@@ -744,8 +732,9 @@ impl RuntimeSourceHost {
         Ok(SourceIntakeOutcome { acknowledgements })
     }
 
-    /// Decodes a batch into its ingest group and dispatches it, returning one acknowledgement per
-    /// message for an acknowledged batch.
+    /// Decodes an acknowledged batch into an ingest group of its own and dispatches it, returning
+    /// one acknowledgement per message. A payload the node's extension workers cannot unfold now
+    /// fails the batch, which its source rejects and presents again.
     #[cfg_attr(
         nervix_lint,
         nervix::context(
@@ -753,73 +742,51 @@ impl RuntimeSourceHost {
             reason = "the source host routes admitted payloads and tracks their acknowledgements"
         )
     )]
-    async fn dispatch_batch(
+    async fn dispatch_acknowledged(
         &mut self,
-        batch: SourceIntakeBatch<'_>,
+        messages: Vec<SourceIntakeMessage<'_>>,
     ) -> SourceIntakeResult<SourceIntakeOutcome> {
-        let acknowledged = batch.mode == SourceIntakeMode::Acknowledged;
-        let row_bound = if acknowledged {
-            batch.messages.len().max(1)
-        } else {
-            INGEST_GROUP_MAX_ROWS
-        };
-        let mut acknowledged_collector = acknowledged.then(|| {
-            IngestRouteCollector::new(self.collector.kind, row_bound, self.metrics.clone())
-        });
-        let collector = match acknowledged_collector.as_mut() {
-            Some(collector) => collector,
-            None => &mut self.collector,
-        };
-
-        let mut metadata = Vec::with_capacity(batch.messages.len());
-        for message in batch.messages {
-            nervix_primitives::task::consume_budget().await;
-            if let Err(failure) = collector
-                .decode_payload(self.runtime.executor(), &self.codec, message.payload)
-                .await
-            {
-                collector.discard_undispatched_payloads();
-                // A payload the node could not take now was never judged, so it is not a decode
-                // failure: the batch failed to dispatch.
-                let error = match failure {
-                    PayloadDecodeFailure::Codec(report) => {
-                        report.change_context(SourceIntakeError::Decode)
-                    }
-                    PayloadDecodeFailure::NotAdmitted(report) => {
-                        report.change_context(SourceIntakeError::Dispatch)
-                    }
-                };
-                return Err(error);
-            }
-            metadata.push(message.metadata);
+        let mut collector = IngestRouteCollector::new(
+            self.collector.kind,
+            messages.len().max(1),
+            self.metrics.clone(),
+        );
+        let decoded = self
+            .runtime
+            .decode_raw_ingest_payload(
+                &mut collector,
+                QueueAdmission::RefuseWhenFull,
+                &self.codec,
+                messages.iter().map(message_payload),
+            )
+            .await;
+        if let Err(failure) = decoded {
+            return Err(failure.into_intake_error());
         }
 
-        let mut roots = Vec::new();
-        let mut completions = Vec::new();
-        let acks = if acknowledged {
-            roots.reserve(metadata.len());
-            completions.reserve(metadata.len());
-            let mut acks = Vec::with_capacity(metadata.len());
-            for _ in &metadata {
-                nervix_primitives::task::consume_budget().await;
-                let (root, completion) = self.ack_root_trackers.tracked_root();
-                if self.branched_senders.is_empty() {
-                    acks.push(root.clone());
-                } else {
-                    acks.push(root.attached());
-                }
-                roots.push(root);
-                completions.push(completion);
+        let metadata = messages
+            .into_iter()
+            .map(|message| message.metadata)
+            .collect::<Vec<_>>();
+        let mut roots = Vec::with_capacity(metadata.len());
+        let mut completions = Vec::with_capacity(metadata.len());
+        let mut acks = Vec::with_capacity(metadata.len());
+        for _ in &metadata {
+            nervix_primitives::task::consume_budget().await;
+            let (root, completion) = self.ack_root_trackers.tracked_root();
+            if self.branched_senders.is_empty() {
+                acks.push(root.clone());
+            } else {
+                acks.push(root.attached());
             }
-            acks
-        } else {
-            metadata.iter().map(|_| AckSet::empty()).collect()
-        };
+            roots.push(root);
+            completions.push(completion);
+        }
 
         self.runtime
             .dispatch_ingested_records(IngestGroupDispatch {
                 handles: &self.handles,
-                collector,
+                collector: &mut collector,
                 domain: &self.domain,
                 ingestor: &self.ingestor,
                 timestamp_source: self.timestamp_source.as_ref(),
@@ -831,18 +798,15 @@ impl RuntimeSourceHost {
             })
             .await
             .change_context(SourceIntakeError::Dispatch)?;
-
-        if acknowledged || self.flush_each_intake || collector.len() >= INGEST_GROUP_MAX_ROWS {
-            self.runtime
-                .flush_ingest_collector(
-                    &self.domain,
-                    &self.ingestor,
-                    &self.branched_senders,
-                    collector,
-                )
-                .await
-                .change_context(SourceIntakeError::Flush)?;
-        }
+        self.runtime
+            .flush_ingest_collector(
+                &self.domain,
+                &self.ingestor,
+                &self.branched_senders,
+                &mut collector,
+            )
+            .await
+            .change_context(SourceIntakeError::Flush)?;
 
         for root in roots {
             root.ack_success();
@@ -858,6 +822,239 @@ impl RuntimeSourceHost {
             .collect();
         Ok(SourceIntakeOutcome { acknowledgements })
     }
+
+    /// Decodes an unacknowledged batch read while the ingestor was not quiesced into the instance's
+    /// open ingest group, and accepts it there.
+    ///
+    /// Its source cannot present the batch again. When the node's extension workers have no room
+    /// for its unfolding, the batch waits for a place if this source's loop may be held, and is
+    /// otherwise refused and counted. The wait ends when the ingestor stops, which drops the
+    /// batch, or when a quiesce decision newer than `decided` arrives: the quiesce control then
+    /// decides on the batch as on input read while quiesced, unless the source's input bypasses the
+    /// control, in which case the batch waits again.
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            recurring,
+            reason = "the source host routes admitted payloads and tracks their acknowledgements"
+        )
+    )]
+    async fn dispatch_unacknowledged(
+        &mut self,
+        messages: Vec<SourceIntakeMessage<'_>>,
+        mut decided: IngestorQuiesceObservation,
+    ) -> SourceIntakeResult<SourceIntakeOutcome> {
+        let unacknowledged = SourceIntakeOutcome {
+            acknowledgements: Vec::new(),
+        };
+        loop {
+            nervix_primitives::task::consume_budget().await;
+            let decode = self.runtime.decode_raw_ingest_payload(
+                &mut self.collector,
+                self.unacknowledged_admission,
+                &self.codec,
+                messages.iter().map(message_payload),
+            );
+            let decoded = match self.unacknowledged_admission {
+                QueueAdmission::RefuseWhenFull => decode.await,
+                QueueAdmission::WaitForPlace => {
+                    let delivery = self
+                        .quiesce
+                        .run_until_redecided(&mut decided, &mut self.delivery_stop, decode)
+                        .await;
+                    match delivery {
+                        LiveDeliveryEnd::Completed(decoded) => decoded,
+                        LiveDeliveryEnd::Stopped => {
+                            self.collector.discard_undispatched_payloads();
+                            self.report_stopped_delivery();
+                            return Ok(unacknowledged);
+                        }
+                        LiveDeliveryEnd::Redecide => {
+                            self.collector.discard_undispatched_payloads();
+                            // A source whose input bypasses the quiesce control dispatches what
+                            // it already read whatever the decision, so its batch waits again.
+                            if !self.buffered_intake {
+                                continue;
+                            }
+                            return self.retain_unacknowledged(messages).await;
+                        }
+                    }
+                }
+            };
+            if let Err(failure) = decoded {
+                self.count_refused(&failure, messages.len());
+                return Err(failure.into_intake_error());
+            }
+            break;
+        }
+
+        let metadata = messages
+            .into_iter()
+            .map(|message| message.metadata)
+            .collect::<Vec<_>>();
+        let acks = vec![AckSet::empty(); metadata.len()];
+        self.runtime
+            .dispatch_ingested_records(IngestGroupDispatch {
+                handles: &self.handles,
+                collector: &mut self.collector,
+                domain: &self.domain,
+                ingestor: &self.ingestor,
+                timestamp_source: self.timestamp_source.as_ref(),
+                output_routes: &self.output_routes,
+                filter_where: self.filter_where.as_ref(),
+                metadata: &metadata,
+                ingested_at: actual_utc_now(),
+                acks,
+            })
+            .await
+            .change_context(SourceIntakeError::Dispatch)?;
+        if self.flush_each_intake || self.collector.len() >= INGEST_GROUP_MAX_ROWS {
+            self.flush().await?;
+        }
+        Ok(unacknowledged)
+    }
+
+    /// Hands an unacknowledged payload this instance read to the quiesce control, and delivers it
+    /// when the control lets it dispatch. Answers whether its messages entered the ingest group.
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            recurring,
+            reason = "the source host routes admitted payloads and tracks their acknowledgements"
+        )
+    )]
+    async fn intake_unacknowledged_payload(
+        &mut self,
+        payload: BufferedIngestPayload,
+    ) -> SourceIntakeResult<bool> {
+        // Observed before the decision is taken, so a newer one is never missed.
+        let decided = self.quiesce.observation();
+        match self.quiesce.intake(self.instance_index, payload, false) {
+            IngestorQuiesceIntake::Dispatch(payload) => {
+                self.deliver_unacknowledged(payload, decided).await
+            }
+            IngestorQuiesceIntake::Buffered
+            | IngestorQuiesceIntake::Dropped
+            | IngestorQuiesceIntake::Rejected { .. } => Ok(false),
+        }
+    }
+
+    /// Delivers an unacknowledged payload the quiesce control let dispatch under `decided`, and
+    /// answers whether its messages entered the ingest group.
+    ///
+    /// When the node's extension workers have no room for its unfolding, the payload waits for a
+    /// place or is refused and counted, as this source's admission says. The wait ends when the
+    /// ingestor stops, which drops the payload, or when a newer quiesce decision arrives, under
+    /// which the control decides on the payload again: a buffer retains it, a drop policy drops
+    /// and counts it, and a suspension lets it dispatch, so it waits on.
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            recurring,
+            reason = "the source host routes admitted payloads and tracks their acknowledgements"
+        )
+    )]
+    async fn deliver_unacknowledged(
+        &mut self,
+        mut payload: BufferedIngestPayload,
+        mut decided: IngestorQuiesceObservation,
+    ) -> SourceIntakeResult<bool> {
+        loop {
+            nervix_primitives::task::consume_budget().await;
+            let decode = self.runtime.decode_raw_ingest_payload(
+                &mut self.collector,
+                self.unacknowledged_admission,
+                &self.codec,
+                payload.payloads(),
+            );
+            let delivery = self
+                .quiesce
+                .run_until_redecided(&mut decided, &mut self.delivery_stop, decode)
+                .await;
+            let decoded = match delivery {
+                LiveDeliveryEnd::Completed(decoded) => decoded,
+                LiveDeliveryEnd::Stopped => {
+                    self.collector.discard_undispatched_payloads();
+                    self.report_stopped_delivery();
+                    return Ok(false);
+                }
+                LiveDeliveryEnd::Redecide => {
+                    self.collector.discard_undispatched_payloads();
+                    decided = self.quiesce.observation();
+                    match self.quiesce.intake(self.instance_index, payload, false) {
+                        IngestorQuiesceIntake::Dispatch(returned) => {
+                            payload = returned;
+                            continue;
+                        }
+                        IngestorQuiesceIntake::Buffered
+                        | IngestorQuiesceIntake::Dropped
+                        | IngestorQuiesceIntake::Rejected { .. } => return Ok(false),
+                    }
+                }
+            };
+            if let Err(failure) = decoded {
+                self.count_refused(&failure, payload.len());
+                return Err(failure
+                    .into_group_error(&self.ingestor)
+                    .change_context(SourceIntakeError::Dispatch));
+            }
+            break;
+        }
+
+        self.runtime
+            .accept_raw_ingest_payload(RawIngestAcceptance {
+                handles: &self.handles,
+                domain: &self.domain,
+                ingestor: &self.ingestor,
+                timestamp_source: self.timestamp_source.as_ref(),
+                output_routes: &self.output_routes,
+                filter_where: self.filter_where.as_ref(),
+                payload: &payload,
+                collector: &mut self.collector,
+            })
+            .await
+            .change_context(SourceIntakeError::Dispatch)?;
+        if self.flush_each_intake || self.collector.len() >= INGEST_GROUP_MAX_ROWS {
+            self.flush().await?;
+        }
+        Ok(true)
+    }
+
+    /// Counts `payloads` an unacknowledged intake did not deliver because the node's extension
+    /// workers had no room to unfold them.
+    fn count_refused(&self, failure: &PayloadDecodeFailure, payloads: usize) {
+        if let PayloadDecodeFailure::NotAdmitted(_) = failure {
+            self.unfolding_refused.inc_by(payloads.arch_into());
+        }
+    }
+
+    /// Records that the ingestor stopped while a live payload waited for the node's extension
+    /// workers, which drops the payload with the rest of the ingestor's in-flight input.
+    fn report_stopped_delivery(&self) {
+        debug!(
+            domain = self.domain.as_str(),
+            ingestor = self.ingestor.as_str(),
+            "dropped an unacknowledged payload that waited for the node's extension workers when \
+             the ingestor stopped"
+        );
+    }
+}
+
+/// The payload bytes one source message lends to its ingest group.
+fn message_payload<'a>(message: &SourceIntakeMessage<'a>) -> &'a [u8] {
+    message.payload
+}
+
+impl PayloadDecodeFailure {
+    /// The intake failure of a source batch one of whose payloads did not decode. A payload the
+    /// node could not take now was never judged, so it is not a decode failure: the batch failed
+    /// to dispatch.
+    fn into_intake_error(self) -> Report<SourceIntakeError> {
+        match self {
+            Self::Codec(report) => report.change_context(SourceIntakeError::Decode),
+            Self::NotAdmitted(report) => report.change_context(SourceIntakeError::Dispatch),
+        }
+    }
 }
 
 #[async_trait]
@@ -866,7 +1063,10 @@ impl SourceHostServices for RuntimeSourceHost {
         &mut self,
         batch: SourceIntakeBatch<'_>,
     ) -> SourceIntakeResult<SourceIntakeOutcome> {
-        if self.buffered_intake && self.quiesce.is_quiesced() {
+        // The decision the batch is taken in under. A batch that waits for the node's extension
+        // workers is decided again once a newer one arrives.
+        let decided = self.quiesce.observation();
+        if self.buffered_intake && decided.is_quiesced() {
             return match batch.mode {
                 SourceIntakeMode::Unacknowledged => {
                     self.retain_unacknowledged(batch.messages).await
@@ -874,7 +1074,12 @@ impl SourceHostServices for RuntimeSourceHost {
                 SourceIntakeMode::Acknowledged => self.retain_acknowledged(batch.messages).await,
             };
         }
-        self.dispatch_batch(batch).await
+        match batch.mode {
+            SourceIntakeMode::Unacknowledged => {
+                self.dispatch_unacknowledged(batch.messages, decided).await
+            }
+            SourceIntakeMode::Acknowledged => self.dispatch_acknowledged(batch.messages).await,
+        }
     }
 
     async fn flush(&mut self) -> SourceIntakeResult<()> {
@@ -890,11 +1095,7 @@ impl SourceHostServices for RuntimeSourceHost {
     }
 
     async fn replay_buffered(&mut self) -> SourceIntakeResult<bool> {
-        let Some(payload) = self.quiesce.pop_buffered(self.instance_index) else {
-            return Ok(false);
-        };
-        self.dispatch_buffered_payload(&payload).await?;
-        Ok(true)
+        self.deliver_retained().await
     }
 
     fn next_flush(&self) -> Option<Instant> {
@@ -984,22 +1185,82 @@ impl SourceHostServices for RuntimeSourceHost {
 }
 
 impl RuntimeSourceHost {
+    /// Delivers the oldest payload this instance's quiesce buffer retained, and answers whether it
+    /// delivered one.
+    ///
+    /// Nothing can present a retained payload again: an endpoint already answered it and a source
+    /// already moved past it. Its unfolding therefore waits for a place on the node's extension
+    /// workers rather than being refused, and the payload stays retained, counted with its bytes,
+    /// until its messages are accepted into the ingest group. A shutdown or a new quiesce ends
+    /// that wait and leaves the payload at the front of the buffer, so it is delivered first when
+    /// the buffer drains again. A payload its codec rejects leaves the buffer and is reported, as
+    /// any retained payload that fails is.
     #[cfg_attr(
         nervix_lint,
         nervix::context(
             recurring,
-            reason = "the source host routes admitted payloads and tracks their acknowledgements"
+            reason = "the source host delivers one retained payload on each loop turn while its \
+                      buffer drains"
         )
     )]
-    async fn dispatch_buffered_payload(
-        &mut self,
-        payload: &BufferedIngestPayload,
-    ) -> SourceIntakeResult<()> {
-        self.dispatch_polled_payload(payload).await?;
+    async fn deliver_retained(&mut self) -> SourceIntakeResult<bool> {
+        let Some(retained) = self.quiesce.take_buffered(self.instance_index) else {
+            return Ok(false);
+        };
+        let decode = self.runtime.decode_raw_ingest_payload(
+            &mut self.collector,
+            QueueAdmission::WaitForPlace,
+            &self.codec,
+            retained.payload().payloads(),
+        );
+        let decoded = retained.run_until_interrupted(&self.shutdown, decode).await;
+        let Some(decoded) = decoded else {
+            // The group keeps none of the payload's messages, and dropping the delivery puts the
+            // payload back at the front of the buffer.
+            self.collector.discard_undispatched_payloads();
+            return Ok(false);
+        };
+        match decoded {
+            Ok(()) => {}
+            Err(PayloadDecodeFailure::NotAdmitted(refusal)) => {
+                // A job that waits for a place is refused only by an executor that no longer
+                // admits work. The refusal judged nothing, so the payload stays retained.
+                debug!(
+                    domain = self.domain.as_str(),
+                    ingestor = self.ingestor.as_str(),
+                    error = ?refusal,
+                    "the node could not take a retained payload's unfolding"
+                );
+                return Ok(false);
+            }
+            Err(failure @ PayloadDecodeFailure::Codec(_)) => {
+                // Its codec rejected it, so it leaves the buffer and its failure is reported.
+                drop(retained.finish());
+                return Err(failure
+                    .into_group_error(&self.ingestor)
+                    .change_context(SourceIntakeError::Dispatch));
+            }
+        }
+        // The payload's messages are in the group, so it leaves the buffer before the group
+        // accepts them.
+        let payload = retained.finish();
+        self.runtime
+            .accept_raw_ingest_payload(RawIngestAcceptance {
+                handles: &self.handles,
+                domain: &self.domain,
+                ingestor: &self.ingestor,
+                timestamp_source: self.timestamp_source.as_ref(),
+                output_routes: &self.output_routes,
+                filter_where: self.filter_where.as_ref(),
+                payload: &payload,
+                collector: &mut self.collector,
+            })
+            .await
+            .change_context(SourceIntakeError::Dispatch)?;
         if self.flush_each_intake || self.collector.len() >= INGEST_GROUP_MAX_ROWS {
             self.flush().await?;
         }
-        Ok(())
+        Ok(true)
     }
 }
 
@@ -1013,7 +1274,6 @@ impl RuntimeSourceHost {
 )]
 trait PacedSourceHostServices: SourceHostServices {
     async fn intake_poll(&mut self, poll: SourcePoll) -> SourceIntakeResult<bool>;
-    async fn replay_buffered_poll(&mut self) -> SourceIntakeResult<bool>;
     fn should_skip_poll(&self) -> bool;
     fn record_poll_error(&self, reason: String);
 }
@@ -1022,10 +1282,6 @@ trait PacedSourceHostServices: SourceHostServices {
 impl PacedSourceHostServices for RuntimeSourceHost {
     async fn intake_poll(&mut self, poll: SourcePoll) -> SourceIntakeResult<bool> {
         RuntimeSourceHost::intake_poll(self, poll).await
-    }
-
-    async fn replay_buffered_poll(&mut self) -> SourceIntakeResult<bool> {
-        RuntimeSourceHost::replay_buffered_poll(self).await
     }
 
     fn should_skip_poll(&self) -> bool {
@@ -1158,7 +1414,7 @@ async fn run_paced_source<C, H, D>(
             PacedSourceAction::Stop => break,
         }
 
-        match host.replay_buffered_poll().await {
+        match host.replay_buffered().await {
             Ok(true) => {
                 flush_paced_source(&mut host).await;
                 continue;
@@ -1982,10 +2238,6 @@ mod tests {
             Ok(!poll.messages.is_empty())
         }
 
-        async fn replay_buffered_poll(&mut self) -> SourceIntakeResult<bool> {
-            Ok(false)
-        }
-
         fn should_skip_poll(&self) -> bool {
             self.suspend_intake
         }
@@ -2378,3 +2630,7 @@ mod tests {
 #[cfg(all(test, feature = "shuttle"))]
 #[path = "source_shuttle_tests.rs"]
 mod shuttle_tests;
+
+#[cfg(test)]
+#[path = "source_extension_tests.rs"]
+mod extension_tests;

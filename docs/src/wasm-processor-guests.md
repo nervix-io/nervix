@@ -402,7 +402,9 @@ whose restored state needs a timer requests it again from its next input or time
 
 Keep `nervix_load_state` strict about what it restores. Save what a restore needs to validate the
 state, such as the branch configuration it was taken under, and reject state that does not match
-the instance it is handed to.
+the instance it is handed to. The Rust SDK's snapshot envelope permits a restored domain name to
+change if the domain type, branch key, and input and output schemas match. Guests with their own
+snapshot format decide whether a domain name change is valid for their application state.
 
 A concrete branch evicted for its `TTL` or instance limit stops without a quiesce flush, but its
 checkpoint stays: when the same branch key appears again, its new instance restores the last

@@ -1,17 +1,20 @@
 //! The execution-sensitive primitives Nervix code obtains through one boundary.
 //!
 //! A build runs in one execution mode. Ordinary execution is the default; `shuttle`, `loom` and
-//! `turmoil` are the opt-in modes, and a dependency graph enables at most one of them. Every crate
-//! that owns a mode feature forwards it to this crate, and Cargo unifies this crate's features
-//! across the whole graph, so a vocabulary type, an engine and the server compiled into one test
-//! binary all receive the same backend. Selection depends only on those features, never on
-//! `cfg(test)`: the library a test links is production code compiled for the selected mode.
+//! `turmoil` are the opt-in modes a model checker or simulator runs, `deloxide` is the opt-in
+//! diagnostic mode, and a dependency graph enables at most one of them. Every crate that owns a
+//! mode feature forwards it to this crate, and Cargo unifies this crate's features across the whole
+//! graph, so a vocabulary type, an engine and the server compiled into one test binary all receive
+//! the same backend. Selection depends only on those features, never on `cfg(test)`: the library a
+//! test links is production code compiled for the selected mode.
 //!
 //! | Family | Path | Capability |
 //! | --- | --- | --- |
 //! | Atomics, orderings and fences | [`sync::atomic`] | Portable |
-//! | Async synchronization: locks, notification, semaphores, channels, cancellation | [`sync`] | `native` |
+//! | Shared ownership: Nervix-owned references, and the standard strong and weak references an external API or a weak reference requires | [`sync::Arc`], [`sync::StdArc`], [`sync::StdWeak`] | Portable |
+//! | Async synchronization: locks, notification, waker registration, semaphores, channels, cancellation | [`sync`] | `native` |
 //! | Thread-blocking synchronization: locks, condition variables, barriers, one-time initialization, channels | `sync::blocking` | `native` |
+//! | Deadlock findings among the thread-blocking locks, and the detector a `deloxide` build installs | [`deadlock`] | Portable findings; the detector is `native` |
 //! | Tasks: spawning, joining, yielding, aborting, tracking, cooperative budgeting, and the mechanism that runs an admitted CPU job | `task` | `native` |
 //! | Timers and the monotonic clock: sleeps, deadlines, timeouts, intervals and instants | `time` | `native` |
 //! | Sockets: TCP listeners and streams, UDP and local sockets | `net` | `native` |
@@ -33,15 +36,31 @@
 //! name lookup are Turmoil's, its timers follow the simulated host's clock, and an admitted CPU job
 //! runs as one task of that host's scheduler.
 //!
+//! Deloxide models nothing. A `deloxide` build takes the ordinary primitives except the thread-blocking
+//! locks and their condition variable, which `sync::blocking` selects as adapters over Deloxide's
+//! tracked locks: every acquisition updates one process-wide wait-for graph, and `deadlock` installs
+//! the detector that reports a cycle in it while the cycle's threads are still blocked. The adapters
+//! keep the ordinary locks' interface where Deloxide can keep its meaning, and an operation outside
+//! that surface fails to compile rather than running untracked. Such a build is a diagnostic
+//! artifact rather than a test artifact: it runs as a product does, and its tracked locks refuse to
+//! run in a process that has not installed the detector, so a cycle can never pass unreported.
+//!
 //! Ordinary execution pays nothing for the boundary: every path is a direct re-export of the
 //! library item, with no wrapper, allocation, dispatch or scheduling point. A modeled primitive
 //! exists only inside a run of its model, and using one outside that run is a test configuration
 //! failure that the backend reports; there is no fallback to a real primitive. A real primitive
-//! that must stay outside every model is reached through [`unmodeled`] and nowhere else.
+//! that must stay outside every model is reached through [`unmodeled`] and nowhere else. A build
+//! that selects a modeled mode is therefore a test artifact, and every binary Nervix ships declares
+//! itself with [`product_binary!`], which fails to compile in such a build. A `deloxide` build
+//! compiles only the binaries that also declare a diagnostic form.
 //!
-//! The portable surface, [`sync::atomic`] and the unmodeled atomics, builds for every target,
-//! including the browser. Everything else is the `native` capability, and requesting a capability or
-//! a mode the target cannot provide is a compile error rather than a different implementation.
+//! Shared ownership is real in every mode: no model checker counts references, so a reference count
+//! establishes no ordering a check claims.
+//!
+//! The portable surface, [`sync::atomic`], shared ownership, and the unmodeled atomics, one-time
+//! initialization and `futures` families, builds for every target, including the browser.
+//! Everything else is the `native` capability, and requesting a capability or a mode the target
+//! cannot provide is a compile error rather than a different implementation.
 //!
 //! Layer: primitives.
 //!
@@ -49,8 +68,8 @@
 //!   rejecting incompatible modes and target capabilities, and the one named path to a real
 //!   primitive that stays outside every model.
 //! - **Depends on.** The standard library, the synchronization, runtime and network libraries it
-//!   selects from, and the Shuttle or Loom runtime or Turmoil's network while that mode is
-//!   selected.
+//!   selects from, and the Shuttle or Loom runtime, Turmoil's network or Deloxide's detector while
+//!   that mode is selected.
 //! - **Must not know.** Anything in Nervix, and any scenario, exploration bound or assertion of a
 //!   check. It selects a backend; the harness that runs a model owns how the model is explored.
 //!   It supplies mechanisms and decides no policy: which resolver answers a name, whether work is
@@ -75,6 +94,24 @@ compile_error!(
      Cargo unifies this crate's features across the dependency graph, so a graph selects one \
      mode; run each modeled suite in its own build invocation."
 );
+#[cfg(all(feature = "loom", feature = "deloxide"))]
+compile_error!(
+    "nervix-primitives: the `loom` and `deloxide` execution modes cannot be enabled together. \
+     Cargo unifies this crate's features across the dependency graph, so a graph selects one \
+     mode; build the diagnostic mode in its own build invocation."
+);
+#[cfg(all(feature = "shuttle", feature = "deloxide"))]
+compile_error!(
+    "nervix-primitives: the `shuttle` and `deloxide` execution modes cannot be enabled together. \
+     Cargo unifies this crate's features across the dependency graph, so a graph selects one \
+     mode; build the diagnostic mode in its own build invocation."
+);
+#[cfg(all(feature = "turmoil", feature = "deloxide"))]
+compile_error!(
+    "nervix-primitives: the `turmoil` and `deloxide` execution modes cannot be enabled together. \
+     Cargo unifies this crate's features across the dependency graph, so a graph selects one \
+     mode; build the diagnostic mode in its own build invocation."
+);
 #[cfg(all(target_family = "wasm", feature = "native"))]
 compile_error!(
     "nervix-primitives: the `native` capability provides operating-system threads and the async \
@@ -82,12 +119,126 @@ compile_error!(
 );
 #[cfg(all(
     target_family = "wasm",
-    any(feature = "loom", feature = "shuttle", feature = "turmoil")
+    any(
+        feature = "loom",
+        feature = "shuttle",
+        feature = "turmoil",
+        feature = "deloxide"
+    )
 ))]
 compile_error!(
-    "nervix-primitives: the `loom`, `shuttle` and `turmoil` execution modes run on native targets \
-     only."
+    "nervix-primitives: the `loom`, `shuttle`, `turmoil` and `deloxide` execution modes run on \
+     native targets only."
 );
+#[cfg(all(feature = "deloxide", not(feature = "native")))]
+compile_error!(
+    "nervix-primitives: the `deloxide` diagnostic mode tracks the thread-blocking locks of the \
+     `native` capability, so it is requested together with `native`."
+);
+#[cfg(all(feature = "deloxide", not(unix)))]
+compile_error!(
+    "nervix-primitives: the `deloxide` diagnostic mode runs on Unix targets only: it keeps the \
+     detector's start-up output off standard output by redirecting the descriptor."
+);
+
+/// Declare the calling crate a product binary, which builds only for ordinary execution, or also
+/// as a diagnostic binary when it declares its diagnostic form.
+///
+/// A build that selects a modeled execution mode is a test artifact: its modeled primitives exist
+/// only inside a run of their model, so a server or client built that way could not run as a
+/// product and must never be published. Every binary Nervix ships invokes this once in its crate
+/// root with its name, and a build that selects `loom`, `shuttle` or `turmoil` fails to compile
+/// there, naming the binary and the mode.
+///
+/// A `deloxide` build is a diagnostic artifact instead: it runs as a product does, with its
+/// thread-blocking locks tracked by the deadlock detector. It compiles only a binary that declares
+/// its diagnostic form, `product_binary!("nervix-server", diagnostic)`, and such a binary installs
+/// the detector through `deadlock` before it uses a tracked lock or starts a runtime worker. Any
+/// other binary fails to compile in that build, naming itself.
+///
+/// ```
+/// nervix_primitives::product_binary!("nervix-example");
+/// nervix_primitives::product_binary!("nervix-diagnosable-example", diagnostic);
+/// ```
+///
+/// No other form exists:
+///
+/// ```compile_fail
+/// nervix_primitives::product_binary!("nervix-example", modeled);
+/// ```
+#[cfg(not(any(
+    feature = "loom",
+    feature = "shuttle",
+    feature = "turmoil",
+    feature = "deloxide"
+)))]
+#[macro_export]
+macro_rules! product_binary {
+    ($binary:literal $(, diagnostic)?) => {};
+}
+
+#[cfg(feature = "loom")]
+#[macro_export]
+macro_rules! product_binary {
+    ($binary:literal $(, diagnostic)?) => {
+        ::core::compile_error!(::core::concat!(
+            $binary,
+            " is a product binary and builds only for ordinary execution; a build that selects \
+             the `loom` execution mode is a test artifact"
+        ));
+    };
+}
+
+#[cfg(all(feature = "shuttle", not(feature = "loom")))]
+#[macro_export]
+macro_rules! product_binary {
+    ($binary:literal $(, diagnostic)?) => {
+        ::core::compile_error!(::core::concat!(
+            $binary,
+            " is a product binary and builds only for ordinary execution; a build that selects \
+             the `shuttle` execution mode is a test artifact"
+        ));
+    };
+}
+
+#[cfg(all(feature = "turmoil", not(any(feature = "loom", feature = "shuttle"))))]
+#[macro_export]
+macro_rules! product_binary {
+    ($binary:literal $(, diagnostic)?) => {
+        ::core::compile_error!(::core::concat!(
+            $binary,
+            " is a product binary and builds only for ordinary execution; a build that selects \
+             the `turmoil` execution mode is a test artifact"
+        ));
+    };
+}
+
+/// Declare the calling crate a product binary. A `deloxide` build compiles only its diagnostic form:
+///
+/// ```
+/// nervix_primitives::product_binary!("nervix-diagnosable-example", diagnostic);
+/// ```
+///
+/// A binary without one fails to compile here, naming itself:
+///
+/// ```compile_fail
+/// nervix_primitives::product_binary!("nervix-example");
+/// ```
+#[cfg(all(
+    feature = "deloxide",
+    not(any(feature = "loom", feature = "shuttle", feature = "turmoil"))
+))]
+#[macro_export]
+macro_rules! product_binary {
+    ($binary:literal) => {
+        ::core::compile_error!(::core::concat!(
+            $binary,
+            " is a product binary without a diagnostic form; a build that selects the `deloxide` \
+             diagnostic mode builds only a binary that declares one"
+        ));
+    };
+    ($binary:literal, diagnostic) => {};
+}
 
 // The runtime attributes name the boundary by its crate name, including in this crate's own tests.
 #[cfg(feature = "native")]
@@ -95,6 +246,7 @@ extern crate self as nervix_primitives;
 
 #[cfg(feature = "native")]
 pub mod collections;
+pub mod deadlock;
 mod lint;
 #[cfg(feature = "native")]
 pub mod net;

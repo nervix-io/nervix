@@ -35,14 +35,13 @@ use nervix_models::{
 use nervix_primitives::{
     collections::DashMap,
     sync::{
-        CancellationToken,
+        Arc, CancellationToken,
         atomic::{AtomicBool, AtomicUsize, Ordering},
         blocking::{Mutex, RwLock},
         broadcast, mpsc, oneshot, watch,
     },
 };
 use nervix_recovery::{Discarded as _, NoReceiver as _};
-use triomphe::Arc;
 
 use crate::registry::SchedulerMode;
 
@@ -97,6 +96,8 @@ struct FaultInjectionState {
     transaction_binding_drops: DashMap<ClusterNodeName, (), RandomState>,
     /// One-shot installation failures, consumed by the next resource version a node installs.
     failed_resource_installations: DashMap<ClusterNodeName, (), RandomState>,
+    /// One-shot failures after earlier restore checkpoints have reached the receiving node.
+    failed_restored_wasm_checkpoints: DashMap<DomainName, (), RandomState>,
     /// One-shot failures, consumed by the next HTTPS listener configuration a node installs.
     failed_https_listener_installations: DashMap<ClusterNodeName, (), RandomState>,
     consensus_probes: DashMap<ClusterNodeName, ConsensusProbeState, RandomState>,
@@ -148,6 +149,9 @@ struct FaultInjectionState {
     /// Wall time already elapsed when the next newly supplied mapping for a domain starts.
     domain_clock_initial_elapsed: DashMap<DomainName, Duration, RandomState>,
     state_replica_polling_paused: AtomicBool,
+    /// While set, every node drops every runtime-state checkpoint announcement it receives, as if
+    /// each was lost on the way.
+    state_checkpoint_announcements_lost: AtomicBool,
     /// While set, every node's WASM guest-state checkpoint fails to reach its stable storage.
     wasm_checkpoint_storage_failing: AtomicBool,
     /// While set, every coordinated WASM reset fails while building its fresh guest instance.
@@ -282,6 +286,11 @@ enum CommandPausePoint {
         node_id: ClusterNodeName,
         step: RestoreStep,
     },
+    BackupCut(DomainName),
+    RestoreStatePublication {
+        domain: DomainName,
+        coordinator: ClusterNodeName,
+    },
     TransactionCommit {
         node_id: ClusterNodeName,
         domain: String,
@@ -345,6 +354,7 @@ impl Default for FaultInjection {
                 failed_entity_schedule_swaps: DashMap::default(),
                 transaction_binding_drops: DashMap::default(),
                 failed_resource_installations: DashMap::default(),
+                failed_restored_wasm_checkpoints: DashMap::default(),
                 failed_https_listener_installations: DashMap::default(),
                 consensus_probes: DashMap::default(),
                 startup_consensus_faults: DashMap::default(),
@@ -368,6 +378,7 @@ impl Default for FaultInjection {
                 wasm_checkpoint_pauses: DashMap::default(),
                 domain_clock_initial_elapsed: DashMap::default(),
                 state_replica_polling_paused: AtomicBool::new(false),
+                state_checkpoint_announcements_lost: AtomicBool::new(false),
                 wasm_checkpoint_storage_failing: AtomicBool::new(false),
                 wasm_state_reset_fresh_initialization_failing: AtomicBool::new(false),
                 state_replica_installation_failing: AtomicBool::new(false),
@@ -384,6 +395,114 @@ impl Default for FaultInjection {
 }
 
 impl FaultInjection {
+    pub fn fail_restored_wasm_checkpoint(&self, domain: DomainName) {
+        self.inner
+            .failed_restored_wasm_checkpoints
+            .insert(domain, ());
+    }
+
+    pub fn pause_restore_state_publication(
+        &self,
+        domain: DomainName,
+        coordinator: ClusterNodeName,
+    ) {
+        self.arm_command_pause(CommandPausePoint::RestoreStatePublication {
+            domain,
+            coordinator,
+        });
+    }
+
+    pub async fn wait_for_restore_state_publication(
+        &self,
+        domain: &DomainName,
+        coordinator: &ClusterNodeName,
+    ) {
+        self.wait_for_command_pause(&CommandPausePoint::RestoreStatePublication {
+            domain: domain.clone(),
+            coordinator: coordinator.clone(),
+        })
+        .await;
+    }
+
+    pub fn release_restore_state_publication(
+        &self,
+        domain: &DomainName,
+        coordinator: &ClusterNodeName,
+    ) {
+        self.release_command_pause(&CommandPausePoint::RestoreStatePublication {
+            domain: domain.clone(),
+            coordinator: coordinator.clone(),
+        });
+    }
+
+    pub(crate) async fn pause_restore_state_publication_if_armed(
+        &self,
+        domain: &DomainName,
+        coordinator: &ClusterNodeName,
+    ) {
+        let point = CommandPausePoint::RestoreStatePublication {
+            domain: domain.clone(),
+            coordinator: coordinator.clone(),
+        };
+        let Some(pause) = self
+            .inner
+            .command_pauses
+            .get(&point)
+            .map(|pause| pause.value().clone())
+        else {
+            return;
+        };
+        if pause.claimed.swap(true, Ordering::AcqRel) {
+            return;
+        }
+        pause.reach();
+        pause.wait_until_released().await;
+        // Retain the observation until the scenario sees the authority refusal after release.
+    }
+
+    pub(crate) fn mark_restore_state_publication_refused(
+        &self,
+        domain: &DomainName,
+        coordinator: &ClusterNodeName,
+    ) {
+        if let Some(pause) =
+            self.inner
+                .command_pauses
+                .get(&CommandPausePoint::RestoreStatePublication {
+                    domain: domain.clone(),
+                    coordinator: coordinator.clone(),
+                })
+        {
+            pause.mark_delivered();
+        }
+    }
+
+    pub async fn wait_for_restore_state_publication_refusal(
+        &self,
+        domain: &DomainName,
+        coordinator: &ClusterNodeName,
+    ) {
+        let point = CommandPausePoint::RestoreStatePublication {
+            domain: domain.clone(),
+            coordinator: coordinator.clone(),
+        };
+        let pause = self
+            .inner
+            .command_pauses
+            .get(&point)
+            .assured("the scenario armed this publication pause")
+            .clone();
+        pause.wait_until_delivered().await;
+        self.inner.command_pauses.remove(&point);
+    }
+
+    pub(crate) fn restored_wasm_checkpoint_fails(&self, domain: &DomainName) -> bool {
+        self.inner
+            .failed_restored_wasm_checkpoints
+            .remove(domain)
+            .is_some()
+    }
+
     pub(crate) fn register_wasm_state_reset_coordinator(
         &self,
         node: ClusterNodeName,
@@ -1073,6 +1192,20 @@ impl FaultInjection {
         });
     }
 
+    /// Holds a backup after its domain drain and before any owner captures state.
+    pub fn pause_backup_cut_on(&self, domain: DomainName) {
+        self.arm_command_pause(CommandPausePoint::BackupCut(domain));
+    }
+
+    pub async fn wait_for_backup_cut_pause(&self, domain: &DomainName) {
+        self.wait_for_command_pause(&CommandPausePoint::BackupCut(domain.clone()))
+            .await;
+    }
+
+    pub fn release_backup_cut_pause(&self, domain: &DomainName) {
+        self.release_command_pause(&CommandPausePoint::BackupCut(domain.clone()));
+    }
+
     pub fn pause_transaction_commit_after(
         &self,
         node_id: ClusterNodeName,
@@ -1463,6 +1596,14 @@ impl FaultInjection {
             .store(true, Ordering::Release);
     }
 
+    /// Make every node drop every runtime-state checkpoint announcement it receives, so replicas
+    /// learn of new checkpoints only through their own catch-up rounds.
+    pub fn lose_state_checkpoint_announcements(&self) {
+        self.inner
+            .state_checkpoint_announcements_lost
+            .store(true, Ordering::Release);
+    }
+
     /// Make every node's WASM guest-state checkpoint fail to reach its stable storage, as a failing
     /// disk would, until [`Self::restore_wasm_checkpoint_storage`].
     pub fn fail_wasm_checkpoint_storage(&self) {
@@ -1826,6 +1967,11 @@ impl FaultInjection {
             step: step.clone(),
         })
         .await;
+    }
+
+    pub(crate) async fn pause_backup_cut_if_armed(&self, domain: &DomainName) {
+        self.pause_command_if_armed(CommandPausePoint::BackupCut(domain.clone()))
+            .await;
     }
 
     pub(crate) async fn pause_health_response_if_armed(
@@ -2262,6 +2408,12 @@ impl FaultInjection {
     pub(crate) fn state_replica_polling_is_paused(&self) -> bool {
         self.inner
             .state_replica_polling_paused
+            .load(Ordering::Acquire)
+    }
+
+    pub(crate) fn state_checkpoint_announcements_are_lost(&self) -> bool {
+        self.inner
+            .state_checkpoint_announcements_lost
             .load(Ordering::Acquire)
     }
 

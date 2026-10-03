@@ -203,7 +203,7 @@ impl CompiledCodec {
             CompiledWireSchema::Json(_)
             | CompiledWireSchema::Cbor(_)
             | CompiledWireSchema::Avro(_)
-            | CompiledWireSchema::Syslog => {
+            | CompiledWireSchema::Syslog(_) => {
                 Err(self.contract_violation(CodecContractError::OnIngestionMissing))
             }
         }
@@ -274,7 +274,7 @@ mod tests {
         CodecJaqFormat, CodecJaqTransformations, CodecWireFormat, CreateCodec, CreateSchema,
         ParseAsType, ResolvedCodecWireFormat, SchemaField,
     };
-    use triomphe::Arc;
+    use nervix_primitives::sync::Arc;
 
     use super::*;
     use crate::runtime_schema::{

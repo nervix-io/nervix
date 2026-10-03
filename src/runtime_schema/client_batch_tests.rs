@@ -1,10 +1,7 @@
 //! A client batch is accepted only as one canonical, uncompressed Arrow IPC stream of exactly the
 //! ingestor's schema within its limits, and every other body is refused with the defect it has.
 
-use std::{
-    num::{NonZeroU64, NonZeroUsize},
-    sync::Arc as StdArc,
-};
+use std::num::{NonZeroU64, NonZeroUsize};
 
 use arrow_array::{
     ArrayRef, BinaryArray, Int64Array, RecordBatch, StringArray, UInt64Array,
@@ -24,6 +21,7 @@ use nervix_execution::{Executor, MemoryClass, Reservation};
 use nervix_models::{
     ClientBatchDefect, CreateSchema, FieldName, ParseAsType, SchemaField, SchemaName,
 };
+use nervix_primitives::sync::StdArc;
 
 use super::{ClientBatchError, ClientBatchLimits, ClientSchemaDifference};
 use crate::runtime_schema::{CompiledSchema, compile_schema};

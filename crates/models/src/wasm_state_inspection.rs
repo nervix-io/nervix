@@ -72,12 +72,19 @@ pub struct WasmCheckpointInspection {
     RkyvDeserialize,
 )]
 pub struct WasmCheckpointCounts {
+    #[rkyv(with = crate::CountAsU64)]
     pub total: usize,
+    #[rkyv(with = crate::CountAsU64)]
     pub empty: usize,
+    #[rkyv(with = crate::CountAsU64)]
     pub captured: usize,
+    #[rkyv(with = crate::CountAsU64)]
     pub locally_durable: usize,
+    #[rkyv(with = crate::CountAsU64)]
     pub awaiting_replicas: usize,
+    #[rkyv(with = crate::CountAsU64)]
     pub replica_confirmed: usize,
+    #[rkyv(with = crate::CountAsU64)]
     pub failed: usize,
 }
 
@@ -164,9 +171,11 @@ pub struct WasmStateInspection {
     pub reset: Option<WasmStateResetInspection>,
     pub reset_readiness: Option<WasmStateResetReadiness>,
     pub recoveries: Vec<WasmRecoveryInspection>,
+    #[rkyv(with = crate::CountAsU64)]
     pub omitted_recoveries: usize,
     pub checkpoint_counts: WasmCheckpointCounts,
     pub checkpoints: Vec<WasmCheckpointInspection>,
+    #[rkyv(with = crate::CountAsU64)]
     pub omitted_checkpoints: usize,
 }
 

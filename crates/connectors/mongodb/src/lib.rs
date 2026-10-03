@@ -1070,11 +1070,10 @@ impl<'a> MappedBsonColumn<'a> {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc as StdArc;
-
     use arrow_array::types::UInt64Type;
     use arrow_schema::{DataType, Field, Schema, TimeUnit};
     use nervix_models::{MessageErrorCode, MessageErrorOperation};
+    use nervix_primitives::sync::StdArc;
 
     use super::*;
 

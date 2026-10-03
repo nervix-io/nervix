@@ -28,7 +28,6 @@ rumqttc-core = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt", "sync", "time"] }
 tracing = { workspace = true }
-triomphe = { workspace = true }
 url = { workspace = true }
 
 [dev-dependencies]

@@ -1549,7 +1549,7 @@ impl Runtime {
 
 #[cfg(test)]
 mod tests {
-    use std::{sync::Arc as StdArc, time::Duration};
+    use std::time::Duration;
 
     use nervix_interconnect::EntityGatePurpose;
     use nervix_models::{
@@ -1561,13 +1561,13 @@ mod tests {
     };
     use nervix_primitives::{
         sync::{
+            Arc, StdArc,
             atomic::{AtomicBool, AtomicUsize, Ordering},
             watch,
         },
         time::Instant,
     };
     use nonzero_ext::nonzero;
-    use triomphe::Arc;
 
     use super::*;
     use crate::emitter_execution_plan::EmitterExecutionPlans;

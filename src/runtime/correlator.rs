@@ -1318,7 +1318,7 @@ pub(super) async fn handle_correlator_timeout_action(
 mod tests {
     use ahash::HashMap;
     use nervix_models::ParseAsType;
-    use triomphe::Arc;
+    use nervix_primitives::sync::Arc;
 
     use super::*;
     use crate::{

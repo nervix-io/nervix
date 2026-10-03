@@ -11,13 +11,13 @@
 
 use meticulous::OptionExt as _;
 use nervix_primitives::sync::{
+    Arc,
     atomic::{AtomicU64, AtomicUsize, Ordering},
     blocking::Mutex,
     oneshot, watch,
 };
 use nervix_recovery::NoReceiver as _;
 use serde::{Deserialize, Serialize};
-use triomphe::Arc;
 
 const ACK_SHARES_FIT_IN_MEMORY: &str =
     "every pending ACK share has an in-memory owner, so their count fits in usize";
@@ -40,7 +40,13 @@ pub enum AckProgress {
 #[derive(Debug)]
 pub struct AckCompletion {
     receiver: oneshot::Receiver<AckOutcome>,
-    alive_rx: watch::Receiver<u64>,
+    alive_rx: watch::Receiver<AckProgressStatus>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct AckProgressStatus {
+    sequence: u64,
+    parked: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -143,7 +149,7 @@ struct AckState {
     /// work.
     handoff: AckHandoffTracking,
     alive_counter: AtomicU64,
-    alive_tx: watch::Sender<u64>,
+    alive_tx: watch::Sender<AckProgressStatus>,
     sender: Mutex<Option<oneshot::Sender<AckOutcome>>>,
     root_trackers: Vec<Arc<AckRootTracker>>,
 }
@@ -300,6 +306,11 @@ impl AckRootTracker {
 }
 
 impl AckCompletion {
+    pub(crate) fn remote_progress(&self) -> (u64, bool) {
+        let status = *self.alive_rx.borrow();
+        (status.sequence, status.parked)
+    }
+
     pub async fn wait_for_progress(&mut self) -> AckProgress {
         nervix_primitives::select! {
             biased;
@@ -358,7 +369,10 @@ impl AckHandle {
 
     fn new_root(root_trackers: Vec<Arc<AckRootTracker>>) -> (Self, AckCompletion) {
         let (sender, receiver) = oneshot::channel();
-        let (alive_tx, alive_rx) = watch::channel(0);
+        let (alive_tx, alive_rx) = watch::channel(AckProgressStatus {
+            sequence: 0,
+            parked: false,
+        });
         // A tracked root starts with its own share active. An untracked root tracks no handoff
         // share at all, so it starts idle and stays idle.
         let active_shares = usize::from(!root_trackers.is_empty());
@@ -458,7 +472,10 @@ impl AckHandle {
         reservation: OwnershipHandoffTrackerReservation<'_>,
     ) {
         match self.0.handoff.publish_shares(shares) {
-            AckHandoffPublication::Activated => reservation.retain(),
+            AckHandoffPublication::Activated => {
+                reservation.retain();
+                self.publish_progress();
+            }
             AckHandoffPublication::Joined | AckHandoffPublication::AlreadyComplete => {}
         }
     }
@@ -471,6 +488,9 @@ impl AckHandle {
             AckHandoffRemoval::Removed
             | AckHandoffRemoval::AlreadyComplete
             | AckHandoffRemoval::NoActiveShare => {}
+        }
+        if removal == AckHandoffRemoval::WentIdle {
+            self.publish_progress();
         }
         removal.removed_share()
     }
@@ -570,9 +590,24 @@ impl AckHandle {
         if self.is_resolved() {
             return;
         }
+        self.publish_progress();
+    }
 
-        let next = self.0.alive_counter.fetch_add(1, Ordering::AcqRel) + 1;
-        self.0.alive_tx.send_replace(next);
+    fn publish_progress(&self) {
+        let sequence = self.0.alive_counter.fetch_add(1, Ordering::AcqRel) + 1;
+        let parked = !self.0.root_trackers.is_empty()
+            && self.0.pending.load(Ordering::Acquire) != 0
+            && matches!(
+                self.0.handoff.state(),
+                AckHandoffState::Tracking { active_shares: 0 }
+            );
+        self.0.alive_tx.send_if_modified(|status| {
+            if sequence <= status.sequence {
+                return false;
+            }
+            *status = AckProgressStatus { sequence, parked };
+            true
+        });
     }
 
     pub fn ack_success(&self) {
@@ -796,8 +831,7 @@ impl AckSet {
 mod tests {
     use std::time::Duration;
 
-    use nervix_primitives::time::timeout;
-    use triomphe::Arc;
+    use nervix_primitives::{sync::Arc, time::timeout};
 
     use super::{AckOutcome, AckProgress, AckRootTracker, AckSet};
 
@@ -1039,14 +1073,16 @@ mod tests {
 #[cfg(all(test, feature = "shuttle"))]
 mod shuttle_tests {
     use meticulous::{OptionExt as _, ResultExt as _};
-    use nervix_primitives::{sync::oneshot::error::TryRecvError, thread};
-    use triomphe::Arc;
+    use nervix_model_harness::shuttle::{check_dfs, check_pct};
+    use nervix_primitives::{
+        sync::{Arc, oneshot::error::TryRecvError},
+        thread,
+    };
 
     use super::{
         AckCompletion, AckHandle, AckHandoffState, AckOutcome, AckRequiredWaitGuard,
         AckRootTracker, AckSet, Ordering,
     };
-    use crate::shuttle_test::{check_dfs, check_pct};
 
     // Models with more than three tasks have too many interleavings to enumerate, so they sample
     // schedules that need up to `PCT_DEPTH` ordering constraints to fail.
@@ -1286,6 +1322,37 @@ mod shuttle_tests {
                     observed.outcome(),
                     Some(&AckOutcome::NoAck("test completion".to_string()))
                 );
+            },
+            None,
+        );
+    }
+
+    #[test]
+    fn parked_remote_progress_survives_a_racing_heartbeat_and_resumes_once() {
+        check_dfs(
+            || {
+                let tracker = Arc::new(AckRootTracker::default());
+                let (root, completion) = AckSet::tracked_root(tracker.clone());
+                let waiting = root.clone();
+                let heartbeat = root.clone();
+
+                let wait_thread = thread::spawn(move || AckRequiredWaitGuard::new([&waiting]));
+                let heartbeat_thread = thread::spawn(move || heartbeat.ack_alive());
+                let required_wait = wait_thread.join().assured(JOINED);
+                heartbeat_thread.join().assured(JOINED);
+
+                let (park_sequence, parked) = completion.remote_progress();
+                assert!(parked, "the remote owner publishes its parked cut state");
+                assert_eq!(tracker.outstanding_for_ownership_handoff(), 0);
+
+                drop(required_wait);
+                let (resume_sequence, parked) = completion.remote_progress();
+                assert!(resume_sequence > park_sequence);
+                assert!(!parked, "the remote owner publishes its resumed cut state");
+                assert_eq!(tracker.outstanding_for_ownership_handoff(), 1);
+
+                root.ack_success();
+                assert_eq!(tracker.outstanding_for_ownership_handoff(), 0);
             },
             None,
         );

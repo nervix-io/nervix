@@ -25,13 +25,13 @@ use std::{
     num::NonZeroUsize,
     path::{Path, PathBuf},
     process::Command,
-    sync::Arc,
     time::Duration,
 };
 
 use arch_into::ArchInto as _;
 use error_stack::Report;
 use meticulous::OptionExt as _;
+use nervix_primitives::sync::StdArc;
 use nervix_recovery::Discarded as _;
 use tempfile::{TempDir, tempdir, tempdir_in};
 use testcontainers::{
@@ -989,7 +989,7 @@ exec /pulsar/bin/pulsar standalone --no-functions-worker --no-stream-storage -c 
         }
         let tls = self.ensure_tls()?.clone();
         let workspace_root = workspace_root();
-        let image = GenericBuildableImage::new("nervix-cucumber-mock-server", "domain-cadence")
+        let image = GenericBuildableImage::new("nervix-cucumber-mock-server", "answered-polls")
             .with_dockerfile(workspace_root.join("docker/mock-server/Dockerfile"))
             .with_file(
                 workspace_root.join("docker/mock-server/app.py"),
@@ -1696,7 +1696,7 @@ impl TlsDirectory {
 
 #[derive(Clone, Debug)]
 struct TlsMaterials {
-    dir: Arc<TlsDirectory>,
+    dir: StdArc<TlsDirectory>,
     ca_path: PathBuf,
     ca_pem: Vec<u8>,
     node_pem: Vec<u8>,
@@ -1707,7 +1707,7 @@ struct TlsMaterials {
 impl TlsMaterials {
     fn generate(mode: ContainerMode) -> io::Result<Self> {
         if !mode.is_reusable() {
-            let directory = Arc::new(TlsDirectory::temporary(tempdir()?));
+            let directory = StdArc::new(TlsDirectory::temporary(tempdir()?));
             Self::generate_at(directory.path())?;
             return Self::load(directory);
         }
@@ -1719,7 +1719,7 @@ impl TlsMaterials {
         fs::create_dir_all(&cache_root)?;
         let cache_path = cache_root.join(dependency_configuration_hash("tls-materials"));
         if cache_path.exists() {
-            return Self::load(Arc::new(TlsDirectory::persistent(cache_path)));
+            return Self::load(StdArc::new(TlsDirectory::persistent(cache_path)));
         }
 
         let staging = tempdir_in(&cache_root)?;
@@ -1733,7 +1733,7 @@ impl TlsMaterials {
             }
             Err(error) => return Err(error),
         }
-        Self::load(Arc::new(TlsDirectory::persistent(cache_path)))
+        Self::load(StdArc::new(TlsDirectory::persistent(cache_path)))
     }
 
     fn generate_at(directory: &Path) -> io::Result<()> {
@@ -1868,7 +1868,7 @@ IP.1 = 127.0.0.1
         Ok(())
     }
 
-    fn load(dir: Arc<TlsDirectory>) -> io::Result<Self> {
+    fn load(dir: StdArc<TlsDirectory>) -> io::Result<Self> {
         let ca_path = dir.path().join("ca.pem");
         let ca_pem = fs::read(&ca_path)?;
         let node_pem = fs::read(dir.path().join("node.pem"))?;

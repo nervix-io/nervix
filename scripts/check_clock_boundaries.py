@@ -84,6 +84,10 @@ def main() -> int:
         ROOT / PHYSICAL_TIME_OWNER,
         ROOT / "src/runtime_schema/syslog.rs",
         ROOT / "crates/web-console/src/clock_display.rs",
+        # A diagnostic process's deadlock evidence: when the detector reported a cycle and when the
+        # run started, operational times an operator correlates with the process's logs.
+        ROOT / "crates/primitives/src/deadlock/detector.rs",
+        ROOT / "crates/deadlock/src/run.rs",
     }
     wall_time_needles = (
         "Timestamp::now(",

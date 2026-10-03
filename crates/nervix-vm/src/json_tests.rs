@@ -14,7 +14,7 @@ use arrow_array::{
     Int64Array, ListArray, StringArray, StructArray, UInt8Array, UInt16Array, types::Int64Type,
 };
 use nervix_models::{JsonPath, ParseAsType};
-use triomphe::Arc;
+use nervix_primitives::sync::Arc;
 
 use super::{
     JsonDefect, JsonExtraction, JsonKind, JsonOperation, JsonOutput, JsonPlace, JsonScanOutput,
@@ -763,11 +763,9 @@ fn declares_only_types_a_json_value_can_hold() {
     );
     assert_eq!(
         target(&vec_of(ParseAsType::F64)).data_type(),
-        arrow_schema::DataType::List(std::sync::Arc::new(arrow_schema::Field::new(
-            "item",
-            arrow_schema::DataType::Float64,
-            false
-        ))),
+        arrow_schema::DataType::List(nervix_primitives::sync::StdArc::new(
+            arrow_schema::Field::new("item", arrow_schema::DataType::Float64, false)
+        )),
         "collection elements are never null, as in a schema field of the same type"
     );
 }

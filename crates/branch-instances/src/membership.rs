@@ -13,15 +13,16 @@ use std::{
     fmt,
     hash::Hash,
     num::{NonZeroU64, NonZeroUsize},
-    sync::Arc as StdArc,
     time::Duration,
 };
 
 use imbl::{GenericHashSet, shared_ptr::DefaultSharedPtr};
 use meticulous::OptionExt as _;
 use nervix_models::Timestamp;
-use nervix_primitives::publication::ArcSwap;
-use triomphe::Arc;
+use nervix_primitives::{
+    publication::ArcSwap,
+    sync::{Arc, StdArc},
+};
 
 use crate::{BranchInstanceRegistry, GetOrCreateBranchInstance};
 

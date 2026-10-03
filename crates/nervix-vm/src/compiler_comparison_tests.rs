@@ -8,15 +8,14 @@
 //! - **Depends on.** The VM frontend and compiler.
 //! - **Must not know.** How execution evaluates a test.
 
-use std::sync::Arc;
-
 use arrow_schema::{DataType, Field, Schema};
+use nervix_primitives::sync::StdArc;
 
 use super::*;
 use crate::test_support::parse_program;
 
-fn operand_schema() -> Arc<Schema> {
-    Arc::new(Schema::new(vec![
+fn operand_schema() -> StdArc<Schema> {
+    StdArc::new(Schema::new(vec![
         Field::new("status", DataType::Utf8, false),
         Field::new("region", DataType::Utf8, true),
         Field::new("priority", DataType::Int32, false),
@@ -27,7 +26,7 @@ fn operand_schema() -> Arc<Schema> {
         Field::new("raw", DataType::Binary, false),
         Field::new(
             "tags",
-            DataType::List(Arc::new(Field::new("item", DataType::Utf8, true))),
+            DataType::List(StdArc::new(Field::new("item", DataType::Utf8, true))),
             true,
         ),
         Field::new("secret", DataType::Float64, false),
@@ -49,7 +48,7 @@ fn compile_assignment(
     fields.push(Field::new("out", output_type, output_nullable));
     compile_program_for_bindings_with_sensitivity(
         &program,
-        Arc::new(Schema::new(fields)),
+        StdArc::new(Schema::new(fields)),
         SchemaSensitivity::from_sensitive_fields(["secret"]),
         [CompileBinding::writable("input", input)
             .with_sensitivity(SchemaSensitivity::from_sensitive_fields(["secret"]))],
@@ -317,7 +316,7 @@ fn a_set_is_evaluated_once_and_shared_by_every_identical_test() {
     }
     let compiled = compile_program_for_bindings(
         &program,
-        Arc::new(Schema::new(fields)),
+        StdArc::new(Schema::new(fields)),
         [CompileBinding::writable("input", input)],
     )
     .expect("the program must compile");

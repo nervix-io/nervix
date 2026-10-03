@@ -237,7 +237,8 @@ Coordination operations use a typed identity composed of the authenticated coord
 current process epoch, and a process-local sequence. The sequence begins independently in every
 process; the node and process epoch make equal sequence values distinct across concurrent leaders
 and restarts. For every coordination request, the receiver verifies the node and process epoch
-against the bound connection before the application handler can observe the request. A process
+against the bound connection before the application handler can observe the request or open a
+coordinated response stream. A process
 therefore cannot issue or replay an identity that belongs to another node or to an earlier run of
 the same node.
 
@@ -324,6 +325,12 @@ there is no version negotiation or alternate decoding path. A wire-contract chan
 requires a coordinated cluster stop and start with all nodes on the same version.
 The subscription-interest visibility request includes the advertisement version, and its current
 wire fingerprint fences that request shape during connection setup.
+
+The fingerprint also covers fixed-width 64-bit counts in Models, transaction commands and records,
+and WASM inspection results. These fields use the vocabulary's `CountAsU64` adapter and checked
+native decoding; an unrepresentable count fails decoding. Window processor state has current
+runtime-state kind tag `8`, and its bulk snapshot codec validates the `NVXWIN64` frame signature
+before decoding histogram delayed-removal bucket indices in the same count representation.
 
 Control records use bounded `rkyv` archives. The receiver validates an archive, including its shape
 and nesting depth, before exposing it to an operation handler. Encoded and decoded memory is charged
@@ -476,8 +483,13 @@ operation's domain semantics.
    may close independently. Opening the stream is bounded by the operation's declared setup
    deadline. An idle established stream is valid; the owning protocol sets deadlines for answers it
    is awaiting. The initiator's sender reports when the peer's flow control last accepted its
-   bytes, so that protocol can tell a slow answer from a peer that accepts nothing. Consensus append
-   traffic and [client producer links](#client-producer-links) use this form.
+   bytes, so that protocol can tell a slow answer from a peer that accepts nothing. Receiving is
+   cancel-safe on both ends: a frame is decoded under the pool's memory and CPU admission after it
+   leaves the stream, and a receive its caller abandons, because a timer or command it selects
+   against won, leaves that decoding to the next receive, which finishes the frame before it reads
+   another. No abandoned receive loses a frame or reorders one. Consensus append traffic,
+   [client producer links](#client-producer-links) and
+   [client consumer streams](#client-consumer-streams) use this form.
 5. **Relay delivery.** A management-plane grant reserves receiver capacity before an Arrow body is
    sent, followed by explicit runtime admission and optional downstream record acknowledgements.
 
@@ -567,6 +579,11 @@ the sender waits for an attached record acknowledgement only while the receiver 
 and fails one the receiver reports nothing about for fifteen seconds, as
 [Acknowledgement Registrations](#acknowledgement-registrations) describes. Progress keeps a live
 attempt from being mistaken for a disconnected one; it does not change the delivery outcome.
+For an attached acknowledgement, progress also carries a monotonic sequence and whether all of its
+remaining handoff shares are parked on `REQUIRED WAIT`. Each upstream node parks or reactivates its
+own attached share in sequence order, so a domain drain excludes a parked chain across relay hops.
+The eventual terminal acknowledgement still resolves every share; parking does not acknowledge the
+source or persist an acknowledgement. Admission progress carries no parked state.
 
 ### Acknowledgement Registrations
 
@@ -825,12 +842,51 @@ the active decoded section are resident at once.
 [Resource Versions And Bindings](./resource-versions.md#publication-and-transfer) defines when a
 node fetches a resource archive and how it verifies and records the fetched version.
 
+Backup state capture uses typed drain, capture, inventory, and fetch operations. The leader reads
+each node's admitted work through a management-class drain request and requests a separate
+confirming force-flush round after all nodes appear quiet. The leader sends a management-class capture
+request with its coordination identity and applied cut revision to each live node, then reads each
+node's management-class inventory of staged sections. A receiver waits up to five seconds for its
+state machine to apply that revision, installs its current runtime plan, and rechecks the sending
+leader before it captures. A closed applied-state authority or a catch-up deadline refuses the
+capture; a follower that is still applying the cut does not produce an archive from earlier state.
+A captured section is fetched over a
+snapshot-subquota bulk response: the inventory declares its path, length, content kind and digest,
+and the leader stages and verifies the stream before adding it to the archive. The owner keeps a
+staged section only for the coordinator process that requested it and releases expired stages.
+The fetch stream authenticates that process identity before its handler can consume the stage; a
+partitioned or cancelled fetch leaves any unconsumed stage available until expiry.
+
+Restore state installation uses the snapshot bulk subquota after the stopped-domain schedule is
+published. The leader admits a replicated installation authority carrying its identity and term,
+the restore execution, mutation lease revision and installation generation. Every request carries
+that authority. A receiver waits for its generation to apply and authenticates the sending leader.
+A begin request declares placement, length and digest; chunks are ordered and at most 64 KiB;
+finish verifies the staged file and stages the checkpoint without changing published state.
+Incomplete transfers expire under the node's staging quota.
+
+After all checkpoints are staged, the leader sends each target node a publish request with the
+complete checkpoint and byte counts. The receiver admits the database batch's memory, validates
+that inventory, and atomically replaces the domain's checkpoints with durable synchronization.
+An empty inventory clears unassigned nodes and implements configuration-only restoration. Local
+and remote mutations revalidate the exact authority under the applied-state read guard, held
+through the storage mutation and clearing of runtime handles. Publication of a new authority or
+release of the replicated start gate requires the corresponding write guard, so a delayed
+coordinator cannot mutate after its successor completes installation. The store also retains the
+published generation to reject lower or competing generations and make exact retries idempotent.
+The domain's replicated start gate is released only after all nodes acknowledge publication.
+Staging and publication run on the admitted filesystem worker class. Authority is checked inside
+the storage job after admission, so waiting for a worker cannot preserve an expired installation
+right. Durable synchronization does not run on the async reactor.
+
 A runtime-state placement names exactly the state it addresses: the domain, entity, state kind, and
 concrete branch; for every kind of state except branch-aggregated metrics and Kafka domain offsets,
 the fingerprint of the schemas the state is laid out by; and for WASM processor guest state the
 generation the committed schedule names for that branch. Branch-aggregated metrics and Kafka domain
 offsets depend on no schema, so their placements carry no fingerprint and stay current across every
-schema change of their entity. A checkpoint carries no identity of its own: a synchronization reply,
+schema change of their entity. A backup archive separately records the Kafka ingestor's schema
+fingerprint and checks it against the restore target before installing offsets. A checkpoint carries
+no identity of its own: a synchronization reply,
 a handoff checkpoint, and a forced-recovery preparation each carry it beside the placement that
 names it. A node answers a synchronization request, and acts on a checkpoint announcement or a
 handoff checkpoint, only while the placement is current on that node, so an owner never serves, and
@@ -876,11 +932,29 @@ acknowledgements a guest checkpoint covers only once every replica the committed
 has acknowledged that checkpoint's revision; a replica that is unreachable, lagging, or failing to
 install stops those acknowledgements from being released rather than letting them through, and the
 checkpoint fails after its ten-second deadline. The owner announces a WASM processor's new branch to
-its replicas as soon as the branch appears. A replica that receives a checkpoint of a branch its
-replicated branch lifecycle does not name yet first synchronizes the owner's branch lifecycle, and
-refuses the checkpoint only when that lifecycle does not name the branch either, as for a branch the
-owner has evicted. [WASM State And Recovery](./wasm-state.md#the-checkpoint) defines the checkpoint
-these acknowledgements complete.
+its replicas as soon as the branch appears. Every catch-up round of a replica synchronizes the
+owner's branch lifecycle before it installs any branch checkpoint, and the replica refuses a
+checkpoint of a branch that lifecycle does not name, as for a branch the owner has evicted.
+[WASM State And Recovery](./wasm-state.md#the-checkpoint) defines the checkpoint these
+acknowledgements complete.
+
+A replica catches the branch-keyed entities it replicates up in rounds, one replica task for each
+entity, through two replication-class requests. A state synchronization request names one placement
+and the revision the replica holds of it. The owner answers from the registry that keeps the
+placement's kind of state: with the checkpoint when it is newer, and with nothing otherwise. Only for
+a placement it holds no state for does the owner read its storage. A branch checkpoint listing
+request names the entity's branch lifecycle placement and the cursor the replica's previous listing
+returned. The owner answers with the next changes of its catalog of the entity's branch
+checkpoints, in the order they happened and at most 256 of them: each branch whose checkpoint
+changed, with the state that checkpoint belongs to and its newest revision, and each branch whose
+state went away, followed by the cursor after them and whether more changes follow. The listing
+restarts from the catalog's beginning when the replica has no cursor, when its cursor belongs to
+another catalog, such as one a replaced or restarted owner kept, and when it is older than the
+oldest removal the catalog kept. An owner that holds no branch state of the entity answers that it
+holds none. Both requests are answered only while the answering node is assigned the placement. A
+round synchronizes the lifecycle, reads the catalog's changes, and requests only the checkpoints of
+the branches that changed or were announced, so a round in which no branch changed sends two
+requests however many branches the entity has.
 
 The owner of a placement offers its newest checkpoint to the replicas the committed schedule
 assigns, and repeats the offer every 100 milliseconds to each replica that has not acknowledged
@@ -895,6 +969,10 @@ captured from live state, and the placements it fills from its storage or with a
 reach replicas through their own synchronization. A replica acts on an announcement by waking the
 task that keeps its copy of that placement current, which keeps the announcement until it next
 waits when it is busy; an announcement of a placement the replica holds no state for wakes nothing.
+The announcements of a branch-keyed entity's lifecycle and branch checkpoints wake the entity's one
+replica task, which takes the newest announcement of each at the start of its next round and
+fetches or acknowledges each announced revision then. The task also runs a round every replication
+poll interval, so a checkpoint whose announcement was lost reaches the replica within one interval.
 
 The owner publishes an empty final window checkpoint when it evicts a concrete window branch. A
 replica that installs that revision replaces the evicted branch's rows and sketch panes with the

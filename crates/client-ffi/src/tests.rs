@@ -20,8 +20,7 @@ use nervix_client_core::{
     },
 };
 use nervix_models::{ParseAsType, SchemaField, Timestamp};
-use nervix_primitives::time::Instant;
-use triomphe::Arc;
+use nervix_primitives::{sync::Arc, time::Instant};
 
 use crate::{
     Cancel, CellState, Disposition, Event, EventKind, FailureKind, FieldType, Outcome, Schema,
@@ -36,8 +35,10 @@ use crate::{
     nx_schema_field_count, nx_schema_free, nx_session_connect, nx_session_free,
 };
 
+mod batches;
 mod clock_events;
 mod domain_clock;
+mod endpoints;
 
 const ROWS: i32 = 1;
 const BRANCH_KEY: i32 = 2;

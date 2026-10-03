@@ -20,12 +20,14 @@ use nervix_client_core::{
     Client, CommandOutcome, ConnectOptions, ExistingUserPolicy, Restore, RestoreMode,
     RestoreReport, RestoreScope, RestoreStepOutcome,
 };
-use nervix_models::{DomainName, Statement};
+use nervix_models::{DomainName, RestoreState, Statement};
 use nervix_nspl::client_statement::{ClientStatement, parse_client_statements};
-use nervix_primitives::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use nervix_primitives::sync::{
+    Arc,
+    atomic::{AtomicBool, AtomicU64, Ordering},
+};
 use nervix_recovery::{Discarded as _, Reported as _};
 use serde_json::{Value, json};
-use triomphe::Arc;
 
 use super::{ClientError, backup::CliReportFormat, human_bytes};
 
@@ -72,6 +74,8 @@ pub(super) struct RestoreRequest {
     pub(super) input: String,
     pub(super) existing_users: Option<CliExistingUsers>,
     pub(super) dry_run: bool,
+    pub(super) without_state: bool,
+    pub(super) without_source_offsets: bool,
     pub(super) format: CliReportFormat,
 }
 
@@ -107,10 +111,18 @@ impl RestoreRequest {
         } else {
             RestoreMode::Apply
         };
+        let state = if self.without_state {
+            RestoreState::ConfigurationOnly
+        } else if self.without_source_offsets {
+            RestoreState::WithoutSourceOffsets
+        } else {
+            RestoreState::All
+        };
         Ok(Restore {
             scope,
             source: self.input.clone(),
             mode,
+            state,
         })
     }
 }
@@ -283,6 +295,11 @@ fn report_text(outcome: &CommandOutcome) -> String {
             step.step
         ));
     }
+    for diagnostic in &outcome.diagnostics {
+        if diagnostic.message.starts_with("warning:") {
+            text.push_str(&format!("\n- {}", diagnostic.message));
+        }
+    }
     text
 }
 
@@ -369,6 +386,10 @@ fn report_json(restore: &Restore, outcome: &CommandOutcome, report: &RestoreRepo
         "users": users,
         "domains": domains,
         "steps": steps,
+        "warnings": outcome.diagnostics.iter()
+            .filter(|diagnostic| diagnostic.message.starts_with("warning:"))
+            .map(|diagnostic| diagnostic.message.as_str())
+            .collect::<Vec<_>>(),
     })
 }
 
@@ -393,6 +414,8 @@ mod tests {
             input: "cluster.nvxb".to_string(),
             existing_users: None,
             dry_run: false,
+            without_state: false,
+            without_source_offsets: false,
             format: CliReportFormat::Json,
         }
     }

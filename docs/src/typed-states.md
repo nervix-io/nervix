@@ -125,6 +125,10 @@ fingerprint is accepted for its identity even if its bytes happen to be zero. Sc
 publish the required fingerprint before schema-bound state can be loaded or replicated. Missing
 required identity is an error, not a default digest.
 
+The runtime Kafka offset key remains schema-independent. A backup archive also records the
+ingestor's scheduled fingerprint with those offsets, so restore applies them only to the same
+ingestor contract after publishing its target schedule.
+
 The runtime checks a stored state's schema identity against the current scheduled identity before
 accepting it. WASM guest state additionally uses its generation for the concrete branch. A state
 from another schema or generation cannot become current merely because it has a later revision.
@@ -137,6 +141,23 @@ Nervix keeps one current stored and wire shape. Producers and consumers of a cha
 updated together. A previously stored shape that cannot supply required identity fails to load
 clearly and must be recreated; it is not defaulted into the current state. Tests construct the
 current shape and assert its behavior.
+
+## Archived Counts
+
+Native `usize` and `NonZeroUsize` counts use the vocabulary's `CountAsU64` archive adapter. Every
+count-bearing archived field selects it explicitly, so its stored width is 64 bits independently
+of the archive's pointer width. Zero remains valid for an ordinary count; a nonzero count uses the
+archive's validated `NonZeroU64` representation. Encoding preserves every bit of a supported
+native count. Decoding converts once with `usize::try_from` and returns `ArchivedCountError` if the
+receiving target cannot represent the value. No narrowing cast, clamp, or default supplies a count.
+
+This contract covers relay capacity, transaction positions and operation numbers, queue limits,
+application progress and outcomes, plan and report counts, topology counts, WASM inspection totals
+and omitted-entry counts, and histogram delayed-removal bucket indices. The owning stored
+namespaces and frame signatures identify the current count-bearing shape before decoding, and the
+interconnect's wire fingerprint fences it between nodes. Unrecognized stored state fails clearly
+and must be recreated. Complete equality properties exercise the production representations at
+their range boundaries; see [Property Testing And Fuzzing](./property-testing-and-fuzzing.md).
 
 ## Atomic States On The Data Plane
 
@@ -332,6 +353,17 @@ not choose the disposition.
 Error-route branch validation carries the node, source route, error relay, and both branch
 declarations as typed data. Direct emitter `VALUES` validation identifies a sensitive external
 target by name and requires explicit leakage; neither error needs the source payload value.
+
+## Restore Installation Authority
+
+A restored domain has a replicated `Pending` installation from creation and an `Installing`
+authority once its state generation is admitted. Neither state permits `START`. Completion of the
+exact current generation removes the installation; terminal command failure does not. Authority
+carries leader identity and term, execution reference, mutation lease revision and generation.
+Checkpoint revision remains guest history and cannot grant installation authority. Validation at
+the applied-state boundary holds its read guard across the storage mutation and handle clearing.
+The state store validates the complete staged inventory before a single durable batch publishes
+it, and retains the successful generation for retry and stale-attempt rejection.
 
 ## Qualification Evidence
 

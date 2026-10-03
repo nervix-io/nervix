@@ -21,6 +21,13 @@ pub(crate) enum StateReplicationError {
         target: ClusterNodeName,
         placement: RuntimeStatePlacement,
     },
+    #[error(
+        "node '{target}' answered a branch checkpoint listing of {placement} that does not decode"
+    )]
+    UndecodableListing {
+        target: ClusterNodeName,
+        placement: RuntimeStatePlacement,
+    },
     #[error("node '{target}' could not synchronize {placement}: {failure}")]
     RemoteFailure {
         target: ClusterNodeName,

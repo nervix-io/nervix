@@ -1072,11 +1072,10 @@ impl Runtime {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc as StdArc;
-
     use nervix_models::{
         CreateSchema, MessageErrorPolicy, ParseAsType, ProcessorOutput, SchemaField, Timestamp,
     };
+    use nervix_primitives::sync::StdArc;
     use nonzero_ext::nonzero;
     use ordered_float::OrderedFloat;
 

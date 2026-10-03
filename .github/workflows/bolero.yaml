@@ -55,7 +55,7 @@ jobs:
         with:
           version: "25.12.19"
 
-      - name: Install LLVM 23
+      - name: Install native build tools
         run: |
           wget https://apt.llvm.org/llvm.sh
           chmod +x llvm.sh
@@ -108,8 +108,10 @@ jobs:
     name: bolero-fuzz
     if: github.event_name == 'pull_request' && contains(github.event.pull_request.labels.*.name, 'fuzz')
     runs-on: blacksmith-16vcpu-ubuntu-2404
-    # Include cold ordinary and sanitizer builds before all bounded target campaigns.
-    timeout-minutes: 120
+    # Cold sanitizer builds precede the full per-target campaign and qualification.
+    timeout-minutes: 180
+    env:
+      CARGO_BUILD_JOBS: "1"
     permissions:
       contents: read
       id-token: write
@@ -192,6 +194,9 @@ jobs:
 
       - name: Install pinned cargo-bolero
         run: just install-cargo-bolero
+
+      - name: Prepare the server sanitizer binary
+        run: just prepare-archive-counts-fuzz
 
       - name: Run every sanitizer libFuzzer target and qualify failures
         run: |

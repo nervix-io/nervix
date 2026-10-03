@@ -29,7 +29,11 @@ process. Stopping a process is an operator or supervisor action delivered as a s
 
 Both signals are registered before the node starts any other work, and they stay registered until
 the process exits. A node that cannot register them refuses to start, reporting
-`failed to register termination signal handlers` and exiting with status `1`. A signal that arrives
+`failed to register termination signal handlers` and exiting with status `1`. A diagnostic node,
+the server built in the `deloxide` mode, then installs its deadlock detector before it starts a
+runtime worker, so the detector's threads exist only once neither signal can end the process by its
+default action; a diagnostic node whose deadlock diagnostics cannot start refuses to start,
+reporting `failed to start the diagnostic node's deadlock diagnostics` and exiting with status `1`. A signal that arrives
 while the node is still starting is held rather than lost: it takes effect once startup completes,
 while its deadline runs from the moment the signal arrived.
 
@@ -112,6 +116,9 @@ The deadline supervisor, not those bounds, is what guarantees the process ends.
 | Shutdown deadline expired | `1` |
 | A public listener, cluster shutdown, or storage release reported an error | `1` |
 | Termination signal handlers could not be registered at startup | `1` |
+| A diagnostic node's deadlock diagnostics could not start | `1` |
+| A diagnostic node reported an active deadlock among its tracked locks and recorded it | `3` |
+| A diagnostic node reported a deadlock it could not record, lost findings, or outlived the budget for recording one | `4` |
 | A command-line option or its environment variable holds a value the node cannot read, such as duration text that names no duration | `2` |
 | Repeated `SIGINT` | `130` |
 | Repeated `SIGTERM` | `143` |
@@ -122,6 +129,13 @@ Every `SIGINT` or `SIGTERM` after the first abandons graceful shutdown. The proc
 and exits immediately with the status a shell reports for that signal, whichever signal it was that
 started the shutdown. No destructor, exit handler, or remaining phase runs. Whichever comes first,
 the repeated signal or the deadline, decides how the process exits.
+
+A diagnostic node that reports an active deadlock ends the same way, immediately, whatever phase it
+is in: its blocked threads hold work it can no longer finish. It describes the cycle on standard
+error, records it as evidence, and exits with `3`, or with `4` when the recording failed, without
+running a destructor, an exit handler or a remaining phase, as
+[Diagnostic deadlock detection](./data-plane-concurrency.md#diagnostic-deadlock-detection)
+describes. Its durable state recovers as after any forced exit.
 
 ## Terminating Incarnation And Placement Eligibility
 
@@ -227,7 +241,11 @@ whose acknowledgement is still unresolved as of unknown outcome with cause `inte
 
 A raw quiesce buffer is not part of the drain. Payloads that a `BUFFER` mode retained during an
 earlier hold are outside runtime graph work: a shutdown does not replay them, and they are discarded
-and counted as dropped when the ingestor stops. Only work already admitted into the graph is
+and counted as dropped when the ingestor stops. A retained payload whose unfolding was still waiting
+for the extension workers stays in the buffer, so the stop ends that wait at once and discards it
+with the rest. A live payload a source handed over without an acknowledgement, such as a paced
+poll, whose unfolding was still waiting for the extension workers is dropped when its ingestor
+stops; the stop ends that wait at once as well. Only work already admitted into the graph is
 drained.
 
 ## Draining Admitted Work
@@ -273,6 +291,12 @@ Draining ends with a confirmation pass. After a flush generation observes nothin
 more generation must also observe nothing, so work that an upstream node publishes after a
 downstream node finished its own flush is not left behind. A domain is quiescent only when that
 confirming generation completes with nothing visible.
+Quiesced backup applies the same admitted-work view to its selected domain across all live nodes.
+It requests a separate cluster-wide confirming generation before capturing checkpoints. Parked
+`REQUIRED WAIT` messages do not hold that cut open, and a failed drain resumes the domain.
+When a parked message has crossed nodes, remote ACK progress carries its parked state back through
+the source's acknowledgement chain. The drain excludes that chain while the message is parked;
+resuming it reactivates the chain, and only a terminal ACK completes the source attempt.
 
 Each domain therefore advances independently through three states:
 
@@ -632,6 +656,7 @@ strongly consistent, selected runtime state is checkpointed, and the hot path is
 | Durable handoff and forced-recovery preparations | Preserved, then reconciled or activated | Preserved, then reconciled or activated |
 | Runtime-state checkpoints: Kafka domain offsets, deduplicator and window state, materialized relay records | Flushed again as runtime tasks stop | Reopen at the last completed periodic checkpoint |
 | WASM guest-state checkpoints | Every checkpoint that released an acknowledgement is already synchronized | Reopen at the newest checkpoint on the node's storage, which covers every acknowledged input |
+| Restored backup state: WASM guest saves, Kafka domain offsets and branch lifecycle | A restore installs the archive's verified checkpoints into the stopped domain before its next `START` | Reopens from the installed checkpoints on each assigned owner and replica; the next `START` continues the saved guest generation, source positions and branch incarnations |
 | External source offsets and sink commits | Complete when the drain succeeds | Only the external connector's own delivery and transaction guarantee applies |
 | Relay batches, queued payload attempts, suspended work, ACK guards, ACK tokens, ACK maps, handoff payloads, gate leases, clock progress | The drain tries to resolve them before its deadline | Volatile; lost |
 | Client producers, their credit and queued batches, producer links | Ended as `shutting down` after the drain, or detached with their sessions | Volatile; lost with the process. Every producer another node forwarded here ends there as `owner lost`: its batches that node never cleared for admission are refused as `producer ended`, and only the cleared ones are of unknown outcome. The node's own sessions end, so their clients report every batch they sent without an outcome as of unknown outcome, and the nodes executing the ingestors detach those producers and finish what they admitted |
@@ -720,6 +745,14 @@ as the new layout, served, replicated, handed over, or selected by a forced reco
 committed schedule of a running domain removes it. Until the node has applied a schedule that names
 an entity,
 it has no fingerprint for that entity's schema-bound state and does not place that state at all.
+
+Recovery also validates the current representation before decoding its counts. Registry Model
+frames and the dedicated consensus database identify their fixed-width 64-bit count shape;
+unrecognized stored state fails with an instruction to recreate it. Window checkpoints use the
+current runtime-state kind and `NVXWIN64` frame signature. Native decoding of an archived count is
+checked and cannot truncate it to fit the target. See
+[Archived Counts](./typed-states.md#archived-counts) and
+[Storage Layout And Compatibility](./consensus-storage-and-replication.md#storage-layout-and-compatibility).
 
 ### Interrupted Snapshot Installation
 

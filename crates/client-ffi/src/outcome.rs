@@ -8,7 +8,7 @@
 use arch_into::ArchInto as _;
 use meticulous::OptionExt as _;
 use nervix_client_core::{CommandDisposition, CommandOutcome, RestoreMode};
-use triomphe::Arc;
+use nervix_primitives::sync::Arc;
 
 use crate::{
     abi,

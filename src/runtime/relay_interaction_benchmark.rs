@@ -63,8 +63,8 @@ pub struct RelayInteractionBenchmark {
     sources: Vec<RelayBroadcast<RelayRecordBatch>>,
     shutdown_tx: watch::Sender<bool>,
     commands: mpsc::Sender<BenchmarkCommand>,
-    force_flush: triomphe::Arc<DomainForceFlush>,
-    quiesce_counters: triomphe::Arc<NodeQuiesceCounters>,
+    force_flush: nervix_primitives::sync::Arc<DomainForceFlush>,
+    quiesce_counters: nervix_primitives::sync::Arc<NodeQuiesceCounters>,
     batch: RelayRecordBatch,
 }
 
@@ -138,7 +138,7 @@ impl RelayInteractionBenchmark {
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
         let (commands, command_rx) = mpsc::channel(1);
         let force_flush = DomainForceFlush::new();
-        let quiesce_counters = triomphe::Arc::new(NodeQuiesceCounters::default());
+        let quiesce_counters = nervix_primitives::sync::Arc::new(NodeQuiesceCounters::default());
         let participant = DomainForceFlush::subscribe(&force_flush, Some(quiesce_counters.clone()));
         let interaction = RelayInteraction::with_commands(
             inputs,
@@ -234,11 +234,11 @@ impl RelayInteractionBenchmark {
     }
 }
 
-fn benchmark_schema() -> triomphe::Arc<CompiledSchema> {
-    static SCHEMA: OnceLock<triomphe::Arc<CompiledSchema>> = OnceLock::new();
+fn benchmark_schema() -> nervix_primitives::sync::Arc<CompiledSchema> {
+    static SCHEMA: OnceLock<nervix_primitives::sync::Arc<CompiledSchema>> = OnceLock::new();
     SCHEMA
         .get_or_init(|| {
-            triomphe::Arc::new(compile_schema(&CreateSchema {
+            nervix_primitives::sync::Arc::new(compile_schema(&CreateSchema {
                 name: SchemaName::parse("relay_interaction_benchmark").assured(
                     "the name is built here from fixed text that satisfies the identifier grammar",
                 ),
@@ -335,7 +335,7 @@ fn delivery_batch(rows: usize, spacing: Duration, delivered_at: Timestamp) -> Re
             .finish_row()
             .assured("the I64 value is built here against the schema declared beside it");
     }
-    let batch = triomphe::Arc::new(
+    let batch = nervix_primitives::sync::Arc::new(
         builder
             .finish()
             .assured("the I64 values are built here against the schema declared beside them"),

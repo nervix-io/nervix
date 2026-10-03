@@ -1,7 +1,6 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
     hash::Hash,
-    sync::Arc,
 };
 
 use ahash::{HashMap, HashMapExt, HashSet, HashSetExt};
@@ -9,6 +8,7 @@ use arrow_array::{BooleanArray, Float64Array, Int64Array, StringArray};
 use arrow_schema::{DataType, Field, Schema, TimeUnit};
 use error_stack::Report;
 use meticulous::{OptionExt as _, ResultExt as _};
+use nervix_primitives::sync::StdArc;
 
 use crate::{
     batch::TypedArray,
@@ -82,7 +82,7 @@ enum BoundFieldRef {
 #[derive(Debug, Clone)]
 pub struct CompileBinding {
     pub namespace: CompileNamespace,
-    pub schema: Arc<Schema>,
+    pub schema: StdArc<Schema>,
     pub sensitivity: SchemaSensitivity,
     pub readable: bool,
     pub writable: bool,
@@ -133,7 +133,7 @@ impl SchemaSensitivity {
 }
 
 impl CompileBinding {
-    pub fn writable(namespace: impl Into<String>, schema: Arc<Schema>) -> Self {
+    pub fn writable(namespace: impl Into<String>, schema: StdArc<Schema>) -> Self {
         Self {
             namespace: CompileNamespace::User(namespace.into()),
             schema,
@@ -143,7 +143,7 @@ impl CompileBinding {
         }
     }
 
-    pub fn writeonly(namespace: impl Into<String>, schema: Arc<Schema>) -> Self {
+    pub fn writeonly(namespace: impl Into<String>, schema: StdArc<Schema>) -> Self {
         Self {
             namespace: CompileNamespace::User(namespace.into()),
             schema,
@@ -153,7 +153,7 @@ impl CompileBinding {
         }
     }
 
-    pub fn readonly(namespace: impl Into<String>, schema: Arc<Schema>) -> Self {
+    pub fn readonly(namespace: impl Into<String>, schema: StdArc<Schema>) -> Self {
         Self {
             namespace: CompileNamespace::User(namespace.into()),
             schema,
@@ -163,7 +163,7 @@ impl CompileBinding {
         }
     }
 
-    pub fn internal_readonly(namespace: InternalFieldNamespace, schema: Arc<Schema>) -> Self {
+    pub fn internal_readonly(namespace: InternalFieldNamespace, schema: StdArc<Schema>) -> Self {
         Self {
             namespace: CompileNamespace::Internal(namespace),
             schema,
@@ -197,7 +197,7 @@ struct Compiler {
     allow_header_reads: bool,
     allow_header_writes: bool,
     udf_signatures: UdfSignatures,
-    injector: Option<triomphe::Arc<Box<dyn crate::runtime::FunctionInjector>>>,
+    injector: Option<nervix_primitives::sync::Arc<Box<dyn crate::runtime::FunctionInjector>>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -342,7 +342,7 @@ pub struct CompileOptions {
     pub allow_header_reads: bool,
     pub allow_header_writes: bool,
     pub udf_signatures: UdfSignatures,
-    pub injector: Option<triomphe::Arc<Box<dyn crate::runtime::FunctionInjector>>>,
+    pub injector: Option<nervix_primitives::sync::Arc<Box<dyn crate::runtime::FunctionInjector>>>,
 }
 
 impl Default for CompileOptions {
@@ -368,7 +368,7 @@ pub struct PredicateCompileOptions {
     pub optimize_temp_registers: bool,
     pub allow_header_reads: bool,
     pub udf_signatures: UdfSignatures,
-    pub injector: Option<triomphe::Arc<Box<dyn crate::runtime::FunctionInjector>>>,
+    pub injector: Option<nervix_primitives::sync::Arc<Box<dyn crate::runtime::FunctionInjector>>>,
 }
 
 impl Default for PredicateCompileOptions {
@@ -460,7 +460,7 @@ impl Compiler {
     }
 
     fn header_values_type() -> DataType {
-        DataType::List(Arc::new(Field::new("item", DataType::Utf8, false)))
+        DataType::List(StdArc::new(Field::new("item", DataType::Utf8, false)))
     }
 
     fn injected_header_call_type(
@@ -554,7 +554,7 @@ impl Compiler {
                         span: args[0].span,
                     }));
                 }
-                Ok(DataType::List(Arc::new(Field::new(
+                Ok(DataType::List(StdArc::new(Field::new(
                     "item", first_type, false,
                 ))))
             }
@@ -693,7 +693,9 @@ impl Compiler {
             )
     }
 
-    fn new(bindings: &[CompileBinding]) -> error_stack::Result<(Self, Arc<Schema>), CompileError> {
+    fn new(
+        bindings: &[CompileBinding],
+    ) -> error_stack::Result<(Self, StdArc<Schema>), CompileError> {
         let mut layouts = RegisterLayouts::default();
         let mut inputs = Vec::new();
         let mut columns = HashMap::new();
@@ -819,7 +821,7 @@ impl Compiler {
                 udf_signatures: UdfSignatures::default(),
                 injector: None,
             },
-            Arc::new(Schema::new(input_fields)),
+            StdArc::new(Schema::new(input_fields)),
         ))
     }
 
@@ -3392,14 +3394,14 @@ fn fold_bitwise(operation: BitwiseOperation, args: &[FoldedValue]) -> Option<Fol
 
 pub fn compile_program(
     program: &SpannedNode<Program>,
-    schema: Arc<Schema>,
+    schema: StdArc<Schema>,
 ) -> error_stack::Result<CompiledProgram, CompileError> {
     compile_program_for_relay(program, schema, "input")
 }
 
 pub fn compile_program_for_relay(
     program: &SpannedNode<Program>,
-    schema: Arc<Schema>,
+    schema: StdArc<Schema>,
     relay_name: &str,
 ) -> error_stack::Result<CompiledProgram, CompileError> {
     compile_program_for_bindings(
@@ -3411,7 +3413,7 @@ pub fn compile_program_for_relay(
 
 pub fn compile_program_for_relays<'a>(
     program: &SpannedNode<Program>,
-    schema: Arc<Schema>,
+    schema: StdArc<Schema>,
     relay_names: impl IntoIterator<Item = &'a str>,
 ) -> error_stack::Result<CompiledProgram, CompileError> {
     compile_program_with_options_for_relays(program, schema, relay_names, CompileOptions::default())
@@ -3419,7 +3421,7 @@ pub fn compile_program_for_relays<'a>(
 
 pub fn compile_program_with_options(
     program: &SpannedNode<Program>,
-    schema: Arc<Schema>,
+    schema: StdArc<Schema>,
     options: CompileOptions,
 ) -> error_stack::Result<CompiledProgram, CompileError> {
     compile_program_with_options_for_relay(program, schema, "input", options)
@@ -3427,7 +3429,7 @@ pub fn compile_program_with_options(
 
 pub fn compile_program_with_options_for_relay(
     program: &SpannedNode<Program>,
-    schema: Arc<Schema>,
+    schema: StdArc<Schema>,
     relay_name: &str,
     options: CompileOptions,
 ) -> error_stack::Result<CompiledProgram, CompileError> {
@@ -3441,7 +3443,7 @@ pub fn compile_program_with_options_for_relay(
 
 pub fn compile_program_with_options_for_relays<'a>(
     program: &SpannedNode<Program>,
-    schema: Arc<Schema>,
+    schema: StdArc<Schema>,
     relay_names: impl IntoIterator<Item = &'a str>,
     options: CompileOptions,
 ) -> error_stack::Result<CompiledProgram, CompileError> {
@@ -3454,7 +3456,7 @@ pub fn compile_program_with_options_for_relays<'a>(
 
 pub fn compile_program_for_bindings(
     program: &SpannedNode<Program>,
-    output_schema: Arc<Schema>,
+    output_schema: StdArc<Schema>,
     bindings: impl IntoIterator<Item = CompileBinding>,
 ) -> error_stack::Result<CompiledProgram, CompileError> {
     compile_program_with_options_for_bindings_with_sensitivity(
@@ -3468,7 +3470,7 @@ pub fn compile_program_for_bindings(
 
 pub fn compile_program_for_bindings_with_sensitivity(
     program: &SpannedNode<Program>,
-    output_schema: Arc<Schema>,
+    output_schema: StdArc<Schema>,
     output_sensitivity: SchemaSensitivity,
     bindings: impl IntoIterator<Item = CompileBinding>,
 ) -> error_stack::Result<CompiledProgram, CompileError> {
@@ -3553,7 +3555,9 @@ pub fn compile_predicate_with_options_for_bindings(
             injector: options.injector,
         },
     )?;
-    Ok(CompiledPredicate::new(triomphe::Arc::new(compiled)))
+    Ok(CompiledPredicate::new(nervix_primitives::sync::Arc::new(
+        compiled,
+    )))
 }
 
 /// One field a program's `SET` list writes, as inferred without compiling the program: the field
@@ -3623,7 +3627,7 @@ pub fn infer_set_expr_types_for_bindings_with_udfs(
 
 pub fn compile_program_with_options_for_bindings(
     program: &SpannedNode<Program>,
-    output_schema: Arc<Schema>,
+    output_schema: StdArc<Schema>,
     bindings: impl IntoIterator<Item = CompileBinding>,
     options: CompileOptions,
 ) -> error_stack::Result<CompiledProgram, CompileError> {
@@ -3638,7 +3642,7 @@ pub fn compile_program_with_options_for_bindings(
 
 pub fn compile_program_with_options_for_bindings_with_sensitivity(
     program: &SpannedNode<Program>,
-    output_schema: Arc<Schema>,
+    output_schema: StdArc<Schema>,
     output_sensitivity: SchemaSensitivity,
     bindings: impl IntoIterator<Item = CompileBinding>,
     options: CompileOptions,
@@ -4303,9 +4307,8 @@ impl FreeTempSlots {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
-
     use arrow_schema::{DataType, Field, Schema};
+    use nervix_primitives::sync::StdArc;
     use rstest::{fixture, rstest};
 
     use super::*;
@@ -4336,8 +4339,8 @@ mod tests {
         arm_count
     }
 
-    fn schema(fields: Vec<Field>) -> Arc<Schema> {
-        Arc::new(Schema::new(fields))
+    fn schema(fields: Vec<Field>) -> StdArc<Schema> {
+        StdArc::new(Schema::new(fields))
     }
 
     #[test]
@@ -4482,11 +4485,11 @@ mod tests {
     }
 
     #[fixture]
-    fn sensitive_string_input_schema() -> Arc<Schema> {
+    fn sensitive_string_input_schema() -> StdArc<Schema> {
         schema(vec![Field::new("secret", DataType::Utf8, true)])
     }
 
-    fn with_output_fields(input_schema: &Arc<Schema>, fields: Vec<Field>) -> Arc<Schema> {
+    fn with_output_fields(input_schema: &StdArc<Schema>, fields: Vec<Field>) -> StdArc<Schema> {
         let mut output_fields = input_schema
             .fields()
             .iter()
@@ -4498,8 +4501,8 @@ mod tests {
 
     fn compile_program_with_output(
         program: &SpannedNode<Program>,
-        input_schema: Arc<Schema>,
-        output_schema: Arc<Schema>,
+        input_schema: StdArc<Schema>,
+        output_schema: StdArc<Schema>,
     ) -> error_stack::Result<CompiledProgram, CompileError> {
         compile_program_with_sensitive_output(
             program,
@@ -4512,9 +4515,9 @@ mod tests {
 
     fn compile_program_with_sensitive_output(
         program: &SpannedNode<Program>,
-        input_schema: Arc<Schema>,
+        input_schema: StdArc<Schema>,
         input_sensitivity: SchemaSensitivity,
-        output_schema: Arc<Schema>,
+        output_schema: StdArc<Schema>,
         output_sensitivity: SchemaSensitivity,
     ) -> error_stack::Result<CompiledProgram, CompileError> {
         compile_program_for_bindings_with_sensitivity(
@@ -4527,7 +4530,7 @@ mod tests {
 
     fn compile_program_with_output_fields(
         program: &SpannedNode<Program>,
-        input_schema: Arc<Schema>,
+        input_schema: StdArc<Schema>,
         fields: Vec<Field>,
     ) -> error_stack::Result<CompiledProgram, CompileError> {
         let output_schema = with_output_fields(&input_schema, fields);
@@ -4861,12 +4864,12 @@ mod tests {
             },
             span: (0..0).into(),
         };
-        let input_schema = Arc::new(Schema::new(vec![Field::new("id", DataType::Utf8, true)]));
-        let output_schema = Arc::new(Schema::new(vec![
+        let input_schema = StdArc::new(Schema::new(vec![Field::new("id", DataType::Utf8, true)]));
+        let output_schema = StdArc::new(Schema::new(vec![
             Field::new("id", DataType::Utf8, true),
             Field::new("enriched", DataType::Utf8, true),
         ]));
-        let lookup_schema = Arc::new(Schema::new(vec![Field::new(
+        let lookup_schema = StdArc::new(Schema::new(vec![Field::new(
             "value_0",
             DataType::Utf8,
             true,
@@ -4898,7 +4901,7 @@ mod tests {
         let parsed = parse_program("SET headers = read_headers(lower(input.name))")
             .expect("program must parse");
         let input_schema = schema(vec![Field::new("name", DataType::Utf8, false)]);
-        let headers_type = DataType::List(Arc::new(Field::new("item", DataType::Utf8, false)));
+        let headers_type = DataType::List(StdArc::new(Field::new("item", DataType::Utf8, false)));
         let output_schema = with_output_fields(
             &input_schema,
             vec![Field::new("headers", headers_type.clone(), false)],
@@ -4959,7 +4962,7 @@ mod tests {
             schema,
             [CompileBinding::writable(
                 "input",
-                Arc::new(Schema::new(vec![Field::new(
+                StdArc::new(Schema::new(vec![Field::new(
                     "value",
                     DataType::Utf8,
                     false,
@@ -5022,12 +5025,12 @@ mod tests {
     #[test]
     fn rejects_set_target_missing_from_declared_output_schema() {
         let program = parse_program("SET extra = input.value").expect("must parse");
-        let input_schema = Arc::new(Schema::new(vec![Field::new(
+        let input_schema = StdArc::new(Schema::new(vec![Field::new(
             "value",
             DataType::Int64,
             true,
         )]));
-        let output_schema = Arc::new(Schema::new(vec![Field::new(
+        let output_schema = StdArc::new(Schema::new(vec![Field::new(
             "value",
             DataType::Int64,
             true,
@@ -5046,11 +5049,11 @@ mod tests {
     #[test]
     fn allows_declared_target_only_field() {
         let program = parse_program("SET total = input.value").expect("must parse");
-        let input_schema = Arc::new(Schema::new(vec![
+        let input_schema = StdArc::new(Schema::new(vec![
             Field::new("value", DataType::Int64, true),
             Field::new("unused_input", DataType::Utf8, true),
         ]));
-        let output_schema = Arc::new(Schema::new(vec![Field::new(
+        let output_schema = StdArc::new(Schema::new(vec![Field::new(
             "total",
             DataType::Int64,
             true,
@@ -5109,7 +5112,7 @@ mod tests {
         SensitivityExpectation::Accepted
     )]
     fn validates_assignment_sensitivity_policy(
-        sensitive_string_input_schema: Arc<Schema>,
+        sensitive_string_input_schema: StdArc<Schema>,
         #[case] source: &str,
         #[case] output_field: &str,
         #[case] output_sensitive: bool,
@@ -5750,7 +5753,7 @@ mod tests {
     #[test]
     fn rejects_unsupported_cast_source_type() {
         let program = parse_program("SET created = input.created AS INT64").expect("must parse");
-        let schema = Arc::new(Schema::new(vec![Field::new(
+        let schema = StdArc::new(Schema::new(vec![Field::new(
             "created",
             DataType::Date32,
             true,

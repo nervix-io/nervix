@@ -2136,6 +2136,7 @@ fn checkpoint_branch_instance_lru_snapshot<V>(
             identifier: ModelName::from(&template.source),
         }
     })?;
+    let _publication = runtime.backup_publication(domain);
     let payload = encode_branch_lru_snapshot(&instances.snapshot_entries())
         .map_err(|error| OwnershipHandoffError::checkpoint(error.to_string()))?;
     let snapshot = PersistedRuntimeStateEntry {
@@ -2169,6 +2170,7 @@ pub(super) fn persist_branch_instance_lru_snapshot<V>(
     }
     let placement = branch_lru_placement(runtime, domain, template)
         .change_context(BranchLruSnapshotError::Unplaced)?;
+    let _publication = runtime.backup_publication(domain);
     let payload = encode_branch_lru_snapshot(&instances.snapshot_entries())?;
     runtime
         .persist_branch_lru_snapshot(
@@ -2182,6 +2184,14 @@ pub(super) fn persist_branch_instance_lru_snapshot<V>(
 
 /// Offer the branch lifecycle of `instances` to the node's replicas at once, without writing it to
 /// storage: the periodic lifecycle snapshot persists it.
+#[cfg_attr(
+    nervix_lint,
+    nervix::context(
+        lifecycle,
+        reason = "a branch that appears offers the entity's lifecycle to its replicas once, as \
+                  one branch lifetime begins"
+    )
+)]
 pub(super) fn publish_branch_instance_lru_snapshot<V>(
     runtime: &Runtime,
     domain: &DomainName,
@@ -2190,6 +2200,7 @@ pub(super) fn publish_branch_instance_lru_snapshot<V>(
 ) -> error_stack::Result<(), BranchLruSnapshotError> {
     let placement = branch_lru_placement(runtime, domain, template)
         .change_context(BranchLruSnapshotError::Unplaced)?;
+    let _publication = runtime.backup_publication(domain);
     let payload = encode_branch_lru_snapshot(&instances.snapshot_entries())?;
     let snapshot = PersistedRuntimeStateEntry {
         lsm: instances.version(),
@@ -2285,8 +2296,7 @@ pub(super) async fn flush_branch_junction(
 mod tests {
     use nervix_interconnect::EntityGatePurpose;
     use nervix_models::{IngestorName, ModelKind, ModelName, NodeRef, ParseAsType, RelayName};
-    use nervix_primitives::time::timeout;
-    use triomphe::Arc;
+    use nervix_primitives::{sync::Arc, time::timeout};
 
     use super::*;
     use crate::{

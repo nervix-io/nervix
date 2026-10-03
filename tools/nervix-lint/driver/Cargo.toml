@@ -12,4 +12,3 @@ meticulous.workspace = true
 nervix-lint-report = { path = "../report" }
 nervix-primitives.workspace = true
 serde_json.workspace = true
-triomphe.workspace = true

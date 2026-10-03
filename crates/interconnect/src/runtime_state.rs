@@ -3,7 +3,8 @@
 //! Layer: engines and infrastructure.
 //!
 //! - **Owns.** The runtime state kinds and their storage-key tags, the placement and snapshot
-//!   envelopes, and the synchronization, acknowledgement and checkpoint messages built from them.
+//!   envelopes, the synchronization, acknowledgement and checkpoint messages built from them, and
+//!   the listing through which a replica learns which branch checkpoints of an entity changed.
 //! - **Depends on.** The vocabulary a placement names and the typed request contract.
 //! - **Must not know.** How a runtime encodes, stores, fences or restores the state it names.
 
@@ -55,7 +56,7 @@ declare_runtime_state_kinds! {
     KafkaOffset = 3,
     MaterializedRelay = 4,
     WasmProcessor = 5,
-    WindowProcessor = 6,
+    WindowProcessor = 8,
     BranchLru = 7,
 }
 
@@ -174,6 +175,74 @@ pub struct OwnershipHandoffCheckpoint {
     pub placement: StatePlacementEnvelope,
     pub snapshot: StateSnapshotEnvelope,
 }
+/// Where a replica stands in the catalog of branch checkpoints an owner keeps for one branch-keyed
+/// entity: the catalog it read, and how many of that catalog's changes it has learned.
+#[derive(Debug, Clone, Copy, Archive, Serialize, Deserialize, PartialEq, Eq)]
+pub struct BranchCheckpointCursor {
+    /// Chosen when the owner created the catalog, so a cursor of another catalog is never taken
+    /// for one of its own.
+    pub epoch: u64,
+    /// How many of the catalog's changes the replica has learned.
+    pub sequence: u64,
+}
+
+/// A replica's request for what changed in the owner's catalog of one entity's branch checkpoints
+/// after `after`, or for the catalog from its beginning when it has no cursor yet.
+#[derive(Debug, Clone, Archive, Serialize, Deserialize, PartialEq)]
+pub struct BranchCheckpointListingRequest {
+    /// The placement of the entity's branch lifecycle, which names the entity and the schemas its
+    /// branch states are laid out by.
+    pub lifecycle: StatePlacementEnvelope,
+    pub after: Option<BranchCheckpointCursor>,
+}
+
+#[derive(Debug, Clone, Archive, Serialize, Deserialize, PartialEq)]
+pub struct BranchCheckpointListingResponse {
+    pub result: Result<BranchCheckpointListing, RemoteOperationFailure>,
+}
+
+/// What an owner answers a listing request with.
+#[derive(Debug, Clone, Archive, Serialize, Deserialize, PartialEq)]
+pub enum BranchCheckpointListing {
+    /// The owner holds no branch state of the entity.
+    Absent,
+    /// The replica's cursor could not be served, so it forgets what it knew of the catalog and
+    /// learns it from its beginning, starting with this page.
+    Restarted(BranchCheckpointPage),
+    /// The next changes after the replica's cursor.
+    Continued(BranchCheckpointPage),
+}
+
+/// Changes of one catalog in the order they happened, up to a bounded number of them.
+#[derive(Debug, Clone, Archive, Serialize, Deserialize, PartialEq)]
+pub struct BranchCheckpointPage {
+    /// Where the replica stands once it applied this page.
+    pub cursor: BranchCheckpointCursor,
+    /// The branches whose state went away.
+    pub removed: Vec<Option<Vec<RemoteRuntimeField>>>,
+    /// The branch checkpoints that changed, each at its newest revision. A branch whose state went
+    /// away and was registered again appears in both lists, and its checkpoint is the newer fact.
+    pub revised: Vec<BranchCheckpointRevision>,
+    /// Whether further changes follow the cursor.
+    pub more: bool,
+}
+
+/// The newest checkpoint revision of one branch state.
+#[derive(Debug, Clone, Archive, Serialize, Deserialize, PartialEq)]
+pub struct BranchCheckpointRevision {
+    pub branch_key: Option<Vec<RemoteRuntimeField>>,
+    pub state: RuntimeState,
+    pub lsm: u64,
+}
+
+impl InterconnectRequest for BranchCheckpointListingRequest {
+    type Response = BranchCheckpointListingResponse;
+
+    const NAME: &'static str = "branch_checkpoint_listing";
+    const CLASS: PoolClass = PoolClass::Replication;
+    const TIMEOUT: Duration = Duration::from_secs(5);
+}
+
 impl InterconnectRequest for StateSyncRequest {
     type Response = StateSyncResponse;
 

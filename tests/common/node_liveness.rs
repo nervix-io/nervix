@@ -13,10 +13,9 @@ use std::{fmt, future::Future, time::Duration};
 use error_stack::Report;
 use nervix_client_wire::{CommandDisposition, Diagnostic};
 use nervix_models::ClusterNodeName;
-use nervix_primitives::{task::JoinHandle, time::timeout};
+use nervix_primitives::{sync::Arc, task::JoinHandle, time::timeout};
 use nervix_server::application::AppError;
 use thiserror::Error;
-use triomphe::Arc;
 
 use super::{
     phase_deadline::PhaseDeadline,

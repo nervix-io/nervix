@@ -5,13 +5,15 @@
 //! - **Depends on.** Typed domain identities, prepared endpoint metadata, and publication primitives.
 //! - **Must not know.** Decoding, request transport, graph planning, or source task scheduling.
 
-use std::{collections::BTreeMap, sync::Arc as StdArc};
+use std::collections::BTreeMap;
 
 use ahash::{HashMap, HashMapExt as _};
 use meticulous::OptionExt as _;
 use nervix_connector_websockets::CompiledSignalingProtocol;
-use nervix_primitives::publication::{ArcSwap, ArcSwapOption, Guard};
-use triomphe::Arc;
+use nervix_primitives::{
+    publication::{ArcSwap, ArcSwapOption, Guard},
+    sync::{Arc, StdArc},
+};
 
 use super::{
     DomainName, DomainNodeRef, EndpointType, HttpRouteKey, RoutedEndpoint,

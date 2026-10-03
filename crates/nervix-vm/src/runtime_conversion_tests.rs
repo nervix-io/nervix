@@ -10,14 +10,13 @@
 //! - **Depends on.** The VM compiler, the runtime's conversion kernel and its entry points.
 //! - **Must not know.** How Arrow converts a value.
 
-use std::sync::Arc as StdArc;
-
 use arrow_array::{
     BooleanArray, Float32Array, Float64Array, Int8Array, Int16Array, Int32Array, Int64Array,
     StringArray, TimestampNanosecondArray, UInt8Array, UInt64Array,
 };
 use arrow_schema::{DataType, Field, Schema};
 use nervix_models::Timestamp;
+use nervix_primitives::sync::StdArc;
 
 use super::{
     FunctionInjector, InjectedResult, RowSelection, cast_typed_array, execute_program_sync,
@@ -661,7 +660,7 @@ fn checked_options() -> CompileOptions {
     let injector: Box<dyn FunctionInjector> = Box::new(CheckedInjector);
     CompileOptions {
         udf_signatures: signatures,
-        injector: Some(triomphe::Arc::new(injector)),
+        injector: Some(nervix_primitives::sync::Arc::new(injector)),
         ..CompileOptions::default()
     }
 }

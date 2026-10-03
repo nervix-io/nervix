@@ -12,10 +12,9 @@
 
 use std::{
     cell::Cell,
-    fmt,
-    io::{self, Cursor, Write as _},
+    fmt, io,
+    io::{Cursor, Write as _},
     num::{NonZeroU32, NonZeroUsize},
-    sync::Arc as StdArc,
 };
 
 use ahash::HashMap;
@@ -61,6 +60,7 @@ use nervix_models::{
     RemoteRuntimeElementValue, RemoteRuntimeRecordMetadata, RemoteRuntimeValue,
     ResolvedCodecWireFormat, Timestamp, WireSchemaField, WireSchemaStrictness,
 };
+use nervix_primitives::sync::{Arc, StdArc};
 use nervix_wasm::{WasmProcessorField, WasmProcessorSchema, WasmProcessorType};
 use ordered_float::OrderedFloat;
 use prost::Message as ProstMessage;
@@ -75,7 +75,6 @@ use serde::{
 use serde_json::{Map as JsonMap, Number as JsonNumber, Value as JsonValue};
 use simd_json::{BorrowedValue, KnownKey, prelude::*};
 use thiserror::Error;
-use triomphe::Arc;
 
 mod arrow_body;
 mod batch_container;
@@ -124,7 +123,7 @@ enum CompiledWireSchema {
     Avro(CompiledAvroWireSchema),
     JaqNative(CompiledJaqNativeCodec),
     Protobuf(CompiledProtobufCodec),
-    Syslog,
+    Syslog(syslog::CompiledSyslogSchema),
 }
 
 impl CompiledWireSchema {
@@ -136,7 +135,7 @@ impl CompiledWireSchema {
             Self::Avro(_) => "AVRO",
             Self::JaqNative(native) => native.format.name(),
             Self::Protobuf(_) => "PROTOBUF",
-            Self::Syslog => "SYSLOG",
+            Self::Syslog(_) => "SYSLOG",
         }
     }
 }
@@ -918,7 +917,7 @@ impl CompiledCodec {
             CompiledWireSchema::Json(_)
             | CompiledWireSchema::Cbor(_)
             | CompiledWireSchema::Avro(_)
-            | CompiledWireSchema::Syslog => false,
+            | CompiledWireSchema::Syslog(_) => false,
         }
     }
 
@@ -957,7 +956,7 @@ impl CompiledCodec {
             CompiledWireSchema::Json(_)
             | CompiledWireSchema::Cbor(_)
             | CompiledWireSchema::Avro(_)
-            | CompiledWireSchema::Syslog => false,
+            | CompiledWireSchema::Syslog(_) => false,
         }
     }
 
@@ -1121,7 +1120,7 @@ impl CompiledCodecBatchEncoder<'_> {
                     })?;
                 write_payload(codec, output, &encoded)?;
             }
-            CompiledWireSchema::Syslog => syslog::encode_row(&row, output)?,
+            CompiledWireSchema::Syslog(_) => syslog::encode_row(&row, output)?,
         }
         Ok(())
     }
@@ -2494,8 +2493,6 @@ pub enum RuntimeSchemaError {
     },
     #[error("SYSLOG Arrow builder expected column {expected}, received {found}")]
     SyslogBuilderColumnOrder { expected: usize, found: usize },
-    #[error("unsupported SYSLOG schema field '{field}'")]
-    UnsupportedSyslogField { field: String },
     #[error("SYSLOG timestamp is outside the Arrow nanosecond range")]
     SyslogTimestampOutOfRange,
     #[error("runtime record materialization does not support Arrow type {data_type}")]
@@ -2948,10 +2945,9 @@ pub(crate) fn compile_codec_spec_with_protobuf(
                 )?,
             })
         }
-        ResolvedCodecWireFormat::Syslog => {
-            syslog::validate_compiled_schema(name, encoding_rules, &schema)?;
-            CompiledWireSchema::Syslog
-        }
+        ResolvedCodecWireFormat::Syslog => CompiledWireSchema::Syslog(
+            syslog::CompiledSyslogSchema::compile(name, encoding_rules, &schema)?,
+        ),
     };
 
     Ok(Arc::new(CompiledCodec {
@@ -3028,7 +3024,7 @@ pub(crate) fn decode_with_codec(
         }
         CompiledWireSchema::Cbor(wire_schema) => decode_cbor(codec, wire_schema, payload, builder),
         CompiledWireSchema::Avro(wire_schema) => decode_avro(codec, wire_schema, payload, builder),
-        CompiledWireSchema::Syslog => syslog::decode(codec, payload, builder),
+        CompiledWireSchema::Syslog(syslog) => syslog.decode(codec, payload, builder),
         CompiledWireSchema::JaqNative(_) | CompiledWireSchema::Protobuf(_) => {
             let unfolded = codec.unfold_on_ingestion(Bytes::copy_from_slice(payload))?;
             return unfolded.append_to(codec, builder);
@@ -7245,6 +7241,43 @@ mod tests {
             Some(RuntimeValue::String(
                 "[example@32473 note=\"line\tvalue\"]".to_string()
             ))
+        );
+    }
+
+    #[rstest]
+    #[case::u8_column(0, "facility")]
+    #[case::datetime_column(2, "timestamp")]
+    #[case::string_column(3, "hostname")]
+    fn a_syslog_column_of_another_arrow_type_fails_naming_its_field(
+        #[case] column: usize,
+        #[case] field: &str,
+    ) {
+        let codec = compiled_syslog_codec();
+        let mut schema = syslog_schema();
+        schema.fields[column].ty = ParseAsType::I64;
+        let mut builder = compile_schema(&schema).batch_builder(1);
+        let mut decoder = JsonDecoder::default();
+        let payload = b"<34>1 2003-10-11T22:14:15.003Z edge-1 orders 123 ID47 - order accepted";
+
+        let error = decode_with_codec(&codec, payload, &mut decoder, &mut builder)
+            .expect_err("the builder's column is not the Arrow type the SYSLOG field appends");
+
+        assert!(
+            matches!(
+                error.current_context(),
+                CodecError::SyslogDecode { codec } if codec == "syslog_codec"
+            ),
+            "{error:?}"
+        );
+        assert!(
+            matches!(
+                error.downcast_ref::<RuntimeSchemaError>(),
+                Some(RuntimeSchemaError::ExactTypeMismatch {
+                    location: RuntimeValueLocation::CodecField { field: mismatched, .. },
+                    ..
+                }) if mismatched == field
+            ),
+            "{error:?}"
         );
     }
 

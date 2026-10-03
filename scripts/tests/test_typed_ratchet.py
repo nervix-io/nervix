@@ -152,13 +152,13 @@ class ConfigurationTests(unittest.TestCase):
 
     def test_declared_modes_and_malformed_configuration(self) -> None:
         configurations = typed_ratchet.load_configurations(ROOT)
-        self.assertEqual({item.name for item in configurations}, {"ordinary", "testing", "shuttle", "loom", "turmoil"})
+        self.assertEqual({item.name for item in configurations}, {"ordinary", "testing", "shuttle", "loom", "turmoil", "deloxide"})
         with tempfile.TemporaryDirectory() as directory:
             root = pathlib.Path(directory)
             path = root / TOOLING / "configurations.toml"
             path.parent.mkdir(parents=True)
             valid = '[[configuration]]\nname="ordinary"\nmanifest="Cargo.toml"\npackages=[]\n'
-            for text, error in ((valid + valid, "duplicate"), (valid + 'features=["loom", "shuttle"]\n', "incompatible"), (valid + 'kinds=["test"]\n', "unsupported"), (valid + 'unknown=true\n', "unknown"), ('[[configuration]]\nname="absent"\n', "missing"), ('configuration=[]\n', "no declared")):
+            for text, error in ((valid + valid, "duplicate"), (valid + 'features=["loom", "shuttle"]\n', "incompatible"), (valid + 'features=["deloxide", "turmoil"]\n', "incompatible"), (valid + 'kinds=["test"]\n', "unsupported"), (valid + 'unknown=true\n', "unknown"), ('[[configuration]]\nname="absent"\n', "missing"), ('configuration=[]\n', "no declared")):
                 path.write_text(text)
                 with self.assertRaisesRegex(AnalysisError, error):
                     typed_ratchet.load_configurations(root)

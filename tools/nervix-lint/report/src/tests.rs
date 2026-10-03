@@ -293,6 +293,30 @@ fn recognition_requires_actual_definition_and_receiver_identity() {
             "into_iter",
             Acquisition::Shared,
         ),
+        (
+            "nervix_primitives::sync::blocking::tracked::Mutex",
+            "nervix_primitives",
+            "lock",
+            Acquisition::Exclusive,
+        ),
+        (
+            "nervix_primitives::sync::blocking::tracked::Mutex",
+            "nervix_primitives",
+            "try_lock",
+            Acquisition::TryExclusive,
+        ),
+        (
+            "nervix_primitives::sync::blocking::tracked::RwLock",
+            "nervix_primitives",
+            "read",
+            Acquisition::Shared,
+        ),
+        (
+            "nervix_primitives::sync::blocking::tracked::RwLock",
+            "nervix_primitives",
+            "try_write",
+            Acquisition::TryExclusive,
+        ),
     ] {
         assert_eq!(
             acquisition(receiver, defining_crate, operation),

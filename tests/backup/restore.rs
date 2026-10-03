@@ -11,12 +11,15 @@
 //!   read an archive's NSPL.
 //! - **Must not know.** How the server stages, plans or applies a restore.
 
-use nervix_backup::{ArchiveLayout, BackupManifest, SectionDigester, SectionPath};
+use nervix_backup::{
+    ArchiveLayout, ArchiveRecord, BackupManifest, BranchLifecycleRecord, SectionDigester,
+    SectionPath, WasmStateDescriptor,
+};
 use nervix_client_wire::{
     CommandDisposition, CommandOutcome as WireCommandOutcome, OutcomeOrigin, RestoreDisposition,
     RestoreUploadFailure, UnknownOutcomeCause,
 };
-use nervix_models::{ResourceName, RestoreStep};
+use nervix_models::{ResourceName, RestoreStep, SchemaFingerprint};
 use nervix_primitives::task::AbortOnDropHandle;
 
 use super::*;
@@ -27,6 +30,129 @@ use crate::common::{
 
 /// How long a restore waits at an armed pause before a scenario gives up on reaching it.
 const RESTORE_PAUSE_TIMEOUT: Duration = Duration::from_secs(120);
+
+#[given(expr = "restoring domain {string} fails before installing its first WASM checkpoint")]
+fn given_restored_wasm_checkpoint_fails(world: &mut ScenarioWorld, domain: String) {
+    world
+        .fault_injection
+        .fail_restored_wasm_checkpoint(scenario_domain(world, &domain));
+}
+
+#[given(expr = "restoring domain {string} by coordinator {string} pauses before state publication")]
+fn given_restore_publication_pauses(
+    world: &mut ScenarioWorld,
+    domain: String,
+    coordinator: String,
+) {
+    world.fault_injection.pause_restore_state_publication(
+        scenario_domain(world, &domain),
+        node_name(&expand_placeholders(world, &coordinator)),
+    );
+}
+
+#[then(expr = "restoring domain {string} by coordinator {string} has reached state publication")]
+async fn then_restore_publication_pauses(
+    world: &mut ScenarioWorld,
+    domain: String,
+    coordinator: String,
+) {
+    nervix_primitives::time::timeout(
+        RESTORE_PAUSE_TIMEOUT,
+        world.fault_injection.wait_for_restore_state_publication(
+            &scenario_domain(world, &domain),
+            &node_name(&expand_placeholders(world, &coordinator)),
+        ),
+    )
+    .await
+    .assured("restore reached its publication boundary");
+}
+
+#[when(expr = "state publication of domain {string} by coordinator {string} is released")]
+fn when_restore_publication_released(
+    world: &mut ScenarioWorld,
+    domain: String,
+    coordinator: String,
+) {
+    world.fault_injection.release_restore_state_publication(
+        &scenario_domain(world, &domain),
+        &node_name(&expand_placeholders(world, &coordinator)),
+    );
+}
+
+#[then(expr = "state publication of domain {string} by coordinator {string} is refused")]
+async fn then_restore_publication_refused(
+    world: &mut ScenarioWorld,
+    domain: String,
+    coordinator: String,
+) {
+    nervix_primitives::time::timeout(
+        RESTORE_PAUSE_TIMEOUT,
+        world
+            .fault_injection
+            .wait_for_restore_state_publication_refusal(
+                &scenario_domain(world, &domain),
+                &node_name(&expand_placeholders(world, &coordinator)),
+            ),
+    )
+    .await
+    .assured("the stale storage mutation was refused");
+}
+
+#[then(
+    expr = "restore {string} of backup archive {string} completes on node {string} under \
+            execution reference {string}"
+)]
+async fn then_restore_eventually_completes(
+    world: &mut ScenarioWorld,
+    restore: String,
+    file: String,
+    node: String,
+    reference: String,
+) {
+    let request = restore_stream_request(world, &restore, &file, &node, &reference);
+    let end = nervix_primitives::time::timeout(RESTORE_PAUSE_TIMEOUT, async {
+        let mut poll = nervix_primitives::time::interval(Duration::from_millis(100));
+        loop {
+            nervix_primitives::task::consume_budget().await;
+            poll.tick().await;
+            let end = stream_restore(&request, None, None).await;
+            match &restore_outcome(&end).disposition {
+                CommandDisposition::Completed { .. } => break end,
+                CommandDisposition::OutcomeUnknown(UnknownOutcomeCause::StillApplying) => {}
+                other => panic!("restore recovery did not complete: {other:?}"),
+            }
+        }
+    })
+    .await
+    .assured("restore completes under the new coordinator");
+    world.last_restore_end = Some(end);
+}
+
+#[then(
+    expr = "backup archives {string} and {string} have identical guest checkpoints and source \
+            offsets"
+)]
+fn then_restored_checkpoints_match(world: &mut ScenarioWorld, before: String, after: String) {
+    fn checkpoints(path: &Path) -> BTreeMap<String, Vec<u8>> {
+        let copy = copy_of_archive(path);
+        let entries = copy
+            .sections
+            .into_iter()
+            .filter(|(path, _)| path.ends_with("/guest.bin") || path.ends_with("/offsets.rkyv"))
+            .collect::<BTreeMap<_, _>>();
+        assert_eq!(
+            entries.len(),
+            3,
+            "two guest saves and domain offsets are visible"
+        );
+        entries
+    }
+    assert_eq!(
+        checkpoints(&archive_path(world, &before)),
+        checkpoints(&archive_path(world, &after)),
+        "a stale installer did not change published state"
+    );
+}
 
 /// A restore step pause a scenario armed, which it releases by the node it named.
 #[derive(Debug, Clone)]
@@ -386,6 +512,20 @@ fn then_cli_restore_succeeded(
         "the report: {report}"
     );
     assert_eq!(restored["models"], models, "the report: {report}");
+}
+
+#[then(expr = "the CLI restore warns that saved state has a mismatched schema")]
+fn then_cli_restore_warns_about_state_schema(world: &mut ScenarioWorld) {
+    let report = succeeded_restore(world);
+    let warnings = report["warnings"]
+        .as_array()
+        .unwrap_or_else(|| panic!("the restore report lists warnings: {report}"));
+    assert!(
+        warnings.iter().any(|warning| warning
+            .as_str()
+            .is_some_and(|message| message.contains("archived schema fingerprint does not match"))),
+        "the restore reports the skipped state: {report}"
+    );
 }
 
 #[then(
@@ -830,6 +970,86 @@ fn write_archive(copy: &ArchiveCopy, replaced: &BTreeMap<String, Vec<u8>>, targe
             sink.write_all(bytes)
         })
         .unwrap_or_else(|report| panic!("the altered archive is written: {report:?}"));
+}
+
+#[given(expr = "backup archive {string} is copied to {string} with mismatched WASM state schemas")]
+fn given_archive_with_mismatched_wasm_schemas(
+    world: &mut ScenarioWorld,
+    source: String,
+    target: String,
+) {
+    let copy = copy_of_archive(&archive_path(world, &source));
+    let mut replaced = BTreeMap::new();
+    for (path, bytes) in &copy.sections {
+        if path.contains("/state/wasm_processor/") && path.ends_with("/descriptor.rkyv") {
+            let mut descriptor = WasmStateDescriptor::decode(path, bytes)
+                .expect("the saved WASM descriptor decodes");
+            descriptor.schema = SchemaFingerprint::from_digest([0xAA; 32]);
+            replaced.insert(
+                path.clone(),
+                descriptor.encode().expect("the altered descriptor encodes"),
+            );
+        }
+    }
+    assert!(
+        !replaced.is_empty(),
+        "the archive contains WASM guest state"
+    );
+    write_archive(&copy, &replaced, &archive_path(world, &target));
+}
+
+#[given(
+    expr = "backup archive {string} is copied to {string} with an unsupported Kafka state version"
+)]
+fn given_archive_with_unsupported_kafka_state(
+    world: &mut ScenarioWorld,
+    source: String,
+    target: String,
+) {
+    let copy = copy_of_archive(&archive_path(world, &source));
+    let mut replaced = BTreeMap::new();
+    for (path, bytes) in &copy.sections {
+        if path.contains("/state/kafka_offset/") && path.ends_with("/offsets.rkyv") {
+            let mut changed = bytes.clone();
+            changed[10..12].copy_from_slice(&999_u16.to_le_bytes());
+            replaced.insert(path.clone(), changed);
+        }
+    }
+    assert!(
+        !replaced.is_empty(),
+        "the archive contains Kafka domain offsets"
+    );
+    write_archive(&copy, &replaced, &archive_path(world, &target));
+}
+
+#[then(expr = "backup archives {string} and {string} keep the WASM processor branch incarnations")]
+fn then_wasm_branch_incarnations_match(
+    world: &mut ScenarioWorld,
+    source: String,
+    restored: String,
+) {
+    fn incarnations(path: &Path) -> BTreeMap<String, u64> {
+        let copy = copy_of_archive(path);
+        let mut values = BTreeMap::new();
+        for (path, bytes) in &copy.sections {
+            if path.contains("/state/branch_lifecycle/")
+                && path.ends_with("/filter_even_rows/branches.rkyv")
+            {
+                let lifecycle = BranchLifecycleRecord::decode(path, bytes)
+                    .expect("the archived branch lifecycle decodes");
+                for branch in lifecycle.branches {
+                    values.insert(format!("{:?}", branch.key), branch.incarnation);
+                }
+            }
+        }
+        assert_eq!(values.len(), 2, "the two WASM branches were captured");
+        values
+    }
+    assert_eq!(
+        incarnations(&archive_path(world, &source)),
+        incarnations(&archive_path(world, &restored)),
+        "the restored WASM branches keep their incarnations"
+    );
 }
 
 #[given(

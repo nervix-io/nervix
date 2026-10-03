@@ -148,10 +148,10 @@ pub(super) fn an_observed_notification_stays_observed() {
 
 /// Counts the wakes of the waker it backs.
 #[derive(Default)]
-struct WakeCount(AtomicUsize);
+pub(super) struct WakeCount(AtomicUsize);
 
 impl WakeCount {
-    fn count(&self) -> usize {
+    pub(super) fn count(&self) -> usize {
         self.0.load(Ordering::SeqCst)
     }
 }

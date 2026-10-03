@@ -31,14 +31,13 @@ use nervix_client_wire::{
 use nervix_models::{DomainClockObservation, DomainClockTickObservation, DomainName};
 use nervix_primitives::{
     sync::{
-        CancellationToken, DropGuard,
+        Arc, CancellationToken, DropGuard,
         atomic::{AtomicBool, Ordering},
     },
     task::JoinHandle,
 };
 use nervix_recovery::Discarded as _;
 use tracing::{debug, warn};
-use triomphe::Arc;
 
 use super::{QueuedReply, SessionShared, outbound::ReplaceableControlFrame};
 use crate::{

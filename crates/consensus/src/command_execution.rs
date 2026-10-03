@@ -66,6 +66,7 @@ pub struct CommandExecutionTransactionStatus {
     pub lifecycle: TransactionLifecycle,
     pub accepted_operations: TransactionPosition,
     /// Never exceeds `accepted_operations`.
+    #[rkyv(with = nervix_models::CountAsU64)]
     pub applied_operations: usize,
 }
 
@@ -411,6 +412,16 @@ impl CommandExecution {
             return;
         };
         domain_mutations.insert(domain, lease);
+    }
+
+    pub(crate) fn release_domain_mutation(&mut self, domain: &DomainName) {
+        let CommandExecutionState::Applying {
+            domain_mutations, ..
+        } = &mut self.state
+        else {
+            return;
+        };
+        domain_mutations.remove(domain);
     }
 
     pub fn transaction_request(&self) -> Option<&CommandExecutionTransactionRequest> {
@@ -982,6 +993,20 @@ impl std::fmt::Display for CommandExecutionRequestConflict {
             Self::Position => formatter.write_str("position"),
         }
     }
+}
+
+#[cfg(test)]
+pub(crate) fn assert_count_archives(count: usize) {
+    use crate::archive_count_tests::assert_round_trip;
+
+    let status = CommandExecutionTransactionStatus {
+        transaction_id: "count-transaction".to_string(),
+        domain: DomainName::parse("tenant").assured("the literal follows the name rule"),
+        lifecycle: TransactionLifecycle::Open,
+        accepted_operations: TransactionPosition::new(count),
+        applied_operations: count,
+    };
+    assert_round_trip(&status);
 }
 
 #[cfg(test)]

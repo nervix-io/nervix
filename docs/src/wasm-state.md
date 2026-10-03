@@ -39,9 +39,39 @@ Nodes](./processors.md#wasm-processor) owns the NSPL statements.
 | Control plane | The recovery coordinator on the leader | Deciding whether a refused lifetime still has its one recovery attempt, recording the decision, and driving the reset it admits. |
 | Edges | The session service and clients | Admitting an NSPL reset as a transaction step, and returning the typed state inspection beside the text of `DESCRIBE WASM PROCESSOR`. |
 
-Guest bytes never leave the data plane and the state store. The control plane decides lifetimes and
-never reads a checkpoint; the data plane executes the lifetime the committed schedule names and
-never decides one.
+During normal execution, guest bytes stay in the data plane and state store. A backup is an
+explicit control-plane export of durable checkpoints to an archive; restore installs those bytes
+under the generations of the newly published schedule. The data plane executes the lifetime the
+committed schedule names and never decides one.
+
+## Backup And Restore
+
+A normal backup holds a quiesced cut for each running domain. Once intake and acknowledged work
+drain, each owner applies the selected cut revision and its runtime plan, then requests a fresh
+branch lifecycle checkpoint from its active supervisors before
+reading durable WASM saves together with its other state from one database snapshot.
+The archive stores a typed descriptor for each saved branch: processor, schema fingerprint, typed
+branch key and its fingerprint, generation, and checkpoint revision. Raw guest bytes occupy a
+separate section with a measured length and digest. `WITHOUT PAUSE` exports the latest published
+checkpoints with crash-consistent semantics; `WITHOUT STATE` omits them. Capture filters the
+current scheduled identity and active lifecycle before reconstructing branch keys. Retained
+checkpoints for TTL or LRU evicted branches are omitted; they remain available for local branch
+reappearance without preventing a backup of the current lifecycle.
+
+A restore creates the target domain stopped and publishes its models and schedule before installing
+state. It stages a complete replacement state set on each target node. It accepts a guest save
+only when its entity and schema fingerprint match the restored schedule, maps the saved branch to
+the generation that schedule names, and stages the checkpoint on the assigned owner and replicas.
+Branch lifecycle is staged first. Each node publishes lifecycle, offsets and saves together in one
+durable database batch, then clears its passive handles under the same installation authority.
+The replicated start gate remains closed until every node completes publication, even if the
+restore fails or its mutation lease is released. Authority binds leader tenure, execution, lease
+and installation generation; stale local and remote requests cannot republish or clear handles. A
+checkpoint from a different schema or an entity absent from the schedule is skipped with a
+diagnostic. The source domain name and owner node are not carried into the restored placement.
+The guest still validates its saved bytes when the restored domain later starts. The Rust SDK
+allows the domain name to change when the branch key, domain type, and input and output schemas
+match; a guest with its own snapshot format may apply stricter identity rules and reject the save.
 
 ## Branch Ownership
 
@@ -134,6 +164,9 @@ A zero-length save means the guest has no state: the next instance is initialize
 `nervix_load_state` call. The Rust SDK wraps every save in a `GuestSnapshot` envelope that also
 carries the branch configuration, so empty application state is still restored as state, and a
 snapshot taken under another branch configuration is rejected.
+For a restore into a differently named domain, the SDK accepts that name change while still
+checking the domain type, concrete branch key, and input and output schemas. The saved application
+bytes are passed through unchanged.
 
 A restore either succeeds, or the guest rejects the saved state with one of the two reserved verdict
 codes, or it fails without a verdict: a trap, an exhausted limit, or another negative code. Only a
@@ -240,13 +273,16 @@ node is reported durable and every later checkpoint there fails until the node r
 ### Replica Confirmation
 
 A replica acts on an announcement only while the placement is current on it and the announcing node
-is the owner its schedule names. It installs a revision newer than the one it holds, synchronizes
-its storage, and only then acknowledges; a replica that already holds the announced revision or a
-newer one synchronizes and acknowledges what it holds, so a lost acknowledgement is replaced by the
-next announcement. A checkpoint of a branch the replica's branch lifecycle does not name yet makes
-the replica fetch the owner's branch lifecycle first, and it refuses the checkpoint only when that
-lifecycle does not name the branch either, as for an evicted branch. A node without stable storage
-acknowledges nothing.
+is the owner its schedule names. The announcement wakes the replica task that keeps the processor's
+branches current, which fetches the checkpoint in its next round. That task also reads what changed
+in the owner's catalog of the processor's branch checkpoints at least once every replication poll
+interval, so a checkpoint whose announcement was lost still reaches the replica within one interval.
+The replica installs a revision newer than the one it holds, synchronizes its storage, and only then
+acknowledges; a replica that already holds the announced revision or a newer one synchronizes and
+acknowledges what it holds, so a lost acknowledgement is replaced by the next announcement. Each
+round synchronizes the owner's branch lifecycle before it installs a branch checkpoint, and the
+replica refuses a checkpoint only when that lifecycle does not name the branch, as for an evicted
+branch. A node without stable storage acknowledges nothing.
 
 While the checkpoint waits, it wakes on each replica report and rereads the schedule at least every
 100 milliseconds. A replica the schedule replaces is replaced in the wait. The wait fails when the
@@ -624,6 +660,10 @@ is unfinished, `AWAITING_USABLE_EXECUTION` when a selected single-scope checkpoi
 the reset is still `Publishing`, and `READY` once `Ready` is published; an all-branches reset stays
 `RESETTING` until then, because a sample of the current branches cannot prove every selected branch
 completed. Nervix exports no WASM-specific metric.
+
+Checkpoint stage totals and omitted-entry counts use the vocabulary's fixed-width 64-bit archive
+adapter, so an interconnect response preserves their complete native magnitude. Decoding refuses a
+count the receiving target cannot represent. See [Archived Counts](./typed-states.md#archived-counts).
 
 ## Guarantees And Limits
 

@@ -579,8 +579,8 @@ mod tests {
         MessageErrorOperation, ModelKind, ModelName, ParseAsType, ResolvedCodecWireFormat,
         RetryPolicy, SchemaField, Timestamp, WireSchemaField,
     };
+    use nervix_primitives::sync::Arc;
     use nonzero_ext::nonzero;
-    use triomphe::Arc;
 
     use super::*;
     use crate::{
@@ -742,7 +742,12 @@ mod tests {
         for offset in 0..3i64 {
             let payload = format!(r#"{{"value":{offset}}}"#);
             group
-                .decode_payload(&Executor::default(), &codec, payload.as_bytes())
+                .decode_payload(
+                    &Executor::default(),
+                    QueueAdmission::RefuseWhenFull,
+                    &codec,
+                    payload.as_bytes(),
+                )
                 .await
                 .expect("each payload must decode into the group's record builder");
             group

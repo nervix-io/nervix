@@ -46,14 +46,35 @@ shuttle = [
   "shuttle-tokio-util/shuttle",
 ]
 turmoil = ["dep:turmoil"]
+# The diagnostic mode: the native capability's thread-blocking locks and condition variable are
+# tracked by Deloxide's process-wide wait-for graph, and a process reports an active deadlock among
+# them through `deadlock`. Unlike the three modes above it models nothing, so a binary that declares
+# a diagnostic form builds and runs as a product does. It requires the `native` capability and is
+# exclusive with every other mode.
+deloxide = ["dep:deloxide", "dep:error-stack", "dep:nix", "dep:thiserror"]
 
 [dependencies]
+# The `futures` channels, `select!` and abort handles of the unmodeled surface, and the waker
+# registration the native `sync` family selects.
+futures-channel = { workspace = true }
+futures-util = { workspace = true }
+meticulous = { workspace = true }
+# Shared ownership of Nervix-owned state, the same in every mode and on every target.
+triomphe = { workspace = true }
+
+# The libraries of the native capability and of every execution mode exist only for native targets.
+# A wasm build that asks for either compiles none of them, so the boundary's own diagnostic is what
+# fails it, rather than a dependency that cannot build for the browser.
+[target.'cfg(not(target_family = "wasm"))'.dependencies]
 arc-swap = { workspace = true, optional = true }
 concurrent-queue = { workspace = true, optional = true }
 dashmap = { workspace = true, optional = true }
+deloxide = { workspace = true, optional = true }
+error-stack = { workspace = true, optional = true }
 loom = { workspace = true, optional = true }
-meticulous = { workspace = true }
 nervix-primitives-macros = { workspace = true, optional = true }
+# Silences Deloxide's start-up banner: standard output carries a node's logs and completion scripts.
+nix = { workspace = true, features = ["fs"], optional = true }
 parking_lot = { workspace = true, optional = true }
 shuttle = { workspace = true, optional = true }
 shuttle-dashmap = { workspace = true, optional = true }
@@ -67,6 +88,7 @@ shuttle-tokio = { workspace = true, features = [
 ], optional = true }
 shuttle-tokio-stream = { workspace = true, optional = true }
 shuttle-tokio-util = { workspace = true, features = ["rt"], optional = true }
+thiserror = { workspace = true, optional = true }
 tokio = { workspace = true, features = [
   "macros",
   "net",

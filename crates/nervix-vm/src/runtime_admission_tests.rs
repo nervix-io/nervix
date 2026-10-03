@@ -1,12 +1,13 @@
 //! Where an execution runs, what it is charged, and how admission refuses or cancels it.
 
-use std::{num::NonZeroUsize, sync::Arc as StdArc};
+use std::num::NonZeroUsize;
 
 use arrow_array::{Int64Array, StringArray};
 use arrow_schema::{DataType, Field, Schema};
 use nervix_execution::{ExecutionConfig, WorkerCounts};
 use nervix_models::Timestamp;
 use nervix_primitives::sync::{
+    StdArc,
     atomic::{AtomicUsize, Ordering},
     blocking::{Mutex, mpsc},
     mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel},
@@ -80,7 +81,7 @@ fn scripted_injector(policy: FunctionExecutionPolicy) -> (ExecutionContext, Inje
     };
     let context = ExecutionContext {
         now: Timestamp::from_unix_nanos(1),
-        injector: Some(triomphe::Arc::new(Box::new(injector))),
+        injector: Some(nervix_primitives::sync::Arc::new(Box::new(injector))),
     };
     (
         context,
@@ -93,7 +94,7 @@ fn scripted_injector(policy: FunctionExecutionPolicy) -> (ExecutionContext, Inje
 }
 
 /// A program that reads two headers, each through its own injected call.
-fn two_header_program() -> triomphe::Arc<CompiledProgram> {
+fn two_header_program() -> nervix_primitives::sync::Arc<CompiledProgram> {
     let input_schema = StdArc::new(Schema::new(vec![
         Field::new("first", DataType::Utf8, false),
         Field::new("second", DataType::Utf8, false),
@@ -114,7 +115,7 @@ fn two_header_program() -> triomphe::Arc<CompiledProgram> {
         },
     )
     .expect("the header program must compile");
-    triomphe::Arc::new(compiled)
+    nervix_primitives::sync::Arc::new(compiled)
 }
 
 fn header_batch(program: &CompiledProgram, rows: usize) -> TypedBatch {
@@ -131,7 +132,7 @@ fn header_batch(program: &CompiledProgram, rows: usize) -> TypedBatch {
     .expect("the batch matches the program's input")
 }
 
-fn increment_program() -> triomphe::Arc<CompiledProgram> {
+fn increment_program() -> nervix_primitives::sync::Arc<CompiledProgram> {
     let input_schema = StdArc::new(Schema::new(vec![
         Field::new("value", DataType::Int64, false),
         Field::new("next", DataType::Int64, true),
@@ -144,7 +145,7 @@ fn increment_program() -> triomphe::Arc<CompiledProgram> {
         CompileOptions::default(),
     )
     .expect("the increment program must compile");
-    triomphe::Arc::new(compiled)
+    nervix_primitives::sync::Arc::new(compiled)
 }
 
 fn increment_batch(program: &CompiledProgram, rows: usize) -> TypedBatch {

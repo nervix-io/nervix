@@ -312,8 +312,9 @@ attach to. It declares no header or metadata scope and supports only `SUSPEND`.
 
 The metadata boundary has distinct header, Kafka, and Syslog scopes. Kafka carries topic,
 partition, offset, and headers; Syslog carries the peer address. Transport headers are visited
-from the borrowed message in arrival order. The host copies them only when quiesce buffering or a
-WebSocket session must retain them after the source message ends. Header support and each
+from the borrowed message in arrival order. The host copies them only when the quiesce control
+decides on a payload, which may retain it, or a WebSocket session must retain them after the source
+message ends. Header support and each
 system's mapping are explicit: HTTP endpoint and polling headers, WebSocket upgrade headers,
 Kafka record headers, NATS headers, Pulsar properties, RabbitMQ AMQP headers, and SQS attributes
 retain their connector-specific semantics. Other source families do not offer header reads.
@@ -345,6 +346,41 @@ The host runs three source loop families, with a listener using the broker loop:
 | Paced | Bind and wait on the domain cadence, hand the scheduled instant to one poll, admit its returned messages without broker ACKs, and report poll failures. | HTTP and Prometheus perform one transport poll; they do not bind a domain clock or choose the cadence. |
 | Request scoped | Bind endpoint routes to request intake, admit and dispatch each request there, replay retained quiesce work, then unbind on close. | The endpoint source has no polling transport or broker position. |
 | Client batches | Keep the producers of one client ingestor, admit their batches one at a time through one admission worker per execution, give each admitted batch one ACK root, and answer each batch with its outcome. | There is no source connector: producers submit Arrow IPC batches through the session protocol. |
+
+The broker, paced and request-scoped loops each drain what their instance's quiesce buffer
+retained once the ingestor resumes, oldest first. A retained payload stays in its buffer, counted
+with its bytes, until its messages enter their ingest group, and the buffer hands out nothing
+behind it until then. Its sender was already answered and its source has moved past it, so the
+host admits its `ON INGESTION` unfolding to wait for a place on the node's extension workers rather
+than to be refused, ahead of work that asks afterwards. A shutdown or a new quiesce ends the wait
+and returns the payload to the front of its buffer, so a drain delays neither. A payload its codec
+rejects leaves the buffer and is reported.
+
+A live payload a source hands over without an acknowledgement, a paced poll or a batch read in a
+`NO_ACK` mode, cannot be presented again either. An acknowledged batch the extension workers refuse
+is rejected for its source to deliver again, and an endpoint refuses a body its sender sends again;
+a live unacknowledged payload follows its source's unacknowledged admission instead, which each
+source's composition declares. Waiting holds the source's loop, so a source waits for a place only
+when its transport stays connected with bounded memory while nothing reads it:
+
+| Source | Unacknowledged admission | The transport while its loop is held |
+| --- | --- | --- |
+| HTTP polling, Prometheus | Waits for a place | Nothing is read. The next poll is delayed, and the domain cadence coalesces the occurrences it missed. |
+| NATS | Waits for a place | The client's connection task keeps reading and answering the server, and holds at most the subscription's 65,536 messages before it drops the newest as a slow consumer. |
+| ZeroMQ | Waits for a place | `PULL` messages stay in the kernel buffers, and then the pushing peers' sends wait. |
+| Syslog | Waits for a place | The kernel drops UDP datagrams beyond the socket's receive buffer; TCP and TLS connections fill the listener's 64-frame queue and then push back on their senders. |
+| MQTT | Refused and counted | The event loop, which sends the keep-alive, runs only while the loop reads, so the broker closes the connection once one and a half keep-alive intervals pass without a packet from the client. |
+| Redis Pub/Sub | Refused and counted | The client's connection task reads every message into an unbounded queue. |
+| WebSocket client | Refused and counted | Server pings go unanswered while frames are unread, and a server that pings closes the connection. |
+| Kafka `NO_ACK PARALLEL` | Refused and counted | A consumer-group member that does not poll for `max.poll.interval.ms` leaves its group, and a domain-offset instance would keep its partitions through an ownership handoff. |
+| Pulsar `NO_ACK PARALLEL` | Refused and counted | The consumer engine blocks on a full receive queue, and the consumer's close, which suspension and stop perform, then waits on it. |
+
+A waiting payload races the ingestor's stop and every new quiesce decision. The stop drops it. A
+new decision, for a source whose input passes through the quiesce control, hands the payload to the
+control as input that arrived under that decision: `BUFFER` retains it, `DROP` drops and counts it,
+and a suspension lets it dispatch, so it waits on. A refused payload is reported as an ingestor
+error and counted in `nervix_ingestor_unfolding_refused_total`. A Pulsar message the host refused
+stays unacknowledged until its consumer reconnects.
 
 For broker sources, `None` admits without an ACK root; `Sequential` requests one message and
 waits for its ACK tree; `Parallel` requests up to the declared in-flight limit within its batch
@@ -472,6 +508,12 @@ delivered before it and routes every other still-owned source row through the em
 error policy. Stop requests retain their separate
 deadline-bounded final flush and transport finish, and a stopped interaction performs its final
 drain before the loop exits.
+
+A quiesced backup keeps these source and sink tasks installed. The host stops domain source
+admission according to each source's declared quiesce policy, reports admitted ACK roots and
+publishing sinks to the domain drain, and runs a confirming force flush after admitted work clears.
+Listeners for other domains continue serving. A sink that does not confirm before the backup's
+quiesce timeout leaves the backup incomplete; it is not treated as a successful publish.
 
 When that policy sends a failed emitter record to a DLQ, the host executes the message-error SET
 program bound during domain installation or replacement. The prepared route retains the input and
@@ -708,6 +750,30 @@ sequenceDiagram
   `SendError` with that error's server code and reason. The broker itself only closes the
   connection on a frame larger than the maximum plus 10 KiB of framing, which would fail every
   other message in flight on it.
+- **Syslog stream listener.** Each accepted TCP or TLS connection has one task that owns its frame
+  buffer and reads into it directly, at most 8 KiB per read and never beyond the connection's
+  frame bound of `max_message_size` plus the eleven bytes of the longest octet count and its
+  space. Framing moves a cursor through the buffer and copies each payload into the frame the
+  intake queue carries; the bytes before the cursor are discarded once, when the next read needs
+  room, so the bytes a read delivers are moved at most once however many frames they hold. The
+  decoder finds a space or LF with `memchr` and remembers how far it has examined the frame at the
+  cursor: an octet-counted frame keeps its parsed count until its payload is complete, and an
+  unterminated non-transparent frame is searched for its LF only in the bytes a read added. An
+  octet count, at most eleven bytes with its space, is read whole again when a read splits it. A
+  frame split anywhere across reads yields the same payload and the same typed framing failure as
+  one read holding the whole stream. [Syslog ingestion](./syslog.md#tcp) defines the framing rules.
+- **Syslog decoding, SQS bodies and OTEL identifiers.** The SYSLOG codec checks header fields and
+  scans `STRUCTURED-DATA` through byte classes of `nervix-simd-kernels`: the first byte outside
+  printable US-ASCII ends a header check, and two forward scans find the byte that ends each
+  `SD-ID` and `PARAM-NAME` and the `"`, `\` or `]` in each `PARAM-VALUE`, classifying each 64-byte
+  block at most once. The codec resolves its schema's fields against the fixed contract when it is
+  compiled, so decoding appends each column by a typed field rather than by reading its name. The
+  SQS sink takes a record's body in one pass that validates UTF-8 with `simdutf8` and classifies
+  characters against the XML 1.0 `Char` production over the same bytes while they are cached, and
+  turns the admitted bytes into the request body without validating them again; invalid UTF-8
+  outranks an excluded character, and either is a record rejection. Attribute values pass through
+  the same character classifier. The OTEL sink decodes trace and span identifiers with
+  `faster-hex` after checking their exact length.
 - **Iceberg sink.** It stages Arrow data locally on the node's filesystem storage workers,
   prepares data files, and publishes a catalog update on its explicit commit cadence or maximum
   size. Staging does not complete an ACK; successful catalog commit does. The sink retains ACKs and its client while a failed commit is

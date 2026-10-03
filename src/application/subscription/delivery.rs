@@ -7,8 +7,8 @@
 //!   queueing them as its delivery behavior asks, reporting the rows it skipped or dropped, ending
 //!   it with a typed reason when its relay closes, and releasing the relay receiver and the
 //!   interest lease it holds.
-//! - **Depends on.** The runtime's relay receiver, subscription predicate and domain time, the Row
-//!   encoder, the session's subscription lane, the interest lease, and the schedule it reads an
+//! - **Depends on.** The runtime's relay receiver, subscription predicate, domain time and executor,
+//!   the Row encoder, the session's subscription lane, the interest lease, and the schedule it reads an
 //!   end reason from.
 //! - **Must not know.** Requests, replies, or how a transport writes frames.
 //!
@@ -29,6 +29,7 @@ use nervix_client_wire::{
     EncodedFrame, ServerFrame, SessionLimits, SubscriptionDeliveryLost, SubscriptionEndReason,
     SubscriptionEnded, SubscriptionHandle, SubscriptionRowsSkipped, WireEncodeError,
 };
+use nervix_execution::Executor;
 use nervix_models::{DomainName, RelayName, SubscriptionDeliveryBehavior};
 use nervix_primitives::sync::oneshot;
 use nervix_recovery::NoReceiver as _;
@@ -82,6 +83,7 @@ enum DeliveryStop {
 
 /// The part of a generation's delivery that outlives its relay receiver and interest lease.
 struct ActiveDelivery {
+    executor: Executor,
     clock: Result<
         crate::runtime::DomainClockLifecycle,
         Report<crate::runtime::DomainClockAccessError>,
@@ -122,7 +124,9 @@ impl SubscriptionDelivery {
                 .session_subscription_dropped_rows(&domain, &relay),
         };
         let clock = service.inner.runtime.domain_clock_lifecycle(&domain);
+        let executor = service.inner.runtime.executor().clone();
         let mut delivery = ActiveDelivery {
+            executor,
             clock,
             domain,
             relay,
@@ -213,7 +217,7 @@ impl ActiveDelivery {
     /// longer deliver.
     async fn deliver_batch(&mut self, batch: &RelayRecordBatch) -> Result<(), LaneClosed> {
         let selection = select_subscription_rows(
-            self.service.inner.runtime.executor(),
+            &self.executor,
             batch,
             self.predicate.as_ref(),
             self.batch_sample_rate,
@@ -413,7 +417,7 @@ impl SubscriptionSender {
 
 #[cfg(test)]
 mod tests {
-    use std::{num::NonZeroUsize, sync::Arc as StdArc, time::Duration};
+    use std::{num::NonZeroUsize, time::Duration};
 
     use arrow_array::{RecordBatch, UInt32Array};
     use arrow_schema::{DataType, Field, Schema};
@@ -421,7 +425,10 @@ mod tests {
         RowSchema, RowsSkippedCause, ServerEvent, ServerMessage, SubscriptionHandle, VerifiedFrame,
     };
     use nervix_models::{DomainName, RelayName, SchemaField, SubscriptionName};
-    use nervix_primitives::{sync::CancellationToken, time::timeout};
+    use nervix_primitives::{
+        sync::{CancellationToken, StdArc},
+        time::timeout,
+    };
 
     use super::*;
     use crate::{

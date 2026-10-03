@@ -8,9 +8,8 @@
 //!   provider, and the bundled and host trust stores.
 //! - **Must not know.** Which connector or driver the configuration is built for.
 
-use std::sync::Arc;
-
 use error_stack::{Report, ResultExt as _};
+use nervix_primitives::sync::StdArc;
 use nervix_recovery::Discarded as _;
 use rustls::{ClientConfig as RustlsClientConfig, RootCertStore};
 use rustls_pki_types::{CertificateDer, PrivateKeyDer, pem::PemObject};
@@ -61,7 +60,9 @@ impl<'a> RustlsClientConfigSource<'a> {
         Self { entries }
     }
 
-    pub fn build(&self) -> Result<Option<Arc<RustlsClientConfig>>, Report<TlsClientConfigError>> {
+    pub fn build(
+        &self,
+    ) -> Result<Option<StdArc<RustlsClientConfig>>, Report<TlsClientConfigError>> {
         let tls = client_tls_paths(self.entries);
         if tls.is_empty() {
             return Ok(None);
@@ -72,14 +73,14 @@ impl<'a> RustlsClientConfigSource<'a> {
 
     pub fn build_with_default_roots(
         &self,
-    ) -> Result<Arc<RustlsClientConfig>, Report<TlsClientConfigError>> {
+    ) -> Result<StdArc<RustlsClientConfig>, Report<TlsClientConfigError>> {
         self.build_config(client_tls_paths(self.entries), CaPlacement::AddToDefaults)
     }
 
     /// Build a TLS client from native roots, replacing them when a CA file is configured.
     pub fn build_with_replacement_ca(
         &self,
-    ) -> Result<Arc<RustlsClientConfig>, Report<TlsClientConfigError>> {
+    ) -> Result<StdArc<RustlsClientConfig>, Report<TlsClientConfigError>> {
         self.build_config(client_tls_paths(self.entries), CaPlacement::ReplaceDefaults)
     }
 
@@ -87,7 +88,7 @@ impl<'a> RustlsClientConfigSource<'a> {
         &self,
         tls: ClientTlsPaths,
         ca_placement: CaPlacement,
-    ) -> Result<Arc<RustlsClientConfig>, Report<TlsClientConfigError>> {
+    ) -> Result<StdArc<RustlsClientConfig>, Report<TlsClientConfigError>> {
         install_rustls_crypto_provider();
 
         let mut roots = match (ca_placement, tls.ca_file.as_ref()) {
@@ -140,7 +141,7 @@ impl<'a> RustlsClientConfigSource<'a> {
         } else {
             builder.with_no_client_auth()
         };
-        Ok(Arc::new(client_config))
+        Ok(StdArc::new(client_config))
     }
 
     /// The trust anchors a connector validates a server against: the bundled public roots, plus

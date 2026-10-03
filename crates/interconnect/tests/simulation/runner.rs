@@ -18,13 +18,13 @@ use std::{
     num::NonZeroUsize,
     panic,
     panic::{AssertUnwindSafe, PanicHookInfo},
-    sync::Arc as StdArc,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_primitives::{
     sync::{
+        StdArc,
         atomic::{AtomicU64, Ordering},
         blocking::{
             Mutex, Once, mpsc,

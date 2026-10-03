@@ -7,8 +7,6 @@
     )
 )]
 
-use std::sync::Arc as StdArc;
-
 use ahash::RandomState;
 use error_stack::Report;
 use nervix_checkpoint_replication::CheckpointReplication;
@@ -16,9 +14,11 @@ use nervix_execution::Executor;
 use nervix_models::ClusterNodeName;
 use nervix_primitives::{
     collections::DashMap,
-    sync::atomic::{AtomicU64, Ordering},
+    sync::{
+        Arc, StdArc,
+        atomic::{AtomicU64, Ordering},
+    },
 };
-use triomphe::Arc;
 
 use super::{
     BranchKey, RuntimeStateOperationError, RuntimeStatePlacement, StateAssignmentAuthority,
@@ -1038,10 +1038,10 @@ mod tests {
 
     #[cfg(feature = "shuttle")]
     mod shuttle_checks {
+        use nervix_model_harness::shuttle::check_interleavings;
         use nervix_primitives::{sync::blocking::mpsc, thread};
 
         use super::*;
-        use crate::shuttle_test::check_interleavings;
 
         /// An originator replaces a branch's record while another thread holds the assignment
         /// barrier, which that thread releases only after the update has returned.

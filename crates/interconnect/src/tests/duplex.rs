@@ -328,3 +328,143 @@ async fn opening_a_duplex_stream_without_a_handler_fails() {
     transport_a.shutdown().await;
     transport_b.shutdown().await;
 }
+
+/// How many frames a caller abandons its waits for while they are decoded.
+const ABANDONED_WAIT_FRAMES: u64 = 16;
+
+/// A caller that selects a receive against a timer or a command abandons the receive whenever the
+/// other arm wins. A receive that already took its frame off the stream waits for the frame's
+/// decoding on the CPU pool, so the next receive must finish that frame instead of reading past it.
+#[nervix_primitives::test]
+async fn a_receive_abandoned_while_its_frame_decodes_leaves_the_frame_to_the_next_receive() {
+    let ConnectedTransports {
+        transport_a,
+        transport_b,
+        node_b,
+        ..
+    } = connected_transports().await;
+    register_counting_handler(&transport_b);
+
+    let (mut sender, mut receiver) = transport_a
+        .open_duplex_stream(&node_b, CountingStream { start: 0 })
+        .await
+        .expect("the duplex test stream should open");
+    for value in 0..ABANDONED_WAIT_FRAMES {
+        sender
+            .send(CountingItem { value })
+            .await
+            .expect("every frame should be submitted");
+    }
+    sender
+        .finish()
+        .expect("the initiator should half-close its direction");
+
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let mut answered = Vec::new();
+    loop {
+        nervix_primitives::task::consume_budget().await;
+        // Each receive is polled once and dropped unless it is ready, as a losing select arm is.
+        let Some(answer) = receiver.next().now_or_never() else {
+            assert!(
+                Instant::now() < deadline,
+                "every answer should arrive before the test deadline, and {answered:?} did"
+            );
+            nervix_primitives::time::sleep(Duration::from_millis(1)).await;
+            continue;
+        };
+        let answer = answer.expect("the duplex stream should stay healthy");
+        let Some(answer) = answer else {
+            break;
+        };
+        answered.push(answer.value);
+    }
+    assert_eq!(
+        answered,
+        (0..ABANDONED_WAIT_FRAMES).collect::<Vec<_>>(),
+        "abandoning a receive must lose no answer and reorder none"
+    );
+
+    transport_a.shutdown().await;
+    transport_b.shutdown().await;
+}
+
+#[derive(Debug, Archive, Serialize, Deserialize)]
+struct AbandoningStream;
+
+impl InterconnectDuplexRequest for AbandoningStream {
+    type Item = CountingItem;
+    type Response = CountingAnswer;
+
+    const NAME: &'static str = "test_abandoning_stream";
+    const CLASS: PoolClass = PoolClass::Replication;
+    const SETUP_TIMEOUT: Duration = Duration::from_secs(5);
+}
+
+/// The responding side reads its frames the same way: a handler selecting its next frame against a
+/// heartbeat abandons that read whenever the heartbeat wins.
+#[nervix_primitives::test]
+async fn a_handler_read_abandoned_while_its_frame_decodes_leaves_the_frame_to_the_next_read() {
+    let ConnectedTransports {
+        transport_a,
+        transport_b,
+        node_b,
+        ..
+    } = connected_transports().await;
+    transport_b
+        .register_duplex_handler::<AbandoningStream, _, _>(|_context, _opening, items| async move {
+            let answers = futures_util::stream::unfold(items, |mut items| async move {
+                loop {
+                    nervix_primitives::task::consume_budget().await;
+                    // Each read is polled once and dropped unless it is ready.
+                    let Some(read) = items.next().now_or_never() else {
+                        nervix_primitives::time::sleep(Duration::from_millis(1)).await;
+                        continue;
+                    };
+                    return match read {
+                        Ok(Some(charged)) => Some((
+                            Ok(CountingAnswer {
+                                value: charged.item.value,
+                            }),
+                            items,
+                        )),
+                        Ok(None) => None,
+                        Err(error) => Some((Err(error), items)),
+                    };
+                }
+            });
+            Ok(DuplexResponses::new(answers))
+        })
+        .assured("the fresh test transport has no duplex handler with this name");
+
+    let (mut sender, mut receiver) = transport_a
+        .open_duplex_stream(&node_b, AbandoningStream)
+        .await
+        .expect("the duplex test stream should open");
+    for value in 0..ABANDONED_WAIT_FRAMES {
+        sender
+            .send(CountingItem { value })
+            .await
+            .expect("every frame should be submitted");
+    }
+    sender
+        .finish()
+        .expect("the initiator should half-close its direction");
+
+    let mut answered = Vec::new();
+    while let Some(answer) = timeout(Duration::from_secs(10), receiver.next())
+        .await
+        .expect("every answer should arrive before the test deadline")
+        .expect("the duplex stream should stay healthy")
+    {
+        nervix_primitives::task::consume_budget().await;
+        answered.push(answer.value);
+    }
+    assert_eq!(
+        answered,
+        (0..ABANDONED_WAIT_FRAMES).collect::<Vec<_>>(),
+        "abandoning a handler's read must lose no frame and reorder none"
+    );
+
+    transport_a.shutdown().await;
+    transport_b.shutdown().await;
+}

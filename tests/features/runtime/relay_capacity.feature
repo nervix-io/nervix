@@ -1,4 +1,45 @@
 Feature: Relay capacity
+  Scenario Outline: Relay capacities keep every bit through replication and a full cluster restart
+    Given the production sticky scheduler is configured
+    And a <cluster_size> node nervix cluster is started
+    And the leader node is configured with these NSPL commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
+    When these NSPL commands are executed on the leader node
+      """
+      CREATE SCHEMA notification (seq I64);
+      CREATE RELAY notifications SCHEMA notification UNBRANCHED CAPACITY <capacity>;
+      """
+    And these NSPL commands are executed on node "<reader>"
+      """
+      SHOW CREATE RELAY notifications;
+      """
+    Then the last command output contains
+      """
+      CREATE RELAY notifications SCHEMA notification UNBRANCHED CAPACITY <capacity>;
+      """
+    When these NSPL commands are executed on the leader node
+      """
+      ALTER RELAY notifications SET CAPACITY <altered_capacity>;
+      """
+    And the cluster is restarted
+    And these NSPL commands are executed on node "<reader>"
+      """
+      SHOW CREATE RELAY notifications;
+      """
+    Then the last command output contains
+      """
+      CREATE RELAY notifications SCHEMA notification UNBRANCHED CAPACITY <altered_capacity>;
+      """
+
+    Examples:
+      | cluster_size | reader | capacity             | altered_capacity     |
+      | 1            | node-1 | 4294967296           | 18446744073709551615 |
+      | 3            | node-2 | 4294967296           | 18446744073709551615 |
+      | 1            | node-1 | 18446744073709551615 | 4294967296           |
+      | 3            | node-2 | 18446744073709551615 | 4294967296           |
+
   Scenario Outline: Relay CAPACITY is persisted and rendered through SHOW CREATE
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started

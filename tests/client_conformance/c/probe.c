@@ -6,7 +6,10 @@
  * scenario compares. Every column is copied in one call; every string and bytes value is also
  * borrowed and compared with its copy. Run as `c-probe clock`, it attaches to the domain's running
  * clock instead, reads the clock the attach reported before its first tick, follows the generation
- * a STOP and START begin and the attachment restored after its session ends, and detaches.
+ * a STOP and START begin and the attachment restored after its session ends, and detaches. Run as
+ * `c-probe io`, it publishes typed batches through a client ingestor, built column by column from
+ * buffers it overwrites as soon as each call returns, and reads, retries, rejects and acknowledges
+ * their output through a client emitter, across the session the scenario cuts.
  */
 
 #define _POSIX_C_SOURCE 200809L
@@ -815,6 +818,1168 @@ static int run_clock(nx_session *session, const char *domain) {
     return 0;
 }
 
+/* ---- Producers and consumers ------------------------------------------------------------- */
+
+#define WAIT_MILLIS 120000
+#define EXPIRING_MILLIS 200
+#define PRODUCER_BATCHES 2
+#define CONSUMER_BATCHES 4
+#define ENDPOINT_BYTES 1048576
+#define SCRIBBLE 0xaa
+
+/* One level of a field's type, as a host names it. */
+typedef struct level_spec {
+    nx_type type;
+    uint32_t length;
+} level_spec;
+
+/* One field the probe expects an endpoint to have. */
+typedef struct field_spec {
+    const char *name;
+    const level_spec *levels;
+    size_t level_count;
+    bool nullable;
+    bool sensitive;
+} field_spec;
+
+static const level_spec LEVELS_U32[] = {{NX_TYPE_U32, 0}};
+static const level_spec LEVELS_STRING[] = {{NX_TYPE_STRING, 0}};
+static const level_spec LEVELS_U8[] = {{NX_TYPE_U8, 0}};
+static const level_spec LEVELS_I8[] = {{NX_TYPE_I8, 0}};
+static const level_spec LEVELS_U16[] = {{NX_TYPE_U16, 0}};
+static const level_spec LEVELS_I16[] = {{NX_TYPE_I16, 0}};
+static const level_spec LEVELS_I32[] = {{NX_TYPE_I32, 0}};
+static const level_spec LEVELS_U64[] = {{NX_TYPE_U64, 0}};
+static const level_spec LEVELS_I64[] = {{NX_TYPE_I64, 0}};
+static const level_spec LEVELS_F32[] = {{NX_TYPE_F32, 0}};
+static const level_spec LEVELS_F64[] = {{NX_TYPE_F64, 0}};
+static const level_spec LEVELS_BOOL[] = {{NX_TYPE_BOOL, 0}};
+static const level_spec LEVELS_BYTES[] = {{NX_TYPE_BYTES, 0}};
+static const level_spec LEVELS_DATETIME[] = {{NX_TYPE_DATETIME, 0}};
+static const level_spec LEVELS_TAGS[] = {{NX_TYPE_LIST, 0}, {NX_TYPE_STRING, 0}};
+static const level_spec LEVELS_GRID[] = {{NX_TYPE_FIXED_LIST, 2}, {NX_TYPE_FIXED_LIST, 2},
+                                         {NX_TYPE_I16, 0}};
+static const level_spec LEVELS_SPANS[] = {{NX_TYPE_LIST, 0}, {NX_TYPE_FIXED_LIST, 2},
+                                          {NX_TYPE_DATETIME, 0}};
+
+#define FIELD(name, levels, nullable, sensitive)                                                  \
+    { name, levels, sizeof levels / sizeof levels[0], nullable, sensitive }
+
+/* The input schema of the probe's ingestor, in declared order. */
+static const field_spec INPUT_FIELDS[] = {
+    FIELD("id", LEVELS_U32, false, false),
+    FIELD("tenant", LEVELS_STRING, false, false),
+    FIELD("u8v", LEVELS_U8, false, false),
+    FIELD("i8v", LEVELS_I8, false, false),
+    FIELD("u16v", LEVELS_U16, false, false),
+    FIELD("i16v", LEVELS_I16, false, false),
+    FIELD("u32v", LEVELS_U32, false, false),
+    FIELD("i32v", LEVELS_I32, false, false),
+    FIELD("u64v", LEVELS_U64, false, false),
+    FIELD("i64v", LEVELS_I64, false, false),
+    FIELD("f32v", LEVELS_F32, false, false),
+    FIELD("f64v", LEVELS_F64, false, false),
+    FIELD("flag", LEVELS_BOOL, false, false),
+    FIELD("text", LEVELS_STRING, true, false),
+    FIELD("raw", LEVELS_BYTES, true, false),
+    FIELD("at", LEVELS_DATETIME, false, false),
+    FIELD("maybe", LEVELS_I64, true, false),
+    FIELD("tags", LEVELS_TAGS, false, false),
+    FIELD("grid", LEVELS_GRID, false, false),
+    FIELD("spans", LEVELS_SPANS, true, false),
+    FIELD("secret", LEVELS_STRING, false, true),
+};
+#define INPUT_FIELD_COUNT (sizeof INPUT_FIELDS / sizeof INPUT_FIELDS[0])
+
+/* The field the emitter adds to every output row: the row's `id` again. */
+static const field_spec ECHO_FIELD = FIELD("echo", LEVELS_U32, false, false);
+
+/* The ingestor's secret as a host that forgot its sensitivity expects it. */
+static const field_spec PUBLIC_SECRET = FIELD("secret", LEVELS_STRING, false, false);
+
+/* A byte string that may be absent. */
+typedef struct blob {
+    const char *data;
+    size_t len;
+    bool present;
+} blob;
+
+#define PRESENT(literal) {literal, sizeof literal - 1, true}
+#define ABSENT {NULL, 0, false}
+
+/* One row of an input batch, as the probe's application holds it. */
+typedef struct row {
+    uint32_t id;
+    const char *tenant;
+    uint8_t u8v;
+    int8_t i8v;
+    uint16_t u16v;
+    int16_t i16v;
+    uint32_t u32v;
+    int32_t i32v;
+    uint64_t u64v;
+    int64_t i64v;
+    uint32_t f32v;
+    uint64_t f64v;
+    bool flag;
+    blob text;
+    blob raw;
+    int64_t at;
+    bool has_maybe;
+    int64_t maybe;
+    const char *const *tags;
+    size_t tag_count;
+    int16_t grid[2][2];
+    bool has_spans;
+    const int64_t (*spans)[2];
+    size_t span_count;
+    const char *secret;
+} row;
+
+static const char *const FIRST_TAGS[] = {"a", "", "h\xc3\xa9llo"};
+static const char *const THIRD_TAGS[] = {"x"};
+static const int64_t FIRST_SPANS[][2] = {{INT64_MIN, INT64_MAX}};
+
+/* The typed rows of the first batch. */
+static row typed_rows[3] = {
+    {1, "acme", UINT8_MAX, INT8_MAX, UINT16_MAX, INT16_MAX, UINT32_MAX, INT32_MAX, UINT64_MAX,
+     INT64_MAX, 0x7f7fffffu, 0x7fefffffffffffffull, true,
+     PRESENT("h\xc3\xa9llo \xe4\xb8\x96\xe7\x95\x8c \xf0\x9f\x9a\x80"),
+     PRESENT("\x00\xff\xfe\x80\x00"), INT64_MAX, false, 0, FIRST_TAGS, 3,
+     {{1, -2}, {INT16_MAX, INT16_MIN}}, true, FIRST_SPANS, 1, "s1"},
+    {2, "acme", 0, INT8_MIN, 0, INT16_MIN, 0, INT32_MIN, 0, INT64_MIN, 0x80000000u,
+     0x0000000000000001ull, false, PRESENT("a\x00" "b"), PRESENT(""), INT64_MIN, true, 0, NULL, 0,
+     {{0, 0}, {0, 0}}, false, NULL, 0, "s2"},
+    {3, "acme", 1, -1, 1, -1, 1, -1, 9007199254740993ull, -9007199254740993ll, 0x3fc00000u,
+     0x3fb999999999999aull, true, ABSENT, ABSENT, 1, true, 9007199254740992ll, THIRD_TAGS, 1,
+     {{-1, 1}, {2, -2}}, true, NULL, 0, "s3"},
+};
+
+/* A row of `tenant` whose every other value is the zero of its type. */
+static row plain_row(uint32_t id, const char *tenant) {
+    row plain;
+    memset(&plain, 0, sizeof plain);
+    plain.id = id;
+    plain.tenant = tenant;
+    plain.secret = "s";
+    return plain;
+}
+
+/* A growing buffer of bytes or offsets. */
+typedef struct bytes {
+    uint8_t *data;
+    size_t len;
+} bytes;
+
+static void push(bytes *target, const void *data, size_t len) {
+    target->data = realloc(target->data, target->len + len + 1);
+    if (len > 0) {
+        memcpy(target->data + target->len, data, len);
+    }
+    target->len += len;
+}
+
+typedef struct offsets {
+    uint64_t *items;
+    size_t len;
+} offsets;
+
+static void push_offset(offsets *target, uint64_t offset) {
+    target->items = realloc(target->items, (target->len + 1) * sizeof(uint64_t));
+    target->items[target->len++] = offset;
+}
+
+/* What a host passes the binding for one column. */
+typedef struct host_column {
+    bool has_states;
+    bytes states;
+    /* The offsets of the only variable-length list level any probe field has: level 0. */
+    bool has_list_offsets;
+    offsets list_offsets;
+    size_t leaf;
+    bool varlen;
+    bytes values;
+    offsets value_offsets;
+} host_column;
+
+static void add_varlen(host_column *column, const void *data, size_t len) {
+    if (column->value_offsets.len == 0) {
+        push_offset(&column->value_offsets, 0);
+    }
+    push(&column->values, data, len);
+    push_offset(&column->value_offsets, column->values.len);
+}
+
+static void add_state(host_column *column, bool present) {
+    uint8_t state = present ? NX_CELL_VALUE : NX_CELL_NULL;
+    push(&column->states, &state, 1);
+}
+
+/* The column `name` of `rows`, as a host lays it out. */
+static host_column column_of(const char *name, const row *rows, size_t count) {
+    host_column column;
+    memset(&column, 0, sizeof column);
+    for (size_t index = 0; index < count; index++) {
+        const row *item = &rows[index];
+        if (strcmp(name, "id") == 0 || strcmp(name, "echo") == 0) {
+            push(&column.values, &item->id, 4);
+        } else if (strcmp(name, "tenant") == 0) {
+            column.varlen = true;
+            add_varlen(&column, item->tenant, strlen(item->tenant));
+        } else if (strcmp(name, "u8v") == 0) {
+            push(&column.values, &item->u8v, 1);
+        } else if (strcmp(name, "i8v") == 0) {
+            push(&column.values, &item->i8v, 1);
+        } else if (strcmp(name, "u16v") == 0) {
+            push(&column.values, &item->u16v, 2);
+        } else if (strcmp(name, "i16v") == 0) {
+            push(&column.values, &item->i16v, 2);
+        } else if (strcmp(name, "u32v") == 0) {
+            push(&column.values, &item->u32v, 4);
+        } else if (strcmp(name, "i32v") == 0) {
+            push(&column.values, &item->i32v, 4);
+        } else if (strcmp(name, "u64v") == 0) {
+            push(&column.values, &item->u64v, 8);
+        } else if (strcmp(name, "i64v") == 0) {
+            push(&column.values, &item->i64v, 8);
+        } else if (strcmp(name, "f32v") == 0) {
+            push(&column.values, &item->f32v, 4);
+        } else if (strcmp(name, "f64v") == 0) {
+            push(&column.values, &item->f64v, 8);
+        } else if (strcmp(name, "flag") == 0) {
+            uint8_t flag = item->flag ? 1 : 0;
+            push(&column.values, &flag, 1);
+        } else if (strcmp(name, "at") == 0) {
+            push(&column.values, &item->at, 8);
+        } else if (strcmp(name, "text") == 0 || strcmp(name, "raw") == 0) {
+            const blob *value = strcmp(name, "text") == 0 ? &item->text : &item->raw;
+            column.varlen = true;
+            column.has_states = true;
+            add_state(&column, value->present);
+            add_varlen(&column, value->data, value->len);
+        } else if (strcmp(name, "maybe") == 0) {
+            column.has_states = true;
+            add_state(&column, item->has_maybe);
+            push(&column.values, &item->maybe, 8);
+        } else if (strcmp(name, "tags") == 0) {
+            column.varlen = true;
+            column.has_list_offsets = true;
+            column.leaf = 1;
+            if (column.list_offsets.len == 0) {
+                push_offset(&column.list_offsets, 0);
+                push_offset(&column.value_offsets, 0);
+            }
+            for (size_t tag = 0; tag < item->tag_count; tag++) {
+                push(&column.values, item->tags[tag], strlen(item->tags[tag]));
+                push_offset(&column.value_offsets, column.values.len);
+            }
+            push_offset(&column.list_offsets, column.value_offsets.len - 1);
+        } else if (strcmp(name, "grid") == 0) {
+            column.leaf = 2;
+            push(&column.values, item->grid, sizeof item->grid);
+        } else if (strcmp(name, "spans") == 0) {
+            column.has_states = true;
+            column.has_list_offsets = true;
+            column.leaf = 2;
+            add_state(&column, item->has_spans);
+            if (column.list_offsets.len == 0) {
+                push_offset(&column.list_offsets, 0);
+            }
+            push(&column.values, item->spans, item->span_count * sizeof(int64_t[2]));
+            push_offset(&column.list_offsets, column.values.len / sizeof(int64_t[2]));
+        } else if (strcmp(name, "secret") == 0) {
+            column.varlen = true;
+            add_varlen(&column, item->secret, strlen(item->secret));
+        } else {
+            fail("the probe holds no column of that name");
+        }
+    }
+    if (column.varlen && column.value_offsets.len == 0) {
+        push_offset(&column.value_offsets, 0);
+    }
+    return column;
+}
+
+static void free_column(host_column *column) {
+    free(column->states.data);
+    free(column->list_offsets.items);
+    free(column->values.data);
+    free(column->value_offsets.items);
+}
+
+static nx_fields *fields_of(const field_spec *const *specs, size_t count) {
+    nx_fields *fields = nx_fields_new();
+    for (size_t index = 0; index < count; index++) {
+        const field_spec *spec = specs[index];
+        check(nx_fields_add(fields, text(spec->name), strlen(spec->name), spec->levels[0].type,
+                            spec->levels[0].length, spec->nullable, spec->sensitive),
+              "add field");
+        for (size_t level = 1; level < spec->level_count; level++) {
+            check(nx_fields_element(fields, spec->levels[level].type, spec->levels[level].length),
+                  "add element");
+        }
+    }
+    return fields;
+}
+
+/* One field of a schema the binding reported, with every level of its type. */
+typedef struct reported_field {
+    const uint8_t *name;
+    size_t name_len;
+    level_spec levels[4];
+    size_t level_count;
+    bool nullable;
+    bool sensitive;
+} reported_field;
+
+typedef struct reported_fields {
+    reported_field items[32];
+    size_t count;
+} reported_fields;
+
+static reported_fields reported_fields_of(const nx_schema *schema) {
+    reported_fields result;
+    memset(&result, 0, sizeof result);
+    check(nx_schema_field_count(schema, NX_PART_ROWS, &result.count), "field count");
+    if (result.count > 32) {
+        fail("a schema has more fields than the probe reads");
+    }
+    for (size_t index = 0; index < result.count; index++) {
+        reported_field *item = &result.items[index];
+        nx_type type = NX_TYPE_U8;
+        check(nx_schema_field(schema, NX_PART_ROWS, index, &item->name, &item->name_len, &type,
+                              &item->nullable, &item->sensitive),
+              "field");
+        check(nx_schema_field_levels(schema, NX_PART_ROWS, index, &item->level_count), "levels");
+        if (item->level_count > 4) {
+            fail("a field nests deeper than the probe reads");
+        }
+        for (size_t level = 0; level < item->level_count; level++) {
+            check(nx_schema_field_level(schema, NX_PART_ROWS, index, level,
+                                        &item->levels[level].type, &item->levels[level].length),
+                  "level");
+        }
+        if (item->levels[0].type != type) {
+            fail("a field's first level differs from its type");
+        }
+    }
+    return result;
+}
+
+/* A field's type in NSPL's spelling, with nested fixed-size lists as dimensions. */
+static void append_type(line *target, const level_spec *levels, size_t count) {
+    if (levels[0].type == NX_TYPE_LIST) {
+        append(target, "VEC<");
+        append_type(target, levels + 1, count - 1);
+        append(target, ">");
+        return;
+    }
+    if (levels[0].type == NX_TYPE_FIXED_LIST) {
+        size_t dimensions = 0;
+        while (dimensions < count && levels[dimensions].type == NX_TYPE_FIXED_LIST) {
+            dimensions++;
+        }
+        append(target, "ARRAY<");
+        append_type(target, levels + dimensions, count - dimensions);
+        for (size_t index = 0; index < dimensions; index++) {
+            append(target, ", %" PRIu32, levels[index].length);
+        }
+        append(target, ">");
+        return;
+    }
+    append(target, "%s", type_name(levels[0].type));
+}
+
+static void print_reported(const char *prefix, const reported_field *item) {
+    line type = {NULL, 0};
+    append(&type, "%s", "");
+    append_type(&type, item->levels, item->level_count);
+    printf("%s %.*s %s %s %s\n", prefix, (int)item->name_len, (const char *)item->name, type.text,
+           item->nullable ? "nullable" : "required", item->sensitive ? "sensitive" : "public");
+    free(type.text);
+}
+
+static bool named(const reported_field *item, const char *name) {
+    return item->name_len == strlen(name) && memcmp(item->name, name, item->name_len) == 0;
+}
+
+/* Builds a batch of `rows` for `schema`, writing over every buffer as soon as the binding has
+   copied it. */
+static nx_batch *build_batch(const nx_schema *schema, const row *rows, size_t count) {
+    reported_fields fields = reported_fields_of(schema);
+    nx_batch_builder *builder = NULL;
+    check(nx_batch_builder_new(schema, count, &builder), "builder");
+    for (size_t index = 0; index < fields.count; index++) {
+        char name[64];
+        snprintf(name, sizeof name, "%.*s", (int)fields.items[index].name_len,
+                 (const char *)fields.items[index].name);
+        host_column column = column_of(name, rows, count);
+        if (column.has_states) {
+            check(nx_batch_builder_states(builder, index, column.states.data, column.states.len),
+                  "states");
+            memset(column.states.data, SCRIBBLE, column.states.len);
+        }
+        if (column.has_list_offsets) {
+            check(nx_batch_builder_offsets(builder, index, 0, column.list_offsets.items,
+                                           column.list_offsets.len),
+                  "list offsets");
+            memset(column.list_offsets.items, 0xff, column.list_offsets.len * sizeof(uint64_t));
+        }
+        if (column.varlen) {
+            check(nx_batch_builder_varlen(builder, index, column.leaf, column.value_offsets.items,
+                                          column.value_offsets.len, column.values.data,
+                                          column.values.len),
+                  "varlen values");
+            memset(column.value_offsets.items, 0xff, column.value_offsets.len * sizeof(uint64_t));
+        } else {
+            check(nx_batch_builder_fixed(builder, index, column.leaf, column.values.data,
+                                         column.values.len),
+                  "fixed values");
+        }
+        if (column.values.data != NULL) {
+            memset(column.values.data, SCRIBBLE, column.values.len);
+        }
+        free_column(&column);
+    }
+    nx_batch *batch = NULL;
+    check(nx_batch_builder_finish(builder, &batch), "finish");
+    nx_batch_builder_free(builder);
+    return batch;
+}
+
+/* One column as the binding copied it out. */
+typedef struct column_view {
+    uint8_t *states;
+    /* One entry per list level: the offsets of a LIST level, or NULL for a FIXED_LIST level. */
+    uint64_t *list_offsets[3];
+    uint32_t list_lengths[3];
+    size_t list_count;
+    nx_type leaf_type;
+    uint8_t *values;
+    uint64_t *value_offsets;
+} column_view;
+
+static size_t batch_cells(const nx_batch *batch, size_t column, size_t level) {
+    size_t cells = 0;
+    check(nx_batch_cells(batch, column, level, &cells), "cells");
+    return cells;
+}
+
+/* Reads one column in one call per level of its type. */
+static column_view read_column(const nx_batch *batch, size_t index, const reported_field *field) {
+    column_view view;
+    memset(&view, 0, sizeof view);
+    size_t rows = batch_cells(batch, index, 0);
+    view.states = malloc(rows + 1);
+    check(nx_batch_states(batch, index, view.states, rows), "states");
+    size_t innermost = field->level_count - 1;
+    view.list_count = innermost;
+    for (size_t level = 0; level < innermost; level++) {
+        if (field->levels[level].type == NX_TYPE_LIST) {
+            size_t cells = batch_cells(batch, index, level);
+            view.list_offsets[level] = malloc((cells + 1) * sizeof(uint64_t));
+            check(nx_batch_offsets(batch, index, level, view.list_offsets[level], cells + 1),
+                  "offsets");
+        } else {
+            view.list_lengths[level] = field->levels[level].length;
+        }
+    }
+    view.leaf_type = field->levels[innermost].type;
+    size_t cells = batch_cells(batch, index, innermost);
+    if (view.leaf_type == NX_TYPE_STRING || view.leaf_type == NX_TYPE_BYTES) {
+        view.value_offsets = malloc((cells + 1) * sizeof(uint64_t));
+        size_t data_len = 0;
+        check(nx_batch_varlen(batch, index, innermost, view.value_offsets, cells + 1, NULL, 0,
+                              &data_len),
+              "varlen length");
+        view.values = malloc(data_len + 1);
+        check(nx_batch_varlen(batch, index, innermost, view.value_offsets, cells + 1, view.values,
+                              data_len, &data_len),
+              "varlen");
+    } else {
+        size_t len = cells * fixed_width(view.leaf_type);
+        view.values = malloc(len + 1);
+        check(nx_batch_fixed(batch, index, innermost, view.values, len), "fixed");
+    }
+    return view;
+}
+
+static void free_view(column_view *view) {
+    free(view->states);
+    for (size_t level = 0; level < view->list_count; level++) {
+        free(view->list_offsets[level]);
+    }
+    free(view->values);
+    free(view->value_offsets);
+}
+
+static void render_leaf(line *target, const column_view *view, size_t index) {
+    if (view->leaf_type == NX_TYPE_STRING || view->leaf_type == NX_TYPE_BYTES) {
+        uint64_t start = view->value_offsets[index];
+        uint64_t end = view->value_offsets[index + 1];
+        append(target, "%s:", view->leaf_type == NX_TYPE_STRING ? "str" : "bytes");
+        append_hex(target, view->values + start, (size_t)(end - start));
+        return;
+    }
+    const uint8_t *cell = view->values + index * fixed_width(view->leaf_type);
+    switch (view->leaf_type) {
+    case NX_TYPE_U8: append(target, "u8:%" PRIu8, *cell); break;
+    case NX_TYPE_I8: { int8_t value; memcpy(&value, cell, 1); append(target, "i8:%" PRId8, value); break; }
+    case NX_TYPE_BOOL: append(target, "bool:%s", *cell == 1 ? "true" : "false"); break;
+    case NX_TYPE_U16: { uint16_t value; memcpy(&value, cell, 2); append(target, "u16:%" PRIu16, value); break; }
+    case NX_TYPE_I16: { int16_t value; memcpy(&value, cell, 2); append(target, "i16:%" PRId16, value); break; }
+    case NX_TYPE_U32: { uint32_t value; memcpy(&value, cell, 4); append(target, "u32:%" PRIu32, value); break; }
+    case NX_TYPE_I32: { int32_t value; memcpy(&value, cell, 4); append(target, "i32:%" PRId32, value); break; }
+    case NX_TYPE_F32: { uint32_t value; memcpy(&value, cell, 4); append(target, "f32:%08" PRIx32, value); break; }
+    case NX_TYPE_U64: { uint64_t value; memcpy(&value, cell, 8); append(target, "u64:%" PRIu64, value); break; }
+    case NX_TYPE_I64: { int64_t value; memcpy(&value, cell, 8); append(target, "i64:%" PRId64, value); break; }
+    case NX_TYPE_F64: { uint64_t value; memcpy(&value, cell, 8); append(target, "f64:%016" PRIx64, value); break; }
+    case NX_TYPE_DATETIME: { int64_t value; memcpy(&value, cell, 8); append(target, "datetime:%" PRId64, value); break; }
+    default: fail("a leaf is not a scalar");
+    }
+}
+
+static void render_cell(line *target, const column_view *view, size_t level, size_t index) {
+    if (level == view->list_count) {
+        render_leaf(target, view, index);
+        return;
+    }
+    size_t start = 0;
+    size_t end = 0;
+    if (view->list_offsets[level] != NULL) {
+        start = (size_t)view->list_offsets[level][index];
+        end = (size_t)view->list_offsets[level][index + 1];
+    } else {
+        start = index * view->list_lengths[level];
+        end = start + view->list_lengths[level];
+    }
+    append(target, "[");
+    for (size_t element = start; element < end; element++) {
+        if (element > start) {
+            append(target, ",");
+        }
+        render_cell(target, view, level + 1, element);
+    }
+    append(target, "]");
+}
+
+/* Every row of the batch rendered as a report line. The caller frees the lines. */
+static char **batch_rows(const nx_batch *batch, const reported_fields *fields, size_t *count) {
+    *count = nx_batch_row_count(batch);
+    column_view *views = calloc(fields->count, sizeof(column_view));
+    for (size_t index = 0; index < fields->count; index++) {
+        views[index] = read_column(batch, index, &fields->items[index]);
+    }
+    char **rows = calloc(*count + 1, sizeof(char *));
+    for (size_t index = 0; index < *count; index++) {
+        line target = {NULL, 0};
+        append(&target, "ROW");
+        for (size_t column = 0; column < fields->count; column++) {
+            append(&target, " %.*s=", (int)fields->items[column].name_len,
+                   (const char *)fields->items[column].name);
+            if (views[column].states[index] == NX_CELL_NULL) {
+                append(&target, "null");
+            } else {
+                render_cell(&target, &views[column], 0, index);
+            }
+        }
+        rows[index] = target.text;
+    }
+    for (size_t index = 0; index < fields->count; index++) {
+        free_view(&views[index]);
+    }
+    free(views);
+    return rows;
+}
+
+static void free_rows(char **rows, size_t count) {
+    for (size_t index = 0; index < count; index++) {
+        free(rows[index]);
+    }
+    free(rows);
+}
+
+/* Whether the batch's `id` column holds exactly `expected`. */
+static bool has_ids(const nx_batch *batch, const reported_fields *fields, const uint32_t *expected,
+                    size_t count) {
+    for (size_t index = 0; index < fields->count; index++) {
+        if (!named(&fields->items[index], "id")) {
+            continue;
+        }
+        if (nx_batch_row_count(batch) != count) {
+            return false;
+        }
+        column_view view = read_column(batch, index, &fields->items[index]);
+        bool same = memcmp(view.values, expected, count * sizeof(uint32_t)) == 0;
+        free_view(&view);
+        return same;
+    }
+    return false;
+}
+
+static nx_cancel *deadline_after(uint64_t millis) {
+    nx_cancel *deadline = NULL;
+    check(nx_cancel_with_deadline(millis, &deadline), "deadline");
+    return deadline;
+}
+
+static const char *submission_refusal_name(nx_submission_refusal refusal) {
+    switch (refusal) {
+    case NX_REFUSAL_INVALID_BATCH: return "invalid_batch";
+    case NX_REFUSAL_SUSPENDED: return "suspended";
+    case NX_REFUSAL_BUSY: return "busy";
+    case NX_REFUSAL_DRAINING: return "draining";
+    case NX_REFUSAL_PRODUCER_ENDED: return "producer_ended";
+    case NX_REFUSAL_CREDIT_EXCEEDED: return "credit_exceeded";
+    }
+    fail("unknown refusal");
+    return NULL;
+}
+
+static const char *defect_name(nx_batch_defect defect) {
+    switch (defect) {
+    case NX_DEFECT_MALFORMED: return "malformed";
+    case NX_DEFECT_UNEXPECTED_MESSAGE: return "unexpected_message";
+    case NX_DEFECT_COMPRESSED: return "compressed";
+    case NX_DEFECT_SCHEMA_MISMATCH: return "schema_mismatch";
+    case NX_DEFECT_NOT_ONE_BATCH: return "not_one_batch";
+    case NX_DEFECT_TOO_MANY_ROWS: return "too_many_rows";
+    case NX_DEFECT_TOO_LARGE: return "too_large";
+    case NX_DEFECT_INVALID_DATA: return "invalid_data";
+    }
+    fail("unknown defect");
+    return NULL;
+}
+
+/* Waits for a submission's outcome and prints it. */
+static void print_outcome(const nx_producer *producer, uint64_t submission) {
+    nx_cancel *deadline = deadline_after(WAIT_MILLIS);
+    nx_submission_outcome *outcome = NULL;
+    check(nx_producer_rejoin(producer, submission, deadline, &outcome), "rejoin");
+    nx_cancel_free(deadline);
+    switch (nx_submission_outcome_result(outcome)) {
+    case NX_SUBMISSION_COMPLETED:
+        printf("OUTCOME completed\n");
+        break;
+    case NX_SUBMISSION_NOT_ADMITTED: {
+        nx_submission_refusal refusal = NX_REFUSAL_BUSY;
+        check(nx_submission_outcome_refusal(outcome, &refusal), "refusal");
+        printf("OUTCOME not_admitted %s", submission_refusal_name(refusal));
+        if (refusal == NX_REFUSAL_INVALID_BATCH) {
+            nx_batch_defect defect = NX_DEFECT_MALFORMED;
+            check(nx_submission_outcome_defect(outcome, &defect), "defect");
+            printf(" %s", defect_name(defect));
+        }
+        printf("\n");
+        break;
+    }
+    case NX_SUBMISSION_PROCESSING_FAILED: {
+        nx_processing_failure failure = NX_FAILURE_ACK_TIMED_OUT;
+        check(nx_submission_outcome_failure(outcome, &failure), "failure");
+        printf("OUTCOME processing_failed %s\n",
+               failure == NX_FAILURE_REJECTED ? "rejected" : "ack_timed_out");
+        break;
+    }
+    case NX_SUBMISSION_OUTCOME_UNKNOWN: {
+        nx_submission_uncertainty cause = NX_UNCERTAINTY_INTERRUPTED;
+        check(nx_submission_outcome_uncertainty(outcome, &cause), "uncertainty");
+        printf("OUTCOME outcome_unknown %s\n",
+               cause == NX_UNCERTAINTY_SESSION_LOST ? "session_lost"
+               : cause == NX_UNCERTAINTY_OWNER_LOST ? "owner_lost"
+                                                    : "interrupted");
+        break;
+    }
+    }
+    nx_submission_outcome_free(outcome);
+}
+
+static uint64_t submit(const nx_producer *producer, const nx_batch *batch) {
+    uint64_t submission = 0;
+    check(nx_producer_submit(producer, batch, NULL, &submission), "submit");
+    return submission;
+}
+
+static nx_delivery *next_delivery(const nx_consumer *consumer) {
+    nx_cancel *deadline = deadline_after(WAIT_MILLIS);
+    nx_delivery *delivery = NULL;
+    check(nx_consumer_next(consumer, deadline, &delivery), "next delivery");
+    nx_cancel_free(deadline);
+    return delivery;
+}
+
+static const char *settlement_name(nx_settlement settlement) {
+    switch (settlement) {
+    case NX_SETTLEMENT_CONFIRMED: return "confirmed";
+    case NX_SETTLEMENT_STALE_REFERENCE: return "stale_reference";
+    case NX_SETTLEMENT_WRONG_CONSUMER: return "wrong_consumer";
+    case NX_SETTLEMENT_INVALID_REASON: return "invalid_reason";
+    case NX_SETTLEMENT_CONSUMER_ENDED: return "consumer_ended";
+    }
+    fail("unknown settlement");
+    return NULL;
+}
+
+static const char *ack(const nx_delivery *delivery) {
+    nx_cancel *deadline = deadline_after(WAIT_MILLIS);
+    nx_settlement settlement = NX_SETTLEMENT_CONSUMER_ENDED;
+    check(nx_delivery_ack(delivery, deadline, &settlement), "ack");
+    nx_cancel_free(deadline);
+    return settlement_name(settlement);
+}
+
+static const char *state_name(nx_endpoint_state state) {
+    switch (state) {
+    case NX_ENDPOINT_ACTIVE: return "active";
+    case NX_ENDPOINT_INTERRUPTED: return "interrupted";
+    case NX_ENDPOINT_RESTORING: return "restoring";
+    case NX_ENDPOINT_REOPEN_REQUIRED: return "reopen_required";
+    case NX_ENDPOINT_CLOSED: return "closed";
+    }
+    fail("unknown endpoint state");
+    return NULL;
+}
+
+/* A borrowed byte string, copied. */
+typedef struct copy {
+    uint8_t *data;
+    size_t len;
+} copy;
+
+static copy copied_bytes(const uint8_t *data, size_t len) {
+    copy result = {malloc(len + 1), len};
+    if (len > 0) {
+        memcpy(result.data, data, len);
+    }
+    return result;
+}
+
+static bool same_bytes(copy left, copy right) {
+    return left.len == right.len && (left.len == 0 || memcmp(left.data, right.data, left.len) == 0);
+}
+
+static copy delivery_identity(const nx_delivery *delivery) {
+    const uint8_t *data = NULL;
+    size_t len = 0;
+    nx_delivery_identity(delivery, &data, &len);
+    return copied_bytes(data, len);
+}
+
+static copy delivery_reference(const nx_delivery *delivery) {
+    const uint8_t *data = NULL;
+    size_t len = 0;
+    nx_delivery_reference(delivery, &data, &len);
+    return copied_bytes(data, len);
+}
+
+static copy delivery_stream(const nx_delivery *delivery) {
+    const uint8_t *data = NULL;
+    size_t len = 0;
+    nx_delivery_ipc(delivery, &data, &len);
+    return copied_bytes(data, len);
+}
+
+static nx_batch *delivery_batch(const nx_delivery *delivery) {
+    nx_batch *batch = NULL;
+    check(nx_delivery_batch(delivery, &batch), "delivery batch");
+    return batch;
+}
+
+/* Opening with `specs` has to be refused; prints the refusal. */
+static void expect_refused_producer(nx_session *session, const char *domain, const char *ingestor,
+                                    nx_fields *fields) {
+    nx_producer *producer = NULL;
+    nx_error *error = nx_session_open_ingestor(session, text(domain), strlen(domain), text(ingestor),
+                                               strlen(ingestor), fields, PRODUCER_BATCHES,
+                                               ENDPOINT_BYTES, NULL, &producer);
+    nx_open_refusal refusal = NX_OPEN_DOMAIN_NOT_FOUND;
+    if (error == NULL || nx_error_kind_of(error) != NX_ERROR_REJECTED ||
+        !nx_error_open_refusal(error, &refusal) || refusal != NX_OPEN_SCHEMA_MISMATCH) {
+        fail("an open with another schema was not refused as a schema mismatch");
+    }
+    nx_error_free(error);
+    printf("REFUSED producer schema mismatch\n");
+}
+
+static void expect_refused_consumer(nx_session *session, const char *domain, const char *emitter,
+                                    nx_fields *fields) {
+    nx_consumer *consumer = NULL;
+    nx_error *error = nx_session_subscribe_emitter(session, text(domain), strlen(domain),
+                                                   text(emitter), strlen(emitter), fields,
+                                                   CONSUMER_BATCHES, ENDPOINT_BYTES, NULL, &consumer);
+    nx_open_refusal refusal = NX_OPEN_DOMAIN_NOT_FOUND;
+    if (error == NULL || nx_error_kind_of(error) != NX_ERROR_REJECTED ||
+        !nx_error_open_refusal(error, &refusal) || refusal != NX_OPEN_SCHEMA_MISMATCH) {
+        fail("an open with another schema was not refused as a schema mismatch");
+    }
+    nx_error_free(error);
+    printf("REFUSED consumer schema mismatch\n");
+}
+
+typedef struct next_waiter {
+    const nx_consumer *consumer;
+    nx_cancel *cancel;
+    nx_error *error;
+} next_waiter;
+
+static void *wait_for_delivery(void *argument) {
+    next_waiter *state = argument;
+    nx_delivery *delivery = NULL;
+    state->error = nx_consumer_next(state->consumer, state->cancel, &delivery);
+    if (delivery != NULL) {
+        nx_delivery_release(delivery);
+    }
+    return NULL;
+}
+
+static void *release_delivery(void *argument) {
+    nx_delivery_release(argument);
+    return NULL;
+}
+
+static int run_endpoints(nx_session *session, const char *domain) {
+    const char *ingestor = env("NERVIX_PROBE_INGESTOR");
+    const char *emitter = env("NERVIX_PROBE_EMITTER");
+    bool checks = true;
+
+    const field_spec *input_specs[INPUT_FIELD_COUNT];
+    const field_spec *output_specs[INPUT_FIELD_COUNT + 1];
+    const field_spec *mismatched_specs[INPUT_FIELD_COUNT];
+    for (size_t index = 0; index < INPUT_FIELD_COUNT; index++) {
+        input_specs[index] = &INPUT_FIELDS[index];
+        output_specs[index] = &INPUT_FIELDS[index];
+        mismatched_specs[index] =
+            strcmp(INPUT_FIELDS[index].name, "secret") == 0 ? &PUBLIC_SECRET : &INPUT_FIELDS[index];
+    }
+    output_specs[INPUT_FIELD_COUNT] = &ECHO_FIELD;
+    nx_fields *input_fields = fields_of(input_specs, INPUT_FIELD_COUNT);
+    nx_fields *output_fields = fields_of(output_specs, INPUT_FIELD_COUNT + 1);
+    nx_fields *mismatched = fields_of(mismatched_specs, INPUT_FIELD_COUNT);
+
+    /* An open whose expected fields differ from the endpoint's is refused exactly. */
+    expect_refused_producer(session, domain, ingestor, mismatched);
+    expect_refused_consumer(session, domain, emitter, input_fields);
+    nx_fields_free(mismatched);
+
+    nx_consumer *consumer = NULL;
+    check(nx_session_subscribe_emitter(session, text(domain), strlen(domain), text(emitter),
+                                       strlen(emitter), output_fields, CONSUMER_BATCHES,
+                                       ENDPOINT_BYTES, NULL, &consumer),
+          "open consumer");
+    nx_producer *producer = NULL;
+    check(nx_session_open_ingestor(session, text(domain), strlen(domain), text(ingestor),
+                                   strlen(ingestor), input_fields, PRODUCER_BATCHES,
+                                   ENDPOINT_BYTES, NULL, &producer),
+          "open producer");
+    nx_schema *output_schema = NULL;
+    check(nx_consumer_schema(consumer, &output_schema), "consumer schema");
+    nx_schema *input_schema = NULL;
+    check(nx_producer_schema(producer, &input_schema), "producer schema");
+    reported_fields output = reported_fields_of(output_schema);
+    reported_fields input = reported_fields_of(input_schema);
+
+    nx_ack_window window = NX_ACK_PARALLEL;
+    uint64_t outstanding = 0;
+    uint64_t ack_timeout = 0;
+    uint64_t backoff = 0;
+    uint64_t max_backoff = 0;
+    uint32_t batches = 0;
+    uint64_t bytes_granted = 0;
+    uint32_t max_rows = 0;
+    uint64_t max_bytes = 0;
+    nx_consumer_policy(consumer, &window, &outstanding, &ack_timeout, &backoff, &max_backoff);
+    nx_consumer_grant(consumer, &batches, &bytes_granted, &max_rows, &max_bytes);
+    printf("CONSUMER generation=%" PRIu64 " state=%s window=%s/%" PRIu64 " ack_timeout=%" PRIu64
+           " credit=%" PRIu32 "/%" PRIu64 " max=%" PRIu32 "/%" PRIu64 "\n",
+           nx_consumer_generation(consumer), state_name(nx_consumer_state(consumer)),
+           window == NX_ACK_SEQUENTIAL ? "sequential" : "parallel", outstanding, ack_timeout,
+           batches, bytes_granted, max_rows, max_bytes);
+    for (size_t index = 0; index < output.count; index++) {
+        print_reported("OUTPUT FIELD", &output.items[index]);
+    }
+    nx_producer_policy(producer, &window, &outstanding, &ack_timeout, &backoff, &max_backoff);
+    nx_producer_grant(producer, &batches, &bytes_granted, &max_rows, &max_bytes);
+    checks = checks && max_rows > 0 && max_bytes > 0 && max_bytes <= bytes_granted;
+    printf("PRODUCER generation=%" PRIu64 " state=%s admission=%s window=%s/%" PRIu64
+           " ack_timeout=%" PRIu64 " credit=%" PRIu32 "/%" PRIu64 "\n",
+           nx_producer_generation(producer), state_name(nx_producer_state(producer)),
+           nx_producer_admission(producer) == NX_ADMISSION_OPEN ? "open" : "suspended",
+           window == NX_ACK_SEQUENTIAL ? "sequential" : "parallel", outstanding, ack_timeout,
+           batches, bytes_granted);
+    for (size_t index = 0; index < input.count; index++) {
+        print_reported("INPUT FIELD", &input.items[index]);
+    }
+    printf("OPENED\n");
+
+    /* A wait for output that nothing produces ends by its deadline, and one cancelled from another
+       thread by its token; the reads they leave behind are the consumer's. */
+    nx_cancel *expiring = deadline_after(EXPIRING_MILLIS);
+    nx_delivery *nothing = NULL;
+    expect_kind(nx_consumer_next(consumer, expiring, &nothing), NX_ERROR_DEADLINE,
+                "an expired read did not report DEADLINE");
+    nx_cancel_free(expiring);
+    printf("NEXT deadline\n");
+    next_waiter waiter = {consumer, nx_cancel_new(), NULL};
+    pthread_t waiting;
+    if (pthread_create(&waiting, NULL, wait_for_delivery, &waiter) != 0) {
+        fail("starting the reading thread");
+    }
+    struct timespec pause = {0, 100 * 1000 * 1000};
+    nanosleep(&pause, NULL);
+    nx_cancel_trigger(waiter.cancel);
+    pthread_join(waiting, NULL);
+    expect_kind(waiter.error, NX_ERROR_CANCELLED, "a cancelled read did not report CANCELLED");
+    nx_cancel_free(waiter.cancel);
+    printf("NEXT cancelled\n");
+
+    /* A batch built for another schema is refused before anything is sent, and the same batch
+       written as a stream by other tooling is refused by the server. */
+    size_t row_count = sizeof typed_rows / sizeof typed_rows[0];
+    nx_batch *other = build_batch(output_schema, typed_rows, row_count);
+    uint64_t submission = 0;
+    expect_kind(nx_producer_submit(producer, other, NULL, &submission), NX_ERROR_INVALID_ARGUMENT,
+                "a batch of another schema was not refused as the host's argument");
+    printf("SUBMIT invalid argument\n");
+    const uint8_t *foreign = NULL;
+    size_t foreign_len = 0;
+    check(nx_batch_ipc(other, &foreign, &foreign_len), "stream");
+    check(nx_producer_submit_ipc(producer, foreign, foreign_len, NULL, &submission), "submit stream");
+    nx_batch_release(other);
+    print_outcome(producer, submission);
+
+    /* The typed batch: its outcome waits for the application's acknowledgement. */
+    nx_batch *first_batch = build_batch(input_schema, typed_rows, row_count);
+    uint64_t first = submit(producer, first_batch);
+    nx_batch_release(first_batch);
+    printf("SUBMITTED first\n");
+    nx_delivery *delivery = next_delivery(consumer);
+    const uint8_t *relay = NULL;
+    size_t relay_len = 0;
+    const uint8_t *fingerprint = NULL;
+    size_t fingerprint_len = 0;
+    nx_delivery_source_relay(delivery, &relay, &relay_len);
+    bool branched = nx_delivery_branch_fingerprint(delivery, &fingerprint, &fingerprint_len);
+    copy identity = delivery_identity(delivery);
+    copy reference = delivery_reference(delivery);
+    printf("DELIVERY relay=%.*s members=%" PRIu32 " branch=", (int)relay_len, (const char *)relay,
+           nx_delivery_members(delivery));
+    if (branched) {
+        printf("%zu", fingerprint_len);
+    } else {
+        printf("none");
+    }
+    printf(" identity=%zu reference=%zu\n", identity.len, reference.len);
+    uint64_t pending_ids[4] = {0};
+    bool pending_resolved[4] = {false};
+    size_t pending_count = 0;
+    check(nx_producer_pending(producer, pending_ids, pending_resolved, 4, &pending_count), "pending");
+    checks = checks && pending_count == 1 && pending_ids[0] == first && !pending_resolved[0];
+    expiring = deadline_after(EXPIRING_MILLIS);
+    nx_submission_outcome *early = NULL;
+    expect_kind(nx_producer_rejoin(producer, first, expiring, &early), NX_ERROR_DEADLINE,
+                "a submission had an outcome before its output was acknowledged");
+    nx_cancel_free(expiring);
+    printf("PENDING first unresolved\n");
+    nx_batch *delivered = delivery_batch(delivery);
+    size_t printed_count = 0;
+    char **printed = batch_rows(delivered, &output, &printed_count);
+    for (size_t index = 0; index < printed_count; index++) {
+        printf("%s\n", printed[index]);
+    }
+    const uint8_t *batch_stream = NULL;
+    size_t batch_stream_len = 0;
+    check(nx_batch_ipc(delivered, &batch_stream, &batch_stream_len), "batch stream");
+    copy carried = delivery_stream(delivery);
+    checks = checks && same_bytes(copied_bytes(batch_stream, batch_stream_len), carried);
+    nx_batch_release(delivered);
+
+    /* A retried attempt comes back with the same identity and a new reference; the first
+       reference is stale from then on. */
+    nx_cancel *deadline = deadline_after(WAIT_MILLIS);
+    nx_settlement settlement = NX_SETTLEMENT_CONSUMER_ENDED;
+    check(nx_delivery_retry(delivery, deadline, &settlement), "retry");
+    nx_cancel_free(deadline);
+    printf("RETRY %s\n", settlement_name(settlement));
+    nx_delivery *again = next_delivery(consumer);
+    checks = checks && same_bytes(delivery_identity(again), identity) &&
+             !same_bytes(delivery_reference(again), reference);
+    printf("REDELIVERED same identity new reference\n");
+    printf("ACK %s\n", ack(delivery));
+    nx_delivery_release(delivery);
+
+    /* A reference retained here outlives the first, released on another thread, and reads and
+       settles the same attempt. */
+    nx_delivery *retained = nx_delivery_retain(again);
+    nx_batch *retained_batch = delivery_batch(again);
+    copy stream_before = delivery_stream(retained);
+    pthread_t releaser;
+    if (pthread_create(&releaser, NULL, release_delivery, again) != 0) {
+        fail("starting the releasing thread");
+    }
+    pthread_join(releaser, NULL);
+    checks = checks && same_bytes(delivery_stream(retained), stream_before);
+    size_t again_count = 0;
+    char **again_rows = batch_rows(retained_batch, &output, &again_count);
+    checks = checks && again_count == printed_count;
+    for (size_t index = 0; index < again_count && index < printed_count; index++) {
+        checks = checks && strcmp(again_rows[index], printed[index]) == 0;
+    }
+    free_rows(again_rows, again_count);
+    free_rows(printed, printed_count);
+    printf("ACK %s\n", ack(retained));
+    nx_delivery_release(retained);
+    nx_batch_release(retained_batch);
+    print_outcome(producer, first);
+
+    /* An application rejection finishes the batch through the emitter's message error policy. */
+    row second_row = plain_row(10, "beta");
+    nx_batch *second_batch = build_batch(input_schema, &second_row, 1);
+    uint64_t second = submit(producer, second_batch);
+    nx_batch_release(second_batch);
+    printf("SUBMITTED second\n");
+    nx_delivery *rejected = next_delivery(consumer);
+    const char *reason = "application refused";
+    deadline = deadline_after(WAIT_MILLIS);
+    check(nx_delivery_reject(rejected, text(reason), strlen(reason), deadline, &settlement),
+          "reject");
+    nx_cancel_free(deadline);
+    printf("REJECT %s\n", settlement_name(settlement));
+    nx_delivery_release(rejected);
+    print_outcome(producer, second);
+
+    /* Two outstanding batches use up the producer's credit, so a third waits for an outcome. */
+    row third_rows[2] = {plain_row(20, "acme"), plain_row(21, "acme")};
+    row fourth_rows[2] = {plain_row(22, "acme"), plain_row(23, "acme")};
+    row fifth_rows[2] = {plain_row(24, "acme"), plain_row(25, "acme")};
+    nx_batch *third_batch = build_batch(input_schema, third_rows, 2);
+    nx_batch *fourth_batch = build_batch(input_schema, fourth_rows, 2);
+    nx_batch *fifth_batch = build_batch(input_schema, fifth_rows, 2);
+    uint64_t third = submit(producer, third_batch);
+    printf("SUBMITTED third\n");
+    uint64_t fourth = submit(producer, fourth_batch);
+    printf("SUBMITTED fourth\n");
+    expiring = deadline_after(EXPIRING_MILLIS);
+    expect_kind(nx_producer_submit(producer, fifth_batch, expiring, &submission), NX_ERROR_DEADLINE,
+                "a batch beyond the credit was submitted");
+    nx_cancel_free(expiring);
+    printf("SUBMIT deadline\n");
+    /* A batch refused as busy is sent again after the ingestor's backoff, behind the batch
+       submitted after it, so the two outputs may arrive in either order; each keeps its own
+       rows. */
+    const uint32_t third_ids[2] = {20, 21};
+    const uint32_t fourth_ids[2] = {22, 23};
+    bool third_seen = false;
+    bool fourth_seen = false;
+    for (size_t index = 0; index < 2; index++) {
+        nx_delivery *output_delivery = next_delivery(consumer);
+        nx_batch *output_batch = delivery_batch(output_delivery);
+        if (!third_seen && has_ids(output_batch, &output, third_ids, 2)) {
+            third_seen = true;
+        } else if (!fourth_seen && has_ids(output_batch, &output, fourth_ids, 2)) {
+            fourth_seen = true;
+        }
+        nx_batch_release(output_batch);
+        printf("ACK %s\n", ack(output_delivery));
+        nx_delivery_release(output_delivery);
+    }
+    checks = checks && third_seen && fourth_seen;
+    print_outcome(producer, third);
+    print_outcome(producer, fourth);
+    uint64_t fifth = submit(producer, fifth_batch);
+    printf("SUBMITTED fifth\n");
+    nx_delivery *fifth_output = next_delivery(consumer);
+    nx_batch *fifth_output_batch = delivery_batch(fifth_output);
+    const uint32_t fifth_ids[2] = {24, 25};
+    checks = checks && has_ids(fifth_output_batch, &output, fifth_ids, 2);
+    nx_batch_release(fifth_output_batch);
+    printf("ACK %s\n", ack(fifth_output));
+    nx_delivery_release(fifth_output);
+    print_outcome(producer, fifth);
+    nx_batch_release(third_batch);
+    nx_batch_release(fourth_batch);
+    nx_batch_release(fifth_batch);
+
+    /* The scenario cuts the session while one delivery is held unacknowledged. */
+    nx_producer *extra = NULL;
+    check(nx_session_open_ingestor(session, text(domain), strlen(domain), text(ingestor),
+                                   strlen(ingestor), input_fields, 1, 65536, NULL, &extra),
+          "open extra producer");
+    printf("PRODUCER extra opened\n");
+    row held_row = plain_row(30, "gamma");
+    nx_batch *held_batch = build_batch(input_schema, &held_row, 1);
+    uint64_t held = submit(producer, held_batch);
+    nx_batch_release(held_batch);
+    printf("SUBMITTED held\n");
+    nx_delivery *held_delivery = next_delivery(consumer);
+    copy held_identity = delivery_identity(held_delivery);
+    printf("HOLDING\n");
+    deadline = deadline_after(WAIT_MILLIS);
+    expect_kind(nx_consumer_next(consumer, deadline, &nothing), NX_ERROR_INTERRUPTED,
+                "a lost session did not interrupt the consumer");
+    nx_cancel_free(deadline);
+    printf("NEXT interrupted\n");
+    deadline = deadline_after(WAIT_MILLIS);
+    expect_kind(nx_delivery_ack(held_delivery, deadline, &settlement), NX_ERROR_REJECTED,
+                "a delivery of a lost session was settled");
+    nx_cancel_free(deadline);
+    printf("ACK expired\n");
+    nx_delivery_release(held_delivery);
+    print_outcome(producer, held);
+    for (int attempt = 0; nx_producer_state(extra) == NX_ENDPOINT_ACTIVE; attempt++) {
+        if (attempt > WAIT_MILLIS / 10) {
+            fail("the extra producer stayed active after its session ended");
+        }
+        struct timespec short_pause = {0, 10 * 1000 * 1000};
+        nanosleep(&short_pause, NULL);
+    }
+    deadline = deadline_after(WAIT_MILLIS);
+    check(nx_producer_close(extra, deadline), "close extra producer");
+    nx_cancel_free(deadline);
+    checks = checks && nx_producer_state(extra) == NX_ENDPOINT_CLOSED;
+    printf("CLOSED extra producer\n");
+    printf("WAITING restore\n");
+
+    /* The restored consumer receives the held batch again, and the restored producer
+       publishes. */
+    nx_delivery *redelivered = next_delivery(consumer);
+    checks = checks && same_bytes(delivery_identity(redelivered), held_identity);
+    printf("REDELIVERED held same identity\n");
+    printf("ACK %s\n", ack(redelivered));
+    nx_delivery_release(redelivered);
+    row sixth_row = plain_row(40, "gamma");
+    nx_batch *sixth_batch = build_batch(input_schema, &sixth_row, 1);
+    uint64_t sixth = submit(producer, sixth_batch);
+    nx_batch_release(sixth_batch);
+    printf("SUBMITTED sixth\n");
+    nx_delivery *sixth_output = next_delivery(consumer);
+    printf("ACK %s\n", ack(sixth_output));
+    nx_delivery_release(sixth_output);
+    print_outcome(producer, sixth);
+    printf("STATE producer=%s extra=%s consumer=%s\n", state_name(nx_producer_state(producer)),
+           state_name(nx_producer_state(extra)), state_name(nx_consumer_state(consumer)));
+    deadline = deadline_after(WAIT_MILLIS);
+    check(nx_consumer_close(consumer, deadline), "close consumer");
+    check(nx_producer_close(producer, deadline), "close producer");
+    nx_cancel_free(deadline);
+    checks = checks && nx_consumer_state(consumer) == NX_ENDPOINT_CLOSED &&
+             nx_producer_state(producer) == NX_ENDPOINT_CLOSED;
+    printf("CLOSED completed\n");
+    if (!checks) {
+        fail("the probe's checks failed");
+    }
+    printf("CHECKS ok\n");
+
+    nx_producer_free(extra);
+    nx_producer_free(producer);
+    nx_consumer_free(consumer);
+    nx_schema_free(input_schema);
+    nx_schema_free(output_schema);
+    nx_fields_free(input_fields);
+    nx_fields_free(output_fields);
+    nx_session_free(session);
+    printf("PASS\n");
+    return 0;
+}
+
 int main(int argc, char **argv) {
     const char *server = env("NERVIX_PROBE_GRPC_URI");
     const char *username = env("NERVIX_PROBE_USERNAME");
@@ -829,6 +1994,9 @@ int main(int argc, char **argv) {
           "connect");
     if (argc > 1 && strcmp(argv[1], "clock") == 0) {
         return run_clock(session, domain);
+    }
+    if (argc > 1 && strcmp(argv[1], "io") == 0) {
+        return run_endpoints(session, domain);
     }
 
     const char *relay = env("NERVIX_PROBE_RELAY");
