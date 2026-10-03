@@ -1332,8 +1332,9 @@ and grant with the first open, then publishes the new attachment to the same pro
 different generation or contract, a removed or stopped endpoint, or an incompatible schema makes
 the handle require an explicit new open. Temporary owner and capacity refusals are retried with
 bounded physical backoff while the new exchange lives. Closing or dropping the handle fences a
-late open and releases any attachment it created. The shared binding and the web console do not
-open producers.
+late open and releases any attachment it created. The shared binding opens producers through these
+same Rust client handles, so its hosts restore them the same way; the web console does not open
+producers.
 
 A serving node whose runtime has not yet passed its process-start linearizable catch-up barrier
 refuses producer and consumer opens as `EndpointUnavailable`. Its local domain snapshot may still

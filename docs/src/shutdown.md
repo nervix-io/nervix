@@ -29,7 +29,11 @@ process. Stopping a process is an operator or supervisor action delivered as a s
 
 Both signals are registered before the node starts any other work, and they stay registered until
 the process exits. A node that cannot register them refuses to start, reporting
-`failed to register termination signal handlers` and exiting with status `1`. A signal that arrives
+`failed to register termination signal handlers` and exiting with status `1`. A diagnostic node,
+the server built in the `deloxide` mode, then installs its deadlock detector before it starts a
+runtime worker, so the detector's threads exist only once neither signal can end the process by its
+default action; a diagnostic node whose deadlock diagnostics cannot start refuses to start,
+reporting `failed to start the diagnostic node's deadlock diagnostics` and exiting with status `1`. A signal that arrives
 while the node is still starting is held rather than lost: it takes effect once startup completes,
 while its deadline runs from the moment the signal arrived.
 
@@ -112,6 +116,9 @@ The deadline supervisor, not those bounds, is what guarantees the process ends.
 | Shutdown deadline expired | `1` |
 | A public listener, cluster shutdown, or storage release reported an error | `1` |
 | Termination signal handlers could not be registered at startup | `1` |
+| A diagnostic node's deadlock diagnostics could not start | `1` |
+| A diagnostic node reported an active deadlock among its tracked locks and recorded it | `3` |
+| A diagnostic node reported a deadlock it could not record, lost findings, or outlived the budget for recording one | `4` |
 | A command-line option or its environment variable holds a value the node cannot read, such as duration text that names no duration | `2` |
 | Repeated `SIGINT` | `130` |
 | Repeated `SIGTERM` | `143` |
@@ -122,6 +129,13 @@ Every `SIGINT` or `SIGTERM` after the first abandons graceful shutdown. The proc
 and exits immediately with the status a shell reports for that signal, whichever signal it was that
 started the shutdown. No destructor, exit handler, or remaining phase runs. Whichever comes first,
 the repeated signal or the deadline, decides how the process exits.
+
+A diagnostic node that reports an active deadlock ends the same way, immediately, whatever phase it
+is in: its blocked threads hold work it can no longer finish. It describes the cycle on standard
+error, records it as evidence, and exits with `3`, or with `4` when the recording failed, without
+running a destructor, an exit handler or a remaining phase, as
+[Diagnostic deadlock detection](./data-plane-concurrency.md#diagnostic-deadlock-detection)
+describes. Its durable state recovers as after any forced exit.
 
 ## Terminating Incarnation And Placement Eligibility
 
@@ -229,7 +243,10 @@ A raw quiesce buffer is not part of the drain. Payloads that a `BUFFER` mode ret
 earlier hold are outside runtime graph work: a shutdown does not replay them, and they are discarded
 and counted as dropped when the ingestor stops. A retained payload whose unfolding was still waiting
 for the extension workers stays in the buffer, so the stop ends that wait at once and discards it
-with the rest. Only work already admitted into the graph is drained.
+with the rest. A live payload a source handed over without an acknowledgement, such as a paced
+poll, whose unfolding was still waiting for the extension workers is dropped when its ingestor
+stops; the stop ends that wait at once as well. Only work already admitted into the graph is
+drained.
 
 ## Draining Admitted Work
 

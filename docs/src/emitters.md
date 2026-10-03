@@ -1087,9 +1087,13 @@ TO SQS <client> QUEUE <queue> [FIFO GROUP (FROM BRANCH | <string_expression>)]
 entries and 256 KiB per request; both modes issue requests sequentially and acknowledge service
 responses. Per-entry transient failures retry only those entries, while invalid entries and a
 message larger than 256 KiB, counting its attributes and FIFO message group, follow
-`ON MESSAGE ERROR` individually. Nervix checks what SQS refuses before sending: a body or attribute
-value holding a character SQS forbids, more than ten attributes, an attribute name SQS does not
-allow, an empty attribute value, and an invalid FIFO message group.
+`ON MESSAGE ERROR` individually. Nervix checks what SQS refuses before sending: a body that is not
+UTF-8, a body or attribute value holding a character SQS forbids, more than ten attributes, an
+attribute name SQS does not allow, an empty attribute value, and an invalid FIFO message group. SQS
+accepts the characters of the XML 1.0 `Char` production: tab, line feed, carriage return, U+0020
+to U+D7FF, U+E000 to U+FFFD and U+10000 to U+10FFFF. Every other C0 control and the noncharacters
+U+FFFE and U+FFFF are forbidden, while the other noncharacters fall inside those ranges and are
+sent.
 
 Set the SQS client's optional `timeout_ms` CONFIG key to bound both the complete service operation
 and its single SDK attempt. Nervix disables the AWS SDK's internal retries, so a timeout returns to

@@ -1,0 +1,37 @@
+[package]
+description = "A paced sensor simulation that produces into and consumes from a Nervix graph through the Rust client library"
+edition.workspace = true
+license-file.workspace = true
+name = "nervix-paced-simulation"
+version.workspace = true
+
+[lints]
+workspace = true
+
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "nervix-paced-simulation"
+path = "src/main.rs"
+
+[dependencies]
+ahash = { workspace = true }
+arrow-array = { workspace = true }
+arrow-schema = { workspace = true }
+clap = { workspace = true, features = ["derive", "env"] }
+error-stack = { workspace = true }
+meticulous = { workspace = true }
+nervix-client-core = { workspace = true, features = ["arrow"] }
+nervix-models = { workspace = true }
+nervix-primitives = { workspace = true, features = ["native"] }
+nervix-recovery = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true, features = ["fs", "io-util", "signal"] }
+
+[dev-dependencies]
+bolero = { workspace = true }
+strum = { workspace = true }
+tempfile = { workspace = true }

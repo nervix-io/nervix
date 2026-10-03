@@ -5,9 +5,10 @@
 A consumer builds a package on its own, and Cargo unifies features only within the graph of the
 root it builds, so the workspace-wide graph alone can hide a package whose own graph selects a mode.
 For the workspace and for every package in it, with default features and without them, the normal
-dependency graph contains no model checker, simulator or modeled wrapper: no Loom, no Shuttle or
-Shuttle wrapper, no Turmoil. Nor does it enable one of the primitive boundary's execution modes, or
-its `test-util` capability, whose paused clock no product runs on.
+dependency graph contains no model checker, simulator, modeled wrapper or deadlock detector: no
+Loom, no Shuttle or Shuttle wrapper, no Turmoil, no Deloxide. Nor does it enable one of the
+primitive boundary's execution modes, the diagnostic one included, or its `test-util` capability,
+whose paused clock no product runs on.
 
 The vocabulary and the browser's packages are portable: the vocabulary crate for the native target,
 and the browser console and the wire crate it decodes with for the browser's target, with default
@@ -32,12 +33,13 @@ from typing import Iterable, Sequence
 
 RULE = "execution mode dependencies"
 BOUNDARY = "nervix-primitives"
-# The model checkers, the simulator, and the wrappers that adapt a library to a model checker.
-ENGINES = frozenset({"loom", "shuttle", "turmoil"})
+# The model checkers, the simulator, the diagnostic mode's deadlock detector, and the wrappers that
+# adapt a library to a model checker.
+ENGINES = frozenset({"loom", "shuttle", "turmoil", "deloxide"})
 ENGINE_WRAPPER_PREFIX = "shuttle-"
-# The boundary's features no ordinary graph enables: every execution mode, and the controls of a
-# paused clock.
-MODELED_FEATURES = frozenset({"loom", "shuttle", "turmoil", "test-util"})
+# The boundary's features no ordinary graph enables: every execution mode, the diagnostic one
+# included, and the controls of a paused clock.
+MODELED_FEATURES = frozenset({"loom", "shuttle", "turmoil", "deloxide", "test-util"})
 BROWSER_TARGET = "wasm32-unknown-unknown"
 
 
@@ -123,8 +125,8 @@ class Root:
 
 
 def ordinary_problems(root: Root, nodes: Iterable[Node]) -> list[str]:
-    """Why an ordinary graph is not one: a model checker, simulator or wrapper in it, or a mode or
-    paused-clock feature of the boundary enabled."""
+    """Why an ordinary graph is not one: a model checker, simulator, wrapper or detector in it, or a
+    mode or paused-clock feature of the boundary enabled."""
 
     problems: list[str] = []
     seen: set[str] = set()
@@ -134,7 +136,7 @@ def ordinary_problems(root: Root, nodes: Iterable[Node]) -> list[str]:
                 seen.add(node.name)
                 problems.append(
                     f"{RULE}: the normal graph of {root.describe()} contains `{node.name}`, which "
-                    "only a modeled build may contain"
+                    "only a modeled or diagnostic build may contain"
                 )
         if node.name == BOUNDARY:
             for feature in sorted(node.features & MODELED_FEATURES):
@@ -144,7 +146,7 @@ def ordinary_problems(root: Root, nodes: Iterable[Node]) -> list[str]:
                 seen.add(key)
                 problems.append(
                     f"{RULE}: the normal graph of {root.describe()} enables `{key}`, which only a "
-                    "modeled or test build selects"
+                    "modeled, diagnostic or test build selects"
                 )
     return problems
 

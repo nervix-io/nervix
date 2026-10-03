@@ -373,9 +373,11 @@ origin, permissions, manifests, global cfgs, the analysis cfg and release binari
 authored source including the isolated analysis workspace,
 `just validate-execution-mode-dependencies` for the ordinary and portable dependency graphs of the
 workspace and of every package, and `just validate-execution-mode-conflicts` for the diagnostics of
-combined modes, of a mode or the native capability requested for the browser's target, and of a
-modeled product binary. `just lint` lints each mode in its own build, including the Shuttle builds
-and checks in `just cargo-clippy-shuttle` and the Loom builds in `just cargo-clippy-loom`.
+combined modes, of a mode or the native capability requested for the browser's target, of the
+diagnostic mode requested without the native capability, and of a product binary built in a mode it
+does not declare. `just lint` lints each mode in its own build, including the Shuttle builds and
+checks in `just cargo-clippy-shuttle`, the Loom builds in `just cargo-clippy-loom` and the
+diagnostic builds in `just cargo-clippy-deloxide`.
 
 `just test-primitives` builds `nervix-primitives` once per execution mode and runs its conformance
 checks: which backend each mode selects, the same contract scripts of every family against the
@@ -383,19 +385,49 @@ ordinary libraries and against the Shuttle adapters, the Shuttle checks that a p
 a read and a waiter's registration is reached, and the check that a Loom build takes the ordinary
 libraries for the families Loom does not model. The timer checks measure every timer on a paused
 clock in ordinary execution and show that Shuttle's timers are scheduling points whose timeouts a
-check triggers, and the Turmoil check shows that sockets, name lookup, timers and admitted CPU jobs
-belong to the simulated host that uses them. Run it after changing an adapter or the families a
-mode provides:
+check triggers, the Turmoil check shows that sockets, name lookup, timers and admitted CPU jobs
+belong to the simulated host that uses them, and the Deloxide checks show that the tracked locks keep
+the contracts of the locks they replace, including their non-blocking `Debug` and the exact count of
+waiters a notification wakes. Run it after changing an adapter or the families a mode provides:
 
 ```bash
 just test-primitives
 ```
 
 It runs `just test-primitives-ordinary`, the checks in ordinary native execution, then
-`just test-primitives-modeled`, the checks under each model checker's backend, then
+`just test-primitives-modeled`, the checks under each other mode's backend, then
 `just test-primitives-compile`, the checks that compile rather than run; each also runs alone.
 [Data-Plane Concurrency](./data-plane-concurrency.md) defines the primitive boundary, what each
 mode observes, and every model's claim.
+
+### Deadlock diagnostics
+
+A diagnostic node is the server built in the `deloxide` mode: every thread-blocking lock is tracked
+by a deadlock detector, and the first active deadlock it reports is described on standard error,
+recorded as evidence and ends the process with status `3`. Build one, in its own target directory so
+it never replaces the ordinary binary, and run it with an evidence directory that already exists:
+
+```bash
+just build-diagnostic-server
+target/deloxide/debug/nervix-server --deadlock-evidence /var/tmp/nervix-deadlocks ...
+```
+
+Run the diagnostic mode's checks with:
+
+```bash
+just test-deloxide
+```
+
+It builds under `target/deloxide` and runs the deadlock probes, each workload in a disposable
+process that must report its real cycle or end cleanly, then the `@deadlock_diagnostics` scenarios
+on in-process nodes and real diagnostic server processes of one and three nodes, without retries. It
+fails when an invocation executed no check or a scenario did not run and pass, keeps every
+invocation's output and the scenario binary's evidence under `target/deloxide/test-deloxide`, and
+exits with `124` once its budget, 2,400 seconds by default, expires. Run it after any change that adds
+or alters blocking synchronization, a lock's acquisition order, or a lifecycle or ownership path that
+uses tracked locks, and record what it covered and what it cannot see.
+[Data-Plane Concurrency](./data-plane-concurrency.md#diagnostic-deadlock-detection) describes the
+detector, its evidence and the locks it does not track.
 
 ### Deterministic network simulation
 

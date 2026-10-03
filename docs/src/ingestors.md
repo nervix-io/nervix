@@ -225,6 +225,45 @@ continues to hold at the source.
 pause|memory pressure`, `status: quiesced` for every active hold, and the four quiesce counters.
 `SHOW CREATE` round-trips the full clause.
 
+## When The Extension Workers Are Full
+
+A codec with an `ON INGESTION` transformation [unfolds](schemas-and-codecs.md#unfolding-payloads)
+every payload on the node's extension workers. When every worker is busy and the class's wait queue
+is full, what happens to a payload depends on whether its sender can present it again:
+
+- An acknowledged delivery mode rejects the batch, and its source delivers it again on its
+  `RETRY POLICY`.
+- An [HTTP endpoint](#http-endpoints) answers the body 503 without `Retry-After`, and an
+  established WebSocket closes with 1013, so the sender sends it again.
+- A payload that `BUFFER` retained waits for a place when its buffer drains; see
+  [Quiesce Modes](#quiesce-modes).
+- A paced source has already moved past its poll, so the poll waits for a place. Waiting delays the
+  next poll, and the domain cadence coalesces the occurrences it missed into one poll at the newest
+  due instant.
+- A source read in a `NO_ACK` mode cannot present a payload again either. The payload waits for a
+  place when holding the source's loop keeps its transport connected with bounded memory. Otherwise
+  it is refused: the ingestor reports the refusal as an error and counts the payload in
+  `nervix_ingestor_unfolding_refused_total`.
+
+| Source | A payload the extension workers cannot take now | Why |
+| --- | --- | --- |
+| HTTP polling, Prometheus | Waits | Holding the loop only delays the next poll. |
+| NATS | Waits | The client keeps its connection and reads the subscription while the loop waits, holding up to 65,536 messages before it drops the newest as a slow consumer. |
+| ZeroMQ | Waits | Unread messages stay in the socket's kernel buffers, and then the pushing peers wait. Nothing is dropped. |
+| Syslog | Waits | The listener stays bound. The kernel drops UDP datagrams beyond the socket's receive buffer, and TCP and TLS senders wait once the listener's 64-frame queue is full. |
+| MQTT | Refused and counted | The client sends its keep-alive only while the loop reads, so the broker closes the connection once one and a half keep-alive intervals pass without a packet from it, and what is published until the source reconnects is lost. |
+| Redis Pub/Sub | Refused and counted | The client reads every published message into an unbounded queue of its own, so a held loop would grow the node's memory without limit. |
+| WebSocket client | Refused and counted | The client answers the server's pings only while the loop reads, so a server that pings would close the connection and lose what it sent until the source reconnects. |
+| Kafka `NO_ACK PARALLEL` | Refused and counted | A consumer-group member that stops polling for `max.poll.interval.ms` leaves its group, and an instance reading domain offsets would keep its partitions assigned through an ownership handoff. |
+| Pulsar `NO_ACK PARALLEL` | Refused and counted | A consumer whose receive queue fills cannot complete its close, so a later suspension or stop would wait on it. The refused message stays unacknowledged until the consumer reconnects, when the broker delivers it again. |
+
+A wait never delays a stop or a new quiesce. Stopping the ingestor ends the wait and drops the
+payload with the rest of the ingestor's in-flight input. A new quiesce decides on the payload again,
+as on input that arrives while quiesced: `BUFFER` retains it, `DROP` drops it and counts it in
+`nervix_ingestor_quiesce_dropped_total`, and a suspension, under which a payload the source already
+handed over still dispatches, lets it wait on until the workers have room. While a payload waits,
+the ones behind it stay with the transport, in order.
+
 ## Branch Semantics
 
 Ingestors are where external mixed flows enter branch-isolated processing. Every route independently
@@ -618,6 +657,8 @@ ON QUIESCE SUSPEND
 - `204 No Content` is treated as no message
 - `SUSPEND` skips polls and therefore creates a sampling gap
 - `BUFFER` keeps polling on the declared cadence and drains retained poll payloads in order
+- a poll whose `ON INGESTION` unfolding finds the node's extension workers full waits for them; see
+  [When The Extension Workers Are Full](#when-the-extension-workers-are-full)
 
 ### Kafka
 
@@ -880,7 +921,9 @@ The first query becomes due after one `EVERY` interval. Nervix supplies each anc
 as Prometheus's evaluation time; a slow query coalesces missed occurrences and returned samples are
 evaluated with a fresh domain execution snapshot.
 `SUSPEND` skips scrapes and leaves a sampling gap. `BUFFER` keeps querying at the declared cadence
-and delivers retained results in order after resume.
+and delivers retained results in order after resume. A scrape whose `ON INGESTION` unfolding finds
+the node's extension workers full waits for them; see
+[When The Extension Workers Are Full](#when-the-extension-workers-are-full).
 
 ### HTTP Endpoints
 

@@ -10,6 +10,10 @@ Runnable end-to-end graphs live under `examples/`:
   materialized lookup state, Rust WASM enrichment, Kafka/Redis output, and Iceberg tables.
 - `examples/wasm-processors/wasm-dual.nspl` wires Rust and Go guests into set-only multi-route WASM
   processors.
+- `examples/paced-simulation/paced_simulation.nspl` is the graph of two runnable applications, a
+  Rust driver and a Python driver over the shared C binding, that pace a sensor simulation by the
+  domain clock through client ingestors and attached client emitters. [Paced Simulation
+  Drivers](paced-simulation-drivers.md) describes the graph and how to run both programs.
 
 The Docker Compose setup explicitly provisions the external bucket, catalog namespace, and tables
 used by the datalake graph. Nervix never creates those external entities during node startup.

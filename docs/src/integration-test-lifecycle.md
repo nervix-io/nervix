@@ -37,11 +37,24 @@ The suite is the `scenarios` test target, `tests/scenarios.rs`, running the feat
 | In-process nodes | One Tokio task per node on the binary's multi-threaded runtime, which has one worker thread per CPU | The cluster fixture, `tests/common/cluster.rs` |
 | Server processes | Child processes executing the `nervix-server` binary | The server-process fixture, `tests/common/server_process.rs` |
 | Real-process cluster | Three server children with separate durable stores, ports and identities under one test certificate authority | `tests/common/server_process_cluster.rs`, using the server-process fixture |
+| Deadlock diagnostics | In a scenario binary built for the `deloxide` mode only: one deadlock detector for the whole process, installed by the binary's `main`, and a diagnostic run for each server child, each recording evidence in a directory of its own | `tests/scenarios.rs`; the `@deadlock_diagnostics` steps, `tests/deadlock_diagnostics` |
 | CLI sessions | Child processes executing `nervix-cli`. One-shot commands and the `subscribe` and `domain-clock` subcommands run on pipes; the subscription reader retains at most 256 output lines and the clock reader retains at most 2,048. The interactive REPL runs on a pseudo-terminal, whose fixture retains the newest 256 KiB the terminal displayed | The scenario world, `tests/scenarios.rs`; the terminal fixture, `tests/common/cli_terminal.rs` |
 | Test dependencies | Containers started on first use and shared by every scenario of the run | `nervix-test-environment`, through `tests/common/dependencies.rs` |
 | HTTP receivers | Tasks on the binary's runtime, one listener and one task per connection, owned by the scenario that started them | The HTTP receiver fixture, `tests/common/http_receiver.rs` |
 | gRPC receivers | Tasks on the binary's runtime, one listener, one task per connection and one per call, owned by the scenario that started them | The gRPC receiver fixture, `tests/common/grpc_receiver.rs` |
 | Client probes | A child process per probe of another language, or one blocking task for the in-process probe of the shared Rust binding, owned by the scenario that started it | The client probe fixture, `tests/common/client_conformance.rs` |
+
+A scenario binary built for the `deloxide` mode, which only `just test-deloxide` builds, starts its
+deadlock diagnostics in `main`, right after it configures the lifecycle of its test dependencies and
+before it builds its runtime, so its one detector is installed before any tracked lock or runtime
+worker exists and every in-process node shares it; the helper process that holds a dependency
+container open starts its own. It records its evidence in `NERVIX_DEADLOCK_EVIDENCE` when that is
+set. A binary whose diagnostics cannot start exits with status `4` before any scenario runs, and the
+first active deadlock any of its tracked locks reports ends the whole run with status `3`, its
+description on standard error. A server child started with the fixture's deadlock evidence option
+records its own evidence under its root, and is a diagnostic node only when the binary beside the
+scenario binary was built for the mode. The ordinary suite leaves the `@deadlock_diagnostics`
+scenarios out by default: their steps assert a detector an ordinary build does not have.
 
 Test dependencies start through one suite-owned environment. If Docker creates a named container
 but cannot bind its randomly selected host port, that owner removes the failed container and tries
@@ -63,7 +76,8 @@ The generator cadence assertion groups equal logical timestamps across concrete 
 checks increasing timestamps within each branch. It allows records from separate branch tasks to
 arrive in either order, as their delivery has no shared ordering contract.
 
-`tests-deps` builds the CLI and NSPL formatter in the normal target directory. The full and focused
+`tests-deps` builds the CLI, the NSPL formatter, the paced simulation's Rust driver and the shared
+C binding its Python driver loads in the normal target directory. The full and focused
 client coverage recipes build a standalone instrumented CLI beside their instrumented server binary
 and place the normal NSPL formatter there. The scenario runner selects the covered CLI through
 `NERVIX_TEST_CLI_PATH`, so its one-shot completion and command paths contribute to the same LCOV
@@ -72,6 +86,12 @@ report as the CLI's binary unit tests and the server's public scenarios. The gen
 and formatter, so a selection containing CLI scenarios needs no separate binary setup. The focused
 CLI process coverage recipe exercises transaction inspection and the clock-following process
 scenarios.
+
+`test-scenarios-coverage`, `coverage-scenarios` and `coverage-scenarios-append` also build the paced
+simulation's Rust driver and the shared binding with coverage flags, and the scenario runner selects
+them through `NERVIX_PACED_SIMULATION_PATH` and `NERVIX_CLIENT_LIBRARY`. A driver process inherits
+the profile location of the scenario binary that starts it, so the Rust driver and the binding
+loaded by the Python driver write their profiles into the same report when they exit.
 
 The CI `scenarios` job uses the shared native
 [CI linker](./developing-nervix.md#validation-and-tests) for the server, CLI and scenario harness,
@@ -101,7 +121,7 @@ The CI jobs divide the work at the scenario boundary:
 | Job | Work |
 | --- | --- |
 | `tests` | Instrumented workspace build and all tests except the scenario target |
-| `scenarios` | Instrumented server and CLI, the unsharded scenario suite at factor 2, and scenario logs |
+| `scenarios` | Instrumented server, CLI and paced simulation drivers, the unsharded scenario suite at factor 2, and scenario logs |
 | `coverage` | After tests, scenarios and extra tests, merge their ordinary-mode workspace reports for CRAP and one Codecov upload |
 | `extra-tests` | Native coverage collectors plus capability doctests, Miri, mutation, and compiler checks |
 | `loom` | Memory-ordering models explored to exhaustion, their weakening qualifications, and failure checkpoints |
@@ -955,9 +975,9 @@ a consensus commit delay that only its scenario's cleanup releases.
 ### The CI Reserve
 
 The suite runs inside `just test-scenarios-coverage` in the CI `scenarios` job, after that job's
-instrumented server and CLI build. The `tests` job runs at the same time on another runner. The
-`scenarios` job's `timeout-minutes` is 60, and the suite budget is derived from it so that the job
-ends on its own.
+instrumented server, CLI and paced simulation driver builds. The `tests` job runs at the same time
+on another runner. The `scenarios` job's `timeout-minutes` is 60, and the suite budget is derived
+from it so that the job ends on its own.
 
 For focused local coverage, `just coverage-scenarios <lcov-path> <scenario-options>` starts a
 fresh measurement. `just coverage-scenarios-append <lcov-path> <scenario-options>` retains the
@@ -1037,6 +1057,9 @@ tail it needs.
 | The run finished with failed steps, parsing errors, or hook errors, reported as a panic naming each count | `101` |
 | The run finished but its dependencies failed to stop or were abandoned | `101` |
 | The suite budget expired | `124` |
+| A `deloxide` build could not start its deadlock diagnostics | `4` |
+| A `deloxide` build reported an active deadlock and recorded it | `3` |
+| A `deloxide` build reported a deadlock it could not record, or lost findings | `4` |
 
 `124` is the status `timeout(1)` reports. It differs from `0`, from `1`, and from the `101` a panic
 ends with, so a wedged suite is told apart from a passing or a failing one by its exit status alone.

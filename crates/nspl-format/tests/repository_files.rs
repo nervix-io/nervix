@@ -31,6 +31,10 @@ const FILES: &[(&str, &str)] = &[
         include_str!("../../../examples/onnx-inference/per-message.nspl"),
     ),
     (
+        "paced_simulation",
+        include_str!("../../../examples/paced-simulation/paced_simulation.nspl"),
+    ),
+    (
         "quickstart",
         include_str!("../../../scripts/console-screenshots/quickstart.nspl"),
     ),
