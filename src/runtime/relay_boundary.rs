@@ -880,6 +880,14 @@ impl RelayBoundaryFanout {
         }
     }
 
+    /// The batches this relay holds in transit on this node.
+    pub(super) fn transit(&self) -> &Arc<RelayTransit> {
+        match self {
+            Self::Direct(fanout) => &fanout.transit,
+            Self::BranchCollapse(branch_collapse) => &branch_collapse.fanout.transit,
+        }
+    }
+
     pub(super) fn begin_owner_batch_completion(&self) -> RelayOwnerBatchCompletion {
         match self {
             Self::Direct(fanout) => fanout.begin_owner_batch_completion(),
@@ -1595,6 +1603,9 @@ impl RelayBoundaryServices {
         batch: &RelayRecordBatch,
     ) -> RelayDispatchResult {
         self.fanout_local_subscriptions(batch).await;
+        // The routed batch enters this relay on this node here, and the relay holds it until its
+        // consumers here have it.
+        let _routed = RelayRoutedAdmission::new(self.fanout.transit());
         self.dispatch_local_runtime_consumers(RuntimeConsumerDispatch::Routed, batch)
             .await
     }

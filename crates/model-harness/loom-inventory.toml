@@ -167,3 +167,63 @@ path = "src/runtime_ack.rs"
 weakened = """
         self.ownership_handoff_outstanding
             .load(Ordering::Acquire)"""
+
+[[invariant]]
+claim = "A batch a node publishes into a relay while a drain observes the domain is never missing from the observation: the relay admits the batch before the node lets it go, the observation reads every relay's admission sequence before and after the node's count, and acquiring the node's release makes the admission visible to the closing read."
+id = "runtime.local-drain.moving-batch"
+package = "nervix-server"
+test = "runtime::local_drain::loom_models::loom_a_batch_published_while_a_drain_observes_is_never_missing_from_it"
+
+[[qualification]]
+failure = "a drain observation reported no work while a batch moved from a node into a relay"
+id = "runtime.local-drain.relaxed-node-work"
+invariant = "runtime.local-drain.moving-batch"
+original = "self.admitted.load(Ordering::Acquire)"
+path = "src/runtime/entity_gate.rs"
+weakened = "self.admitted.load(Ordering::Relaxed)"
+
+[[invariant]]
+claim = "A batch a consumer takes from a relay while a drain observes the domain is never missing from the observation: the consumer's node counts the batch before the consumer returns the relay's admission, the observation reads the relay before the node, and returning the admission releases the node's count to the observation that acquires it."
+id = "runtime.local-drain.taken-batch"
+package = "nervix-server"
+test = "runtime::local_drain::loom_models::loom_a_batch_a_consumer_takes_while_a_drain_observes_is_never_missing_from_it"
+
+[[qualification]]
+failure = "a drain observation reported no work while a consumer took a batch from a relay"
+id = "runtime.local-drain.relaxed-take"
+invariant = "runtime.local-drain.taken-batch"
+original = """
+        self.admitted
+            .fetch_sub(1, Ordering::AcqRel)"""
+path = "src/runtime/relay_channel.rs"
+weakened = """
+        self.admitted
+            .fetch_sub(1, Ordering::Relaxed)"""
+
+[[invariant]]
+claim = "A batch a relay's owner hands on to its consumer while a drain observes the domain is never missing from the observation: the consumer admits the batch before the owner hands it on, the observation reads the relay's transit before its consumers' queues, and handing on releases the consumer's admission to the observation that acquires it."
+id = "runtime.local-drain.handed-on-batch"
+package = "nervix-server"
+test = "runtime::local_drain::loom_models::loom_a_batch_its_owner_hands_on_while_a_drain_observes_is_never_missing_from_it"
+
+[[qualification]]
+failure = "a drain observation reported no work while a relay handed a batch on to its consumer"
+id = "runtime.local-drain.relaxed-hand-on"
+invariant = "runtime.local-drain.handed-on-batch"
+original = "self.handed_on.fetch_add(1, Ordering::Release);"
+path = "src/runtime/relay_transit.rs"
+weakened = "self.handed_on.fetch_add(1, Ordering::Relaxed);"
+
+[[invariant]]
+claim = "A message a force flush resumed is admitted work to a drain observation that sees the flush complete: the participant resumes the message before it completes its obligation, the observation reads the obligations before the node's work, and acquiring the completion makes the resumed message visible."
+id = "runtime.local-drain.flush-completion"
+package = "nervix-server"
+test = "runtime::local_drain::loom_models::loom_a_message_a_flush_resumed_is_seen_by_a_drain_that_sees_the_flush_complete"
+
+[[qualification]]
+failure = "a drain observation saw the flush complete without the message the flush resumed"
+id = "runtime.local-drain.relaxed-obligations"
+invariant = "runtime.local-drain.flush-completion"
+original = "self.force_flushes.load(Ordering::Acquire)"
+path = "src/runtime/entity_gate.rs"
+weakened = "self.force_flushes.load(Ordering::Relaxed)"
