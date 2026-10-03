@@ -765,37 +765,52 @@ impl RetainedPeerHealth {
 struct PeerHealthStateWatcher {
     state: watch::Receiver<PeerHealthStateSnapshot>,
     observation_freshness: Duration,
+    /// The scheduling revision the caller last read the cluster state under: the one current when
+    /// the watcher subscribed, and then the one each wait returned for. A caller subscribes before
+    /// it reads, so a change it has not read yet always differs from this.
+    observed: u64,
 }
 
 impl PeerHealthStateWatcher {
-    fn wait_for_change_or_next_transition(&mut self) -> impl std::future::Future<Output = ()> + '_ {
-        let scheduling_revision = self.state.borrow_and_update().scheduling_revision();
-        async move {
-            loop {
-                nervix_primitives::task::consume_budget().await;
-                let next_transition = self
-                    .state
-                    .borrow()
-                    .next_effective_transition(Instant::now(), self.observation_freshness);
-                nervix_primitives::select! {
-                    changed = self.state.changed() => {
-                        changed.assured(
-                            "the cluster handle retains its peer-health state sender for its \
-                             lifetime",
-                        );
-                        if self.state.borrow_and_update().scheduling_revision()
-                            != scheduling_revision
-                        {
-                            return;
-                        }
-                    }
-                    _ = async {
-                        match next_transition {
-                            Some(deadline) => nervix_primitives::time::sleep_until(deadline).await,
-                            None => std::future::pending::<()>().await,
-                        }
-                    } => return,
+    fn new(
+        mut state: watch::Receiver<PeerHealthStateSnapshot>,
+        observation_freshness: Duration,
+    ) -> Self {
+        let observed = state.borrow_and_update().scheduling_revision();
+        Self {
+            state,
+            observation_freshness,
+            observed,
+        }
+    }
+
+    /// Waits until the scheduling revision differs from the one the caller last read under, or
+    /// until a peer's health next takes effect. A change made after the caller read, even one made
+    /// before this wait was prepared, ends the wait.
+    async fn wait_for_change_or_next_transition(&mut self) {
+        loop {
+            nervix_primitives::task::consume_budget().await;
+            let current = self.state.borrow_and_update().scheduling_revision();
+            if current != self.observed {
+                self.observed = current;
+                return;
+            }
+            let next_transition = self
+                .state
+                .borrow()
+                .next_effective_transition(Instant::now(), self.observation_freshness);
+            nervix_primitives::select! {
+                changed = self.state.changed() => {
+                    changed.assured(
+                        "the cluster handle retains its peer-health state sender for its lifetime",
+                    );
                 }
+                _ = async {
+                    match next_transition {
+                        Some(deadline) => nervix_primitives::time::sleep_until(deadline).await,
+                        None => std::future::pending::<()>().await,
+                    }
+                } => return,
             }
         }
     }
@@ -1800,10 +1815,10 @@ impl ClusterHandle {
     }
 
     fn subscribe_peer_health_state(&self) -> PeerHealthStateWatcher {
-        PeerHealthStateWatcher {
-            state: self.peer_health_state.subscribe(),
-            observation_freshness: self.node_unavailability_timeout,
-        }
+        PeerHealthStateWatcher::new(
+            self.peer_health_state.subscribe(),
+            self.node_unavailability_timeout,
+        )
     }
 
     pub(crate) fn node_unavailability_timeout(&self) -> Duration {
@@ -2770,6 +2785,40 @@ mod tests {
         assert!(capacity.unavailable_nodes().is_empty());
     }
 
+    /// A caller subscribes, reads the cluster state, and only then prepares its wait. A health
+    /// change published between its read and its wait must still wake that wait.
+    #[nervix_primitives::test]
+    async fn cluster_state_watcher_observes_a_health_target_change_before_wait_preparation() {
+        let observation_freshness = Duration::from_secs(10);
+        let (_live_state, live_state_receiver) =
+            nervix_primitives::unmodeled::sync::watch::channel(BTreeMap::new());
+        let (peer_health_state, peer_health_state_receiver) =
+            watch::channel(PeerHealthStateSnapshot::default());
+        let mut watcher = ClusterStateWatcher {
+            live_node_states: live_state_receiver,
+            peer_health_state: PeerHealthStateWatcher::new(
+                peer_health_state_receiver,
+                observation_freshness,
+            ),
+        };
+        peer_health_state.send_modify(|snapshot| {
+            snapshot.replace_endpoints(
+                [health_endpoint("node-2", 7, "node-2.example:7001")],
+                Instant::now(),
+                observation_freshness,
+            );
+        });
+        let mut waiting = Box::pin(watcher.wait_for_change_or_next_unavailability());
+
+        nervix_primitives::select! {
+            biased;
+            _ = &mut waiting => {}
+            () = nervix_primitives::task::yield_now() => {
+                panic!("a health target update before wait preparation must wake the waiter")
+            }
+        }
+    }
+
     #[nervix_primitives::test]
     async fn cluster_state_watcher_observes_a_health_target_change_after_wait_preparation() {
         let observation_freshness = Duration::from_secs(10);
@@ -2779,10 +2828,10 @@ mod tests {
             watch::channel(PeerHealthStateSnapshot::default());
         let mut watcher = ClusterStateWatcher {
             live_node_states: live_state_receiver,
-            peer_health_state: PeerHealthStateWatcher {
-                state: peer_health_state_receiver,
+            peer_health_state: PeerHealthStateWatcher::new(
+                peer_health_state_receiver,
                 observation_freshness,
-            },
+            ),
         };
         let mut waiting = Box::pin(watcher.wait_for_change_or_next_unavailability());
         peer_health_state.send_modify(|snapshot| {
