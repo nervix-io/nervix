@@ -428,7 +428,7 @@ use ingest_metadata::{
 };
 pub(in crate::runtime) use ingestor_quiesce::{
     BufferedIngestMetadata, BufferedIngestPayload, IngestorQuiesceCause, IngestorQuiesceControl,
-    IngestorQuiesceIntake,
+    IngestorQuiesceIntake, MemoryPressurePause,
 };
 use ingestor_quiesce::{
     DEFAULT_KAFKA_PARTITION_WATCH_INTERVAL, IngestorReadiness, RuntimeReconnectStatus,
