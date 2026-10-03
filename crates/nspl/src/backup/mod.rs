@@ -173,11 +173,8 @@ fn writes_keyword(tokens: &[Token], keyword: Identifier) -> bool {
 }
 
 /// The clauses that may still follow a complete `BACKUP`, as completion offers them.
-pub(crate) fn backup_tail(tokens: &[Token]) -> Vec<String> {
-    if writes_keyword(tokens, Identifier::State)
-        || writes_keyword(tokens, Identifier::Pause)
-        || writes_keyword(tokens, Identifier::Timeout)
-    {
+pub(crate) fn backup_tail(backup: &Backup) -> Vec<String> {
+    if backup.capture != BackupCapture::default() {
         return vec![";".to_string()];
     }
     let mut tail = vec![
@@ -186,7 +183,7 @@ pub(crate) fn backup_tail(tokens: &[Token]) -> Vec<String> {
         "WITHOUT PAUSE".to_string(),
         "TIMEOUT".to_string(),
     ];
-    if !writes_keyword(tokens, Identifier::Resources) {
+    if backup.resources == BackupResources::Included {
         tail.push("WITHOUT RESOURCES".to_string());
     }
     tail.sort();
@@ -195,7 +192,7 @@ pub(crate) fn backup_tail(tokens: &[Token]) -> Vec<String> {
 
 /// The clauses that may still follow a complete `RESTORE`, as completion offers them.
 pub(crate) fn restore_tail(restore: &Restore, tokens: &[Token]) -> Vec<String> {
-    if writes_keyword(tokens, Identifier::State) || writes_keyword(tokens, Identifier::Offsets) {
+    if restore.state != RestoreState::All {
         return vec![";".to_string()];
     }
     let mut tail = vec![
@@ -203,7 +200,7 @@ pub(crate) fn restore_tail(restore: &Restore, tokens: &[Token]) -> Vec<String> {
         "WITHOUT STATE".to_string(),
         "WITHOUT SOURCE OFFSETS".to_string(),
     ];
-    if !writes_keyword(tokens, Identifier::Dry) {
+    if restore.mode == RestoreMode::Apply {
         match &restore.scope {
             RestoreScope::Cluster { .. } if !writes_keyword(tokens, Identifier::Existing) => {
                 tail.push("ON EXISTING USER".to_string());
@@ -445,6 +442,13 @@ mod tests {
     #[case::without_state("BACKUP CLUSTER TO '/tmp/c.nvxb' ", "WITHOUT STATE")]
     #[case::without_pause("BACKUP CLUSTER TO '/tmp/c.nvxb' ", "WITHOUT PAUSE")]
     #[case::timeout("BACKUP CLUSTER TO '/tmp/c.nvxb' ", "TIMEOUT")]
+    #[case::domain_named_timeout("BACKUP DOMAIN timeout TO '/tmp/c.nvxb' ", "TIMEOUT")]
+    #[case::domain_named_pause("BACKUP DOMAIN pause TO '/tmp/c.nvxb' ", "WITHOUT PAUSE")]
+    #[case::domain_named_state("BACKUP DOMAIN state TO '/tmp/c.nvxb' ", "WITHOUT STATE")]
+    #[case::domain_named_resources(
+        "BACKUP DOMAIN resources TO '/tmp/c.nvxb' ",
+        "WITHOUT RESOURCES"
+    )]
     #[case::optional_tail_prefix("BACKUP DOMAIN TO '/tmp/c.nvxb' WI", "WITHOUT RESOURCES")]
     #[case::terminator("BACKUP CLUSTER TO '/tmp/c.nvxb' WITHOUT RESOURCES ", ";")]
     #[case::describe_after_describe("DESCRIBE ", "BACKUP")]
@@ -711,6 +715,9 @@ mod tests {
     #[case::policy_replace("RESTORE CLUSTER FROM 'c.nvxb' ON EXISTING USER ", "REPLACE")]
     #[case::dry_run_after_policy("RESTORE CLUSTER FROM 'c.nvxb' ON EXISTING USER SKIP ", "DRY RUN")]
     #[case::domain_dry_run("RESTORE DOMAIN prod FROM 'p.nvxb' ", "DRY RUN")]
+    #[case::domain_named_dry("RESTORE DOMAIN dry FROM 'p.nvxb' ", "DRY RUN")]
+    #[case::domain_named_offsets("RESTORE DOMAIN offsets FROM 'p.nvxb' ", "WITHOUT SOURCE OFFSETS")]
+    #[case::target_named_state("RESTORE DOMAIN prod AS state FROM 'p.nvxb' ", "WITHOUT STATE")]
     #[case::dry_run_prefix("RESTORE DOMAIN prod FROM 'p.nvxb' DR", "DRY RUN")]
     #[case::terminator_after_dry_run("RESTORE DOMAIN prod FROM 'p.nvxb' DRY RUN ", ";")]
     fn completion_offers_each_restore_clause(#[case] source: &str, #[case] expected: &str) {
