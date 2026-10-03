@@ -109,6 +109,7 @@ checks = [
   "runtime::ingestors::source::shuttle_tests::shuttle_request_source_observes_engagement_during_dispatch",
   "runtime::kafka_offset_state::tests::shuttle_checks::shuttle_a_committed_offset_proceeds_while_the_assignment_barrier_is_held",
   "runtime::kafka_offset_state::tests::shuttle_checks::shuttle_a_replica_acknowledgement_racing_the_quorum_wait_is_never_missed",
+  "runtime::materialized_read::shuttle_tests::shuttle_a_parked_message_is_woken_by_the_materialized_state_it_waits_for",
   "runtime::materialized_state::tests::shuttle_checks::shuttle_an_originator_update_proceeds_while_the_assignment_barrier_is_held",
   "runtime::relay_boundary::branch_presence_shuttle_tests::shuttle_a_replaced_owner_never_publishes_over_its_successor",
   "runtime::relay_boundary::branch_presence_shuttle_tests::shuttle_an_observer_sees_every_owner_step_whole_and_never_an_older_one",
