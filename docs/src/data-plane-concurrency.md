@@ -1281,6 +1281,43 @@ a file whose owners block in different ways, such as the CLI's, has a permission
 The boundary check rejects either item in a file no permission lists it for, and a listed item its
 file no longer names.
 
+### Thread creation outside the executor
+
+Starting a thread can bypass the executor's admission, memory charges and cancellation just as
+blocking work can. Every caller of `thread::spawn`, `thread::Builder`, `thread::scope`,
+`thread::spawn_detached` or `unmodeled::thread::Builder` therefore declares its exact file and
+items in the same `crates/primitives/blocking-permissions.toml`. The declaration states its owner,
+why the work stays outside the executor, and what bounds the work, thread count and lifetime.
+No caller outside the primitive crate has a built-in permission. Naming the builder includes its
+ordinary and scoped spawn methods; a glob names every confined item it brings into scope.
+Reimported module aliases retain the same confinement regardless of import order. A glob over
+the boundary root is rejected; name its modules and items explicitly so confined and unmodeled
+paths remain visible.
+
+| Owner | Thread items | Work, count and lifetime bound |
+| --- | --- | --- |
+| Process termination supervision | `thread::spawn_detached` | Two supervisors per process, parked between signals or deadline changes, plus at most one forced-exit watchdog after the single exit claim; supervisors end with the process, and the watchdog waits only the forced-exit report budget |
+| WASM epoch driver | `unmodeled::thread::Builder` | One thread per WASM runtime; one sleep and one engine epoch increment per configured tick; it ends on its next wake after the stop flag is set or the weak stop reference can no longer upgrade |
+| Diagnostic finding recorder | `thread::spawn_detached` | At most one watchdog for the process's one finding; it exits the process after the ten-second recording budget |
+| Shared Loom participant launcher | `thread::Builder` | Loom's five slots, including coordinator and body, the branch limit and runner watchdog; participants end within one model execution |
+| Benchmark load driver | `thread::Builder`, `thread::scope` | One joined summary poller per drain owner, and one scoped watermark query per configured partition, each with the request timeout within the driver deadline |
+| Turmoil scenario runner | `thread::Builder` | One scheduler per disposable attempt; physical run and cleanup deadlines, a normal join, and a failed process when either deadline is missed |
+| NSPL completion walk | `thread::Builder`, `thread::scope` | At most the configured jobs per finite frontier; every worker is joined before the next level |
+| Public C binding probes and external Kafka member | `thread::spawn`, `thread::scope`, `thread::Builder` as listed for each file | Fixed probe participants joined within their bounded call and cancellation waits; one Kafka poller per member, stopped and joined when the member drops |
+
+Unit tests and Loom and Shuttle checks declare every file and its exact thread items too. Their
+permissions describe finite participants for each case, joins or model termination, and the
+registered exploration bounds where applicable. Diagnostic cycle probes instead use disposable
+processes and a parent watchdog, since their tested cycle intentionally cannot join. These
+declarations do not exempt a directory or evaluate away `cfg(test)`, a model-only module, an
+inactive branch or a macro body. A new item needs its declaration, and a listed item its file no
+longer names fails as stale. A file whose product owner and tests use different items names both.
+
+The real epoch builder also keeps its independent unmodeled permission, with its reason and
+verification limit. That permission does not supply the work and lifetime bound and cannot alone
+authorize thread creation. The ordinary re-exports and every modeled thread operation retain their
+existing execution semantics; this confinement changes source validation only.
+
 ## Deterministic Concurrency Verification
 
 The ordering contracts above are checked against the production owners under Shuttle. A check

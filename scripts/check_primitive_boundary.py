@@ -39,6 +39,12 @@ below `nervix_primitives`, its owner, why that owner stays outside the executor,
 work instead. A use no permission lists for its file and a listed item the file does not name both
 fail.
 
+Thread creation is confined by the same manifest: `thread::spawn`, `thread::Builder`,
+`thread::scope`, `thread::spawn_detached` and `unmodeled::thread::Builder` each need an owner,
+reason and bound on their work, thread count and lifetime. Tests, models and harnesses declare
+each file and its exact items too; neither a directory nor a conditional module is exempt.
+The real builder also needs its unmodeled permission, which states what remains unverified.
+
 An execution mode is a feature of the boundary and never a global cfg, which every crate of a build
 reads, Tokio's included. A bare `loom`, `shuttle`, `turmoil` or `deloxide` in a `cfg` predicate is
 rejected, and so is `--cfg` with any of those names in any `justfile` recipe, Cargo configuration,
@@ -371,6 +377,19 @@ CONFINED = {
         meaning="the runtime's way to block the worker thread that calls it",
         declared_in=BLOCKING_PERMISSIONS,
     ),
+    **{
+        ("nervix_primitives", "thread", name): Confinement(
+            owners=frozenset(),
+            meaning="a thread-creation mechanism outside the bounded executor",
+            declared_in=BLOCKING_PERMISSIONS,
+        )
+        for name in ("spawn", "Builder", "scope", "spawn_detached")
+    },
+    UNMODELED_ROOT + ("thread", "Builder"): Confinement(
+        owners=frozenset(),
+        meaning="a real thread-creation mechanism outside every model and the bounded executor",
+        declared_in=BLOCKING_PERMISSIONS,
+    ),
 }
 # The confined items a blocking permission may declare, by their paths below `nervix_primitives`. A
 # permission lists items by these paths.
@@ -651,6 +670,14 @@ def _segments(path: str) -> tuple[str, ...]:
         if stripped:
             segments.append(stripped)
     return tuple(segments)
+
+
+def _local_path(path: tuple[str, ...]) -> tuple[str, ...]:
+    """A path to resolve against this file's imports, without module qualifiers."""
+
+    while len(path) > 1 and path[0] in ("self", "super", "crate"):
+        path = path[1:]
+    return path
 
 
 @dataclass
@@ -1098,6 +1125,7 @@ def check_source(file: RustFile, loom_only_file: bool = False) -> tuple[list[Sit
     # holding a confined item, each with the module's path.
     module_aliases: dict[str, tuple[str, ...]] = {}
     confining_aliases: dict[str, tuple[str, ...]] = {}
+    indirect_imports: list[tuple[int, UseLeaf]] = []
 
     def confine(offset: int, item: tuple[str, ...]) -> None:
         confinement = CONFINED[item]
@@ -1125,6 +1153,8 @@ def check_source(file: RustFile, loom_only_file: bool = False) -> tuple[list[Sit
         for leaf in leaves:
             names.bind(leaf)
             path = leaf.path
+            if path[:1] != ("nervix_primitives",):
+                indirect_imports.append((match.start(), leaf))
             item = confined_item(path)
             if item is not None:
                 confine(match.start(), item)
@@ -1135,7 +1165,15 @@ def check_source(file: RustFile, loom_only_file: bool = False) -> tuple[list[Sit
                 elif path == parent + ("*",):
                     confine(match.start(), confined)
             if path[:1] == ("nervix_primitives",):
-                if path[:2] == UNMODELED_ROOT:
+                if path == ("nervix_primitives", "*"):
+                    violations.append(
+                        file.site(
+                            match.start(),
+                            f"{RULE}: import boundary modules and items by name, not with a root "
+                            "glob that hides confined and unmodeled paths",
+                        )
+                    )
+                elif path[:2] == UNMODELED_ROOT:
                     rest = path[len(UNMODELED_ROOT) :]
                     if rest[-1:] == ("*",):
                         violations.append(
@@ -1221,6 +1259,30 @@ def check_source(file: RustFile, loom_only_file: bool = False) -> tuple[list[Sit
                     )
                 )
 
+    # Rust imports are unordered. Resolve reimports after collecting every original module name,
+    # including chains of renamed modules, so a separate import cannot hide a confined item.
+    while indirect_imports:
+        unresolved: list[tuple[int, UseLeaf]] = []
+        for offset, leaf in indirect_imports:
+            path = _local_path(leaf.path)
+            module = confining_aliases.get(path[0])
+            if module is None:
+                unresolved.append((offset, leaf))
+                continue
+            path = module + path[1:]
+            item = confined_item(path)
+            if item is not None:
+                confine(offset, item)
+            for confined in CONFINED:
+                parent = confined[:-1]
+                if path == parent:
+                    confining_aliases[leaf.alias or parent[-1]] = parent
+                elif path == parent + ("*",):
+                    confine(offset, confined)
+        if len(unresolved) == len(indirect_imports):
+            break
+        indirect_imports = unresolved
+
     for match in _EXTERN_CRATE.finditer(code):
         name = match.group("name")
         alias = match.group("alias")
@@ -1291,7 +1353,7 @@ def check_source(file: RustFile, loom_only_file: bool = False) -> tuple[list[Sit
                 )
             )
     for match in _QUALIFIED_PATH.finditer(body):
-        path = _segments(match.group("path"))
+        path = _local_path(_segments(match.group("path")))
         root = path[0]
         item = confined_item(path)
         if item is not None:
@@ -1636,8 +1698,8 @@ def check_permissions(
 
 @dataclass(frozen=True)
 class BlockingPermission:
-    """A file whose own work blocks a thread outside the bounded executor: the blocking items it
-    names, who owns that work, why it stays outside the executor, and what bounds it instead."""
+    """A file whose work blocks or starts a thread outside the bounded executor: its exact items,
+    who owns the work, why it stays outside the executor, and what bounds its work and lifetime."""
 
     path: str
     items: frozenset[tuple[str, ...]]
@@ -1649,7 +1711,7 @@ class BlockingPermission:
 def parse_blocking_permissions(text: str) -> list[BlockingPermission]:
     document = tomllib.loads(text)
     permissions: list[BlockingPermission] = []
-    # Each file declares each blocking item once, so exactly one owner answers for it.
+    # Each file declares each confined item once, so exactly one owner answers for it.
     seen: set[tuple[str, str]] = set()
     for index, table in enumerate(document.get("permission", [])):
         context = f"{BLOCKING_PERMISSIONS} permission #{index + 1}"
@@ -1660,6 +1722,11 @@ def parse_blocking_permissions(text: str) -> list[BlockingPermission]:
         if unknown:
             raise ValueError(f"{context} has unknown keys: {', '.join(unknown)}")
         path = table["path"]
+        if not _is_one_rust_file(path):
+            raise ValueError(
+                f"{context} names `{path}`; a permission covers one Rust file, never a "
+                "directory, a glob or a path outside the repository"
+            )
         names = table.get("items")
         if not isinstance(names, list) or not names:
             raise ValueError(f"{context} lists no items")
@@ -1692,7 +1759,7 @@ def parse_blocking_permissions(text: str) -> list[BlockingPermission]:
 def check_blocking_permissions(
     uses: Mapping[str, FileUses], permissions: Sequence[BlockingPermission]
 ) -> list[str]:
-    """Match every blocking item a file names outside its built-in owners against a permission that
+    """Match every confined item a file names outside its built-in owners against a permission that
     lists it for that file, and every item a permission lists against a file that names it."""
 
     problems: list[str] = []
@@ -2183,7 +2250,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             f"{len(problems)} {RULE} violation(s). Every governed primitive comes from {OWNER}, and "
             "no selected atomic lives in a static; a real primitive outside every model comes from "
             f"{'::'.join(UNMODELED_ROOT)} with a permission in {PERMISSIONS}, and work outside the "
-            f"bounded executor blocks a thread, on the blocking pool or in place, only with a "
+            f"bounded executor blocks or starts a thread only with a "
             f"permission in {BLOCKING_PERMISSIONS}.",
             file=sys.stderr,
         )
