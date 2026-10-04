@@ -101,10 +101,10 @@ coverage-bolero duration="2": bolero-deps
     set -euo pipefail
     coverage=(uvx --from coverage==7.11.0 coverage)
     "${coverage[@]}" erase
-    "${coverage[@]}" run --branch --source=scripts.bolero,scripts.build_web_console -m unittest scripts.tests.test_bolero
-    "${coverage[@]}" run --branch -a --source=scripts.bolero,scripts.build_web_console scripts/bolero.py test
-    "${coverage[@]}" run --branch -a --source=scripts.bolero,scripts.build_web_console scripts/bolero.py fuzz-all {{ quote(duration) }}
-    "${coverage[@]}" run --branch -a --source=scripts.bolero,scripts.build_web_console scripts/bolero.py qualify
+    "${coverage[@]}" run --branch --source=scripts.bolero,scripts.build_web_console,scripts.tests.test_bolero -m unittest scripts.tests.test_bolero
+    "${coverage[@]}" run --branch -a --source=scripts.bolero,scripts.build_web_console,scripts.tests.test_bolero scripts/bolero.py test
+    "${coverage[@]}" run --branch -a --source=scripts.bolero,scripts.build_web_console,scripts.tests.test_bolero scripts/bolero.py fuzz-all {{ quote(duration) }}
+    "${coverage[@]}" run --branch -a --source=scripts.bolero,scripts.build_web_console,scripts.tests.test_bolero scripts/bolero.py qualify
     mkdir -p target/bolero
     "${coverage[@]}" lcov -o target/bolero/python.lcov
     "${coverage[@]}" report --fail-under=80

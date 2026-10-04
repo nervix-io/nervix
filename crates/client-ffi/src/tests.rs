@@ -39,6 +39,7 @@ mod batches;
 mod clock_events;
 mod domain_clock;
 mod endpoints;
+mod properties;
 
 const ROWS: i32 = 1;
 const BRANCH_KEY: i32 = 2;

@@ -29,6 +29,7 @@ strum = { workspace = true, features = ["derive"] }
 [dev-dependencies]
 arrow-ipc = { workspace = true }
 bolero = { workspace = true }
+nervix-arbitrary = { workspace = true }
 serde_json = { workspace = true }
 tonic = { workspace = true }
 uuid = { workspace = true }

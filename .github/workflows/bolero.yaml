@@ -25,7 +25,7 @@ jobs:
   bolero-random:
     name: bolero-random
     runs-on: blacksmith-8vcpu-ubuntu-2404
-    timeout-minutes: 35
+    timeout-minutes: 60
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -40,11 +40,6 @@ jobs:
         with:
           tool: just@latest,toml-cli,trunk,wild-linker
 
-      - name: Install server build dependencies
-        run: |
-          sudo apt update
-          sudo apt install -y libcurl4-openssl-dev protobuf-compiler
-
       - name: Setup flatc
         uses: Nugine/setup-flatc@v1
         with:
@@ -55,6 +50,11 @@ jobs:
           wget https://apt.llvm.org/llvm.sh
           chmod +x llvm.sh
           sudo ./llvm.sh 23
+
+      - name: Install native server build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake libcurl4-openssl-dev protobuf-compiler
 
       - name: Configure cargo
         run: |
@@ -129,11 +129,6 @@ jobs:
         with:
           tool: just@latest,toml-cli,trunk,wild-linker
 
-      - name: Install server build dependencies
-        run: |
-          sudo apt update
-          sudo apt install -y libcurl4-openssl-dev protobuf-compiler
-
       - name: Setup flatc
         uses: Nugine/setup-flatc@v1
         with:
@@ -147,6 +142,11 @@ jobs:
           wget https://apt.llvm.org/llvm.sh
           chmod +x llvm.sh
           sudo ./llvm.sh 23
+
+      - name: Install native server build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake libcurl4-openssl-dev protobuf-compiler
 
       - name: Configure cargo
         run: |
@@ -188,12 +188,14 @@ jobs:
       - name: Install pinned cargo-bolero
         run: just install-cargo-bolero
 
-      - name: Prepare the server sanitizer binary
-        run: just prepare-archive-counts-fuzz
+      - name: Prepare the registered server sanitizer harnesses
+        run: |
+          just toolchains-install
+          just prepare-archive-counts-fuzz
+          just prepare-bolero client-arrow-rows
 
       - name: Run every sanitizer libFuzzer target and qualify failures
         run: |
-          just toolchains-install
           just coverage-bolero 30
 
       - name: Upload runner coverage to Codecov
