@@ -171,6 +171,13 @@ root tracker's accounting without adding a lock. The delivery and handoff bounda
 are described in [Data-Plane Concurrency](./data-plane-concurrency.md) and
 [Shutdown And Recovery](./shutdown.md).
 
+A source instance owns starting, ready and retired states in a private atomic byte. Its handle alone
+interprets starting=0, ready=1 and retired=2. Compare-and-swap permits readiness changes only before
+retirement; a retired source cannot become ready or change a replacement instance. This relaxed
+scalar publishes no payload or other location. Buffered message-error workers separately own
+`Prepared`, `Running` and `Ended` lifecycle states; a fallible binding prepares the bounded queue,
+and successful running publication starts its worker once. An ended worker is never restarted.
+
 The domain clock's atomic maximum has a different meaning. Its initial `i64::MIN` is the
 documented identity for a maximum computation, and zero elapsed time is the value of an elapsed
 duration clamped at its physical anchor. Neither encodes an absent clock. The

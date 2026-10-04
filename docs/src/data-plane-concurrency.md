@@ -8,6 +8,12 @@ state, metric, and connector handles have been resolved.
 [Execution Plans](./execution-plans.md) describes the revision that installs and publishes those
 handles before record and batch work begins.
 
+[SIMD Kernels](./simd-kernels.md) defines the pure buffer boundary that folds batch latency and
+computes admission, arithmetic, and byte masks. Its cached CPU level is process-wide detection
+under an unmodeled permission; it carries no protocol state. Batch-local reductions preserve this
+chapter's ownership and bounded synchronization rules, including one accumulator lock and one
+wall-clock read per delivery-latency series per batch.
+
 The hot paths are:
 
 - accepting one record from an ingestor
@@ -29,6 +35,50 @@ value up in a shared map at all, whether by borrowed lookup or by `entry()`. It 
 it resolved when its task, branch, channel, or attempt was created. A shared registry serves the
 cold paths around that handle: registration and first installation, where `entry()` gives racing
 installers a single winner, replacement, teardown, and observers.
+
+## Relay, Transport And Source Lifetimes
+
+A concrete producer retains its branch channel handle. The relay publishes branch membership in a
+persistent immutable table; concurrent first binding selects one allocation with CAS. Each branch
+publishes an owner/consumer routing generation, whose cancellation parent fences ingress and
+outbound slots, including candidates created during replacement. Eviction cancels the exact branch
+before withdrawing its allocation. An independently expiring receiver branch permits a still-live
+producer to bind a fresh channel after invalidation. The producer's own ending moves it to `Ended`
+and prevents rebinding. Domain terminal teardown cancels the relay publication itself.
+
+Channel gates serialize encode, sequence assignment and dispatch for that channel only. Gate waits
+select cancellation, and transport admission retains its existing physical deadline. They do not
+serialize unrelated branches or peers. A subscription snapshot selects only live advertised peers,
+fenced by incarnation and interest version. Equal advertisements retain channels; changed selection
+cancels the preceding subscription generation. Branch and destination registration copy only a
+persistent changed-key path. Tables are never rebuilt for an established batch.
+
+Transport targets publish immutable fixed pool arrays. A slot atomically claims one reconnect
+worker for its lifetime and publishes its authenticated connection through `ArcSwapOption`. Leasing
+reads these publications, scans the fixed class slots and retains the selected connection. The
+connection registry serves registration, exact retirement and observers. Endpoint, peer or TLS
+replacement cancels slots before publishing replacement handles; a changed DNS answer affects only
+the next dial. [Cluster Interconnect](./interconnect.md) owns quotas, deadlines and delivery rules.
+
+A fresh intake selects its domain publisher from an immutable persistent table. Executing tasks
+retain the selected publisher and observe complete snapshots. Domain removal withdraws its table
+entry; terminal shutdown clears the table after ending executions. Buffered error routes similarly
+send through the worker retained by the bound plan, with no failure-path discovery acquisition.
+
+Source polling writes a retained instance readiness scalar. Starting and ready may alternate;
+retired is final, so a late poll or drop cannot change a replacement instance's readiness. These
+scalar transitions and worker claims use relaxed atomic operations and publish no other data.
+Shuttle checks production binding, refresh, retirement and polling races. ArcSwap internals remain
+opaque; this delivery adds no cross-location memory-ordering claim requiring a new Loom weakening.
+Existing memory-ordering claims remain with their owning models. Deloxide tracks the existing
+sequence and route-task blocking locks; it does not track ArcSwap, scalar atomics or async channel
+ordering gates.
+
+`just bench-retained-channels` measures published versus retained branch selection, established
+stream leasing and bounded branch churn. Its ordinary native bodies also run in `bench-smoke`,
+whose shared native coverage producer prepares browser, guest and runtime dependencies before
+instrumentation. The measured bodies retain the usual allocation assertions; their timing output
+is workload evidence, not a portable latency threshold.
 
 The resulting design uses four forms of ownership:
 
@@ -811,9 +861,9 @@ errors. The lints use ordinary Rust warn/deny/expect levels; the required gate a
 Retained repair debt names its owning task at the exact operation:
 
 ```rust,ignore
-let channel = nervix_primitives::expect_lint!(nervix::sync_acquisition,
-    "Typed Ratchet 03 (86bc9eqjv): retain the channel selected at branch installation",
-    channels.get(&branch));
+let state = nervix_primitives::expect_lint!(nervix::sync_acquisition,
+    "Typed Ratchet 15 (86bca1web): retain the replica entity before frame handling",
+    states.get(&entity));
 ```
 
 `expect_lint!` puts a normal reason-bearing Rust expectation on one binding, evaluates the
@@ -825,9 +875,9 @@ lint caps and unfulfilled expectations fail. The checker counts distinct HIR ope
 Rust's effective expectation identity, including macro expansion; widening a binding to cover a
 second operation fails even when Rust would regard the expectation as fulfilled.
 
-Task handles remove recurring status, freeze, metric and checkpoint lookups. Source readiness
-registry reads during polling remain operation-specific debt for Typed Ratchet 03, alongside
-relay/channel selection. Typed Ratchet 04 owns materialized branch discovery and Typed Ratchet 05
+Task handles remove recurring status, freeze, metric and checkpoint lookups. Source readiness,
+relay channels, buffered error delivery, domain selection and transport leasing use retained handles
+or immutable publications. Typed Ratchet 04 owns materialized branch discovery and Typed Ratchet 05
 owns remaining remote acknowledgement/admission discovery. Replica catch-up retains the entity's
 lifecycle handle and its own record of each branch, and Typed Ratchet 15 owns state-replication
 frame, synchronization, listing and announcer registry reads.

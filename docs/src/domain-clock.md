@@ -408,6 +408,11 @@ ACKs and follow each output route's message-error policy with code `validation` 
 `admit`; a rejected timestamp cannot discard another row of the group. A missing declared timestamp
 is also rejected for that row. The single-timestamp admission check has the same inclusive bounds.
 
+[SIMD Kernels](./simd-kernels.md#latency-and-domain-admission) describes the buffer arithmetic,
+exact period reduction, bitmap results, and scalar/level qualification. The clock owns the
+eligible centers and ingestion snapshot; the kernel consumes their already-resolved bounds and
+never reads time or establishes a frontier.
+
 Unpaced ingestion has no admission window. Its clock snapshot still supplies delivery time, while
 an explicit event timestamp or connector-owned source timestamp remains preserved source time.
 

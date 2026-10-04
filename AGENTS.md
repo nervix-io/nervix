@@ -190,6 +190,13 @@ behavior, and a compatibility requirement the user states explicitly for the cur
   of window state, measured performance evidence, and the checklist for adding a function.
   [Expression Functions](docs/src/filter-map-functions.md) remains the owner of every public
   function contract.
+- [SIMD Kernels](docs/src/simd-kernels.md) is the authoritative architecture reference for portable
+  buffer kernels and their callers. Any change to kernel ownership, dispatch or build targets,
+  arithmetic or bitmap contracts, byte scanning, typed run execution, scalar/level qualification,
+  or SIMD performance claims must keep that chapter current in the same change. Its scope includes
+  the admission rule for new kernels, the caller catalog, bounded tails and reductions, measured
+  scalar versus vector selection, evidence limits, and the checklist for adding a kernel. VM,
+  codec, connector, clock and concurrency chapters retain their respective semantic contracts.
 - [Resource Versions And Bindings](docs/src/resource-versions.md) is the authoritative architecture
   reference for resource versions and the models that bind them. Any change to the resource
   catalog, upload installation or replication, version resolution, how a binding is validated,

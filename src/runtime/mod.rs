@@ -295,6 +295,7 @@ mod state_replication;
 mod state_snapshot_exchange;
 mod state_snapshot_transfer;
 mod state_store;
+mod subscription_interests;
 mod subscription_predicate;
 #[cfg(test)]
 mod test_fixtures;
@@ -889,6 +890,9 @@ pub(crate) use state_replication::StateSyncAck;
 pub(crate) use state_snapshot_transfer::{DescribeStateSnapshot, FetchStateSnapshot};
 pub(crate) use state_store::{
     PersistedRuntimeStateEntry, RuntimePersistenceError, RuntimeStatePlacement,
+};
+pub(crate) use subscription_interests::{
+    AdvertisedSubscriptionInterest, SubscriptionInterestIndex,
 };
 pub(crate) use subscription_predicate::{
     CompiledSubscriptionPredicate, SubscriptionPredicateCompileContext,

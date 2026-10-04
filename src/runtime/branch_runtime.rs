@@ -239,12 +239,7 @@ impl BranchDispatchLanes {
 impl BranchRuntime {
     pub(super) fn refresh_domain_routing(&mut self) -> Result<(), Report<DomainRoutingError>> {
         if self.routing.is_none() {
-            self.routing = nervix_primitives::expect_lint!(
-                nervix::lifecycle_call,
-                "Typed Ratchet 03 (86bc9eqjv): retain the domain routing publication across \
-                 revision refresh instead of repeating its installation lookup",
-                self.runtime.domain_routing_cache(&self.domain)
-            );
+            self.routing = self.runtime.domain_routing_cache(&self.domain);
         }
         let Some(routing) = self.routing.as_mut() else {
             return Err(Report::new(DomainRoutingError::DomainNotInstantiated {
@@ -280,6 +275,9 @@ impl BranchRuntime {
     }
 
     pub(super) async fn evict(&mut self) {
+        for relay in self.relays.values_mut() {
+            relay.retire();
+        }
         for processor in self.processors.values_mut() {
             processor.drop_collected_inputs("processor branch was evicted");
             processor.reset_window_state();

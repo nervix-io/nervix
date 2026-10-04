@@ -197,7 +197,12 @@ assignments. Installation binds its program against local capabilities once. A f
 uses that bound plan with a structured, non-sensitive error reference, code, operation, fields,
 and timestamp. A handler failure cannot invoke the same handler recursively; an unavailable
 route is reported and does not acknowledge the source record. A route change replaces its bound
-plan with the installed revision. [Errors And Diagnostics](./errors-and-diagnostics.md) owns the
+plan with the installed revision. Buffered plans retain their prepared delivery queue and exact
+worker handle. Binding starts no worker and retires no active route. Successful running publication
+activates each prepared worker once, retires unselected/replaced workers and publishes the complete
+routing snapshot. Failed and passive builds cannot replace running delivery. Subsequent failed
+records send through the bound handle, selecting retirement against bounded queue admission;
+accepted deliveries drain through the worker that already owns them. [Errors And Diagnostics](./errors-and-diagnostics.md) owns the
 error taxonomy and public reporting contract.
 
 ## Placement, Resources, And Recovery
