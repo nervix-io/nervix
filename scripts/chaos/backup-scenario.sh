@@ -59,6 +59,45 @@ run_backup_scenario() {
         "${archive_dir}/description.json" >/dev/null \
         || backup_fail 'the archive omitted acknowledged Kafka domain offsets'
 
+    phase 'complete generation restore through the packaged CLI'
+    compose run --rm --no-deps --user "$(id -u):$(id -g)" \
+        -v "${archive_dir}:/chaos-backup:ro" admin \
+        nervix-cli --server "http://${cli_host}:47391" \
+        --domain chaos_baseline --password "${CHAOS_PASSWORD}" \
+        restore domain chaos_baseline --as chaos_restored \
+        --input /chaos-backup/domain.nvxb --format json \
+        >"${archive_dir}/restore-report.json" \
+        || backup_fail 'the packaged CLI could not publish the complete restored generation'
+    jq -e '.domains | length == 1' "${archive_dir}/restore-report.json" >/dev/null \
+        || backup_fail 'the restore report does not name one domain'
+    jq -e '.domains[0].domain == "chaos_restored"' \
+        "${archive_dir}/restore-report.json" >/dev/null \
+        || backup_fail 'the restore report names the wrong target'
+    compose run --rm --no-deps --user "$(id -u):$(id -g)" \
+        -v "${archive_dir}:/chaos-backup" admin \
+        nervix-cli --server "http://${cli_host}:47391" \
+        --domain chaos_restored --password "${CHAOS_PASSWORD}" \
+        backup domain chaos_restored --output /chaos-backup/restored.nvxb \
+        --timeout 30s --format json >"${archive_dir}/restored-backup-report.json" \
+        || backup_fail 'the stopped restored domain could not be backed up'
+    compose run --rm --no-deps --user "$(id -u):$(id -g)" \
+        -v "${archive_dir}:/chaos-backup:ro" admin \
+        nervix-cli --command \
+        "DESCRIBE BACKUP '/chaos-backup/restored.nvxb' FORMAT JSON;" \
+        >"${archive_dir}/restored-description.json" \
+        || backup_fail 'the restored generation could not be verified offline'
+    # The renamed domain has different section paths and encoded record digests. Compare its
+    # public checkpoint identities, revisions, branch counts and exact source positions.
+    local state_projection='[.domains[0].runtime_state[] |
+        {kind,owner_kind,entity,schema_fingerprint,revision,branches,positions}] |
+        sort_by(.kind,.owner_kind,.entity,.schema_fingerprint)'
+    jq -S "${state_projection}" "${archive_dir}/description.json" \
+        >"${archive_dir}/expected-state.json"
+    jq -S "${state_projection}" "${archive_dir}/restored-description.json" \
+        >"${archive_dir}/restored-state.json"
+    cmp "${archive_dir}/expected-state.json" "${archive_dir}/restored-state.json" \
+        || backup_fail 'restored lifecycle or source checkpoints differ from the complete cut'
+
     phase 'post-cut continuity'
     check_support_containers
     wait_for 'Kafka source advanced through the cut' 30 \
@@ -86,7 +125,9 @@ run_backup_scenario() {
           engaged_at:$engaged_at,released_at:$released_at,
           freeze_duration_ms:$freeze_duration_ms,
           archive:"backup/domain.nvxb",archive_description:"backup/description.json",
-          backup_report:"backup/report.json"}' \
+          backup_report:"backup/report.json",
+          restore_report:"backup/restore-report.json",
+          restored_archive_description:"backup/restored-description.json"}' \
         >"${artifact_dir}/results/backup-progress.json"
 
     phase 'backup traffic final boundary'

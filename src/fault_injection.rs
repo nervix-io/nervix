@@ -97,7 +97,7 @@ struct FaultInjectionState {
     /// One-shot installation failures, consumed by the next resource version a node installs.
     failed_resource_installations: DashMap<ClusterNodeName, (), RandomState>,
     /// One-shot failures after earlier restore checkpoints have reached the receiving node.
-    failed_restored_wasm_checkpoints: DashMap<DomainName, (), RandomState>,
+    failed_restore_state_installations: DashMap<DomainName, RestoreStateFailure, RandomState>,
     /// One-shot failures, consumed by the next HTTPS listener configuration a node installs.
     failed_https_listener_installations: DashMap<ClusterNodeName, (), RandomState>,
     consensus_probes: DashMap<ClusterNodeName, ConsensusProbeState, RandomState>,
@@ -354,7 +354,7 @@ impl Default for FaultInjection {
                 failed_entity_schedule_swaps: DashMap::default(),
                 transaction_binding_drops: DashMap::default(),
                 failed_resource_installations: DashMap::default(),
-                failed_restored_wasm_checkpoints: DashMap::default(),
+                failed_restore_state_installations: DashMap::default(),
                 failed_https_listener_installations: DashMap::default(),
                 consensus_probes: DashMap::default(),
                 startup_consensus_faults: DashMap::default(),
@@ -394,11 +394,24 @@ impl Default for FaultInjection {
     }
 }
 
+/// One precise failure boundary of a stopped-domain restore installation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RestoreStateFailure {
+    GuestStaging,
+    DurablePublication,
+}
+
 impl FaultInjection {
     pub fn fail_restored_wasm_checkpoint(&self, domain: DomainName) {
         self.inner
-            .failed_restored_wasm_checkpoints
-            .insert(domain, ());
+            .failed_restore_state_installations
+            .insert(domain, RestoreStateFailure::GuestStaging);
+    }
+
+    pub fn fail_after_durable_restore_publication(&self, domain: DomainName) {
+        self.inner
+            .failed_restore_state_installations
+            .insert(domain, RestoreStateFailure::DurablePublication);
     }
 
     pub fn pause_restore_state_publication(
@@ -498,8 +511,19 @@ impl FaultInjection {
 
     pub(crate) fn restored_wasm_checkpoint_fails(&self, domain: &DomainName) -> bool {
         self.inner
-            .failed_restored_wasm_checkpoints
-            .remove(domain)
+            .failed_restore_state_installations
+            .remove_if(domain, |_, fault| {
+                *fault == RestoreStateFailure::GuestStaging
+            })
+            .is_some()
+    }
+
+    pub(crate) fn durable_restore_publication_fails(&self, domain: &DomainName) -> bool {
+        self.inner
+            .failed_restore_state_installations
+            .remove_if(domain, |_, fault| {
+                *fault == RestoreStateFailure::DurablePublication
+            })
             .is_some()
     }
 

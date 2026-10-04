@@ -15,7 +15,10 @@
     )
 )]
 
+use std::io::Read;
+
 use error_stack::{Report, ResultExt as _};
+use nervix_execution::Cancellation;
 use nervix_interconnect::StatePlacementEnvelope;
 use nervix_models::{
     BranchKeyFingerprint, DomainName, ModelName, NodeRef, RemoteRuntimeField, Timestamp,
@@ -29,7 +32,7 @@ use super::{
     backup_capture_fence::{BackupCaptureFence, BackupPublication},
     decode_branch_lru_snapshot, encode_branch_lru_snapshot,
     kafka_offset_state::{backup_offset_positions, restore_offset_payload},
-    state_store::StoredPlacement,
+    state_store::{RuntimePersistenceError, StoredPlacement, generation::CheckpointMetadata},
 };
 
 #[derive(Debug, Clone)]
@@ -39,6 +42,20 @@ pub(crate) struct CapturedRuntimeState {
     pub(crate) revision: u64,
     pub(crate) payload: Vec<u8>,
 }
+
+/// A checkpoint's identity and byte contract, independent of how its bytes are delivered.
+#[derive(Debug, Clone)]
+pub(crate) struct RestoredRuntimeState {
+    pub(crate) placement: StatePlacementEnvelope,
+    pub(crate) branch_fingerprint: Option<BranchKeyFingerprint>,
+    pub(crate) revision: u64,
+    pub(crate) length: u64,
+    pub(crate) digest: [u8; 32],
+}
+
+pub(crate) use super::state_store::generation::{
+    RESTORE_STATE_CHUNK_BYTES, RESTORE_STATE_WORKING_BYTES,
+};
 
 #[derive(Debug, Clone)]
 pub(crate) struct BackupBranchLifecycleEntry {
@@ -190,7 +207,9 @@ impl Runtime {
     pub(crate) fn stage_restored_domain_state(
         &self,
         authority: &nervix_models::RestoreStateAuthority,
-        checkpoint: CapturedRuntimeState,
+        checkpoint: RestoredRuntimeState,
+        reader: impl Read,
+        cancellation: &Cancellation,
     ) -> error_stack::Result<(), BackupStateCaptureError> {
         #[cfg(feature = "testing")]
         if checkpoint.placement.state.kind() == RuntimeStateKind::WasmProcessor
@@ -215,8 +234,17 @@ impl Runtime {
             .stage_restored_checkpoint(
                 authority,
                 &placement,
-                checkpoint.revision,
-                &checkpoint.payload,
+                CheckpointMetadata {
+                    lsm: checkpoint.revision,
+                    length: checkpoint.length,
+                    digest: checkpoint.digest,
+                },
+                reader,
+                || {
+                    cancellation
+                        .check()
+                        .change_context(RuntimePersistenceError::Cancelled)
+                },
             )
             .change_context(BackupStateCaptureError::Storage)?;
         Ok(())
@@ -228,6 +256,7 @@ impl Runtime {
         domain: &DomainName,
         authority: &nervix_models::RestoreStateAuthority,
         inventory: nervix_interconnect::backup::RestoreStateInventory,
+        cancellation: &Cancellation,
     ) -> error_stack::Result<(), BackupStateCaptureError> {
         let store = self
             .inner
@@ -235,8 +264,20 @@ impl Runtime {
             .as_ref()
             .ok_or_else(|| Report::new(BackupStateCaptureError::Unavailable))?;
         store
-            .publish_restored_state(domain, authority, inventory)
+            .publish_restored_state(domain, authority, inventory, || {
+                cancellation
+                    .check()
+                    .change_context(RuntimePersistenceError::Cancelled)
+            })
             .change_context(BackupStateCaptureError::Storage)?;
+        #[cfg(feature = "testing")]
+        if self
+            .inner
+            .fault_injection
+            .durable_restore_publication_fails(domain)
+        {
+            return Err(Report::new(BackupStateCaptureError::Storage));
+        }
         self.clear_runtime_state_for_domain(domain);
         Ok(())
     }

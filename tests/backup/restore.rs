@@ -31,6 +31,125 @@ use crate::common::{
 /// How long a restore waits at an armed pause before a scenario gives up on reaching it.
 const RESTORE_PAUSE_TIMEOUT: Duration = Duration::from_secs(120);
 
+#[given("the restore coordinator uses remote placement in a multi-node cluster")]
+async fn given_restore_uses_remote_placement(world: &mut ScenarioWorld) {
+    if world.cluster().node_ids().len() > 1 {
+        let leader = current_leader_node(world).await;
+        world
+            .cluster()
+            .run_command(&leader, &world.domain, &format!("CORDON NODE {leader};"))
+            .await
+            .assured("the multi-node restore coordinator is excluded from execution placement");
+    }
+}
+
+#[given(
+    expr = "node {string} has a state-counting WASM fixture with {int} MiB saves in resource \
+            directory {string}"
+)]
+async fn given_large_guest_save(
+    world: &mut ScenarioWorld,
+    node: String,
+    mebibytes: usize,
+    placeholder: String,
+) {
+    assert!(
+        (1..=48).contains(&mebibytes),
+        "the fixture fits the guest memory limit"
+    );
+    let bytes = mebibytes
+        .checked_mul(1024 * 1024)
+        .assured("the fixture size is bounded");
+    crate::place_generated_wasm_processor_fixture(
+        world,
+        &node,
+        &placeholder,
+        crate::state_counting_wasm_fixture_with_size("filtered_metrics", bytes),
+    )
+    .await;
+}
+
+#[when(
+    expr = "round {int} of Kafka messages for {int} restore tenants is published to topic {string}"
+)]
+async fn when_restore_tenant_round_is_published(
+    world: &mut ScenarioWorld,
+    round: u32,
+    tenants: usize,
+    topic: String,
+) {
+    let topic = expand_placeholders(world, &topic);
+    for tenant in 0..tenants {
+        let payload =
+            serde_json::json!({ "value": round, "tenant": format!("restore-tenant-{tenant}") })
+                .to_string();
+        world
+            .cluster()
+            .publish_kafka(&topic, &payload)
+            .await
+            .assured("one interleaved tenant input is accepted");
+    }
+}
+
+#[then(
+    expr = "within {string} the restore subscription receives one isolated even row for each of \
+            {int} tenants"
+)]
+async fn then_restore_tenants_remain_isolated(
+    world: &mut ScenarioWorld,
+    duration: String,
+    tenants: usize,
+) {
+    let duration = parse_duration_text(&duration).assured("the scenario duration is valid");
+    let deadline = Instant::now() + duration;
+    let mut pending = (0..tenants)
+        .map(|tenant| format!("restore-tenant-{tenant}"))
+        .collect::<BTreeSet<_>>();
+    let session = world
+        .active_session
+        .as_mut()
+        .assured("the restored output has a subscription");
+    while !pending.is_empty() {
+        let now = Instant::now();
+        assert!(
+            now < deadline,
+            "missing isolated restored rows: {pending:?}"
+        );
+        let event = session
+            .try_next_subscription(deadline.saturating_duration_since(now))
+            .await
+            .assured("the subscription remains connected")
+            .assured("each restored tenant emits its expected even row");
+        let matched = pending
+            .iter()
+            .find(|tenant| {
+                event
+                    .payload
+                    .contains(&format!("key={{\"tenant\":\"{tenant}\"}}"))
+            })
+            .cloned()
+            .assured("an emitted row belongs to one pending tenant");
+        assert!(
+            event.payload.contains(&format!("\"tenant\":\"{matched}\"")),
+            "the row's tenant agrees with its branch: {}",
+            event.payload
+        );
+        assert!(
+            event.payload.contains("\"note\":\"even\""),
+            "the row resumes the saved even batch count: {}",
+            event.payload
+        );
+        assert!(pending.remove(&matched), "each tenant emits exactly once");
+    }
+}
+
+#[given(expr = "restoring domain {string} fails after durable state publication")]
+fn given_durable_restore_publication_fails(world: &mut ScenarioWorld, domain: String) {
+    world
+        .fault_injection
+        .fail_after_durable_restore_publication(scenario_domain(world, &domain));
+}
+
 #[given(expr = "restoring domain {string} fails before installing its first WASM checkpoint")]
 fn given_restored_wasm_checkpoint_fails(world: &mut ScenarioWorld, domain: String) {
     world
@@ -442,6 +561,118 @@ async fn when_cli_restores(world: &mut ScenarioWorld, scope: String, file: Strin
         "json".to_string(),
     ]);
     run_cli(world, &node, arguments).await;
+}
+
+/// Samples public executor gauges and process heap statistics only while the public CLI restores.
+/// Heap statistics include every cluster in this harness process; run one example at a time for
+/// attributable measurements. Executor peaks are per node and sampled, rather than continuous.
+#[when(
+    expr = "the CLI restores {string} from {string} on node {string} reporting JSON with memory \
+            measurements"
+)]
+async fn when_cli_restores_with_memory_measurements(
+    world: &mut ScenarioWorld,
+    scope: String,
+    file: String,
+    node: String,
+) {
+    let nodes = world.cluster().node_ids();
+    let mut urls = Vec::new();
+    for node in &nodes {
+        urls.push((
+            node.clone(),
+            world
+                .cluster()
+                .observability_metrics_url(node)
+                .assured("a restore target exposes metrics"),
+        ));
+    }
+    let (ready, started) = nervix_primitives::sync::oneshot::channel();
+    let stop = CancellationToken::new();
+    let sampled_stop = stop.clone();
+    let initial_usage = nervix_server::memory_pressure::jemalloc_memory_usage()
+        .assured("the harness allocator exposes statistics");
+    let initial_heap = initial_usage.allocated;
+    let initial_resident = initial_usage.resident;
+    let sampler = AbortOnDropHandle::new(nervix_primitives::task::spawn(async move {
+        let client = reqwest::Client::new();
+        let mut peak_heap = initial_heap;
+        let mut peak_resident = initial_resident;
+        let mut peaks = BTreeMap::<String, f64>::new();
+        let mut baseline_rejections = BTreeMap::<String, f64>::new();
+        let mut final_rejections = BTreeMap::<String, f64>::new();
+        let mut samples = 0_u64;
+        let mut ready = Some(ready);
+        loop {
+            for (node, url) in &urls {
+                let response = client
+                    .get(url)
+                    .send()
+                    .await
+                    .assured("the restore target's metrics remain reachable");
+                let body = response.text().await.assured("metrics decode as text");
+                for line in body.lines() {
+                    if !line.contains("class=\"bulk\"") {
+                        continue;
+                    }
+                    let value = line
+                        .split_whitespace()
+                        .last()
+                        .assured("a metric sample contains its value")
+                        .parse::<f64>()
+                        .assured("the metric value is numeric");
+                    if line.starts_with("nervix_execution_memory_reserved_bytes{") {
+                        let peak = peaks.entry(node.clone()).or_default();
+                        *peak = peak.max(value);
+                    } else if line.starts_with("nervix_execution_memory_rejections_total{") {
+                        baseline_rejections.entry(node.clone()).or_insert(value);
+                        final_rejections.insert(node.clone(), value);
+                    }
+                }
+            }
+            let usage = nervix_server::memory_pressure::jemalloc_memory_usage()
+                .assured("allocator statistics remain available");
+            peak_heap = peak_heap.max(usage.allocated);
+            peak_resident = peak_resident.max(usage.resident);
+            samples = samples
+                .checked_add(1)
+                .assured("one restore has a bounded sample count");
+            if let Some(sender) = ready.take() {
+                sender
+                    .send(())
+                    .assured("the measurement caller waits for its baseline");
+            }
+            nervix_primitives::select! {
+                () = sampled_stop.cancelled() => break,
+                () = nervix_primitives::time::sleep(Duration::from_millis(20)) => {}
+            }
+        }
+        assert_eq!(
+            baseline_rejections, final_rejections,
+            "valid restored state incurs no bulk budget refusal"
+        );
+        (peak_heap, peak_resident, peaks, samples)
+    }));
+    started
+        .await
+        .assured("every restore target was sampled before the CLI starts");
+    let began = Instant::now();
+    when_cli_restores(world, scope, file.clone(), node).await;
+    let elapsed = began.elapsed();
+    stop.cancel();
+    let (peak_heap, peak_resident, peaks, samples) =
+        sampler.await.assured("the restore memory sampler finishes");
+    assert_eq!(peaks.len(), nodes.len(), "each restore target was sampled");
+    eprintln!(
+        "restore generation measurement: {}",
+        serde_json::json!({
+            "test_id": world.test_id, "nodes": nodes.len(), "archive_bytes": std::fs::metadata(archive_path(world, &file)).assured("the archive remains available").len(),
+            "restore_milliseconds": elapsed.as_millis(), "sample_interval_milliseconds": 20, "samples": samples,
+            "sampled_bulk_peaks_bytes": peaks, "harness_heap_before_bytes": initial_heap, "harness_heap_peak_bytes": peak_heap,
+            "harness_allocator_resident_before_bytes": initial_resident, "harness_allocator_resident_peak_bytes": peak_resident,
+            "heap_scope": "every in-process cluster and harness allocation; allocator resident excludes mappings outside jemalloc", "storage_working_reservation_bytes": 2 * 1024 * 1024
+        })
+    );
 }
 
 /// The report the last restore the CLI ran printed: the whole document of a restore that
@@ -1028,27 +1259,49 @@ fn then_wasm_branch_incarnations_match(
     source: String,
     restored: String,
 ) {
-    fn incarnations(path: &Path) -> BTreeMap<String, u64> {
-        let copy = copy_of_archive(path);
-        let mut values = BTreeMap::new();
-        for (path, bytes) in &copy.sections {
-            if path.contains("/state/branch_lifecycle/")
-                && path.ends_with("/filter_even_rows/branches.rkyv")
-            {
-                let lifecycle = BranchLifecycleRecord::decode(path, bytes)
-                    .expect("the archived branch lifecycle decodes");
-                for branch in lifecycle.branches {
-                    values.insert(format!("{:?}", branch.key), branch.incarnation);
-                }
+    assert_eq!(
+        wasm_branch_incarnations(&archive_path(world, &source), 2),
+        wasm_branch_incarnations(&archive_path(world, &restored), 2),
+        "the restored WASM branches keep their incarnations"
+    );
+}
+
+fn wasm_branch_incarnations(path: &Path, expected: usize) -> BTreeMap<String, u64> {
+    let copy = copy_of_archive(path);
+    let mut values = BTreeMap::new();
+    for (path, bytes) in &copy.sections {
+        if path.contains("/state/branch_lifecycle/")
+            && path.ends_with("/filter_even_rows/branches.rkyv")
+        {
+            let lifecycle = BranchLifecycleRecord::decode(path, bytes)
+                .expect("the archived branch lifecycle decodes");
+            for branch in lifecycle.branches {
+                values.insert(format!("{:?}", branch.key), branch.incarnation);
             }
         }
-        assert_eq!(values.len(), 2, "the two WASM branches were captured");
-        values
     }
     assert_eq!(
-        incarnations(&archive_path(world, &source)),
-        incarnations(&archive_path(world, &restored)),
-        "the restored WASM branches keep their incarnations"
+        values.len(),
+        expected,
+        "all expected WASM branches were captured"
+    );
+    values
+}
+
+#[then(
+    expr = "backup archives {string} and {string} keep all {int} WASM processor branch \
+            incarnations"
+)]
+fn then_all_wasm_branch_incarnations_match(
+    world: &mut ScenarioWorld,
+    source: String,
+    restored: String,
+    expected: usize,
+) {
+    assert_eq!(
+        wasm_branch_incarnations(&archive_path(world, &source), expected),
+        wasm_branch_incarnations(&archive_path(world, &restored), expected),
+        "every restored WASM branch keeps its incarnation"
     );
 }
 

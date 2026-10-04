@@ -412,7 +412,9 @@ test-primitives-compile:
 # contract-change scenario also runs the diagnostic Rust paced driver; the Python application's
 # locks remain outside the detector while its diagnostic nodes are tracked. Each
 # invocation's output stays under target/deloxide/test-deloxide, and the scenario binary's own
-# evidence under its evidence directory there. An invocation that executed no check fails the run,
+# evidence under its evidence directory there. State-store owner tests also exercise staging,
+# snapshot views, queued writers, interrupted publication and multi-batch cleanup under tracked
+# installation locks. An invocation that executed no check fails the run,
 # and so does a smoke whose scenarios did not all run and pass. The whole run is bounded by
 # `budget_seconds` and exits with 124 when it expires.
 test-deloxide budget_seconds="2400": tests-deps
@@ -450,6 +452,11 @@ test-deloxide budget_seconds="2400": tests-deps
     python3 -m scripts.libtest_accounting deloxide "${logs}/probes.log"
     export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
     export NERVIX_DEADLOCK_EVIDENCE="${logs}/evidence"
+    cargo test --no-run --features 'testing deloxide' --lib
+    within_budget restore-storage \
+        cargo test --features 'testing deloxide' --lib -- \
+            runtime::state_store::backup::tests::deloxide_restore_storage --exact
+    python3 -m scripts.libtest_accounting deloxide "${logs}/restore-storage.log"
     cargo test --no-run --features 'testing deloxide' --test scenarios
     within_budget scenarios \
         cargo test --features 'testing deloxide' --test scenarios -- \

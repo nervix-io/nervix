@@ -329,7 +329,14 @@ resource, or version, and a resource import, domain model batch, or state instal
 beneath the step. `RestoreStateInstallationError` distinguishes an incomplete installation that
 blocks starting a domain from authority that no longer permits mutation. The runtime store reports
 a stale or competing published generation as `RuntimePersistenceError::RestoreGeneration`.
-Staging or publication failure leaves the durable start gate in place. The steps before it stay
+`InvalidCheckpointChunks` covers a missing, misordered, truncated or digest-mismatched current
+chunk set or a conflicting publication inventory. `RestoreRead`, `Cancelled`, `Synchronize` and
+storage admission preserve their owning failure boundary. `CheckpointPlacementTooLarge` rejects
+an encoding beyond the bounded storage key allowance. `InvalidStorageFormat` requires recreation
+of the node state directory when the required current format marker is missing or invalid.
+Staging or publication failure leaves the durable start gate in place, including a failure after
+the complete generation's pointer became durable but before runtime handles were cleared. Exact
+publication retry completes durability and bounded cleanup under the same authority and inventory. The steps before it stay
 applied, and the message says so. Transaction planning reports a blocked `START` as
 `TransactionPlanningError::RestoreInstallation`, naming the domain and restore execution before
 lifecycle admission. The client receives a definitive failure. No restore

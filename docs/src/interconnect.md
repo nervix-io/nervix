@@ -871,18 +871,25 @@ published. The leader admits a replicated installation authority carrying its id
 the restore execution, mutation lease revision and installation generation. Every request carries
 that authority. A receiver waits for its generation to apply and authenticates the sending leader.
 A begin request declares placement, length and digest; chunks are ordered and at most 64 KiB;
-finish verifies the staged file and stages the checkpoint without changing published state.
-Incomplete transfers expire under the node's staging quota.
+finish verifies the staged file, then reads it directly inside a filesystem storage job that
+reserves 2 MiB and stages bounded checkpoint chunks into an invisible installation namespace.
+It retains the upload's disk-quota owner through that job. There is no full guest buffer or nested
+staged-reader reservation. Incomplete transfers expire under the node's staging quota.
 
 After all checkpoints are staged, the leader sends each target node a publish request with the
-complete checkpoint and byte counts. The receiver admits the database batch's memory, validates
-that inventory, and atomically replaces the domain's checkpoints with durable synchronization.
+complete checkpoint and byte counts. The receiver reserves a fixed 2 MiB, validates receipts,
+headers and chunk digests one checkpoint at a time, synchronizes the generation data, and commits
+and synchronizes one active-generation pointer. It then deletes obsolete keys in bounded batches.
+The inventory size and total payload bytes do not determine the publication reservation.
 An empty inventory clears unassigned nodes and implements configuration-only restoration. Local
 and remote mutations revalidate the exact authority under the applied-state read guard, held
 through the storage mutation and clearing of runtime handles. Publication of a new authority or
 release of the replicated start gate requires the corresponding write guard, so a delayed
 coordinator cannot mutate after its successor completes installation. The store also retains the
-published generation to reject lower or competing generations and make exact retries idempotent.
+published authority and inventory to reject lower or competing generations. An exact retry must
+carry the same counts and repeats durability and cleanup before acknowledging completion.
+A failure after pointer commit can leave that complete generation selected with the start gate
+closed; it cannot authorize START or clear handles before durable completion.
 The domain's replicated start gate is released only after all nodes acknowledge publication.
 Staging and publication run on the admitted filesystem worker class. Authority is checked inside
 the storage job after admission, so waiting for a worker cannot preserve an expired installation

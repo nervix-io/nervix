@@ -17,6 +17,7 @@
 
 mod assembly;
 pub(in crate::application) mod interconnect;
+pub(in crate::application) mod restore_storage;
 pub(in crate::application) mod retained;
 mod state_sections;
 
