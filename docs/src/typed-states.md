@@ -324,6 +324,14 @@ same plan shape feeds running and passive builds. Passive builds retain the plan
 relay identities and endpoint routes, while admission remains stopped. A server-side listener stays
 bound on every live node independently of graph placement or domain leadership.
 
+Materialized origination is an exclusive task capability: moving it transfers the mutable branch
+selections, while reads and snapshot installation remain independently retainable. Read publications
+carry an immutable row with its Arrow schema and watermarks. Branch membership and an ended row
+publication are distinct states; absence in live state owns the answer even when storage retains an
+earlier checkpoint. Recreating a branch allocates a fresh publication. Installation validates
+assignment capability, branch generation, captured fence and revision before replacing any row;
+the current branch lifecycle and revision cannot move backwards.
+
 Server endpoint configuration and source availability are distinct states. The immutable route
 table contains configured definitions; a bound source lifetime contains an optional prepared intake.
 Source ending publishes absence through that lifetime before removing its route binding. A retained

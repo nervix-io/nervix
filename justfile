@@ -260,6 +260,12 @@ test-admission-runtime *args: download-onnxruntime
 test-runtime *args: build-web-console wasm-processor-guests download-onnxruntime
     ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)" cargo test --package nervix-server --features testing --lib -- {{ args }}
 
+# Measure established row publication and immutable captures with bounded allocation evidence.
+bench-materialized-state: build-web-console wasm-processor-guests download-onnxruntime bench-materialized-state-bodies
+
+bench-materialized-state-bodies:
+    ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)" cargo test --package nervix-server --features testing --lib materialized_owner_cost -- --ignored --nocapture
+
 # Measure the endpoint's actual request routing and per-thread allocations on the same host.
 bench-endpoint-routing: build-web-console download-onnxruntime
     ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)" cargo test --package nervix-server --features testing,benchmarks --lib endpoint_routing_cost -- --ignored --nocapture
@@ -458,6 +464,10 @@ test-deloxide budget_seconds="2400": tests-deps
         cargo test --features 'testing deloxide' --lib -- \
             runtime::state_store::backup::tests::deloxide_restore_storage --exact
     python3 -m scripts.libtest_accounting deloxide "${logs}/restore-storage.log"
+    within_budget materialized-publication \
+        cargo test --features 'testing deloxide' --lib -- \
+            runtime::materialized_state::publication_tests::deloxide_materialized_publications --exact
+    python3 -m scripts.libtest_accounting deloxide "${logs}/materialized-publication.log"
     cargo test --no-run --features 'testing deloxide' --test scenarios
     within_budget scenarios \
         cargo test --features 'testing deloxide' --test scenarios -- \
@@ -1422,6 +1432,7 @@ bench-smoke-bodies:
     cargo bench --profile dev --package nervix-connector-syslog --bench stream_framing --features benchmarks -- --test
     cargo bench --profile dev --package nervix-vm --bench vm -- --test
     just bench-retained-channels-bodies
+    just bench-materialized-state-bodies
 
 # Measure the data-plane work a node admits through its bounded executor, as the runtime submits it:
 # one branched input prepared into its branch batches, and an emitter batch encoded through a JAQ

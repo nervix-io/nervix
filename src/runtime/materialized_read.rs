@@ -110,11 +110,46 @@ pub(super) struct MaterializedRelayRead<'a> {
 }
 
 impl Runtime {
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            lifecycle,
+            reason = "domain routing binds each materialized relay's installed-state publication \
+                      once"
+        )
+    )]
+    pub(super) fn materialized_relay_publications(
+        &self,
+        domain: &DomainName,
+        specs: &HashMap<RelayName, RuntimeMaterializedRelaySpec>,
+    ) -> HashMap<RelayName, state_replication::routing::MaterializedRelayPublication> {
+        let mut publications = HashMap::default();
+        for relay in specs.keys() {
+            let entity = DomainNodeRef::node_in(domain.clone(), ModelKind::Relay, relay);
+            let published = self
+                .inner
+                .state_replication_routing
+                .materialized(&entity)
+                .assured(
+                    "each materialized relay assignment is registered before routing is staged",
+                );
+            publications.insert(relay.clone(), published);
+        }
+        publications
+    }
+
     /// Every materialized record one relay holds on this node, each reported with the concrete
     /// branch it belongs to.
     ///
     /// This is the relay-scoped report, and it says so. Reading one branch is a different
     /// operation that names that branch.
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            observer,
+            reason = "the public report enumerates installed states on observer request"
+        )
+    )]
     pub(crate) async fn local_materialized_stream_state(
         &self,
         domain: &DomainName,
@@ -123,25 +158,23 @@ impl Runtime {
         let routing = self
             .domain_routing(domain)
             .map(|routing| routing.load_full());
-        let states = nervix_primitives::expect_lint!(
-            nervix::sync_acquisition,
-            "Typed Ratchet 04 https://app.clickup.com/t/86bc9eqp3: retain branch materialized \
-             dependencies instead of table lookup",
-            self.inner.replicated_materialized_stream_states.iter()
-        )
-        .filter(|state| {
-            let placement = state.key();
-            placement.domain == *domain
-                && placement.kind == ModelKind::Relay
-                && placement.identifier == ModelName::from(relay)
-        })
-        .map(|state| {
-            (
-                state.key().clone(),
-                ReplicatedMaterializedRelayState::read(state.value()),
-            )
-        })
-        .collect::<Vec<_>>();
+        let states = self
+            .inner
+            .replicated_materialized_stream_states
+            .iter()
+            .filter(|state| {
+                let placement = state.key();
+                placement.domain == *domain
+                    && placement.kind == ModelKind::Relay
+                    && placement.identifier == ModelName::from(relay)
+            })
+            .map(|state| {
+                (
+                    state.key().clone(),
+                    ReplicatedMaterializedRelayState::read(state.value()),
+                )
+            })
+            .collect::<Vec<_>>();
         let mut reports = Vec::new();
         let mut found = false;
         for (placement, state) in states {
@@ -215,24 +248,19 @@ impl Runtime {
         branch_key: &Option<BranchKey>,
     ) -> error_stack::Result<Option<MaterializedGenerationRecord>, MaterializedReadError> {
         let placements = self.materialized_record_placements(domain, relay, branch_key)?;
-        for placement in &placements {
-            let state = nervix_primitives::expect_lint!(
-                nervix::sync_acquisition,
-                "Typed Ratchet 04 https://app.clickup.com/t/86bc9eqp3: retain branch materialized \
-                 dependencies instead of table lookup",
-                self.inner
-                    .replicated_materialized_stream_states
-                    .get(placement)
-            )
-            .map(|state| ReplicatedMaterializedRelayState::read(state.value()));
-            let Some(state) = state else {
-                continue;
-            };
-            if !self.materialized_stream_key_is_visible(Some(routing), placement, branch_key) {
-                continue;
-            }
-            if let Some(record) = state.record(branch_key) {
+        let root = placements
+            .last()
+            .assured("a materialized read always has its relay placement");
+        if !self.materialized_stream_key_is_visible(Some(routing), root, branch_key) {
+            return Ok(None);
+        }
+        if let Some(published) = routing.materialized_stream_reads.get(relay) {
+            if let Some(record) = published.record(branch_key) {
                 return Ok(Some(record));
+            }
+            // Live state owns absence too. Storage may still hold its pre-eviction checkpoint.
+            if published.has_state_for(branch_key) {
+                return Ok(None);
             }
         }
         for placement in &placements {
@@ -333,20 +361,6 @@ impl Runtime {
         routing: Option<&DomainRoutingSnapshot>,
         placement: &RuntimeStatePlacement,
     ) -> Option<StdArc<arrow_schema::Schema>> {
-        if let Some(state) = nervix_primitives::expect_lint!(
-            nervix::sync_acquisition,
-            "Typed Ratchet 04 https://app.clickup.com/t/86bc9eqp3: retain branch materialized \
-             dependencies instead of table lookup",
-            self.inner
-                .replicated_materialized_stream_states
-                .get(placement)
-        ) {
-            return Some(
-                ReplicatedMaterializedRelayState::read(state.value())
-                    .schema()
-                    .clone(),
-            );
-        }
         if let Some(routing) = routing {
             return routing
                 .materialized_stream_specs
@@ -506,20 +520,14 @@ impl Runtime {
         if scheduled {
             return true;
         }
-        // Branch presence is kept for the whole relay, in the same lifetime as the state.
-        let presence_placement = RuntimeStatePlacement {
-            branch_key: None,
-            ..placement.clone()
-        };
-        let Some(presence) = nervix_primitives::expect_lint!(
-            nervix::sync_acquisition,
-            "Typed Ratchet 04 https://app.clickup.com/t/86bc9eqp3: retain branch materialized \
-             dependencies instead of table lookup",
-            self.inner.relay_branch_presences.get(&presence_placement)
-        ) else {
-            return true;
-        };
-        presence.contains(key.as_ref())
+        if let Some(routing) = routing
+            && let Some(services) = routing
+                .relay_services
+                .get(&RelayName::from(&placement.identifier))
+        {
+            return services.branch_presence.contains(key.as_ref());
+        }
+        true
     }
 
     /// Every materialized record one relay holds on another node, reported the same way as the
@@ -626,25 +634,10 @@ impl Runtime {
                 })
                 .collect());
         }
-        let states = nervix_primitives::expect_lint!(
-            nervix::sync_acquisition,
-            "Typed Ratchet 04 https://app.clickup.com/t/86bc9eqp3: retain branch materialized \
-             dependencies instead of table lookup",
-            self.inner.replicated_materialized_stream_states.iter()
-        )
-        .filter(|state| {
-            let key = state.key();
-            key.domain == *domain
-                && key.kind == ModelKind::Relay
-                && key.identifier == ModelName::from(relay)
-        })
-        .map(|state| {
-            (
-                state.key().clone(),
-                ReplicatedMaterializedRelayState::read(state.value()),
-            )
-        })
-        .collect::<Vec<_>>();
+        let states = match routing.materialized_stream_reads.get(relay) {
+            Some(published) => published.states(),
+            None => Vec::new(),
+        };
         if states.is_empty() {
             let Some(restored) = self
                 .open_stored_materialized_snapshot(Some(&routing), &placement)
@@ -662,11 +655,11 @@ impl Runtime {
                 .collect());
         }
         let mut records = Vec::new();
-        for (placement, state) in states {
+        for state in states {
             for record in state.records() {
                 if self.materialized_stream_key_is_visible(
                     Some(&routing),
-                    &placement,
+                    state.placement(),
                     &record.branch,
                 ) {
                     records.push(record);
@@ -947,17 +940,16 @@ impl Runtime {
                     branch: batch.key.clone(),
                 })?
                 .now();
-            let changed = self.inner.materialized_state_changed.notified();
-            match self
-                .resolve_materialized_dependencies(
+            let (resolution, changed) = self
+                .observe_materialized_dependencies(
                     routing.load(),
                     domain,
                     &batch.key,
                     dependencies,
                     execution_now,
                 )
-                .await?
-            {
+                .await?;
+            match resolution {
                 MaterializedDependencyResolution::Ready(values) => {
                     if let Some(work) = quiesce_work.as_deref_mut() {
                         work.resume_from_required_materialized_state();
@@ -1011,6 +1003,29 @@ impl Runtime {
                 }
             }
         }
+    }
+
+    /// Registration and observation are one protocol boundary. The returned future already
+    /// observes notify_waiters, including a publication after the read and before its first poll.
+    pub(in crate::runtime) async fn observe_materialized_dependencies<'a>(
+        &'a self,
+        routing: &DomainRoutingSnapshot,
+        domain: &DomainName,
+        branch: &Option<BranchKey>,
+        dependencies: &[nervix_models::MaterializedStateDependency],
+        execution_now: Timestamp,
+    ) -> error_stack::Result<
+        (
+            MaterializedDependencyResolution,
+            nervix_primitives::sync::futures::Notified<'a>,
+        ),
+        MaterializedReadError,
+    > {
+        let changed = self.inner.materialized_state_changed.notified();
+        let resolution = self
+            .resolve_materialized_dependencies(routing, domain, branch, dependencies, execution_now)
+            .await?;
+        Ok((resolution, changed))
     }
 }
 

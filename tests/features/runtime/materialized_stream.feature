@@ -183,9 +183,9 @@ Feature: Materialized relay state
       | 3            | 0             |
       | 3            | 1             |
 
-  Scenario: Materialized dependencies resolve in written order after REQUIRED WAIT wakes
+  Scenario Outline: Materialized dependencies resolve in written order after REQUIRED WAIT wakes
     Given runtime replication is configured with replica count 0 and snapshot interval "100ms"
-    And a 1 node nervix cluster is started
+    And a <cluster_size> node nervix cluster is started
     And the leader node is configured with these NSPL commands
       """
       CREATE UNPACED DOMAIN {{domain}};
@@ -305,6 +305,11 @@ Feature: Materialized relay state
       {"tenant":"beta","value":"second-beta"}
       """
     Then the relay subscription does not receive a payload within "1s"
+
+    Examples:
+      | cluster_size |
+      | 1            |
+      | 3            |
 
   Scenario Outline: Materialized relays keep the latest value by message watermark
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
@@ -451,7 +456,7 @@ Feature: Materialized relay state
       | 3            | 0             |
       | 3            | 1             |
 
-  Scenario Outline: Expiration deletes materialized relay state
+  Scenario Outline: Expiration and recreation publish isolated materialized branch lifetimes
     Given branched relay expiration scan interval is configured as "100ms"
     And runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
@@ -463,10 +468,12 @@ Feature: Materialized relay state
     When these NSPL commands are executed on the leader node
       """
       CREATE SCHEMA notification (
-        user_id I64
+        user_id I64,
+        note STRING
       );
         CREATE WIRE JSON SCHEMA notification_wire MODE STRICT (
-        user_id integer
+        user_id integer,
+        note string
       );
         CREATE CODEC notification_codec
         FROM WIRE JSON SCHEMA notification_wire
@@ -495,15 +502,32 @@ Feature: Materialized relay state
       """
     When http payload is posted to node "node-1" with host "http-{{test_id}}.example.com" path "/ingest"
       """
-      {"user_id":42}
+      {"note":"first","user_id":42}
       """
     Then within "5s" node "node-1" eventually reports materialized state for relay "notifications" containing
       """
-      key={"user_id":42} payload={"user_id":42}
+      key={"user_id":42} payload={"note":"first","user_id":42}
       """
     And within "5s" node "node-1" eventually reports materialized state for relay "notifications" containing
       """
       relay 'notifications' materialized state is empty
+      """
+
+    When http payload is posted to node "node-1" with host "http-{{test_id}}.example.com" path "/ingest"
+      """
+      {"note":"recreated-acme","user_id":42}
+      """
+    And http payload is posted to node "node-1" with host "http-{{test_id}}.example.com" path "/ingest"
+      """
+      {"note":"recreated-beta","user_id":43}
+      """
+    Then within "5s" node "node-1" eventually reports materialized state for relay "notifications" containing
+      """
+      key={"user_id":42} payload={"note":"recreated-acme","user_id":42}
+      """
+    And within "5s" node "node-1" eventually reports materialized state for relay "notifications" containing
+      """
+      key={"user_id":43} payload={"note":"recreated-beta","user_id":43}
       """
 
     Examples:

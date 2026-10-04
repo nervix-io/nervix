@@ -1039,3 +1039,18 @@ random_iterations = 256
 source = "src/runtime/state_replication/routing_tests.rs"
 test = "runtime::state_replication::routing::tests::bolero_frame_sequences_preserve_assignments_and_exact_state_lifetimes"
 test_target = "lib"
+
+[[target]]
+case_timeout_seconds = 10
+corpus = "src/runtime/__fuzz__/runtime__materialized_state__publication_tests__bolero_materialized_sequences_preserve_selection_lifetimes_and_complete_snapshots/corpus"
+domain_version = 1
+features = []
+id = "materialized-publication-lifetimes"
+invariant = "Bounded update, capture, delete and rebind sequences preserve strict high/low timestamp selection, ties, branch identities, revision and lifecycle generations; every captured snapshot restores its complete Arrow schema, logical values and metadata despite subsequent live changes."
+manifest = "Cargo.toml"
+max_input_bytes = 64
+package = "nervix-server"
+random_iterations = 256
+source = "src/runtime/materialized_state_publication_tests.rs"
+test = "runtime::materialized_state::publication_tests::bolero_materialized_sequences_preserve_selection_lifetimes_and_complete_snapshots"
+test_target = "lib"

@@ -82,4 +82,5 @@ tests = [
   "transport::production_transport_exchanges_typed_arrow_batch_and_state_frames_over_simulated_tcp",
   "transport::relay::relay_reconciliation_and_cancellation_survive_lost_replies",
   "transport::relay::relay_restart_fences_unresolved_delivery_and_accepts_fresh_work",
+  "transport::materialized::materialized_branch_state_transfers_reconnect_to_the_replacement_owner",
 ]
