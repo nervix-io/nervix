@@ -282,6 +282,24 @@ impl Runtime {
         Ok(())
     }
 
+    pub(crate) fn reclaim_restore_checkpoint_staging(
+        &self,
+        retains: impl Fn(&DomainName, u64) -> bool,
+        cancellation: &Cancellation,
+    ) -> error_stack::Result<crate::metrics::RestoreStagingObservation, BackupStateCaptureError>
+    {
+        let Some(store) = self.inner.state_store.as_ref() else {
+            return Ok(crate::metrics::RestoreStagingObservation::default());
+        };
+        store
+            .reclaim_restore_staging(retains, || {
+                cancellation
+                    .check()
+                    .change_context(RuntimePersistenceError::Cancelled)
+            })
+            .change_context(BackupStateCaptureError::Storage)
+    }
+
     /// Publishes volatile state and reads it with durable WASM saves from one database snapshot.
     /// The caller holds the domain cut or accepts a live checkpoint.
     pub(crate) fn capture_backup_state(

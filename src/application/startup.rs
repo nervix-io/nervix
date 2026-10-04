@@ -331,6 +331,7 @@ impl TryFrom<Args> for Application {
             .transaction_max_open(args.transaction_max_open)
             .replica_count(args.replica_count)
             .state_snapshot_interval(args.state_snapshot_interval)
+            .restore_staging_max_bytes(args.restore_staging_max_bytes.as_u64())
             .memory_pressure(memory_pressure)
             .shutdown(ShutdownCoordinator::new(args.shutdown_timeout))
             .drain_timeout(args.drain_timeout)

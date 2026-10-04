@@ -887,7 +887,8 @@ use state_assignment::{CheckpointOwners, ScheduledStateAssignment, SharedStateAs
 pub(crate) use state_replication::StateSyncAck;
 pub(crate) use state_snapshot_transfer::{DescribeStateSnapshot, FetchStateSnapshot};
 pub(crate) use state_store::{
-    PersistedRuntimeStateEntry, RuntimePersistenceError, RuntimeStatePlacement,
+    DEFAULT_RESTORE_STAGING_MAX_BYTES, PersistedRuntimeStateEntry, RuntimePersistenceError,
+    RuntimeStatePlacement,
 };
 pub(crate) use subscription_interests::{
     AdvertisedSubscriptionInterest, SubscriptionInterestIndex,

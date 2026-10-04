@@ -108,6 +108,47 @@ pub(crate) fn with_restore_state_installation<T>(
     Ok(result)
 }
 
+/// A borrowed applied revision that cannot change while a storage sweep uses it.
+/// Publication identity is owned by the node store and must be protected separately.
+pub struct RestoreStateRetention<'a> {
+    state: &'a StateMachineData,
+}
+
+impl RestoreStateRetention<'_> {
+    /// Keep installations ahead of this node's applied revision and the current generation of
+    /// every applying restore. Leadership or lease expiry alone never ends retry liveness.
+    pub fn retains(&self, domain: &DomainName, generation: u64) -> bool {
+        let Some(applied) = &self.state.last_applied_log_id else {
+            return true;
+        };
+        if generation > applied.index {
+            return true;
+        }
+        let Some(DomainRestoreInstallation::Installing(authority)) =
+            self.state.domain_restore_installations.get(domain)
+        else {
+            return false;
+        };
+        if authority.generation != generation {
+            return false;
+        }
+        self.state
+            .command_executions
+            .get(&authority.execution)
+            .is_some_and(|execution| {
+                execution.is_applying() && execution.restore_execution().is_some()
+            })
+    }
+}
+
+pub(crate) fn with_restore_state_reclamation<T>(
+    applied: &nervix_primitives::sync::blocking::RwLock<StateMachineData>,
+    reclaim: impl FnOnce(&RestoreStateRetention<'_>) -> T,
+) -> T {
+    let state = applied.read();
+    reclaim(&RestoreStateRetention { state: &state })
+}
+
 pub(crate) fn validate_restored_domain_start(
     state: &StateMachineData,
     domain: &DomainName,
@@ -732,6 +773,123 @@ mod tests {
             ConsensusResponse::Applied
         );
         (state, reference)
+    }
+
+    #[test]
+    fn restore_retention_tracks_applied_generations_and_durable_execution_liveness() {
+        let (mut state, reference) = preparing_restore();
+        let authority = begin_installation(&mut state, &reference, 3, 12);
+        let retained = RestoreStateRetention { state: &state };
+        assert!(retained.retains(&domain("prod"), authority.generation));
+        assert!(retained.retains(&domain("ahead"), authority.generation + 1));
+        assert!(!retained.retains(&domain("prod"), authority.generation - 1));
+        assert!(!retained.retains(&domain("another"), authority.generation));
+        state.domain_mutations.remove(&domain("prod"));
+        assert!(
+            RestoreStateRetention { state: &state }.retains(&domain("prod"), 12),
+            "loss of the lease alone does not end an applying restore's retry lifetime"
+        );
+        let (mut successor, _) = preparing_restore();
+        begin_installation(&mut successor, &reference, 4, 13);
+        state = successor;
+        assert!(!RestoreStateRetention { state: &state }.retains(&domain("prod"), 12));
+        assert!(RestoreStateRetention { state: &state }.retains(&domain("prod"), 13));
+        let response = apply_consensus_command(
+            &mut state,
+            &ConsensusCommand::FinishCommandExecution {
+                reference: reference.clone(),
+                owner: user("operator"),
+                request_digest: [9; 32],
+                at: Timestamp::from_unix_nanos(1_700_000_011_000_000_000),
+                result: Box::new(crate::CommandExecutionResult {
+                    disposition: crate::CommandExecutionDisposition::Failed,
+                    message: "installation failed".to_string(),
+                    diagnostics: Vec::new(),
+                    statements: Vec::new(),
+                    transaction: None,
+                    transaction_admission: None,
+                    backup: None,
+                    restore: None,
+                }),
+            },
+        )
+        .response;
+        assert_eq!(response, ConsensusResponse::Applied);
+        assert!(!RestoreStateRetention { state: &state }.retains(&domain("prod"), 13));
+        state.command_executions = Default::default();
+        assert!(!RestoreStateRetention { state: &state }.retains(&domain("prod"), 13));
+        assert!(
+            validate_restored_domain_start(&state, &domain("prod")).is_err(),
+            "reclamation eligibility never opens the failed target's activation gate"
+        );
+        state.last_applied_log_id = None;
+        assert!(RestoreStateRetention { state: &state }.retains(&domain("prod"), 13));
+    }
+
+    #[cfg(feature = "shuttle")]
+    #[test]
+    fn shuttle_restore_reclamation_holds_the_revision_through_queued_installation() {
+        use nervix_primitives::{
+            sync::{
+                Arc,
+                blocking::{Mutex, RwLock},
+            },
+            thread,
+        };
+        let invariant = || {
+            let (mut state, reference) = preparing_restore();
+            begin_installation(&mut state, &reference, 3, 12);
+            let applied = Arc::new(RwLock::new(state));
+            let staged = Arc::new(Mutex::new(BTreeSet::from([12_u64])));
+            let installed_revision = Arc::new(Mutex::new(12_u64));
+            let sweeper = thread::spawn({
+                let applied = applied.clone();
+                let staged = staged.clone();
+                let installed_revision = installed_revision.clone();
+                move || {
+                    with_restore_state_reclamation(&applied, |retention| {
+                        let revision = *installed_revision.lock();
+                        let mut staged = staged.lock();
+                        staged.retain(|generation| retention.retains(&domain("prod"), *generation));
+                        thread::yield_now();
+                        assert_eq!(
+                            *installed_revision.lock(),
+                            revision,
+                            "the applied revision stays fixed through namespace deletion"
+                        );
+                    })
+                }
+            });
+            let authority = {
+                let mut state = applied.write();
+                let authority = begin_installation(&mut state, &reference, 4, 13);
+                *installed_revision.lock() = authority.generation;
+                authority
+            };
+            with_restore_state_installation(
+                &applied,
+                &domain("prod"),
+                &authority,
+                || {
+                    Some(crate::LeaderTenure {
+                        leader_id: authority.leader.clone(),
+                        term: authority.term,
+                    })
+                },
+                || {
+                    staged.lock().insert(authority.generation);
+                },
+            )
+            .assured("the queued current installation is admitted");
+            sweeper
+                .join()
+                .assured("the sweep completes under the model");
+            assert!(
+                staged.lock().contains(&13),
+                "maintenance cannot delete the queued current installation"
+            );
+        };
+        nervix_model_harness::shuttle::check_interleavings(invariant);
     }
 
     #[test]
