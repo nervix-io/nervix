@@ -30,6 +30,18 @@ own Cucumber, Shuttle, Loom, Turmoil and external Chaos evidence.
 | ID | Package and invariant | Domain | Ordinary cases | Input limit |
 | --- | --- | --- | ---: | ---: |
 | `client-emitter-wire` | `nervix-client-wire` native emitter frame round-trip equality | all current request, reply, refusal and settlement variants with bounded exact schema, window, identity, branch and batch fields, v1 | 256 | 128 bytes |
+| `client-requests` | `nervix-client-wire` complete client request equality | every current request family, identities, positions, schemas and opaque I/O payloads, v1 | 128 | 2048 bytes |
+| `client-replies` | `nervix-client-wire` complete reply equality | every reply family, dispositions, ordered diagnostics and structured command metadata, v1 | 128 | 4096 bytes |
+| `client-events` | `nervix-client-wire` complete event equality and retained graph ownership | every unsolicited event, discovery, clocks and opaque graph text, v1 | 128 | 2048 bytes |
+| `client-streams` | `nervix-client-wire` complete stream equality and shared chunk ownership | all upload, download and restore roots and outcomes, v1 | 128 | 2048 bytes |
+| `client-reply-transfer` | `nervix-client-wire` exact segmentation bytes, reply equality and rejected append isolation | single frames and ordered transfers, incorrect identities and duplicates, v1 | 128 | 256 bytes |
+| `client-row-views` | `nervix-client-wire` complete retained Row views | all scalar cells, nested vectors, fixed arrays, nulls, redaction, branches and float bits, v1 | 128 | 512 bytes |
+| `client-arbitrary-frames` | `nervix-client-wire` typed verification and decoding within budgets | arbitrary bytes at all eight frame roots, v1 | 256 | 16385 bytes |
+| `client-frame-corruption` | `nervix-client-wire` typed verification and decoding within budgets | current frame truncation, bit, offset, length and size mutations, v1 | 256 | 64 bytes |
+| `client-discriminators` | `nervix-client-wire` validate discriminants before accessing union members | all byte-valued request tags, v1 | 256 | 64 bytes |
+| `client-arrow-rows` | `nervix-server` Arrow logical values and validity against production Row views | scalar columns, nullable and nested lists, arrays, selected rows, concrete branches, frame splitting and explicit redaction, v1 | 128 | 512 bytes |
+| `client-arrow-selection` | `nervix-server` whole-input typed rejection without partial output | invalid row bounds, order, duplicates and branch alignment, v1 | 128 | 512 bytes |
+| `client-binding-rows` | `nervix-client-ffi` complete column values and retained frame ownership | native scalar bits, states, string/bytes offsets, branch keys and nested cells, v1 | 128 | 512 bytes |
 | `client-processor-choice-request` | `nervix-client-wire` processor choice request round-trip equality | current targets with relay context, search, page and identity, v1 | 128 | 32 bytes |
 | `nspl-expression` | `nervix-nspl` expression render and reparse equality through a statement and the standalone expression, expression-list and route-construction readers | NSPL expressions of every form, v5 | 256 | 512 bytes |
 | `nspl-model` | `nervix-nspl` canonical `CREATE` render and client and server reparse equality | NSPL Models of every family, client emitters included, v6 | 256 | 2048 bytes |
@@ -103,9 +115,15 @@ under `target/bolero/runs`. Promote a verified minimized failure to the checked-
 when it remains a meaningful regression for the current domain. Breaking shape changes replace
 obsolete seeds.
 
+The [client representation coverage map](https://github.com/nervix-io/nervix/blob/main/tests/client-representation-coverage.md)
+ties the client targets to current schema families, complete oracles, ownership and malformed-input
+boundaries. Request, reply and event coverage checks compare generated families with the schema's
+union declarations, so adding a family requires extending its generator.
+
 ## Generated Domains
 
-`nervix-arbitrary` builds every generated value these properties check. It reads a property's bytes
+`nervix-arbitrary` supplies bounded vocabulary values and entropy; properties compose these into
+their owning frame or Arrow representations in test code. It reads a property's bytes
 as a sequence of bounded choices, so the same bytes always build the same value and a saved failure
 replays exactly. It is a harness outside the layer order: it depends only on the vocabulary, and
 states what NSPL can spell as a rule over values instead of calling the parser, so the vocabulary's
@@ -215,6 +233,14 @@ must be a positive integer and affects only compilation; the inventory's case li
 requested campaign duration remain enforced. CI uses the default deadline. The runner prints the
 effective compilation deadline alongside the build command and retains timeout evidence.
 
+Ordinary execution prepares each selected package, harness and exact feature set once with
+`cargo test --no-run`, under a separate 1,800-second compilation deadline. Discovery can require
+the union of a package's features; its binary does not prepare a target with a different declared
+feature set. Each property still has a 240-second execution bound and must complete its exact
+randomized iteration count and replay every checked-in corpus input. A failed preparation ends
+the run before that harness executes any property. The ordinary CI job reserves 60 minutes for
+discovery, the declared feature builds and every registered target.
+
 Install the dated sanitizer nightly named in the inventory and the pinned CLI. Server properties
 also require the native server build dependencies, including `protoc` for the Pulsar driver;
 both ordinary and sanitizer CI jobs install the Protocol Buffers compiler, Trunk and the browser
@@ -235,16 +261,23 @@ just fuzz-reduce nspl-model <saved-input>
 ```
 
 `just validate-bolero` compares the inventory with all workspace packages declaring
-Bolero, scans their property macros, and queries compiled targets through filtered library-test
-discovery. It rejects missing, unregistered, duplicate, ignored and zero-selected targets, plus
-corpus paths different from Bolero's actual work directory. Each source scan stays within its owning
-Cargo package, excluding generated build directories and packages nested beneath the server's root
-manifest. Discovery executes only
+Bolero, scans their property macros within each owning Cargo package, and queries compiled targets
+through filtered library and integration-test discovery with the inventory's declared features.
+Source scanning stops at nested Cargo manifests and excludes Cargo build output; an authored module
+named `target` remains part of its package. It rejects missing, unregistered, duplicate, ignored and
+zero-selected targets, plus
+corpus paths different from Bolero's actual work directory. Discovery executes only
 `bolero_` tests of the registered library and integration-test targets under Bolero's selection
 mode; it cannot start the server's scenario harness. It reports discovered, selected, executed and
 completed counts.
-`just validate` and `just validate-ci` do not run Bolero checks. The dedicated Bolero commands
-perform discovery before their selected action, and the ordinary Bolero CI job owns this check.
+`just validate` and `just validate-ci` do not run Bolero checks. Bolero commands perform discovery
+before their selected action, and the dedicated ordinary Bolero CI job owns this check. The inventory includes server-owned Arrow
+properties, so Bolero recipes prepare the web console assets the server library embeds through
+`just bolero-deps`. This compiles assets only; it starts no live service. Both Bolero CI jobs install
+Trunk, the browser Rust target and native server build dependencies before compiled discovery.
+Console builds stage the complete real Trunk output and publish only changed assets. Identical
+assets retain their file identity and timestamps, so repeated preparation preserves an already
+instrumented server build; failed builds leave the published assets intact.
 
 `just test-bolero` requires the configured randomized-case count and checked-in corpus
 replay for every selected property, checking Bolero's reported input counts. Fuzz runs use real
@@ -252,6 +285,21 @@ libFuzzer coverage with AddressSanitizer, bounded input length and per-case time
 profile enables optimization, debug information, debug assertions and overflow checks. Builds
 use the pinned nightly and keep the configured kache wrapper. Modeled execution features are
 excluded; Loom, Shuttle and Turmoil remain independent build invocations.
+The server package uses the current profile's lighter optimization and omits debug output for its
+single codegen unit; sanitizer instrumentation, coverage, debug assertions and overflow checks remain
+enabled.
+The pinned cargo-bolero CLI does not expose a Cargo test-harness selector. Each instrumented build
+therefore records a run-local Rustup adapter that forwards the declared `--lib` or `--test` selector
+to its Cargo test calls and forwards toolchain/version queries unchanged. It preserves the toolchain,
+features, sanitizer flags and compiler wrapper. Library properties compile and execute only their
+registered harness; they do not compile or invoke the server's Cucumber executable.
+On a shared host, a cold server build can exceed the campaign runner's 30-minute compilation
+limit. `just prepare-bolero <id>` prepares that same pinned, scoped sanitizer build with a two-hour
+limit and retains its log and preparation metadata. It does not run a campaign or record fuzz
+completion. `just prepare-archive-counts-fuzz` uses this shared path for the declared registry library harness.
+CI prepares the server library with both the empty and `testing` feature sets.
+The target must subsequently pass `just fuzz <id>` with the ordinary build and case
+limits; CI campaigns continue to use that bounded runner.
 
 PR CI runs a required ordinary randomized/corpus job. The sanitizer libFuzzer job runs only when
 the PR has the `fuzz` label, with 30 seconds of engine time per target. Both jobs use the native

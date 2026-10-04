@@ -857,6 +857,13 @@ the wire and corpus tests through `just test-client-wire`, and the cross-languag
 | B-12 to B-16 | `A <runtime> client publishes typed batches through a client ingestor and acknowledges their output through a client emitter` in `client_conformance.feature` for the C ABI in process, C, C++, Python, Java, and Ruby; `a_producer_reports_its_description_and_takes_every_outcome_class`, `a_refused_open_names_its_refusal_and_a_host_argument_is_checked_first`, `a_consumer_reads_and_settles_a_delivery_and_a_lost_confirmation_is_uncertain`, `a_reconnect_interrupts_a_consumer_expires_its_deliveries_and_restores_only_open_handles`, `every_kind_of_column_reads_back_from_the_batch_and_from_its_stream`, `a_builder_refuses_what_a_column_cannot_hold`, and `bolero_host_columns_round_trip_through_builder_and_stream` in `nervix-client-ffi` |
 | P-1 to P-5, B-10 | Every scenario of `restore.feature`, including `An interrupted restore upload is sent again under its execution reference`, `A restore repeated under its execution reference joins it or returns its recorded outcome`, and `A leader change while a restore applies resumes it on the new leader`; `a_restore_start_round_trips`, `every_restore_chunk_round_trips_and_an_empty_one_is_refused`, and `every_restore_reply_round_trips` in `nervix-client-wire`; the `restore_*` conformance frames; `a_restore_outcome_reports_its_steps` in `nervix-client-ffi` |
 
+The [client representation properties](https://github.com/nervix-io/nervix/blob/main/tests/client-representation-coverage.md)
+add complete generated-value evidence for F-1 to F-7, R-1 to R-5 and B-1 to B-7. They preserve
+integer widths, float bits, nanosecond timestamps, schema metadata, cell validity, nested lists,
+branch and subscription identities, and retained bytes. Opaque JSON and connector payloads are
+compared as exact text or bytes. The malformed-request scenario also checks both completion page
+bounds and then sends a valid completion and command on the same session.
+
 ### Executable Examples
 
 The conformance probes are complete, runnable clients, and each prints the same report as every

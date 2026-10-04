@@ -201,6 +201,15 @@ extreme values, nested lists, and every refusal of a domain clock attachment, to
 `just test-client-wire` checks that the checked-in bytes are exactly what the encoder writes, and
 `just update-client-wire-corpus` regenerates them for review.
 
+The registered client representation properties also compare complete generated current values
+through the production codecs. Separate targets verify malformed bytes under fixed limits; Arrow
+properties compare selected logical values and validity with decoded Row cells, using float bits
+and explicit redaction, while binding properties check column copies and retained frame lifetime.
+The [client representation coverage map](https://github.com/nervix-io/nervix/blob/main/tests/client-representation-coverage.md)
+records their schema coverage and ownership boundaries. Both ordinary corpus replay and
+sanitizer-backed fuzzing run the same assertions through the
+[property target inventory](./property-testing-and-fuzzing.md#target-and-representation-register).
+
 ## Transports, Endpoints, And Authentication
 
 Every live node runs both client listeners. Neither depends on leadership or placement, and both
