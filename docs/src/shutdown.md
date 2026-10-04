@@ -609,8 +609,10 @@ releases the node's storage.
 
 Runtime teardown ends each resolved replication route before clearing its state registry. A
 retained route cannot attach to replacement state; a request already admitted through a borrowed
-checkpoint handle may finish on that exact state. The replication task tracker has ended its
-announcers before these routes are cleared.
+checkpoint handle may finish on that exact state. After domain drain, closing the replication task
+owner cancels its announcers, including pending dispatches and retry waits, and waits for their
+retained handles to be released before these routes are cleared. Teardown does not wait for an
+announcement's remote dispatch timeout; synchronization supplies any missed availability hint.
 
 Consensus stops Raft and then waits for its storage to reach an idle barrier, which proves every
 earlier durable write has returned and released the store, before its dedicated database handle is

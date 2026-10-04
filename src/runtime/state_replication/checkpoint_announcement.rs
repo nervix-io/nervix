@@ -16,7 +16,46 @@
     )
 )]
 
+use std::future::Future;
+
 use super::*;
+
+/// Announcement tasks retain their exact state until they finish or terminal teardown cancels
+/// them. Closing the owner also interrupts a pending dispatch or retry wait.
+#[derive(Default)]
+pub(in crate::runtime) struct CheckpointAnnouncementTasks {
+    tracker: TaskTracker,
+    shutdown: CancellationToken,
+}
+
+impl CheckpointAnnouncementTasks {
+    pub(in crate::runtime) fn spawn(
+        &self,
+        task: impl Future<Output = ()> + Send + 'static,
+    ) -> JoinHandle<()> {
+        let shutdown = self.shutdown.clone();
+        self.tracker.spawn(async move {
+            nervix_primitives::select! {
+                biased;
+                _ = shutdown.cancelled() => {}
+                _ = task => {}
+            }
+        })
+    }
+
+    pub(in crate::runtime) fn is_closed(&self) -> bool {
+        self.tracker.is_closed()
+    }
+
+    pub(in crate::runtime) fn close(&self) {
+        self.shutdown.cancel();
+        self.tracker.close();
+    }
+
+    pub(in crate::runtime) async fn wait(&self) {
+        self.tracker.wait().await;
+    }
+}
 
 impl Runtime {
     /// Offer revision `lsm` of `placement` to its replicas through `replication`, the replication of

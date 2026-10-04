@@ -42,6 +42,7 @@ mod handoff;
 mod preparation;
 mod published_branch_state;
 
+pub(in crate::runtime) use checkpoint_announcement::CheckpointAnnouncementTasks;
 pub(in crate::runtime) use checkpoint_listing::OwnerCheckpointListing;
 use handoff::OwnershipHandoffTransitionRef;
 pub(in crate::runtime) use handoff::{

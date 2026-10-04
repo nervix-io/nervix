@@ -976,7 +976,10 @@ that revision, until every one of them has, the node stops being the placement's
 placement's state goes away, or the node stops. A newer checkpoint taken meanwhile raises the
 revision on offer instead of starting a second offer. Each announcer retains the installed route
 and reads its primary and replica set from the same assignment slot used by checkpoint execution.
-Removal, a replaced identity or loss of primary ownership ends its next step. The owner records
+Removal, a replaced identity or loss of primary ownership ends its next step. Terminal runtime
+teardown cancels a pending announcement dispatch or retry wait after domain drain, then joins the
+announcers before withdrawing their routes. These messages are availability hints; the replica's
+periodic synchronization supplies a hint cancelled during shutdown. The owner records
 the highest revision each
 replica acknowledged, so an acknowledgement delivered after a newer one never lowers it, and a
 Kafka offset commit waiting for its replica quorum, like a WASM checkpoint waiting for its replicas,

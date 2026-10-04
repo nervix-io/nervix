@@ -149,7 +149,7 @@ impl Runtime {
                 remote_dispatch: Arc::new(RemoteDispatchRegistry::new()),
                 remote_ack_watcher_shutdown: CancellationToken::new(),
                 remote_ack_watcher_tasks: TaskTracker::new(),
-                state_replication_tasks: TaskTracker::new(),
+                state_replication_tasks: Default::default(),
                 passive_runtime_state_snapshots: DashMap::default(),
                 backup_capture_fences: ArcSwap::from_pointee(HashMap::default()),
                 replicated_branch_lifecycles: DashMap::default(),

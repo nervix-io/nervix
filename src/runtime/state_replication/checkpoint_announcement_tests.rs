@@ -471,6 +471,69 @@ async fn an_announcer_of_a_stopping_runtime_ends() {
     );
 }
 
+#[nervix_primitives::test(start_paused = true)]
+async fn runtime_shutdown_cancels_an_in_flight_checkpoint_announcement() {
+    let runtime = Runtime::new();
+    let local = named::<ClusterNodeName>("node-1");
+    let replica = named::<ClusterNodeName>("node-2");
+    attach_loopback_cluster(&runtime, &local).await;
+    let kafka = placement(
+        RuntimeState::KafkaOffset,
+        ModelKind::Ingestor,
+        "orders",
+        None,
+    );
+    runtime.publish_state_assignment(
+        kafka.entity(),
+        ScheduledStateAssignment {
+            identity: ScheduledStateIdentity {
+                schema_fingerprint: schema(),
+                wasm_state_generations: None,
+            },
+            checkpoint_owners: Some(CheckpointOwners {
+                primary: Some(local.clone()),
+                executors: BTreeSet::from([local.clone()]),
+                replicas: BTreeSet::from([replica.clone()]),
+            }),
+        },
+    );
+    let state = runtime
+        .replicated_kafka_offset_state(kafka.clone(), Some(local), vec![replica], 0, None)
+        .assured("the current offset state installs");
+    let replication = state.persistence.read().replication();
+    let route = runtime
+        .inner
+        .state_replication_routing
+        .resolve(&kafka)
+        .assured("the installed state publishes its announcement route");
+    let announcer = route
+        .offer(replication, 1)
+        .assured("the first checkpoint starts an announcer");
+    let announcing_runtime = runtime.clone();
+    let mut announcing = Box::pin(async move {
+        announcing_runtime
+            .offer_to_lagging_replicas(route, announcer)
+            .await;
+    });
+    assert!(
+        announcing.as_mut().now_or_never().is_none(),
+        "dispatch to a replica outside the loopback cluster is pending"
+    );
+    let announcing = runtime.inner.state_replication_tasks.spawn(announcing);
+    let started = Instant::now();
+    let (_, joined) = futures_util::join!(runtime.shutdown(), announcing);
+    joined.assured("the cancelled announcement exits without a task failure");
+    assert_eq!(
+        Instant::now(),
+        started,
+        "terminal teardown cancels the pending offer without waiting for its dispatch deadline"
+    );
+    assert!(
+        replication.offer(2).is_some(),
+        "cancelling the task returns its announcement to the retained state"
+    );
+}
+
 /// The quorum wait registers before it reads, so the acknowledgement that satisfies it wakes it at
 /// once: on a paused clock, no time passes between the commit and its completion. A lost wake-up
 /// would leave the commit to its deadline, which the paused clock reaches as soon as nothing else

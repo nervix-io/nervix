@@ -822,6 +822,10 @@ its absence is a broken invariant. A watch value needed by later subscribers use
 so loss of current subscribers cannot leave stale state. [Shutdown And Recovery](./shutdown.md)
 owns where these outcomes occur during stop and drain.
 
+Closing the runtime's checkpoint announcement task owner after drain cancels pending dispatches
+and retry waits, then joins them before withdrawing their routes. This cancellation is an ordinary
+terminal task ending; replica synchronization supplies any missed checkpoint availability hint.
+
 Broken internal guarantees take the explicit panic classes `assured` for a construction or platform
 guarantee, `verified` for a condition checked on the current path, and `todo` for a deliberately
 unimplemented path. An actually reachable failure instead becomes a typed error or a valid state

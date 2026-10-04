@@ -138,8 +138,8 @@ pub(in crate::runtime) struct RuntimeInner {
     /// Owns acknowledgement progress tasks so none can retain an interconnect after shutdown.
     pub(in crate::runtime) remote_ack_watcher_tasks: TaskTracker,
     /// Owns checkpoint announcement work that outlives the event that scheduled it. Closing it
-    /// when the runtime stops ends every announcer.
-    pub(in crate::runtime) state_replication_tasks: TaskTracker,
+    /// after domain drain cancels each announcer, including a pending dispatch or retry wait.
+    pub(in crate::runtime) state_replication_tasks: state_replication::CheckpointAnnouncementTasks,
     /// The copy of each branch checkpoint this node installed as a replica, taken when it is
     /// promoted and dropped when its branch lifecycle stops naming the branch.
     pub(in crate::runtime) passive_runtime_state_snapshots:
