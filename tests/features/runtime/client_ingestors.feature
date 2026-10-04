@@ -775,15 +775,15 @@ Feature: Client ingestors
       """
 
     Examples:
-      | session                 | cluster_size | failure                | disposition           | error                                            | outcomes                                                    |
-      | client "app"            | 1            | pending entity drain   | is forced to time out | timed out draining domain                        | REQUESTED,CONFIRMED,FAILED,RELEASED                           |
-      | client "app"            | 3            | pending entity drain   | is forced to time out | timed out draining domain                        | REQUESTED,CONFIRMED,FAILED,RELEASED                           |
-      | WebSocket session "app" | 1            | pending entity drain   | is forced to time out | timed out draining domain                        | REQUESTED,CONFIRMED,FAILED,RELEASED                           |
-      | WebSocket session "app" | 3            | pending entity drain   | is forced to time out | timed out draining domain                        | REQUESTED,CONFIRMED,FAILED,RELEASED                           |
-      | client "app"            | 1            | entity gate engagement | is rejected           | injected entity gate rejection before engagement | REQUESTED,CONFIRMED,RELEASED\|REQUESTED,FAILED                 |
-      | client "app"            | 3            | entity gate engagement | is rejected           | injected entity gate rejection before engagement | REQUESTED,CONFIRMED,RELEASED\|REQUESTED,FAILED                 |
-      | WebSocket session "app" | 1            | entity gate engagement | is rejected           | injected entity gate rejection before engagement | REQUESTED,CONFIRMED,RELEASED\|REQUESTED,FAILED                 |
-      | WebSocket session "app" | 3            | entity gate engagement | is rejected           | injected entity gate rejection before engagement | REQUESTED,CONFIRMED,RELEASED\|REQUESTED,FAILED                 |
+      | session                 | cluster_size | failure                | disposition           | error                                            | outcomes                                       |
+      | client "app"            | 1            | pending entity drain   | is forced to time out | timed out draining domain                        | REQUESTED,CONFIRMED,FAILED,RELEASED            |
+      | client "app"            | 3            | pending entity drain   | is forced to time out | timed out draining domain                        | REQUESTED,CONFIRMED,FAILED,RELEASED            |
+      | WebSocket session "app" | 1            | pending entity drain   | is forced to time out | timed out draining domain                        | REQUESTED,CONFIRMED,FAILED,RELEASED            |
+      | WebSocket session "app" | 3            | pending entity drain   | is forced to time out | timed out draining domain                        | REQUESTED,CONFIRMED,FAILED,RELEASED            |
+      | client "app"            | 1            | entity gate engagement | is rejected           | injected entity gate rejection before engagement | REQUESTED,CONFIRMED,RELEASED\|REQUESTED,FAILED |
+      | client "app"            | 3            | entity gate engagement | is rejected           | injected entity gate rejection before engagement | REQUESTED,CONFIRMED,RELEASED\|REQUESTED,FAILED |
+      | WebSocket session "app" | 1            | entity gate engagement | is rejected           | injected entity gate rejection before engagement | REQUESTED,CONFIRMED,RELEASED\|REQUESTED,FAILED |
+      | WebSocket session "app" | 3            | entity gate engagement | is rejected           | injected entity gate rejection before engagement | REQUESTED,CONFIRMED,RELEASED\|REQUESTED,FAILED |
 
   @client_ingestor @client_ingestor_placement
   Scenario Outline: A producer entering through another node is forwarded to the owner, and a planned relocation ends it
