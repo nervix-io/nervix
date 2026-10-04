@@ -5,12 +5,13 @@
 //! - **Owns.** Syslog UDP, TCP and TLS listeners, RFC 6587 stream framing, peer metadata, and
 //!   source lifecycle operations.
 //! - **Depends on.** The connector source contract, connector-owned Syslog configuration, Tokio
-//!   sockets, and rustls.
+//!   sockets, `memchr`, and rustls.
 //! - **Must not know.** Runtime collectors, relays, branches, schedules, registry state, or NSPL.
 
 use std::{net::SocketAddr, num::NonZeroUsize};
 
 use async_trait::async_trait;
+use bytes::{BufMut as _, buf::Limit};
 use error_stack::{Report, ResultExt as _};
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_connector::{
@@ -33,6 +34,10 @@ use crate::config::{SyslogClientConfig, SyslogConfigError, SyslogDirection, Sysl
 const SYSLOG: &str = "syslog";
 const STREAM_INTAKE_QUEUE_CAPACITY: usize = 64;
 const MAX_OCTET_COUNT_DIGITS: usize = 10;
+/// The most bytes one read appends to a connection's frame buffer, so a buffer grows with the
+/// frames a connection actually sends rather than to its frame bound on the first read.
+const STREAM_READ_CHUNK: usize = 8_192;
+
 #[derive(Clone)]
 pub struct SyslogSourcePlan {
     config: SyslogClientConfig,
@@ -161,8 +166,9 @@ enum SyslogConnectionError {
     Frame,
 }
 
+/// Why a connection's byte stream is not RFC 6587 framing the listener accepts.
 #[derive(Debug, Error)]
-enum SyslogFrameError {
+pub enum SyslogFrameError {
     #[error("malformed Syslog octet-counting length prefix")]
     MalformedOctetCount,
     #[error("malformed Syslog octet count: {source}")]
@@ -465,11 +471,9 @@ async fn read_stream_connection(
             }
             continue;
         }
-        let read_capacity = decoder
-            .read_capacity()
+        let mut buffer = decoder
+            .read_buffer()
             .change_context(SyslogConnectionError::Frame)?;
-        let mut chunk = [0_u8; 8_192];
-        let read_capacity = read_capacity.min(chunk.len());
         let read = nervix_primitives::select! {
             changed = paused.changed() => {
                 if changed.is_err() {
@@ -477,7 +481,7 @@ async fn read_stream_connection(
                 }
                 continue;
             }
-            read = stream.read(&mut chunk[..read_capacity]) => read,
+            read = stream.read_buf(&mut buffer) => read,
         }
         .map_err(|source| Report::new(SyslogConnectionError::StreamRead { source }))?;
         if read == 0 {
@@ -487,12 +491,38 @@ async fn read_stream_connection(
                 Err(Report::new(SyslogConnectionError::IncompleteFrame))
             };
         }
-        decoder.extend(&chunk[..read]);
     }
 }
 
+/// How far the frame at the read cursor has been examined, in bytes past the cursor, so that a
+/// frame split across reads is not examined again from its start.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FrameProgress {
+    /// Only the frame's first byte decides its framing. An octet count, at most ten digits and a
+    /// space, is read whole again when a read splits it.
+    Unread,
+    /// An octet-counted frame whose count was read: its payload is the bytes
+    /// `payload_start..frame_end`.
+    OctetCounted {
+        payload_start: usize,
+        frame_end: usize,
+    },
+    /// A non-transparent frame whose first `searched` bytes hold no LF.
+    NonTransparent { searched: usize },
+}
+
+/// RFC 6587 framing of one connection's byte stream.
+///
+/// Reads append to one buffer, and framing moves a cursor through it, copying each payload out.
+/// The bytes before the cursor are discarded once, when the next read needs room, so the bytes
+/// a read delivers are moved at most once however many frames they hold. Delimiters are found
+/// with `memchr`, from where the previous search of the same frame stopped.
 struct StreamFrameDecoder {
-    bytes: Vec<u8>,
+    /// Framed bytes before `cursor`, then the bytes of the frames not yet complete.
+    buffer: Vec<u8>,
+    /// The first byte of the next frame.
+    cursor: usize,
+    progress: FrameProgress,
     max_message_size: NonZeroUsize,
     allow_non_transparent: bool,
 }
@@ -500,21 +530,21 @@ struct StreamFrameDecoder {
 impl StreamFrameDecoder {
     fn new(max_message_size: NonZeroUsize, allow_non_transparent: bool) -> Self {
         Self {
-            bytes: Vec::new(),
+            buffer: Vec::new(),
+            cursor: 0,
+            progress: FrameProgress::Unread,
             max_message_size,
             allow_non_transparent,
         }
     }
 
     fn is_empty(&self) -> bool {
-        self.bytes.is_empty()
+        self.cursor == self.buffer.len()
     }
 
-    fn extend(&mut self, bytes: &[u8]) {
-        self.bytes.extend_from_slice(bytes);
-    }
-
-    fn read_capacity(&self) -> error_stack::Result<usize, SyslogFrameError> {
+    /// Discards the framed bytes and returns the buffer the next read appends to, limited to what
+    /// the frame bound still admits and to one read chunk.
+    fn read_buffer(&mut self) -> error_stack::Result<Limit<&mut Vec<u8>>, SyslogFrameError> {
         let cap = self
             .max_message_size
             .get()
@@ -524,46 +554,52 @@ impl StreamFrameDecoder {
                     maximum: self.max_message_size,
                 })
             })?;
+        self.buffer.drain(..self.cursor);
+        self.cursor = 0;
         // The buffer is filled to at most `cap` bytes, so a longer one has no room left.
-        let remaining = cap.saturating_sub(self.bytes.len());
+        let remaining = cap.saturating_sub(self.buffer.len());
         if remaining == 0 {
-            Err(Report::new(SyslogFrameError::OversizedBufferedFrame {
+            return Err(Report::new(SyslogFrameError::OversizedBufferedFrame {
                 maximum: self.max_message_size,
-            }))
-        } else {
-            Ok(remaining)
+            }));
         }
+        let limit = remaining.min(STREAM_READ_CHUNK);
+        self.buffer.reserve(limit);
+        Ok((&mut self.buffer).limit(limit))
     }
 
     fn next_frame(&mut self) -> error_stack::Result<Option<Vec<u8>>, SyslogFrameError> {
-        let Some(first) = self.bytes.first().copied() else {
+        let Some(first) = self.buffer.get(self.cursor).copied() else {
             return Ok(None);
         };
-        if first.is_ascii_digit() {
-            self.next_octet_counted_frame()
-        } else if !self.allow_non_transparent {
-            Err(Report::new(SyslogFrameError::NonOctetTlsFrame))
-        } else {
-            self.next_non_transparent_frame()
+        match self.progress {
+            FrameProgress::Unread if first.is_ascii_digit() => self.read_octet_count(),
+            FrameProgress::Unread if !self.allow_non_transparent => {
+                Err(Report::new(SyslogFrameError::NonOctetTlsFrame))
+            }
+            FrameProgress::Unread => self.next_non_transparent_frame(0),
+            FrameProgress::OctetCounted {
+                payload_start,
+                frame_end,
+            } => Ok(self.take_octet_counted_frame(payload_start, frame_end)),
+            FrameProgress::NonTransparent { searched } => self.next_non_transparent_frame(searched),
         }
     }
 
-    fn next_octet_counted_frame(
-        &mut self,
-    ) -> error_stack::Result<Option<Vec<u8>>, SyslogFrameError> {
-        let delimiter = self.bytes.iter().position(|byte| *byte == b' ');
-        let Some(delimiter) = delimiter else {
-            if self.bytes.len() > MAX_OCTET_COUNT_DIGITS
-                || self.bytes.iter().any(|byte| !byte.is_ascii_digit())
+    /// Reads the octet count at the cursor. The count and its space are at most eleven bytes, so
+    /// the search for the space looks no further.
+    fn read_octet_count(&mut self) -> error_stack::Result<Option<Vec<u8>>, SyslogFrameError> {
+        let pending = &self.buffer[self.cursor..];
+        let window = &pending[..pending.len().min(MAX_OCTET_COUNT_DIGITS + 1)];
+        let Some(delimiter) = memchr::memchr(b' ', window) else {
+            if pending.len() > MAX_OCTET_COUNT_DIGITS
+                || pending.iter().any(|byte| !byte.is_ascii_digit())
             {
                 return Err(Report::new(SyslogFrameError::MalformedOctetCount));
             }
             return Ok(None);
         };
-        if delimiter == 0 || delimiter > MAX_OCTET_COUNT_DIGITS {
-            return Err(Report::new(SyslogFrameError::MalformedOctetCount));
-        }
-        let prefix = &self.bytes[..delimiter];
+        let prefix = &pending[..delimiter];
         if prefix.first() == Some(&b'0') || !prefix.iter().all(|byte| byte.is_ascii_digit()) {
             return Err(Report::new(SyslogFrameError::MalformedOctetCount));
         }
@@ -584,22 +620,36 @@ impl StreamFrameDecoder {
         let frame_end = payload_start
             .checked_add(length)
             .verified("the octet count checked above is at most the maximum message size");
-        if self.bytes.len() < frame_end {
-            return Ok(None);
-        }
-        let frame = self.bytes[payload_start..frame_end].to_vec();
-        self.bytes.drain(..frame_end);
-        Ok(Some(frame))
+        self.progress = FrameProgress::OctetCounted {
+            payload_start,
+            frame_end,
+        };
+        Ok(self.take_octet_counted_frame(payload_start, frame_end))
     }
 
+    fn take_octet_counted_frame(
+        &mut self,
+        payload_start: usize,
+        frame_end: usize,
+    ) -> Option<Vec<u8>> {
+        let pending = &self.buffer[self.cursor..];
+        let payload = pending.get(payload_start..frame_end)?;
+        let frame = payload.to_vec();
+        self.consume(frame_end);
+        Some(frame)
+    }
+
+    /// Searches the frame at the cursor for its LF from byte `searched`, which earlier searches
+    /// already covered.
     fn next_non_transparent_frame(
         &mut self,
+        searched: usize,
     ) -> error_stack::Result<Option<Vec<u8>>, SyslogFrameError> {
-        let Some(delimiter) = self.bytes.iter().position(|byte| *byte == b'\n') else {
-            let pending_payload_size = self
-                .bytes
+        let pending = &self.buffer[self.cursor..];
+        let Some(offset) = memchr::memchr(b'\n', &pending[searched..]) else {
+            let pending_payload_size = pending
                 .len()
-                .checked_sub(usize::from(self.bytes.last() == Some(&b'\r')))
+                .checked_sub(usize::from(pending.last() == Some(&b'\r')))
                 .verified("a trailing carriage return means the buffer holds at least one byte");
             if pending_payload_size > self.max_message_size.get() {
                 return Err(Report::new(
@@ -608,9 +658,15 @@ impl StreamFrameDecoder {
                     },
                 ));
             }
+            self.progress = FrameProgress::NonTransparent {
+                searched: pending.len(),
+            };
             return Ok(None);
         };
-        let payload_end = if delimiter > 0 && self.bytes[delimiter - 1] == b'\r' {
+        let delimiter = searched
+            .checked_add(offset)
+            .verified("the offset indexes the bytes after the searched ones");
+        let payload_end = if delimiter > 0 && pending[delimiter - 1] == b'\r' {
             delimiter - 1
         } else {
             delimiter
@@ -622,92 +678,52 @@ impl StreamFrameDecoder {
                 },
             ));
         }
-        let frame = self.bytes[..payload_end].to_vec();
-        self.bytes.drain(..=delimiter);
+        let frame = pending[..payload_end].to_vec();
+        self.consume(delimiter + 1);
         Ok(Some(frame))
+    }
+
+    /// Moves the cursor past a complete frame of `length` bytes.
+    fn consume(&mut self, length: usize) {
+        self.cursor = self
+            .cursor
+            .checked_add(length)
+            .verified("a complete frame lies inside the buffered bytes");
+        self.progress = FrameProgress::Unread;
+    }
+}
+
+/// Frames one connection's whole byte stream through the production decoder, reading it into the
+/// decoder's buffer at most `read_size` bytes at a time as a connection does, and answers how many
+/// payload bytes its frames held. Criterion measures the framer through it.
+#[cfg(feature = "benchmarks")]
+pub fn frame_stream(
+    stream: &[u8],
+    read_size: usize,
+    max_message_size: NonZeroUsize,
+) -> error_stack::Result<usize, SyslogFrameError> {
+    const IN_MEMORY: &str = "every count is a length of the stream this call holds in memory";
+
+    let mut decoder = StreamFrameDecoder::new(max_message_size, true);
+    let mut position = 0_usize;
+    let mut payload_bytes = 0_usize;
+    loop {
+        while let Some(frame) = decoder.next_frame()? {
+            payload_bytes = payload_bytes.checked_add(frame.len()).assured(IN_MEMORY);
+        }
+        if position == stream.len() {
+            return Ok(payload_bytes);
+        }
+        let mut buffer = decoder.read_buffer()?;
+        let read = read_size.min(buffer.remaining_mut());
+        let end = stream
+            .len()
+            .min(position.checked_add(read).assured(IN_MEMORY));
+        buffer.put_slice(&stream[position..end]);
+        position = end;
     }
 }
 
 #[cfg(test)]
-mod tests {
-    use nonzero_ext::nonzero;
-
-    use super::*;
-
-    #[test]
-    fn stream_decoder_interleaves_both_rfc6587_framings() {
-        let mut decoder = StreamFrameDecoder::new(nonzero!(128usize), true);
-        decoder.extend(b"5 helloalpha\r\n4 test");
-        assert_eq!(
-            decoder.next_frame().expect("valid frame"),
-            Some(b"hello".to_vec())
-        );
-        assert_eq!(
-            decoder.next_frame().expect("valid frame"),
-            Some(b"alpha".to_vec())
-        );
-        assert_eq!(
-            decoder.next_frame().expect("valid frame"),
-            Some(b"test".to_vec())
-        );
-        assert_eq!(decoder.next_frame().expect("needs data"), None);
-    }
-
-    #[test]
-    fn stream_decoder_rejects_malformed_and_oversized_frames() {
-        let mut malformed = StreamFrameDecoder::new(nonzero!(128usize), true);
-        malformed.extend(b"12x payload");
-        assert!(malformed.next_frame().is_err());
-
-        let mut oversized_count = StreamFrameDecoder::new(nonzero!(4usize), true);
-        oversized_count.extend(b"5 hello");
-        assert!(oversized_count.next_frame().is_err());
-
-        let mut oversized_line = StreamFrameDecoder::new(nonzero!(4usize), true);
-        oversized_line.extend(b"hello\n");
-        assert!(oversized_line.next_frame().is_err());
-    }
-
-    #[test]
-    fn stream_decoder_limits_octet_count_prefix_to_ten_digits() {
-        let mut decoder = StreamFrameDecoder::new(nonzero!(128usize), true);
-        decoder.extend(b"12345678901");
-        assert!(decoder.next_frame().is_err());
-    }
-
-    #[test]
-    fn stream_decoder_rejects_zero_and_leading_zero_octet_counts() {
-        for frame in [b"0 ".as_slice(), b"05 hello".as_slice()] {
-            let mut decoder = StreamFrameDecoder::new(nonzero!(128usize), true);
-            decoder.extend(frame);
-            assert!(decoder.next_frame().is_err());
-        }
-    }
-
-    #[test]
-    fn stream_decoder_accepts_a_maximum_size_frame_with_split_crlf() {
-        let mut decoder = StreamFrameDecoder::new(nonzero!(5usize), true);
-        decoder.extend(b"hello\r");
-        assert_eq!(
-            decoder.next_frame().expect("trailing CR may await LF"),
-            None
-        );
-        decoder.extend(b"\n");
-        assert_eq!(
-            decoder
-                .next_frame()
-                .expect("maximum-size CRLF frame is valid"),
-            Some(b"hello".to_vec())
-        );
-    }
-
-    #[test]
-    fn stream_decoder_rejects_non_transparent_tls_framing() {
-        let mut decoder = StreamFrameDecoder::new(nonzero!(128usize), false);
-        decoder.extend(b"<13>line framed\n");
-        assert!(matches!(
-            decoder.next_frame(),
-            Err(error) if matches!(error.current_context(), SyslogFrameError::NonOctetTlsFrame)
-        ));
-    }
-}
+#[path = "source_tests.rs"]
+mod tests;

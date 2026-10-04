@@ -7,8 +7,8 @@ use error_stack::Report;
 use flatbuffers::WIPOffset;
 use meticulous::OptionExt as _;
 use nervix_models::{
-    ArchiveDigest, BackupArchiveSummary, BackupDomainSummary, BackupResources,
-    CommandExecutionReference, DomainName, Timestamp,
+    ArchiveDigest, BackupArchiveSummary, BackupCut, BackupCutKind, BackupDomainSummary,
+    BackupQuiesceCounters, BackupResources, CommandExecutionReference, DomainName, Timestamp,
 };
 
 use crate::{
@@ -22,6 +22,13 @@ use crate::{
 wire_enum!(ALL_BACKUP_RESOURCES: BackupResources => wire::BackupResources {
     Included,
     Omitted,
+});
+
+wire_enum!(ALL_BACKUP_CUT_KINDS: BackupCutKind => wire::BackupCutKind {
+    Quiesced,
+    Live,
+    Stopped,
+    ConfigurationOnly,
 });
 
 pub(crate) fn encode_backup_archive<'fbb>(
@@ -53,11 +60,38 @@ fn encode_backup_domain<'fbb>(
     encoder: &mut Encoder<'fbb>,
 ) -> Result<WIPOffset<wire::BackupDomainSummary<'fbb>>, Report<WireEncodeError>> {
     let name = encoder.text("BackupDomainSummary.domain", domain.domain.as_str())?;
+    let (engaged_at, released_at, counters) = match domain.cut {
+        BackupCut::Quiesced {
+            engaged_at,
+            released_at,
+            quiesce,
+        } => (
+            Some(engaged_at.unix_nanos()),
+            Some(released_at.unix_nanos()),
+            quiesce,
+        ),
+        BackupCut::Live | BackupCut::Stopped | BackupCut::ConfigurationOnly => {
+            (None, None, BackupQuiesceCounters::default())
+        }
+    };
+    let cut = wire::BackupCut::create(
+        encoder.fbb(),
+        &wire::BackupCutArgs {
+            kind: Some(domain.cut.kind().into()),
+            engaged_at,
+            released_at,
+            buffered_records: counters.buffered_records,
+            buffered_bytes: counters.buffered_bytes,
+            dropped_records: counters.dropped_records,
+            rejected_records: counters.rejected_records,
+        },
+    );
     Ok(wire::BackupDomainSummary::create(
         encoder.fbb(),
         &wire::BackupDomainSummaryArgs {
             domain: Some(name),
             revision: domain.revision,
+            cut: Some(cut),
             sections: domain.sections,
             section_bytes: domain.section_bytes,
         },
@@ -107,9 +141,57 @@ fn decode_backup_domain(
     decoder: Decoder<'_>,
     domain: wire::BackupDomainSummary<'_>,
 ) -> Result<BackupDomainSummary, Report<WireDecodeError>> {
+    let cut = domain.cut();
+    let kind: BackupCutKind = decoder.required_enumeration("BackupCut.kind", cut.kind())?;
+    let counters = BackupQuiesceCounters {
+        buffered_records: cut.buffered_records(),
+        buffered_bytes: cut.buffered_bytes(),
+        dropped_records: cut.dropped_records(),
+        rejected_records: cut.rejected_records(),
+    };
+    let decoded_cut = match kind {
+        BackupCutKind::Quiesced => {
+            let (Some(engaged_at), Some(released_at)) = (cut.engaged_at(), cut.released_at())
+            else {
+                return Err(Report::new(WireDecodeError::InvalidValue {
+                    field: "BackupCut",
+                    kind: "quiesced cut interval",
+                }));
+            };
+            if released_at < engaged_at {
+                return Err(Report::new(WireDecodeError::InvalidValue {
+                    field: "BackupCut",
+                    kind: "ordered cut interval",
+                }));
+            }
+            BackupCut::Quiesced {
+                engaged_at: Timestamp::from_unix_nanos(engaged_at),
+                released_at: Timestamp::from_unix_nanos(released_at),
+                quiesce: counters,
+            }
+        }
+        BackupCutKind::Live | BackupCutKind::Stopped | BackupCutKind::ConfigurationOnly => {
+            if cut.engaged_at().is_some()
+                || cut.released_at().is_some()
+                || counters != BackupQuiesceCounters::default()
+            {
+                return Err(Report::new(WireDecodeError::InvalidValue {
+                    field: "BackupCut",
+                    kind: "non-quiesced cut fields",
+                }));
+            }
+            match kind {
+                BackupCutKind::Live => BackupCut::Live,
+                BackupCutKind::Stopped => BackupCut::Stopped,
+                BackupCutKind::ConfigurationOnly => BackupCut::ConfigurationOnly,
+                BackupCutKind::Quiesced => unreachable!(),
+            }
+        }
+    };
     Ok(BackupDomainSummary {
         domain: decoder.name("BackupDomainSummary.domain", domain.domain())?,
         revision: domain.revision(),
+        cut: decoded_cut,
         sections: domain.sections(),
         section_bytes: domain.section_bytes(),
     })

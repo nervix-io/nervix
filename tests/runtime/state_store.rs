@@ -556,7 +556,7 @@ async fn guest_checkpoints_and_replica_installs_return_once_synchronized() {
     let guest = super::super::ReplicatedWasmProcessorState::new(
         placement.clone(),
         None,
-        Arc::new(nervix_primitives::publication::ArcSwapOption::empty()),
+        Default::default(),
     );
     let captured = guest.capture(
         vec![1, 2, 3],

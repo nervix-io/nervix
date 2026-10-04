@@ -514,6 +514,15 @@ pub struct Args {
         help = "OpenTelemetry parent-based trace sample ratio used when trace export is enabled"
     )]
     pub otel_trace_sample_ratio: f64,
+    /// Where a diagnostic node records its deadlock evidence. Without it, a deadlock the detector
+    /// reports is described on standard error only. Exists only in a `deloxide` build.
+    #[cfg(feature = "deloxide")]
+    #[arg(
+        long,
+        env = "NERVIX_DEADLOCK_EVIDENCE",
+        help = "Existing directory a diagnostic node records its deadlock evidence in"
+    )]
+    pub deadlock_evidence: Option<PathBuf>,
     #[command(subcommand)]
     pub subcommand: Option<Command>,
 }
@@ -1880,6 +1889,8 @@ impl Application {
                 resource_upload_executions: DashMap::with_hasher(RandomState::new()),
                 resource_replication_executions: DashMap::with_hasher(RandomState::new()),
                 retained_backups: Default::default(),
+                captured_backup_sections: DashMap::with_hasher(RandomState::new()),
+                restored_state_uploads: DashMap::with_hasher(RandomState::new()),
                 restore_archives: Default::default(),
             }),
         };
@@ -1919,6 +1930,9 @@ impl Application {
             })
             .change_context(AppError::RegisterInterconnectRequestHandler)?;
         let resource_replica_service = service.clone();
+        service
+            .register_backup_state_handlers(&interconnect)
+            .change_context(AppError::RegisterInterconnectRequestHandler)?;
         interconnect
             .register_handler::<PublishResourceReplica, _, _>(move |context, request| {
                 let service = resource_replica_service.clone();

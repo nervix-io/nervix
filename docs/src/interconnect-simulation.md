@@ -56,6 +56,7 @@ them substitutes for another.
 | `crates/interconnect/tests/simulation.rs` | Harness | The `simulation` test target: runner checks, the DNS and CPU scenarios, and the fresh-process record and replay checks |
 | `crates/interconnect/tests/simulation/transport.rs` | Harness | The certificate authority fixture, typed Arrow requests, host synchronization, and the exchange and link-fault scenarios |
 | `crates/interconnect/tests/simulation/relay.rs` | Harness | Relay reply loss, cancellation, and receiver-restart scenarios |
+| `crates/interconnect/tests/simulation/backup.rs` | Harness | Authenticated backup capture and section fetch across a partition, repair, and owner restart during transfer |
 | `crates/interconnect/tests/simulation/isolation.rs` | Harness | The three-host stalled-peer scenario and the capacity bounds it checks |
 | `crates/interconnect/src/authentication/simulation_tests.rs` | Harness | Certificate validity, expiry drain, handshake deadlines, and trace replay under the simulated clock |
 | `crates/interconnect/src/wire.rs`, module `simulation_checks` | Harness | Seeded rkyv round trips through the execution owner |
@@ -79,7 +80,7 @@ compilation with the production or Shuttle builds.
 | Normal | Default features | Tokio's operating-system sockets, which `nervix_primitives::net` selects, and the node's Hickory resolver | Tokio's blocking pool, through `task::spawn_cpu` | The ordinary primitives `nervix-primitives` re-exports: Tokio, Tokio Util, `parking_lot`, DashMap and the standard library's | Stable |
 | Shuttle | The `shuttle` feature of each owning package, forwarded to `nervix-primitives` | Tokio's, outside every model and never driven by the checks: a socket created inside a check fails it | `spawn_blocking` of Shuttle's modeled Tokio | The modeled primitives `nervix-primitives` selects: Shuttle's Tokio, timers, Tokio Util, `parking_lot`, DashMap and atomics, and its own scheduler-visible `Notify` and `watch` | Stable |
 | Turmoil | The `turmoil` feature of `nervix-interconnect`, which enables `nervix-execution/turmoil` and `nervix-primitives/turmoil` | Turmoil's simulated sockets and DNS table, which `nervix_primitives::net` selects | A task on the simulated host's scheduler, through `task::spawn_cpu`; storage jobs stay on the blocking pool | The ordinary primitives, on the simulated host that runs the caller, with timers that follow its clock | `--cfg tokio_unstable` |
-| Turmoil with Shuttle or Loom | Both modes in one dependency graph, from one package or two | Fails to compile in `nervix-primitives` with a diagnostic naming both modes | | | |
+| Turmoil with Shuttle, Loom or Deloxide | Both modes in one dependency graph, from one package or two | Fails to compile in `nervix-primitives` with a diagnostic naming both modes, so the deadlock detector never runs inside a simulation | | | |
 | Turmoil for the browser's target | The `turmoil` feature with `--target wasm32-unknown-unknown` | Fails to compile with the boundary's diagnostic that execution modes run on native targets only, before any simulator dependency is built | | | |
 
 Only the Turmoil recipes pass `--cfg tokio_unstable`, and `just validate-primitive-boundary` rejects
@@ -97,15 +98,15 @@ Validation keeps the modes apart:
 
 - `just validate-execution-mode-dependencies` fails when the normal dependency graph of the
   workspace, or of any package built on its own, with or without default features, contains
-  Turmoil, Loom, Shuttle or a Shuttle wrapper, or enables an execution mode on the primitive
-  boundary.
+  Turmoil, Loom, Shuttle, a Shuttle wrapper or Deloxide, or enables an execution mode on the
+  primitive boundary.
 - `just validate-primitive-boundary` rejects every path to Tokio's or Turmoil's sockets, Tokio's
   timers, or the standard library's monotonic clock and sockets outside `nervix-primitives`, and a
   `turmoil` dependency outside the boundary unless it is optional behind the package's own
   `turmoil` feature, as the interconnect's harness takes it. The simulated path therefore cannot
   name an operating-system socket or clock that would escape its host.
 - `just validate-execution-mode-conflicts` builds `nervix-primitives` with every pair of the
-  `loom`, `shuttle` and `turmoil` modes and with all three, and `nervix-interconnect` with Shuttle
+  `loom`, `shuttle`, `turmoil` and `deloxide` modes and with all four, and `nervix-interconnect` with Shuttle
   while its execution dependency selects Turmoil, and requires the diagnostic naming the modes in
   each. It builds each mode for the browser's target and requires the boundary's own diagnostic
   first, and builds the NSPL formatter, a product binary, with each mode and requires the
@@ -548,6 +549,8 @@ seeds twice each, in fresh processes; the sweep replaces the seeds without weake
 | receiver restart after relay body receipt | `transport::relay::relay_restart_fences_unresolved_delivery_and_accepts_fresh_work` | 81 | 90 s / 50,000 / 90 s | A new process epoch leaves the unresolved delivery indeterminate and admits fresh work |
 | receiver restart after runtime admission | The same | 83 | 90 s / 50,000 / 90 s | The same after runtime admission |
 | receiver restart with delayed relay response | The same | 85, 1036 | 90 s / 50,000 / 90 s | A released pre-crash reply confirms only historical receipt; admission stays indeterminate against the new epoch |
+| backup section partition and repair | `transport::backup::backup_section_fetch_is_fenced_and_recovers_after_partition` | 101 | 85 s / 100,000 / 90 s | A forged process identity cannot capture or consume a section; a stalled fetch reaches its deadline; a partitioned fetch fails and succeeds after repair |
+| backup owner restart during transfer | `transport::backup::restart_during_backup_transfer_discards_the_process_stage` | 102 | 85 s / 100,000 / 90 s | An incomplete section cannot finish after owner restart, and the replacement process has no prior capture stage |
 | stalled peer isolation | `transport::isolation::stalled_peer_cannot_consume_unrelated_capacity_or_leak_reservations` | 91–93 | 120 s / 120,000 / 120 s | A stalled peer holds only its own connection's slots, unrelated work progresses, and every reservation is released |
 
 The simulation target also holds 26 runner and driver checks, such as the supervision, bound, clock,
@@ -614,6 +617,17 @@ released pre-crash reply can confirm only that the old process received the body
 identity then crosses the rebound listener and is admitted. The fixture checks the Arrow batch and
 both process identities at the protocol boundary, and that the receiver crashed and restarted
 exactly once.
+
+### Backup Section Transfer
+
+The backup cases send the production typed capture, inventory, and bulk fetch messages. A request
+that claims another process epoch is rejected before the capture or stream handler runs. The
+partition case bounds a stalled fetch by its request deadline, leaves the staged section available
+when the link is partitioned, repairs the link, and reads the verified section. The restart case
+ends an owner process after its first stream chunk;
+the incomplete stream fails, and the rebound owner has no stage from that process. These are
+transport and in-memory staging boundary checks; the Cucumber cluster scenarios verify the
+server's archive and restore behavior.
 
 ### Stalled-Peer Isolation
 

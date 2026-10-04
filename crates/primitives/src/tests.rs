@@ -5,11 +5,13 @@
 //! [`exercise_the_atomic_surface`] and the same scripts of the native families, so a backend that
 //! lacks an operation fails to compile here and a backend that answers one differently fails here,
 //! rather than in the first owner that uses it. The Shuttle checks also show that the scheduler
-//! reaches the races its adapters exist for, and the Turmoil check that sockets, name lookup,
-//! timers and admitted CPU jobs belong to the simulated host that uses them.
+//! reaches the races its adapters exist for, the Turmoil check that sockets, name lookup, timers
+//! and admitted CPU jobs belong to the simulated host that uses them, and the `deloxide` checks
+//! that the tracked locks keep the contracts of the locks they replace.
 
 #[cfg(all(feature = "native", not(feature = "loom")))]
 mod families;
+mod findings;
 #[cfg(all(feature = "native", not(feature = "loom")))]
 mod notification;
 #[cfg(all(feature = "native", feature = "shuttle", not(feature = "loom")))]
@@ -24,6 +26,12 @@ mod tasks;
     not(feature = "loom")
 ))]
 mod timers;
+#[cfg(all(
+    feature = "native",
+    feature = "deloxide",
+    not(any(feature = "loom", feature = "shuttle", feature = "turmoil"))
+))]
+mod tracked_locks;
 #[cfg(all(feature = "native", not(feature = "loom")))]
 mod watch_channel;
 
@@ -229,14 +237,6 @@ mod ordinary {
             tokio_util::sync::CancellationToken,
         >());
         assert!(is_same_type::<
-            crate::sync::blocking::Mutex<u8>,
-            parking_lot::Mutex<u8>,
-        >());
-        assert!(is_same_type::<
-            crate::sync::blocking::Condvar,
-            parking_lot::Condvar,
-        >());
-        assert!(is_same_type::<
             crate::sync::blocking::OnceLock<u8>,
             std::sync::OnceLock<u8>,
         >());
@@ -279,6 +279,20 @@ mod ordinary {
         assert!(is_same_type::<crate::time::Instant, tokio::time::Instant>());
         assert!(is_same_type::<crate::time::Sleep, tokio::time::Sleep>());
         assert!(is_same_type::<crate::time::Interval, tokio::time::Interval>());
+    }
+
+    /// Outside the `deloxide` diagnostic mode the thread-blocking locks are `parking_lot`'s own.
+    #[cfg(all(feature = "native", not(feature = "deloxide")))]
+    #[test]
+    fn ordinary_execution_selects_parking_lots_locks() {
+        assert!(is_same_type::<
+            crate::sync::blocking::Mutex<u8>,
+            parking_lot::Mutex<u8>,
+        >());
+        assert!(is_same_type::<
+            crate::sync::blocking::Condvar,
+            parking_lot::Condvar,
+        >());
     }
 
     /// Outside Turmoil the sockets are Tokio's, over the operating system's network.
@@ -331,6 +345,8 @@ mod ordinary {
     #[cfg(feature = "native")]
     #[test]
     fn the_other_native_families_keep_their_contracts() {
+        #[cfg(feature = "deloxide")]
+        super::tracked_locks::detector_installed();
         super::families::keep_their_contracts();
     }
 

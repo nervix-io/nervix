@@ -49,6 +49,7 @@ include = [
   "metrics-and-observability.md",
   "client-library.md",
   "examples.md",
+  "paced-simulation-drivers.md",
 ]
 title = "Nervix NSPL Documentation"
 

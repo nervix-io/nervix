@@ -852,9 +852,11 @@ These are three different claims, and the implementation makes them separately:
   before claiming a specific instruction set.
 - **Explicit SIMD.** The VM still uses library dispatch for simd-json, base64-simd, faster-hex,
   and sha2; xxhash chooses when the binary is built. `nervix-simd-kernels` uses `fearless_simd` to
-  select supported instructions at run time, with a scalar fallback. Outside the VM it serves the
-  schemaful JSON emission classifier and the delivery-latency fold, which reads a batch's ingestion
-  watermarks once to find its latest watermark and bucket every row's latency. Inside the VM it packs
+  select supported instructions at run time, with a scalar fallback. Outside the VM its byte
+  classes serve the schemaful JSON emission classifier, the SYSLOG codec's header and
+  structured-data scans and the SQS sink's XML character check, and it serves the delivery-latency
+  fold, which reads a batch's ingestion watermarks once to find its latest watermark and bucket
+  every row's latency. Inside the VM it packs
   the failure bytes of the checked lanes into bitmap words, with the same word at every level, and
   computes the [explicit integer lanes](#checked-buffer-kernels).
 - **Dispatch.** The kernel crate resolves one `fearless_simd` level per process from the CPU's

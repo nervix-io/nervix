@@ -63,7 +63,11 @@ inspection, which wait on the broker, and the one read of the resolver configura
 Each class also holds at most 1,024 jobs waiting for a worker; a job beyond that is refused, and
 the work that submitted it reports the refusal as its own failure. The one exception is work the
 node already accepted and keeps: the unfolding of a payload a quiesce buffer retained waits for a
-place instead, while its payload stays counted in the buffer.
+place instead, while its payload stays counted in the buffer. So does the unfolding of a poll a
+paced source handed over, and of a payload a NATS, ZeroMQ or Syslog source read without an
+acknowledgement. Holding one of those source loops pushes back into its transport, so a node whose
+extension workers stay full delays polls and lets those transports buffer or drop at their own
+bounds; see [When The Extension Workers Are Full](./ingestors.md#when-the-extension-workers-are-full).
 
 Transient memory is 275 MiB per node, divided into ceilings that cannot borrow from each other:
 8 MiB for management, 24 MiB for commands and replication, 192 MiB for relay work, 32 MiB for

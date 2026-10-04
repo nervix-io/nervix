@@ -1635,54 +1635,6 @@ fn runtime_state_store_purges_only_stale_schema_fingerprints() {
 }
 
 #[test]
-fn runtime_state_store_purges_only_the_requested_domain() {
-    let dir = tempdir().expect("temp dir should open");
-    let db = Database::builder(dir.path())
-        .open()
-        .expect("db should open");
-    let store =
-        RuntimeStateStore::from_database(db, Executor::default()).expect("state store should open");
-    let stopped = RuntimeStatePlacement {
-        domain: domain("stopped"),
-        state: RuntimeState::Deduplicator {
-            schema: SchemaFingerprint::from_digest([1; 32]),
-        },
-        kind: ModelKind::Deduplicator,
-        identifier: named("dedup_orders"),
-        branch_key: None,
-    };
-    let running = RuntimeStatePlacement {
-        domain: domain("running"),
-        ..stopped.clone()
-    };
-    store
-        .persist_latest_snapshot(&stopped, 1, b"stopped")
-        .expect("stopped-domain snapshot should persist");
-    store
-        .persist_latest_snapshot(&running, 2, b"running")
-        .expect("running-domain snapshot should persist");
-
-    store
-        .purge_domain(&stopped.domain)
-        .expect("stopped-domain snapshots should purge");
-
-    assert!(
-        store
-            .latest_snapshot(&stopped)
-            .expect("stopped-domain snapshot lookup should succeed")
-            .is_none()
-    );
-    assert_eq!(
-        store
-            .latest_snapshot(&running)
-            .expect("running-domain snapshot lookup should succeed")
-            .expect("running-domain snapshot should remain")
-            .payload,
-        b"running".to_vec()
-    );
-}
-
-#[test]
 fn runtime_state_store_purges_only_the_requested_entity() {
     let dir = tempdir().expect("temp dir should open");
     let db = Database::builder(dir.path())

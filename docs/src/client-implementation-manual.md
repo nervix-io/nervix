@@ -596,7 +596,8 @@ payload, infinity, and nullable and sensitive branch key fields.
 - **A-1.** A client MUST send `BACKUP` as a `CommandRequest` on its own, under an execution reference
   that follows E-1 to E-4, and MUST download the archive only after a `CommandCompleted` outcome
   that carries a `backup` summary. It MUST keep the reference and the summary until the archive is
-  downloaded or its retention ends.
+  downloaded or its retention ends. Each domain summary includes the capture cut kind and, for a
+  quiesced cut, its engagement and release times and quiesce counters.
 - **A-2.** A client MUST download one archive per `DownloadBackup` call, sending exactly one
   `BackupDownloadRequest` that names the backup's execution reference. The answer is one
   `BackupDownloadFailed` or `LeaderRedirect` frame, or a `BackupArchiveStart`, the archive as
@@ -885,6 +886,18 @@ reads the state and the first tick of the generation the scenario starts, and de
 `io` argument, it opens a producer and a consumer, builds typed batches column by column, reads
 their output one level at a time, and retries, rejects, and acknowledges it across a session the
 scenario cuts.
+
+The [Paced Simulation Drivers](paced-simulation-drivers.md) are runnable applications rather than
+qualification clients. `examples/paced-simulation/python/paced_simulation.py` follows B-11 through
+the binding: it reads the attached clock before it submits anything, waits with
+`nx_domain_clock_wall_duration_until`, stamps its readings within `nx_domain_clock_admission_window`,
+pauses from `NX_CLOCK_EVENT_INTERRUPTED` until the next `NX_CLOCK_EVENT_STATE`, and runs its
+consumers beside its producer on one session, as emitter consumer rule E-6 allows. The Rust driver
+beside it does the same with the Rust client.
+Both drivers explicitly reopen changed contracts within the current START generation, retaining
+the original handle for outstanding producer outcomes. Only `domain_stopped` and
+`generation_changed` wait for a later generation. Removed endpoints, incompatible fields, and
+unusable consumer credit produce configuration errors; no unknown submission is resent.
 
 `just test-client-conformance` builds every probe and runs it against one- and three-node clusters;
 [`tests/client-conformance-ledger.md`](https://github.com/nervix-io/nervix/blob/main/tests/client-conformance-ledger.md)

@@ -240,7 +240,8 @@ pub enum OutputColumnRef {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct GuestSnapshot {
     /// A `BranchInit` message of the branch configuration the instance was initialized with,
-    /// which a restore checks against the configuration of the instance it restores into.
+    /// which a restore checks against the state-bearing configuration of its new instance.
+    /// The Rust SDK permits a domain rename when type, key, and schemas still match.
     pub init_metadata: Vec<u8>,
     /// The guest's durable computation state. Empty bytes are the state of a guest with nothing to
     /// carry over.

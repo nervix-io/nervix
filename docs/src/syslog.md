@@ -224,6 +224,10 @@ stream cannot be resynchronized safely. Other connections and the listener conti
 Per-connection frame memory is bounded by `max_message_size`, and completed frames enter a bounded
 intake queue.
 
+A frame may arrive split across any number of reads, including inside its octet count or between
+its CR and LF. The listener keeps the part it has and completes the frame from the following
+reads; the frame, and any framing failure, is the same as when one read carries it whole.
+
 ### TLS
 
 TLS follows RFC 5425: the TCP listener behavior runs over a TLS session and frames use octet

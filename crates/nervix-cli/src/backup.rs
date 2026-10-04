@@ -17,16 +17,18 @@ use std::{
     fs::File,
     io::{self, BufReader},
     path::{Path, PathBuf},
+    time::Duration,
 };
 
 use error_stack::{Report as StackReport, ResultExt as _};
 use nervix_backup::{
-    ArchiveDescription, ArchiveScope, DescribedDomain, DescribedResourceVersion, DescribedSection,
-    ResourceVersionState, describe_archive,
+    ArchiveDescription, ArchiveScope, DescribedDomain, DescribedResourceVersion,
+    DescribedRuntimeState, DescribedSection, ResourceVersionState, describe_archive,
 };
 use nervix_client_core::{BackupArchiveSummary, Client, CommandOutcome, ConnectOptions};
 use nervix_models::{
-    Backup, BackupResources, BackupScope, DescribeBackup, DomainName, DomainPace, InspectionFormat,
+    Backup, BackupCapture, BackupResources, BackupScope, DescribeBackup, DomainName, DomainPace,
+    InspectionFormat,
 };
 use nervix_nspl::client_statement::{ClientStatement, parse_client_statements};
 use serde_json::{Value, json};
@@ -60,6 +62,9 @@ pub(super) struct BackupRequest {
     pub(super) domain: Option<DomainName>,
     pub(super) output: String,
     pub(super) without_resources: bool,
+    pub(super) without_state: bool,
+    pub(super) without_pause: bool,
+    pub(super) timeout: Option<Duration>,
     pub(super) format: CliReportFormat,
 }
 
@@ -156,10 +161,20 @@ pub(super) async fn run_backup(request: BackupRequest) -> Result<(), StackReport
     } else {
         BackupResources::Included
     };
+    let capture = if request.without_state {
+        BackupCapture::ConfigurationOnly
+    } else if request.without_pause {
+        BackupCapture::Live
+    } else {
+        BackupCapture::Quiesced {
+            timeout: request.timeout,
+        }
+    };
     let backup = Backup {
         scope,
         destination: destination.to_string(),
         resources,
+        capture,
     };
     let client = match Client::connect_with_options(
         &request.server,
@@ -239,6 +254,7 @@ fn backup_report_json(
         domains.push(json!({
             "domain": domain.domain.as_str(),
             "revision": domain.revision,
+            "cut": cut_json(domain.cut),
             "sections": domain.sections,
             "section_bytes": domain.section_bytes,
         }));
@@ -382,15 +398,74 @@ fn domain_text(domain: &DescribedDomain) -> Vec<String> {
             "  models: bytes={} blake3={}",
             domain.models.length, domain.models.digest
         ),
+        format!("  cut: {}", domain.capture.cut.kind().as_str()),
         "  resource_versions:".to_string(),
     ];
+    if let nervix_models::BackupCut::Quiesced {
+        engaged_at,
+        released_at,
+        quiesce,
+    } = domain.capture.cut
+    {
+        lines.insert(
+            3,
+            format!(
+                "  cut_times: engaged_at={} released_at={} buffered_records={} buffered_bytes={} \
+                 dropped_records={} rejected_records={}",
+                engaged_at,
+                released_at,
+                quiesce.buffered_records,
+                quiesce.buffered_bytes,
+                quiesce.dropped_records,
+                quiesce.rejected_records,
+            ),
+        );
+    }
     if domain.resource_versions.is_empty() {
         lines.push("  - none".to_string());
     }
     for version in &domain.resource_versions {
         lines.push(resource_version_text(version));
     }
+    lines.push("  runtime_state:".to_string());
+    if domain.state.is_empty() {
+        lines.push("  - none".to_string());
+    }
+    for state in &domain.state {
+        lines.push(runtime_state_text(state));
+    }
     lines
+}
+
+fn runtime_state_text(state: &DescribedRuntimeState) -> String {
+    match state {
+        DescribedRuntimeState::Wasm {
+            descriptor, guest, ..
+        } => format!(
+            "  - wasm_processor={} branch={} generation={} revision={} bytes={} blake3={}",
+            descriptor.entity,
+            match descriptor.branch_fingerprint.as_ref() {
+                Some(fingerprint) => digest_hex(fingerprint.fingerprint()),
+                None => "unbranched".to_string(),
+            },
+            u64::from(descriptor.generation),
+            descriptor.revision,
+            guest.length,
+            guest.digest,
+        ),
+        DescribedRuntimeState::KafkaOffsets { offsets, .. } => format!(
+            "  - kafka_ingestor={} partitions={} revision={}",
+            offsets.entity,
+            offsets.offsets.len(),
+            offsets.revision,
+        ),
+        DescribedRuntimeState::BranchLifecycle { lifecycle, .. } => format!(
+            "  - branch_lifecycle={} branches={} revision={}",
+            lifecycle.entity,
+            lifecycle.branches.len(),
+            lifecycle.revision,
+        ),
+    }
 }
 
 fn resource_version_text(version: &DescribedResourceVersion) -> String {
@@ -474,17 +549,93 @@ fn domain_json(domain: &DescribedDomain) -> Value {
     for version in &domain.resource_versions {
         versions.push(resource_version_json(version));
     }
+    let state = domain
+        .state
+        .iter()
+        .map(runtime_state_json)
+        .collect::<Vec<_>>();
     json!({
         "domain": domain.capture.domain.as_str(),
         "revision": domain.capture.revision,
         "raft_term": domain.capture.raft_log.term,
         "raft_index": domain.capture.raft_log.index,
+        "cut": cut_json(domain.capture.cut),
         "status": record.status.as_ref(),
         "pace": pace_text(&record.pace),
         "start_version": record.start_version,
         "models": section_json(&domain.models),
         "resource_versions": versions,
+        "runtime_state": state,
     })
+}
+
+fn runtime_state_json(state: &DescribedRuntimeState) -> Value {
+    match state {
+        DescribedRuntimeState::Wasm {
+            descriptor,
+            record,
+            guest,
+        } => json!({
+            "kind": "wasm_processor",
+            "entity": descriptor.entity.as_str(),
+            "schema_fingerprint": digest_hex(descriptor.schema.as_digest()),
+            "branch_fingerprint": descriptor.branch_fingerprint.as_ref().map(|fingerprint| digest_hex(fingerprint.fingerprint())),
+            "generation": u64::from(descriptor.generation),
+            "revision": descriptor.revision,
+            "descriptor": section_json(record),
+            "guest": section_json(guest),
+        }),
+        DescribedRuntimeState::KafkaOffsets { offsets, record } => json!({
+            "kind": "kafka_offsets",
+            "entity": offsets.entity.as_str(),
+            "schema_fingerprint": digest_hex(offsets.schema.as_digest()),
+            "revision": offsets.revision,
+            "positions": offsets.offsets.iter().map(|offset| json!({
+                "topic": offset.topic,
+                "partition": offset.partition,
+                "next_offset": offset.next_offset,
+            })).collect::<Vec<_>>(),
+            "record": section_json(record),
+        }),
+        DescribedRuntimeState::BranchLifecycle { lifecycle, record } => json!({
+            "kind": "branch_lifecycle",
+            "owner_kind": lifecycle.owner_kind.as_str(),
+            "entity": lifecycle.entity.as_str(),
+            "schema_fingerprint": digest_hex(lifecycle.schema.as_digest()),
+            "revision": lifecycle.revision,
+            "branches": lifecycle.branches.len(),
+            "record": section_json(record),
+        }),
+    }
+}
+
+fn digest_hex(bytes: &[u8; 32]) -> String {
+    let mut hex = String::with_capacity(64);
+    for byte in bytes {
+        let byte = *byte;
+        hex.push(char::from(b"0123456789abcdef"[usize::from(byte >> 4)]));
+        hex.push(char::from(b"0123456789abcdef"[usize::from(byte & 15)]));
+    }
+    hex
+}
+
+fn cut_json(cut: nervix_models::BackupCut) -> Value {
+    match cut {
+        nervix_models::BackupCut::Quiesced {
+            engaged_at,
+            released_at,
+            quiesce,
+        } => json!({
+            "kind": "quiesced",
+            "engaged_at": engaged_at.to_string(),
+            "released_at": released_at.to_string(),
+            "buffered_records": quiesce.buffered_records,
+            "buffered_bytes": quiesce.buffered_bytes,
+            "dropped_records": quiesce.dropped_records,
+            "rejected_records": quiesce.rejected_records,
+        }),
+        other => json!({ "kind": other.kind().as_str() }),
+    }
 }
 
 fn resource_version_json(version: &DescribedResourceVersion) -> Value {

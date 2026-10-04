@@ -74,6 +74,8 @@ tests = [
   "simulation_timer_smoke",
   "simulation_wall_bound_is_outside_simulated_time",
   "simulation_wall_bound_reports_where_simulated_time_stopped",
+  "transport::backup::backup_section_fetch_is_fenced_and_recovers_after_partition",
+  "transport::backup::restart_during_backup_transfer_discards_the_process_stage",
   "transport::isolation::stalled_peer_cannot_consume_unrelated_capacity_or_leak_reservations",
   "transport::multiple_peers_keep_remote_failure_classes_and_reject_invalid_authentication",
   "transport::network_disruption_respects_deadlines_and_repairs_authenticated_service",

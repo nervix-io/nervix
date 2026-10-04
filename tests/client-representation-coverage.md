@@ -7,7 +7,7 @@ Generators and Arrow dependencies remain in their owning test harnesses.
 | Current representation | Target | Complete oracle |
 | --- | --- | --- |
 | `ClientMessage` | `client-requests` | Complete typed request equality, request identity, prepared retry bytes and re-encoding equality; command/transaction positions, completion/choice context, subscriptions, clocks, producer and consumer requests |
-| `Reply` | `client-replies` | Complete typed equality for every reply union member and disposition; ordered statement results and diagnostics, transaction/impact inspection, backup/restore/resource/WASM metadata, Row opening schemas and client I/O descriptions/outcomes |
+| `Reply` | `client-replies` | Complete typed equality for every reply union member and disposition; ordered statement results and diagnostics, transaction/impact inspection, all backup cut kinds with ordered quiesce times and exact counters, restore/resource/WASM metadata, Row opening schemas and client I/O descriptions/outcomes |
 | `ServerMessage` events | `client-events`, `client-row-views` | Complete event equality; retained graph text and entities; every Row cell, subscription generation and branch; unsolicited request identity remains absent |
 | Upload start/chunk/reply | `client-streams` | Complete start and outcome equality, optional correlation, upload/version identity and opaque chunk bytes; retained slices survive frame and decoded-owner drop |
 | Backup download request/start/chunk/complete/failure/redirect | `client-streams` | Complete typed values and exact shared chunk bytes |

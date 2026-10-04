@@ -150,9 +150,12 @@ mod client_consumers;
 mod client_producers;
 mod common;
 mod database_batches;
+#[cfg(feature = "deloxide")]
+mod deadlock_diagnostics;
 mod domain_clock_attachment;
 mod endpoint_intake;
 mod ingestion_time;
+mod paced_simulation;
 mod process_cluster;
 mod session_protocol;
 
@@ -260,6 +263,13 @@ struct SavedHealthyPlacement {
     owner: String,
 }
 
+/// A Syslog TCP or TLS connection that wrote one complete frame and the start of a second one,
+/// and the bytes of that second frame it has not written yet.
+struct SyslogSplitSender {
+    stream: Box<dyn tokio::io::AsyncWrite + Send + Sync + Unpin>,
+    rest: Vec<u8>,
+}
+
 /// One long-running CLI clock follower and the bounded stdout lines its assertions inspect.
 struct CliClockProcess {
     child: tokio::process::Child,
@@ -279,6 +289,8 @@ struct ScenarioWorld {
     active_session_has_subscription: bool,
     endpoint_websocket: Option<endpoint_intake::EndpointWebsocket>,
     transaction_clients: BTreeMap<String, Client>,
+    /// The paced simulation drivers a scenario ran, and the files their runs share.
+    paced_simulation: paced_simulation::PacedSimulation,
     /// Rows a named client received and a step has not taken yet, as the client displays them.
     client_subscription_rows: BTreeMap<String, VecDeque<String>>,
     /// Requests the active session sent under names a scenario gave them.
@@ -296,6 +308,8 @@ struct ScenarioWorld {
     backup_directory: Option<TempDir>,
     /// The backup a scenario ran through its own session, whose archive it downloads itself.
     last_backup: Option<backup::TestBackup>,
+    /// A CLI backup paused at its quiesced cut while the scenario exercises other operations.
+    background_backup: Option<AbortOnDropHandle<std::process::Output>>,
     /// How the last backup download a scenario shaped itself ended.
     last_backup_download: Option<crate::common::raw_session::TestDownloadEnd>,
     /// The `SHOW CREATE` output of models a scenario saved, by the name it saved them as and then
@@ -377,6 +391,9 @@ struct ScenarioWorld {
     /// nodes and its observers bind. Given back once cleanup has stopped both.
     scenario_ports: Vec<u16>,
     syslog_udp_observer: Option<nervix_primitives::net::UdpSocket>,
+    /// A Syslog stream connection holding back the end of a frame it began, until a step writes
+    /// the rest.
+    syslog_split_sender: Option<SyslogSplitSender>,
     placeholders: BTreeMap<String, String>,
     saved_healthy_placements: Vec<SavedHealthyPlacement>,
     health_fault_started_at: Option<Instant>,
@@ -499,6 +516,7 @@ impl fmt::Debug for ScenarioWorld {
             .field("mongodb_collection", &self.mongodb_collection)
             .field("mongodb_tls", &self.mongodb_tls)
             .field("syslog_udp_observer", &self.syslog_udp_observer.is_some())
+            .field("syslog_split_sender", &self.syslog_split_sender.is_some())
             .field("placeholder_count", &self.placeholders.len())
             .field(
                 "mqtt_ingestor_domain_count",
@@ -12108,6 +12126,11 @@ async fn given_the_active_domain_is(world: &mut ScenarioWorld, raw_domain: Strin
     world.last_command_output = None;
 }
 
+#[given(expr = "the active domain is saved as placeholder {string}")]
+fn given_active_domain_is_saved_as_placeholder(world: &mut ScenarioWorld, placeholder: String) {
+    world.placeholders.insert(placeholder, world.domain.clone());
+}
+
 async fn run_nspl_commands_on_node(
     world: &ScenarioWorld,
     node_id: &str,
@@ -15218,6 +15241,359 @@ async fn when_extension_execution_is_released_on_every_node(world: &mut Scenario
             .fault_injection
             .release_execution(&crate::common::cluster::node_name(&node_id));
     }
+}
+
+/// Waits until the HTTP mock has answered this scenario's one polled payload, so the steps after
+/// it know the poll's payload has left for the node that polled it.
+#[then("the HTTP mock eventually answers a poll with its payload")]
+async fn then_the_http_mock_eventually_answers_a_poll_with_its_payload(world: &mut ScenarioWorld) {
+    let deadline = Instant::now() + Duration::from_secs(60);
+    loop {
+        nervix_primitives::task::consume_budget().await;
+        let answered = world
+            .dependencies
+            .http_poll_answered(&world.test_id)
+            .await
+            .expect("the HTTP mock reports whether it answered a poll");
+        if answered {
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the HTTP mock never answered a poll for '{}'",
+            world.test_id
+        );
+        nervix_primitives::time::sleep(Duration::from_millis(100)).await;
+    }
+}
+
+/// The ingestor every unacknowledged source fixture creates.
+const UNACKNOWLEDGED_SOURCE_INGESTOR: &str = "unacknowledged_source";
+
+/// A transport an ingestor reads in an unacknowledged mode, through a codec whose `ON INGESTION`
+/// transformation unfolds every payload on the node's extension workers.
+#[derive(Clone, Copy, Debug)]
+enum UnacknowledgedSourceFixture {
+    Kafka,
+    Mqtt,
+    Nats,
+    Pulsar,
+    RedisPubSub,
+    Syslog,
+    WebsocketClient,
+    ZeroMq,
+}
+
+impl UnacknowledgedSourceFixture {
+    fn parse(value: &str) -> Self {
+        match value {
+            "kafka" => Self::Kafka,
+            "mqtt" => Self::Mqtt,
+            "nats" => Self::Nats,
+            "pulsar" => Self::Pulsar,
+            "redis" => Self::RedisPubSub,
+            "syslog" => Self::Syslog,
+            "websocket client" => Self::WebsocketClient,
+            "zeromq" => Self::ZeroMq,
+            other => panic!("unsupported unacknowledged source fixture '{other}'"),
+        }
+    }
+
+    async fn start_dependency(self, world: &mut ScenarioWorld) {
+        let started = match self {
+            Self::Kafka => world.dependencies.start_kafka(&world.test_id).await,
+            Self::Mqtt => world.dependencies.start_mqtt(&world.test_id).await,
+            Self::Nats => world.dependencies.start_nats(&world.test_id).await,
+            Self::Pulsar => world.dependencies.start_pulsar(&world.test_id).await,
+            Self::RedisPubSub => world.dependencies.start_redis(&world.test_id).await,
+            Self::WebsocketClient => world.dependencies.start_mock_server(&world.test_id).await,
+            // The ingestor binds the address the scenario sends to, so nothing else runs.
+            Self::Syslog | Self::ZeroMq => Ok(()),
+        };
+        if let Err(error) = started {
+            panic!("the {self:?} test dependency should start: {error}");
+        }
+    }
+
+    /// Provisions what the transport needs before the ingestor reads it.
+    async fn prepare(self, world: &mut ScenarioWorld) {
+        if let Self::Kafka = self {
+            let topic = expand_placeholders(world, "unacknowledged_{{test_id}}");
+            world
+                .cluster()
+                .ensure_kafka_topic_partitions(&topic, 1)
+                .await
+                .expect("failed to provision the unacknowledged source's Kafka topic");
+        }
+    }
+
+    /// The client the ingestor reads through, named `unacknowledged_client`.
+    fn client_fragment(self) -> &'static str {
+        match self {
+            Self::Kafka => {
+                r#"
+      CREATE CLIENT unacknowledged_client TYPE KAFKA CONFIG {
+        'bootstrap.servers' = '{{kafka_addr}}',
+        'auto.offset.reset' = 'earliest'
+      };"#
+            }
+            Self::Mqtt => {
+                r#"
+      CREATE CLIENT unacknowledged_client TYPE MQTT CONFIG {
+        'addr' = '{{mqtt_addr}}',
+        'client_id' = 'nervix-cucumber-unacknowledged-{{test_id}}'
+      };"#
+            }
+            Self::Nats => {
+                r#"
+      CREATE CLIENT unacknowledged_client TYPE NATS CONFIG {
+        'addr' = '{{nats_addr}}'
+      };"#
+            }
+            Self::Pulsar => {
+                r#"
+      CREATE CLIENT unacknowledged_client TYPE PULSAR CONFIG {
+        'addr' = '{{pulsar_addr}}'
+      };"#
+            }
+            Self::RedisPubSub => {
+                r#"
+      CREATE CLIENT unacknowledged_client TYPE REDIS POOL SIZE MIN 1 MAX 4 CONFIG {
+        'addr' = '{{redis_addr}}'
+      };"#
+            }
+            Self::Syslog => {
+                r#"
+      CREATE CLIENT unacknowledged_client TYPE SYSLOG CONFIG {
+        'protocol' = 'udp',
+        'addr' = '{{syslog_ingest_addr}}'
+      };"#
+            }
+            Self::WebsocketClient => {
+                r#"
+      CREATE CLIENT unacknowledged_client TYPE WEBSOCKETS CONFIG {
+        'endpoint' = '{{mock_ws_addr}}/ws/{{test_id}}'
+      };"#
+            }
+            Self::ZeroMq => {
+                r#"
+      CREATE CLIENT unacknowledged_client TYPE ZEROMQ CONFIG {
+        'addr' = '{{zeromq_ingest_addr}}',
+        'bind' = 'true'
+      };"#
+            }
+        }
+    }
+
+    /// What the ingestor reads, in the transport's unacknowledged mode, and its quiesce mode.
+    fn source_fragment(self) -> &'static str {
+        match self {
+            Self::Kafka => {
+                "FROM KAFKA unacknowledged_client TOPIC unacknowledged_{{test_id}}
+          OFFSET BY CONSUMER GROUP unacknowledged_group_{{test_id}}
+          MODE NO_ACK PARALLEL
+        ON QUIESCE SUSPEND"
+            }
+            Self::Mqtt => {
+                "FROM MQTT unacknowledged_client TOPIC unacknowledged_{{test_id}} MODE NO_ACK \
+                 SEQUENTIAL
+        ON QUIESCE DROP"
+            }
+            Self::Nats => {
+                "FROM NATS unacknowledged_client SUBJECT unacknowledged_{{test_id}}
+          QUEUE GROUP unacknowledged_group_{{test_id}} INSTANCES 1 MODE NO_ACK SEQUENTIAL
+        ON QUIESCE DROP"
+            }
+            Self::Pulsar => {
+                "FROM PULSAR unacknowledged_client TOPIC unacknowledged_{{test_id}}
+          SUBSCRIPTION unacknowledged_{{test_id}} INSTANCES 1 MODE NO_ACK PARALLEL
+        ON QUIESCE SUSPEND"
+            }
+            Self::RedisPubSub => {
+                "FROM REDIS PUBSUB unacknowledged_client CHANNEL unacknowledged_{{test_id}}
+          MODE NO_ACK SEQUENTIAL
+        ON QUIESCE DROP"
+            }
+            Self::Syslog => {
+                "FROM SYSLOG unacknowledged_client MODE NO_ACK SEQUENTIAL
+        ON QUIESCE SUSPEND"
+            }
+            Self::WebsocketClient => {
+                "FROM WEBSOCKETS unacknowledged_client MODE NO_ACK SEQUENTIAL
+        ON QUIESCE DROP"
+            }
+            Self::ZeroMq => {
+                "FROM ZEROMQ unacknowledged_client MODE NO_ACK SEQUENTIAL
+        ON QUIESCE SUSPEND"
+            }
+        }
+    }
+
+    /// The models of a domain whose one ingestor reads this transport into `unacknowledged_events`,
+    /// and a subscription to that relay. Nothing starts until the scenario starts the domain.
+    fn commands(self) -> String {
+        format!(
+            r#"
+      CREATE SCHEMA unacknowledged_event ( user_id I64 );
+      CREATE CODEC unacknowledged_codec FROM JSON TO SCHEMA unacknowledged_event
+        WITH JAQ TRANSFORMATIONS ON INGESTION '.';
+      CREATE RELAY unacknowledged_events SCHEMA unacknowledged_event UNBRANCHED;{client}
+      CREATE INGESTOR {UNACKNOWLEDGED_SOURCE_INGESTOR}
+        {source}
+        DECODE USING unacknowledged_codec
+        TO unacknowledged_events INHERIT ALL UNBRANCHED
+        FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+      CREATE SUBSCRIPTION unacknowledged_subscription TO unacknowledged_events;
+"#,
+            client = self.client_fragment(),
+            source = self.source_fragment(),
+        )
+    }
+
+    /// Sends `{"user_id":<user_id>}` through the transport once.
+    async fn deliver(self, world: &mut ScenarioWorld, user_id: i64) {
+        let payload = format!(r#"{{"user_id":{user_id}}}"#);
+        let destination = expand_placeholders(world, "unacknowledged_{{test_id}}");
+        match self {
+            Self::Kafka => world
+                .cluster()
+                .publish_kafka(&destination, &payload)
+                .await
+                .expect("failed to publish the unacknowledged Kafka payload"),
+            Self::Mqtt => world
+                .cluster()
+                .publish_mqtt_burst(&destination, &payload, 1)
+                .await
+                .expect("failed to publish the unacknowledged MQTT payload"),
+            Self::Nats => world
+                .cluster()
+                .publish_nats_payloads(&destination, std::slice::from_ref(&payload))
+                .await
+                .expect("failed to publish the unacknowledged NATS payload"),
+            Self::Pulsar => world
+                .cluster()
+                .publish_pulsar(&destination, &payload)
+                .await
+                .expect("failed to publish the unacknowledged Pulsar payload"),
+            Self::RedisPubSub => world
+                .cluster()
+                .publish_redis(&destination, &payload)
+                .await
+                .expect("failed to publish the unacknowledged Redis payload"),
+            Self::Syslog => {
+                let socket = nervix_primitives::net::UdpSocket::bind("127.0.0.1:0")
+                    .await
+                    .expect("failed to bind the unacknowledged Syslog sender");
+                socket
+                    .send_to(payload.as_bytes(), &world.syslog_ingest_addr)
+                    .await
+                    .expect("failed to send the unacknowledged Syslog datagram");
+            }
+            Self::WebsocketClient => {
+                send_websocket_client_test_server_payload(world, &payload).await;
+            }
+            Self::ZeroMq => world
+                .cluster()
+                .publish_zeromq(&world.zeromq_ingest_addr, &payload)
+                .await
+                .expect("failed to publish the unacknowledged ZeroMQ payload"),
+        }
+    }
+}
+
+#[given(expr = "unacknowledged source {string} is running")]
+async fn given_unacknowledged_source_is_running(world: &mut ScenarioWorld, source: String) {
+    initialize_scenario_identity(world);
+    UnacknowledgedSourceFixture::parse(&source)
+        .start_dependency(world)
+        .await;
+    refresh_dependency_configuration(world);
+}
+
+/// Creates the fixture's models on the leader through a session that keeps the relay
+/// subscription, so a later `START;` runs on that session.
+#[when(expr = "the unacknowledged source {string} ingestor is created")]
+async fn when_the_unacknowledged_source_ingestor_is_created(
+    world: &mut ScenarioWorld,
+    source: String,
+) {
+    world.last_command_error = None;
+    world.last_command_output = None;
+    world.last_server_error = None;
+    let source = UnacknowledgedSourceFixture::parse(&source);
+    source.prepare(world).await;
+    let commands = expand_placeholders(world, &source.commands());
+    let leader = current_leader_node(world).await;
+    let session = execute_nspl_commands_on_node(world, &leader, &commands)
+        .await
+        .expect("failed to create the unacknowledged source's models on the leader");
+    world.active_session = Some(session);
+    world.active_session_node = Some(leader);
+    world.active_session_has_subscription = true;
+}
+
+/// The WebSocket client fixture's mock server sends `{"user_id":42}` itself two seconds after the
+/// ingestor connects, so delivering that payload sends nothing more.
+#[when(expr = "the unacknowledged source {string} delivers the payload of user {int}")]
+async fn when_the_unacknowledged_source_delivers_the_payload_of_user(
+    world: &mut ScenarioWorld,
+    source: String,
+    user_id: i64,
+) {
+    let source = UnacknowledgedSourceFixture::parse(&source);
+    if let (UnacknowledgedSourceFixture::WebsocketClient, 42) = (source, user_id) {
+        return;
+    }
+    source.deliver(world, user_id).await;
+}
+
+/// Waits until the node that executes the fixture's ingestor counts `refused` of its payloads as
+/// refused for want of room on that node's extension workers.
+#[then(expr = "the unacknowledged source ingestor eventually counts {int} refused payload(s)")]
+async fn then_the_unacknowledged_source_ingestor_eventually_counts_refused_payloads(
+    world: &mut ScenarioWorld,
+    refused: i64,
+) {
+    let leader = current_leader_node(world).await;
+    let placement = PhaseDeadline::after(Duration::from_secs(30));
+    let owner = loop {
+        nervix_primitives::task::consume_budget().await;
+        assert!(
+            !placement.has_passed(),
+            "timed out waiting for the unacknowledged source ingestor's placement"
+        );
+        let output = world
+            .cluster()
+            .status_text(&leader, placement)
+            .await
+            .unwrap_or_else(|error| panic!("failed to read the cluster status: {error:#}"));
+        if let Some((owner, _)) = scheduled_node_placement_from_status(
+            &output,
+            &world.domain,
+            "ingestor",
+            UNACKNOWLEDGED_SOURCE_INGESTOR,
+        ) {
+            break owner.to_string();
+        }
+        placement.pause(Duration::from_millis(50)).await;
+    };
+    let labels = [
+        format!(r#"domain="{}""#, world.domain),
+        format!(r#"ingestor="{UNACKNOWLEDGED_SOURCE_INGESTOR}""#),
+    ];
+    world
+        .cluster()
+        .wait_for_observability_metric_value(
+            &owner,
+            "nervix_ingestor_unfolding_refused_total",
+            &labels,
+            refused,
+            Some(Duration::from_secs(60)),
+        )
+        .await
+        .unwrap_or_else(|error| {
+            panic!("node '{owner}' never counted {refused} refused payloads: {error}")
+        });
 }
 
 #[when(expr = "bulk execution on node {string} is released")]
@@ -21735,19 +22111,7 @@ async fn when_syslog_tcp_messages_are_published_with_mixed_framing_to(
         2,
         "mixed Syslog TCP framing step requires exactly two messages"
     );
-    let deadline = Instant::now() + Duration::from_secs(5);
-    let mut stream = loop {
-        match nervix_primitives::net::TcpStream::connect(&addr).await {
-            Ok(stream) => break stream,
-            Err(error) => {
-                assert!(
-                    Instant::now() < deadline,
-                    "timed out connecting to Syslog TCP listener '{addr}': {error}"
-                );
-                nervix_primitives::time::sleep(Duration::from_millis(20)).await;
-            }
-        }
-    };
+    let mut stream = connect_syslog_tcp(&addr).await;
     let octet_counted = messages[0].as_bytes();
     stream
         .write_all(octet_counted.len().to_string().as_bytes())
@@ -21775,34 +22139,46 @@ async fn when_syslog_tcp_messages_are_published_with_mixed_framing_to(
         .expect("failed to close Syslog TCP test sender");
 }
 
-#[when(
-    expr = "Syslog TLS message is published to {string} using identity and CA from resource \
-            directory {string}"
-)]
-async fn when_syslog_tls_message_is_published_to(
-    world: &mut ScenarioWorld,
-    addr: String,
-    ca_resource_directory: String,
-    #[step] step: &Step,
-) {
-    use tokio::io::AsyncWriteExt as _;
+/// A TCP connection to a Syslog listener, retried while the listener starts.
+async fn connect_syslog_tcp(addr: &str) -> nervix_primitives::net::TcpStream {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        nervix_primitives::task::consume_budget().await;
+        match nervix_primitives::net::TcpStream::connect(addr).await {
+            Ok(stream) => return stream,
+            Err(error) => {
+                assert!(
+                    Instant::now() < deadline,
+                    "timed out connecting to Syslog listener '{addr}': {error}"
+                );
+                nervix_primitives::time::sleep(Duration::from_millis(20)).await;
+            }
+        }
+    }
+}
 
+/// A TLS session with a Syslog listener that authenticates with the identity, and trusts the CA,
+/// of the resource directory `resource_directory`.
+async fn connect_syslog_tls(
+    world: &ScenarioWorld,
+    addr: &str,
+    resource_directory: &str,
+) -> tokio_rustls::client::TlsStream<nervix_primitives::net::TcpStream> {
     nervix_interconnect::install_rustls_crypto_provider();
-    let addr = expand_placeholders(world, &addr);
     let parsed = url::Url::parse(&format!("syslog://{addr}"))
         .unwrap_or_else(|error| panic!("invalid Syslog TLS test address '{addr}': {error}"));
     let server_name = parsed
         .host_str()
         .expect("Syslog TLS test address must have a host")
         .to_string();
-    let ca_pem = resource_directory_ca_pem(world, &ca_resource_directory);
+    let ca_pem = resource_directory_ca_pem(world, resource_directory);
     let mut roots = RootCertStore::empty();
     for certificate in CertificateDer::pem_slice_iter(ca_pem.as_bytes()) {
         roots
             .add(certificate.expect("Syslog TLS test CA must contain a valid certificate"))
             .expect("Syslog TLS test CA certificate must be accepted");
     }
-    let identity_dir = resource_directory_path(world, &ca_resource_directory);
+    let identity_dir = resource_directory_path(world, resource_directory);
     let certificate_pem = std::fs::read(identity_dir.join("tls.crt"))
         .expect("Syslog TLS test client certificate must be readable");
     let certificates = CertificateDer::pem_slice_iter(&certificate_pem)
@@ -21817,25 +22193,32 @@ async fn when_syslog_tls_message_is_published_to(
         .with_client_auth_cert(certificates, key)
         .expect("Syslog TLS test client identity must be valid");
     let connector = tokio_rustls::TlsConnector::from(StdArc::new(config));
-    let deadline = Instant::now() + Duration::from_secs(5);
-    let stream = loop {
-        match nervix_primitives::net::TcpStream::connect(&addr).await {
-            Ok(stream) => break stream,
-            Err(error) => {
-                assert!(
-                    Instant::now() < deadline,
-                    "timed out connecting to Syslog TLS listener '{addr}': {error}"
-                );
-                nervix_primitives::time::sleep(Duration::from_millis(20)).await;
-            }
-        }
-    };
+    let stream = connect_syslog_tcp(addr).await;
+    stream
+        .set_nodelay(true)
+        .expect("the Syslog TLS test connection must accept TCP_NODELAY");
     let server_name =
         ServerName::try_from(server_name).expect("Syslog TLS test server name must be valid");
-    let mut stream = connector
+    connector
         .connect(server_name, stream)
         .await
-        .expect("failed to establish Syslog TLS test session");
+        .expect("failed to establish Syslog TLS test session")
+}
+
+#[when(
+    expr = "Syslog TLS message is published to {string} using identity and CA from resource \
+            directory {string}"
+)]
+async fn when_syslog_tls_message_is_published_to(
+    world: &mut ScenarioWorld,
+    addr: String,
+    ca_resource_directory: String,
+    #[step] step: &Step,
+) {
+    use tokio::io::AsyncWriteExt as _;
+
+    let addr = expand_placeholders(world, &addr);
+    let mut stream = connect_syslog_tls(world, &addr, &ca_resource_directory).await;
     let payload = expand_placeholders(world, docstring(step));
     let payload = payload.trim().as_bytes();
     stream
@@ -21850,6 +22233,139 @@ async fn when_syslog_tls_message_is_published_to(
         .shutdown()
         .await
         .expect("failed to close Syslog TLS test sender");
+}
+
+/// One message in an RFC 6587 framing, as a stream carries it.
+fn syslog_stream_frame(framing: &str, message: &str) -> Vec<u8> {
+    match framing {
+        "octet-counted" => format!("{} {message}", message.len()).into_bytes(),
+        "non-transparent" => format!("{message}\r\n").into_bytes(),
+        other => panic!("unknown Syslog stream framing '{other}'"),
+    }
+}
+
+/// How many bytes of `frame` precede the split that `split` names.
+fn syslog_split_position(frame: &[u8], framing: &str, split: &str) -> usize {
+    match split {
+        "inside its octet count" => {
+            assert_eq!(
+                framing, "octet-counted",
+                "only an octet-counted frame has a count"
+            );
+            assert!(
+                frame
+                    .iter()
+                    .take_while(|byte| byte.is_ascii_digit())
+                    .count()
+                    > 1,
+                "splitting inside the octet count needs a count of at least two digits"
+            );
+            1
+        }
+        "inside its payload" => frame.len() / 2,
+        "between CR and LF" => {
+            assert_eq!(
+                framing, "non-transparent",
+                "only a non-transparent frame ends in CRLF"
+            );
+            frame.len() - 1
+        }
+        other => panic!("unknown Syslog frame split '{other}'"),
+    }
+}
+
+/// Writes the first docstring message as one complete frame and the second up to `split`, in one
+/// write, and keeps the connection and the rest of the second frame for a later step.
+async fn write_syslog_split_frames(
+    world: &mut ScenarioWorld,
+    mut stream: Box<dyn tokio::io::AsyncWrite + Send + Sync + Unpin>,
+    framing: &str,
+    split: &str,
+    step: &Step,
+) {
+    use tokio::io::AsyncWriteExt as _;
+
+    let messages = expand_placeholders(world, docstring(step))
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .map(str::to_string)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        messages.len(),
+        2,
+        "the split Syslog frame step requires exactly two messages"
+    );
+    let first = syslog_stream_frame(framing, &messages[0]);
+    let second = syslog_stream_frame(framing, &messages[1]);
+    let at = syslog_split_position(&second, framing, split);
+    let mut written = first;
+    written.extend_from_slice(&second[..at]);
+    stream
+        .write_all(&written)
+        .await
+        .expect("failed to write the frames before the split");
+    stream
+        .flush()
+        .await
+        .expect("failed to flush the frames before the split");
+    world.syslog_split_sender = Some(SyslogSplitSender {
+        stream,
+        rest: second[at..].to_vec(),
+    });
+}
+
+#[when(expr = "a Syslog TCP sender writes to {string} one {word} frame and another split {string}")]
+async fn when_syslog_tcp_sender_writes_split_frames(
+    world: &mut ScenarioWorld,
+    addr: String,
+    framing: String,
+    split: String,
+    #[step] step: &Step,
+) {
+    let addr = expand_placeholders(world, &addr);
+    let stream = connect_syslog_tcp(&addr).await;
+    stream
+        .set_nodelay(true)
+        .expect("the Syslog TCP test connection must accept TCP_NODELAY");
+    write_syslog_split_frames(world, Box::new(stream), &framing, &split, step).await;
+}
+
+#[when(
+    expr = "a Syslog TLS sender using identity and CA from resource directory {string} writes to \
+            {string} one {word} frame and another split {string}"
+)]
+async fn when_syslog_tls_sender_writes_split_frames(
+    world: &mut ScenarioWorld,
+    resource_directory: String,
+    addr: String,
+    framing: String,
+    split: String,
+    #[step] step: &Step,
+) {
+    let addr = expand_placeholders(world, &addr);
+    let stream = connect_syslog_tls(world, &addr, &resource_directory).await;
+    write_syslog_split_frames(world, Box::new(stream), &framing, &split, step).await;
+}
+
+#[when("the Syslog sender writes the rest of the split frame")]
+async fn when_syslog_sender_writes_the_rest_of_the_split_frame(world: &mut ScenarioWorld) {
+    use tokio::io::AsyncWriteExt as _;
+
+    let mut sender = world
+        .syslog_split_sender
+        .take()
+        .expect("a Syslog sender must hold the rest of a split frame");
+    sender
+        .stream
+        .write_all(&sender.rest)
+        .await
+        .expect("failed to write the rest of the split frame");
+    sender
+        .stream
+        .shutdown()
+        .await
+        .expect("failed to close the split Syslog sender");
 }
 
 #[when(expr = "websocket message is published to host {string} path {string}")]
@@ -21874,6 +22390,13 @@ async fn when_websocket_client_test_server_sends_a_payload(
     world: &mut ScenarioWorld,
     #[step] step: &Step,
 ) {
+    let payload = expand_placeholders(world, docstring(step));
+    send_websocket_client_test_server_payload(world, &payload).await;
+}
+
+/// Has the mock server send `payload` to every WebSocket client connected to this scenario's path,
+/// retrying until a client is connected.
+async fn send_websocket_client_test_server_payload(world: &mut ScenarioWorld, payload: &str) {
     let base = world
         .dependencies
         .endpoints()
@@ -21881,7 +22404,7 @@ async fn when_websocket_client_test_server_sends_a_payload(
         .expect("HTTP mock server endpoint must be available");
     let mut url = url::Url::parse(base).expect("HTTP mock server endpoint must be a valid URL");
     url.set_path(&format!("/ws/{}", world.test_id));
-    let payload = expand_placeholders(world, docstring(step));
+    let payload = payload.to_string();
     let client = reqwest::Client::new();
     let deadline = Instant::now() + Duration::from_secs(10);
 
@@ -27164,6 +27687,10 @@ async fn then_node_eventually_reports_interconnect_status(
 
 fn main() {
     TestDependencies::configure_process_lifecycle();
+    // A diagnostic build tracks the blocking locks of every in-process node with one detector,
+    // installed once for the whole process before any tracked lock or runtime worker exists.
+    #[cfg(feature = "deloxide")]
+    start_deadlock_diagnostics();
     let parallelism = TestParallelism::detect();
     let runtime = nervix_primitives::runtime::Builder::new_multi_thread()
         .enable_all()
@@ -27203,6 +27730,23 @@ fn main() {
 
     assert!(dependency_teardown.is_clean(), "{dependency_teardown}");
     outcome.end_process();
+}
+
+/// The environment variable naming the directory a diagnostic scenario binary records its deadlock
+/// evidence in, the same one a diagnostic server reads.
+#[cfg(feature = "deloxide")]
+const DEADLOCK_EVIDENCE_ENV: &str = "NERVIX_DEADLOCK_EVIDENCE";
+
+/// Start this process's deadlock diagnostics, or end the process: its tracked locks refuse to run
+/// without them.
+#[cfg(feature = "deloxide")]
+fn start_deadlock_diagnostics() {
+    let directory =
+        std::env::var_os(DEADLOCK_EVIDENCE_ENV).map(nervix_deadlock::EvidenceDirectory::new);
+    if let Err(error) = nervix_deadlock::DiagnosticRun::start(directory) {
+        eprintln!("the scenario binary could not start its deadlock diagnostics: {error:?}");
+        std::process::exit(nervix_deadlock::DIAGNOSTIC_FAILURE_EXIT_STATUS);
+    }
 }
 
 /// Holds one dependency container open until the parent scenario kills this process.
@@ -27328,7 +27872,8 @@ async fn run_scenarios(parallelism: TestParallelism) -> SuiteOutcome {
     if cli.tags_filter.is_none() {
         cli.tags_filter = Some(
             "(not @client_wire_expected_failure) and (not @client_wire_baseline) and (not \
-             @client_wire_tls_cost) and (not @client_conformance_toolchain)"
+             @client_wire_tls_cost) and (not @client_conformance_toolchain) and (not \
+             @deadlock_diagnostics)"
                 .parse()
                 .assured("the built-in opt-in scenario tag expression is valid"),
         );
@@ -27435,6 +27980,7 @@ async fn run_scenarios(parallelism: TestParallelism) -> SuiteOutcome {
                 world.node_trace_export = None;
                 world.broker_observer = None;
                 world.syslog_udp_observer = None;
+                world.syslog_split_sender = None;
                 world.producers = client_producers::ScenarioProducers::default();
                 stop_receivers(world).await;
                 close_browser(world).await;

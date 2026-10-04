@@ -137,7 +137,7 @@ def load_inventory(path: pathlib.Path = INVENTORY) -> Inventory:
             raise BoleroError(f"{item['id']}: invalid cargo test target")
         if not isinstance(item["features"], list) or any(
             not isinstance(feature, str)
-            or feature in {"loom", "shuttle", "turmoil"}
+            or feature in {"loom", "shuttle", "turmoil", "deloxide"}
             for feature in item["features"]
         ):
             raise BoleroError(f"{item['id']}: invalid or modeled feature")
@@ -232,10 +232,13 @@ def package_rust_sources(manifest: pathlib.Path) -> Iterator[pathlib.Path]:
         excluded.add(pathlib.Path(target_dir).resolve())
     for directory, children, files in os.walk(manifest.parent):
         path = pathlib.Path(directory)
+        # A nested manifest owns its sources; hidden directories are metadata or dependencies.
+        # Only known build targets are excluded, so an authored `src/target` remains visible.
         children[:] = sorted(
             child for child in children
-            if path / child not in excluded
-            and child not in {".git", ".venv", ".nervix-deps", "node_modules", "__fuzz__"}
+            if not child.startswith(".")
+            and path / child not in excluded
+            and child not in {"node_modules", "__fuzz__"}
             and not (path / child / "Cargo.toml").is_file()
         )
         for filename in sorted(files):
@@ -846,17 +849,18 @@ def replay(target: Target, failure: pathlib.Path) -> int:
     }
     result = command(args, env=env, timeout=240, allowed_status=(0, 101))
     output = result.stdout + result.stderr
-    print(output[-4000:])
     if hashlib.sha256(destination.read_bytes()).hexdigest() != digest:
         raise BoleroError(f"{target.id}: replay bytes changed during staging")
     if result.returncode != 0 and not re.search(
         r"test result: FAILED\. 0 passed; 1 failed", output
     ):
         raise BoleroError(f"{target.id}: replay failed outside the selected property")
+    # Bolero omits zero counters: corpus-only completion ends after the corpus count.
     if result.returncode == 0 and not re.search(
-        r"corpus inputs: [1-9]\d*(?: \| rng inputs: 0)?(?:\r?\n|$)", output
+        r"corpus inputs: [1-9]\d*(?:\r?\n|$)", output
     ):
         raise BoleroError(f"{target.id}: saved input was not replayed")
+    print(output[-4000:])
     return result.returncode
 
 

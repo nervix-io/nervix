@@ -47,6 +47,9 @@ impl RabbitMqIngestorStartPlan {
             acknowledgement: mode.acknowledgement(),
             buffered_intake: false,
             flush_each_intake: false,
+            // Every delivery mode of this source is acknowledged: a batch the extension workers
+            // refuse is rejected and delivered again, and no payload is taken in unacknowledged.
+            unacknowledged_admission: QueueAdmission::RefuseWhenFull,
             client_mounts: resolved.mounts.into_iter().collect(),
             connector_label: "rabbitmq",
         }

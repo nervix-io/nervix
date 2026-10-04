@@ -55,7 +55,7 @@ test_target = "lib"
 [[target]]
 case_timeout_seconds = 10
 corpus = "crates/nspl/src/__fuzz__/canonical_round_trip_tests__bolero_expression_roundtrip_minimal_parentheses/corpus"
-domain_version = 4
+domain_version = 5
 features = []
 id = "nspl-expression"
 invariant = "A generated current expression of every form renders to text that a statement and every standalone expression reader read back as the complete structured expression."
@@ -70,7 +70,7 @@ test_target = "lib"
 [[target]]
 case_timeout_seconds = 10
 corpus = "crates/nspl/src/__fuzz__/canonical_round_trip_tests__bolero_model_roundtrip_canonical_nspl/corpus"
-domain_version = 5
+domain_version = 6
 features = []
 id = "nspl-model"
 invariant = "Canonical NSPL of a generated Model of every family reparses through the client and server grammars to the complete CREATE statement."
@@ -85,7 +85,7 @@ test_target = "lib"
 [[target]]
 case_timeout_seconds = 10
 corpus = "crates/nspl/src/backup/__fuzz__/backup__tests__bolero_models_exported_through_an_archive_reparse_to_themselves/corpus"
-domain_version = 5
+domain_version = 6
 features = []
 id = "nspl-archive-model"
 invariant = "An archived canonical document of generated Models of every family reparses to the complete ordered Model sequence."
@@ -110,6 +110,66 @@ package = "nervix-backup"
 random_iterations = 256
 source = "crates/backup/src/tests.rs"
 test = "tests::bolero_domain_records_and_manifests_round_trip"
+test_target = "lib"
+
+[[target]]
+case_timeout_seconds = 10
+corpus = "crates/backup/src/__fuzz__/tests__bolero_runtime_state_records_round_trip/corpus"
+domain_version = 1
+features = []
+id = "backup-runtime-state-records"
+invariant = "Current WASM descriptors, Kafka offsets, and branch lifecycle records decode from their own encoding to complete equal values."
+manifest = "Cargo.toml"
+max_input_bytes = 128
+package = "nervix-backup"
+random_iterations = 256
+source = "crates/backup/src/tests.rs"
+test = "tests::bolero_runtime_state_records_round_trip"
+test_target = "lib"
+
+[[target]]
+case_timeout_seconds = 10
+corpus = "crates/deadlock/src/__fuzz__/tests__bolero_deadlock_evidence_round_trips/corpus"
+domain_version = 1
+features = []
+id = "deadlock-evidence"
+invariant = "Every deadlock evidence a diagnostic process can record, with every finding variant at the edges of its bounds, decodes from its own encoding to the complete original value."
+manifest = "Cargo.toml"
+max_input_bytes = 4096
+package = "nervix-deadlock"
+random_iterations = 256
+source = "crates/deadlock/src/tests.rs"
+test = "tests::bolero_deadlock_evidence_round_trips"
+test_target = "lib"
+
+[[target]]
+case_timeout_seconds = 10
+corpus = "crates/deadlock/src/__fuzz__/tests__bolero_malformed_deadlock_evidence_is_refused_or_round_trips/corpus"
+domain_version = 1
+features = []
+id = "deadlock-evidence-malformed"
+invariant = "Arbitrary bytes, bare or behind a valid evidence header, are refused with a typed error or decode to evidence within every bound that encodes back to itself."
+manifest = "Cargo.toml"
+max_input_bytes = 1024
+package = "nervix-deadlock"
+random_iterations = 256
+source = "crates/deadlock/src/tests.rs"
+test = "tests::bolero_malformed_deadlock_evidence_is_refused_or_round_trips"
+test_target = "lib"
+
+[[target]]
+case_timeout_seconds = 10
+corpus = "crates/deadlock/src/__fuzz__/tests__bolero_deadlock_evidence_outside_its_bounds_is_refused/corpus"
+domain_version = 1
+features = []
+id = "deadlock-evidence-bounds"
+invariant = "A valid evidence encoding that breaks one bound, of findings, cycle threads, omitted threads, identities, lost findings or kept texts, is refused as out of bounds."
+manifest = "Cargo.toml"
+max_input_bytes = 1024
+package = "nervix-deadlock"
+random_iterations = 256
+source = "crates/deadlock/src/tests.rs"
+test = "tests::bolero_deadlock_evidence_outside_its_bounds_is_refused"
 test_target = "lib"
 
 [[target]]
@@ -160,7 +220,7 @@ test_target = "lib"
 [[target]]
 case_timeout_seconds = 10
 corpus = "crates/nspl/src/__fuzz__/canonical_round_trip_tests__bolero_statement_roundtrip_canonical_nspl/corpus"
-domain_version = 3
+domain_version = 4
 features = []
 id = "nspl-statement"
 invariant = "Canonical NSPL of every generated current statement form, session-only forms included, reparses through the client and server grammars to the complete statement."
@@ -175,7 +235,7 @@ test_target = "lib"
 [[target]]
 case_timeout_seconds = 10
 corpus = "crates/nspl/src/__fuzz__/canonical_round_trip_tests__bolero_expression_text_reads_alike_at_every_entry_point/corpus"
-domain_version = 2
+domain_version = 3
 features = []
 id = "nspl-expression-text"
 invariant = "Edited expression text reads as the same expression through a statement and every standalone expression reader, or none of them reads it as one."
@@ -190,7 +250,7 @@ test_target = "lib"
 [[target]]
 case_timeout_seconds = 10
 corpus = "crates/nspl/src/__fuzz__/canonical_round_trip_tests__bolero_statement_text_is_canonical_or_rejected/corpus"
-domain_version = 3
+domain_version = 4
 features = []
 id = "nspl-statement-text"
 invariant = "Edited canonical text is either rejected with located diagnostics or read as statements whose canonical NSPL reparses to them."
@@ -205,7 +265,7 @@ test_target = "lib"
 [[target]]
 case_timeout_seconds = 10
 corpus = "crates/nspl-format/src/__fuzz__/format_round_trip_tests__bolero_formatted_documents_keep_their_statements/corpus"
-domain_version = 3
+domain_version = 4
 features = []
 id = "nspl-format-document"
 invariant = "Formatting a generated document with gaps, comments and either line ending keeps its statements and comments and is idempotent."
@@ -220,7 +280,7 @@ test_target = "lib"
 [[target]]
 case_timeout_seconds = 10
 corpus = "crates/nspl-format/src/__fuzz__/format_round_trip_tests__bolero_formatter_text_is_formatted_or_rejected/corpus"
-domain_version = 3
+domain_version = 4
 features = []
 id = "nspl-format-text"
 invariant = "Edited documents are either refused as unparseable or formatted without changing their statements, idempotently."
@@ -459,6 +519,36 @@ test_target = "test:representations"
 
 [[target]]
 case_timeout_seconds = 10
+corpus = "crates/interconnect/src/__fuzz__/backup__wire_properties__bolero_restore_installation_requests_round_trip/corpus"
+domain_version = 1
+features = []
+id = "restore-installation-wire"
+invariant = "Every current restore installation action retains its complete authority, coordination, placement, payload and inventory through the production wire encoder and decoder."
+manifest = "Cargo.toml"
+max_input_bytes = 128
+package = "nervix-interconnect"
+random_iterations = 256
+source = "crates/interconnect/src/backup.rs"
+test = "backup::wire_properties::bolero_restore_installation_requests_round_trip"
+test_target = "lib"
+
+[[target]]
+case_timeout_seconds = 10
+corpus = "src/runtime/state_store/__fuzz__/runtime__state_store__backup__tests__bolero_restore_staging_and_publication_records_round_trip/corpus"
+domain_version = 1
+features = []
+id = "restore-installation-storage"
+invariant = "Current staged checkpoints and durable publication records decode to their complete original authority, placement, revision, payload and inventory."
+manifest = "Cargo.toml"
+max_input_bytes = 128
+package = "nervix-server"
+random_iterations = 256
+source = "src/runtime/state_store/backup.rs"
+test = "runtime::state_store::backup::tests::bolero_restore_staging_and_publication_records_round_trip"
+test_target = "lib"
+
+[[target]]
+case_timeout_seconds = 10
 corpus = "crates/simd-kernels/src/__fuzz__/division__tests__bolero_constant_division_matches_checked_operations_at_every_level/corpus"
 domain_version = 1
 features = []
@@ -485,6 +575,66 @@ package = "nervix-simd-kernels"
 random_iterations = 256
 source = "crates/simd-kernels/src/checked.rs"
 test = "checked::tests::bolero_checked_lanes_match_overflowing_arithmetic_at_every_level"
+test_target = "lib"
+
+[[target]]
+case_timeout_seconds = 10
+corpus = "crates/simd-kernels/src/__fuzz__/byte_class__tests__bolero_byte_classes_match_the_scalar_definition_at_every_level/corpus"
+domain_version = 1
+features = []
+id = "simd-byte-classes"
+invariant = "At every supported SIMD level and the scalar fallback, the first member of a generated buffer, and every member a forward scan finds after each generated jump, equal the scalar definition of a range-only, a listed-only and a mixed byte class."
+manifest = "Cargo.toml"
+max_input_bytes = 512
+package = "nervix-simd-kernels"
+random_iterations = 256
+source = "crates/simd-kernels/src/byte_class_tests.rs"
+test = "byte_class::tests::bolero_byte_classes_match_the_scalar_definition_at_every_level"
+test_target = "lib"
+
+[[target]]
+case_timeout_seconds = 10
+corpus = "crates/simd-kernels/src/__fuzz__/xml_chars__tests__bolero_xml_chars_match_standard_decoding_at_every_level/corpus"
+domain_version = 1
+features = []
+id = "simd-xml-chars"
+invariant = "At every supported SIMD level, the one-pass verdict on generated bytes equals standard UTF-8 decoding followed by the XML 1.0 Char production, invalid UTF-8 outranking an excluded character, and the check of valid text agrees with it."
+manifest = "Cargo.toml"
+max_input_bytes = 1024
+package = "nervix-simd-kernels"
+random_iterations = 256
+source = "crates/simd-kernels/src/xml_chars_tests.rs"
+test = "xml_chars::tests::bolero_xml_chars_match_standard_decoding_at_every_level"
+test_target = "lib"
+
+[[target]]
+case_timeout_seconds = 10
+corpus = "crates/connectors/syslog/src/__fuzz__/source__tests__bolero_stream_framing_matches_the_reference_however_reads_split_it/corpus"
+domain_version = 1
+features = []
+id = "syslog-stream-framing"
+invariant = "However reads split a generated RFC 6587 stream, the stream decoder yields exactly the frames and the ending, clean, incomplete or the typed framing failure, that framing the whole stream defines."
+manifest = "Cargo.toml"
+max_input_bytes = 512
+package = "nervix-connector-syslog"
+random_iterations = 256
+source = "crates/connectors/syslog/src/source_tests.rs"
+test = "source::tests::bolero_stream_framing_matches_the_reference_however_reads_split_it"
+test_target = "lib"
+
+[[target]]
+case_timeout_seconds = 10
+corpus = "src/runtime_schema/__fuzz__/runtime_schema__syslog__tests__bolero_structured_data_and_headers_match_the_per_byte_reading/corpus"
+domain_version = 1
+features = []
+id = "syslog-structured-data"
+invariant = "For generated text, the scanner-based RFC 5424 structured-data parser and header check report exactly the length, or the failing byte and typed reason, of the per-byte reading of the grammar."
+manifest = "Cargo.toml"
+max_input_bytes = 512
+package = "nervix-server"
+random_iterations = 256
+source = "src/runtime_schema/syslog_tests.rs"
+test = "runtime_schema::syslog::tests::bolero_structured_data_and_headers_match_the_per_byte_reading"
 test_target = "lib"
 
 [[target]]
@@ -642,7 +792,7 @@ test_target = "lib"
 [[target]]
 case_timeout_seconds = 10
 corpus = "crates/client-wire/src/tests/properties/__fuzz__/tests__properties__requests__bolero_client_requests_keep_complete_values/corpus"
-domain_version = 1
+domain_version = 2
 features = []
 id = "client-requests"
 invariant = "Every current typed client request decodes to its complete original value, including identities, positions, schemas and opaque payloads."
@@ -658,7 +808,7 @@ test_target = "lib"
 [[target]]
 case_timeout_seconds = 10
 corpus = "crates/client-wire/src/tests/properties/__fuzz__/tests__properties__replies__bolero_replies_keep_complete_values/corpus"
-domain_version = 1
+domain_version = 2
 features = []
 id = "client-replies"
 invariant = "Every current reply family decodes to the complete original typed value, including dispositions, diagnostics, metadata and client I/O."
@@ -690,7 +840,7 @@ test_target = "lib"
 [[target]]
 case_timeout_seconds = 10
 corpus = "crates/client-wire/src/tests/properties/__fuzz__/tests__properties__streams__bolero_stream_frames_keep_values_and_chunk_ownership/corpus"
-domain_version = 1
+domain_version = 2
 features = []
 id = "client-streams"
 invariant = "Every upload, restore and backup stream root preserves complete typed values and retained chunk ownership."
@@ -828,4 +978,19 @@ package = "nervix-client-ffi"
 random_iterations = 128
 source = "crates/client-ffi/src/tests/properties.rs"
 test = "tests::properties::bolero_shared_binding_keeps_complete_cells_and_retained_frames"
+test_target = "lib"
+
+[[target]]
+case_timeout_seconds = 10
+corpus = "examples/paced-simulation/rust/src/__fuzz__/file_records_tests__bolero_ledger_and_effect_records_read_back_whole/corpus"
+domain_version = 1
+features = []
+id = "paced-simulation-records"
+invariant = "Every ledger and effect-store record the paced simulation driver writes reads back from its one JSON line as the complete original record, timestamps to the nanosecond and escaped text included."
+manifest = "Cargo.toml"
+max_input_bytes = 96
+package = "nervix-paced-simulation"
+random_iterations = 256
+source = "examples/paced-simulation/rust/src/file_records_tests.rs"
+test = "file_records_tests::bolero_ledger_and_effect_records_read_back_whole"
 test_target = "lib"

@@ -45,6 +45,11 @@ that same run can make it valid. An intervening lifecycle, domain, resource-cata
 ends the run, so a later run cannot repair the earlier one. An incomplete candidate is never a
 complete empty scope, and `COMMIT` requires every step to plan completely.
 
+Planning captures the restored domain's installation gate with its authoritative control inputs.
+An incomplete restore refuses a queued or standalone `START` before lifecycle admission, naming
+the restore execution responsible for the gate. Consensus revalidates the gate at activation;
+releasing a failed restore's mutation lease does not make that domain startable.
+
 ```mermaid
 stateDiagram-v2
     [*] --> OPEN: BEGIN for one domain

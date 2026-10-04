@@ -23,7 +23,7 @@ delivery can fail during schedule application.
 | Vocabulary Models and the execution-graph description | Alterations the stored Model refuses; invalid placement members, inferencer tensor schemas, and upload identities; values canonical NSPL cannot spell; and execution-graph encoding or decoding | Refuse the command and keep the stored Model unchanged, or report which statement or graph could not be rendered or decoded. |
 | NSPL language and formatter | Source text the lexer or parser rejects, with the stage that rejected it, the rejected text, and every diagnostic's message and byte span; statements the formatter cannot render, and formatted output that does not reparse to the statements it came from | Report the stage and underline each diagnostic in the text that was submitted, or leave a file unchanged and report the formatter defect. |
 | Arrow record and batch layer | Schema, field, column, row, and batch construction or decoding failures | Reject a malformed batch or a field operation without inventing a replacement value. |
-| Bounded execution | A memory charge a class could not grant (`AdmissionError`), a job refused because its class's wait queue is full, a closed pool, a job that panicked on its worker (`ExecutionError`), and a job that stopped at a `Cancelled` check because its caller stopped waiting | The job's owner maps each to its own typed outcome. A refusal judged nothing, so it stays retryable: an emitter keeps its rows, an ingested payload fails its dispatch rather than its decode and an endpoint answers it as a retryable rejection, and a credential check answers `UNAVAILABLE` rather than failing authentication. The unfolding of a payload a quiesce buffer retained is not refused at all: nothing could present it again, so it waits for a place. A panic is the job's own defect. |
+| Bounded execution | A memory charge a class could not grant (`AdmissionError`), a job refused because its class's wait queue is full, a closed pool, a job that panicked on its worker (`ExecutionError`), and a job that stopped at a `Cancelled` check because its caller stopped waiting | The job's owner maps each to its own typed outcome. A refusal judged nothing, so it stays retryable: an emitter keeps its rows, an ingested payload fails its dispatch rather than its decode and an endpoint answers it as a retryable rejection, and a credential check answers `UNAVAILABLE` rather than failing authentication. The unfolding of a payload a quiesce buffer retained, or of a poll a paced source handed over, is not refused at all: nothing could present it again, so it waits for a place. So does a payload a source handed over without an acknowledgement, when its transport survives a held loop; any other such payload is refused, reported as an ingestor error and counted in `nervix_ingestor_unfolding_refused_total`. A panic is the job's own defect. |
 | Expression VM frontend and runtime bridge | Invalid expression scopes, types, sensitivity, compiled program inputs, and evaluation failures | Refuse a model during validation, or classify an affected row or batch during execution. [VM Functions](./vm-functions.md) owns execution detail. |
 | Stateful processors | Branch-local deduplication, ordering, window, correlation, inference, and WASM execution or state failures | Apply the processor's message or node policy, or fail a checkpoint and its held acknowledgements. |
 | Connector crates and host | Integration-specific configuration, decoding, external source and sink outcomes; host-owned routing, retry, flush, and acknowledgement failures | Separate a record rejection from a source or sink failure and follow the configured retry or acknowledgement contract. [Connector Crates And The Connector Contract](./connector-contract.md) owns those contracts. |
@@ -34,6 +34,7 @@ delivery can fail during schedule application.
 | Backup archive format | Records that do not encode or exceed their size limit, and archives whose structure, record headers, record values, section lengths or digests do not match what the manifest declares | Refuse to write an archive, or refuse a whole archive naming the section and the check that failed. |
 | Restore planning | Archives a restore cannot apply to the cluster: the wrong scope, a domain the archive lacks or the cluster has, an archived user the cluster has under `ON EXISTING USER FAIL`, resource versions the archive does not hold consistently, and models that bind no restored version | Refuse the restore before it changes anything, naming the domain, user, resource, version, or model. |
 | Interconnect | Authentication, framing, limits, transport, and the class and subject of a remote operation failure | Distinguish a transport failure from a peer's rejection, absence, unreadiness, or executed failure. |
+| Deadlock detector and diagnostic run | A detector that cannot be installed or is installed twice (`InstallError`), a diagnostic run that cannot install it or record its starting evidence (`DiagnosticError`), and evidence that does not encode, decode, fit its bounds, write or read (`EvidenceError`) | Refuse to start a diagnostic process, or refuse a whole evidence file naming the check that failed. A deadlock finding is not one of these errors: it is a diagnostic result that ends the process with its own status. |
 | Control plane and public edges | Transaction and lifecycle results, command dispositions, session diagnostics, and HTTP response selection | Return a recoverable command outcome or an appropriate response to a client or operator. |
 
 The owner extends its existing error type when an operation gains another failure case. A second
@@ -285,7 +286,14 @@ bytes. The control plane's backup execution reports a `BackupError`: no configur
 selected or no existing domain, models that are not a valid graph or do not render or parse back to
 themselves, a clock mapping that cannot be projected, a resource version that is missing on the
 leader or differs from its catalog entry, a record that does not encode, and an archive the
-staging area cannot hold. The failed command's message is `backup failed:` followed by that
+staging area cannot hold. A quiesced capture also names its domain when the mutation lease, pause,
+drain, owner capture, or resume fails or times out, or when its coordinator loses the leader tenure
+under which it acquired the cut. Owner capture failures are classified at the
+interconnect boundary without guest bytes in the failure. An owner still applying the selected
+revision waits within a five-second bound; a closed applied-state authority or an expired catch-up
+wait is a domain capture failure. A leadership change during that wait refuses the capture before
+state is read. The failed command's message is
+`backup failed:` followed by that
 error's text. A download the server does not serve is answered with a typed refusal,
 `InvalidRequest`, `NotRetained`, `Expired`, `NotOwner` or `ReadFailed`, or with a redirect to the
 leader, and a call without valid credentials ends with `UNAUTHENTICATED`. The client reports a
@@ -317,9 +325,19 @@ version other than a restored one by number. Each of these is reported as `resto
 its reason, and changes nothing. Once admitted, a step that fails ends the restore as
 `restore failed at step '<step>':` and its reason, with the restore's report: the consensus command
 that records a step refuses it with a `RestoreStepConflict` naming the step and the domain, user,
-resource, or version, and a resource import or the domain's model batch keeps its own failure
-beneath the step. The steps before it stay applied, and the message says so. No restore
-diagnostic includes password hashes or resource bytes. The client reports an archive it cannot read
+resource, or version, and a resource import, domain model batch, or state installation keeps its own failure
+beneath the step. `RestoreStateInstallationError` distinguishes an incomplete installation that
+blocks starting a domain from authority that no longer permits mutation. The runtime store reports
+a stale or competing published generation as `RuntimePersistenceError::RestoreGeneration`.
+Staging or publication failure leaves the durable start gate in place. The steps before it stay
+applied, and the message says so. Transaction planning reports a blocked `START` as
+`TransactionPlanningError::RestoreInstallation`, naming the domain and restore execution before
+lifecycle admission. The client receives a definitive failure. No restore
+diagnostic includes password hashes or resource bytes. When a state section's entity is absent
+from the restored schedule or its schema fingerprint differs, installation skips that section and
+the successful command carries an unlocated warning diagnostic. The same applies to a verified
+state record whose kind tag or version is unsupported. The CLI includes those warnings
+in text and JSON reports. The client reports an archive it cannot read
 as `ClientError::ReadRestoreArchive` with the path and the I/O error kind, an empty file as
 `ClientError::EmptyRestoreArchive`, a failed call as `ClientError::Restore` with its status, and a
 reply that does not decode as `ClientError::InvalidRestoreReply`; an error that may hide an
@@ -758,6 +776,14 @@ output. A submission cancelled that way sent nothing, and an outcome wait leaves
 with the producer. A read stays with the consumer, which hands its reply to the next read, and a
 settlement may still have reached the server.
 
+The [paced simulation drivers](./paced-simulation-drivers.md) classify a refused replacement
+producer or consumer as a configuration error and exit with status `2`, retaining the typed
+refusal or schema diagnostic. A consumer's refusal ends input planning and interrupts outstanding
+outcome, rejection-notice and producer-close waits, including after planning finished: batches
+whose output contract cannot be consumed cannot finish that close.
+The application retains their ledger entries for an explicit `--replay`; reopening never resends
+an unknown submission automatically.
+
 If a paced clock cannot convert one period through its rate, the authority can still emit its
 already-due first tick. Scheduling a later tick then reports a rate-conversion or cadence error and
 stops production. A next-boundary overflow reports its own clock arithmetic error. None of these
@@ -823,6 +849,19 @@ meaning; whether it is an ordinary outcome, a recoverable failure, or a broken i
 typed fields let the caller act; which context must cross each boundary; and which public
 diagnostic or recovery class closes the path. That classification must preserve branch and
 sensitivity rules, and it must not add a second form of a failure the owner already represents.
+
+A diagnostic node's deadlock findings are neither errors nor recoverable outcomes. The detector
+hands each finding to the diagnostic run's recorder, which describes it on standard error, records
+it as evidence and ends the process with status `3`; a finding it cannot record, or findings the
+detector lost, end it with status `4`, a failed diagnostic execution that is never taken for a clean
+run. Nothing on that path returns an error to the code whose locks deadlocked, writes a log, or
+waits for a lock a blocked thread could hold, and the detector's callback cannot panic: Deloxide
+would catch the panic and carry on. Two diagnostic failures are panics by design. A tracked lock
+constructed in a process that has not installed the detector panics, naming the configuration
+failure, as a modeled primitive used outside its model does; and a sink that panics while handling a
+finding aborts the process, because a finding it failed to handle must not pass for no finding.
+[Data-Plane Concurrency](./data-plane-concurrency.md#diagnostic-deadlock-detection) owns the
+detector, its bounds and what it does not cover.
 
 The isolated architecture compiler emits ordinary Rust tool diagnostics:
 `nervix::sync_acquisition`, `nervix::lifecycle_call`, `nervix::unknown_effect` and

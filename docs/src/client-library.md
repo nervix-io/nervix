@@ -18,6 +18,9 @@ Capabilities:
 - `Client::open_ingestor(...)`, with `Producer::send(...)`, `Producer::submit(...)`,
   `Producer::rejoin(...)`, `Producer::pending_submissions()`, `Producer::release(...)` and
   `Producer::close()`
+- `Client::subscribe_emitter(...)`, with `EmitterConsumer::next_batch()`,
+  `EmitterDelivery::ack()`, `EmitterDelivery::retry()`, `EmitterDelivery::reject(...)` and
+  `EmitterConsumer::close()`
 - `Client::upload_resource_from_directory(...)`
 - `Client::download_backup(...)`
 - `Client::restore(...)` and `Client::restore_with_reference(...)`
@@ -449,6 +452,14 @@ application processing awaits ACK. A `next_batch` future dropped before its repl
 with the consumer, and the next `next_batch` of the same attachment receives that reply without
 asking for another batch, so abandoning a wait never strands an attempt until its ACK timeout.
 `close` releases the attachment the way a producer's does.
+
+The [Paced Simulation Drivers](paced-simulation-drivers.md) are complete programs that combine a
+followed domain clock, a producer and competing consumers on one session, in Rust and through the
+shared C binding: they start their consumers before they await an attached outcome, pace their
+`TIMESTAMP AT` values by the attached clock's projections, and make their effects idempotent across
+redeliveries and deliberate replays. They explicitly reopen changed endpoint contracts within a
+START generation, validate the same expected fields and credit requests again, and keep unknown
+submissions with their original handle rather than resending them.
 
 ### Through The Shared C Binding
 

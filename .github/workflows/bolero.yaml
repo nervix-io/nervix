@@ -45,7 +45,7 @@ jobs:
         with:
           version: "25.12.19"
 
-      - name: Install LLVM 23
+      - name: Install native build tools
         run: |
           wget https://apt.llvm.org/llvm.sh
           chmod +x llvm.sh
@@ -137,7 +137,7 @@ jobs:
       - name: Setup uv for runner coverage
         uses: astral-sh/setup-uv@v6
 
-      - name: Install LLVM 23
+      - name: Install native build tools
         run: |
           wget https://apt.llvm.org/llvm.sh
           chmod +x llvm.sh

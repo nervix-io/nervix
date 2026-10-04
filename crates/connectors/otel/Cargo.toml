@@ -19,6 +19,7 @@ arrow-schema = { workspace = true }
 async-trait = { workspace = true }
 chrono = { workspace = true }
 error-stack = { workspace = true }
+faster-hex = { workspace = true }
 flate2 = { workspace = true }
 hyper-util = { workspace = true, features = ["client-legacy", "tokio"] }
 meticulous = { workspace = true }

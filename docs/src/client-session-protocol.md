@@ -1339,8 +1339,9 @@ and grant with the first open, then publishes the new attachment to the same pro
 different generation or contract, a removed or stopped endpoint, or an incompatible schema makes
 the handle require an explicit new open. Temporary owner and capacity refusals are retried with
 bounded physical backoff while the new exchange lives. Closing or dropping the handle fences a
-late open and releases any attachment it created. The shared binding and the web console do not
-open producers.
+late open and releases any attachment it created. The shared binding opens producers through these
+same Rust client handles, so its hosts restore them the same way; the web console does not open
+producers.
 
 A serving node whose runtime has not yet passed its process-start linearizable catch-up barrier
 refuses producer and consumer opens as `EndpointUnavailable`. Its local domain snapshot may still
@@ -1462,11 +1463,12 @@ under its execution reference like every other persistent command, while its arc
 call of its own, `DownloadBackup`, keyed by that reference. [Backup And
 Restore](./backup-and-restore.md) owns what an archive holds and how it is laid out.
 
-The leader runs the backup. It reads every section from one applied revision, assembles the archive
-in its staging area, and only then completes the command. The `CommandCompleted` outcome carries the
+The leader runs the backup. Each domain is captured at its own applied revision and records whether
+its cut was quiesced, live, stopped, or configuration-only. The leader assembles the archive in its
+staging area, and only then completes the command. The `CommandCompleted` outcome carries the
 archive's summary: its size and BLAKE3 digest, the capture time, the instant the node stops
 retaining the archive, whether resource bytes are included, the number of users, and each domain's
-revision, section count, and bytes. The summary is part of the recorded outcome, so repeating the
+revision, cut kind and quiesce counters, section count, and bytes. The summary is part of the recorded outcome, so repeating the
 command under its reference returns the same summary and never assembles a second archive.
 
 A download call carries exactly one `BackupDownloadRequest`, which names the backup's execution
@@ -1554,6 +1556,12 @@ other answer is a `CommandOutcome` under the start's execution reference:
 A restore that failed at a step is `RequestFailed`, and its report names the step as `Failed`, the
 steps before it as `Applied`, and those after it as `NotAttempted`. A dry run reports every step as
 `Planned`, and is never admitted or recorded.
+
+A domain whose restore has not published its complete runtime-state generation refuses `START`
+with a definitive command failure naming the incomplete installation. Planning rejects it before
+admitting a lifecycle step, and consensus checks the same gate at activation. Failure of the
+restore, release of its mutation lease, and node restart do not release this gate. Only completion
+of the whole installation does.
 
 The call is not bounded by the request deadline, because an archive can take far longer to send
 than a command takes to run; the Rust client bounds each frame by it, and then the wait for the

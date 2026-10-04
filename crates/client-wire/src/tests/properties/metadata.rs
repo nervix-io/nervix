@@ -6,11 +6,12 @@
 //! - **Must not know.** Runtime Arrow arrays, service dispatch or live external systems.
 
 use nervix_models::{
-    ArchiveDigest, BackupArchiveSummary, BackupDomainSummary, BackupResources, ModelKind, NodeRef,
-    ResourceDescription, ResourceEntryContent, ResourceManifestEntry, ResourceUsage,
-    ResourceVersionDescription, ResourceVersionEntries, RestoreArchive, RestoreMode, RestoreReport,
-    RestoreStep, RestoreStepOutcome, RestoreStepReport, RestoredDomain, RestoredUsers,
-    TransactionInspection, TransactionLifecycle,
+    ArchiveDigest, BackupArchiveSummary, BackupCut, BackupCutKind, BackupDomainSummary,
+    BackupQuiesceCounters, BackupResources, ModelKind, NodeRef, ResourceDescription,
+    ResourceEntryContent, ResourceManifestEntry, ResourceUsage, ResourceVersionDescription,
+    ResourceVersionEntries, RestoreArchive, RestoreMode, RestoreReport, RestoreStep,
+    RestoreStepOutcome, RestoreStepReport, RestoredDomain, RestoredUsers, TransactionInspection,
+    TransactionLifecycle,
 };
 
 use super::WireValues;
@@ -26,6 +27,7 @@ impl WireValues<'_> {
             domains.push(BackupDomainSummary {
                 domain: self.arbitrary.name(),
                 revision: self.arbitrary.entropy().any_u64(),
+                cut: self.backup_cut(),
                 sections: self.arbitrary.entropy().any_u64(),
                 section_bytes: self.arbitrary.entropy().any_u64(),
             });
@@ -47,6 +49,38 @@ impl WireValues<'_> {
                 None
             },
             domains,
+        }
+    }
+
+    fn backup_cut(&mut self) -> BackupCut {
+        match self.arbitrary.entropy().pick([
+            BackupCutKind::Quiesced,
+            BackupCutKind::Live,
+            BackupCutKind::Stopped,
+            BackupCutKind::ConfigurationOnly,
+        ]) {
+            BackupCutKind::Quiesced => {
+                let first = self.timestamp();
+                let second = self.timestamp();
+                let (engaged_at, released_at) = if first.unix_nanos() <= second.unix_nanos() {
+                    (first, second)
+                } else {
+                    (second, first)
+                };
+                BackupCut::Quiesced {
+                    engaged_at,
+                    released_at,
+                    quiesce: BackupQuiesceCounters {
+                        buffered_records: self.arbitrary.entropy().any_u64(),
+                        buffered_bytes: self.arbitrary.entropy().any_u64(),
+                        dropped_records: self.arbitrary.entropy().any_u64(),
+                        rejected_records: self.arbitrary.entropy().any_u64(),
+                    },
+                }
+            }
+            BackupCutKind::Live => BackupCut::Live,
+            BackupCutKind::Stopped => BackupCut::Stopped,
+            BackupCutKind::ConfigurationOnly => BackupCut::ConfigurationOnly,
         }
     }
 
@@ -170,4 +204,22 @@ impl WireValues<'_> {
             command.wasm_state = Some(Box::new(self.wasm_state()));
         }
     }
+}
+
+#[test]
+fn backup_summary_generator_covers_every_cut_kind() {
+    let mut covered = std::collections::BTreeSet::new();
+    for marker in 0..=u8::MAX {
+        let bytes = [marker; 64];
+        covered.insert(WireValues::new(&bytes).backup_cut().kind().as_str());
+    }
+    assert_eq!(
+        covered,
+        std::collections::BTreeSet::from([
+            BackupCutKind::Quiesced.as_str(),
+            BackupCutKind::Live.as_str(),
+            BackupCutKind::Stopped.as_str(),
+            BackupCutKind::ConfigurationOnly.as_str(),
+        ])
+    );
 }

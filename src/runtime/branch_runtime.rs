@@ -2136,6 +2136,7 @@ fn checkpoint_branch_instance_lru_snapshot<V>(
             identifier: ModelName::from(&template.source),
         }
     })?;
+    let _publication = runtime.backup_publication(domain);
     let payload = encode_branch_lru_snapshot(&instances.snapshot_entries())
         .map_err(|error| OwnershipHandoffError::checkpoint(error.to_string()))?;
     let snapshot = PersistedRuntimeStateEntry {
@@ -2169,6 +2170,7 @@ pub(super) fn persist_branch_instance_lru_snapshot<V>(
     }
     let placement = branch_lru_placement(runtime, domain, template)
         .change_context(BranchLruSnapshotError::Unplaced)?;
+    let _publication = runtime.backup_publication(domain);
     let payload = encode_branch_lru_snapshot(&instances.snapshot_entries())?;
     runtime
         .persist_branch_lru_snapshot(
@@ -2198,6 +2200,7 @@ pub(super) fn publish_branch_instance_lru_snapshot<V>(
 ) -> error_stack::Result<(), BranchLruSnapshotError> {
     let placement = branch_lru_placement(runtime, domain, template)
         .change_context(BranchLruSnapshotError::Unplaced)?;
+    let _publication = runtime.backup_publication(domain);
     let payload = encode_branch_lru_snapshot(&instances.snapshot_entries())?;
     let snapshot = PersistedRuntimeStateEntry {
         lsm: instances.version(),

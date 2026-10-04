@@ -26,6 +26,7 @@ use strum::IntoStaticStr;
 use thiserror::Error;
 
 mod authentication;
+pub mod backup;
 mod connection;
 mod entropy;
 mod identity;

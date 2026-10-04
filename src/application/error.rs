@@ -116,6 +116,9 @@ pub enum AppError {
     InitTracing,
     #[error("failed to register termination signal handlers")]
     RegisterTerminationSignals,
+    #[cfg(feature = "deloxide")]
+    #[error("failed to start the diagnostic node's deadlock diagnostics")]
+    StartDeadlockDiagnostics,
     #[error("failed to start termination signal supervision")]
     SuperviseTerminationSignals,
     #[error("failed to start shutdown deadline supervision")]

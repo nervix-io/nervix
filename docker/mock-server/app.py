@@ -6,6 +6,7 @@ from aiohttp import WSMsgType, web
 
 
 served_http = set()
+answered_http = set()
 active_websockets = {}
 clock_source_requests = {}
 
@@ -18,11 +19,17 @@ async def handle_http(request: web.Request) -> web.StreamResponse:
 
     served_http.add(path)
     await asyncio.sleep(2)
+    answered_http.add(request.match_info["name"])
     return web.Response(
         status=200,
         body=b'{"user_id":42}',
         content_type="application/json",
     )
+
+
+async def http_observations(request: web.Request) -> web.StreamResponse:
+    name = request.match_info["name"]
+    return web.json_response({"answered": name in answered_http})
 
 
 async def handle_clock_source(request: web.Request) -> web.StreamResponse:
@@ -137,6 +144,7 @@ async def publish_ws(request: web.Request) -> web.StreamResponse:
 
 app = web.Application()
 app.router.add_get("/http/{name}", handle_http)
+app.router.add_get("/http-observations/{name}", http_observations)
 app.router.add_get("/clock-source/{name}", handle_clock_source)
 app.router.add_get(
     "/prometheus-clock-source/{name}/{delay_ms}/api/v1/query",

@@ -15,7 +15,23 @@ use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 use serde::{Deserialize, Serialize};
 use strum::AsRefStr;
 
-use crate::{ArchiveDigest, DomainName, Timestamp, TransactionImpactReport};
+use crate::{
+    ArchiveDigest, ClusterNodeName, CommandExecutionReference, DomainName, Timestamp,
+    TransactionImpactReport,
+};
+
+/// Authority for one stopped-domain state installation. The generation is the committed log
+/// position that admitted this attempt; checkpoint revisions describe guest history instead.
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
+pub struct RestoreStateAuthority {
+    pub leader: ClusterNodeName,
+    pub term: u64,
+    pub execution: CommandExecutionReference,
+    pub mutation_revision: u64,
+    pub generation: u64,
+}
 
 /// `RESTORE CLUSTER FROM '<file>' [ON EXISTING USER FAIL | SKIP | REPLACE] [DRY RUN]` or
 /// `RESTORE DOMAIN <name> [AS <new_name>] FROM '<file>' [DRY RUN]`.
@@ -30,6 +46,31 @@ pub struct Restore {
     /// The local archive file the client reads.
     pub source: String,
     pub mode: RestoreMode,
+    /// Which archived runtime state the restore installs.
+    pub state: RestoreState,
+}
+
+/// The runtime state a restore installs into each stopped domain.
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    Serialize,
+    Deserialize,
+    Archive,
+    RkyvSerialize,
+    RkyvDeserialize,
+)]
+pub enum RestoreState {
+    #[default]
+    All,
+    /// Install state other than source positions.
+    WithoutSourceOffsets,
+    /// Install configuration only.
+    ConfigurationOnly,
 }
 
 /// What a restore recreates.

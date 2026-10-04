@@ -7,14 +7,14 @@
 `crates/model-harness/loom-inventory.toml` registers every model by the invariant it checks.
 
 `run` lists the library tests named `loom_*` of every inventory package, built with its `loom`
-feature, and checks them against the inventory: a run over the whole inventory fails when a
-registered test is missing or ignored, or when a discovered model is not registered. It then runs
-each selected model in its own process and accepts it only when the model's harness printed the
+feature and build profile, and checks them against the inventory: a run over the whole inventory
+fails when a registered test is missing or ignored, or when a discovered model is not registered.
+It then runs each selected model in its own process and accepts it only when the model's harness printed the
 record of an exhaustive exploration for the model's own invariant; a passing test without that
 record is an incomplete run. It reports how many models it discovered, selected, executed and saw
 complete, and a filter that selects nothing fails.
 
-A failed model leaves `<target>/loom-failures/<package>/<test>/` behind: Loom's checkpoint of the
+A failed model leaves `<target>/loom-failures/<package>/<invariant>/` behind: Loom's checkpoint of the
 failed execution, the run's output, and `metadata.json` with the invariant, revision, toolchain,
 Loom version and exploration bounds. `replay` resumes Loom from that checkpoint with location
 tracking and tracing enabled, so the failed execution runs first. The artifacts hold model output
@@ -22,7 +22,9 @@ only; a model has no payloads or secrets to leak.
 
 `qualify` applies each registered weakening to a copy of the working tree, requires the named
 model to fail with the registered message, and requires the checkpoint of that failure to replay
-it. The copy shares the target directory, so only the mutated packages are rebuilt.
+it. The copy shares the target directory, so only the mutated packages are rebuilt. Discovery,
+execution, replay and qualification use the same profile, and qualification clears only that
+profile's package artifacts before and after each mutation.
 """
 
 from __future__ import annotations
@@ -39,11 +41,14 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Mapping, Sequence
 
+from scripts.model_evidence import Evidence
+
 INVENTORY = Path("crates/model-harness/loom-inventory.toml")
 FAILURES = "loom-failures"
 QUALIFICATIONS = "loom-qualification"
 MODEL_PREFIX = "loom_"
 LOOM_FEATURE = "loom"
+LOOM_PROFILE = "loom"
 
 _INVARIANT_ID = re.compile(r"^[a-z0-9-]+(?:\.[a-z0-9-]+)+$")
 # The test harness prints `test <name> ... ` before a test's own output, so a record can share its
@@ -263,6 +268,8 @@ def completion(output: str, invariant_id: str) -> Completion | None:
 
     for match in _COMPLETED.finditer(output):
         if match.group("id") == invariant_id:
+            if int(match.group("executions")) == 0:
+                return None
             return Completion(
                 executions=int(match.group("executions")), bounds=match.group("bounds")
             )
@@ -331,7 +338,7 @@ class Commands:
 
 
 def cargo_test(package: str, *arguments: str, manifest: Path | None = None) -> list[str]:
-    command = ["cargo", "test"]
+    command = ["cargo", "test", "--profile", LOOM_PROFILE]
     if manifest is not None:
         command += ["--manifest-path", str(manifest)]
     return [*command, "--package", package, "--features", LOOM_FEATURE, "--lib", *arguments]
@@ -406,16 +413,35 @@ def checkpoint_environment(checkpoint: Path) -> dict[str, str]:
     }
 
 
-def run_models(commands: Commands, inventory: Inventory, target: Path, filter_text: str) -> int:
+def run_models(
+    commands: Commands, inventory: Inventory, target: Path, filter_text: str, report: Path | None = None
+) -> int:
+    evidence = Evidence(report, "loom", filter_text, INVENTORY)
     discoveries = [discover(commands, package) for package in inventory.packages()]
+    evidence.discover([
+        {
+            "package": discovery.package,
+            "test": test,
+            "invariant": registered.id if (registered := inventory.registered(discovery.package, test)) else None,
+            "ignored": test in discovery.ignored,
+        }
+        for discovery in discoveries for test in discovery.models
+    ])
     discovered = sum(len(discovery.models) for discovery in discoveries)
     selected = select(inventory, discoveries, filter_text)
+    evidence.select([
+        {"package": model.package, "test": model.test, "invariant": model.invariant.id}
+        for model in selected
+    ])
 
     executed = 0
     completed = 0
     failures: list[str] = []
     for model in selected:
-        directory = target / FAILURES / model.package / model.test
+        check_evidence = evidence.begin({
+            "package": model.package, "test": model.test, "invariant": model.invariant.id
+        })
+        directory = target / FAILURES / model.package / model.invariant.id
         shutil.rmtree(directory, ignore_errors=True)
         directory.mkdir(parents=True)
         checkpoint = directory / "checkpoint.json"
@@ -424,8 +450,18 @@ def run_models(commands: Commands, inventory: Inventory, target: Path, filter_te
         outcome = commands.run(command, environment=checkpoint_environment(checkpoint))
         executed += 1
         record = completion(outcome.output, model.invariant.id)
+        check_evidence["runs"] = [{
+            "name": "exploration",
+            "exit_status": outcome.status,
+            "completed": outcome.status == 0 and record is not None,
+            "executions": record.executions if record is not None else None,
+            "bounds": record.bounds if record is not None else exploration_bounds(outcome.output, model.invariant.id),
+        }]
+        evidence.write()
         if outcome.status == 0 and record is not None:
             completed += 1
+            check_evidence["completed"] = True
+            evidence.write()
             shutil.rmtree(directory)
             continue
         if outcome.status == 0:
@@ -447,7 +483,9 @@ def run_models(commands: Commands, inventory: Inventory, target: Path, filter_te
     for failure in failures:
         print(f"loom: {failure}", file=sys.stderr)
     if failures:
+        evidence.finish(1)
         return 1
+    evidence.finish(0)
     return 0
 
 
@@ -492,6 +530,11 @@ def copy_working_tree(commands: Commands, destination: Path) -> None:
         target = destination / relative
         target.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(source, target)
+    # Server models embed the generated web console at compile time. It is ignored by Git, so
+    # tracked-source copies need this build input alongside the source under qualification.
+    console_dist = Path("crates/web-console/dist")
+    if (commands.root / console_dist).is_dir():
+        shutil.copytree(commands.root / console_dist, destination / console_dist)
 
 
 def qualification_failure(outcome: Outcome, qualification: Qualification) -> str | None:
@@ -522,6 +565,17 @@ def qualify(commands: Commands, inventory: Inventory, target: Path) -> int:
         )
         manifest = tree / "Cargo.toml"
         environment = {"CARGO_TARGET_DIR": str(target)}
+        clean_command = [
+            "cargo", "clean", "--profile", LOOM_PROFILE,
+            "--manifest-path", str(manifest), "--package", model.package,
+        ]
+        cleaned = commands.run(clean_command, environment=environment, cwd=tree, echo=False)
+        if cleaned.status != 0:
+            problems.append(
+                f"qualification {qualification.id}: could not clear a previous package build; "
+                f"{cleaned.output}"
+            )
+            continue
         checkpoint = directory / "checkpoint.json"
         checkpoint.unlink(missing_ok=True)
         print(f"loom: qualifying {invariant.id} against {qualification.id}", flush=True)
@@ -546,6 +600,9 @@ def qualify(commands: Commands, inventory: Inventory, target: Path) -> int:
             replay_problem = qualification_failure(replayed, qualification)
             if replay_problem is not None:
                 problem = f"its checkpoint does not replay the failure: {replay_problem}"
+        cleaned = commands.run(clean_command, environment=environment, cwd=tree, echo=False)
+        if cleaned.status != 0:
+            problem = f"could not clear its weakened package build: {cleaned.output}"
         if problem is not None:
             problems.append(f"qualification {qualification.id}: {problem}; see {directory}")
             continue
@@ -579,6 +636,7 @@ def main(
     subcommands = parser.add_subparsers(dest="command", required=True)
     run_parser = subcommands.add_parser("run")
     run_parser.add_argument("filter", nargs="?", default="")
+    run_parser.add_argument("--report", type=Path)
     replay_parser = subcommands.add_parser("replay")
     replay_parser.add_argument("failure", type=Path)
     subcommands.add_parser("qualify")
@@ -590,7 +648,7 @@ def main(
     try:
         inventory = parse_inventory((root / INVENTORY).read_text(encoding="utf-8"))
         if arguments.command == "run":
-            return run_models(commands, inventory, target, arguments.filter)
+            return run_models(commands, inventory, target, arguments.filter, arguments.report)
         if arguments.command == "replay":
             return replay(commands, inventory, arguments.failure.resolve())
         return qualify(commands, inventory, target)

@@ -16,6 +16,7 @@ shuttle = [
   "nervix-execution/shuttle",
   "nervix-interconnect/shuttle",
   "nervix-primitives/shuttle",
+  "nervix-model-harness/shuttle",
 ]
 testing = []
 
@@ -45,6 +46,7 @@ tracing = { workspace = true }
 [dev-dependencies]
 bolero = { workspace = true }
 nervix-arbitrary = { workspace = true }
+nervix-model-harness = { workspace = true }
 tempfile = { workspace = true }
 tokio = { workspace = true, features = ["test-util"] }
 ubyte = { workspace = true }

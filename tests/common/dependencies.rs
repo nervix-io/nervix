@@ -108,6 +108,36 @@ impl TestDependencies {
             })
     }
 
+    /// Whether the HTTP mock has answered `name`'s one polled payload. It answers the first poll of
+    /// a name with the payload two seconds after the request, and every later poll with no
+    /// content.
+    pub(crate) async fn http_poll_answered(&self, name: &str) -> io::Result<bool> {
+        let base = self.endpoints.get(MOCK_HTTP_ADDR)?;
+        let mut url = url::Url::parse(base)
+            .map_err(|error| io::Error::other(format!("invalid HTTP mock endpoint: {error}")))?;
+        let mut segments = url
+            .path_segments_mut()
+            .map_err(|()| io::Error::other("HTTP mock endpoint cannot hold path segments"))?;
+        segments.clear().push("http-observations").push(name);
+        drop(segments);
+        let observations: serde_json::Value = reqwest::get(url)
+            .await
+            .map_err(|error| io::Error::other(format!("HTTP poll query failed: {error}")))?
+            .error_for_status()
+            .map_err(|error| io::Error::other(format!("HTTP poll query failed: {error}")))?
+            .json()
+            .await
+            .map_err(|error| {
+                io::Error::other(format!("HTTP poll response was not valid JSON: {error}"))
+            })?;
+        match observations.get("answered") {
+            Some(serde_json::Value::Bool(answered)) => Ok(*answered),
+            _ => Err(io::Error::other(format!(
+                "HTTP poll observations carry no answered flag: {observations}"
+            ))),
+        }
+    }
+
     dependency_starters! {
         start_kafka => "kafka",
         start_pulsar => "pulsar",

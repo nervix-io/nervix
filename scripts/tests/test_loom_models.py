@@ -15,10 +15,13 @@ from scripts.loom_models import (
     Outcome,
     RunnerError,
     completion,
+    copy_working_tree,
     exploration_bounds,
     listed_tests,
     parse_inventory,
+    qualify,
     qualification_failure,
+    replay,
     run_models,
     select,
     weaken,
@@ -246,6 +249,54 @@ def listing(*tests: str) -> Outcome:
     return Outcome(0, "".join(f"{test}: test\n" for test in tests))
 
 
+class QualificationCopyTests(unittest.TestCase):
+    def test_generated_server_assets_join_the_source_copy(self) -> None:
+        with TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / "src").mkdir()
+            (root / "src/lib.rs").write_text("mod server;\n", encoding="utf-8")
+            dist = root / "crates/web-console/dist"
+            dist.mkdir(parents=True)
+            (dist / "index.html").write_text("<html></html>", encoding="utf-8")
+            commands = ScriptedCommands(root, lambda _: Outcome(0, "src/lib.rs\0"))
+
+            copy_working_tree(commands, root / "candidate")
+
+            self.assertEqual(
+                (root / "candidate/crates/web-console/dist/index.html").read_text(
+                    encoding="utf-8"
+                ),
+                "<html></html>",
+            )
+
+    def test_a_failed_qualification_still_clears_its_package_build(self) -> None:
+        with TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / "Cargo.toml").write_text("[workspace]\n", encoding="utf-8")
+            source = root / "crates/execution/src/cancellation.rs"
+            source.parent.mkdir(parents=True)
+            source.write_text("store(true, Ordering::Release)", encoding="utf-8")
+
+            def respond(arguments: Sequence[str]) -> Outcome:
+                if arguments[:2] == ["git", "ls-files"]:
+                    return Outcome(0, "Cargo.toml\0crates/execution/src/cancellation.rs\0")
+                return Outcome(0, "     Running unittests src/lib.rs\n")
+
+            commands = ScriptedCommands(root, respond)
+            with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
+                status = qualify(commands, inventory(), root / "target")
+
+            self.assertEqual(status, 1)
+            self.assertEqual(
+                [command[1] for command in commands.commands if command[0] == "cargo"],
+                ["clean", "test", "clean"],
+            )
+            for command in commands.commands:
+                if command[0] == "cargo":
+                    self.assertIn("--profile", command)
+                    self.assertEqual(command[command.index("--profile") + 1], "loom")
+
+
 class RunTests(unittest.TestCase):
     def run_gate(self, respond: Callable[[Sequence[str]], Outcome]) -> tuple[int, str, Path]:
         directory = TemporaryDirectory()
@@ -262,6 +313,8 @@ class RunTests(unittest.TestCase):
 
     def test_a_gate_passes_when_every_model_completes(self) -> None:
         def respond(arguments: Sequence[str]) -> Outcome:
+            self.assertIn("--profile", arguments)
+            self.assertEqual(arguments[arguments.index("--profile") + 1], "loom")
             if "--ignored" in arguments:
                 return listing()
             if "--list" in arguments:
@@ -274,8 +327,8 @@ class RunTests(unittest.TestCase):
         self.assertEqual(status, 0, report)
         self.assertIn("discovered 2, selected 2, executed 2, completed 2", report)
         failures = target / "loom-failures" / "nervix-execution"
-        self.assertFalse((failures / PUBLICATION_TEST).exists())
-        self.assertFalse((failures / DISARM_TEST).exists())
+        self.assertFalse((failures / "execution.cancellation.publication").exists())
+        self.assertFalse((failures / "execution.cancellation.disarm").exists())
 
     def test_a_model_that_passes_without_completing_fails_with_its_evidence(self) -> None:
         def respond(arguments: Sequence[str]) -> Outcome:
@@ -295,12 +348,48 @@ class RunTests(unittest.TestCase):
         self.assertEqual(status, 1)
         self.assertIn("completed 1", report)
         self.assertIn("passed without the record of an exhaustive exploration", report)
-        evidence = target / "loom-failures" / "nervix-execution" / PUBLICATION_TEST
+        evidence = (
+            target / "loom-failures" / "nervix-execution" / "execution.cancellation.publication"
+        )
         metadata = json.loads((evidence / "metadata.json").read_text(encoding="utf-8"))
         self.assertEqual(metadata["invariant"], "execution.cancellation.publication")
+        self.assertEqual(metadata["test"], PUBLICATION_TEST)
         self.assertEqual(metadata["revision"], "0123abcd")
         self.assertEqual(metadata["loom"], "0.7.2")
         self.assertTrue((evidence / "output.log").is_file())
+
+
+class ReplayTests(unittest.TestCase):
+    def test_replay_uses_the_model_profile_and_preserves_the_recorded_checkpoint(self) -> None:
+        with TemporaryDirectory() as temporary:
+            directory = Path(temporary)
+            checkpoint = directory / "checkpoint.json"
+            checkpoint.write_text('{"pos": 0}\n', encoding="utf-8")
+            (directory / "metadata.json").write_text(
+                json.dumps({"invariant": "execution.cancellation.publication"}),
+                encoding="utf-8",
+            )
+
+            def respond(arguments: Sequence[str]) -> Outcome:
+                self.assertIn("--profile", arguments)
+                self.assertEqual(arguments[arguments.index("--profile") + 1], "loom")
+                self.assertIn(PUBLICATION_TEST, arguments)
+                self.assertIn("--exact", arguments)
+                (directory / "replay-checkpoint.json").write_text(
+                    '{"pos": 1}\n', encoding="utf-8"
+                )
+                return Outcome(101, "the recorded assertion failed\n")
+
+            commands = ScriptedCommands(directory, respond)
+            with redirect_stderr(io.StringIO()):
+                status = replay(commands, inventory(), directory)
+
+            self.assertEqual(status, 101)
+            self.assertEqual(checkpoint.read_text(encoding="utf-8"), '{"pos": 0}\n')
+            self.assertEqual(
+                (directory / "replay-checkpoint.json").read_text(encoding="utf-8"),
+                '{"pos": 1}\n',
+            )
 
 
 if __name__ == "__main__":

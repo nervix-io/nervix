@@ -347,6 +347,10 @@ impl KafkaIngestorStartPlan {
             companions,
             buffered_intake: false,
             flush_each_intake: false,
+            // A consumer-group member that stops polling for `max.poll.interval.ms` leaves its group,
+            // which rebalances, and an instance reading domain offsets would keep its partitions
+            // assigned through an ownership handoff.
+            unacknowledged_admission: QueueAdmission::RefuseWhenFull,
             client_mounts: resolved_client.mounts.into_iter().collect(),
             connector_label: "kafka",
         })

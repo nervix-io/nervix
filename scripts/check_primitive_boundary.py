@@ -39,10 +39,16 @@ below `nervix_primitives`, its owner, why that owner stays outside the executor,
 work instead. A use no permission lists for its file and a listed item the file does not name both
 fail.
 
+Thread creation is confined by the same manifest: `thread::spawn`, `thread::Builder`,
+`thread::scope`, `thread::spawn_detached` and `unmodeled::thread::Builder` each need an owner,
+reason and bound on their work, thread count and lifetime. Tests, models and harnesses declare
+each file and its exact items too; neither a directory nor a conditional module is exempt.
+The real builder also needs its unmodeled permission, which states what remains unverified.
+
 An execution mode is a feature of the boundary and never a global cfg, which every crate of a build
-reads, Tokio's included. A bare `loom`, `shuttle` or `turmoil` in a `cfg` predicate is rejected, and
-so is `--cfg loom`, `--cfg shuttle` or `--cfg turmoil` in any `justfile` recipe, Cargo
-configuration, workflow or build script. Tokio's unstable runtime controls belong to the Turmoil
+reads, Tokio's included. A bare `loom`, `shuttle`, `turmoil` or `deloxide` in a `cfg` predicate is
+rejected, and so is `--cfg` with any of those names in any `justfile` recipe, Cargo configuration,
+workflow or build script. Tokio's unstable runtime controls belong to the Turmoil
 build alone: `--cfg tokio_unstable` may appear only in a `justfile` recipe whose name names Turmoil.
 
 The analysis cfg, `nervix_lint`, is tooling only. The synchronization analysis driver alone sets
@@ -82,10 +88,13 @@ macros. What a build wrote is not authored source: Cargo tags each build directo
 The manifest rules keep mode selection in one place, in every tracked or new manifest, whether or
 not the workspace lists it. Only the owner selects Loom, and the harness runs it, so no other
 package may depend on `loom`. Only the owner depends on the libraries whose families it selects and
-on their Shuttle wrappers. No other package renames a governed crate, which would hide its paths from
+on their Shuttle wrappers, and only the owner depends on `deloxide`, the diagnostic mode's
+detector, as an optional dependency, so no ordinary graph contains it; no other source names its
+paths, whose locks come from `nervix_primitives::sync::blocking` and whose detector from
+`nervix_primitives::deadlock`. No other package renames a governed crate, which would hide its paths from
 the source rules. Turmoil is also a runner, so beside the owner, a package whose harness drives a
 simulation may depend on it, as an optional dependency its own `turmoil` feature enables, and never
-names its network. A package that owns a `loom`, `shuttle` or `turmoil` feature depends on
+names its network. A package that owns a `loom`, `shuttle`, `turmoil` or `deloxide` feature depends on
 `nervix-primitives` directly and forwards the mode to it, and forwards it to every workspace
 dependency that owns the same mode, so the whole graph of that package uses one backend even when it
 is built on its own.
@@ -115,7 +124,7 @@ PERMISSIONS = PurePosixPath("crates/primitives/unmodeled-permissions.toml")
 BLOCKING_PERMISSIONS = PurePosixPath("crates/primitives/blocking-permissions.toml")
 BLOCKING_PERMISSION_FIELDS = ("path", "items", "owner", "reason", "bound")
 HARNESS = "nervix-model-harness"
-MODES = ("loom", "shuttle", "turmoil")
+MODES = ("loom", "shuttle", "turmoil", "deloxide")
 SELECTED = ("nervix_primitives", "sync", "atomic")
 UNMODELED_ROOT = ("nervix_primitives", "unmodeled")
 UNMODELED = UNMODELED_ROOT + ("sync", "atomic")
@@ -248,6 +257,20 @@ ROUTES = (
     Route(("shuttle_tokio_stream",), ("nervix_primitives", "stream")),
     Route(("shuttle_parking_lot",), ("nervix_primitives", "sync", "blocking")),
     Route(("shuttle_dashmap",), ("nervix_primitives", "collections")),
+    # The diagnostic mode's detector: the owner selects its locks for `sync::blocking` and installs
+    # it through `deadlock`, so nothing else names it.
+    Route(("deloxide",), ("nervix_primitives", "deadlock"), exact=True),
+    *(
+        Route(("deloxide", lock), ("nervix_primitives", "sync", "blocking", lock))
+        for lock in (
+            "Condvar",
+            "Mutex",
+            "MutexGuard",
+            "RwLock",
+            "RwLockReadGuard",
+            "RwLockWriteGuard",
+        )
+    ),
     # Shared ownership: the same library types in every mode, reached through the boundary.
     Route(("triomphe",), ("nervix_primitives", "sync")),
     *(
@@ -354,6 +377,19 @@ CONFINED = {
         meaning="the runtime's way to block the worker thread that calls it",
         declared_in=BLOCKING_PERMISSIONS,
     ),
+    **{
+        ("nervix_primitives", "thread", name): Confinement(
+            owners=frozenset(),
+            meaning="a thread-creation mechanism outside the bounded executor",
+            declared_in=BLOCKING_PERMISSIONS,
+        )
+        for name in ("spawn", "Builder", "scope", "spawn_detached")
+    },
+    UNMODELED_ROOT + ("thread", "Builder"): Confinement(
+        owners=frozenset(),
+        meaning="a real thread-creation mechanism outside every model and the bounded executor",
+        declared_in=BLOCKING_PERMISSIONS,
+    ),
 }
 # The confined items a blocking permission may declare, by their paths below `nervix_primitives`. A
 # permission lists items by these paths.
@@ -383,7 +419,8 @@ CACHE_TAG_SIGNATURE = "Signature: 8a477f597d28d172789f06886806bc55"
 RELEASE_BUILD = "Dockerfile.debian"
 _RELEASE_PACKAGE = re.compile(r"(?<![A-Za-z0-9_-])--package\s+(?P<package>[A-Za-z0-9_-]+)")
 _PRODUCT_BINARY = re.compile(
-    r"nervix_primitives\s*::\s*product_binary\s*!\s*\(\s*\"(?P<name>[^\"]*)\"\s*\)"
+    r"nervix_primitives\s*::\s*product_binary\s*!\s*\(\s*\"(?P<name>[^\"]*)\"\s*"
+    r"(?:,\s*diagnostic\s*)?\)"
 )
 JUSTFILE = "justfile"
 CONFIGURATION_GLOBS = (".cargo/config.toml", ".cargo/config", ".github/workflows/*.yaml", ".github/workflows/*.yml")
@@ -397,6 +434,7 @@ OWNER_ONLY_PACKAGES = frozenset(
         "atomic-waker",
         "concurrent-queue",
         "dashmap",
+        "deloxide",
         "flume",
         "futures-channel",
         "futures-executor",
@@ -413,6 +451,8 @@ OWNER_ONLY_PACKAGES = frozenset(
 # Turmoil is a runner as well as the network the owner selects, so a package whose harness drives a
 # simulation may depend on it behind its own `turmoil` feature.
 TURMOIL = "turmoil"
+# The diagnostic mode's detector, which only the owner depends on, and optionally.
+DELOXIDE = "deloxide"
 # The WASM guest SDK. It and every guest library built on it are compiled into a user's WASM guest,
 # a single-threaded program inside the host's sandbox where no execution mode exists and that no
 # Nervix process runs, so their sources are outside the source rules; their manifests are checked.
@@ -452,7 +492,7 @@ _PATH_ATTRIBUTE = re.compile(r"#\[\s*path\s*=\s*\"(?P<path>[^\"]*)\"\s*\]")
 _MODULE_ROOT_FILES = frozenset({"build.rs", "lib.rs", "main.rs", "mod.rs"})
 _CRATE_ROOT_DIRECTORIES = frozenset({"bin", "benches", "examples", "tests"})
 _CFG_PREDICATE = re.compile(r"(?<![A-Za-z0-9_])cfg(?:_attr)?\s*!?\s*\(")
-_MODE_CFG_NAME = re.compile(r"(?<![A-Za-z0-9_])(?P<name>loom|shuttle|turmoil)(?![A-Za-z0-9_])")
+_MODE_CFG_NAME = re.compile(rf"(?<![A-Za-z0-9_])(?P<name>{'|'.join(MODES)})(?![A-Za-z0-9_])")
 # A conditional-compilation form, told apart by whether it selects code or attaches attributes.
 _CFG_USE = re.compile(r"(?<![A-Za-z0-9_])(?P<kind>cfg_attr|cfg)\s*!?\s*\(")
 _ANALYSIS_CFG_NAME = re.compile(rf"(?<![A-Za-z0-9_]){ANALYSIS_CFG}(?![A-Za-z0-9_])")
@@ -630,6 +670,14 @@ def _segments(path: str) -> tuple[str, ...]:
         if stripped:
             segments.append(stripped)
     return tuple(segments)
+
+
+def _local_path(path: tuple[str, ...]) -> tuple[str, ...]:
+    """A path to resolve against this file's imports, without module qualifiers."""
+
+    while len(path) > 1 and path[0] in ("self", "super", "crate"):
+        path = path[1:]
+    return path
 
 
 @dataclass
@@ -1077,6 +1125,7 @@ def check_source(file: RustFile, loom_only_file: bool = False) -> tuple[list[Sit
     # holding a confined item, each with the module's path.
     module_aliases: dict[str, tuple[str, ...]] = {}
     confining_aliases: dict[str, tuple[str, ...]] = {}
+    indirect_imports: list[tuple[int, UseLeaf]] = []
 
     def confine(offset: int, item: tuple[str, ...]) -> None:
         confinement = CONFINED[item]
@@ -1104,6 +1153,8 @@ def check_source(file: RustFile, loom_only_file: bool = False) -> tuple[list[Sit
         for leaf in leaves:
             names.bind(leaf)
             path = leaf.path
+            if path[:1] != ("nervix_primitives",):
+                indirect_imports.append((match.start(), leaf))
             item = confined_item(path)
             if item is not None:
                 confine(match.start(), item)
@@ -1114,7 +1165,15 @@ def check_source(file: RustFile, loom_only_file: bool = False) -> tuple[list[Sit
                 elif path == parent + ("*",):
                     confine(match.start(), confined)
             if path[:1] == ("nervix_primitives",):
-                if path[:2] == UNMODELED_ROOT:
+                if path == ("nervix_primitives", "*"):
+                    violations.append(
+                        file.site(
+                            match.start(),
+                            f"{RULE}: import boundary modules and items by name, not with a root "
+                            "glob that hides confined and unmodeled paths",
+                        )
+                    )
+                elif path[:2] == UNMODELED_ROOT:
                     rest = path[len(UNMODELED_ROOT) :]
                     if rest[-1:] == ("*",):
                         violations.append(
@@ -1200,6 +1259,30 @@ def check_source(file: RustFile, loom_only_file: bool = False) -> tuple[list[Sit
                     )
                 )
 
+    # Rust imports are unordered. Resolve reimports after collecting every original module name,
+    # including chains of renamed modules, so a separate import cannot hide a confined item.
+    while indirect_imports:
+        unresolved: list[tuple[int, UseLeaf]] = []
+        for offset, leaf in indirect_imports:
+            path = _local_path(leaf.path)
+            module = confining_aliases.get(path[0])
+            if module is None:
+                unresolved.append((offset, leaf))
+                continue
+            path = module + path[1:]
+            item = confined_item(path)
+            if item is not None:
+                confine(offset, item)
+            for confined in CONFINED:
+                parent = confined[:-1]
+                if path == parent:
+                    confining_aliases[leaf.alias or parent[-1]] = parent
+                elif path == parent + ("*",):
+                    confine(offset, confined)
+        if len(unresolved) == len(indirect_imports):
+            break
+        indirect_imports = unresolved
+
     for match in _EXTERN_CRATE.finditer(code):
         name = match.group("name")
         alias = match.group("alias")
@@ -1270,7 +1353,7 @@ def check_source(file: RustFile, loom_only_file: bool = False) -> tuple[list[Sit
                 )
             )
     for match in _QUALIFIED_PATH.finditer(body):
-        path = _segments(match.group("path"))
+        path = _local_path(_segments(match.group("path")))
         root = path[0]
         item = confined_item(path)
         if item is not None:
@@ -1615,8 +1698,8 @@ def check_permissions(
 
 @dataclass(frozen=True)
 class BlockingPermission:
-    """A file whose own work blocks a thread outside the bounded executor: the blocking items it
-    names, who owns that work, why it stays outside the executor, and what bounds it instead."""
+    """A file whose work blocks or starts a thread outside the bounded executor: its exact items,
+    who owns the work, why it stays outside the executor, and what bounds its work and lifetime."""
 
     path: str
     items: frozenset[tuple[str, ...]]
@@ -1628,7 +1711,7 @@ class BlockingPermission:
 def parse_blocking_permissions(text: str) -> list[BlockingPermission]:
     document = tomllib.loads(text)
     permissions: list[BlockingPermission] = []
-    # Each file declares each blocking item once, so exactly one owner answers for it.
+    # Each file declares each confined item once, so exactly one owner answers for it.
     seen: set[tuple[str, str]] = set()
     for index, table in enumerate(document.get("permission", [])):
         context = f"{BLOCKING_PERMISSIONS} permission #{index + 1}"
@@ -1639,6 +1722,11 @@ def parse_blocking_permissions(text: str) -> list[BlockingPermission]:
         if unknown:
             raise ValueError(f"{context} has unknown keys: {', '.join(unknown)}")
         path = table["path"]
+        if not _is_one_rust_file(path):
+            raise ValueError(
+                f"{context} names `{path}`; a permission covers one Rust file, never a "
+                "directory, a glob or a path outside the repository"
+            )
         names = table.get("items")
         if not isinstance(names, list) or not names:
             raise ValueError(f"{context} lists no items")
@@ -1671,7 +1759,7 @@ def parse_blocking_permissions(text: str) -> list[BlockingPermission]:
 def check_blocking_permissions(
     uses: Mapping[str, FileUses], permissions: Sequence[BlockingPermission]
 ) -> list[str]:
-    """Match every blocking item a file names outside its built-in owners against a permission that
+    """Match every confined item a file names outside its built-in owners against a permission that
     lists it for that file, and every item a permission lists against a file that names it."""
 
     problems: list[str] = []
@@ -1965,6 +2053,14 @@ def check_manifests(packages: Sequence[Package]) -> list[str]:
                             f"{package.manifest}: {RULE}: `loom` must be an optional {kind} "
                             "entry, so no ordinary graph contains it"
                         )
+        deloxide = package.every_kind.get(DELOXIDE)
+        if deloxide is not None and package.name == OWNER:
+            for kind, entry in deloxide.items():
+                if not (isinstance(entry, dict) and entry.get("optional") is True):
+                    problems.append(
+                        f"{package.manifest}: {RULE}: `deloxide` must be an optional {kind} "
+                        "entry, so no ordinary graph contains it"
+                    )
         turmoil = package.every_kind.get(TURMOIL)
         if turmoil is not None:
             enabled = package.features.get(TURMOIL, ())
@@ -2024,8 +2120,8 @@ def check_global_cfgs(root: Path, files: Sequence[str]) -> list[str]:
     A cfg a build passes reaches every crate in it. `tokio_unstable` changes how Tokio schedules
     and reports, so only a Turmoil recipe passes it. An execution mode is never a global cfg: Tokio
     and other dependencies read the same names and would change their own behavior, so `--cfg
-    loom`, `--cfg shuttle` and `--cfg turmoil` fail in every recipe, configuration, workflow and
-    build script. `--cfg nervix_lint` fails there too: only the synchronization analysis driver,
+    loom`, `--cfg shuttle`, `--cfg turmoil` and `--cfg deloxide` fail in every recipe,
+    configuration, workflow and build script. `--cfg nervix_lint` fails there too: only the synchronization analysis driver,
     which registers the tool its annotations name, sets it for the crates it analyzes.
     """
 
@@ -2154,7 +2250,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             f"{len(problems)} {RULE} violation(s). Every governed primitive comes from {OWNER}, and "
             "no selected atomic lives in a static; a real primitive outside every model comes from "
             f"{'::'.join(UNMODELED_ROOT)} with a permission in {PERMISSIONS}, and work outside the "
-            f"bounded executor blocks a thread, on the blocking pool or in place, only with a "
+            f"bounded executor blocks or starts a thread only with a "
             f"permission in {BLOCKING_PERMISSIONS}.",
             file=sys.stderr,
         )

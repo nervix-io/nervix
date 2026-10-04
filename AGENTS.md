@@ -174,7 +174,8 @@ behavior, and a compatibility requirement the user states explicitly for the cur
   chapter current in the same change. Its scope includes the contentionless rule, published and
   pre-resolved state, mutable execution state, bounded synchronization, review classification for
   new lock sites, the primitive surface with its per-mode visibility and permitted real primitives,
-  deterministic checks of data-plane concurrency protocols, and memory-ordering models. A change
+  deterministic checks of data-plane concurrency protocols, memory-ordering models, and the
+  diagnostic mode's deadlock detection with its evidence and the locks it does not track. A change
   that adds a concurrent map, or changes how often one is reached or what disposes of it, updates
   the concurrent map inventory in `tests/concurrent-map-inventory-ledger.md` in the same change.
 - [VM Functions](docs/src/vm-functions.md) is the authoritative architecture reference for the
@@ -303,7 +304,8 @@ moves into them keeps its counts and its clock rules.
 ### Execution-sensitive primitives
 
 `nervix-primitives` in `crates/primitives` selects every execution-sensitive primitive for the
-build's execution mode: ordinary execution, or one of the `shuttle`, `loom` and `turmoil` modes.
+build's execution mode: ordinary execution, one of the `shuttle`, `loom` and `turmoil` modes, or
+the `deloxide` diagnostic mode.
 It sits in the primitives layer, below the vocabulary, so vocabulary types, engines, connectors,
 the server and the clients share one boundary. Callers express the operation they need; they never
 choose a backend.
@@ -331,8 +333,9 @@ choose a backend.
   and `task`, Tokio Stream, Turmoil's `net`, `parking_lot`, `dashmap`, `concurrent-queue`,
   `arc-swap`, `triomphe`, the `futures` crates' channels, locks, executors, atomic waker, `select!`
   and abort handles, `atomic-waker`, the standard library's threads, `sync` items including `Arc`
-  and `Weak`, `Instant` and sockets, Shuttle's and Loom's primitives, and the Shuttle wrapper crates
-  are rejected however they are spelled, and only `nervix-primitives` depends on the libraries whose
+  and `Weak`, `Instant` and sockets, Shuttle's and Loom's primitives, the Shuttle wrapper crates,
+  and Deloxide's locks and detector, which come from `nervix_primitives::sync::blocking` and
+  `nervix_primitives::deadlock`, are rejected however they are spelled, and only `nervix-primitives` depends on the libraries whose
   families it selects. No manifest renames a governed crate, and every tracked or new manifest is
   checked. The isolated analysis workspace under `tools/nervix-lint`, with its driver, fixtures
   and fixture macros, is authored source under the same rules; what a build wrote into a Cargo
@@ -357,8 +360,11 @@ choose a backend.
   stays retryable rather than becoming a decode, encode or authentication failure. A class whose
   wait queue is full refuses work that answers a request, because its sender can present it again.
   Work the node already accepted and keeps, which nothing can present again, such as a payload a
-  quiesce buffer retained, states `QueueAdmission::WaitForPlace` and waits for a place instead; its
-  owner lets shutdown and a new quiesce end that wait, and keeps the work where it was until then.
+  quiesce buffer retained or a poll a paced source moved past, states
+  `QueueAdmission::WaitForPlace` and waits for a place instead; its owner lets shutdown and a new
+  quiesce end that wait, and keeps the work where it was until then or decides on it again. A
+  payload a source hands over without an acknowledgement waits only when holding the source's loop
+  keeps its transport connected with bounded memory; otherwise its refusal is reported and counted.
   `nervix_primitives::task::spawn_blocking` belongs to the executor's storage workers, and
   `nervix_primitives::task::block_in_place`, which blocks the runtime worker thread that calls it,
   belongs to no file by default. Any other file that names either needs a permission in
@@ -367,8 +373,19 @@ choose a backend.
   tool that is not a node or an external driver that waits on the network. A permission declares
   its file for exactly the items it lists, so an item no permission lists for its file and a listed
   item the file no longer names both fail.
-- An execution mode is a feature, never a global cfg: a bare `loom`, `shuttle` or `turmoil` in a
-  `cfg` predicate, and `--cfg loom`, `--cfg shuttle` or `--cfg turmoil` in any recipe, Cargo
+- Thread creation through `nervix_primitives::thread::{spawn, Builder, scope, spawn_detached}`
+  and `nervix_primitives::unmodeled::thread::Builder` needs the same exact-file, exact-item
+  declaration in `crates/primitives/blocking-permissions.toml`, with its owner, why it stays
+  outside the bounded executor, and what bounds its work, thread count and lifetime. There is
+  no built-in caller outside the primitive crate. Unit tests, Loom and Shuttle models, and
+  harnesses declare their files and items too: no directory, `cfg(test)` module, model-only
+  module, inactive branch or authored macro is exempt. An unlisted use and an unused declared
+  item fail. The real builder also needs its unmodeled permission and verification limit;
+  that permission alone does not authorize thread creation.
+  Reimported module aliases retain confinement; import boundary modules and items by name,
+  because a root glob hides confined and unmodeled paths and is rejected.
+- An execution mode is a feature, never a global cfg: a bare `loom`, `shuttle`, `turmoil` or
+  `deloxide` in a `cfg` predicate, and `--cfg` with any of those names in any recipe, Cargo
   configuration, workflow or build script, are rejected, because every crate of a build, Tokio's
   included, reads such a cfg. Tokio's unstable runtime controls belong to the Turmoil build: only a
   Turmoil recipe in the `justfile` passes `--cfg tokio_unstable`, never Cargo configuration, a
@@ -410,29 +427,43 @@ choose a backend.
   in every mode: no model checker counts references, so no claim relies on the ordering a reference
   count establishes. No model checker simulates a network: under Shuttle the sockets are Tokio's,
   and a socket created inside a check panics and fails it.
-- A package that owns a `shuttle`, `loom` or `turmoil` feature depends on `nervix-primitives`
-  directly and forwards the mode to it and to every workspace dependency that owns the same mode.
+- Deloxide models nothing. A `deloxide` build replaces only the thread-blocking locks and their
+  condition variable, with adapters over Deloxide's tracked locks that keep the interface of the
+  locks they replace where Deloxide keeps its meaning, including a `Debug` that never waits and the
+  exact count of waiters a notification wakes; an operation outside that surface fails to compile
+  rather than running untracked. The detector is process-wide and installs once, through the
+  diagnostic run of `nervix-deadlock`, after the process registers the signals it must not lose
+  and before it constructs a tracked lock or starts a runtime worker; a tracked lock constructed
+  before then panics, because the detector would drop its cycle unreported, and nothing reinstalls
+  or reconfigures it for a node or a test. Every other family of the build stays ordinary.
+- A package that owns a `shuttle`, `loom`, `turmoil` or `deloxide` feature depends on
+  `nervix-primitives` directly and forwards the mode to it and to every workspace dependency that
+  owns the same mode.
   Cargo unifies features, so ordinary and modeled suites run in separate build invocations with
   explicit features; a workspace-wide `--all-features` command excludes every package that owns a
   mode.
 - Ordinary execution re-exports each library's items directly and adds no allocation, wrapper,
   dispatch, lock, reference-count operation or scheduling point. An adapter exists only in a
-  modeled build, keeps the library's semantics, and states what its mode observes.
+  modeled or diagnostic build, keeps the library's semantics, and states what its mode observes.
 - The atomic and shared-ownership surfaces are portable and build for the browser. Every other
   family is the explicit `native` capability. Requesting a capability or a mode the target cannot
   provide fails to compile with the boundary's own diagnostic as the first error, instead of
   selecting another implementation: no library of a mode or of the native capability is compiled
   for the browser's target. The vocabulary and the browser's graphs contain no async runtime or
   network library.
-- A build that selects a mode is a test artifact. Every binary the release image builds declares
-  itself with `nervix_primitives::product_binary!`, which fails to compile in a modeled build.
+- A build that selects a modeled mode is a test artifact. Every binary the release image builds
+  declares itself with `nervix_primitives::product_binary!`, which fails to compile in a modeled
+  build. A `deloxide` build is a diagnostic artifact, which runs but is never released: it compiles
+  only a binary that declares a diagnostic form, `product_binary!("nervix-server", diagnostic)`,
+  and such a binary starts its diagnostic run at start-up.
 - Guest code, the WASM guest SDK and the guests built on it, runs inside a user's WASM guest where
   no mode exists, and is outside the source rules; a user's guest never takes Nervix's boundary.
 - Only `nervix-primitives` selects Loom and only `nervix-model-harness` runs Loom models and Shuttle
   checks; both take the model checkers as optional dependencies, and no other package depends on
-  `loom`. The ordinary dependency graph of the workspace and of every package built on its own, with
-  default features or without them, contains no model checker, simulator or modeled wrapper, and
-  enables no mode or paused-clock capability of the boundary.
+  `loom`. Only `nervix-primitives` depends on `deloxide`, the diagnostic mode's detector, and only
+  optionally. The ordinary dependency graph of the workspace and of every package built on its own,
+  with default features or without them, contains no model checker, simulator, modeled wrapper or
+  deadlock detector, and enables no mode or paused-clock capability of the boundary.
 - A new execution-sensitive primitive joins the boundary before any caller introduces it, and no
   change adds a new bypass. These rules bind every change from the moment they land, including work
   in flight on other branches: a branch that merges after them takes its primitives from the
@@ -897,8 +928,23 @@ build and the existing tests, and nothing in it changes behavior.
   model.
 - The evidence forms are complementary and none replaces another: Shuttle for interleavings of
   production owners, Loom for memory-ordering claims of synchronous production owners, Turmoil for
-  network claims within the supported simulation, Cucumber for public behavior, and the external
-  Chaos suite against an immutable product image for real-process recovery.
+  network claims within the supported simulation, Deloxide for active deadlocks among the tracked
+  thread-blocking locks of real diagnostic processes, Cucumber for public behavior, and the
+  external Chaos suite against an immutable product image for real-process recovery.
+- A change that adds or alters thread-blocking synchronization, a `sync::blocking` lock or
+  condition variable, the order in which tracked locks are acquired, or a lifecycle or ownership
+  path that uses tracked locks runs `just test-deloxide`, and extends its probes or its diagnostic
+  scenarios where they do not yet reach the changed path. The change records what the diagnostic
+  run covered, what it cannot see, and the evidence it retained under
+  `target/deloxide/test-deloxide`. An active cycle it reports is fixed in the owner, never
+  suppressed, retried away or excluded from the run. A run that executed no check, lost a finding
+  or could not record one is a failed diagnostic execution, never a clean result. Every
+  concurrency-related change states whether this applies: async-only or otherwise untracked work,
+  such as Tokio's locks, channels and `Notify`, DashMap, atomic protocols or network waits, records
+  that the detector does not see it and keeps its Shuttle, Loom, Turmoil, Chaos and Bolero
+  evidence, and documentation-only or unrelated work records that the rule does not apply. The rule
+  binds concurrent work from the moment it lands. A clean diagnostic run never proves an untracked
+  path, or an interleaving the run did not take, free of deadlocks.
 - [Integration Test Lifecycle](docs/src/integration-test-lifecycle.md) is the authoritative
   architecture reference for the lifecycle of the Cucumber scenario harness. Any change to how the
   harness starts, observes, diagnoses, or stops in-process nodes, server processes, scenarios, or
@@ -1054,8 +1100,8 @@ build and the existing tests, and nothing in it changes behavior.
   gating budget stops short of.
 - A change to a primitive adapter or a synchronization protocol runs the checks of every mode it
   affects: `just test-shuttle [filter]` for interleavings, `just test-loom [filter]` for
-  memory-ordering claims, and `just test-turmoil` for the simulated network, beside the ordinary
-  suite. `just test-primitives` runs the boundary's own conformance checks once per mode. Every mode
+  memory-ordering claims, `just test-turmoil` for the simulated network, and `just test-deloxide`
+  for active deadlocks among tracked locks, beside the ordinary suite. `just test-primitives` runs the boundary's own conformance checks once per mode. Every mode
   command reports how many checks it discovered, selected, executed and saw complete; a selection
   that executes nothing across its whole scope fails, though a package with no match inside a
   nonempty selection is fine. `just test-shuttle` runs every registered check in its own process
@@ -1075,19 +1121,27 @@ build and the existing tests, and nothing in it changes behavior.
   mode. `just cargo-clippy-shuttle`, also part of `just lint`, lints every Shuttle build with
   warnings denied, including each package `just test-shuttle` explores in test mode, so a warning
   in a check fails validation.
-- `just coverage-native-extras [producer ...]` runs the extra checks that execute Nervix code
-  natively in ordinary mode, `test-typed-ratchet`, `bench-smoke`, `test-primitives` and
-  `nspl-completion-walk`, exactly as their recipes do but under LLVM source instrumentation, and
-  CI's extra-tests job runs them only
-  that way. Each run writes `lcov.info`, `completion.json`, `executions.jsonl` and `export.log` to a
+- `just coverage-native-extras [producer ...]` runs eligible native extra checks under LLVM source
+  instrumentation: `test-typed-ratchet`, `bench-smoke`, `nspl-completion-walk`, the canonical
+  `test-shuttle` and `test-loom` runners, and each `test-primitives-<mode>` conformance recipe.
+  `test-primitives` selects every native conformance mode. CI runs these checks through collection;
+  primitive compile/browser checks, replay qualification and Loom weakening qualification retain
+  independent verdicts outside its instrumentation. Each run writes `lcov.info`, `completion.json`,
+  `executions.jsonl` and `export.log` to a
   fresh `target/native-coverage/<producer>/<mode>/<toolchain>/<attempt>/`. A report counts only
   beside a `complete` completion record; a failed, interrupted or incomplete collection never is
   one, and it keeps its evidence. Prerequisites build outside the instrumentation, and the parts
-  of a check that compile, target the browser or run a model checker stay uninstrumented, as do
+  of a check that compile or target the browser stay uninstrumented, as do
   Miri, mutation testing and the Loom weakening qualification. An extra check that starts
   executing Nervix code natively joins the producer inventory in `scripts/native_coverage.py`, with
   its justfile recipe composed as prepare, instrumented and finish parts. `just test-native-coverage`
   tests the collector.
+  Model producers also retain `models.json` with canonical discovery, selection, execution and
+  completion, including Shuttle's paired nondeterminism run and Loom's invariant, executions and
+  bounds. Missing or incomplete evidence fails collection before export. Each mode uses its own
+  instrumented build directory; model and diagnostic reports never enter the ordinary coverage or
+  CRAP gate. Coverage bookkeeping stays outside model processes and supplies no synchronization
+  to the invariant.
 - Every public interface or NSPL surface change must update the relevant `docs/src` pages and the
   user-facing NSPL skill in the same change. Keep `.agents/skills/nspl/SKILL.md` and its references
   accurate for users configuring Nervix, then regenerate `docs/book` with `just book`.

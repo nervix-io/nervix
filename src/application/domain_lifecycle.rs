@@ -2,21 +2,24 @@
 //!
 //! Layer: control plane.
 //!
-//! - **Owns.** The domain lifecycle commands, the pause and drain an alteration needs, and the
-//!   rollback when one of its steps fails.
+//! - **Owns.** The domain lifecycle commands, the pause and drain an alteration or backup needs,
+//!   and the rollback when one of its steps fails.
 //! - **Depends on.** Consensus for the domain record, the registry for its models, and the entity
 //!   gate to hold the domain while it changes.
 //! - **Must not know.** How the domain's graph is scheduled or executed.
 
 use std::time::Duration;
 
-use error_stack::Report;
+use error_stack::{Report, ResultExt as _};
 use nervix_consensus::{ConsensusError, DomainMutationLease};
-use nervix_interconnect::DomainDrainStatusEnvelope;
+use nervix_interconnect::{
+    DomainDrainStatusEnvelope, RemoteOperationFailure,
+    backup::{BackupDrainAction, BackupDrainStatus, BackupDrainStatusRequest},
+};
 use nervix_models::{
-    AlterDomain, ClusterNodeName, CreateDomain, CreateStatement, DomainClockState, DomainName,
-    DomainStartPoint, DomainState, DomainStatus, QuiesceLevel, StartDomain, StopDomain,
-    TimestampError,
+    AlterDomain, ClusterNodeName, CoordinationIdentity, CreateDomain, CreateStatement,
+    DomainClockState, DomainName, DomainStartPoint, DomainState, DomainStatus, QuiesceLevel,
+    StartDomain, StopDomain, TimestampError,
 };
 use nervix_primitives::time::interval;
 use thiserror::Error;
@@ -38,6 +41,19 @@ pub(in crate::application) enum DomainAlterError {
     ConcurrentAlter { domain: DomainName },
     #[error("{outstanding}")]
     QuiesceTimeout { outstanding: DrainOutstanding },
+    #[error("timed out draining domain '{domain}' for backup: {details}")]
+    BackupQuiesceTimeout { domain: DomainName, details: String },
+    #[error("failed to read backup drain status of domain '{domain}' on node '{node}'")]
+    BackupDrainRequest {
+        domain: DomainName,
+        node: ClusterNodeName,
+    },
+    #[error("backup drain status of domain '{domain}' on node '{node}' failed: {failure}")]
+    BackupDrainRemote {
+        domain: DomainName,
+        node: ClusterNodeName,
+        failure: RemoteOperationFailure,
+    },
     #[error(
         "timed out draining domain '{domain}' for {operation}: pending_node={pending_node}, \
          relay_buffers={buffered_relay_batches}, node_work_items={node_work_items}, \
@@ -68,6 +84,12 @@ pub(in crate::application) enum DomainAlterError {
     RestoreIngestion { domain: DomainName, reason: String },
     #[error("failed to roll back model alteration in domain '{domain}': {reason}")]
     Rollback { domain: DomainName, reason: String },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(in crate::application) enum DomainDrainMode {
+    Alteration,
+    Backup,
 }
 
 pub(in crate::application) struct ResolvedDomainStart {
@@ -151,6 +173,24 @@ impl SessionServiceImpl {
         mutation: Option<&DomainMutationLease>,
         impact: Option<&TransactionStepImpactRecorder>,
     ) -> Result<Option<QuiescenceAttempt>, Report<DomainAlterError>> {
+        self.pause_and_drain_domain_for_alter_with_timeout(
+            domain,
+            mutation,
+            impact,
+            self.inner.runtime.domain_drain_timeout(),
+            DomainDrainMode::Alteration,
+        )
+        .await
+    }
+
+    pub(in crate::application) async fn pause_and_drain_domain_for_alter_with_timeout(
+        &self,
+        domain: &DomainName,
+        mutation: Option<&DomainMutationLease>,
+        impact: Option<&TransactionStepImpactRecorder>,
+        timeout: Duration,
+        mode: DomainDrainMode,
+    ) -> Result<Option<QuiescenceAttempt>, Report<DomainAlterError>> {
         let attempt = impact.map(|impact| {
             impact.request(nervix_models::PauseRequirement::Domain {
                 domain: domain.clone(),
@@ -208,7 +248,14 @@ impl SessionServiceImpl {
                 .await);
         }
 
-        match self.wait_for_paused_domain_drain(domain).await {
+        let drained = match mode {
+            DomainDrainMode::Alteration => {
+                self.wait_for_paused_domain_drain_with_timeout(domain, timeout)
+                    .await
+            }
+            DomainDrainMode::Backup => self.wait_for_backup_domain_drain(domain, timeout).await,
+        };
+        match drained {
             Ok(()) => Ok(attempt),
             Err(reason) => {
                 if let (Some(impact), Some(attempt)) = (impact, attempt) {
@@ -228,6 +275,149 @@ impl SessionServiceImpl {
     pub(in crate::application) async fn wait_for_paused_domain_drain(
         &self,
         domain: &DomainName,
+    ) -> Result<(), Report<DomainAlterError>> {
+        self.wait_for_paused_domain_drain_with_timeout(
+            domain,
+            self.inner.runtime.domain_drain_timeout(),
+        )
+        .await
+    }
+
+    async fn backup_drain_status_on_node(
+        &self,
+        node: &ClusterNodeName,
+        domain: &DomainName,
+        coordination: &CoordinationIdentity,
+        action: BackupDrainAction,
+    ) -> error_stack::Result<BackupDrainStatus, DomainAlterError> {
+        let request = BackupDrainStatusRequest {
+            coordination: coordination.clone(),
+            domain: domain.clone(),
+            action,
+        };
+        let result = if node == self.inner.consensus.local_node_id() {
+            self.handle_backup_drain_status_request(node, request).await
+        } else {
+            self.inner
+                .interconnect
+                .request(node, request)
+                .await
+                .change_context(DomainAlterError::BackupDrainRequest {
+                    domain: domain.clone(),
+                    node: node.clone(),
+                })?
+        };
+        result.map_err(|failure| {
+            Report::new(DomainAlterError::BackupDrainRemote {
+                domain: domain.clone(),
+                node: node.clone(),
+                failure,
+            })
+        })
+    }
+
+    /// Uses the shutdown drain's admitted-work view. After every node is quiet, a separate
+    /// cluster-wide confirming flush catches work moving between status reads.
+    async fn wait_for_backup_domain_drain(
+        &self,
+        domain: &DomainName,
+        timeout: Duration,
+    ) -> Result<(), Report<DomainAlterError>> {
+        let coordination = self
+            .inner
+            .interconnect
+            .next_coordination_identity()
+            .map_err(|error| {
+                Report::new(DomainAlterError::BackupQuiesceTimeout {
+                    domain: domain.clone(),
+                    details: error.to_string(),
+                })
+            })?;
+        let mut nodes = self.inner.cluster.live_node_ids().await;
+        if !nodes.contains(self.inner.consensus.local_node_id()) {
+            nodes.push(self.inner.consensus.local_node_id().clone());
+        }
+        nodes.sort();
+        nodes.dedup();
+        let deadline = nervix_primitives::time::Instant::now() + timeout;
+        let mut polling = interval(Duration::from_millis(50));
+        polling.set_missed_tick_behavior(nervix_primitives::time::MissedTickBehavior::Skip);
+        let mut confirming = false;
+        loop {
+            nervix_primitives::task::consume_budget().await;
+            polling.tick().await;
+            let action = if confirming {
+                BackupDrainAction::Observe
+            } else {
+                BackupDrainAction::FlushIfIdle
+            };
+            let mut quiet = true;
+            let mut flushes_complete = true;
+            let mut details = Vec::new();
+            for node in &nodes {
+                match self
+                    .backup_drain_status_on_node(node, domain, &coordination, action)
+                    .await
+                {
+                    Ok(status) => {
+                        if status.holds_admitted_work() {
+                            quiet = false;
+                        }
+                        if status.force_flush_obligations != 0 {
+                            flushes_complete = false;
+                        }
+                        if status.holds_admitted_work() || status.force_flush_obligations != 0 {
+                            details.push(format!("node={node} {status:?}"));
+                        }
+                    }
+                    Err(error) => {
+                        quiet = false;
+                        details.push(format!("node={node} status_error={error}"));
+                    }
+                }
+            }
+            if quiet {
+                if confirming && flushes_complete {
+                    return Ok(());
+                }
+                if !confirming {
+                    let mut confirmed = true;
+                    for node in &nodes {
+                        if let Err(error) = self
+                            .backup_drain_status_on_node(
+                                node,
+                                domain,
+                                &coordination,
+                                BackupDrainAction::Confirm,
+                            )
+                            .await
+                        {
+                            confirmed = false;
+                            details.push(format!("node={node} confirm_error={error}"));
+                        }
+                    }
+                    confirming = confirmed;
+                }
+            } else {
+                confirming = false;
+            }
+            if nervix_primitives::time::Instant::now() >= deadline {
+                return Err(Report::new(DomainAlterError::BackupQuiesceTimeout {
+                    domain: domain.clone(),
+                    details: if details.is_empty() {
+                        "confirming flush did not finish".to_string()
+                    } else {
+                        details.join("; ")
+                    },
+                }));
+            }
+        }
+    }
+
+    pub(in crate::application) async fn wait_for_paused_domain_drain_with_timeout(
+        &self,
+        domain: &DomainName,
+        timeout: Duration,
     ) -> Result<(), Report<DomainAlterError>> {
         let mut nodes = self.inner.cluster.live_node_ids().await;
         if !nodes
@@ -255,8 +445,7 @@ impl SessionServiceImpl {
             }));
         }
 
-        let deadline =
-            nervix_primitives::time::Instant::now() + self.inner.runtime.domain_drain_timeout();
+        let deadline = nervix_primitives::time::Instant::now() + timeout;
         let mut polling = interval(Duration::from_millis(50));
         polling.set_missed_tick_behavior(nervix_primitives::time::MissedTickBehavior::Skip);
         let mut last_pending = None::<(ClusterNodeName, DomainDrainStatusEnvelope)>;

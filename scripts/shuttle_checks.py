@@ -41,6 +41,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Mapping, Sequence
 
+from scripts.model_evidence import Evidence
+
 INVENTORY = Path("crates/model-harness/shuttle-inventory.toml")
 FAILURES = "shuttle-failures"
 CHECK_MARKER = "shuttle_"
@@ -322,15 +324,26 @@ def failure_metadata(
     }
 
 
-def run_checks(commands: Commands, inventory: Inventory, target: Path, filter_text: str) -> int:
+def run_checks(
+    commands: Commands, inventory: Inventory, target: Path, filter_text: str, report: Path | None = None
+) -> int:
+    evidence = Evidence(report, "shuttle", filter_text, INVENTORY)
     discoveries = [discover(commands, package) for package in inventory.packages()]
+    evidence.discover([
+        {"package": discovery.package, "test": test, "ignored": test in discovery.ignored}
+        for discovery in discoveries for test in discovery.checks
+    ])
     discovered = sum(len(discovery.checks) for discovery in discoveries)
     selected = select(inventory, discoveries, filter_text)
+    evidence.select([{"package": check.package, "test": check.test} for check in selected])
 
     executed = 0
     complete = 0
     failures: list[str] = []
     for check in selected:
+        check_evidence = evidence.begin({"package": check.package, "test": check.test})
+        runs: list[dict[str, object]] = []
+        check_evidence["runs"] = runs
         directory = target / FAILURES / check.package / check.test
         shutil.rmtree(directory, ignore_errors=True)
         directory.mkdir(parents=True)
@@ -343,6 +356,13 @@ def run_checks(commands: Commands, inventory: Inventory, target: Path, filter_te
                 command,
                 environment={**run.environment, "SHUTTLE_TRACE_DIR": str(directory)},
             )
+            runs.append({
+                "name": run.name,
+                "exit_status": outcome.status,
+                "completed": completed(outcome),
+                "records": [line.strip() for line in outcome.output.splitlines() if COMPLETED in line],
+            })
+            evidence.write()
             if completed(outcome):
                 continue
             if outcome.status == 0:
@@ -362,6 +382,8 @@ def run_checks(commands: Commands, inventory: Inventory, target: Path, filter_te
             failures.extend(check_failures)
             continue
         complete += 1
+        check_evidence["completed"] = True
+        evidence.write()
         shutil.rmtree(directory)
 
     print(
@@ -372,7 +394,9 @@ def run_checks(commands: Commands, inventory: Inventory, target: Path, filter_te
     for failure in failures:
         print(f"shuttle: {failure}", file=sys.stderr)
     if failures:
+        evidence.finish(1)
         return 1
+    evidence.finish(0)
     return 0
 
 
@@ -478,6 +502,7 @@ def main(
     subcommands = parser.add_subparsers(dest="command", required=True)
     run_parser = subcommands.add_parser("run")
     run_parser.add_argument("filter", nargs="?", default="")
+    run_parser.add_argument("--report", type=Path)
     replay_parser = subcommands.add_parser("replay")
     replay_parser.add_argument("schedule", type=Path)
     subcommands.add_parser("replay-check")
@@ -501,7 +526,7 @@ def main(
         target = arguments.target_dir.resolve()
         target.mkdir(parents=True, exist_ok=True)
         if arguments.command == "run":
-            return run_checks(commands, inventory, target, arguments.filter)
+            return run_checks(commands, inventory, target, arguments.filter, arguments.report)
         return replay_check(commands, inventory, target)
     except RunnerError as error:
         print(f"shuttle: {error}", file=sys.stderr)
