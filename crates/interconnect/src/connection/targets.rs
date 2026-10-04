@@ -22,18 +22,21 @@ impl TransportState {
         // the same sequence in every process.
         let removed = self
             .targets
+            .load()
             .iter()
-            .filter(|entry| accepted.get(entry.key()) != Some(&entry.value().endpoint))
-            .map(|entry| entry.key().clone())
+            .filter(|entry| accepted.get(entry.0) != Some(&entry.1.endpoint))
+            .map(|entry| entry.0.clone())
             .collect::<BTreeSet<_>>();
         for node in removed {
-            self.targets.remove(&node);
-            self.cancel_slots_for_node(&node);
+            self.remove_target(&node);
         }
 
         for (node, endpoint) in accepted {
-            let outbound = self.install_outbound_target(node, endpoint, OutboundDial::Advertised);
-            self.ensure_preconnected_slots(&outbound);
+            if let Ok(outbound) =
+                self.install_outbound_target(node, endpoint, OutboundDial::Advertised)
+            {
+                self.ensure_preconnected_slots(&outbound);
+            }
         }
     }
 
@@ -42,10 +45,7 @@ impl TransportState {
         node_id: ClusterNodeName,
         endpoint: NodeEndpoint,
     ) -> Result<(), Report<TransportError>> {
-        if !self.has_room_for(&node_id) {
-            return Err(Report::new(TransportError::PoolExhausted));
-        }
-        let outbound = self.install_outbound_target(node_id, endpoint, OutboundDial::Advertised);
+        let outbound = self.install_outbound_target(node_id, endpoint, OutboundDial::Advertised)?;
         self.ensure_preconnected_slots(&outbound);
         Ok(())
     }
@@ -57,23 +57,15 @@ impl TransportState {
         &self,
         node_id: ClusterNodeName,
         target: PeerTarget,
-    ) -> Arc<OutboundTarget> {
+    ) -> Result<Arc<OutboundTarget>, Report<TransportError>> {
         let endpoint = target.endpoint();
-        let current = self
-            .targets
-            .get(&node_id)
-            .map(|current| Arc::clone(current.value()));
+        let current = self.targets.load().get(&node_id).cloned();
         if let Some(current) = current
             && current.endpoint == endpoint
         {
-            return current;
+            return Ok(current);
         }
         self.install_outbound_target(node_id, endpoint, OutboundDial::Authenticated(target.addr))
-    }
-
-    /// Whether `node_id` fits the topology limit: a node that already has a target always does.
-    pub(super) fn has_room_for(&self, node_id: &ClusterNodeName) -> bool {
-        self.targets.contains_key(node_id) || self.targets.len() < self.options.max_peers
     }
 
     /// Make `endpoint` the endpoint `node_id` is reached at, dialled through `dial`, and return its
@@ -85,25 +77,71 @@ impl TransportState {
         node_id: ClusterNodeName,
         endpoint: NodeEndpoint,
         dial: OutboundDial,
-    ) -> Arc<OutboundTarget> {
-        let current = self
-            .targets
-            .get(&node_id)
-            .map(|current| Arc::clone(current.value()));
-        if let Some(current) = current
-            && current.endpoint == endpoint
-        {
-            if current.dial == dial {
-                return current;
+    ) -> Result<Arc<OutboundTarget>, Report<TransportError>> {
+        loop {
+            let current = self.targets.load_full();
+            let registered = current.get(&node_id);
+            if registered.is_none() && current.len() >= self.options.max_peers {
+                return Err(Report::new(TransportError::PoolExhausted));
             }
-            let redialled = Arc::new(current.with_dial(dial));
-            self.targets.insert(node_id, Arc::clone(&redialled));
-            return redialled;
+            let outbound = if let Some(registered) = registered
+                && registered.endpoint == endpoint
+            {
+                if registered.dial == dial {
+                    return Ok(registered.clone());
+                }
+                Arc::new(registered.with_dial(dial))
+            } else {
+                if let Some(registered) = registered {
+                    self.retire_target(registered);
+                }
+                Arc::new(OutboundTarget::new(&node_id, endpoint.clone(), dial))
+            };
+            let mut next = (*current).clone();
+            next.insert(node_id.clone(), outbound.clone());
+            let observed = self.targets.compare_and_swap(&current, StdArc::new(next));
+            if StdArc::ptr_eq(&current, &observed) {
+                self.connection_changed.notify_waiters();
+                return Ok(outbound);
+            }
         }
-        self.cancel_slots_for_node(&node_id);
-        let outbound = Arc::new(OutboundTarget::new(&node_id, endpoint, dial));
-        self.targets.insert(node_id, Arc::clone(&outbound));
-        outbound
     }
 
+    pub(super) fn remove_target(&self, node_id: &ClusterNodeName) {
+        let current = self.targets.load_full();
+        let Some(target) = current.get(node_id).cloned() else {
+            return;
+        };
+        self.retire_target(&target);
+        self.withdraw_target(node_id, &target);
+    }
+
+    pub(super) fn withdraw_target(&self, node_id: &ClusterNodeName, target: &Arc<OutboundTarget>) {
+        let mut current = self.targets.load_full();
+        loop {
+            let Some(published) = current.get(node_id) else {
+                return;
+            };
+            // A dial-policy publication retains the exact pool lifetime under a new wrapper.
+            // Only a newly created pool may survive withdrawal of this retained owner.
+            if !Arc::ptr_eq(&published.slots, &target.slots) {
+                return;
+            }
+            let mut next = (*current).clone();
+            next.remove(node_id);
+            let observed = self.targets.compare_and_swap(&current, StdArc::new(next));
+            if StdArc::ptr_eq(&current, &observed) {
+                return;
+            }
+            current = StdArc::clone(&observed);
+        }
+    }
+
+    pub(super) fn retire_target(&self, target: &OutboundTarget) {
+        for slots in target.slots.iter() {
+            for slot in slots.iter() {
+                self.retire_slot(slot);
+            }
+        }
+    }
 }

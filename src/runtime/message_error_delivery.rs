@@ -14,7 +14,6 @@
 )]
 
 use nervix_models::DomainName;
-use nervix_primitives::collections::dash_map::Entry as DashMapEntry;
 
 use super::{message_error::MessageErrorHandlingError, *};
 
@@ -62,11 +61,19 @@ impl MessageErrorDelivery {
 }
 
 pub(super) struct MessageErrorRouteRuntime {
-    /// Identifies the bound revision whose target and cadence this task is executing.
-    plan: Arc<BoundMessageErrorRoute>,
+    retired: CancellationToken,
     sender: mpsc::Sender<MessageErrorDelivery>,
     shutdown: watch::Sender<bool>,
-    task: nervix_primitives::sync::blocking::Mutex<Option<JoinHandle<()>>>,
+    task: nervix_primitives::sync::blocking::Mutex<MessageErrorRouteState>,
+}
+
+enum MessageErrorRouteState {
+    Prepared {
+        input: mpsc::Receiver<MessageErrorDelivery>,
+        shutdown: watch::Receiver<bool>,
+    },
+    Running(JoinHandle<()>),
+    Ended,
 }
 
 struct MessageErrorRouteTask {
@@ -85,15 +92,40 @@ impl MessageErrorRouteRuntime {
             reason = "install or terminate the retained message error route task"
         )
     )]
-    fn new(runtime: Runtime, plan: Arc<BoundMessageErrorRoute>) -> Arc<Self> {
+    pub(super) fn prepare() -> Arc<Self> {
         let (sender, input) = mpsc::channel(1);
         let (shutdown, shutdown_rx) = watch::channel(false);
-        let route_runtime = Arc::new(Self {
-            plan: plan.clone(),
+        Arc::new(Self {
+            retired: CancellationToken::new(),
             sender,
             shutdown,
-            task: nervix_primitives::sync::blocking::Mutex::new(None),
-        });
+            task: nervix_primitives::sync::blocking::Mutex::new(MessageErrorRouteState::Prepared {
+                input,
+                shutdown: shutdown_rx,
+            }),
+        })
+    }
+
+    #[cfg(test)]
+    fn new(runtime: Runtime, plan: &BoundMessageErrorRoute) -> Arc<Self> {
+        let route = Self::prepare();
+        assert!(route.activate(runtime, plan));
+        route
+    }
+
+    /// Starts only at successful running publication. An unchanged bound handle starts once.
+    fn activate(&self, runtime: Runtime, plan: &BoundMessageErrorRoute) -> bool {
+        let mut state = self.task.lock();
+        if !matches!(*state, MessageErrorRouteState::Prepared { .. }) {
+            return false;
+        }
+        let MessageErrorRouteState::Prepared {
+            input,
+            shutdown: shutdown_rx,
+        } = std::mem::replace(&mut *state, MessageErrorRouteState::Ended)
+        else {
+            unreachable!("the prepared state was checked while holding its lifecycle lock")
+        };
         // A route owes the force-flush generations of the node whose messages failed. The
         // obligation is registered before the task starts, so a generation requested between the
         // spawn and the first poll is still owed by this route rather than missed.
@@ -114,8 +146,8 @@ impl MessageErrorRouteRuntime {
             }
             .run(input, shutdown_rx, force_flush),
         );
-        *route_runtime.task.lock() = Some(task);
-        route_runtime
+        *state = MessageErrorRouteState::Running(task);
+        true
     }
 
     #[cfg_attr(
@@ -126,9 +158,10 @@ impl MessageErrorRouteRuntime {
         )
     )]
     async fn shutdown(&self) {
+        self.retired.cancel();
         self.shutdown.send_replace(true);
-        let task = self.task.lock().take();
-        if let Some(task) = task {
+        let state = std::mem::replace(&mut *self.task.lock(), MessageErrorRouteState::Ended);
+        if let MessageErrorRouteState::Running(task) = state {
             task.join_after_shutdown("message error delivery").await;
         }
     }
@@ -478,12 +511,70 @@ where
 }
 
 impl Runtime {
+    /// Prepared routes bind their worker before the domain publishes the revision. Replacement
+    /// ends the exact preceding worker and drains what it already accepted.
+    pub(super) fn install_message_error_route(
+        &self,
+        plan: &BoundMessageErrorRoute,
+    ) -> Arc<MessageErrorRouteRuntime> {
+        let route = plan
+            .delivery
+            .as_ref()
+            .assured("binding prepared the buffered route handle")
+            .clone();
+        if !route.activate(self.clone(), plan) {
+            return route;
+        }
+        if let Some(predecessor) = self.inner.message_error_routes.get(&plan.key) {
+            predecessor.retired.cancel();
+            predecessor.shutdown.send_replace(true);
+        }
+        let predecessor = self
+            .inner
+            .message_error_routes
+            .insert(plan.key.clone(), route.clone());
+        if let Some(predecessor) = predecessor {
+            nervix_primitives::task::spawn(async move {
+                predecessor.shutdown().await;
+            });
+        }
+        route
+    }
+
+    pub(super) fn retire_unselected_message_error_routes(
+        &self,
+        domain: &DomainName,
+        selected: &HashMap<MessageErrorRouteKey, Arc<BoundMessageErrorRoute>>,
+    ) {
+        let keys = self
+            .inner
+            .message_error_routes
+            .iter()
+            .filter_map(|entry| {
+                (&entry.key().domain == domain
+                    && selected
+                        .get(entry.key())
+                        .is_none_or(|plan| plan.flush_policy.is_none()))
+                .then_some(entry.key().clone())
+            })
+            .collect::<Vec<_>>();
+        for key in keys {
+            if let Some((_, route)) = self.inner.message_error_routes.remove(&key) {
+                route.retired.cancel();
+                route.shutdown.send_replace(true);
+                nervix_primitives::task::spawn(async move {
+                    route.shutdown().await;
+                });
+            }
+        }
+    }
+
     #[cfg_attr(
         nervix_lint,
         nervix::context(
             recurring,
-            reason = "this owner is reached by recurring record, frame, acknowledgement or \
-                      state-poll work"
+            reason = "each failed record sends directly to the worker retained by its prepared \
+                      route"
         )
     )]
     pub(super) async fn enqueue_message_error_delivery(
@@ -491,57 +582,24 @@ impl Runtime {
         plan: Arc<BoundMessageErrorRoute>,
         delivery: MessageErrorDelivery,
     ) -> error_stack::Result<(), MessageErrorHandlingError> {
-        let route = plan.key.clone();
-        let failure_route = route.clone();
-        let (route_runtime, replaced) = match nervix_primitives::expect_lint!(
-            nervix::sync_acquisition,
-            "Typed Ratchet 03 https://app.clickup.com/t/86bc9eqjv: retain the message error route \
-             before admitting deliveries",
-            self.inner.message_error_routes.entry(route)
-        ) {
-            DashMapEntry::Occupied(mut entry) => {
-                if Arc::ptr_eq(&entry.get().plan, &plan) {
-                    (entry.get().clone(), None)
-                } else {
-                    let route_runtime = nervix_primitives::expect_lint!(
-                        nervix::lifecycle_call,
-                        "Typed Ratchet 03 (86bc9eqjv): a missing or replaced message-error route \
-                         installs its one concrete retained task lifetime",
-                        MessageErrorRouteRuntime::new(self.clone(), plan)
-                    );
-                    let replaced = entry.insert(route_runtime.clone());
-                    (route_runtime, Some(replaced))
-                }
-            }
-            DashMapEntry::Vacant(entry) => {
-                let route_runtime = nervix_primitives::expect_lint!(
-                    nervix::lifecycle_call,
-                    "Typed Ratchet 03 (86bc9eqjv): a missing or replaced message-error route \
-                     installs its one concrete retained task lifetime",
-                    MessageErrorRouteRuntime::new(self.clone(), plan)
-                );
-                entry.insert(route_runtime.clone());
-                (route_runtime, None)
+        let route = plan.delivery.as_ref().ok_or_else(|| {
+            Report::new(MessageErrorHandlingError::PreparedRouteUnavailable {
+                route: plan.key.clone(),
+            })
+        })?;
+        let source_acks = delivery.merged_source_acks();
+        let admitted = async {
+            nervix_primitives::select! {
+                biased;
+                _ = route.retired.cancelled() => Err(()),
+                sent = route.sender.send(delivery) => sent.map_err(|_| ()),
             }
         };
-        let source_acks = delivery.merged_source_acks();
-        if let Some(replaced) = replaced {
-            await_message_error_ack_alive(
-                &source_acks,
-                nervix_primitives::expect_lint!(
-                    nervix::lifecycle_call,
-                    "a replaced message-error route ends its exact retained task lifetime; Typed \
-                     Ratchet 03 (86bc9eqjv) retains route handles",
-                    replaced.shutdown()
-                ),
-            )
-            .await;
-        }
-        await_message_error_ack_alive(&source_acks, route_runtime.sender.send(delivery))
+        await_message_error_ack_alive(&source_acks, admitted)
             .await
-            .map_err(|_| {
-                error_stack::Report::new(MessageErrorHandlingError::DeliveryStopped {
-                    route: failure_route,
+            .map_err(|()| {
+                Report::new(MessageErrorHandlingError::DeliveryStopped {
+                    route: plan.key.clone(),
                 })
             })
     }
@@ -628,6 +686,7 @@ mod tests {
             branching,
             program,
             flush_policy: Some(flush_policy),
+            delivery: Some(MessageErrorRouteRuntime::prepare()),
         })
     }
 
@@ -669,6 +728,59 @@ mod tests {
             RelayRetention::default(),
         );
         (task, owner_task)
+    }
+
+    #[nervix_primitives::test]
+    async fn prepared_error_workers_activate_once_and_end_when_the_plan_becomes_immediate() {
+        let fanout = RelayBoundaryFanout::direct_with_capacity(
+            NonZeroUsize::new(1).expect("non-zero test capacity"),
+        );
+        let (task, owner_task) = test_task(RuntimeFlushPolicy::Immediate, fanout);
+        let mut plan = test_plan(
+            task.route.clone(),
+            task.target,
+            RuntimeFlushPolicy::Immediate,
+        );
+        let worker = plan
+            .delivery
+            .as_ref()
+            .expect("buffered plan owns its worker")
+            .clone();
+        assert!(matches!(
+            *worker.task.lock(),
+            MessageErrorRouteState::Prepared { .. }
+        ));
+        assert!(task.runtime.inner.message_error_routes.is_empty());
+        assert!(Arc::ptr_eq(
+            &worker,
+            &task.runtime.install_message_error_route(&plan)
+        ));
+        assert!(matches!(
+            *worker.task.lock(),
+            MessageErrorRouteState::Running(_)
+        ));
+        assert!(Arc::ptr_eq(
+            &worker,
+            &task.runtime.install_message_error_route(&plan)
+        ));
+        assert_eq!(task.runtime.inner.message_error_routes.len(), 1);
+
+        let bound = Arc::get_mut(&mut plan).expect("the fixture exclusively owns its plan");
+        bound.flush_policy = None;
+        bound.delivery = None;
+        let mut selected = HashMap::default();
+        selected.insert(task.route.clone(), plan.clone());
+        task.runtime
+            .retire_unselected_message_error_routes(&task.route.domain, &selected);
+        assert!(worker.retired.is_cancelled());
+        assert!(task.runtime.inner.message_error_routes.is_empty());
+        worker.shutdown().await;
+        assert!(matches!(*worker.task.lock(), MessageErrorRouteState::Ended));
+        assert!(!worker.activate(task.runtime, &plan));
+        owner_task
+            .stop(Duration::from_secs(1))
+            .await
+            .expect("relay owner stops");
     }
 
     #[nervix_primitives::test]
@@ -758,7 +870,7 @@ mod tests {
                 max_batch_size: u64::MAX,
             },
         );
-        let route_runtime = MessageErrorRouteRuntime::new(runtime.clone(), plan);
+        let route_runtime = MessageErrorRouteRuntime::new(runtime.clone(), &plan);
         let (delivery, completion) = test_delivery();
         route_runtime
             .sender
@@ -813,7 +925,7 @@ mod tests {
             target.services.clone(),
             RelayRetention::default(),
         );
-        let previous = test_plan(
+        let mut previous = test_plan(
             route.clone(),
             target.clone(),
             RuntimeFlushPolicy::Each {
@@ -821,12 +933,20 @@ mod tests {
                 max_batch_size: u64::MAX,
             },
         );
-        let replacement = test_plan(route.clone(), target, RuntimeFlushPolicy::Immediate);
+        let mut replacement = test_plan(route.clone(), target, RuntimeFlushPolicy::Immediate);
+        let worker = runtime.install_message_error_route(&previous);
+        Arc::get_mut(&mut previous)
+            .assured("the fixture owns its prepared plan")
+            .delivery = Some(worker);
         let (first, first_completion) = test_delivery();
         runtime
             .enqueue_message_error_delivery(previous, first)
             .await
             .expect("the preceding route accepts its error");
+        let worker = runtime.install_message_error_route(&replacement);
+        Arc::get_mut(&mut replacement)
+            .assured("the fixture owns its prepared plan")
+            .delivery = Some(worker);
         let (second, second_completion) = test_delivery();
         runtime
             .enqueue_message_error_delivery(replacement.clone(), second)
@@ -850,7 +970,13 @@ mod tests {
             .message_error_routes
             .get(&route)
             .expect("the replacement is installed");
-        assert!(Arc::ptr_eq(&installed.plan, &replacement));
+        assert!(Arc::ptr_eq(
+            installed.value(),
+            replacement
+                .delivery
+                .as_ref()
+                .assured("the fixture installed its route")
+        ));
         drop(installed);
         runtime.stop_message_error_routes_for_domain(&domain).await;
         owner_task
@@ -931,9 +1057,12 @@ mod tests {
                 Arc::new(BranchPresence::new()),
             )),
         };
-        let plan = test_plan(route.clone(), target, RuntimeFlushPolicy::Immediate);
-        let route_runtime = MessageErrorRouteRuntime::new(runtime.clone(), plan.clone());
+        let mut plan = test_plan(route.clone(), target, RuntimeFlushPolicy::Immediate);
+        let route_runtime = MessageErrorRouteRuntime::new(runtime.clone(), &plan);
         route_runtime.shutdown().await;
+        Arc::get_mut(&mut plan)
+            .assured("the fixture owns its prepared plan")
+            .delivery = Some(route_runtime.clone());
         runtime
             .inner
             .message_error_routes

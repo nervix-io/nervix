@@ -104,3 +104,27 @@ Feature: Kafka acknowledgements across relay-owner recovery
       "event_id":"after-a","branch_name":"a","sequence":5
       """
     And within "30s" Kafka consumer group "relay_handoff_group_{{test_id}}" next offset for topic "relay_handoff_in_{{test_id}}" partition 0 is "at least 5"
+    When node "node-2" is restarted 1 times with a new interconnect address
+    And these NSPL commands are executed on the leader node
+      """
+      RELOCATE RELAY relay_handoff_records ONTO NODE node-2 IGNORE PREFERENCES;
+      SHOW CLUSTER STATUS;
+      """
+    Then the last command output contains
+      """
+      - domain={{domain}} kind=relay name=relay_handoff_records owner=node-2
+      """
+    When Kafka message is published to topic "relay_handoff_in_{{test_id}}"
+      """
+      {"event_id":"reconnected-b","branch_name":"b","sequence":6}
+      """
+    And Kafka message is published to topic "relay_handoff_in_{{test_id}}"
+      """
+      {"event_id":"reconnected-a","branch_name":"a","sequence":7}
+      """
+    Then within "30s" the observed broker receives payloads
+      """
+      "event_id":"reconnected-b","branch_name":"b","sequence":6
+      "event_id":"reconnected-a","branch_name":"a","sequence":7
+      """
+    And within "30s" Kafka consumer group "relay_handoff_group_{{test_id}}" next offset for topic "relay_handoff_in_{{test_id}}" partition 0 is "at least 7"

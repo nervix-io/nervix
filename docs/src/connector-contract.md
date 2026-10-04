@@ -338,6 +338,13 @@ Each timestamp rejection retains the source row's ACK for its route-local messag
 accepted neighbors continue into the graph. A source position is acknowledged only after every
 message it unfolded into has completed its own route or error delivery.
 
+Each source host retains its exact instance readiness handle. Poll success and suspend/resume
+publish through that scalar, without looking up the ingestor registry. Replacing an ingestor retires
+its preceding handles before installing the new instances; host drop also retires its own handle.
+Retirement is final, so late polling or teardown cannot mark a replacement ready or unready.
+Readiness observers aggregate the installed instance handles. Quiescence and ACK/commit ownership
+remain with the host's existing loop and controls.
+
 The host runs three source loop families, with a listener using the broker loop:
 
 | Family | Host behavior | Source behavior |

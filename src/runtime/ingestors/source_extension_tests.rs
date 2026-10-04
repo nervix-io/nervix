@@ -161,6 +161,12 @@ impl UnfoldingDomain {
             quiesce,
             shutdown,
             instance_index: 1,
+            readiness: self
+                .runtime
+                .prepare_ingestor_readiness(&self.domain, &self.ingestor, NonZeroU64::MIN)
+                .into_iter()
+                .next()
+                .assured("the source fixture declares one instance"),
             metadata_kind: plan.ingestor.metadata_kind(),
             buffered_intake: intake.buffered,
             flush_each_intake: true,
