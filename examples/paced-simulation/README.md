@@ -19,12 +19,19 @@ changes under them.
 ## Run It
 
 Load the graph into a running cluster, then start its clock at the pace the simulation should run
-at. `TIME RATE 4.0` runs domain time four times faster than wall time:
+at. The file's domain bootstrap and `USE` are separate phases; load its graph transaction with
+the CLI's domain selection. `TIME RATE 4.0` runs domain time four times faster than wall time:
 
 ```bash
-nervix-cli --domain paced_simulation --command "$(cat examples/paced-simulation/paced_simulation.nspl)"
+nervix-cli --command "CREATE PACED DOMAIN paced_simulation WITH PERIOD 100ms SKEW 100ms;"
+nervix-cli --domain paced_simulation --command \
+  "$(sed -n '/^BEGIN;/,$p' examples/paced-simulation/paced_simulation.nspl)"
 nervix-cli --domain paced_simulation --command "START AT NOW TIME RATE 4.0;"
 ```
+
+Check the printed command dispositions; ordinary `--command` currently prints a refusal without
+a nonzero exit status. The [architecture chapter](../../docs/src/client-io-architecture.md)
+explains the graph's endpoint ownership, ACK, credit and restoration boundaries.
 
 Run the Rust driver:
 

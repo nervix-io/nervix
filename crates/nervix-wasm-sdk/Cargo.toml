@@ -16,3 +16,8 @@ error-stack = { workspace = true }
 meticulous = { workspace = true }
 nervix-wasm-protocol = { workspace = true }
 thiserror = { workspace = true }
+
+[dev-dependencies]
+arrow-buffer = { workspace = true }
+bolero = { workspace = true }
+nervix-arbitrary = { workspace = true }

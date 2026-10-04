@@ -10,6 +10,10 @@ and run each one, and what the qualification found. It does not promise a separa
 production SDK for any language: the probes are qualification clients, and the binding is the
 supported way for Python, JVM, Ruby, C and C++ hosts to reuse the Rust session.
 
+The [Client Ingestors And Emitters](../docs/src/client-io-architecture.md) architecture chapter
+connects the qualified endpoint operations to graph ownership, ACK/credit boundaries, buffer
+lifetimes, restoration and runnable paced workflows. This ledger owns the qualification scope.
+
 ## Paths
 
 | Runtime | Path | Transport | Probe |

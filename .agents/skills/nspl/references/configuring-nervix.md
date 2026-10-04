@@ -49,6 +49,11 @@ For transaction preview scopes, operation and step impact, actual engagement, an
 inspection, read [Transaction Quiescence And Impact Inspection](https://docs.nervix.io/transaction-quiescence.html)
 directly. It is an architecture chapter and is outside the curated NSPL index.
 
+For native application graphs, endpoint ownership, Arrow/credit limits, ACK boundaries, ALTER,
+restoration and replay, read [Client Ingestors And Emitters](https://docs.nervix.io/client-io-architecture.html)
+directly. Follow the same documentation version as the selected index; this architecture chapter
+is outside the curated NSPL index.
+
 Prefer the narrow indexed topic over an old copied snippet. Do not leave the immutable version
 selected by the documentation index when following related material.
 

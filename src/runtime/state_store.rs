@@ -31,6 +31,10 @@ mod backup;
 mod durability;
 pub(super) mod generation;
 mod maintenance;
+
+#[cfg(test)]
+mod wasm_properties;
+
 use durability::DurabilityBarrier;
 use generation::{StoredCheckpoint, index_key, physical_placement, read_checkpoint};
 pub(crate) use maintenance::DEFAULT_RESTORE_STAGING_MAX_BYTES;
