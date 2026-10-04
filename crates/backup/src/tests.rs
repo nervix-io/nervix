@@ -5,10 +5,9 @@ use std::{io::Read as _, num::NonZeroU64};
 use error_stack::Report;
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_models::{
-    BackupResources, BranchKeyFingerprint, ClusterNodeName, DomainClockPeriod, DomainClockSkew,
-    DomainClockState, DomainName, DomainPace, DomainStartPoint, DomainStatus, DomainTimeRate,
-    ModelKind, ModelName, PlacementPolicy, ResourceName, SchemaFingerprint, Timestamp, UserName,
-    WasmStateGeneration,
+    BackupResources, ClusterNodeName, DomainClockPeriod, DomainClockSkew, DomainClockState,
+    DomainName, DomainPace, DomainStartPoint, DomainStatus, DomainTimeRate, ModelName,
+    PlacementPolicy, ResourceName, SchemaFingerprint, Timestamp, UserName, WasmStateGeneration,
 };
 
 use crate::{
@@ -19,100 +18,30 @@ use crate::{
     SectionReader, SectionVisitor, SkippedStateReason, UserRecord, UsersRecord, describe_archive,
     read_archive, read_archive_contents,
     section::{RECORD_HEADER_BYTES, RECORD_MAGIC, decode_record, encode_record},
-    state::{
-        BranchLifecycleEntry, BranchLifecycleRecord, KafkaOffsetsRecord, KafkaPartitionOffset,
-        WasmStateDescriptor,
-    },
+    state::{KafkaOffsetsRecord, WasmStateDescriptor},
     wire::{
         DeclaredResourceWire, DomainWire, ManifestWire, PaceWire, PlacementWire, StartPointWire,
-        StateField, StateValue, StatusWire,
+        StatusWire,
     },
 };
 
 #[test]
 fn bolero_runtime_state_records_round_trip() {
     bolero::check!()
-        .with_iterations(128)
-        .with_max_len(128)
-        .with_type::<(u64, i64, i32, u16, u8, bool, u32)>()
-        .for_each(
-            |&(revision, time, partition, incarnation, byte, branched, bits)| {
-                let domain = domain("prod");
-                let entity = ModelName::parse("processor").assured("the test entity is valid");
-                let schema = SchemaFingerprint::from_digest([byte; 32]);
-                let branch = branched.then(|| {
-                    vec![
-                        StateField {
-                            name: "id".to_string(),
-                            value: StateValue::I64(time),
-                        },
-                        StateField {
-                            name: "value".to_string(),
-                            value: StateValue::F32Bits(bits),
-                        },
-                    ]
-                });
-                let descriptor = WasmStateDescriptor {
-                    domain: domain.clone(),
-                    entity: entity.clone(),
-                    schema,
-                    branch_fingerprint: branch
-                        .as_ref()
-                        .map(|_| BranchKeyFingerprint::new([byte; 32])),
-                    branch: branch.clone(),
-                    generation: WasmStateGeneration::try_from(revision.max(1))
-                        .assured("a positive generation is valid"),
-                    revision,
-                };
-                assert_eq!(
-                    WasmStateDescriptor::decode(
-                        "state/wasm.rkyv",
-                        &descriptor.encode().assured("the descriptor encodes"),
-                    )
-                    .assured("the descriptor decodes"),
-                    descriptor
-                );
-                let offsets = KafkaOffsetsRecord {
-                    domain: domain.clone(),
-                    entity: entity.clone(),
-                    schema,
-                    revision,
-                    offsets: vec![KafkaPartitionOffset {
-                        topic: format!("topic-{byte}"),
-                        partition: partition.rem_euclid(32),
-                        next_offset: i64::from(incarnation),
-                    }],
-                };
-                assert_eq!(
-                    KafkaOffsetsRecord::decode(
-                        "state/offsets.rkyv",
-                        &offsets.encode().assured("the offsets encode"),
-                    )
-                    .assured("the offsets decode"),
-                    offsets
-                );
-                let lifecycle = BranchLifecycleRecord {
-                    domain,
-                    owner_kind: ModelKind::WasmProcessor,
-                    entity,
-                    schema,
-                    revision,
-                    branches: vec![BranchLifecycleEntry {
-                        key: branch,
-                        last_ingestion: Timestamp::from_unix_nanos(time),
-                        incarnation: u64::from(incarnation) + 1,
-                    }],
-                };
-                assert_eq!(
-                    BranchLifecycleRecord::decode(
-                        "state/lifecycle.rkyv",
-                        &lifecycle.encode().assured("the lifecycle encodes"),
-                    )
-                    .assured("the lifecycle decodes"),
-                    lifecycle
-                );
-            },
-        );
+        .with_iterations(256)
+        .with_max_len(4096)
+        .for_each(|bytes| {
+            let mut values = crate::archive_values::Values::new(bytes);
+            let domain = values.0.name();
+            crate::archive_properties::assert_record(&values.offsets(domain));
+            let domain = values.0.name();
+            crate::archive_properties::assert_record(&values.lifecycle(domain));
+            for branched in [false, true] {
+                let descriptor =
+                    crate::wasm_properties::Descriptors(values.0.clone()).descriptor(branched);
+                crate::archive_properties::assert_record(&descriptor);
+            }
+        });
 }
 
 fn domain(name: &str) -> DomainName {
@@ -1247,64 +1176,16 @@ fn a_visitor_that_reads_part_of_a_section_still_gets_every_section_verified() {
 #[test]
 fn bolero_domain_records_and_manifests_round_trip() {
     bolero::check!()
-        .with_iterations(128)
-        .with_max_len(128)
-        .with_type::<(u64, u64, i64, i64, u16, bool, u8)>()
-        .for_each(
-            |&(period, skew, wall, logical, start_version, running, placement)| {
-                let period =
-                    NonZeroU64::new(period.max(1)).assured("max with one is always nonzero");
-                let record = DomainRecord {
-                    pace: DomainPace::Paced {
-                        period: DomainClockPeriod::from_nanos(period),
-                        skew: DomainClockSkew::from_nanos(skew),
-                    },
-                    placement: match placement % 4 {
-                        0 => PlacementPolicy::RequireColocation,
-                        1 => PlacementPolicy::PreferColocation,
-                        2 => PlacementPolicy::Neutral,
-                        _ => PlacementPolicy::SuggestSeparation,
-                    },
-                    status: if running {
-                        DomainStatus::Running
-                    } else {
-                        DomainStatus::Paused
-                    },
-                    start_version: u64::from(start_version),
-                    start_point: DomainStartPoint::At {
-                        timestamp: Timestamp::from_unix_nanos(logical),
-                        time_rate: rate(0.5),
-                    },
-                    clock: Some(DomainClockState::new(
-                        Timestamp::from_unix_nanos(wall),
-                        Timestamp::from_unix_nanos(logical),
-                        rate(0.5),
-                    )),
-                    logical_frontier: Some(Timestamp::from_unix_nanos(wall)),
-                    ..paced_domain("prod")
-                };
-                let encoded = record.encode().assured("every valid record encodes");
-                assert_eq!(
-                    DomainRecord::decode("domain.rkyv", &encoded)
-                        .assured("its own encoding decodes"),
-                    record
-                );
-                let entry = SectionEntry {
-                    path: SectionPath::domain_record(&record.domain),
-                    content: SectionContent::Record(RecordKind::Domain),
-                    length: skew,
-                    digest: SectionDigester::digest_of(&wall.to_le_bytes()),
-                };
-                let manifest = BackupManifest {
-                    captured_at: Timestamp::from_unix_nanos(logical),
-                    ..manifest_of(ArchiveScope::Cluster, vec![entry])
-                };
-                let encoded = manifest.encode().assured("every valid manifest encodes");
-                assert_eq!(
-                    BackupManifest::decode("manifest.rkyv", &encoded)
-                        .assured("its own encoding decodes"),
-                    manifest
-                );
-            },
-        );
+        .with_iterations(256)
+        .with_max_len(4096)
+        .for_each(|bytes| {
+            let mut values = crate::archive_values::Values::new(bytes);
+            let domain = values.0.name();
+            crate::archive_properties::assert_record(&values.domain_record(domain));
+            for cut in 0..4 {
+                let cluster = values.0.entropy().flag();
+                let resources = values.0.entropy().flag();
+                values.case(cluster, resources, cut).assert_records();
+            }
+        });
 }

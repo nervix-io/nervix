@@ -57,3 +57,12 @@ mod tests;
 
 #[cfg(test)]
 mod wasm_properties;
+
+#[cfg(test)]
+mod archive_values;
+
+#[cfg(test)]
+mod archive_properties;
+
+#[cfg(test)]
+mod malformed_properties;

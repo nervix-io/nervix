@@ -521,6 +521,27 @@ versions.
 An archive holds password hashes, and its models and resources can hold credentials and other
 secrets. Store it as a secret.
 
+### Archive Fidelity Checks
+
+The registered [archive properties](./property-testing-and-fuzzing.md) compare complete current
+manifests, users, domain lifecycle and clocks, resource catalogs, WASM descriptors and guest saves,
+Kafka offsets and ordered branch lifecycle entries. They exercise the production record validators,
+manifest-first tar writer, streaming reader and restore-content reader, checking every section's
+membership, order, length, digest and bytes. Re-exporting verified extracted values produces the
+same archive bytes. Canonical NSPL documents also reparse to their complete ordered Models across
+multiple domains. Synthetic payloads cover empty data, tar block boundaries and long section paths;
+entry permissions remain owner-only.
+
+Separate malformed-input targets check current record headers and fields, inconsistent metadata,
+missing or reordered sections and truncated streams before verified contents reach installation.
+Schema agreement with the restored schedule remains the restore planner's contract, exercised by
+public restore scenarios. The one-node and three-node WASM/Kafka restore scenario compares every
+archived field and raw resource/guest byte before the restored domain starts, then proves subsequent
+START behavior and two-branch isolation. It asserts domain renaming, the stopped lifecycle and the
+new guest lifetime explicitly; capture metadata belongs to each new backup. These representation
+checks do not establish capture-fence or installation-ordering correctness, which retain their
+production-owner concurrency and recovery evidence.
+
 ## Limits
 
 | Limit | Value |

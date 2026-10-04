@@ -1082,6 +1082,23 @@ coverage-visual-create-report output="target/visual-create.lcov":
 coverage-lib output *args:
     cargo llvm-cov --lib --lcov --output-path {{ output }} {{ args }}
 
+# Complete public archive representation and restore/re-export coverage, including test sources.
+coverage-backup-archives output="target/backup-archives.lcov": tests-deps
+    #!/usr/bin/env bash
+    set -euo pipefail
+    export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
+    cargo llvm-cov clean --workspace
+    just coverage-cli-binary
+    export NERVIX_TEST_CLI_PATH={{ quote(cargo_target_dir + "/llvm-cov-target/debug/nervix-cli") }}
+    cargo llvm-cov --no-report --lib --package nervix-backup
+    cargo llvm-cov --no-report --lib --package nervix-nspl -- backup
+    cargo llvm-cov --no-report --features testing --package nervix-server --test scenarios -- \
+        --input tests/features/cluster/backup.feature \
+        --name 'A quiesced backup restores two WASM branches and Kafka domain offsets' \
+        --concurrency 2 --retry 0
+    cargo llvm-cov report --no-default-ignore-filename-regex --lcov --output-path {{ quote(output) }} \
+        --package nervix-backup --package nervix-nspl --package nervix-server
+
 # Ordinary representation coverage includes the protocol's integration-test target and the
 # native host, SDK, archive descriptors and current checkpoint storage codecs.
 coverage-wasm output="target/wasm-representations.lcov": build-web-console wasm-processor-guests download-onnxruntime
