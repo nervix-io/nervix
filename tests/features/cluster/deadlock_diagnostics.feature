@@ -18,10 +18,12 @@ Feature: Diagnostic nodes track their blocking locks for active deadlocks
     When these NSPL commands are executed on the leader node
       """
       CREATE SCHEMA event ( seq I64 );
+      CREATE SCHEMA event_error ( seq I64, operation STRING );
       CREATE WIRE JSON SCHEMA event_wire MODE STRICT ( seq integer );
       CREATE CODEC event_codec FROM WIRE JSON SCHEMA event_wire TO SCHEMA event;
       CREATE RELAY incoming SCHEMA event UNBRANCHED;
       CREATE RELAY outgoing SCHEMA event UNBRANCHED;
+      CREATE RELAY event_errors SCHEMA event_error UNBRANCHED;
       CREATE VHOST edge http-{{test_id}}-deadlock-diagnostics.example.com;
       CREATE ENDPOINT event_ingress ON edge PATH '/events' TYPE HTTP;
       CREATE INGESTOR event_source
@@ -34,7 +36,11 @@ Feature: Diagnostic nodes track their blocking locks for active deadlocks
       CREATE JUNCTION route_events
         FROM incoming
         UNBRANCHED
-        TO outgoing INHERIT ALL FLUSH IMMEDIATE ON MESSAGE ERROR LOG;
+        TO outgoing INHERIT ALL
+          WHERE input.seq / (input.seq - 2) >= -100
+          FLUSH EACH 100ms MAX BATCH SIZE 1MiB
+          ON MESSAGE ERROR SEND TO event_errors
+            SET seq = input.seq, operation = error.operation;
       CREATE SUBSCRIPTION outgoing_subscription TO outgoing;
       START;
       """
@@ -57,6 +63,23 @@ Feature: Diagnostic nodes track their blocking locks for active deadlocks
     Then the relay subscription receives a payload
       """
       "seq":10
+      """
+    When these NSPL commands are executed on the leader node
+      """
+      ALTER JUNCTION route_events SET FILTER WHERE input.seq >= 1;
+      CREATE SUBSCRIPTION event_errors_subscription TO event_errors;
+      """
+    And http payload is posted to node "node-1" with host "http-{{test_id}}-deadlock-diagnostics.example.com" path "/events"
+      """
+      {"seq":2}
+      """
+    Then the relay subscription receives a payload
+      """
+      "seq":2
+      """
+    And the last relay subscription payload contains
+      """
+      "operation":"route_where"
       """
     And the scenario process has recorded no deadlock findings
 

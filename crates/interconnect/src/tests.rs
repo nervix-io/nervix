@@ -341,12 +341,12 @@ impl InterconnectStreamRequest for DeadlineStreamRequest {
     const TIMEOUT: Duration = Duration::from_millis(200);
 }
 
-struct ConnectedTransports {
+pub(crate) struct ConnectedTransports {
     _authority: TestCertificateAuthority,
-    transport_a: Transport,
-    transport_b: Transport,
+    pub(crate) transport_a: Transport,
+    pub(crate) transport_b: Transport,
     node_a: ClusterNodeName,
-    node_b: ClusterNodeName,
+    pub(crate) node_b: ClusterNodeName,
     /// The responder's budgets, so a test can observe what its handlers are holding charged.
     executor_b: Executor,
     _incoming_a: mpsc::Receiver<ReceivedEnvelope>,
@@ -369,7 +369,9 @@ async fn connected_transports_with_options(options: TransportOptions) -> Connect
     transports
 }
 
-async fn bound_transports_with_options(options: TransportOptions) -> ConnectedTransports {
+pub(crate) async fn bound_transports_with_options(
+    options: TransportOptions,
+) -> ConnectedTransports {
     let authority = TestCertificateAuthority::new();
     let node_a = ClusterNodeName::parse("node-a").expect("test node name should be valid");
     let node_b = ClusterNodeName::parse("node-b").expect("test node name should be valid");

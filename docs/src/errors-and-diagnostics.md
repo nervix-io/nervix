@@ -533,8 +533,11 @@ and UDFs once for that installed revision. Missing inputs, codecs or relays fail
 missing runtime relay services, invalid flush settings or a failed VM compilation fail binding
 with the owning node and DLQ relay. A failed record uses the installed plan and never reads the
 scheduled Model or compiles its handler. If unavailable, it reports the delivery failure and does
-not acknowledge the source record. Replacing a buffered route starts a task for the new bound plan and
-drains the earlier task, preserving the earlier task's pending acknowledgements.
+not acknowledge the source record. Binding a buffered route prepares its bounded queue; successful
+running publication starts the worker once and the plan retains its exact delivery handle. A failed
+record sends directly through that handle. Replacement cancels the preceding handle before
+installing the new worker and drains the earlier task, preserving its pending acknowledgements.
+Changing to immediate delivery or withdrawing the route also retires its buffered worker.
 
 A batch payload's rejection becomes one message error per member, each a copy of the sink's
 structured error: the members share its reference, so an operator can see that they failed

@@ -13,7 +13,7 @@ use error_stack::Report;
 use meticulous::OptionExt as _;
 use nervix_dns::ConnectionBudget;
 use nervix_models::NodeEndpoint;
-use nervix_primitives::{net::TcpStream, sync::Arc, time::timeout};
+use nervix_primitives::{net::TcpStream, time::timeout};
 use tracing::debug;
 
 use super::{ConnectionSlotKey, TransportState};
@@ -106,13 +106,8 @@ impl TransportState {
         &self,
         key: &ConnectionSlotKey,
     ) -> Result<OutboundDial, Report<TransportError>> {
-        let current = nervix_primitives::expect_lint!(
-            nervix::sync_acquisition,
-            "Typed Ratchet 03 https://app.clickup.com/t/86bc9eqjv: retain published connection \
-             slots instead of recurring shared registry lookup",
-            self.targets.get(&key.node_id)
-        )
-        .map(|current| Arc::clone(current.value()));
+        let targets = self.targets.load();
+        let current = targets.get(&key.node_id);
         let Some(current) = current else {
             return Err(Report::new(TransportError::Closed(key.endpoint.clone())));
         };

@@ -867,12 +867,7 @@ impl IngestRouteCollector {
         domain: &DomainName,
     ) -> Result<StdArc<DomainRoutingSnapshot>, Report<DomainRoutingError>> {
         if self.routing.is_none() {
-            self.routing = nervix_primitives::expect_lint!(
-                nervix::lifecycle_call,
-                "Typed Ratchet 03 (86bc9eqjv): retain the domain routing publication across \
-                 revision refresh instead of repeating its installation lookup",
-                runtime.domain_routing_cache(domain)
-            );
+            self.routing = runtime.domain_routing_cache(domain);
         }
         let Some(routing) = self.routing.as_mut() else {
             return Err(Report::new(DomainRoutingError::DomainNotInstantiated {
