@@ -137,6 +137,7 @@ class InventoryTests(unittest.TestCase):
             "syslog-structured-data",
             "replica-progress",
             "replica-catch-up",
+            "state-replication-routing",
             "paced-simulation-records",
             "deadlock-evidence",
             "deadlock-evidence-malformed",
