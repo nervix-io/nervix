@@ -25,6 +25,7 @@ impl Runtime {
             DEFAULT_STATE_SNAPSHOT_INTERVAL,
             ConfiguredFaultInjection::default(),
             PathBuf::from(DEFAULT_TEMP_DIR),
+            DEFAULT_RESTORE_STAGING_MAX_BYTES,
         )
         .verified("the None persistence path has no fallible step")
     }
@@ -40,6 +41,7 @@ impl Runtime {
             state_snapshot_interval,
             ConfiguredFaultInjection::default(),
             PathBuf::from(DEFAULT_TEMP_DIR),
+            DEFAULT_RESTORE_STAGING_MAX_BYTES,
         )
     }
 
@@ -50,11 +52,14 @@ impl Runtime {
         state_snapshot_interval: Duration,
         fault_injection: ConfiguredFaultInjection,
         temp_dir: PathBuf,
+        restore_staging_max_bytes: u64,
     ) -> Result<Self, RuntimePersistenceError> {
         let events = RuntimeEvents::new();
         let (domain_status_changed, _) = watch::channel(0);
         let state_store = db
-            .map(|db| RuntimeStateStore::from_database(db, executor.clone()))
+            .map(|db| {
+                RuntimeStateStore::from_database(db, executor.clone(), restore_staging_max_bytes)
+            })
             .transpose()?
             .map(Arc::new);
         let prepared_runtime_state_handoffs = DashMap::default();

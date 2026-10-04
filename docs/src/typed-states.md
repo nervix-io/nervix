@@ -389,6 +389,17 @@ its selected namespace and validates that it remains current before writing. The
 marker is required for nonempty checkpoint storage; corruption or absence fails explicitly and
 requires recreation rather than inventing a namespace for the stored keys.
 
+Restore reclamation receives a borrowed `RestoreStateRetention` from one locked applied revision.
+Absence of an applied log means catch-up is unknown and retains all generations. A generation
+ahead of that log is also retained. Once applied, only the exact generation of an applying restore
+requires unpublished storage; terminal, expired or absent execution records do not. Publication
+identity remains a separate node-store protection, and reclamation never converts an incomplete
+installation into a completed one. Key/value usage is reconstructed from current namespace keys,
+including partial chunks without a receipt, rather than a defaulted persisted counter.
+Namespace cursors use the vocabulary's canonical `decode` entry point for the required domain
+name. It requires lowercase stored text and retains the typed `NameError` beneath the storage
+format failure.
+
 ## Qualification Evidence
 
 The [typed states qualification ledger](https://github.com/nervix-io/nervix/blob/main/tests/typed-states-qualification-ledger.md)
