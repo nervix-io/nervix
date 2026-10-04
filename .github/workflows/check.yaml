@@ -190,6 +190,11 @@ jobs:
         with:
           tool: just@latest,toml-cli,cargo-llvm-cov,wild-linker
 
+      - name: Setup flatc
+        uses: Nugine/setup-flatc@v1
+        with:
+          version: "25.12.19"
+
       - name: Install Latest LLVM
         run: |
           wget https://apt.llvm.org/llvm.sh
