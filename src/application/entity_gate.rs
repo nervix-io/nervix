@@ -19,7 +19,10 @@ use nervix_interconnect::{
     EntityGatePurpose, EntityGateReleaseRequest as RemoteEntityGateReleaseRequest,
     EntityGateRequest as RemoteEntityGateRequest, RemoteOperationFailure, RemoteOperationSubject,
 };
-use nervix_models::{ClusterNodeName, CoordinationIdentity, DomainName, NodeRef, RelayName};
+use nervix_models::{
+    ClusterNodeName, CoordinationIdentity, DomainName, ModelKind, NodeRef, PauseRequirement,
+    QuiesceSubgraph, RelayName,
+};
 use nervix_primitives::time::{interval, sleep};
 use tracing::{debug, warn};
 
@@ -610,6 +613,120 @@ impl SessionServiceImpl {
         affected_entities: &[NodeRef],
         purpose: EntityGatePurpose,
         deadline: nervix_primitives::time::Instant,
+        impact: Option<(&TransactionStepImpactRecorder, PauseRequirement)>,
+    ) -> Result<ClusterEntityGate, Report<DomainAlterError>> {
+        let ingestors = affected_entities
+            .iter()
+            .filter(|entity| entity.kind == ModelKind::Ingestor)
+            .cloned()
+            .collect::<Vec<_>>();
+        if purpose != EntityGatePurpose::ModelAlteration
+            || relays.is_empty()
+            || ingestors.is_empty()
+        {
+            return self
+                .engage_cluster_entity_gate_scope(
+                    domain,
+                    relays,
+                    affected_entities,
+                    purpose,
+                    deadline,
+                    impact,
+                )
+                .await;
+        }
+
+        // A route may own an admitted partial batch that has not entered its relay yet. Closing
+        // that relay first would park the batch behind the very gate waiting for its ACK root.
+        // Hold source admission on every node and drain those roots with the relay still open.
+        let intake_impact = match &impact {
+            Some((recorder, PauseRequirement::Subgraph { scope })) => Some((
+                *recorder,
+                PauseRequirement::Subgraph {
+                    scope: QuiesceSubgraph::new(
+                        domain.clone(),
+                        scope
+                            .nodes()
+                            .iter()
+                            .filter(|node| ingestors.contains(&node.coverage.node))
+                            .cloned(),
+                        [],
+                    ),
+                },
+            )),
+            _ => None,
+        };
+        let intake_recorder = intake_impact.as_ref().map(|(recorder, _)| *recorder);
+        let intake_gate = self
+            .engage_cluster_entity_gate_scope(
+                domain,
+                &[],
+                &ingestors,
+                purpose,
+                deadline,
+                intake_impact,
+            )
+            .await?;
+        if let Err(error) = self
+            .wait_for_cluster_entity_drain(&intake_gate, &[], &ingestors, purpose, &[], deadline)
+            .await
+        {
+            if let (Some(recorder), Some(attempt)) = (intake_recorder, intake_gate.impact_attempt())
+            {
+                recorder.fail(
+                    attempt,
+                    nervix_models::ImpactDiagnosticKind::Quiescence,
+                    error.to_string(),
+                );
+            }
+            self.release_cluster_entity_gates_recording(intake_gate, intake_recorder)
+                .await;
+            return Err(error);
+        }
+
+        let recorder = impact.as_ref().map(|(recorder, _)| *recorder);
+        let gate = match self
+            .engage_cluster_entity_gate_scope(
+                domain,
+                relays,
+                affected_entities,
+                purpose,
+                deadline,
+                impact,
+            )
+            .await
+        {
+            Ok(gate) => gate,
+            Err(error) => {
+                self.release_cluster_entity_gates_recording(intake_gate, intake_recorder)
+                    .await;
+                return Err(error);
+            }
+        };
+        // The full hold now owns source suspension too. Overlap the two lifetimes so neither
+        // cancellation nor releasing the intake-only hold can reopen admission between phases.
+        if let Err(error) = self
+            .release_cluster_entity_gates_and_wait_recording(intake_gate, intake_recorder)
+            .await
+        {
+            self.release_cluster_entity_gates_recording(gate, recorder)
+                .await;
+            return Err(error.change_context(DomainAlterError::EntityGate {
+                domain: domain.clone(),
+                operation: purpose.operation_name(),
+                reason: "failed to release the drained ingestor admission hold".to_string(),
+            }));
+        }
+        Ok(gate)
+    }
+
+    async fn engage_cluster_entity_gate_scope(
+        &self,
+        domain: &DomainName,
+        relays: &[RelayName],
+        affected_entities: &[NodeRef],
+        purpose: EntityGatePurpose,
+        deadline: nervix_primitives::time::Instant,
         impact: Option<(
             &TransactionStepImpactRecorder,
             nervix_models::PauseRequirement,
@@ -1150,66 +1267,82 @@ mod tests {
     }
 
     #[nervix_primitives::test]
-    async fn dropping_cluster_gate_owner_releases_local_durable_hold() {
+    async fn dropping_cluster_gate_owners_releases_overlapping_local_holds() {
+        use meticulous::ResultExt as _;
+
+        use super::super::test_fixtures::named;
+
         let TestService {
             service,
             registry: _registry,
             path,
         } = build_test_service(false).await;
-        let domain = DomainName::parse("default").expect("valid domain");
-        let coordination = service
-            .inner
-            .interconnect
-            .next_coordination_identity()
-            .expect("test interconnect should allocate a coordination identity");
-        service
-            .inner
-            .runtime
-            .engage_entity_gate_operation(
-                &coordination,
-                &domain,
-                &[],
-                &[],
-                EntityGatePurpose::ModelAlteration,
-                EntityGateLease {
-                    deadline: nervix_primitives::time::Instant::now() + Duration::from_secs(30),
-                    reason: "canceled coordinator test",
-                },
-            )
-            .await
-            .expect("local gate hold should engage");
-        assert!(
+        let domain: DomainName = named("default");
+        let ingestor = NodeRef::new(
+            ModelKind::Ingestor,
+            named::<nervix_models::ModelName>("orders_in"),
+        );
+        let relay: RelayName = named("orders");
+        let mut coordinations = Vec::new();
+        let mut gates = Vec::new();
+        for relays in [vec![], vec![relay]] {
+            let coordination = service
+                .inner
+                .interconnect
+                .next_coordination_identity()
+                .assured("the test interconnect has coordination capacity");
             service
                 .inner
                 .runtime
-                .entity_gate_operation_is_held(&coordination)
-        );
+                .engage_entity_gate_operation(
+                    &coordination,
+                    &domain,
+                    &relays,
+                    std::slice::from_ref(&ingestor),
+                    EntityGatePurpose::ModelAlteration,
+                    EntityGateLease {
+                        deadline: nervix_primitives::time::Instant::now() + Duration::from_secs(30),
+                        reason: "canceled coordinator with overlapping intake and full holds",
+                    },
+                )
+                .await
+                .assured("the passive participant owns each exact gate scope");
+            assert!(
+                service
+                    .inner
+                    .runtime
+                    .entity_gate_operation_is_held(&coordination)
+            );
+            let mut gate = ClusterEntityGate::new(&service, coordination.clone(), &domain);
+            gate.record_attempt(service.inner.consensus.local_node_id().clone());
+            gates.push(gate);
+            coordinations.push(coordination);
+        }
+        assert_ne!(coordinations[0], coordinations[1]);
+        drop(gates);
 
-        let mut gate = ClusterEntityGate::new(&service, coordination.clone(), &domain);
-        gate.record_attempt(service.inner.consensus.local_node_id().clone());
-        drop(gate);
-
-        nervix_primitives::time::timeout(Duration::from_secs(2), async {
-            while service
-                .inner
-                .runtime
-                .entity_gate_operation_is_held(&coordination)
-            {
+        nervix_primitives::time::timeout(Duration::from_secs(10), async {
+            while coordinations.iter().any(|coordination| {
+                service
+                    .inner
+                    .runtime
+                    .entity_gate_operation_is_held(coordination)
+            }) {
                 nervix_primitives::task::consume_budget().await;
                 nervix_primitives::task::yield_now().await;
             }
         })
         .await
-        .expect("dropped coordinator guard should release its local durable hold");
+        .assured("canceling the coordinator releases both exact overlapping holds");
 
         service.inner.drain_support_shutdown.cancel();
         let shutdown = crate::application::ShutdownCoordinator::default();
         shutdown.request_stop();
         let deadline = shutdown
             .request()
-            .expect("the stop request above was accepted")
+            .verified("the stop request above was accepted")
             .deadline();
         service.inner.service_tasks.shut_down(deadline).await;
-        let _ = std::fs::remove_dir_all(path);
+        std::fs::remove_dir_all(path).assured("the test database is removed after cleanup");
     }
 }

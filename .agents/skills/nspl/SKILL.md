@@ -143,6 +143,11 @@ dynamic. In `ALTER INGESTOR`, use a complete transport-specific source body afte
 change only the current source's mode with `SET QUIESCE <body>`; a client ingestor takes the
 complete `SET FROM CLIENT SCHEMA ...` body, and a change to its endpoint contract ends its attached
 producers.
+Buffered client routes force-flush and settle their admitted acknowledgements before an alteration
+publishes a replacement contract. Keep reading admitted outcomes while admission is suspended;
+reopen a producer after a committed contract change, and retain its attachment when an alteration
+fails. Unresolved submissions keep their unknown-outcome boundary and must never be replayed
+automatically.
 Every reingestor and generator ALTER uses entity pause; reingestor route bodies retain their
 per-route branch selection, while generator route bodies remain set-only.
 `ALTER DOMAIN SET PLACEMENT` is nameless, targets the active domain, and performs a normal schedule

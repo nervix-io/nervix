@@ -1285,6 +1285,13 @@ outcome before it: `EndpointChanged`, `EndpointRemoved`, `DomainStopped`, `Reloc
 which change causes each. A producer closed by its client ends with the close reply and no
 `ProducerEnded`.
 
+During an ingestor alteration, admitted buffered batches keep their original outcome and credit
+while admission is suspended. The server drains them before publishing the replacement contract,
+including partial branch batches that must first pass through a shared relay. An intake hold and
+the full entity hold overlap, so no intermediate `Open` admits work between those phases. A failed
+drain keeps the committed contract and producer attachments; it does not replay an unresolved
+submission. A successful contract change delivers the admitted outcomes before `EndpointChanged`.
+
 ### Ordering And Backpressure
 
 Each producer has one task on the serving node that is the only writer of its replies and frames, so

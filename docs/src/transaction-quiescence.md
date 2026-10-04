@@ -111,6 +111,18 @@ every producer attached once the step is applied, one that changes it ends them 
 `endpoint changed`, and a failed drain releases the hold and reopens admission with the previous
 execution and every producer still attached.
 
+When a model alteration pauses an ingestor and gates a shared downstream relay, the coordinator
+first engages an ingestor-only admission hold on every node. It force-flushes the current graph
+and waits for those ingestors' route work and admitted ACK roots while the relay gates remain
+open. A partial branch batch can therefore reach its relay and acknowledging sink. The full
+subgraph hold is engaged before the intake hold is released, so admission never reopens between
+the two phases. Both phases share the alteration's physical deadline and retain separate exact
+coordination identities. Failure releases the attempted holds and keeps the committed contract;
+dropping the coordinator leaves their existing owned release and lease cleanup responsible.
+For a planned subgraph pause, transaction inspection records the intake-only scope separately
+from the full subgraph scope, with each scope's actual engagement, drain failure, and release
+outcomes. An already engaged domain pause covers its ingestors throughout these phases.
+
 A native client emitter keeps its prepared IPC bytes, source members and application ACK wait as
 emitter work. Force flush releases rows into that same wait; a read or network delivery does not
 finish the drain. A consumer settlement runs beside the session's ordered command lane, so an

@@ -453,8 +453,8 @@ test-deloxide budget_seconds="2400": tests-deps
     cargo test --no-run --features 'testing deloxide' --test scenarios
     within_budget scenarios \
         cargo test --features 'testing deloxide' --test scenarios -- \
-            --input 'tests/features/cluster/*.feature' \
-            --tags '@deadlock_diagnostics or @restore_installation' \
+            --input 'tests/features/**/*.feature' \
+            --tags '@deadlock_diagnostics or @restore_installation or @client_ingestor_alter_drain' \
             --retry 0
     summary="$(grep -E '^[0-9]+ scenarios? \(' "${logs}/scenarios.log" | tail -n 1 || true)"
     if [[ ! "${summary}" =~ ^([1-9][0-9]*)\ scenarios?\ \(([0-9]+)\ passed\)$ ]] \

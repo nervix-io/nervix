@@ -800,6 +800,11 @@ sequenceDiagram
   progress. An alteration that keeps the endpoint contract finds the same producers attached once
   the new execution is installed; a changed contract, a new domain generation, removal,
   relocation, and shutdown end them with the reason that applies.
+  Before a model alteration closes a shared downstream relay gate, an intake-only hold suspends
+  the affected ingestors across the cluster and force-flushes their buffered routes. Their
+  admitted ACK roots drain through the open relay and sink. The full entity hold takes over
+  suspension before the intake hold is released; a failed drain retains the committed execution
+  and the admitted batches' original outcome ownership.
   [Ingestors](./ingestors.md#client-ingestors) defines the public behavior.
 - **Pooled sinks.** The connector owns the driver's pool and borrowed connection. The host owns
   the lease on the node's named client and the runtime wait while no connection is available.

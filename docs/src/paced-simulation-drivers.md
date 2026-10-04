@@ -287,11 +287,11 @@ The clock and the data endpoints recover independently, and neither waits for th
   open budget. A flush-only change preserves the contract and requires no application reopen.
   Clock and credit waits recheck the endpoint every 200ms, so a slow domain rate does not defer
   reopening until the next tick. Suspended admission pauses planning before it creates readings.
-  An alteration must drain admitted work before it publishes the changed contract. The example's
-  buffered branched input route can currently leave a partial batch outstanding during an ingestor
-  alteration, causing that alteration to time out. Use `FLUSH IMMEDIATE` on the input route when
-  demonstrating contract replacement until this runtime drain issue is resolved. An unsuccessful
-  alteration keeps the committed contract and requires no reopen.
+  An alteration drains admitted work before it publishes the changed contract. The example keeps
+  its buffered `FLUSH EACH 100ms` branched input route: an intake hold force-flushes partial batches
+  through the open shared relay and waits for their ACK roots before the full alteration hold
+  closes the relay gates. Admission stays suspended across both holds. An unsuccessful alteration
+  keeps the committed contract and requires no reopen.
 - Each replacement validates the example's exact fields again and requests the same credit
   limits. A schema mismatch, removed endpoint, or unusable credit limit ends the run with status
   2 and the endpoint's refusal text. A fresh producer has fresh credit; outstanding submissions

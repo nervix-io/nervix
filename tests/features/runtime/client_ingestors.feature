@@ -512,8 +512,8 @@ Feature: Client ingestors
       | 1            |
       | 3            |
 
-  @client_ingestor
-  Scenario Outline: An alteration suspends producers for its hold and keeps them while their endpoint contract holds
+  @client_ingestor @client_ingestor_alter_drain
+  Scenario Outline: An alteration drains buffered branches on a shared relay before replacing its client contract
     Given HTTP receiver "sink" is running
     And HTTP receiver "sink" answers with
       """
@@ -528,13 +528,24 @@ Feature: Client ingestors
       CREATE SCHEMA order_in (
         region STRING, order_id STRING, amount I64, card STRING SENSITIVE
       );
-      CREATE RELAY orders SCHEMA order_in UNBRANCHED;
+      CREATE SCHEMA region_key (region STRING);
+      CREATE BRANCH by_region SCHEMA region_key TTL 5m;
+      CREATE RELAY orders SCHEMA order_in BRANCHED BY by_region;
       CREATE INGESTOR orders_in
         FROM CLIENT SCHEMA order_in
           MODE ACK PARALLEL MAX 4 ACK TIMEOUT 60s RETRY POLICY BACKOFF 100ms MAX 1s
           ON QUIESCE SUSPEND
         TIMESTAMP NOW
-        TO orders INHERIT ALL UNBRANCHED FLUSH IMMEDIATE ON MESSAGE ERROR LOG
+        TO orders INHERIT ALL BRANCHED BY by_region SET region = message.region
+          FLUSH EACH 1h MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
+      CREATE INGESTOR other_orders_in
+        FROM CLIENT SCHEMA order_in
+          MODE ACK PARALLEL MAX 4 ACK TIMEOUT 60s RETRY POLICY BACKOFF 100ms MAX 1s
+          ON QUIESCE SUSPEND
+        TIMESTAMP NOW
+        TO orders INHERIT ALL BRANCHED BY by_region SET region = message.region
+          FLUSH IMMEDIATE ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
       CREATE CLIENT sink_api TYPE HTTP CONFIG {
         'endpoint' = '{{http_receiver.sink}}', 'timeout_ms' = 60000
@@ -551,25 +562,48 @@ Feature: Client ingestors
       """
     And <session> is connected to the leader node
     When <session> opens producer "orders" on ingestor "orders_in" expecting fields "region STRING, order_id STRING, amount I64, card STRING SENSITIVE"
+    And <session> opens producer "other orders" on ingestor "other_orders_in" expecting fields "region STRING, order_id STRING, amount I64, card STRING SENSITIVE"
     And producer "orders" submits batch "held" with rows
       | region | order_id | amount | card   |
       | eu     | o-1      | 1      | 4111-1 |
-    Then HTTP receiver "sink" eventually receives at least 1 request
-    # A new flush cadence keeps the endpoint contract. The alteration's drain waits for the held
-    # batch, and admission stays suspended until the alteration commits.
+      | us     | o-2      | 2      | 4111-2 |
+      | eu     | o-3      | 3      | 4111-3 |
+    Then within "30s" the leader node describes ingestor "orders_in" with
+      """
+      outstanding batches: 1
+      admitted batches: 1
+      """
+    # Both branches have partial batches at a cadence much longer than the test. The hold must
+    # force them through the shared relay while it remains open, then wait for the sink's ACK.
     When these NSPL commands begin executing in the background
       """
       ALTER INGESTOR orders_in REPLACE ROUTE TO orders
-        INHERIT ALL UNBRANCHED FLUSH EACH 10ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG;
+        INHERIT ALL BRANCHED BY by_region SET region = message.region
+        FLUSH EACH 10ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG;
       """
     Then producer "orders" eventually reports admission "suspended"
+    And within "30s" the leader node describes ingestor "other_orders_in" with
+      """
+      admission: open
+      producers: 1
+      """
+    And HTTP receiver "sink" eventually receives at least 1 request
+    When these NSPL commands are executed on the leader node
+      """
+      SHOW CREATE INGESTOR orders_in;
+      """
+    Then the last command output contains
+      """
+      FLUSH EACH 1h
+      """
     When HTTP receiver "sink" releases its held responses with "respond 200"
     Then the background NSPL execution succeeds
     And batch "held" completes
     And producer "orders" eventually reports admission "open"
     When producer "orders" submits batch "after flush change" with rows
       | region | order_id | amount | card   |
-      | us     | o-2      | 2      | 4111-2 |
+      | us     | o-4      | 4      | 4111-4 |
+      | eu     | o-5      | 5      | 4111-5 |
     Then batch "after flush change" completes
     # A new acknowledgement window is a new endpoint contract.
     When these NSPL commands are executed on the leader node
@@ -582,17 +616,32 @@ Feature: Client ingestors
     When within "30s" <session> opens producer "reopened" on ingestor "orders_in" expecting fields "region STRING, order_id STRING, amount I64, card STRING SENSITIVE"
     And producer "reopened" submits batch "after contract change" with rows
       | region | order_id | amount | card   |
-      | eu     | o-3      | 3      | 4111-3 |
+      | eu     | o-6      | 6      | 4111-6 |
+      | us     | o-7      | 7      | 4111-7 |
     Then batch "after contract change" completes
-    And HTTP receiver "sink" has captured exactly 3 requests
+    And HTTP receiver "sink" has captured exactly 7 requests
+    And HTTP receiver "sink" captured one request that is
+      """
+      POST /orders/eu/o-1
+      """
+    And HTTP receiver "sink" captured one request that is
+      """
+      POST /orders/us/o-2
+      """
+    And HTTP receiver "sink" captured one request that is
+      """
+      POST /orders/eu/o-3
+      """
 
     Examples:
       | session                 | cluster_size |
       | client "app"            | 1            |
+      | client "app"            | 3            |
+      | WebSocket session "app" | 1            |
       | WebSocket session "app" | 3            |
 
-  @client_ingestor
-  Scenario Outline: An alteration whose drain fails keeps every producer attached to the previous execution
+  @client_ingestor @client_ingestor_alter_drain
+  Scenario Outline: A rejected <failure> releases buffered client admission and retains its committed contract
     Given HTTP receiver "sink" is running
     And HTTP receiver "sink" answers with
       """
@@ -607,13 +656,24 @@ Feature: Client ingestors
       CREATE SCHEMA order_in (
         region STRING, order_id STRING, amount I64, card STRING SENSITIVE
       );
-      CREATE RELAY orders SCHEMA order_in UNBRANCHED;
+      CREATE SCHEMA region_key (region STRING);
+      CREATE BRANCH by_region SCHEMA region_key TTL 5m;
+      CREATE RELAY orders SCHEMA order_in BRANCHED BY by_region;
       CREATE INGESTOR orders_in
         FROM CLIENT SCHEMA order_in
           MODE ACK PARALLEL MAX 4 ACK TIMEOUT 60s RETRY POLICY BACKOFF 100ms MAX 1s
           ON QUIESCE SUSPEND
         TIMESTAMP NOW
-        TO orders INHERIT ALL UNBRANCHED FLUSH IMMEDIATE ON MESSAGE ERROR LOG
+        TO orders INHERIT ALL BRANCHED BY by_region SET region = message.region
+          FLUSH EACH 1h MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
+      CREATE INGESTOR other_orders_in
+        FROM CLIENT SCHEMA order_in
+          MODE ACK PARALLEL MAX 4 ACK TIMEOUT 60s RETRY POLICY BACKOFF 100ms MAX 1s
+          ON QUIESCE SUSPEND
+        TIMESTAMP NOW
+        TO orders INHERIT ALL BRANCHED BY by_region SET region = message.region
+          FLUSH IMMEDIATE ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
       CREATE CLIENT sink_api TYPE HTTP CONFIG {
         'endpoint' = '{{http_receiver.sink}}', 'timeout_ms' = 60000
@@ -630,18 +690,38 @@ Feature: Client ingestors
       """
     And <session> is connected to the leader node
     When <session> opens producer "orders" on ingestor "orders_in" expecting fields "region STRING, order_id STRING, amount I64, card STRING SENSITIVE"
+    And <session> opens producer "other orders" on ingestor "other_orders_in" expecting fields "region STRING, order_id STRING, amount I64, card STRING SENSITIVE"
     And producer "orders" submits batch "held" with rows
       | region | order_id | amount | card   |
       | eu     | o-1      | 1      | 4111-1 |
-    Then HTTP receiver "sink" eventually receives at least 1 request
-    Given the next pending entity drain in domain "{{domain}}" is forced to time out
-    When these NSPL commands fail with "timed out draining domain"
+      | us     | o-2      | 2      | 4111-2 |
+      | eu     | o-3      | 3      | 4111-3 |
+    Then within "30s" the leader node describes ingestor "orders_in" with
+      """
+      outstanding batches: 1
+      admitted batches: 1
+      """
+    When these NSPL commands begin executing in the background
       """
       ALTER INGESTOR orders_in SET FROM CLIENT SCHEMA order_in
         MODE ACK SEQUENTIAL ACK TIMEOUT 60s RETRY POLICY BACKOFF 100ms MAX 1s
         ON QUIESCE SUSPEND;
       """
-    And these NSPL commands are executed on the leader node
+    Then producer "orders" eventually reports admission "suspended"
+    And within "30s" the leader node describes ingestor "other_orders_in" with
+      """
+      admission: open
+      producers: 1
+      """
+    And HTTP receiver "sink" eventually receives at least 1 request
+    Given the next <failure> in domain "{{domain}}" <disposition>
+    When HTTP receiver "sink" releases its held responses with "respond 200"
+    Then the background NSPL execution fails with "<error>"
+    And the last command error contains
+      """
+      quiesce level: ENTITY_PAUSE
+      """
+    When these NSPL commands are executed on the leader node
       """
       SHOW CREATE INGESTOR orders_in;
       """
@@ -652,16 +732,40 @@ Feature: Client ingestors
     And producer "orders" eventually reports admission "open"
     When producer "orders" submits batch "after rollback" with rows
       | region | order_id | amount | card   |
-      | us     | o-2      | 2      | 4111-2 |
-    And HTTP receiver "sink" releases its held responses with "respond 200"
+      | us     | o-4      | 4      | 4111-4 |
+      | eu     | o-5      | 5      | 4111-5 |
+    And these NSPL commands are executed on the leader node
+      """
+      ALTER INGESTOR orders_in REPLACE ROUTE TO orders
+        INHERIT ALL BRANCHED BY by_region SET region = message.region
+        FLUSH EACH 10ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG;
+      """
     Then batch "held" completes
     And batch "after rollback" completes
-    And HTTP receiver "sink" has captured exactly 2 requests
+    And HTTP receiver "sink" has captured exactly 5 requests
+    And HTTP receiver "sink" captured one request that is
+      """
+      POST /orders/eu/o-1
+      """
+    And HTTP receiver "sink" captured one request that is
+      """
+      POST /orders/us/o-2
+      """
+    And HTTP receiver "sink" captured one request that is
+      """
+      POST /orders/eu/o-3
+      """
 
     Examples:
-      | session                 | cluster_size |
-      | client "app"            | 3            |
-      | WebSocket session "app" | 1            |
+      | session                 | cluster_size | failure                | disposition           | error                                            |
+      | client "app"            | 1            | pending entity drain   | is forced to time out | timed out draining domain                        |
+      | client "app"            | 3            | pending entity drain   | is forced to time out | timed out draining domain                        |
+      | WebSocket session "app" | 1            | pending entity drain   | is forced to time out | timed out draining domain                        |
+      | WebSocket session "app" | 3            | pending entity drain   | is forced to time out | timed out draining domain                        |
+      | client "app"            | 1            | entity gate engagement | is rejected           | injected entity gate rejection before engagement |
+      | client "app"            | 3            | entity gate engagement | is rejected           | injected entity gate rejection before engagement |
+      | WebSocket session "app" | 1            | entity gate engagement | is rejected           | injected entity gate rejection before engagement |
+      | WebSocket session "app" | 3            | entity gate engagement | is rejected           | injected entity gate rejection before engagement |
 
   @client_ingestor @client_ingestor_placement
   Scenario Outline: A producer entering through another node is forwarded to the owner, and a planned relocation ends it
