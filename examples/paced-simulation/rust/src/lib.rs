@@ -32,6 +32,7 @@ mod ledger;
 mod options;
 mod readings;
 mod refusal;
+mod reopen;
 mod report;
 mod simulation;
 #[cfg(test)]

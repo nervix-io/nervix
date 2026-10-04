@@ -779,6 +779,14 @@ output. A submission cancelled that way sent nothing, and an outcome wait leaves
 with the producer. A read stays with the consumer, which hands its reply to the next read, and a
 settlement may still have reached the server.
 
+The [paced simulation drivers](./paced-simulation-drivers.md) classify a refused replacement
+producer or consumer as a configuration error and exit with status `2`, retaining the typed
+refusal or schema diagnostic. A consumer's refusal ends input planning and interrupts outstanding
+outcome, rejection-notice and producer-close waits, including after planning finished: batches
+whose output contract cannot be consumed cannot finish that close.
+The application retains their ledger entries for an explicit `--replay`; reopening never resends
+an unknown submission automatically.
+
 If a paced clock cannot convert one period through its rate, the authority can still emit its
 already-due first tick. Scheduling a later tick then reports a rate-conversion or cadence error and
 stops production. A next-boundary overflow reports its own clock arithmetic error. None of these

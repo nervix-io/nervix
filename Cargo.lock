@@ -7480,6 +7480,7 @@ dependencies = [
  "error-stack",
  "meticulous",
  "nervix-client-core",
+ "nervix-deadlock",
  "nervix-models",
  "nervix-primitives",
  "nervix-recovery",

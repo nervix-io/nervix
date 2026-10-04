@@ -523,7 +523,7 @@ jobs:
 
   coverage:
     name: coverage
-    needs: [tests, scenarios, extra-tests]
+    needs: [tests, scenarios, extra-tests, shuttle]
     runs-on: ubuntu-latest
     timeout-minutes: 20
     permissions:
@@ -564,6 +564,12 @@ jobs:
           name: coverage-native-extras
           path: coverage-inputs/native-extras
 
+      - name: Download Shuttle coverage evidence
+        uses: actions/download-artifact@v4
+        with:
+          name: coverage-shuttle
+          path: coverage-inputs/shuttle
+
       - name: Merge coverage and check CRAP
         run: |
           lcov --add-tracefile coverage-inputs/tests/lcov-workspace.info \
@@ -575,7 +581,7 @@ jobs:
           while IFS= read -r report; do
             lcov --add-tracefile lcov-workspace.info --add-tracefile "$report" --output-file lcov-workspace.info
             lcov --add-tracefile lcov.info --add-tracefile "$report" --output-file lcov.info
-          done < <(find coverage-inputs/native-extras -name lcov.info -o -name python.lcov)
+          done < <(find coverage-inputs/native-extras -path '*/ordinary/*/lcov.info' -o -name python.lcov)
           just check-coverage
 
       - name: Upload coverage to Codecov
@@ -875,16 +881,16 @@ jobs:
       - name: Expiry map mutation tests
         run: just test-expiry-map-mutants
 
+      - name: Setup uv for runner coverage
+        uses: astral-sh/setup-uv@v6
+
       # The collector that the steps below run their checks through, including its refusal of
       # every incomplete collection.
       - name: Native coverage collector
-        run: just test-native-coverage
+        run: just coverage-model-runner
 
       - name: Source contracts, compiler diagnostics and paired API doctests
         run: just coverage-native-extras test-typed-ratchet
-
-      - name: Setup uv for compiler runner coverage
-        uses: astral-sh/setup-uv@v6
 
       - name: Compiler cache changes, interruption and runner qualification
         run: |
@@ -900,15 +906,18 @@ jobs:
       - name: Benchmark smoke tests
         run: just coverage-native-extras bench-smoke
 
-      # The primitive boundary's conformance in every execution mode, the ordinary one collected
-      # for coverage, then every registered Loom model of a production owner explored to
+      # The primitive boundary's native conformance collected separately in every execution mode,
+      # then every registered Loom model of a production owner explored to
       # exhaustion, then the proof that each model fails under the ordering weakening it exists to
       # detect.
       - name: Primitive boundary conformance
         run: just coverage-native-extras test-primitives
 
+      - name: Primitive boundary compile and browser checks
+        run: just test-primitives-compile
+
       - name: Loom memory-ordering models
-        run: just test-loom
+        run: just coverage-native-extras test-loom
 
       - name: Loom ordering qualification
         run: just test-loom-qualification
@@ -931,7 +940,9 @@ jobs:
             target/native-coverage/**/lcov.info
             target/native-coverage/**/executions.jsonl
             target/native-coverage/**/export.log
+            target/native-coverage/**/models.json
             target/typed-ratchet/python.lcov
+            target/model-coverage/python.lcov
             target/primitive-boundary/python.lcov
             target/typed-ratchet/cache-qualification/**/qualification.json
           if-no-files-found: warn
@@ -956,13 +967,13 @@ jobs:
         with:
           name: loom-failures
           path: |
-            target/loom-failures
+            target/native-coverage-build-loom/loom-failures
             target/loom-qualification/*/*.log
             target/loom-qualification/*/*.json
           if-no-files-found: ignore
 
   # Shuttle's in-process scheduling checks and uncontrolled-nondeterminism rechecks run
-  # independently of the native coverage collectors and other extra tests.
+  # in their own coverage collection job beside the other extra tests.
   shuttle:
     name: shuttle
     runs-on: blacksmith-8vcpu-ubuntu-2404
@@ -982,7 +993,7 @@ jobs:
       - name: Install cargo tools
         uses: taiki-e/install-action@v2
         with:
-          tool: just@latest,toml-cli,trunk,wild-linker
+          tool: just@latest,toml-cli,trunk,wild-linker,cargo-llvm-cov
 
       - name: Install Latest LLVM
         run: |
@@ -1066,10 +1077,23 @@ jobs:
       - name: Shuttle concurrency checks
         run: |
           just toolchains-install
-          just test-shuttle
+          just coverage-native-extras test-shuttle
 
       - name: Shuttle schedule replay
         run: just test-shuttle-replay-check
+
+      - name: Upload Shuttle coverage
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-shuttle
+          path: |
+            target/native-coverage/**/completion.json
+            target/native-coverage/**/lcov.info
+            target/native-coverage/**/executions.jsonl
+            target/native-coverage/**/export.log
+            target/native-coverage/**/models.json
+          if-no-files-found: warn
 
       - name: Publish kache report
         if: always()
@@ -1090,7 +1114,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: shuttle-failures
-          path: target/shuttle-failures
+          path: target/native-coverage-build-shuttle/shuttle-failures
           if-no-files-found: ignore
 
   # Turmoil's seeded network simulations of the interconnect: every scenario over its committed

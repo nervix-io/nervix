@@ -1157,11 +1157,23 @@ one invocation:
 
 | Mode | Lint | Tests | Coverage |
 | --- | --- | --- | --- |
-| Ordinary | `just lint`: every package in ordinary mode, the server, the client, the formatter, the browser console and the wire crate for the browser | `just test`, `just test-primitives-ordinary` | `just test-coverage`, `just coverage-native-extras` |
-| Shuttle | `just cargo-clippy-shuttle`: every Shuttle library, and each package `just test-shuttle` explores in test mode, where its checks are compiled | `just test-shuttle [filter]`, `just test-shuttle-replay-check`, the Shuttle part of `just test-primitives-modeled` | `just coverage-shuttle` |
-| Loom | `just cargo-clippy-loom` | `just test-loom [filter]`, `just test-loom-qualification`, the Loom part of `just test-primitives-modeled` | Not collected: a model is evidence of an ordering, not of product coverage |
-| Turmoil | The Turmoil targets of `just cargo-clippy` | `just test-turmoil`, `just test-turmoil-replay-check`, the Turmoil part of `just test-primitives-modeled` | `just coverage-turmoil` |
-| Deloxide | `just cargo-clippy-deloxide`: the boundary, the deadlock diagnostics with their probes, and the server as a diagnostic node, alone and with its tests and scenario binary | `just test-deloxide`, the Deloxide parts of `just test-primitives-modeled` and `just test-primitives-compile` | Not collected: a diagnostic run is evidence of what its workload exercised, not of product coverage |
+| Ordinary | `just lint`: every package in ordinary mode, the server, the client, the formatter, the browser console and the wire crate for the browser | `just test`, `just test-primitives-ordinary` | `just test-coverage`; ordinary extras and `test-primitives-ordinary` through `just coverage-native-extras` |
+| Shuttle | `just cargo-clippy-shuttle`: every Shuttle library, and each package `just test-shuttle` explores in test mode, where its checks are compiled | `just test-shuttle [filter]`, `just test-shuttle-replay-check`, `just test-primitives-shuttle` | `just coverage-native-extras test-shuttle test-primitives-shuttle`; `just coverage-shuttle <output> [filter]` |
+| Loom | `just cargo-clippy-loom` | `just test-loom [filter]`, `just test-loom-qualification`, `just test-primitives-loom` | `just coverage-native-extras test-loom test-primitives-loom`; `just coverage-loom <output> [filter]` |
+| Turmoil | The Turmoil targets of `just cargo-clippy` | `just test-turmoil`, `just test-turmoil-replay-check`, `just test-primitives-turmoil` | `just coverage-turmoil`; native conformance through `just coverage-native-extras test-primitives-turmoil` |
+| Deloxide | `just cargo-clippy-deloxide`: the boundary, the deadlock diagnostics with their probes, and the server as a diagnostic node, alone and with its tests and scenario binary | `just test-deloxide`, `just test-primitives-deloxide`, diagnostic compile checks in `just test-primitives-compile` | Native conformance through `just coverage-native-extras test-primitives-deloxide`; full diagnostic workloads retain separate evidence |
+
+Model coverage uses the canonical inventories and runners, including per-test process isolation,
+Shuttle random/PCT exploration and nondeterminism checking, and Loom InvariantIds and exhaustive
+completion. `models.json` retains discovered/selected/executed/completed counts and exact check
+identities; the coverage collector requires matching complete evidence before exporting LCOV.
+Loom weakening qualification runs independently outside instrumentation. Coverage bookkeeping
+runs in the command processes and supplies no ordering, wakeups or branches inside a model.
+The per-mode build directories and fresh attempt directories prevent one mode from replacing
+another's executable or counters. Native source-line execution complements each model's claim;
+it does not broaden the ordering or interleaving guarantee. Mode reports remain separate from
+the ordinary coverage and CRAP gate. See [native extra coverage](developing-nervix.md) for
+collection, artifacts, filtering and replay commands.
 
 `just validate-execution-mode-dependencies` resolves the normal dependency graph of the workspace
 and of every package on its own, the way a consumer builds it, with default features and without
@@ -1220,7 +1232,8 @@ builds.
 diagnostic process starts its run after it has registered the signals it must not lose and before it
 constructs a tracked lock or starts a runtime worker: the server's `main` right after it registers
 its termination signals, and the scenario binary's right after it configures the lifecycle of its
-test dependencies. A tracked lock constructed in a process that has not installed the detector
+test dependencies. The Rust paced driver's diagnostic `main` installs it before entering the
+runtime that runs the application. A tracked lock constructed in a process that has not installed the detector
 panics, naming the configuration failure, because Deloxide drops a cycle it detects while no
 callback is installed, so such a lock would deadlock unreported. A second installation is refused,
 so nothing resets the detector or configures it twice, and the in-process nodes of a scenario binary
@@ -1292,6 +1305,10 @@ the blocking applied-state authority guard through staging failure, complete pub
 handle clearing and a delayed coordinator across leadership transfer and a successor's START.
 Those restore scenarios also run in the ordinary public suite. An invocation that executed no
 check fails the run, and so does a diagnostic workload whose scenarios did not all run and pass.
+The command also runs `@paced_simulation_reopen` on one and three nodes, with the diagnostic
+Rust driver replacing producer credit owners, retaining pending submission owners, reopening
+consumers and publishing replacement refusals. Python runs against diagnostic nodes with its
+ordinary shared binding; Python's own locks and condition variables are outside this detector.
 The retained diagnostic evidence covers the tracked locks acquired by those workloads; async
 coordination, atomic capture fencing, database dependency locks and network waits keep their
 Shuttle, Loom, Turmoil and Chaos evidence.

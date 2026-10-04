@@ -8,15 +8,13 @@ use std::collections::BTreeMap;
 
 use nervix_client_core::{
     ClientBatchDefect, ClientProcessingFailure, ClientProducerRefusal, ClientSubmissionRefusal,
-    ConsumerReopenReason, EmitterSettlement, ProducerOutcome, SubmissionUncertainty,
-    wire::EmitterOpenRefusal,
+    ConsumerReopenReason, EmitterSettlement, ProducerOutcome, ProducerReopenReason,
+    SubmissionUncertainty, wire::EmitterOpenRefusal,
 };
 use strum::IntoEnumIterator as _;
 
 use crate::{
-    consumers::{reopen_reason, settlement},
-    ledger::OutcomeKind,
-    refusal::Refusal,
+    consumers::settlement, ledger::OutcomeKind, refusal::Refusal, reopen::Reopen,
     simulation::outcome_of,
 };
 
@@ -148,47 +146,66 @@ fn a_refused_open_prints_the_python_drivers_words() {
 struct ReopenCase {
     number: u8,
     reason: ConsumerReopenReason,
+    producer: ProducerReopenReason,
 }
 
 #[test]
-fn a_consumer_reopen_reason_prints_the_python_drivers_words() {
+fn reopen_reasons_and_generation_waits_match_the_python_drivers_vocabulary() {
     let words = python_table("REOPEN_REASONS");
     let cases = [
         ReopenCase {
             number: 1,
             reason: ConsumerReopenReason::DomainStopped,
+            producer: ProducerReopenReason::DomainStopped,
         },
         ReopenCase {
             number: 2,
             reason: ConsumerReopenReason::EndpointRemoved,
+            producer: ProducerReopenReason::EndpointRemoved,
         },
         ReopenCase {
             number: 3,
             reason: ConsumerReopenReason::SchemaChanged,
+            producer: ProducerReopenReason::SchemaChanged,
         },
         ReopenCase {
             number: 4,
             reason: ConsumerReopenReason::ContractChanged,
+            producer: ProducerReopenReason::ContractChanged,
         },
         ReopenCase {
             number: 5,
             reason: ConsumerReopenReason::GenerationChanged,
+            producer: ProducerReopenReason::GenerationChanged,
         },
         ReopenCase {
             number: 6,
             reason: ConsumerReopenReason::ProtocolViolated,
+            producer: ProducerReopenReason::ProtocolViolated,
         },
     ];
     for case in cases {
-        assert_eq!(reopen_reason(&case.reason), word(&words, case.number));
+        let consumer = Reopen::from(&case.reason);
+        let producer = Reopen::from(&case.producer);
+        assert_eq!(consumer, producer);
+        assert_eq!(consumer.text(), word(&words, case.number));
+        assert_eq!(
+            consumer.waits_for_generation(),
+            matches!(case.number, 1 | 5)
+        );
     }
 
     // A refused restoration names its refusal the way a refused open does.
     let refusals = python_table("REFUSALS");
     for case in OPEN_REFUSALS {
         let reason = ConsumerReopenReason::Refused(case.consumer);
+        let producer_reason = ProducerReopenReason::Refused(case.producer);
+        let consumer = Reopen::from(&reason);
+        let producer = Reopen::from(&producer_reason);
         let expected = format!("{} ({})", word(&words, 7), word(&refusals, case.number));
-        assert_eq!(reopen_reason(&reason), expected);
+        assert_eq!(consumer, producer);
+        assert_eq!(consumer.text(), expected);
+        assert!(!consumer.waits_for_generation());
     }
 }
 
