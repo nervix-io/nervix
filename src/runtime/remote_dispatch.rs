@@ -813,6 +813,12 @@ impl RemoteDispatcher {
     ) {
         let local_node_id = self.local_node_id();
         let interest_index = self.cluster.subscription_interest_index();
+        let channels = services.subscription_channels(
+            &batch.key,
+            StdArc::clone(&interest_index),
+            domain,
+            relay,
+        );
         let Some(interested_nodes) = interest_index.nodes(domain.as_str(), relay.as_str()) else {
             return;
         };
@@ -826,13 +832,12 @@ impl RemoteDispatcher {
             if node_id == local_node_id || excluded_nodes.contains(node_id) {
                 continue;
             }
-            let outbound_slot = services.outbound_slot(
-                node_id,
-                relay,
-                RelayPayloadKind::SubscriptionFanout,
-                &batch.key,
-            );
-            let _slot = outbound_slot.gate.lock().await;
+            let Some(outbound_slot) = channels.slot(node_id, relay) else {
+                continue;
+            };
+            let Some(_slot) = outbound_slot.lock_for_delivery().await else {
+                continue;
+            };
             let batch_ipc = match encoded_body.clone() {
                 Some(bytes) => bytes,
                 None => match batch.batch.encode_arrow_ipc(self.executor()).await {

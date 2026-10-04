@@ -733,6 +733,10 @@ batch iteration, not the VM. A UDF adds its own watchdog, described
 
 ## Kernels
 
+[SIMD Kernels](./simd-kernels.md) owns the primitives boundary, dispatch and build targets,
+caller catalog, exact buffer results, scalar/level qualification, and measured evidence. This
+chapter owns how the VM selects those operations, masks nulls and failures, and reports errors.
+
 ### Kernel Classes
 
 Every kernel falls into one of five classes. The class decides how its cost scales and which claim
@@ -846,30 +850,22 @@ These are three different claims, and the implementation makes them separately:
   executes this way, including the irregular ones.
 - **Compiler vectorization.** A buffer loop is written so that LLVM *can* widen it to the vector
   instructions of the CPU the binary targets, and its result is the same whether or not it does.
-  A local build without `RUSTFLAGS` target tuning uses the compiler's baseline target. The Docker
+  The effective compiler flags determine the baseline: local `target-cpu=native` builds use the
+  compiling host's features, while untuned builds use the compiler target's baseline. The Debian
   image builds its x86-64 payloads for `x86-64-v3` through cargo-sonic. A
   compiler-vectorized loop needs inspection of the generated instructions for the particular build
   before claiming a specific instruction set.
-- **Explicit SIMD.** The VM still uses library dispatch for simd-json, base64-simd, faster-hex,
-  and sha2; xxhash chooses when the binary is built. `nervix-simd-kernels` uses `fearless_simd` to
-  select supported instructions at run time, with a scalar fallback. Outside the VM its byte
-  classes serve the schemaful JSON emission classifier, the SYSLOG codec's header and
-  structured-data scans and the SQS sink's XML character check, and it serves the delivery-latency
-  fold, which reads a batch's ingestion watermarks once to find its latest watermark and bucket
-  every row's latency. Inside the VM it packs
-  the failure bytes of the checked lanes into bitmap words, with the same word at every level, and
-  computes the [explicit integer lanes](#checked-buffer-kernels).
-- **Dispatch.** The kernel crate resolves one `fearless_simd` level per process from the CPU's
-  features, never below what the build's target already guarantees. An x86-64 build selects
-  AVX-512, AVX2, SSE4.2, or SSE2, so the Docker image's `x86-64-v3` payload runs the AVX2 arm, or
-  the AVX-512 arm on a CPU that has it. An AArch64 build runs NEON, and the scalar fallback runs only
-  where no level is available. Each kernel call enters the selected level once through
-  `dispatch!`, which enables that level's target features for small `#[inline(always)]` functions
-  generic over `S: Simd`, and computes its whole run there. Every level gives every lane the same
-  value and failure bit, and the kernel tests compare every level the host offers, and the forced
-  fallback, against a scalar reference. The VM itself names no instruction set: it hands buffers to
-  the kernel crate, its other lane operations remain compiler-vectorized, and it uses no
-  `std::arch` or `target_feature` of its own.
+- **Explicit SIMD.** The VM hands typed buffers to `nervix-simd-kernels` for failure packing and
+  [checked integer operations](#checked-buffer-kernels). The
+  [caller catalog](./simd-kernels.md#kernel-and-caller-catalog) also covers JSON, delivery latency,
+  domain/window admission, selections, and text codecs. Library-dispatched functions retain the
+  library's selection; xxhash chooses when the binary is built.
+- **Dispatch.** The kernel crate caches one `fearless_simd` level per process and enters it once
+  per buffer operation. The [build-target matrix](./simd-kernels.md#dispatch-and-build-targets)
+  defines SSE2, SSE4.2, AVX2, Ice Lake class AVX-512, NEON, WASM SIMD, and forced fallback, including
+  the ambient baseline that can coalesce lower test tokens into a higher backend. Every integer
+  lane and failure bit is exact. The VM names no instruction set and uses no `std::arch` or
+  `target_feature` of its own.
 
 The [VM functions measurement report](https://github.com/nervix-io/nervix/blob/main/benches/reports/vm-functions-18.md)
 records what the measurements establish, and

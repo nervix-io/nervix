@@ -245,6 +245,7 @@ impl Runtime {
             execution.relay_services.contains_key(relay)
         });
         self.publish_routed_endpoints(domain, &execution);
+        execution.routing.activate(self, domain);
         execution.routing.publish();
         self.inner
             .domain_routings

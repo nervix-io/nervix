@@ -1396,7 +1396,7 @@ bench *args: build-web-console
     cargo bench --package nervix-vm --bench vm -- {{ args }}
 
 # Exercise every Criterion body once without spending CI's smoke-test budget on release codegen.
-bench-smoke: build-web-console bench-smoke-bodies
+bench-smoke: build-web-console wasm-processor-guests download-onnxruntime bench-smoke-bodies
 
 # The Criterion bodies `bench-smoke` exercises, without the console build that precedes them there.
 # `coverage-native-extras` builds the console outside its instrumentation and then runs these in it.
@@ -1413,6 +1413,7 @@ bench-smoke-bodies:
     cargo bench --profile dev --package nervix-simd-kernels --bench byte_classes -- --test
     cargo bench --profile dev --package nervix-connector-syslog --bench stream_framing --features benchmarks -- --test
     cargo bench --profile dev --package nervix-vm --bench vm -- --test
+    just bench-retained-channels-bodies
 
 # Measure the data-plane work a node admits through its bounded executor, as the runtime submits it:
 # one branched input prepared into its branch batches, and an emitter batch encoded through a JAQ
@@ -2589,3 +2590,11 @@ coverage-task-handles-export executable profile output="target/task-handles-benc
     llvm_bin="$(rustc --print sysroot)/lib/rustlib/$(rustc -vV | sed -n 's/^host: //p')/bin"
     "${llvm_bin}/llvm-profdata" merge -sparse {{ quote(profile) }} -o target/task-handles-benchmark.profdata
     "${llvm_bin}/llvm-cov" export {{ quote(executable) }} --instr-profile=target/task-handles-benchmark.profdata --format=lcov > {{ quote(output) }}
+
+# Same-host retained relay selection, branch churn and authenticated pool leasing measurements.
+bench-retained-channels: build-web-console wasm-processor-guests download-onnxruntime bench-retained-channels-bodies
+
+# Native bodies also exercised by the coverage-producing benchmark smoke check.
+bench-retained-channels-bodies:
+    ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)" cargo test --package nervix-server --features testing --lib relay_channel_cost -- --ignored --nocapture
+    cargo test --package nervix-interconnect --lib established_pool_cost -- --ignored --nocapture

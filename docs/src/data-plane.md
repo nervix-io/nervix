@@ -33,6 +33,11 @@ materialized-state outcomes, message errors, and recovery classes reach their re
 Decoded messages are processed in memory as Apache Arrow batches, including batches with one row.
 That gives the runtime a columnar format suitable for vectorized processing and batch transfer.
 
+[SIMD Kernels](./simd-kernels.md) describes the typed buffer operations used by JSON boundaries,
+delivery-latency recording, domain and window admission, failure and selection bitmaps, integer
+arithmetic, and text codecs. Kernel dispatch changes how those operations execute; schema checks,
+branch ownership, acknowledgement attribution, and persistence remain the runtime's contracts.
+
 Nervix has three separate persistence boundaries:
 
 - Execution graph configuration is control-plane state. NSPL models, domain lifecycle, and schedules are persisted with strong consistency guarantees before runtime nodes execute them. The control plane turns each committed schedule into a complete typed execution revision; the runtime retains its planned nodes, placement, and executable plans together and does not reread Models during application or recovery.

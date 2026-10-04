@@ -91,6 +91,8 @@ class InventoryTests(unittest.TestCase):
             "task-status-transitions",
             "entity-freeze-transitions",
             "endpoint-route-table",
+            "relay-channel-lifetimes",
+            "interconnect-slot-lifetimes",
             "client-emitter-wire",
             "client-requests",
             "client-replies",

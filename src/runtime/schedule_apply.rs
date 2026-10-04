@@ -1573,6 +1573,7 @@ impl Runtime {
             execution.revision = revision;
             execution.routing.message_error_plans = message_error_plans;
             execution.routing.processor_plans = processor_plans;
+            execution.routing.activate(self, domain);
             execution.routing.publish();
             routing_published = true;
         }
@@ -1623,6 +1624,7 @@ impl Runtime {
             execution.revision = revision;
             execution.routing.message_error_plans = message_error_plans;
             execution.routing.processor_plans = processor_plans;
+            execution.routing.activate(self, domain);
             execution.routing.publish();
         } else {
             return Err(RuntimeError::BuildDomainExecution {

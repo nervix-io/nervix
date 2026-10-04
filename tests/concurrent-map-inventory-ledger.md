@@ -24,9 +24,9 @@ Replica catch-up retains the entity's lifecycle handle and the replica task's ow
 branch (see [Replica catch-up](#replica-catch-up-the-repair-typed-ratchet-14-makes)); Typed
 Ratchet 15 owns the remaining state-replication frame, synchronization, listing and announcer
 reads, including the lifecycle lookup those requests share. The primary's synchronization request
-handler remains recurring debt. Source readiness marking
-also reaches its registry from polling and remains debt for Typed Ratchet 03. This tooling cutover
-changes no runtime map, access cadence or ownership protocol.
+handler remains recurring debt. Source hosts retain an exact instance readiness handle; installation and observers alone reach
+the readiness registry. Relay channels, transport selection and domain publications use the
+immutable tables and retained lifetimes described below.
 
 ## How accesses are classified
 
@@ -169,11 +169,6 @@ the task in its next round, and `pending_state_replica_syncs` is deleted. See
 
 | Map | Hottest access | Delivery |
 | --- | --- | --- |
-| `RelayBoundaryServices::ingress_slots` | `ingress_slot` get per batch forwarded to a remote owner | Typed Ratchet 03 |
-| `RelayBoundaryServices::outbound_slots` | `outbound_slot` get with a rebuilt key per batch per remote consumer and per interested node; full `retain` per eviction for every relay of the domain | Typed Ratchet 03 |
-| interconnect `targets`, `slots`, `connections` | `try_lease` and `ensure_slot` reads per outbound request, acknowledgement and relay send | Typed Ratchet 03 |
-| `RuntimeInner::message_error_routes` | occupied `entry` per buffered failed record, holding the write lock across route construction | Typed Ratchet 03 |
-| `RuntimeInner::domain_routings` | get for every fresh ingest route collector (per endpoint request and per acknowledged source batch) and per branch eviction | Typed Ratchet 03 |
 | `ReplicatedMaterializedRelayState::entries` | `get_mut` per record; `record` per batch per dependency | Typed Ratchet 04 |
 | `RuntimeInner::replicated_materialized_stream_states` | get per materialized dependency read; full iteration per generator tick | Typed Ratchet 04 |
 | `RuntimeInner::relay_branch_presences` | get per materialized dependency read and per generated record in `materialized_stream_key_is_visible` | Typed Ratchet 04 |
@@ -207,8 +202,6 @@ the task in its next round, and `pending_state_replica_syncs` is deleted. See
 | Map | Readers and writers | Frequency | Handle, owner and generation | Guard and bound | Disposition |
 | --- | --- | --- | --- | --- | --- |
 | `RelayBoundaryServices::branch_presence` (not a map: the owner task's published `BranchPresence`) | the relay owner publishes on branch creation, eviction, expiry, claim and release; `DESCRIBE`, materialized visibility and the console branch list load it | lifecycle (publication); observer (loads) | owner task, fenced by owner lifetime | lock-free load; one publication per changed owner step | retain: bounded protocol (owner-published membership) |
-| `RelayBoundaryServices::ingress_slots` | `entry` on a branch's first forwarded batch; get on every later one; remove and cancel on eviction | per batch | first batch installs; channel incarnation reopened after idleness or an indeterminate outcome | slot gate held across encode and dispatch by design | Typed Ratchet 03 |
-| `RelayBoundaryServices::outbound_slots` | `entry` on a channel's first batch; get with a rebuilt key per batch and destination; `retain` per eviction | per batch per destination | relay owner task; as ingress | as ingress; slots of departed consumers stay until eviction | Typed Ratchet 03 |
 | `RuntimeInner::relay_boundary_fanouts` | inserted at domain build; read by capacity changes, gates, generators, drain polls | lifecycle, observer | services keep the fanout; never removed | values cloned out | retain: lifecycle registry |
 | `RemoteDispatchRegistry::pending_acks` | insert per forwarded row with acknowledgements, naming its receiver; get per admitted delivery row and per `Alive`, and get_mut per ordered parked or resumed progress report; a sweep iterates every entry once a second and fails a silent one through a predicate-rechecked `remove_if`; remove per terminal | per record, per ACK; sweep every second | shared by dispatchers, the incoming loop and the sweep; process-run identity fence | `Ref` over the admission and `Alive` updates; an admitted share fails after 15 s without a report from its receiver; no cap | Typed Ratchet 05 |
 | `RemoteDispatchRegistry::pending_relay_admissions` | insert per relay payload and destination; get per `Alive`; remove per terminal | per remote frame, per ACK | waiter keeps its receiver; process-run identity fence | ≤1 per outbound channel; 5 s inactivity, 300 s total | Typed Ratchet 05 |
@@ -239,11 +232,10 @@ the task in its next round, and `pending_state_replica_syncs` is deleted. See
 | Map | Readers and writers | Frequency | Handle, owner and generation | Guard and bound | Disposition |
 | --- | --- | --- | --- | --- | --- |
 | `RuntimeInner::executions` | schedule installation and observation; tasks bind clock, routing and assignment handles | lifecycle, observer | start version and published lifecycle generation | no record or batch guard for the repaired sites | retain: lifecycle registry |
-| `RuntimeInner::domain_routings` | inserted at install; read at task start and by the sites above | per batch, per record | one stable publication handle per domain | cloned out | map: retain: lifecycle registry; recurring sites: Typed Ratchet 03 |
+| `RuntimeInner::domain_routings` (`ArcSwap` persistent table) | installed at successful publication, withdrawn at domain removal and cleared on shutdown; tasks retain the selected domain publisher; fresh intake and eviction read the immutable table | per fresh request or source batch; per eviction | one stable routing publisher per installed domain | changed key copies a persistent path; reads acquire no discovery shard | retain: immutable publication |
 | `RuntimeInner::domains` | committed lifecycle installation and task binding | lifecycle, observer | pause, generation and start point publish with clock installation | no ingest-group, Kafka-poll or generator-record guard | retain: lifecycle registry |
-| `RuntimeInner::message_error_routes` | `entry` per buffered failed record; removed at domain stop | per record (failure path) | plan pointer identity | write guard spans route construction | Typed Ratchet 03 |
 | `RuntimeInner::ingestors`, `ingestor_quiescence`, `client_ingestors` | start, stop and swap; drain polls and `DESCRIBE` | lifecycle, observer | hosts keep their control and command handles | short | retain: lifecycle registry |
-| `RuntimeInner::ingestor_readiness` | source poll success and suspension mark the current source instance ready/unready through `get_mut`; observers read status | per successful poll, source transition, observer | retain the readiness publication with the source host and its exact incarnation | one short shard write, no await | recurring marking: Typed Ratchet 03; installation/observation: lifecycle/observer |
+| `RuntimeInner::ingestor_readiness` | prepare and retire exact instance handles; readiness observers read aggregate state | lifecycle, observer | source host retains its instance scalar; retirement is final | source polling acquires no registry guard; predecessor retired before replacement | retain: lifecycle registry |
 | `RuntimeInner::ingestor_statuses` | sources retain a coherent failure/retry publication; healthy clears do not write | lifecycle, observer | one status per ingestor, shared by its instances | task preparation installs the slot; stop removes it | retain: lifecycle registry |
 | `RuntimeInner::emitter_statuses` | sinks retain a coherent failure/retry publication; healthy clears do not write | lifecycle, observer | sink and event-loop readers share status; retry remains drain work even without buffered messages | task registration and teardown; no recurring map guard | retain: lifecycle registry |
 | `RuntimeInner::emitter_confirmation_waits` | resolve at emitter spawn; guards increment/decrement the retained scalar | lifecycle, observer | registration follows emitter task lifetime | removed at task end with pointer identity | retain: lifecycle registry |
@@ -260,13 +252,21 @@ the task in its next round, and `pending_state_replica_syncs` is deleted. See
 | `RelayConsumerQueue::batches` (`ConcurrentQueue`) | one push per batch per consumer; one receiver pops | per batch | receiver owns its queue | lock-free, bounded by admitted count | retain: bounded protocol (relay fan-out queue) |
 | `DeduplicatorKeyspace::recent_keys` (`ExpiryMap`), `BranchInstanceRegistry`, `WasmAckMap` | their one task mutates them through `&mut self` | per record, single owner | branch or task owner | no locks | retain: single owner |
 
+### Relay channel publications
+
+| Publication | Readers and writers | Frequency | Handle, owner and generation | Guard and bound | Disposition |
+| --- | --- | --- | --- | --- | --- |
+| `RelayChannels::branches` (`ArcSwap` persistent table) | producer binding, exact branch withdrawal | first use and explicit branch invalidation; fresh fanout selection | retained branch allocation; receiver and producer endings are distinct | CAS gives first-use races one winner; withdrawal cancels before removing the exact allocation; persistent changed-key path | retain: immutable publication |
+| `RelayBranchChannels::routes` and `BranchRoutes::destinations` | producers select route generation and destination slot | per batch; insertion only on first use or route replacement | owner/consumer publication cancellation parent, branch lifetime and exact slot token | one ordering gate per channel; cancellation bounds gate and transport waits; no per-batch table rebuild | retain: immutable publication and bounded ordering |
+| `BranchRoutes::subscriptions` | observed gossip snapshot replaces the live advertisement selection | first observed snapshot; stable fanout reads | node incarnation and advertisement version; exact subscription generation | equal advertisements retain slots; changed live set cancels the preceding generation; table bounded to advertised peers | retain: immutable publication |
+
 ### Interconnect
 
 | Map | Readers and writers | Frequency | Handle, owner and generation | Guard and bound | Disposition |
 | --- | --- | --- | --- | --- | --- |
-| `targets` | health passes, gossip registration and bootstrap write; `try_lease` reads | per remote frame | no retained selection; endpoint identity renews slot keys | ≤ `max_peers` | Typed Ratchet 03 |
-| `slots` | `entry` installs one `run_slot` per key; `contains_key` per lease | per remote frame | per-key slot task; cancel-token identity | single run task per key | Typed Ratchet 03 |
-| `connections` | registered after connect; get per lease | per remote frame | retiring token and peer epoch | one connection per slot key | Typed Ratchet 03 |
+| `targets` (`ArcSwap` persistent table) | health, gossip and bootstrap publish endpoints; leases read immutable targets | per operation | target retains a fixed array of slots for each pool class | at most `max_peers`; persistent changed-key path | retain: immutable publication |
+| `SlotControl::connection` (`ArcSwapOption`) | one claimed slot worker publishes authenticated connections and clears on loss | per lease, connection lifecycle | endpoint/TLS cancellation lifetime and authenticated peer epoch; lease retains exact connection | one current connection per slot; one atomic worker claim; fixed pool scan | retain: immutable publication |
+| `connections` | connection registration, exact retirement, statistics and shutdown | lifecycle, observer | cancel-token and allocation identity prevent predecessor teardown from removing its replacement | one connection per slot key; no recurring selection guard | retain: lifecycle registry |
 | `peer_connections`, `inbound_pool_connections` | connection open and close | lifecycle | registration paths | peer and pool caps | retain: lifecycle registry |
 | `grants` | insert per grant request; claim per body; expiry task per grant | per remote frame | no single owner; random id checked against peer, epochs and expiry | queue and terminal permits, 5 s lifetime | Typed Ratchet 05 |
 | `relay_attempts`, `active_relay_channels`, `relay_admissions`, `relay_watermarks` | grant, body, cancel and terminal handlers; 100 ms progress scan; 60 s sweep | per remote frame, per ACK, steady poll | channel, sequence and process epochs; pointer identity on retirement | consistent lock order; ≤1 unadmitted batch per channel; watermarks time-bounded only | Typed Ratchet 05 |
@@ -344,7 +344,7 @@ epic, but tracing them found defects:
 - `shared_clients` release removes its slot after decrementing without rechecking its users, so a
   lease that joins in between can be orphaned.
 - The gossip `outgoing` map keeps one idle worker per address forever.
-- `relay_boundary_fanouts` and `domain_routings` are never removed with their domain.
+- `relay_boundary_fanouts` is never removed with its domain.
 - The Shuttle `DashMap` adapter documentation claims it observes every shard acquisition; it models
   one lock over the whole map.
 
