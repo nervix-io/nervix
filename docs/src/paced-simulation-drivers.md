@@ -196,7 +196,8 @@ lines for the same run. Errors go to standard error, prefixed with `error:`.
 | `REJECTED reading_id=… occurred_at=… error_code=… error_message=…` | A rejection notice arrived |
 | `INTERRUPTED consumer=…`, `CONSUMER reopen_required\|reopened\|left\|unavailable …` | A consumer's attachment changed |
 | `CONSUMER delayed`, `PRODUCER unavailable`, `… close_failed`, `CLOCK detach_failed` | A consumer waits to join, the session could not be restored for a submission yet, or closing failed |
-| `REOPENED generation=…` | The run moved on to a new START generation |
+| `REOPENED generation=… ingestor=… reason=…` | The producer accepted a changed contract within the current START generation |
+| `REOPENED generation=… ingestor=… after=…` | The run moved on to a new START generation |
 | `REPLAY tick=… readings=…`, `REPLAY expired\|skipped …` | A replay resubmitted, or could not resubmit, ledger readings |
 | `INSPECT …` | An inspection of the ingestor and the output emitter |
 | `WAITING notices outstanding=…`, `NOTICES missing=…` | The run waits for rejection notices of completed batches |
@@ -278,10 +279,31 @@ The clock and the data endpoints recover independently, and neither waits for th
   idempotent, not because delivery is exactly once.
 - A delivery whose acknowledgement was lost comes again with the same identity and a fresh
   reference, and is recorded as a duplicate.
+- When an endpoint requires a new open because its contract or schema changed, it was removed,
+  it violated the protocol, or restoration was refused, the driver opens a fresh producer or
+  consumer immediately in the current START generation. Consumers print `CONSUMER reopen_required`
+  and `CONSUMER reopened`; the producer prints `REOPENED` with the unchanged generation and the
+  reason. An `endpoint unavailable` refusal is retried within the existing 30-second physical
+  open budget. A flush-only change preserves the contract and requires no application reopen.
+  Clock and credit waits recheck the endpoint every 200ms, so a slow domain rate does not defer
+  reopening until the next tick. Suspended admission pauses planning before it creates readings.
+  An alteration must drain admitted work before it publishes the changed contract. The example's
+  buffered branched input route can currently leave a partial batch outstanding during an ingestor
+  alteration, causing that alteration to time out. Use `FLUSH IMMEDIATE` on the input route when
+  demonstrating contract replacement until this runtime drain issue is resolved. An unsuccessful
+  alteration keeps the committed contract and requires no reopen.
+- Each replacement validates the example's exact fields again and requests the same credit
+  limits. A schema mismatch, removed endpoint, or unusable credit limit ends the run with status
+  2 and the endpoint's refusal text. A fresh producer has fresh credit; outstanding submissions
+  retain their original producer and credit until their outcomes resolve. Nothing with an unknown
+  outcome is resent. A tick already planned when its producer ended is recorded as `not_admitted
+  not_sent` if it never left the client, or with the node's refusal if it reached the node. These
+  readings can be resubmitted only by an explicit `--replay`.
 - `STOP` ends the producer and the consumers with the generation; their batches that had not
   completed end not admitted or of unknown outcome. With `--follow-generations` the driver waits for
   the next `START`, opens a new producer and new consumers under the new generation, and continues
   from that generation's reached tick center. Without it the run finishes.
+  The `domain_stopped` and `generation_changed` reopen reasons wait for this next generation.
 - With `--consumer-delay` the output emitter has no consumer at first: it retains the batches it
   could not deliver, which `DESCRIBE EMITTER` shows, and the producer stops being granted credit once
   its outstanding batches fill it. The backlog is bounded by that credit. Consumers that join drain

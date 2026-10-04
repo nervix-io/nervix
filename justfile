@@ -172,6 +172,7 @@ test: tests-deps
         nervix-execution
         nervix-interconnect
         nervix-model-harness
+        nervix-paced-simulation
         nervix-primitives
         nervix-server
         nervix-wasm
@@ -190,6 +191,7 @@ test: tests-deps
         --package nervix-execution \
         --package nervix-interconnect \
         --package nervix-model-harness \
+        --package nervix-paced-simulation \
         --package nervix-wasm
     cargo test --all-targets --features native --package nervix-primitives
     just test-capability-docs
@@ -407,6 +409,8 @@ test-primitives-compile:
 # `@deadlock_diagnostics` and `@restore_installation` scenarios, without retries, in a scenario
 # binary built for the mode: in-process nodes, real diagnostic server processes on one and three
 # nodes, interrupted restore installation and stale publication after leadership transfer. Each
+# contract-change scenario also runs the diagnostic Rust paced driver; the Python application's
+# locks remain outside the detector while its diagnostic nodes are tracked. Each
 # invocation's output stays under target/deloxide/test-deloxide, and the scenario binary's own
 # evidence under its evidence directory there. An invocation that executed no check fails the run,
 # and so does a smoke whose scenarios did not all run and pass. The whole run is bounded by
@@ -459,6 +463,20 @@ test-deloxide budget_seconds="2400": tests-deps
         exit 1
     fi
     echo "test-deloxide: probes accounted for and ${summary}"
+    cargo build --package nervix-paced-simulation --features deloxide
+    export NERVIX_PACED_SIMULATION_PATH="${CARGO_TARGET_DIR}/debug/nervix-paced-simulation"
+    export NERVIX_CLIENT_LIBRARY={{ quote(cargo_target_dir + "/debug/libnervix_client_ffi.so") }}
+    within_budget paced-simulation \
+        cargo test --features 'testing deloxide' --test scenarios -- \
+            --input tests/features/runtime/paced_simulation.feature \
+            --tags @paced_simulation_reopen --retry 0
+    summary="$(grep -E '^[0-9]+ scenarios? \(' "${logs}/paced-simulation.log" | tail -n 1 || true)"
+    if [[ ! "${summary}" =~ ^([1-9][0-9]*)\ scenarios?\ \(([0-9]+)\ passed\)$ ]] \
+        || [[ "${BASH_REMATCH[1]}" != "${BASH_REMATCH[2]}" ]]; then
+        echo "test-deloxide: the paced driver scenarios did not all run and pass: ${summary:-no summary}" >&2
+        exit 1
+    fi
+    echo "test-deloxide: paced driver ${summary}"
 
 # The packages whose `shuttle_` checks `test-shuttle` explores, as the Shuttle inventory lists them,
 # and whose test builds `shuttle-clippy-targets` lints. scripts/tests/test_shuttle_checks.py holds
@@ -855,6 +873,7 @@ test-coverage: tests-deps
         nervix-execution
         nervix-interconnect
         nervix-model-harness
+        nervix-paced-simulation
         nervix-primitives
         nervix-server
         nervix-wasm
@@ -878,9 +897,10 @@ test-coverage: tests-deps
         --package nervix-execution \
         --package nervix-interconnect \
         --package nervix-model-harness \
+        --package nervix-paced-simulation \
         --package nervix-wasm
     cargo llvm-cov --no-report --all-targets --features native --package nervix-primitives
-    cargo llvm-cov report --workspace --no-default-ignore-filename-regex --lcov --output-path lcov-workspace.info
+    cargo llvm-cov report --no-default-ignore-filename-regex --lcov --output-path lcov-workspace.info
     cargo llvm-cov report --package nervix-cli --package nervix-web-console \
         --package nervix-server --lcov --output-path lcov.info
 
@@ -897,7 +917,7 @@ test-scenarios-coverage: tests-deps
     install -m 755 {{ quote(cargo_target_dir + "/debug/nervix-nspl-format") }} \
         {{ quote(cargo_target_dir + "/llvm-cov-target/debug/nervix-nspl-format") }}
     cargo llvm-cov --no-report --features testing --package nervix-server --test scenarios
-    cargo llvm-cov report --workspace --no-default-ignore-filename-regex --lcov --output-path lcov-workspace.info
+    cargo llvm-cov report --no-default-ignore-filename-regex --lcov --output-path lcov-workspace.info
     cargo llvm-cov report --package nervix-cli --package nervix-web-console \
         --package nervix-server --lcov --output-path lcov.info
 
@@ -910,7 +930,7 @@ coverage-clean-workspace:
 # Rewrite lcov.info from the profiles the last coverage recipe collected, over the sources of every
 # workspace package, so crate lines the server's tests executed are measured as CI measures them.
 coverage-report-workspace *args:
-    cargo llvm-cov report --workspace --no-default-ignore-filename-regex --lcov --output-path lcov.info {{ args }}
+    cargo llvm-cov report --no-default-ignore-filename-regex --lcov --output-path lcov.info {{ args }}
 
 # Check the same merged workspace coverage and complexity limit locally as CI does.
 check-coverage report="lcov-workspace.info":
@@ -1075,7 +1095,7 @@ coverage-archive-counts output="target/archive-counts.lcov": tests-deps
 coverage-archive-counts-tests-append output="target/archive-counts-tests.lcov":
     cargo llvm-cov --no-report --package nervix-models --test representations
     cargo llvm-cov --no-report --package nervix-consensus --lib
-    cargo llvm-cov report --workspace --no-default-ignore-filename-regex --lcov --output-path {{ quote(output) }}
+    cargo llvm-cov report --no-default-ignore-filename-regex --lcov --output-path {{ quote(output) }}
 
 # Retain the current package profiles while collecting both server archive owners.
 coverage-archive-counts-server-append output="target/archive-counts.lcov": download-onnxruntime
@@ -1121,6 +1141,56 @@ coverage-scenarios-append output *args: tests-deps
     install -m 755 {{ quote(cargo_target_dir + "/debug/nervix-nspl-format") }} \
         {{ quote(cargo_target_dir + "/llvm-cov-target/debug/nervix-nspl-format") }}
     cargo llvm-cov --no-clean --features testing --test scenarios --no-default-ignore-filename-regex --lcov --output-path {{ quote(output) }} -- {{ args }}
+
+# Measure both published paced drivers through their public scenarios, including Python threads
+# and Rust unit tests. The Python report is written beside `output` with a `.python.lcov` suffix.
+# A compiled scenario binary can run the instrumented drivers without rebuilding the server.
+coverage-paced-simulation output="target/paced-simulation.lcov" scenario_binary="" *args: tests-deps
+    #!/usr/bin/env bash
+    set -euo pipefail
+    collection_dir="$(mktemp -d {{ quote(cargo_target_dir + "/paced-simulation-coverage.XXXXXX") }})"
+    cat > "${collection_dir}/sitecustomize.py" <<'PYTHON'
+    import sys
+    if sys.argv[0].endswith("paced_simulation.py"):
+        import coverage
+        coverage.process_startup()
+    PYTHON
+    cat > "${collection_dir}/coverage.ini" <<CONFIG
+    [run]
+    branch = true
+    parallel = true
+    source = {{ justfile_directory() }}/examples/paced-simulation/python
+    data_file = ${collection_dir}/python.coverage
+    CONFIG
+    export PYTHONPATH="${collection_dir}${PYTHONPATH:+:${PYTHONPATH}}"
+    export COVERAGE_PROCESS_START="${collection_dir}/coverage.ini"
+    if [[ -n {{ quote(scenario_binary) }} ]]; then
+        just coverage-paced-simulation-binaries
+        (
+            source <(CARGO_TARGET_DIR={{ quote(cargo_target_dir + "/llvm-cov-target") }} \
+                cargo llvm-cov show-env --sh 2>/dev/null)
+            export NERVIX_TEST_CLI_PATH={{ quote(cargo_target_dir + "/debug/nervix-cli") }}
+            export NERVIX_PACED_SIMULATION_PATH={{ quote(cargo_target_dir + "/llvm-cov-target/debug/nervix-paced-simulation") }}
+            export NERVIX_CLIENT_LIBRARY={{ quote(cargo_target_dir + "/llvm-cov-target/debug/libnervix_client_ffi.so") }}
+            install -m 755 {{ quote(cargo_target_dir + "/debug/nervix-nspl-format") }} \
+                {{ quote(cargo_target_dir + "/llvm-cov-target/debug/nervix-nspl-format") }}
+            uv run --no-project --with coverage==7.11.0 just test-scenarios-binary {{ quote(scenario_binary) }} \
+                --input tests/features/runtime/paced_simulation.feature {{ args }}
+        )
+    else
+        uv run --no-project --with coverage==7.11.0 just coverage-scenarios {{ quote(output) }} \
+            --input tests/features/runtime/paced_simulation.feature {{ args }}
+    fi
+    uvx --from coverage==7.11.0 coverage combine --data-file "${collection_dir}/python.coverage"
+    uvx --from coverage==7.11.0 coverage lcov --data-file "${collection_dir}/python.coverage" \
+        -o {{ quote(output + ".python.lcov") }}
+    just coverage-paced-simulation-report {{ quote(output) }}
+
+# Add the driver's unit coverage to already collected public-driver profiles and export them.
+coverage-paced-simulation-report output="target/paced-simulation.lcov":
+    cargo llvm-cov --no-clean --package nervix-paced-simulation --lib --lcov --output-path {{ quote(output) }}
+    cargo llvm-cov report --no-default-ignore-filename-regex --lcov \
+        --output-path {{ quote(output) }}
 
 # Measure the Redis DNS connector, its shared TLS/DNS code, and public source/sink scenarios.
 coverage-redis output="target/redis-dns.lcov": tests-deps
@@ -1588,7 +1658,6 @@ clippy_all_features_packages := [
     "nervix-models",
     "nervix-nspl",
     "nervix-nspl-format",
-    "nervix-paced-simulation",
     "nervix-primitives-macros",
     "nervix-recovery",
     "nervix-roto",
@@ -1657,6 +1726,7 @@ ordinary-clippy-targets: \
     *(clippy-target *["nervix-execution", "nervix-interconnect", "nervix-model-harness", "nervix-wasm"] ["--all-targets"]) \
     (clippy-target "nervix-server" ["--all-targets", "--features", "benchmarks testing"]) \
     (clippy-target "nervix-client-core" ["--all-targets", "--features", "autocomplete"]) \
+    (clippy-target "nervix-paced-simulation" ["--all-targets"]) \
     (clippy-target "nervix-consensus" ["--all-targets", "--features", "testing"]) \
     (clippy-target "nervix-primitives" ["--all-targets", "--features", "native"]) \
     (clippy-target "nervix-primitives" ["--all-targets", "--features", "native test-util"]) \
@@ -1704,6 +1774,7 @@ cargo-clippy-deloxide jobs=default_jobs: (run-with-jobs "deloxide-clippy-targets
 deloxide-clippy-targets: \
     (clippy-target "nervix-primitives" ["--all-targets", "--features", "deloxide native"]) \
     (clippy-target "nervix-deadlock" ["--all-targets", "--features", "deloxide"]) \
+    (clippy-target "nervix-paced-simulation" ["--all-targets", "--features", "deloxide"]) \
     (clippy-target "nervix-server" ["--lib", "--bins", "--features", "deloxide"]) \
     (clippy-target "nervix-server" ["--all-targets", "--features", "deloxide testing"])
 
