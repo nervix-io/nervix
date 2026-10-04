@@ -21,14 +21,16 @@ use arrow_schema::{DataType, Field, Schema};
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_execution::{Executor, MemoryClass};
 use nervix_interconnect::{
-    ConnectionFailureReason, Envelope, InterconnectRequest, PeerResolver, PeerTarget, PoolClass,
-    ReceivedEnvelope, RelayDelivery, RelayPayload, RelayPayloadKind, RemoteOperationFailure,
-    RemoteOperationSubject, RequestError, RequestSubquota, TlsConfigBundle, Transport,
-    TransportClock, TransportEntropy, TransportError, TransportIdentity, TransportOptions,
+    ConnectionFailureReason, ControlEnvelope, Envelope, InterconnectRequest, PeerResolver,
+    PeerTarget, PoolClass, ReceivedEnvelope, RelayDelivery, RelayPayload, RelayPayloadKind,
+    RemoteOperationFailure, RemoteOperationSubject, RequestError, RequestSubquota, RuntimeState,
+    StateCheckpointAvailable, StatePlacementEnvelope, StateReplicationAck, StateSnapshotEnvelope,
+    StateSyncRequest, StateSyncResponse, TlsConfigBundle, Transport, TransportClock,
+    TransportEntropy, TransportError, TransportIdentity, TransportOptions,
 };
 use nervix_models::{
-    ClusterNodeIdentity, ClusterNodeIncarnation, ClusterNodeName, DomainName, NodeEndpoint,
-    RelayName, RemoteAckRegistration,
+    ClusterNodeIdentity, ClusterNodeIncarnation, ClusterNodeName, DomainName, ModelKind, ModelName,
+    NodeEndpoint, RelayName, RemoteAckRegistration, SchemaFingerprint, WasmStateGeneration,
 };
 use nervix_primitives::sync::{StdArc, mpsc, watch};
 use rcgen::{
@@ -315,12 +317,26 @@ async fn register_peer(transport: &Transport, name: &str) {
         .assured("fixture target registration succeeds");
 }
 
+fn state_frame_placement(generation: u64) -> StatePlacementEnvelope {
+    StatePlacementEnvelope {
+        domain: DomainName::parse("simulated").assured("fixture domain is valid"),
+        state: RuntimeState::WasmProcessor {
+            schema: SchemaFingerprint::from_digest([7; 32]),
+            generation: WasmStateGeneration::try_from(generation)
+                .assured("fixture generations are positive"),
+        },
+        kind: ModelKind::WasmProcessor,
+        identifier: ModelName::parse("guest").assured("fixture processor is valid"),
+        branch_key: None,
+    }
+}
+
 #[test]
-fn production_transport_exchanges_typed_arrow_batch_over_simulated_tcp() {
+fn production_transport_exchanges_typed_arrow_batch_and_state_frames_over_simulated_tcp() {
     let scenario = Scenario {
         name: "typed Arrow exchange",
         fault_plan: "none; the server rebinds its listener, then the client sends a typed Arrow \
-                     request and an Arrow relay",
+                     request, an Arrow relay and generation-qualified state replication frames",
         seeds: &[49],
     };
     scenario.check(config, exchange_typed_arrow_batch);
@@ -361,6 +377,22 @@ fn exchange_typed_arrow_batch(run: ScenarioRun) -> Result<(), SimulationError> {
                             }
                         })
                         .assured("fixture handler is registered once");
+                    server
+                        .register_handler::<StateSyncRequest, _, _>(|context, request| async move {
+                            assert_eq!(context.peer_node_id().as_str(), "client");
+                            assert_eq!(request.after_lsm, Some(0));
+                            assert!(
+                                request.placement == state_frame_placement(1)
+                                    || request.placement == state_frame_placement(2)
+                            );
+                            StateSyncResponse {
+                                result: Ok(Some(StateSnapshotEnvelope {
+                                    lsm: 1,
+                                    payload: vec![7],
+                                })),
+                            }
+                        })
+                        .assured("state synchronization handler registers once");
                     server.replace_live_nodes(&BTreeSet::from([
                         ClusterNodeName::parse("client").assured("fixture node name is valid"),
                         ClusterNodeName::parse("server").assured("fixture node name is valid"),
@@ -383,6 +415,44 @@ fn exchange_typed_arrow_batch(run: ScenarioRun) -> Result<(), SimulationError> {
                         .assured("a received relay has an admission token")
                         .admit();
                     trace.record("server", "Arrow relay from the client admitted");
+                    let mut expected = Vec::new();
+                    for generation in [1, 2] {
+                        expected.push((state_frame_placement(generation), false));
+                        expected.push((state_frame_placement(generation), true));
+                    }
+                    for _ in 0..4 {
+                        let received =
+                            nervix_primitives::time::timeout(HOST_DEADLINE, incoming.recv())
+                                .await
+                                .assured("a state frame arrives before the simulated deadline")
+                                .assured("the frame receiver remains open");
+                        assert_eq!(received.peer_node_id.as_str(), "client");
+                        let (placement, announced, lsm) = match received.envelope {
+                            Envelope::Control(ControlEnvelope::StateReplicationAck(ack)) => {
+                                (ack.placement, false, ack.lsm)
+                            }
+                            Envelope::Control(ControlEnvelope::StateCheckpointAvailable(
+                                checkpoint,
+                            )) => (checkpoint.placement, true, checkpoint.lsm),
+                            other => {
+                                panic!("expected a state-replication frame, received {other:?}")
+                            }
+                        };
+                        assert_eq!(lsm, 1);
+                        let index = expected
+                            .iter()
+                            .position(|candidate| candidate == &(placement.clone(), announced))
+                            .assured(
+                                "each current generation and frame kind is delivered exactly once",
+                            );
+                        expected.remove(index);
+                    }
+                    assert!(expected.is_empty());
+                    trace.record(
+                        "server",
+                        "authenticated state frame placements and generations retained",
+                    );
+
                     let mut done = done_rx;
                     wait_for(&mut done).await;
                     server.shutdown().await;
@@ -445,6 +515,51 @@ fn exchange_typed_arrow_batch(run: ScenarioRun) -> Result<(), SimulationError> {
                         .await
                         .assured("the production relay transfers the Arrow IPC batch");
                     trace.record("client", "Arrow relay transferred");
+                    for generation in [1, 2] {
+                        let placement = state_frame_placement(generation);
+                        let snapshot = client
+                            .request(
+                                &server,
+                                StateSyncRequest {
+                                    placement: placement.clone(),
+                                    after_lsm: Some(0),
+                                },
+                            )
+                            .await
+                            .assured(
+                                "a typed synchronization request reaches its production handler",
+                            );
+                        assert_eq!(
+                            snapshot.result,
+                            Ok(Some(StateSnapshotEnvelope {
+                                lsm: 1,
+                                payload: vec![7]
+                            }))
+                        );
+                        client
+                            .send(
+                                &server,
+                                Envelope::Control(ControlEnvelope::StateReplicationAck(
+                                    StateReplicationAck {
+                                        placement: placement.clone(),
+                                        lsm: 1,
+                                    },
+                                )),
+                            )
+                            .await
+                            .assured("a typed state acknowledgement transfers");
+                        client
+                            .send(
+                                &server,
+                                Envelope::Control(ControlEnvelope::StateCheckpointAvailable(
+                                    StateCheckpointAvailable { placement, lsm: 1 },
+                                )),
+                            )
+                            .await
+                            .assured("a typed checkpoint announcement transfers");
+                    }
+                    trace.record("client", "typed state requests and frames transferred");
+
                     done_tx.send_replace(true);
                     client.shutdown().await;
                     Ok::<(), std::io::Error>(())

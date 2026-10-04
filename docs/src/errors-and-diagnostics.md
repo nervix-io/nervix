@@ -833,6 +833,10 @@ its absence is a broken invariant. A watch value needed by later subscribers use
 so loss of current subscribers cannot leave stale state. [Shutdown And Recovery](./shutdown.md)
 owns where these outcomes occur during stop and drain.
 
+Closing the runtime's checkpoint announcement task owner after drain cancels pending dispatches
+and retry waits, then joins them before withdrawing their routes. This cancellation is an ordinary
+terminal task ending; replica synchronization supplies any missed checkpoint availability hint.
+
 Broken internal guarantees take the explicit panic classes `assured` for a construction or platform
 guarantee, `verified` for a condition checked on the current path, and `todo` for a deliberately
 unimplemented path. An actually reachable failure instead becomes a typed error or a valid state
@@ -894,3 +898,12 @@ Reporting a different error without selecting a new retry preserves the active r
 renders error, backoff and remaining wait from one immutable observation. A failed record obtains
 its prepared message-error route from its task's retained routing publication and preserves that
 plan while its VM program and delivery execute.
+
+## Replication Routing
+
+Replication frame routing treats an absent state, an ended route or a replaced assignment as an
+ordinary non-admission: it creates no state and records no replica progress. Synchronization
+request admission retains the existing rejected-assignment outcome. A WASM reset lifecycle wait
+reports the existing typed superseded-state failure when its retained assignment loses identity
+or primary ownership, the existing replica-plan-shrunk failure when its promised boundary loses
+replicas, and the existing replica-confirmation failure when its deadline expires.

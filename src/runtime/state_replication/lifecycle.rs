@@ -37,6 +37,7 @@ impl Runtime {
             processor,
             branch.clone(),
         )?;
+        self.inner.state_replication_routing.retire(&placement);
         self.inner
             .replicated_window_processor_states
             .remove(&placement);
@@ -84,6 +85,7 @@ impl Runtime {
             .map(|entry| entry.key().clone())
             .collect::<Vec<_>>();
         for placement in placements {
+            self.inner.state_replication_routing.retire(&placement);
             self.inner
                 .replicated_materialized_stream_states
                 .remove(&placement);
@@ -124,6 +126,7 @@ impl Runtime {
             .map(|entry| entry.key().clone())
             .collect::<Vec<_>>();
         for placement in placements {
+            self.inner.state_replication_routing.retire(&placement);
             self.inner.replicated_deduplicator_states.remove(&placement);
         }
         if let Some(store) = &self.inner.state_store {

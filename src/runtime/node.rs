@@ -102,6 +102,10 @@ pub(in crate::runtime) struct RuntimeInner {
         Arc<DashMap<DomainName, ActiveDomainAlter, RandomState>>,
     pub(in crate::runtime) state_identities:
         DashMap<DomainNodeRef, SharedStateAssignment, RandomState>,
+    /// Immutable routes retain the state installed for each replication relationship. Frames and
+    /// announcers share those handles with the executing tasks until cold teardown retires them.
+    pub(in crate::runtime) state_replication_routing:
+        state_replication::routing::StateReplicationRouting,
     /// The endpoint task of every client ingestor this node executes, kept while the ingestor
     /// restarts so its producers stay attached.
     pub(in crate::runtime) client_ingestors:
@@ -134,8 +138,8 @@ pub(in crate::runtime) struct RuntimeInner {
     /// Owns acknowledgement progress tasks so none can retain an interconnect after shutdown.
     pub(in crate::runtime) remote_ack_watcher_tasks: TaskTracker,
     /// Owns checkpoint announcement work that outlives the event that scheduled it. Closing it
-    /// when the runtime stops ends every announcer.
-    pub(in crate::runtime) state_replication_tasks: TaskTracker,
+    /// after domain drain cancels each announcer, including a pending dispatch or retry wait.
+    pub(in crate::runtime) state_replication_tasks: state_replication::CheckpointAnnouncementTasks,
     /// The copy of each branch checkpoint this node installed as a replica, taken when it is
     /// promoted and dropped when its branch lifecycle stops naming the branch.
     pub(in crate::runtime) passive_runtime_state_snapshots:

@@ -964,8 +964,9 @@ acknowledgements complete.
 
 A replica catches the branch-keyed entities it replicates up in rounds, one replica task for each
 entity, through two replication-class requests. A state synchronization request names one placement
-and the revision the replica holds of it. The owner answers from the registry that keeps the
-placement's kind of state: with the checkpoint when it is newer, and with nothing otherwise. Only for
+and the revision the replica holds of it. The owner answers through the actual state handle
+published when that placement was installed: with the checkpoint when it is newer, and with
+nothing otherwise. Only for
 a placement it holds no state for does the owner read its storage. A branch checkpoint listing
 request names the entity's branch lifecycle placement and the cursor the replica's previous listing
 returned. The owner answers with the next changes of its catalog of the entity's branch
@@ -975,7 +976,11 @@ state went away, followed by the cursor after them and whether more changes foll
 restarts from the catalog's beginning when the replica has no cursor, when its cursor belongs to
 another catalog, such as one a replaced or restarted owner kept, and when it is older than the
 oldest removal the catalog kept. An owner that holds no branch state of the entity answers that it
-holds none. Both requests are answered only while the answering node is assigned the placement. A
+holds none. Both requests are answered only while the answering node is assigned the placement. Admission
+reads the retained entity assignment from the immutable routing publication; state and catalog
+selection never reads the execution, identity or replicated-state registries. Route withdrawal
+ends the exact state handle before replacement, while an already admitted request may finish on
+the state it borrowed. A
 round synchronizes the lifecycle, reads the catalog's changes, and requests only the checkpoints of
 the branches that changed or were announced, so a round in which no branch changed sends two
 requests however many branches the entity has.
@@ -984,7 +989,13 @@ The owner of a placement offers its newest checkpoint to the replicas the commit
 assigns, and repeats the offer every 100 milliseconds to each replica that has not acknowledged
 that revision, until every one of them has, the node stops being the placement's primary, the
 placement's state goes away, or the node stops. A newer checkpoint taken meanwhile raises the
-revision on offer instead of starting a second offer. The owner records the highest revision each
+revision on offer instead of starting a second offer. Each announcer retains the installed route
+and reads its primary and replica set from the same assignment slot used by checkpoint execution.
+Removal, a replaced identity or loss of primary ownership ends its next step. Terminal runtime
+teardown cancels a pending announcement dispatch or retry wait after domain drain, then joins the
+announcers before withdrawing their routes. These messages are availability hints; the replica's
+periodic synchronization supplies a hint cancelled during shutdown. The owner records
+the highest revision each
 replica acknowledged, so an acknowledgement delivered after a newer one never lowers it, and a
 Kafka offset commit waiting for its replica quorum, like a WASM checkpoint waiting for its replicas,
 completes on the acknowledgement that satisfies it rather than at its deadline. Only a node that

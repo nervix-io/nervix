@@ -408,7 +408,12 @@ which values remain legitimate zeros, empty content, Arrow masked lanes, and pri
 Healthy connector status is absence of a failure; a failure contains its safe error and an optional
 retry in one publication. Domain-clock publication carries lifecycle pause, generation and start
 point beside the installation. Entity assignment absence invalidates a retained checkpoint reader;
-a present assignment contains its state identity and checkpoint owners together. Force-flush
+a present assignment contains its state identity, optional primary, executors and replicas
+together. An absent primary represents an assignment without one primary owner. Replication routes
+retain that same slot and an optional state intake; ending an intake permanently fences its exact
+route before the routing publication withdraws it. Assignment absence and ended intake are distinct
+states: identity removal invalidates every reader, while state retirement may leave the entity's
+assignment available for storage-backed synchronization. Force-flush
 readiness is privately encoded as idle=0, available=1 and closed=2. Only its owning type writes or
 decodes that byte; the coordinator remains the authority for generation and claim state. The hint
 has no cross-location data-publication contract.

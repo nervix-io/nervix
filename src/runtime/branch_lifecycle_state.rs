@@ -11,20 +11,21 @@
 //! - **Must not know.** Branch tasks, schedules, how a checkpoint is persisted or fetched, or NSPL.
 
 use ahash::{HashMap, HashSet};
+use imbl::{GenericHashMap, shared_ptr::DefaultSharedPtr};
 use meticulous::OptionExt as _;
 use nervix_checkpoint_replication::CheckpointReplication;
 use nervix_interconnect::RuntimeState;
 use nervix_primitives::{
-    publication::ArcSwapOption,
+    publication::{ArcSwap, ArcSwapOption},
     sync::{
-        StdArc,
+        Arc, StdArc,
         blocking::{Mutex, MutexGuard, OnceLock},
     },
 };
 use nervix_recovery::Discarded as _;
 
 use super::{
-    BranchKey, PersistedRuntimeStateEntry, RuntimeStatePlacement,
+    BranchKey, PersistedRuntimeStateEntry, RuntimeStatePlacement, SharedStateAssignment,
     branch_checkpoint_catalog::BranchCheckpointCatalog,
     branch_lru_state::{BranchLruSnapshotError, decode_branch_lru_snapshot},
 };
@@ -37,8 +38,12 @@ use super::{
 /// installed, whose branches decide which branch checkpoints the replica accepts, and the owner's
 /// announcements that wake the replica task keeping the entity current, until that task takes
 /// them.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub(super) struct ReplicatedBranchLifecycle {
+    assignment: SharedStateAssignment,
+    /// Passive copies belong to this entity. The replica task publishes complete immutable
+    /// values; pruning cannot acquire another entity's registry shard.
+    passive: ArcSwap<PassiveCheckpoints>,
     /// Replaced whole, so a reader keeps the checkpoint it loaded without holding anything.
     latest: ArcSwapOption<BranchLifecycleCheckpoint>,
     replication: CheckpointReplication,
@@ -46,6 +51,136 @@ pub(super) struct ReplicatedBranchLifecycle {
     /// Changed under a short lock that belongs to this one entity and is never held across an
     /// await: an announcement adds to it, and the replica task takes everything at once.
     announcements: Mutex<AnnouncedCheckpoints>,
+}
+
+type PassiveCheckpoints = GenericHashMap<
+    RuntimeStatePlacement,
+    StdArc<PersistedRuntimeStateEntry>,
+    ahash::RandomState,
+    DefaultSharedPtr,
+>;
+
+impl Default for ReplicatedBranchLifecycle {
+    fn default() -> Self {
+        Self {
+            assignment: Arc::new(ArcSwapOption::empty()),
+            passive: ArcSwap::from_pointee(PassiveCheckpoints::default()),
+            latest: ArcSwapOption::empty(),
+            replication: CheckpointReplication::new(),
+            catalog: BranchCheckpointCatalog::default(),
+            announcements: Mutex::default(),
+        }
+    }
+}
+
+impl ReplicatedBranchLifecycle {
+    pub(super) fn assigned(assignment: SharedStateAssignment) -> Self {
+        Self {
+            assignment,
+            ..Self::default()
+        }
+    }
+
+    pub(super) fn placement_is_current(&self, placement: &RuntimeStatePlacement) -> bool {
+        let assignment = self.assignment.load();
+        let Some(assignment) = assignment.as_deref() else {
+            return false;
+        };
+        assignment.names(placement)
+    }
+
+    pub(super) fn replicates_from(
+        &self,
+        placement: &RuntimeStatePlacement,
+        local: &nervix_models::ClusterNodeName,
+        owner: &nervix_models::ClusterNodeName,
+    ) -> bool {
+        let assignment = self.assignment.load();
+        let Some(assignment) = assignment.as_deref() else {
+            return false;
+        };
+        assignment.names(placement) && assignment.replicates_from(local, owner)
+    }
+
+    pub(super) fn passive_checkpoint(
+        &self,
+        placement: &RuntimeStatePlacement,
+    ) -> Option<StdArc<PersistedRuntimeStateEntry>> {
+        self.passive.load().get(placement).cloned()
+    }
+
+    /// Move a fetched payload into the entity's publication only when its revision advances.
+    pub(super) fn hold_passive_checkpoint(
+        &self,
+        placement: &RuntimeStatePlacement,
+        snapshot: PersistedRuntimeStateEntry,
+    ) {
+        let snapshot = StdArc::new(snapshot);
+        self.passive.rcu(|current| {
+            if let Some(held) = current.get(placement)
+                && held.lsm >= snapshot.lsm
+            {
+                return current.clone();
+            }
+            let mut next = current.as_ref().clone();
+            next.insert(placement.clone(), snapshot.clone());
+            StdArc::new(next)
+        });
+    }
+
+    pub(super) fn prune_passive_checkpoints(&self, branches: &NamedBranches) {
+        self.passive.rcu(|current| {
+            let mut next = current.as_ref().clone();
+            next.retain(|placement, _| {
+                placement.branch_key.is_none() || branches.names(placement.branch_key.as_ref())
+            });
+            next
+        });
+    }
+
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            lifecycle,
+            reason = "assignment replacement discards superseded passive state"
+        )
+    )]
+    pub(super) fn purge_stale_passive_checkpoints(&self) {
+        let assignment = self.assignment.load();
+        self.passive.rcu(|current| {
+            let mut next = current.as_ref().clone();
+            next.retain(|placement, _| {
+                assignment
+                    .as_deref()
+                    .is_some_and(|assignment| assignment.names(placement))
+            });
+            next
+        });
+    }
+
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            lifecycle,
+            reason = "ownership activation consumes the entity's passive checkpoint once"
+        )
+    )]
+    pub(super) fn take_passive_checkpoint(
+        &self,
+        placement: &RuntimeStatePlacement,
+    ) -> Option<PersistedRuntimeStateEntry> {
+        let previous = self.passive.rcu(|current| {
+            let mut next = current.as_ref().clone();
+            next.remove(placement);
+            next
+        });
+        let held = previous.get(placement)?.clone();
+        drop(previous);
+        match StdArc::try_unwrap(held) {
+            Ok(snapshot) => Some(snapshot),
+            Err(shared) => Some(shared.as_ref().clone()),
+        }
+    }
 }
 
 /// The owner's announcements a replica task has not taken yet, the newest one of each checkpoint.

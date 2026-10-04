@@ -51,9 +51,7 @@ use nervix_branch_instances::{
     BranchInstanceRegistry, BranchInstanceSnapshotEntry, BranchPresence, GetOrCreateBranchInstance,
     OwnedBranches,
 };
-use nervix_checkpoint_replication::{
-    Announcer, AnnouncerStep, CheckpointReplication, ReplicaProgress,
-};
+use nervix_checkpoint_replication::{Announcer, AnnouncerStep, CheckpointReplication};
 use nervix_dns::DnsResolver;
 use nervix_execution::{ChargedBytes, Executor, QueueAdmission};
 use nervix_interconnect::{
@@ -885,7 +883,7 @@ pub(crate) use relay_batch::{RelayMessage, RelayRecordBatch};
 pub(crate) use relay_channel::{RelayBroadcast, RelayReceiver as RelaySubscriptionReceiver};
 pub(crate) use relay_subscription::RelaySubscriptionDefinition;
 use relay_subscription::{RelaySubscriptionRefusal, RelaySubscriptions};
-use state_assignment::{ScheduledStateAssignment, SharedStateAssignment, WasmCheckpointOwners};
+use state_assignment::{CheckpointOwners, ScheduledStateAssignment, SharedStateAssignment};
 pub(crate) use state_replication::StateSyncAck;
 pub(crate) use state_snapshot_transfer::{DescribeStateSnapshot, FetchStateSnapshot};
 pub(crate) use state_store::{

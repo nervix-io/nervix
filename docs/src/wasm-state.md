@@ -193,7 +193,11 @@ schemas the processor's records are laid out by, and the branch's guest-state ge
 places guest state only under the identity derived from the committed schedule in its applied typed
 execution revision, and acts on a placement only while that placement is current. The same revision
 carries the processor's reset and pinned module plans through a rebuild or owner change. A replica
-acknowledgement counts only toward the placement it names. See [Checkpoint
+acknowledgement counts only toward the placement it names. Installed replication routes retain the
+same entity assignment publication as guest checkpoint execution. Reset lifecycle confirmation
+retains its route, follows replica reassignment, and refuses replacement or loss of primary
+ownership before declaring confirmation; neither that wait nor its announcer reads execution maps.
+See [Checkpoint
 Identity](./shutdown.md#checkpoint-identity) and [Membership, Consensus, And Bulk
 Transfer](./interconnect.md#membership-consensus-and-bulk-transfer).
 

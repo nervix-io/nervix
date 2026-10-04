@@ -52,6 +52,21 @@ Feature: Coordinated WASM processor state reset
       key={"tenant":"alpha"} | "tenant":"alpha" | "note":"even"
       """
 
+    When these NSPL commands are executed through the client on the leader node
+      """
+      RESET WASM PROCESSOR counting_guest STATE IN DOMAIN {{domain}} FOR BRANCH VALUES { tenant = 'beta' };
+      """
+    Then within "10s" DESCRIBE WASM PROCESSOR "counting_guest" on the leader node contains
+      """
+      state reset: READY, branch, generation 3
+      state reset reason: TRANSACTION
+      state reset readiness: READY
+      """
+    And within "10s" DESCRIBE WASM PROCESSOR "counting_guest" on the leader node contains
+      """
+      stage=REPLICA_CONFIRMED required_replicas=<replica_count> confirmed_replicas=<replica_count>
+      """
+
     Examples:
       | cluster_size | replica_count |
       | 1            | 0             |

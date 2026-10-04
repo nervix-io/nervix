@@ -135,6 +135,7 @@ impl Runtime {
                 frozen_ownership_handoff_entities: Arc::new(DashMap::default()),
                 active_domain_alters: Arc::new(DashMap::default()),
                 state_identities: DashMap::default(),
+                state_replication_routing: Default::default(),
                 client_ingestors: DashMap::default(),
                 client_producer_budget: client_ingestor::ClientProducerBudget::default(),
                 client_emitters: DashMap::default(),
@@ -148,7 +149,7 @@ impl Runtime {
                 remote_dispatch: Arc::new(RemoteDispatchRegistry::new()),
                 remote_ack_watcher_shutdown: CancellationToken::new(),
                 remote_ack_watcher_tasks: TaskTracker::new(),
-                state_replication_tasks: TaskTracker::new(),
+                state_replication_tasks: Default::default(),
                 passive_runtime_state_snapshots: DashMap::default(),
                 backup_capture_fences: ArcSwap::from_pointee(HashMap::default()),
                 replicated_branch_lifecycles: DashMap::default(),
@@ -646,6 +647,7 @@ impl Runtime {
         self.inner.state_replication_tasks.close();
         self.inner.state_replication_tasks.wait().await;
         self.inner.relay_branch_presences.clear();
+        self.inner.state_replication_routing.clear();
         self.inner.replicated_deduplicator_states.clear();
         self.inner.replicated_kafka_offset_states.clear();
         self.inner.replicated_materialized_stream_states.clear();

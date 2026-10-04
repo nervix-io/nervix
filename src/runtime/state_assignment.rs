@@ -10,22 +10,51 @@ use std::collections::BTreeSet;
 use nervix_models::ClusterNodeName;
 use nervix_primitives::{publication::ArcSwapOption, sync::Arc};
 
-use super::ScheduledStateIdentity;
+use super::{RuntimeStatePlacement, ScheduledStateIdentity};
 
 /// The identity and checkpoint owners committed for one entity, published together.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(in crate::runtime) struct ScheduledStateAssignment {
     pub(in crate::runtime) identity: ScheduledStateIdentity,
-    pub(in crate::runtime) checkpoint_owners: Option<WasmCheckpointOwners>,
+    pub(in crate::runtime) checkpoint_owners: Option<CheckpointOwners>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(in crate::runtime) struct WasmCheckpointOwners {
+pub(in crate::runtime) struct CheckpointOwners {
+    pub(in crate::runtime) primary: Option<ClusterNodeName>,
     pub(in crate::runtime) executors: BTreeSet<ClusterNodeName>,
     pub(in crate::runtime) replicas: BTreeSet<ClusterNodeName>,
 }
 
 pub(in crate::runtime) type SharedStateAssignment = Arc<ArcSwapOption<ScheduledStateAssignment>>;
+
+impl ScheduledStateAssignment {
+    pub(in crate::runtime) fn names(&self, placement: &RuntimeStatePlacement) -> bool {
+        let branch = placement
+            .branch_key
+            .as_ref()
+            .map(|branch| branch.fingerprint());
+        self.identity.names(placement.state, branch.as_ref())
+    }
+
+    pub(in crate::runtime) fn assigned_to(&self, local: &ClusterNodeName) -> bool {
+        let Some(owners) = self.checkpoint_owners.as_ref() else {
+            return false;
+        };
+        owners.executors.contains(local) || owners.replicas.contains(local)
+    }
+
+    pub(in crate::runtime) fn replicates_from(
+        &self,
+        local: &ClusterNodeName,
+        source: &ClusterNodeName,
+    ) -> bool {
+        let Some(owners) = self.checkpoint_owners.as_ref() else {
+            return false;
+        };
+        owners.primary.as_ref() == Some(source) && owners.replicas.contains(local)
+    }
+}
 
 #[cfg(test)]
 mod tests {
