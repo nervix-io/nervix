@@ -798,6 +798,17 @@ durable. Stopping the node, gracefully or not, loses it: a later download is ref
 backup's recorded outcome stays retained under its execution reference. See
 [Backup And Restore](./backup-and-restore.md#downloading-the-archive).
 
+Unpublished restore checkpoint namespaces remain in the runtime database after an interrupted
+installation. Every restarted node's admitted maintenance borrows its applied consensus revision
+before taking the checkpoint installation barrier. It retains selected publications, applying
+installations and generations ahead of catch-up; without an applied log it retains all generations.
+Terminal or superseded applied attempts are reclaimed in bounded deletion batches, including
+chunks without receipts. Terminal teardown cancels the maintenance caller, and its storage job
+checks cancellation between bounded units. A later startup resumes from the remaining keys.
+Reclamation preserves snapshot readers and never completes an installation or opens its `START`
+gate. See [restore checkpoint storage](backup-and-restore.md#restore-checkpoint-storage-quota-and-metrics)
+for quotas, metrics and physical storage limits.
+
 ### Domain Time
 
 The paced mapping, lifecycle generation, and authority fence recover from consensus state. Tick

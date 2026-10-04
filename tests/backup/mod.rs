@@ -24,6 +24,7 @@ use crate::common::{
 
 mod fidelity;
 pub(crate) mod restore;
+mod staging;
 
 /// The backup a scenario ran through its own session.
 #[derive(Debug, Clone)]

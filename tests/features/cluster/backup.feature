@@ -689,6 +689,7 @@ Feature: Configuration backup into a public archive
     And restoring domain "{{domain}}_incomplete" fails before installing its first WASM checkpoint
     When the CLI restores "domain {{domain}} --as {{domain}}_incomplete" from "stateful.nvxb" on node "{{leader}}" reporting JSON
     Then the CLI restore failed with JSON error code "RESTORE_INCOMPLETE" and a message containing "runtime state"
+    And abandoned restore storage is reclaimed across every node
     Given the active domain is "{{domain}}_incomplete"
     When these NSPL commands fail with "restore state installation is incomplete"
       """

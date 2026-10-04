@@ -164,5 +164,6 @@ name = "nervix-server"
 [[package]]
 checks = [
   "restore::tests::shuttle_restore_publication_and_handle_clear_cannot_cross_a_successors_start",
+  "restore::tests::shuttle_restore_reclamation_holds_the_revision_through_queued_installation",
 ]
 name = "nervix-consensus"

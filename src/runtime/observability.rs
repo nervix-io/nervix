@@ -842,8 +842,12 @@ mod tests {
             let db = Database::builder(dir.path())
                 .open()
                 .expect("db should open");
-            let store = RuntimeStateStore::from_database(db, Executor::default())
-                .expect("state store should open");
+            let store = RuntimeStateStore::from_database(
+                db,
+                Executor::default(),
+                crate::runtime::DEFAULT_RESTORE_STAGING_MAX_BYTES,
+            )
+            .expect("state store should open");
             let metrics = RuntimeMetrics::default();
             metrics
                 .resolve_node_batch_metrics(NodeBatchMetricsSpec {
@@ -907,8 +911,12 @@ mod tests {
         let db = Database::builder(dir.path())
             .open()
             .expect("db should open");
-        let store = RuntimeStateStore::from_database(db.clone(), Executor::default())
-            .expect("state store should open");
+        let store = RuntimeStateStore::from_database(
+            db.clone(),
+            Executor::default(),
+            crate::runtime::DEFAULT_RESTORE_STAGING_MAX_BYTES,
+        )
+        .expect("state store should open");
         let persisted_metrics = RuntimeMetrics::default();
         persisted_metrics
             .resolve_node_batch_metrics(NodeBatchMetricsSpec {
@@ -986,8 +994,12 @@ mod tests {
         let db = Database::builder(dir.path())
             .open()
             .expect("db should open");
-        let store = RuntimeStateStore::from_database(db.clone(), Executor::default())
-            .expect("state store should open");
+        let store = RuntimeStateStore::from_database(
+            db.clone(),
+            Executor::default(),
+            crate::runtime::DEFAULT_RESTORE_STAGING_MAX_BYTES,
+        )
+        .expect("state store should open");
         let persisted_metrics = RuntimeMetrics::default();
         persisted_metrics
             .resolve_node_batch_metrics(NodeBatchMetricsSpec {
