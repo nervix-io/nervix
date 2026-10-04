@@ -149,6 +149,9 @@ discard a record.
 
 ### Client emitters
 
+The [Client Ingestors And Emitters](./client-io-architecture.md) architecture chapter connects
+construction, competing consumers, application ACK, buffering and lifecycle in a complete graph.
+
 `TO CLIENT SCHEMA <output_schema>` constructs native Arrow output for applications. It has no
 connector `CLIENT` object, codec, header operations, or direct `VALUES` form. The emitter still
 uses its ordinary `FROM` predicates, optional collection, materialized dependencies, ordered

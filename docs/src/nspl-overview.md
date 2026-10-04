@@ -13,6 +13,9 @@ AI coding agents can use the portable [NSPL Agent Skill](nspl-agent-skill.md) to
 review, and troubleshoot Nervix configurations. The guide explains installation without cloning
 this repository, skill invocation, useful request details, expected output, and updates.
 
+For application-owned producers and consumers, [Client Ingestors And Emitters](./client-io-architecture.md)
+connects the native endpoint grammar to a complete graph and its execution contracts.
+
 The current top-level surface includes:
 
 - domain lifecycle statements
