@@ -54,3 +54,6 @@ pub use wire::{StateField, StateValue};
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod wasm_properties;

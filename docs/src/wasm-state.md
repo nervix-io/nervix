@@ -44,6 +44,14 @@ explicit control-plane export of durable checkpoints to an archive; restore inst
 under the generations of the newly published schedule. The data plane executes the lifetime the
 committed schedule names and never decides one.
 
+Registered representation properties compare complete guest snapshots, SDK restore values,
+archive state descriptors and stored checkpoint headers. The oracle includes every raw guest byte,
+typed name, schema, branch field, generation and revision; segmented headers retain their full
+length and digest. These serial conversions establish value preservation. Callback completion,
+replica durability and publication ordering retain the scenario and concurrency evidence of their
+production owners. The [WASM representation register](https://github.com/nervix-io/nervix/blob/main/tests/wasm-representation-coverage.md)
+records each conversion, its exact oracle and the limits of its claim.
+
 ## Backup And Restore
 
 A normal backup holds a quiesced cut for each running domain. Once intake and acknowledged work

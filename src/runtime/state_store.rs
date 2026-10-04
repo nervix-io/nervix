@@ -31,6 +31,9 @@ mod backup;
 mod durability;
 pub(super) mod generation;
 
+#[cfg(test)]
+mod wasm_properties;
+
 use durability::DurabilityBarrier;
 use generation::{StoredCheckpoint, index_key, physical_placement, read_checkpoint};
 

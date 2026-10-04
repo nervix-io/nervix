@@ -39,6 +39,12 @@ that result is part of the function contract. Arrow values under a null or failu
 also do not encode absence in the numeric lane: the mask does. An `Option` or enum is needed when
 the *state* is absent or different, not merely because a literal looks special.
 
+The guest protocol keeps an absent branch key and an absent source token distinct from present
+values. Empty application-state bytes remain present inside the Rust SDK's snapshot envelope.
+Reset acceptance, reset refusal, an unusable snapshot envelope and rejected application state have
+distinct typed ABI verdicts. Protocol decoding checks the complete size-prefixed header before
+identifier access and verifies offsets and counts before constructing owned values.
+
 ## Absence And Distinct States
 
 **Node trace export.** A tracing guard either has no trace export or owns its provider and resolver
