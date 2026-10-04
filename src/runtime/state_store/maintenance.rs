@@ -55,7 +55,9 @@ impl RuntimeStateStore {
                 }
                 for item in view.prefix(keyspace, namespace.prefix(&domain)) {
                     check()?;
-                    let key = item.key().change_context(RuntimePersistenceError::ReadValue)?;
+                    let key = item
+                        .key()
+                        .change_context(RuntimePersistenceError::ReadValue)?;
                     physical_namespace(&key)?;
                     let value_bytes = view
                         .size_of(keyspace, &key)
@@ -232,7 +234,9 @@ fn next_namespace(
     else {
         return Ok(None);
     };
-    let key = item.key().change_context(RuntimePersistenceError::ReadValue)?;
+    let key = item
+        .key()
+        .change_context(RuntimePersistenceError::ReadValue)?;
     let (namespace, tail) = physical_namespace(&key)?;
     let domain = RuntimeStateStore::restore_key_domain(tail)?;
     let mut next = namespace.prefix(&domain);
