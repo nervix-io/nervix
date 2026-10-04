@@ -300,7 +300,8 @@ mod subscription_predicate;
 mod test_fixtures;
 
 pub(crate) use backup_state::{
-    BackupBranchLifecycleEntry, CapturedRuntimeState, decode_backup_branch_lifecycle,
+    BackupBranchLifecycleEntry, CapturedRuntimeState, RESTORE_STATE_CHUNK_BYTES,
+    RESTORE_STATE_WORKING_BYTES, RestoredRuntimeState, decode_backup_branch_lifecycle,
     decode_backup_kafka_offsets, encode_restored_branch_lifecycle, encode_restored_kafka_offsets,
 };
 use branch_aggregated_state::{

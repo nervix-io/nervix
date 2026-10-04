@@ -5,6 +5,20 @@
 
 use super::*;
 
+/// Called only after the diagnostic process installed its detector, covering the other writers
+/// and purges that select the same physical generation under the installation barrier.
+#[cfg(feature = "deloxide")]
+pub(super) fn diagnostic_installation_writers_and_purges() {
+    ownership_handoff_preparation_retains_exact_coordination_identity_across_reopen();
+    forced_recovery_preparation_survives_reopen_and_activation_is_idempotent();
+    forced_recovery_preserves_checkpoint_after_incarnation_change();
+    forced_recovery_preserves_checkpoint_after_fingerprint_change();
+    purging_removes_only_guest_state_of_superseded_generations();
+    a_schema_change_replaces_only_schema_bound_state();
+    guest_checkpoints_and_replica_installs_return_once_synchronized();
+    forced_recovery_publishes_staged_guest_state_in_the_committed_generation();
+}
+
 #[test]
 fn ownership_handoff_preparation_retains_exact_coordination_identity_across_reopen() {
     let dir = tempfile::tempdir().expect("temporary runtime state directory should open");
@@ -528,18 +542,17 @@ fn purging_removes_only_guest_state_of_superseded_generations() {
 }
 
 #[test]
-fn persisted_runtime_state_decodes_from_unaligned_storage() {
-    let expected = PersistedRuntimeStateEntry {
+fn checkpoint_header_decodes_from_unaligned_storage() {
+    let expected = StoredCheckpoint::Inline(PersistedRuntimeStateEntry {
         lsm: 7,
         payload: vec![1, 2, 3],
-    };
-    let encoded =
-        rkyv::to_bytes::<rkyv::rancor::Error>(&expected).expect("runtime state should encode");
+    });
+    let encoded = expected.encode().assured("the checkpoint header encodes");
     let mut unaligned = vec![0];
     unaligned.extend_from_slice(&encoded);
 
-    let decoded = PersistedRuntimeStateEntry::decode(&unaligned[1..])
-        .expect("runtime state should decode from an unaligned database buffer");
+    let decoded = StoredCheckpoint::decode(&unaligned[1..])
+        .assured("the checkpoint header decodes from an unaligned database buffer");
 
     assert_eq!(decoded, expected);
 }

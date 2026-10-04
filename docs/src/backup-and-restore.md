@@ -254,13 +254,56 @@ browser session has no file to read.
 
 A restore stages the archive's compatible branch lifecycle, WASM guest checkpoints, and Kafka
 source positions on every newly assigned owner and replica after its models are scheduled. Each
-node validates the complete staged inventory, then atomically replaces the target domain's
-checkpoints in one durable database batch. Nodes without assigned checkpoints publish an empty
+node validates the complete staged inventory, synchronizes its generation namespace, then
+atomically selects it through one durably synchronized active-generation pointer. Nodes without assigned checkpoints publish an empty
 set. In-memory state handles are cleared only after that publication. A replicated installation
 gate prevents `START` until every target node has published the complete set; it survives failure,
 lease release and node restart. A source uses its restored next offset when it starts, clamped to
 the partitions its current source assignment contains. The domain remains stopped. Relays and
 materialized state start empty.
+
+### Publishing The State Generation
+
+A node writes restored checkpoint bytes into an installation-specific namespace in chunks of at
+most 64 KiB. A completed checkpoint has a revision, length and BLAKE3 digest and an authority-bound
+receipt; incomplete chunks have no completed receipt. Guest saves stream directly from the staged
+archive on the coordinator and from the sealed upload file on a remote node. Neither path assembles
+a guest save in a second full-size buffer or reserves a file-read chunk inside an already reserved
+full checkpoint.
+
+Publication checks each receipt, checkpoint header and ordered chunk against the complete expected
+inventory. It synchronizes those writes before committing the small pointer containing the exact
+installation authority and inventory, then synchronizes that pointer before clearing runtime
+handles or acknowledging publication. Cancellation or failure on either side of pointer publication
+leaves the replicated start gate closed. An exact retry repeats pointer durability and cleanup;
+it cannot select different counts or a different authority under the same generation.
+
+Every read selects the pointer, checkpoint headers and chunks from one database snapshot. Readers
+that opened a view before publication keep its complete prior set while obsolete keys are deleted.
+Checkpoint jobs retain the namespace they selected before execution and compare it again under
+the installation barrier; a queued job for another namespace cannot write into the restored set.
+Normal checkpoint writes and replica installation use the selected namespace. Generation identity
+is separate from a WASM branch's guest-state lifetime and its checkpoint revision.
+
+Successful publication removes obsolete namespace keys and completed or abandoned receipts through
+bounded deletion batches. A snapshot can retain the data it still reads after that deletion.
+Within the selected namespace, chunks whose checkpoint was replaced by a normal inline write or
+purged remain on disk until a later generation removes that namespace. Reclaiming these unreferenced
+chunks belongs to the staging and checkpoint storage maintenance work.
+Maintenance of failed unpublished installations remains a separate staging-lifecycle concern; it
+never releases the start gate. Runtime storage requires its current format marker. A missing or
+invalid marker in nonempty checkpoint storage fails with an instruction to recreate the node state
+directory.
+
+Local archive readers and received upload readers retain their staged artifact and disk quota through the storage job, including cancellation.
+
+The streamed state-install and publication jobs reserve 2 MiB per node, independent of total guest
+bytes and checkpoint count. Physical checkpoint placement encodings are limited to 60 KiB, leaving room for revision
+and chunk coordinates within the database key limit. Archive verification, model planning, typed
+lifecycle and offset conversion, database caches, and loading a guest when the domain starts retain
+their own allocation bounds. Encoded lifecycle and offset staging reserves twice the encoded
+payload size plus 2 MiB; it can be refused if that individual conversion does not fit the bulk
+budget. The generation publisher has no aggregate-payload admission limit.
 
 ### Order Of Steps
 
@@ -492,7 +535,9 @@ secrets. Store it as a secret.
 | Restore frames the Rust client queues ahead of the transport | 8 |
 | Restore archive retention | Until the restore finishes, or the retry validity of the execution reference ends |
 | State section staging on an owner | Charged to the same node staging quota until fetched or expired |
-| Complete restore publication per node | Admitted to the bulk working-memory budget; four times staged payload bytes plus 64 KiB per checkpoint |
+| Streamed guest installation and complete generation publication per node | Fixed 2 MiB bulk working-memory reservation; 64 KiB checkpoint chunks |
+| Encoded lifecycle and offset staging per node | Twice the encoded record size plus 2 MiB |
+| Physical checkpoint placement encoding | 60 KiB, including domain and installation namespace |
 
 A backup larger than the staging quota fails. A backup that fits waits while the leader's staging
 area is full, until retained archives are downloaded or expire and snapshot transfers finish.
@@ -501,8 +546,9 @@ A restore stages its archive under the same limits, and is refused rather than k
 the archive is larger than one archive may be, or the leader's staging area cannot hold it now; send
 it again once retained archives are released and snapshot transfers finish. A restore's model batch
 is not bounded by the statement and source-byte limits of a transaction. Each node must admit the
-complete publication batch within its bulk working-memory budget (32 MiB by default). An
-installation that cannot be admitted fails with the start gate still closed.
+bounded installation or publication job within its bulk working-memory budget (32 MiB by default).
+A state set may exceed that budget. An individual job that cannot be admitted fails with the start
+gate still closed.
 
 ## Failures
 

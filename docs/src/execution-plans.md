@@ -224,7 +224,10 @@ schedule. Archived node assignments are never installation authority. The coordi
 each archived entity's schema fingerprint to match the new schedule and stages its checkpoints on
 the scheduled owner and replicas. Branch lifecycle is staged before WASM guest saves, and each
 save uses the state generation from the published schedule. Each node atomically publishes its
-complete replacement set, including an empty set on unassigned nodes, then clears passive handles.
+complete replacement set through a small durable pointer to its verified generation namespace,
+including an empty set on unassigned nodes, then clears passive handles. Restart and passive-state
+loading select pointer, headers and checkpoint chunks from one database view. Checkpoint jobs
+queued for a different namespace cannot cross into the new installation.
 The replicated installation gate prevents `START` until all nodes finish. A retry of an unfinished
 model step admits a new installation generation bound to its leader tenure, execution and lease;
 a delayed preceding attempt cannot mutate the state or its handles after completion.

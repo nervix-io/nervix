@@ -1,3 +1,10 @@
+//! Durable checkpoints and their placement-qualified storage boundary.
+//!
+//! Layer: infrastructure.
+//! - **Owns.** Checkpoint persistence, durable generation selection and recovery records.
+//! - **Depends on.** Typed vocabulary and state envelopes, Fjall, and the bounded executor.
+//! - **Must not know.** Models, graph decisions or how consensus admits a restore.
+//!
 use std::{collections::BTreeSet, fmt, str::FromStr};
 
 use ahash::HashMap;
@@ -22,8 +29,10 @@ use super::{Arc, BranchKey, StdArc, WasmGuestState};
 
 mod backup;
 mod durability;
+pub(super) mod generation;
 
 use durability::DurabilityBarrier;
+use generation::{StoredCheckpoint, index_key, physical_placement, read_checkpoint};
 
 /// The byte that opens the generation segment of a WASM guest state key. A key without it was not
 /// written in the current shape and fails to decode instead of addressing the current lifetime.
@@ -649,17 +658,20 @@ impl PersistedRuntimeStateEntry {
         }
         None
     }
-
-    fn decode(raw: &[u8]) -> error_stack::Result<Self, RuntimePersistenceError> {
-        let mut aligned = rkyv::util::AlignedVec::<16>::with_capacity(raw.len());
-        aligned.extend_from_slice(raw);
-        rkyv::from_bytes::<Self, rkyv::rancor::Error>(&aligned)
-            .map_err(|error| Report::new(RuntimePersistenceError::DecodeState(error.to_string())))
-    }
 }
 
 #[derive(Debug, Clone, Error)]
 pub(crate) enum RuntimePersistenceError {
+    #[error("runtime state storage has an invalid format; recreate the node state directory")]
+    InvalidStorageFormat,
+    #[error("checkpoint placement exceeds the bounded storage key size")]
+    CheckpointPlacementTooLarge,
+    #[error("checkpoint chunks are incomplete or differ from their declared length and digest")]
+    InvalidCheckpointChunks,
+    #[error("restore storage work was cancelled between bounded units")]
+    Cancelled,
+    #[error("failed to read the restore checkpoint stream")]
+    RestoreRead,
     #[error("failed to open runtime state keyspace")]
     OpenKeyspace,
     #[error("failed to read runtime state value")]
@@ -707,6 +719,7 @@ pub(in crate::runtime) struct RuntimeStateStore {
     lsm_index: Keyspace,
     restore_staging: Keyspace,
     restore_publications: Keyspace,
+    checkpoint_chunks: Keyspace,
     handoff_preparations: Keyspace,
     handoff_activations: Keyspace,
     forced_recovery_preparations: Keyspace,
@@ -726,7 +739,8 @@ pub(in crate::runtime) struct RuntimeStateStore {
     nervix::context(
         bounded,
         key = "one node state store installation barrier",
-        bound = "one admitted checkpoint write or complete restore batch; never held across await",
+        bound = "one admitted checkpoint write or bounded restore storage job; never held across \
+                 await",
         reason = "the writer serializes revision comparison, checkpoint writes and complete \
                   restore publication"
     )
@@ -735,6 +749,8 @@ struct LatestSnapshotWriter {
     db: Database,
     latest: Keyspace,
     lsm_index: Keyspace,
+    restore_publications: Keyspace,
+    namespace_view: fjall::Snapshot,
     replica_installs: Arc<nervix_primitives::sync::blocking::Mutex<()>>,
 }
 
@@ -757,6 +773,21 @@ impl LatestSnapshotWriter {
         require_newer: bool,
     ) -> error_stack::Result<bool, RuntimePersistenceError> {
         self.with_installation(|| {
+            let namespace = backup::active_namespace(
+                &self.namespace_view,
+                &self.restore_publications,
+                &placement.domain,
+            )?;
+            if namespace
+                != backup::active_namespace(
+                    &self.db.snapshot(),
+                    &self.restore_publications,
+                    &placement.domain,
+                )?
+            {
+                return Ok(false);
+            }
+            let placement_key = namespace.key(placement)?;
             // A periodic encode can finish after the backup's forced publication. Preserve the
             // greater revision even when storage workers complete in the opposite order.
             if self
@@ -769,14 +800,12 @@ impl LatestSnapshotWriter {
                 lsm,
                 payload: payload.to_vec(),
             };
-            let encoded = rkyv::to_bytes::<rkyv::rancor::Error>(&entry)
-                .map_err(|error| RuntimePersistenceError::EncodeState(error.to_string()))?;
-            let placement_key = placement.as_storage_key();
+            let encoded = StoredCheckpoint::Inline(entry).encode()?;
             self.latest
-                .insert(placement_key.clone(), encoded.to_vec())
+                .insert(placement_key.clone(), encoded)
                 .map_err(|_| RuntimePersistenceError::WriteValue)?;
             self.lsm_index
-                .insert(placement.as_lsm_index_key(lsm), placement_key)
+                .insert(index_key(&placement_key, lsm), placement_key)
                 .map_err(|_| RuntimePersistenceError::WriteValue)?;
             Ok(true)
         })
@@ -786,8 +815,8 @@ impl LatestSnapshotWriter {
     #[cfg_attr(
         nervix_lint,
         nervix::dispatch(reason = "the admitted storage caller supplies one synchronous \
-                                   checkpoint write or complete restore batch; local callbacks \
-                                   remain analyzed")
+                                   checkpoint write or bounded restore generation work; local \
+                                   callbacks remain analyzed")
     )]
     fn with_installation<T>(
         &self,
@@ -807,14 +836,16 @@ impl LatestSnapshotWriter {
         &self,
         placement: &RuntimeStatePlacement,
     ) -> error_stack::Result<Option<u64>, RuntimePersistenceError> {
-        let Some(raw) = self
-            .latest
-            .get(placement.as_storage_key())
+        let view = self.db.snapshot();
+        let namespace =
+            backup::active_namespace(&view, &self.restore_publications, &placement.domain)?;
+        let Some(raw) = view
+            .get(&self.latest, namespace.key(placement)?)
             .map_err(|_| RuntimePersistenceError::ReadValue)?
         else {
             return Ok(None);
         };
-        Ok(Some(PersistedRuntimeStateEntry::decode(raw.as_ref())?.lsm))
+        Ok(Some(StoredCheckpoint::decode(&raw)?.lsm()))
     }
 
     /// Replace the stored snapshot of `placement` with `snapshot` unless the stored one is as new,
@@ -1021,13 +1052,6 @@ impl RuntimeStatePlacement {
         }
     }
 
-    fn as_lsm_index_key(&self, lsm: u64) -> Vec<u8> {
-        let mut key = self.as_storage_key();
-        key.push(0);
-        key.extend_from_slice(&lsm.to_be_bytes());
-        key
-    }
-
     pub(in crate::runtime) fn to_remote(&self) -> nervix_interconnect::StatePlacementEnvelope {
         nervix_interconnect::StatePlacementEnvelope {
             domain: self.domain.clone(),
@@ -1083,6 +1107,43 @@ impl RuntimeStateStore {
                 KeyspaceCreateOptions::default,
             )
             .map_err(|_| RuntimePersistenceError::OpenKeyspace)?;
+        let checkpoint_chunks = db
+            .keyspace(
+                "runtime_state_checkpoint_chunks",
+                KeyspaceCreateOptions::default,
+            )
+            .map_err(|_| RuntimePersistenceError::OpenKeyspace)?;
+        let format = db
+            .keyspace("runtime_state_format", KeyspaceCreateOptions::default)
+            .map_err(|_| RuntimePersistenceError::OpenKeyspace)?;
+        match format
+            .get(b"encoding")
+            .map_err(|_| RuntimePersistenceError::ReadValue)?
+        {
+            Some(value) if value.as_ref() == generation::STORAGE_FORMAT => {}
+            Some(_) => return Err(RuntimePersistenceError::InvalidStorageFormat),
+            None => {
+                for keyspace in [
+                    &latest,
+                    &lsm_index,
+                    &restore_staging,
+                    &restore_publications,
+                    &checkpoint_chunks,
+                ] {
+                    if !keyspace
+                        .is_empty()
+                        .map_err(|_| RuntimePersistenceError::ReadValue)?
+                    {
+                        return Err(RuntimePersistenceError::InvalidStorageFormat);
+                    }
+                }
+                format
+                    .insert(b"encoding", generation::STORAGE_FORMAT)
+                    .map_err(|_| RuntimePersistenceError::WriteValue)?;
+                db.persist(PersistMode::SyncAll)
+                    .map_err(|_| RuntimePersistenceError::Synchronize)?;
+            }
+        }
         let handoff_preparations = db
             .keyspace(
                 "runtime_state_handoff_preparations",
@@ -1113,6 +1174,7 @@ impl RuntimeStateStore {
             lsm_index,
             restore_staging,
             restore_publications,
+            checkpoint_chunks,
             handoff_preparations,
             handoff_activations,
             forced_recovery_preparations,
@@ -1128,6 +1190,8 @@ impl RuntimeStateStore {
             db: self.db.clone(),
             latest: self.latest.clone(),
             lsm_index: self.lsm_index.clone(),
+            restore_publications: self.restore_publications.clone(),
+            namespace_view: self.db.snapshot(),
             replica_installs: self.replica_installs.clone(),
         }
     }
@@ -1511,11 +1575,25 @@ impl RuntimeStateStore {
         Ok(Some(preparation))
     }
 
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            lifecycle,
+            reason = "one admitted ownership handoff activates its stored checkpoints"
+        )
+    )]
     pub(in crate::runtime) fn activate_handoff_preparation(
         &self,
         transition: &RuntimeStateHandoffTransition<'_>,
         checkpoints: &[(RuntimeStatePlacement, PersistedRuntimeStateEntry)],
     ) -> Result<(), Report<RuntimePersistenceError>> {
+        let _installation = self.replica_installs.lock();
+        let namespace = backup::active_namespace(
+            &self.db.snapshot(),
+            &self.restore_publications,
+            &transition.entity.domain,
+        )
+        .map_err(|error| error.current_context().clone())?;
         let preparation_key = Self::handoff_preparation_key(
             transition.coordination,
             transition.operation_id,
@@ -1535,8 +1613,7 @@ impl RuntimeStateStore {
             ));
         }
 
-        let mut domain_prefix = transition.entity.domain.as_str().as_bytes().to_vec();
-        domain_prefix.push(0);
+        let domain_prefix = namespace.prefix(&transition.entity.domain);
         let latest_keys = self
             .latest
             .prefix(domain_prefix)
@@ -1545,7 +1622,7 @@ impl RuntimeStateStore {
                     .key()
                     .map(|key| key.as_ref().to_vec())
                     .map_err(|_| RuntimePersistenceError::ReadValue)?;
-                let stored = stored_placement(&key)
+                let (_, stored) = physical_placement(&key)
                     .map_err(|error| RuntimePersistenceError::DecodeState(error.to_string()))?;
                 Ok((stored.kind == transition.entity.kind()
                     && stored.identifier == *transition.entity.identifier())
@@ -1579,13 +1656,12 @@ impl RuntimeStateStore {
             batch.remove(&self.lsm_index, key);
         }
         for (placement, snapshot) in checkpoints {
-            let encoded = rkyv::to_bytes::<rkyv::rancor::Error>(snapshot)
-                .map_err(|error| RuntimePersistenceError::EncodeState(error.to_string()))?;
-            let placement_key = placement.as_storage_key();
-            batch.insert(&self.latest, placement_key.clone(), encoded.to_vec());
+            let placement_key = namespace.key(placement)?;
+            let encoded = StoredCheckpoint::Inline(snapshot.clone()).encode()?;
+            batch.insert(&self.latest, placement_key.clone(), encoded);
             batch.insert(
                 &self.lsm_index,
-                placement.as_lsm_index_key(snapshot.lsm),
+                index_key(&placement_key, snapshot.lsm),
                 placement_key,
             );
         }
@@ -1678,6 +1754,13 @@ impl RuntimeStateStore {
         self.synchronize().await
     }
 
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            lifecycle,
+            reason = "one admitted forced recovery replaces an entity's stored checkpoints"
+        )
+    )]
     fn replace_entity_snapshots(
         &self,
         domain: &DomainName,
@@ -1685,8 +1768,11 @@ impl RuntimeStateStore {
         identifier: &ModelName,
         checkpoints: &[(RuntimeStatePlacement, PersistedRuntimeStateEntry)],
     ) -> Result<(), Report<RuntimePersistenceError>> {
-        let mut domain_prefix = domain.as_str().as_bytes().to_vec();
-        domain_prefix.push(0);
+        let _installation = self.replica_installs.lock();
+        let namespace =
+            backup::active_namespace(&self.db.snapshot(), &self.restore_publications, domain)
+                .map_err(|error| error.current_context().clone())?;
+        let domain_prefix = namespace.prefix(domain);
         let latest_keys = self
             .latest
             .prefix(domain_prefix)
@@ -1695,7 +1781,7 @@ impl RuntimeStateStore {
                     .key()
                     .map(|key| key.as_ref().to_vec())
                     .map_err(|_| RuntimePersistenceError::ReadValue)?;
-                let stored = stored_placement(&key)
+                let (_, stored) = physical_placement(&key)
                     .map_err(|error| RuntimePersistenceError::DecodeState(error.to_string()))?;
                 Ok((stored.kind == kind && stored.identifier == *identifier).then_some(key))
             })
@@ -1726,13 +1812,12 @@ impl RuntimeStateStore {
             batch.remove(&self.lsm_index, key);
         }
         for (placement, snapshot) in checkpoints {
-            let encoded = rkyv::to_bytes::<rkyv::rancor::Error>(snapshot)
-                .map_err(|error| RuntimePersistenceError::EncodeState(error.to_string()))?;
-            let placement_key = placement.as_storage_key();
-            batch.insert(&self.latest, placement_key.clone(), encoded.to_vec());
+            let placement_key = namespace.key(placement)?;
+            let encoded = StoredCheckpoint::Inline(snapshot.clone()).encode()?;
+            batch.insert(&self.latest, placement_key.clone(), encoded);
             batch.insert(
                 &self.lsm_index,
-                placement.as_lsm_index_key(snapshot.lsm),
+                index_key(&placement_key, snapshot.lsm),
                 placement_key,
             );
         }
@@ -1780,18 +1865,31 @@ impl RuntimeStateStore {
         &self,
         placement: &RuntimeStatePlacement,
     ) -> Result<Option<PersistedRuntimeStateEntry>, RuntimePersistenceError> {
-        let Some(raw) = self
-            .latest
-            .get(placement.as_storage_key())
+        let view = self.db.snapshot();
+        let namespace =
+            backup::active_namespace(&view, &self.restore_publications, &placement.domain)
+                .map_err(|error| error.current_context().clone())?;
+        let key = namespace
+            .key(placement)
+            .map_err(|error| error.current_context().clone())?;
+        let Some(raw) = view
+            .get(&self.latest, &key)
             .map_err(|_| RuntimePersistenceError::ReadValue)?
         else {
             return Ok(None);
         };
-        let decoded = PersistedRuntimeStateEntry::decode(raw.as_ref())
+        let decoded = read_checkpoint(&view, &self.checkpoint_chunks, &key, &raw)
             .map_err(|error| error.current_context().clone())?;
         Ok(Some(decoded))
     }
 
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            lifecycle,
+            reason = "domain activation resets the selected entity's persisted state"
+        )
+    )]
     pub(in crate::runtime) fn purge_entity(
         &self,
         domain: &DomainName,
@@ -1799,8 +1897,13 @@ impl RuntimeStateStore {
         kind: ModelKind,
         identifier: impl Into<ModelName>,
     ) -> Result<(), RuntimePersistenceError> {
+        let _installation = self.replica_installs.lock();
+        let namespace =
+            backup::active_namespace(&self.db.snapshot(), &self.restore_publications, domain)
+                .map_err(|error| error.current_context().clone())?;
         let identifier = identifier.into();
-        let mut prefix = domain.as_str().as_bytes().to_vec();
+        let mut prefix = namespace.prefix(domain);
+        prefix.extend_from_slice(domain.as_str().as_bytes());
         prefix.push(0);
         prefix.push(u8::from(state));
         prefix.push(0);
@@ -1851,20 +1954,30 @@ impl RuntimeStateStore {
     /// schedule dropped, schema-bound state written under another schema fingerprint, and WASM guest
     /// state of a generation the committed schedule has moved past. State that depends on no schema
     /// stays for as long as its node is scheduled.
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            lifecycle,
+            reason = "a committed execution revision retires its unscheduled state identities"
+        )
+    )]
     pub(in crate::runtime) fn purge_stale_state_identities(
         &self,
         domain: &DomainName,
         current: &HashMap<NodeRef, ScheduledStateIdentity>,
     ) -> Result<(), Report<RuntimePersistenceError>> {
-        let mut domain_prefix = domain.as_str().as_bytes().to_vec();
-        domain_prefix.push(0);
+        let _installation = self.replica_installs.lock();
+        let namespace =
+            backup::active_namespace(&self.db.snapshot(), &self.restore_publications, domain)
+                .map_err(|error| error.current_context().clone())?;
+        let domain_prefix = namespace.prefix(domain);
         let mut stale_latest_keys = Vec::new();
         for item in self.latest.prefix(domain_prefix) {
             let key = item
                 .key()
                 .map(|key| key.as_ref().to_vec())
                 .map_err(|_| RuntimePersistenceError::ReadValue)?;
-            let stored = stored_placement(&key)?;
+            let (_, stored) = physical_placement(&key)?;
             let node = NodeRef {
                 kind: stored.kind,
                 identifier: stored.identifier,
