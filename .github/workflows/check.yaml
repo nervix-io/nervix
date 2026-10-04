@@ -2,7 +2,7 @@ name: Check
 
 on:
   pull_request:
-    types: [opened, synchronize, reopened]
+    types: [opened, synchronize, reopened, labeled, unlabeled]
 
 env:
   KACHE_VERSION: "0.28.1"
@@ -17,6 +17,17 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  bolero:
+    uses: ./.github/workflows/bolero.yaml
+    permissions:
+      contents: read
+      id-token: write
+    secrets: inherit
+    with:
+      tested-sha: ${{ github.sha }}
+      event-name: ${{ github.event_name }}
+      labels-json: ${{ toJSON(github.event.pull_request.labels.*.name) }}
+
   conventional-pr-title:
     if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
