@@ -11,7 +11,7 @@
 //! - **Owns.** The byte cursor properties read their choices from, the generators of current
 //!   vocabulary values, expressions, Models and statements, and the documented domain each draws
 //!   from.
-//! - **Depends on.** The vocabulary.
+//! - **Depends on.** The vocabulary and the current guest message protocol.
 //! - **Must not know.** The language or its parser. What NSPL can spell is stated here as a rule
 //!   over values, never learned by calling the parser, so the vocabulary's own properties can use
 //!   these generators without a language dependency.
@@ -29,6 +29,7 @@ mod route;
 mod schema;
 mod statement;
 mod text;
+mod wasm;
 
 pub use client::ClientParts;
 pub use emitter::SinkVariant;
@@ -38,6 +39,7 @@ pub use model::ModelVariant;
 pub use route::{RouteBranch, RouteFlush, RouteShape};
 pub use statement::StatementVariant;
 pub use text::{GeneratedName, KEYWORDS};
+pub use wasm::WasmValues;
 
 /// Which values a generator may produce.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

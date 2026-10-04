@@ -753,6 +753,11 @@ test-vm *args:
 # than the server lib. The host tests drive the bundled Rust and Go reference guests.
 test-wasm *args: wasm-processor-guests
     cargo test --package nervix-wasm --package nervix-wasm-sdk --package nervix-wasm-protocol --lib -- {{ args }}
+    cargo test --package nervix-wasm-protocol --test representations -- {{ args }}
+
+# Protocol boundary checks do not need compiled processor guests.
+test-wasm-protocol *args:
+    cargo test --package nervix-wasm-protocol -- {{ args }}
 
 # Run the consensus unit tests, which live in the nervix-consensus crate rather than the server lib.
 test-consensus *args:
@@ -1075,6 +1080,24 @@ coverage-visual-create-report output="target/visual-create.lcov":
 # a change to those packages without the scenario suite that `test-coverage` runs.
 coverage-lib output *args:
     cargo llvm-cov --lib --lcov --output-path {{ output }} {{ args }}
+
+# Ordinary representation coverage includes the protocol's integration-test target and the
+# native host, SDK, archive descriptors and current checkpoint storage codecs.
+coverage-wasm output="target/wasm-representations.lcov": build-web-console wasm-processor-guests download-onnxruntime
+    #!/usr/bin/env bash
+    set -euo pipefail
+    export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
+    cargo llvm-cov clean --workspace
+    cargo llvm-cov --no-report --lib --package nervix-wasm --package nervix-wasm-sdk
+    cargo llvm-cov --no-report --lib --tests --package nervix-wasm-protocol
+    cargo llvm-cov --no-report --lib --package nervix-backup -- wasm_properties
+    cargo llvm-cov --no-report --features testing --lib --package nervix-server -- wasm_properties
+    cargo llvm-cov --no-report --features testing --package nervix-server --test scenarios -- \
+        --input tests/features/runtime/wasm_processor.feature --name '^Malformed.*output' \
+        --concurrency 1 --retry 0
+    cargo llvm-cov report --no-default-ignore-filename-regex --lcov --output-path {{ quote(output) }} \
+        --package nervix-arbitrary --package nervix-wasm-protocol --package nervix-wasm-sdk \
+        --package nervix-wasm --package nervix-backup --package nervix-server
 
 # Measure the count adapter through vocabulary properties, production storage codecs, language
 # archives and window snapshots. These ordinary tests need no external services or containers.

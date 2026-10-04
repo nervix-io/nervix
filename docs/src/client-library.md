@@ -5,6 +5,9 @@ gRPC API used by `nervix-cli`. It is the reference implementation of the [Client
 Manual](./client-implementation-manual.md), and [Client Session
 Protocol](./client-session-protocol.md) explains the protocol behavior it relies on.
 
+For a complete graph, data-handle lifetimes, credit and failure decisions, read
+[Client Ingestors And Emitters](./client-io-architecture.md).
+
 Capabilities:
 
 - `Client::connect(...)` and `Client::connect_with_options(...)`

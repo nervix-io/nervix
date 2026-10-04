@@ -73,7 +73,9 @@ conversion. A codec or runtime caller retains that report under its operation co
 errors remain typed values in the batch outcome and are formatted only when a message error is
 reported; this conversion does not turn them into report allocations per row.
 
-The WASM FlatBuffers decoder reports protocol failures with their verified payload cause. The Rust
+The WASM FlatBuffers decoder reports protocol failures with their verified payload cause. It checks
+the complete header length before reading the identifier; a truncated header returns the typed
+length or identifier error even when its size prefix matches the received bytes. The Rust
 guest SDK retains that report beneath its envelope or snapshot meaning, and its `Processor`
 callbacks return guest-error reports. It renders a failure only when returning an ABI code or
 global-error reason; rejected snapshot bytes and rejected application state keep their distinct

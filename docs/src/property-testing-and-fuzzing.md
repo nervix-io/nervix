@@ -122,6 +122,15 @@ union declarations, so adding a family requires extending its generator.
 
 ## Generated Domains
 
+The [WASM representation coverage map](https://github.com/nervix-io/nervix/blob/main/tests/wasm-representation-coverage.md)
+registers protocol messages, native host conversions, SDK Arrow and snapshot conversions, archive
+state descriptors and stored checkpoints. `just test-bolero wasm` selects their seventeen targets;
+`just test-wasm` also builds and exercises the supported Rust and Go reference guests. The malformed
+targets separately cover header lengths, offsets, vector counts, tags and invalid descriptor fields.
+Shared guest-message generators live only in the `nervix-arbitrary` test harness; guests and product
+libraries acquire no generator dependency. These properties preserve values and retain the existing
+owners of callback, ACK, checkpoint and recovery semantics.
+
 `nervix-arbitrary` supplies bounded vocabulary values and entropy; properties compose these into
 their owning frame or Arrow representations in test code. It reads a property's bytes
 as a sequence of bounded choices, so the same bytes always build the same value and a saved failure
