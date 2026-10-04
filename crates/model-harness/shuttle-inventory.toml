@@ -23,6 +23,7 @@ name = "nervix-execution"
 
 [[package]]
 checks = [
+  "connection::retained_slots_tests::shuttle_a_retained_pool_slot_claims_one_worker_and_retirement_is_final",
   "connection::stream_slots::shuttle_checks::bulk_drain_stops_leasing_and_waits_for_every_leased_slot",
   "connection::stream_slots::shuttle_checks::management_drain_stops_leasing_and_waits_for_every_leased_slot",
   "connection::stream_slots::shuttle_checks::relay_drain_stops_leasing_and_waits_for_every_leased_slot",
@@ -77,6 +78,10 @@ checks = [
   "runtime::domain_clock::shuttle_lifecycle_tests::readers_never_observe_an_installation_older_than_one_they_observed",
   "runtime::domain_clock::shuttle_lifecycle_tests::shuttle_an_attach_waiting_for_the_first_installation_observes_its_domains",
   "runtime::domain_clock::shuttle_lifecycle_tests::shuttle_delivery_sends_state_before_ticks_without_regressing_progress",
+  "runtime::ingestor_quiesce::readiness::shuttle_tests::shuttle_retirement_racing_source_polling_is_final_and_instance_local",
+  "runtime::relay_boundary::channels::shuttle_tests::shuttle_first_binding_has_one_winner_and_routing_retirement_cancels_every_slot",
+  "runtime::relay_boundary::channels::shuttle_tests::shuttle_first_delivery_binding_racing_terminal_retirement_cannot_publish_a_live_channel",
+  "runtime::relay_boundary::channels::shuttle_tests::shuttle_branch_retirement_racing_a_route_refresh_never_revives_a_retained_producer",
   "runtime::domain_execution::shuttle_tests::shuttle_a_reader_observes_one_complete_typed_routing_revision",
   "runtime::emitter_record_writes::shuttle_tests::shuttle_a_cancelled_attempt_leaves_each_member_to_resolve_once",
   "runtime::emitter_record_writes::shuttle_tests::shuttle_a_drain_never_finds_the_emitter_empty_while_a_member_is_retained",

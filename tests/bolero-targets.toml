@@ -9,6 +9,36 @@ sanitizer = "address"
 
 [[target]]
 case_timeout_seconds = 10
+corpus = "crates/interconnect/src/connection/__fuzz__/connection__retained_slots_tests__bolero_pool_slot_generations_have_one_worker_and_fixed_capacity/corpus"
+domain_version = 1
+features = []
+id = "interconnect-slot-lifetimes"
+invariant = "Bounded slot claim, retire, replace and dial-update sequences preserve one worker per lifetime, irreversible retirement, shared slot identity for dial updates and exact pool capacities."
+manifest = "Cargo.toml"
+max_input_bytes = 64
+package = "nervix-interconnect"
+random_iterations = 256
+source = "crates/interconnect/src/connection/retained_slots_tests.rs"
+test = "connection::retained_slots_tests::bolero_pool_slot_generations_have_one_worker_and_fixed_capacity"
+test_target = "lib"
+
+[[target]]
+case_timeout_seconds = 10
+corpus = "src/runtime/__fuzz__/runtime__relay_boundary__channels__tests__bolero_relay_sequences_preserve_exact_lifetimes_and_order/corpus"
+domain_version = 1
+features = []
+id = "relay-channel-lifetimes"
+invariant = "Bounded bind, send, route replacement, eviction and teardown sequences preserve channel identity and order, cancel retired handles and bound retained live tables to active branches and destinations."
+manifest = "Cargo.toml"
+max_input_bytes = 64
+package = "nervix-server"
+random_iterations = 256
+source = "src/runtime/relay_channels_tests.rs"
+test = "runtime::relay_boundary::channels::tests::bolero_relay_sequences_preserve_exact_lifetimes_and_order"
+test_target = "lib"
+
+[[target]]
+case_timeout_seconds = 10
 corpus = "src/runtime/__fuzz__/runtime__endpoint_route_table__tests__bolero_endpoint_sequences_preserve_visible_routes_and_intake_lifetimes/corpus"
 domain_version = 1
 features = []

@@ -113,7 +113,7 @@ impl Runtime {
                 pool_waits: DashMap::default(),
                 emitter_confirmation_waits: DashMap::default(),
                 executions: DashMap::default(),
-                domain_routings: DashMap::default(),
+                domain_routings: domain_execution::DomainRoutings::default(),
                 message_error_routes: DashMap::default(),
                 compiled_domain_udfs: DashMap::default(),
                 compiled_wasm_modules: DashMap::default(),
@@ -574,6 +574,9 @@ impl Runtime {
             }
         }
         self.stop_message_error_routes_for_domain(domain).await;
+        for services in execution.routing.relay_services.values() {
+            services.retire_channels();
+        }
         if !self.inner.domains.contains_key(domain) {
             self.clear_runtime_state_for_domain(domain);
         }
@@ -630,9 +633,13 @@ impl Runtime {
             }
             self.clear_domain_ingestor_quiescence(domain);
         }
+        self.inner.domain_routings.clear();
         self.inner.endpoint_intake_routes.clear();
         self.inner.compiled_domain_udfs.clear();
         self.inner.compiled_wasm_modules.clear();
+        for readiness in self.inner.ingestor_readiness.iter() {
+            readiness.retire();
+        }
         self.inner.ingestor_readiness.clear();
         self.inner.remote_ack_watcher_shutdown.cancel();
         self.inner.remote_ack_watcher_tasks.close();

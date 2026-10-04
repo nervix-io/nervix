@@ -360,7 +360,7 @@ impl Runtime {
         let expected_instances = NonZeroU64::new(instance_count).assured(
             "every source composition opens the non-zero instance count its source declares",
         );
-        self.prepare_ingestor_readiness(domain, &ingestor.name, expected_instances);
+        let readiness = self.prepare_ingestor_readiness(domain, &ingestor.name, expected_instances);
 
         let (shutdown_tx, _) = watch::channel(false);
         let mut tasks = Vec::with_capacity(instances.len());
@@ -369,7 +369,9 @@ impl Runtime {
                 companion.start(shutdown_tx.subscribe()),
             ));
         }
-        for (instance_index, instance) in (0_u64..).zip(instances) {
+        for (instance_index, (instance, readiness)) in
+            (0_u64..).zip(instances.into_iter().zip(readiness))
+        {
             let host = RuntimeSourceHost::new(RuntimeSourceHostSpec {
                 handles: handles.clone(),
                 runtime: self.clone(),
@@ -384,6 +386,7 @@ impl Runtime {
                 quiesce: quiesce.clone(),
                 shutdown: shutdown_tx.subscribe(),
                 instance_index,
+                readiness,
                 metadata_kind: ingestor.metadata_kind(),
                 buffered_intake,
                 flush_each_intake,
@@ -456,6 +459,7 @@ pub(super) struct RuntimeSourceHostSpec {
     pub(super) quiesce: Arc<IngestorQuiesceControl>,
     pub(super) shutdown: watch::Receiver<bool>,
     pub(super) instance_index: u64,
+    pub(super) readiness: ingestor_quiesce::SourceInstanceReadiness,
     pub(super) metadata_kind: IngestMetadataKind,
     pub(super) buffered_intake: bool,
     pub(super) flush_each_intake: bool,
@@ -483,6 +487,7 @@ pub(super) struct RuntimeSourceHost {
     /// `shutdown`.
     delivery_stop: watch::Receiver<bool>,
     instance_index: u64,
+    readiness: ingestor_quiesce::SourceInstanceReadiness,
     collector: IngestRouteCollector,
     buffered_intake: bool,
     flush_each_intake: bool,
@@ -534,6 +539,7 @@ impl RuntimeSourceHost {
             shutdown: spec.shutdown,
             delivery_stop,
             instance_index: spec.instance_index,
+            readiness: spec.readiness,
             collector,
             buffered_intake: spec.buffered_intake,
             flush_each_intake: spec.flush_each_intake,
@@ -1138,19 +1144,11 @@ impl SourceHostServices for RuntimeSourceHost {
     }
 
     fn mark_ready(&self) {
-        self.runtime.mark_ingestor_instance_ready(
-            &self.domain,
-            &self.ingestor,
-            self.instance_index,
-        );
+        self.readiness.mark_ready();
     }
 
     fn mark_unready(&self) {
-        self.runtime.mark_ingestor_instance_unready(
-            &self.domain,
-            &self.ingestor,
-            self.instance_index,
-        );
+        self.readiness.mark_unready();
     }
 
     fn record_transient_error(&self, reason: String, retry_after: Duration) {
@@ -2634,3 +2632,9 @@ mod shuttle_tests;
 #[cfg(test)]
 #[path = "source_extension_tests.rs"]
 mod extension_tests;
+
+impl Drop for RuntimeSourceHost {
+    fn drop(&mut self) {
+        self.readiness.retire();
+    }
+}

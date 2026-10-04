@@ -28,9 +28,9 @@ including the subscription fan-out that feeds a client's Row frames.
 
 Source-local compiler contracts distinguish peer/slot installation from recurring stream,
 frame, admission and acknowledgement operations. Retained admission records and placement progress
-name their bounded protocol key and transition bound; shared relay/connection discovery and remote
-ACK tracking retain exact-operation expectations naming their repair tasks. A conditional first
-installation from a recurring transport path documents that phase at the call. The compiler's
+name their bounded protocol key and transition bound. Transport selection reads immutable target
+and connection publications; remote ACK tracking retains exact-operation repair expectations.
+A retained slot admits one worker through an atomic claim; established operations read that claim. The compiler's
 contracts do not establish wire delivery or concurrency guarantees; those remain the protocols
 and checks described here. [Data-Plane Concurrency](./data-plane-concurrency.md#source-contracts)
 owns the compiler authoring contract.
@@ -405,13 +405,22 @@ applied separately to incoming and outgoing work across all peers and connection
 These reservations mean that ordinary management traffic cannot consume the capacity required to
 resolve already-started relay work or determine whether a peer is healthy.
 
-Leasing a stream slot takes no exclusive lock and allocates nothing once a pool is established.
-When an endpoint is registered for a peer, the transport builds the identity of every connection
-slot that endpoint can hold, and each lease reads the registration, its slots, and their connections
-through shared lookups. Only a slot that is not running yet, such as the first on-demand bulk
-connection, takes the exclusive path that starts it. A replaced endpoint gets a new registration
-with its own slot identities, so a lease can never select a connection that belongs to the endpoint
-it replaced.
+Leasing an established stream allocates nothing and acquires no shared discovery map. An immutable
+persistent target table selects the peer's fixed pool arrays. Each slot retains its cancellation
+lifetime, one atomic worker claim and an `ArcSwapOption` containing the current authenticated
+connection. A lease retains that exact connection and takes its existing pool/subquota reservation.
+Only a first use can win the worker claim, including on-demand bulk. The worker clears its connection
+publication on loss and publishes a fresh connection after authenticated reconnect. The cold
+connection registry remains available for registration, statistics and exact teardown; predecessor
+teardown removes only its own allocation.
+
+Endpoint or TLS replacement cancels the preceding slots before publishing new fixed arrays. Peer
+retirement therefore cannot expose a replacement connection through a stale slot. A dial-address
+update for an unchanged endpoint preserves slot identity and affects only the next connection
+attempt. Such an update retains the fixed arrays' shared owner under its new target wrapper, so a
+concurrent peer withdrawal still withdraws that exact pool lifetime. A recreated pool has a distinct
+owner, even at the same endpoint, and survives a predecessor's withdrawal. The fixed array scan
+retains round-robin selection and each class's existing capacities.
 
 A connection stops granting stream leases the moment it begins to drain, whether it is retiring or
 the transport is shutting down. A lease checks for the drain only after it holds its slot, so it

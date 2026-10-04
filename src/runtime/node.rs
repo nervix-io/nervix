@@ -51,7 +51,7 @@ pub(in crate::runtime) struct RuntimeInner {
     pub(in crate::runtime) executions: DashMap<DomainName, DomainExecution, RandomState>,
     /// Stable per-domain publication handles retained across execution rebuilds. Data-plane tasks
     /// resolve one handle when they start and keep its cache instead of revisiting `executions`.
-    pub(in crate::runtime) domain_routings: DashMap<DomainName, SharedDomainRouting, RandomState>,
+    pub(in crate::runtime) domain_routings: domain_execution::DomainRoutings,
     pub(in crate::runtime) message_error_routes:
         DashMap<MessageErrorRouteKey, Arc<MessageErrorRouteRuntime>, RandomState>,
     pub(in crate::runtime) compiled_domain_udfs:
