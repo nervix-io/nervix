@@ -363,7 +363,9 @@ All table and vector fields are required, including empty vectors. Unknown
 fields are ignored for FlatBuffers schema evolution; unknown union or enum
 variants, missing required fields, a wrong identifier or size prefix, trailing
 bytes, invalid column counts, bad source tokens, malformed or trailing Arrow
-IPC, and exact-schema mismatches are global processor errors. Empty output
+IPC, and exact-schema mismatches are global processor errors. Short headers are
+rejected before identifier access, including a complete size prefix whose declared
+length matches a buffer too short to hold the root and identifier. Empty output
 groups, out-of-range or unreferenced generated columns, and generated
 row-layout mismatches are also rejected. Nonzero uninitialized column indexes
 are rejected. CBOR and per-output generated-column
