@@ -36,6 +36,7 @@ fastrand = { workspace = true }
 futures-util = { workspace = true }
 h2 = { workspace = true }
 http = { workspace = true }
+imbl = { workspace = true }
 meticulous = { workspace = true }
 nervix-dns = { workspace = true }
 nervix-execution = { workspace = true }

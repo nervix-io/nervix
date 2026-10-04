@@ -19,6 +19,34 @@
 # thread count, work and lifetime bound here.
 
 [[permission]]
+bound = "Three model threads per execution: two claim one fixed pool slot and one retires it; all are joined before the bounded Shuttle execution ends."
+items = ["thread::spawn"]
+owner = "The retained transport pool-slot lifetime model."
+path = "crates/interconnect/src/connection/retained_slots_tests.rs"
+reason = "These threads drive the production slot owner inside Shuttle's scheduler. They are model contenders, not node work admitted to the bounded executor."
+
+[[permission]]
+bound = "Two contender threads register one peer each, synchronize with the test through a three-party barrier, and are joined before both fixture transports shut down."
+items = ["thread::spawn"]
+owner = "The ordinary transport registration-limit regression."
+path = "crates/interconnect/src/tests/lease.rs"
+reason = "The test races synchronous public target registration from external threads with an entered ordinary runtime; it is a harness, not a node's accepted work."
+
+[[permission]]
+bound = "At most two model threads coexist: each binds or selects one channel, replaces routing, or retires one lifetime. Each pair is joined before the bounded Shuttle execution advances or ends."
+items = ["thread::spawn"]
+owner = "The relay channel binding and retirement models."
+path = "src/runtime/relay_channels_shuttle_tests.rs"
+reason = "The model contenders drive the production channel owners under Shuttle's scheduler rather than executing a node job through the bounded executor."
+
+[[permission]]
+bound = "Two model threads per execution: one publishes three readiness transitions and one retires the exact instance. Both are joined before the bounded Shuttle execution ends."
+items = ["thread::spawn"]
+owner = "The exact source-instance readiness lifetime model."
+path = "src/runtime/source_readiness.rs"
+reason = "Thread creation is confined to this file's Shuttle test module, where model contenders exercise the production scalar owner; product readiness publication creates no thread."
+
+[[permission]]
 bound = "Two small files, read once for each resolver built; a node builds one when it starts."
 items = ["task::spawn_blocking"]
 owner = "The resolver's configuration load in nervix-dns."

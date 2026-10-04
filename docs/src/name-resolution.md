@@ -32,6 +32,12 @@ resolve through it keep their own facts, and this chapter links to them rather t
   [Deterministic Interconnect Simulation](./interconnect-simulation.md#sockets-and-dns) owns the
   simulated names of the Turmoil build.
 
+Transport selection retains pool-slot handles in immutable target publications. A changed dial
+address for the same advertised endpoint preserves those lifetimes. Established leases retain the
+authenticated connection; only its reconnect worker reads the current dial policy and resolves the
+endpoint again. Publication changes do not add DNS lookups to established leasing or change the
+resolver, setup budget, address-attempt order, TLS name or HTTP authority.
+
 ## Ownership
 
 `nervix-dns` sits in the engines and infrastructure layer. It owns one resolver's configuration

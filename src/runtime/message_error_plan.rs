@@ -20,6 +20,7 @@ pub(super) struct BoundMessageErrorRoute {
     pub(super) branching: ResolvedBranching,
     pub(super) program: CompiledProgramWithMaterializedInterest,
     pub(super) flush_policy: Option<RuntimeFlushPolicy>,
+    pub(super) delivery: Option<Arc<MessageErrorRouteRuntime>>,
 }
 
 pub(super) struct MessageErrorRouteBindingContext<'a> {
@@ -88,6 +89,7 @@ impl BoundMessageErrorRoutes {
                 branching: spec.target_branching,
                 program,
                 flush_policy,
+                delivery: flush_policy.map(|_| MessageErrorRouteRuntime::prepare()),
             });
             if routes.insert(key.clone(), route).is_some() {
                 return Err(error_stack::Report::new(
@@ -96,6 +98,17 @@ impl BoundMessageErrorRoutes {
             }
         }
         Ok(Self { routes })
+    }
+
+    /// Only the successful running revision installs delivery workers. Binding is fallible and
+    /// must not retire a worker belonging to the preceding published revision.
+    pub(super) fn activate(&self, runtime: &Runtime, domain: &DomainName) {
+        runtime.retire_unselected_message_error_routes(domain, &self.routes);
+        for route in self.routes.values() {
+            if route.flush_policy.is_some() {
+                runtime.install_message_error_route(route);
+            }
+        }
     }
 
     pub(super) fn get(&self, key: &MessageErrorRouteKey) -> Option<Arc<BoundMessageErrorRoute>> {

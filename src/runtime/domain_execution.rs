@@ -16,6 +16,7 @@
     )
 )]
 
+use imbl::{GenericHashMap, shared_ptr::DefaultSharedPtr};
 use nervix_connector_websockets::CompiledSignalingProtocol;
 
 use super::{domain_rebuild::ActivatedDomainSurfaces, *};
@@ -59,6 +60,57 @@ pub(crate) struct DomainRoutingSnapshot {
 pub(crate) type SharedDomainRouting = StdArc<ArcSwap<DomainRoutingSnapshot>>;
 pub(crate) type DomainRoutingCache = Cache<SharedDomainRouting, StdArc<DomainRoutingSnapshot>>;
 
+type RoutingPublications =
+    GenericHashMap<DomainName, SharedDomainRouting, RandomState, DefaultSharedPtr>;
+
+/// The node publishes its domain handles only when domains are installed. A fresh request may
+/// select a domain from this immutable table; an executing task retains the selected publication.
+pub(super) struct DomainRoutings {
+    published: ArcSwap<RoutingPublications>,
+}
+
+impl Default for DomainRoutings {
+    fn default() -> Self {
+        Self {
+            published: ArcSwap::from_pointee(RoutingPublications::default()),
+        }
+    }
+}
+
+impl DomainRoutings {
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            recurring,
+            reason = "intake and branch owners read an immutable table of domain publications"
+        )
+    )]
+    pub(super) fn get(&self, domain: &DomainName) -> Option<SharedDomainRouting> {
+        self.published.load().get(domain).cloned()
+    }
+
+    pub(super) fn remove(&self, domain: &DomainName) {
+        self.published.rcu(|current| {
+            let mut next = (**current).clone();
+            next.remove(domain);
+            next
+        });
+    }
+
+    pub(super) fn clear(&self) {
+        self.published
+            .store(StdArc::new(RoutingPublications::default()));
+    }
+
+    pub(super) fn insert(&self, domain: DomainName, routing: SharedDomainRouting) {
+        self.published.rcu(|current| {
+            let mut next = (**current).clone();
+            next.insert(domain.clone(), routing.clone());
+            next
+        });
+    }
+}
+
 /// Lifecycle-owned staging and publication for one domain's routing state.
 ///
 /// `current` shares the published allocation until lifecycle code first mutates it. `Arc::make_mut`
@@ -94,6 +146,12 @@ impl DomainRouting {
     /// mutated.
     pub(super) fn staged(&self) -> StdArc<DomainRoutingSnapshot> {
         self.current.clone()
+    }
+
+    pub(super) fn activate(&mut self, runtime: &Runtime, domain: &DomainName) {
+        if !self.current.passive_only {
+            self.current.message_error_plans.activate(runtime, domain);
+        }
     }
 
     pub(super) fn publish(&mut self) {
@@ -208,8 +266,8 @@ pub(super) struct RuntimeDomainState {
 
 impl Runtime {
     /// Resolves the stable publication handle for a domain. Data-plane tasks call this once when
-    /// they are created and retain a `DomainRoutingCache`; lifecycle and observability callers may
-    /// resolve it directly because they are not batch paths.
+    /// they are created and retain a `DomainRoutingCache`. Fresh request collectors, lifecycle
+    /// and observability callers select it through the immutable domain publication.
     #[cfg_attr(
         nervix_lint,
         nervix::context(
@@ -219,13 +277,7 @@ impl Runtime {
         )
     )]
     pub(crate) fn domain_routing(&self, domain: &DomainName) -> Option<SharedDomainRouting> {
-        nervix_primitives::expect_lint!(
-            nervix::sync_acquisition,
-            "Typed Ratchet 03 https://app.clickup.com/t/86bc9eqjv: retain domain routing on the \
-             execution owner",
-            self.inner.domain_routings.get(domain)
-        )
-        .map(|routing| routing.value().clone())
+        self.inner.domain_routings.get(domain)
     }
 
     pub(super) fn stage_domain_routing(
@@ -242,9 +294,8 @@ impl Runtime {
     #[cfg_attr(
         nervix_lint,
         nervix::context(
-            lifecycle,
-            reason = "this operation installs, snapshots or retires retained execution state at \
-                      an explicit lifetime boundary"
+            recurring,
+            reason = "intake and branch owners retain a cache of the domain routing publication"
         )
     )]
     pub(crate) fn domain_routing_cache(&self, domain: &DomainName) -> Option<DomainRoutingCache> {
@@ -316,6 +367,7 @@ impl Runtime {
                 if let Some((_, removed)) = self.inner.domains.remove(&domain) {
                     removed.clock.mark_missing();
                 }
+                self.inner.domain_routings.remove(&domain);
                 self.inner.domain_instantiation_errors.remove(&domain);
                 self.inner.in_flight_by_domain.remove(&domain);
                 self.inner

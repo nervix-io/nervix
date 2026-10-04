@@ -30,6 +30,8 @@ Use it for:
   regressions, sanitizer libFuzzer runs and exact failure replay](./property-testing-and-fuzzing.md)
 - [the expression VM: compilation, columnar execution, kernels and SIMD, function families, window
   aggregates and sketches, and adding a function](./vm-functions.md)
+- [SIMD kernels: typed buffer ownership, dispatch and build targets, exact results, caller
+  catalog, qualification, and measured evidence](./simd-kernels.md)
 - runtime semantics that are easier to understand from the implementation side
 - relay/state internals
 

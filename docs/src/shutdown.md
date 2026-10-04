@@ -213,6 +213,11 @@ If a broker-style source is still resuming, the host cancels that pending resume
 arrives, drops its DNS, socket and handshake work, and closes the source before exiting. A quiesce
 change also cancels an in-progress resume so the next loop turn observes the new intake state.
 
+Source-instance readiness retirement is final and names the ending host's exact handle. Shutdown
+retires installed readiness before withdrawing the registry. Terminal domain execution teardown
+cancels its relay channel publication after owned tasks stop; retained producer or channel handles
+then reject further dispatch and cannot attach to a restarted execution.
+
 This intake stop ignores `ON QUIESCE`. That clause governs what an external source experiences
 during a resumable hold — a model alteration, a domain pause, or memory-pressure shedding — where
 the ingestor will run again. Shutdown and ownership handoff are not resumable, so polling and

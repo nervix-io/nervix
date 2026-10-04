@@ -21,6 +21,10 @@ use nervix_models::parse_duration_text;
 
 use super::*;
 
+#[path = "source_readiness.rs"]
+mod readiness;
+pub(in crate::runtime) use readiness::SourceInstanceReadiness;
+
 pub(super) const DEFAULT_KAFKA_PARTITION_WATCH_INTERVAL: Duration = Duration::from_secs(1);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, strum::IntoStaticStr)]
@@ -1087,21 +1091,24 @@ pub(crate) struct IngestorQuiesceCounters {
 
 #[derive(Debug)]
 pub(super) struct IngestorReadiness {
-    pub(super) expected_instances: NonZeroU64,
-    pub(super) ready_instances: BTreeSet<u64>,
+    instances: Vec<SourceInstanceReadiness>,
 }
 
 impl IngestorReadiness {
     pub(super) fn new(expected_instances: NonZeroU64) -> Self {
-        Self {
-            expected_instances,
-            ready_instances: BTreeSet::new(),
-        }
+        let count: usize = expected_instances.get().arch_into();
+        let instances = (0..count).map(|_| SourceInstanceReadiness::new()).collect();
+        Self { instances }
     }
 
     pub(super) fn is_ready(&self) -> bool {
-        let ready_instances: u64 = self.ready_instances.len().arch_into();
-        ready_instances >= self.expected_instances.get()
+        self.instances.iter().all(SourceInstanceReadiness::is_ready)
+    }
+
+    pub(super) fn retire(&self) {
+        for instance in &self.instances {
+            instance.retire();
+        }
     }
 }
 
@@ -1153,11 +1160,15 @@ impl Runtime {
         domain: &DomainName,
         ingestor: &IngestorName,
         expected_instances: NonZeroU64,
-    ) {
-        self.inner.ingestor_readiness.insert(
-            DomainNodeRef::node_in(domain.clone(), ModelKind::Ingestor, ingestor.clone()),
-            IngestorReadiness::new(expected_instances),
-        );
+    ) -> Vec<SourceInstanceReadiness> {
+        let key = DomainNodeRef::node_in(domain.clone(), ModelKind::Ingestor, ingestor.clone());
+        if let Some(predecessor) = self.inner.ingestor_readiness.get(&key) {
+            predecessor.retire();
+        }
+        let readiness = IngestorReadiness::new(expected_instances);
+        let handles = readiness.instances.clone();
+        self.inner.ingestor_readiness.insert(key, readiness);
+        handles
     }
 
     pub(in crate::runtime) fn prepare_ingestor_quiescence(
@@ -1306,68 +1317,16 @@ impl Runtime {
         }
     }
 
-    #[cfg_attr(
-        nervix_lint,
-        nervix::context(
-            recurring,
-            reason = "the source task checks its retained quiesce state before each admitted \
-                      payload or poll"
-        )
-    )]
-    pub(in crate::runtime) fn mark_ingestor_instance_ready(
-        &self,
-        domain: &DomainName,
-        ingestor: &IngestorName,
-        instance_idx: u64,
-    ) {
-        let key = DomainNodeRef::node_in(domain.clone(), ModelKind::Ingestor, ingestor.clone());
-        if let Some(mut readiness) = nervix_primitives::expect_lint!(
-            nervix::sync_acquisition,
-            "Typed Ratchet 03 (86bc9eqjv): retain the source instance readiness publication \
-             instead of finding its registry slot during polling",
-            self.inner.ingestor_readiness.get_mut(&key)
-        ) {
-            readiness.ready_instances.insert(instance_idx);
-        }
-    }
-
-    #[cfg_attr(
-        nervix_lint,
-        nervix::context(
-            recurring,
-            reason = "the source task checks its retained quiesce state before each admitted \
-                      payload or poll"
-        )
-    )]
-    pub(in crate::runtime) fn mark_ingestor_instance_unready(
-        &self,
-        domain: &DomainName,
-        ingestor: &IngestorName,
-        instance_idx: u64,
-    ) {
-        let key = DomainNodeRef::node_in(domain.clone(), ModelKind::Ingestor, ingestor.clone());
-        if let Some(mut readiness) = nervix_primitives::expect_lint!(
-            nervix::sync_acquisition,
-            "Typed Ratchet 03 (86bc9eqjv): retain the source instance readiness publication \
-             instead of finding its registry slot during polling",
-            self.inner.ingestor_readiness.get_mut(&key)
-        ) {
-            readiness.ready_instances.remove(&instance_idx);
-        }
-    }
-
     pub(in crate::runtime) fn clear_ingestor_readiness(
         &self,
         domain: &DomainName,
         ingestor: &IngestorName,
     ) {
-        self.inner
-            .ingestor_readiness
-            .remove(&DomainNodeRef::node_in(
-                domain.clone(),
-                ModelKind::Ingestor,
-                ingestor.clone(),
-            ));
+        let key = DomainNodeRef::node_in(domain.clone(), ModelKind::Ingestor, ingestor.clone());
+        if let Some(readiness) = self.inner.ingestor_readiness.get(&key) {
+            readiness.retire();
+        }
+        self.inner.ingestor_readiness.remove(&key);
     }
 
     pub(super) fn ingestor_ready(&self, domain: &DomainName, ingestor: &IngestorName) -> bool {
