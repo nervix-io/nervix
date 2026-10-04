@@ -683,7 +683,11 @@ report carries its planning diagnostics and cannot supply a commit preview. A st
 recoverable command disposition that applies no effects and tells the client to refresh its
 inspection before retrying `COMMIT`. [Transaction Quiescence And Impact
 Inspection](./transaction-quiescence.md) defines the planned and actual report outcomes these
-diagnostics describe. Parse diagnostics retain precise expected and found tokens and byte spans
+diagnostics describe. A buffered ingestor's intake-only drain uses the same typed entity-quiesce
+timeout, naming the domain, pending node, work counts, and outstanding ACK roots. Its failure
+releases the attempted hold and retains the committed endpoint contract. A failure while
+releasing that intake hold keeps the typed release cause beneath the model alteration's gate
+error; it cannot publish the replacement. Parse diagnostics retain precise expected and found tokens and byte spans
 into the submitted source for a client to underline, whichever statement of a batch was
 rejected. Validation diagnostics attach a source span when the
 relevant identifier is present in the submitted text; failures without a source location have an

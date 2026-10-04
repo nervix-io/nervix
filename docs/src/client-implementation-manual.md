@@ -508,6 +508,9 @@ payload, infinity, and nullable and sensitive branch key fields.
   `Suspended`. Admission changes are coalesced, so it MUST NOT expect every intermediate state. It
   MUST treat `ProducerEnded` as the last frame about the producer, every batch of which has already
   received its outcome.
+  It MUST continue reading outcomes for admitted batches during an alteration's suspension,
+  including buffered partial batches. It MUST retain their credit until their outcomes arrive;
+  suspension and a failed alteration do not authorize replay or a replacement producer.
 - **P-7.** A client MUST NOT send `CancelRequest` for a submitted batch; the server refuses it with
   `InvalidRequest`, and the batch's outcome still follows. A caller that stops waiting MUST leave the
   outcome retrievable, so it is never lost.

@@ -251,6 +251,14 @@ identity. Prepared handoff state persists it in the sole current stored shape an
 before activation or cleanup after a restart. The handoff's committed schedule-transition ID still
 names the schedule change; it does not authorize coordination traffic.
 
+A model alteration that includes an ingestor and shared downstream relay uses two entity-gate
+operations. An intake-only scope, with no relay gates, first suspends the affected ingestors on
+every node and drains their admitted work. The full subgraph operation then engages before that
+intake operation is released. Each operation has its own authenticated coordination identity and
+exact scope, and both use the same alteration deadline. Status, retries, receiver-owned release,
+and lease expiry retain the normal identity checks throughout this overlap. The coordinator does
+not change an existing operation's scope to advance the drain.
+
 A coordinated WASM guest-state reset uses the same authenticated coordination identity and adds its
 typed reset scope to the entity-gate purpose. Engagement publishes a branch-selective relay fence:
 one concrete fingerprint, the explicit unbranched instance, or all concrete branches. A retry must

@@ -645,6 +645,16 @@ same reason: a batch that left an input collector for an output buffer was admit
 the move. Overcounting only delays a drain, while undercounting lets one conclude early, so the
 ordering is chosen in that direction. The counts are hot-path scalars and are never persisted.
 
+An ingestor route's force-flush participant releases its partial batches into branch execution;
+the admitted client submission's tracked ACK root stays outstanding until its downstream work
+settles. For a model alteration with a shared relay gate, the control plane suspends the affected
+ingestors on every node and drains those roots before closing the relay gate. Otherwise a flushed
+batch could wait behind the gate whose drain waits for that same root. Intake and full entity
+holds overlap on the same quiesce control: releasing one `EntityHold` removes only its share, so
+the remaining hold keeps admission suspended. The client admission Shuttle check exercises that
+overlap with racing batch admission; the public buffered alteration scenarios exercise delivery
+through local and remote relay owners.
+
 A task that must not publish while an ownership handoff has frozen its entity observes that freeze
 through one watch, which registers for the next freeze change before it reads the freeze. A release
 landing between a read and a registration wakes nothing, because the waiter does not exist yet, and
@@ -1316,10 +1326,12 @@ the current generation regressions: cancellation before and after pointer public
 readers, queued checkpoint writers, corrupt and incomplete chunks, exact retry after reopen,
 stale authority, bounded cleanup across 600 checkpoints and a 40 MiB guest save admitted with a
 2 MiB reservation. Its evidence is retained beside the probe and scenario evidence. The command
-then runs the `@deadlock_diagnostics` and `@restore_installation` scenarios, without retries, in a
+then runs the `@deadlock_diagnostics`, `@restore_installation`, and
+`@client_ingestor_alter_drain` scenarios, without retries, in a
 scenario binary built for the mode: in-process diagnostic nodes running a workload, real diagnostic
 server processes that stop gracefully with evidence that records a running detector and no
-findings, each on one and three nodes, and the restore installation workloads. The latter exercise
+findings, each on one and three nodes, the buffered client alterations with overlapping holds and
+failed drains or full-hold engagement, and the restore installation workloads. The latter exercise
 the blocking applied-state authority guard through staging failure, complete publication, runtime
 handle clearing and a delayed coordinator across leadership transfer and a successor's START.
 The large-generation scenarios cover two 20 MiB saves and forty 1 MiB saves on one and three nodes,

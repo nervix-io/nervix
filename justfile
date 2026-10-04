@@ -406,9 +406,10 @@ test-primitives-compile:
 # consistent-order controls must end cleanly with evidence that records no finding; and the
 # start-up, quiet-output and recording-failure cases end as their contract says. A child that never
 # ends is killed by its probe's watchdog and fails it. The diagnostic node smoke then runs the
-# `@deadlock_diagnostics` and `@restore_installation` scenarios, without retries, in a scenario
-# binary built for the mode: in-process nodes, real diagnostic server processes on one and three
-# nodes, interrupted restore installation and stale publication after leadership transfer. Each
+# `@deadlock_diagnostics`, `@restore_installation` and `@client_ingestor_alter_drain` scenarios,
+# without retries, in a scenario binary built for the mode: in-process nodes, real diagnostic
+# server processes on one and three nodes, buffered client alterations, interrupted restore
+# installation and stale publication after leadership transfer. Each
 # contract-change scenario also runs the diagnostic Rust paced driver; the Python application's
 # locks remain outside the detector while its diagnostic nodes are tracked. Each
 # invocation's output stays under target/deloxide/test-deloxide, and the scenario binary's own
@@ -460,8 +461,8 @@ test-deloxide budget_seconds="2400": tests-deps
     cargo test --no-run --features 'testing deloxide' --test scenarios
     within_budget scenarios \
         cargo test --features 'testing deloxide' --test scenarios -- \
-            --input 'tests/features/cluster/*.feature' \
-            --tags '@deadlock_diagnostics or @restore_installation' \
+            --input 'tests/features/**/*.feature' \
+            --tags '@deadlock_diagnostics or @restore_installation or @client_ingestor_alter_drain' \
             --retry 0
     summary="$(grep -E '^[0-9]+ scenarios? \(' "${logs}/scenarios.log" | tail -n 1 || true)"
     if [[ ! "${summary}" =~ ^([1-9][0-9]*)\ scenarios?\ \(([0-9]+)\ passed\)$ ]] \
