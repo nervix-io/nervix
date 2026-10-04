@@ -35,11 +35,17 @@ just chaos run backup --image nervix:debian --nodes 1
 
 The runner first observes healthy source and sink progress, then uses the packaged CLI to create a
 quiesced domain archive while load continues. The packaged CLI verifies the archive offline with
-`DESCRIBE BACKUP`. The result records the cut's engagement and release times and freeze duration
+`DESCRIBE BACKUP`. It then restores a stopped `chaos_restored` domain through the packaged CLI,
+backs up that domain and compares the public checkpoint identities, revisions, branch counts and
+exact Kafka positions with the original complete cut. The restored domain stays stopped while
+the source traffic continues. The result records the cut's engagement and release times and freeze duration
 under `results/backup-progress.json`. After the cut, the runner checks renewed source and sink
 progress, stops the producer, and checks the exact accepted-input ledger. Identical replay
 duplicates are counted separately in `results/ledger.json`. This run uses domain-owned Kafka
-offsets and requires both those offsets and branch lifecycle state in the archive.
+offsets and requires both those offsets and branch lifecycle state in the archive. Restore reports,
+both archive descriptions and the compared state inventories stay under `backup/`. This packaged
+workload exercises one-node and three-node publication; the large guest-save and post-START
+branch-isolation workloads run in the public Cucumber and diagnostic suites.
 
 Run graceful rolling restarts while Kafka traffic is flowing:
 

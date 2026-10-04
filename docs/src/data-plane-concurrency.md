@@ -139,7 +139,15 @@ writer.
 | Ingestor quiesce decision | Each ingestor publishes the declared and pending modes, active causes, source support, and derived intake decision as one value. Concurrent lifecycle changes derive their replacement from the current publication. | Polling and per-message intake make one load to decide whether to dispatch, suspend, skip, buffer, drop, or reject. A source host retains its last observed publication across dispatch awaits; its change wait registers before comparing that publication with the current one, so an engagement or release in the gap wakes it. The retained-payload lock is reached only after the published decision selects buffering. |
 | Backup state snapshot | Branch lifecycle publications, Kafka offset commits and WASM checkpoints register on a per-domain atomic generation before changing their published state. After the domain is paused and drained, the owner closes that generation with a Release RMW and waits with Acquire loads for registered publishers to leave. It then serializes Kafka positions and branch lifecycle into the runtime state store and opens one database snapshot for those records and durable WASM saves. The closing RMW is in the release sequence that a publisher entering the next generation acquires. | A publisher that entered before the cut completes into the captured view; a publisher that enters after it waits for the next generation. An older periodic storage write cannot replace a newer forced publication. The backup reads the database snapshot off the record path and stages owned section bytes. A live backup does not close the generation and reports its weaker cut explicitly. The server's Shuttle and Loom checks drive this production fence. |
 
-| Restore state publication | The control plane stages checkpoints under a replicated authority, then admits and publishes one complete domain batch. It holds the consensus applied-state read guard through authority validation, synchronous storage mutation and runtime-handle clearing. The state store reuses its existing latest-snapshot installation mutex for staging and publication. | A newer applied generation and the release of the start gate require the state-machine write guard. Every node therefore replaces a whole state set before `START` is available, and stale coordinators cannot mutate a running restored domain. The store retains the publication generation for exact retry and monotonic rejection. These are stopped-domain cold paths; record paths add no lock. |
+| Restore state publication | The control plane stages checkpoints under a replicated authority, then admits one fixed-size storage job, validates a complete generation namespace and durably publishes its active pointer. It holds the consensus applied-state read guard through authority validation, synchronous storage mutation and runtime-handle clearing. The state store reuses its existing latest-snapshot installation mutex for staging, pointer publication and bounded cleanup. Checkpoint jobs retain their selected namespace and validate it under that barrier; entity replacement and purge also select the active namespace while holding the barrier. | A newer applied generation and the release of the start gate require the state-machine write guard. Every node therefore replaces a whole state set before `START` is available, and stale coordinators cannot mutate a running restored domain. The store retains authority and inventory for exact retry and monotonic rejection. Database readers select pointer, header and chunk values from one snapshot, which retains its complete set across bounded deletion of obsolete namespaces. These are stopped-domain cold paths; record paths add no lock. |
+
+Restore storage qualification includes the store's cancellation, corruption, snapshot, queued
+writer and many-key cleanup regressions in `just test-deloxide`, plus the public one-node and
+three-node `@restore_installation` workloads for large saves, many checkpoints, durable publication
+failure, restart and delayed coordinators. Deloxide tracks the installation barrier and other
+boundary blocking locks; Fjall's internal locks, async authority ordering and memory ordering keep
+their separate ordinary, Shuttle, Loom and Turmoil checks. Measurements and diagnostic artifacts
+are delivered to the owning task.
 
 The backup coordinator waits for each node's admitted-work counters to reach zero, then orders one
 confirming force-flush generation across the cluster. The generation's obligations use the same
@@ -1312,7 +1320,12 @@ end their process with status `3`. Threads taking two mutexes in one order, a co
 between threads and readers sharing a lock must end cleanly, with evidence that records the process
 and no finding. A tracked lock before the run fails its process, a second run is refused, standard
 output never carries the banner, and a deadlock whose evidence cannot be recorded ends its process
-with status `4`. A child that never ends is killed by its watchdog and fails its probe. The command
+with status `4`. A child that never ends is killed by its watchdog and fails its probe. A fresh
+state-store test process starts its detector before constructing store or executor locks and runs
+the current generation regressions: cancellation before and after pointer publication, snapshot
+readers, queued checkpoint writers, corrupt and incomplete chunks, exact retry after reopen,
+stale authority, bounded cleanup across 600 checkpoints and a 40 MiB guest save admitted with a
+2 MiB reservation. Its evidence is retained beside the probe and scenario evidence. The command
 then runs the `@deadlock_diagnostics`, `@restore_installation`, and
 `@client_ingestor_alter_drain` scenarios, without retries, in a
 scenario binary built for the mode: in-process diagnostic nodes running a workload, real diagnostic
@@ -1321,6 +1334,10 @@ findings, each on one and three nodes, the buffered client alterations with over
 failed drains or full-hold engagement, and the restore installation workloads. The latter exercise
 the blocking applied-state authority guard through staging failure, complete publication, runtime
 handle clearing and a delayed coordinator across leadership transfer and a successor's START.
+The large-generation scenarios cover two 20 MiB saves and forty 1 MiB saves on one and three nodes,
+failure after durable publication, cluster restart, branch isolation and saved source offsets.
+The three-node copy restore cordons its coordinator before planning, so every guest save uses the
+remote chunk transfer and the receiver's quota-owned completed file.
 Those restore scenarios also run in the ordinary public suite. An invocation that executed no
 check fails the run, and so does a diagnostic workload whose scenarios did not all run and pass.
 The command also runs `@paced_simulation_reopen` on one and three nodes, with the diagnostic

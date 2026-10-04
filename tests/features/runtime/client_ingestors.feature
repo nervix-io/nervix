@@ -575,11 +575,18 @@ Feature: Client ingestors
       """
     # Both branches have partial batches at a cadence much longer than the test. The hold must
     # force them through the shared relay while it remains open, then wait for the sink's ACK.
-    When these NSPL commands begin executing in the background
+    Given client "alter owner" is connected to the leader node
+    When client "alter owner" executes these NSPL commands
       """
+      BEGIN;
       ALTER INGESTOR orders_in REPLACE ROUTE TO orders
         INHERIT ALL BRANCHED BY by_region SET region = message.region
         FLUSH EACH 10ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG;
+      """
+    Then client "alter owner" transaction id is saved as placeholder "alter_transaction"
+    When client "alter owner" begins executing these NSPL commands in the background
+      """
+      COMMIT;
       """
     Then producer "orders" eventually reports admission "suspended"
     And within "30s" the leader node describes ingestor "other_orders_in" with
@@ -598,6 +605,8 @@ Feature: Client ingestors
       """
     When HTTP receiver "sink" releases its held responses with "respond 200"
     Then the background NSPL execution succeeds
+    And transaction "{{alter_transaction}}" eventually has state "COMMITTED"
+    And transaction "{{alter_transaction}}" report step 1 eventually records planned quiesce "ENTITY_PAUSE", actual quiesce "ENTITY_PAUSE", execution "APPLIED", and outcomes "REQUESTED,CONFIRMED,RELEASED|REQUESTED,CONFIRMED,RELEASED"
     And batch "held" completes
     And producer "orders" eventually reports admission "open"
     When producer "orders" submits batch "after flush change" with rows
@@ -701,11 +710,18 @@ Feature: Client ingestors
       outstanding batches: 1
       admitted batches: 1
       """
-    When these NSPL commands begin executing in the background
+    Given client "alter owner" is connected to the leader node
+    When client "alter owner" executes these NSPL commands
       """
+      BEGIN;
       ALTER INGESTOR orders_in SET FROM CLIENT SCHEMA order_in
         MODE ACK SEQUENTIAL ACK TIMEOUT 60s RETRY POLICY BACKOFF 100ms MAX 1s
         ON QUIESCE SUSPEND;
+      """
+    Then client "alter owner" transaction id is saved as placeholder "alter_transaction"
+    When client "alter owner" begins executing these NSPL commands in the background
+      """
+      COMMIT;
       """
     Then producer "orders" eventually reports admission "suspended"
     And within "30s" the leader node describes ingestor "other_orders_in" with
@@ -717,6 +733,8 @@ Feature: Client ingestors
     Given the next <failure> in domain "{{domain}}" <disposition>
     When HTTP receiver "sink" releases its held responses with "respond 200"
     Then the background NSPL execution fails with "<error>"
+    And transaction "{{alter_transaction}}" eventually has state "FAILED"
+    And transaction "{{alter_transaction}}" report step 1 eventually records planned quiesce "ENTITY_PAUSE", actual quiesce "ENTITY_PAUSE", execution "FAILED", and outcomes "<outcomes>"
     And the last command error contains
       """
       quiesce level: ENTITY_PAUSE
@@ -757,15 +775,15 @@ Feature: Client ingestors
       """
 
     Examples:
-      | session                 | cluster_size | failure                | disposition           | error                                            |
-      | client "app"            | 1            | pending entity drain   | is forced to time out | timed out draining domain                        |
-      | client "app"            | 3            | pending entity drain   | is forced to time out | timed out draining domain                        |
-      | WebSocket session "app" | 1            | pending entity drain   | is forced to time out | timed out draining domain                        |
-      | WebSocket session "app" | 3            | pending entity drain   | is forced to time out | timed out draining domain                        |
-      | client "app"            | 1            | entity gate engagement | is rejected           | injected entity gate rejection before engagement |
-      | client "app"            | 3            | entity gate engagement | is rejected           | injected entity gate rejection before engagement |
-      | WebSocket session "app" | 1            | entity gate engagement | is rejected           | injected entity gate rejection before engagement |
-      | WebSocket session "app" | 3            | entity gate engagement | is rejected           | injected entity gate rejection before engagement |
+      | session                 | cluster_size | failure                | disposition           | error                                            | outcomes                                                    |
+      | client "app"            | 1            | pending entity drain   | is forced to time out | timed out draining domain                        | REQUESTED,CONFIRMED,FAILED,RELEASED                           |
+      | client "app"            | 3            | pending entity drain   | is forced to time out | timed out draining domain                        | REQUESTED,CONFIRMED,FAILED,RELEASED                           |
+      | WebSocket session "app" | 1            | pending entity drain   | is forced to time out | timed out draining domain                        | REQUESTED,CONFIRMED,FAILED,RELEASED                           |
+      | WebSocket session "app" | 3            | pending entity drain   | is forced to time out | timed out draining domain                        | REQUESTED,CONFIRMED,FAILED,RELEASED                           |
+      | client "app"            | 1            | entity gate engagement | is rejected           | injected entity gate rejection before engagement | REQUESTED,CONFIRMED,RELEASED\|REQUESTED,FAILED                 |
+      | client "app"            | 3            | entity gate engagement | is rejected           | injected entity gate rejection before engagement | REQUESTED,CONFIRMED,RELEASED\|REQUESTED,FAILED                 |
+      | WebSocket session "app" | 1            | entity gate engagement | is rejected           | injected entity gate rejection before engagement | REQUESTED,CONFIRMED,RELEASED\|REQUESTED,FAILED                 |
+      | WebSocket session "app" | 3            | entity gate engagement | is rejected           | injected entity gate rejection before engagement | REQUESTED,CONFIRMED,RELEASED\|REQUESTED,FAILED                 |
 
   @client_ingestor @client_ingestor_placement
   Scenario Outline: A producer entering through another node is forwarded to the owner, and a planned relocation ends it

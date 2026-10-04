@@ -369,8 +369,19 @@ exact current generation removes the installation; terminal command failure does
 carries leader identity and term, execution reference, mutation lease revision and generation.
 Checkpoint revision remains guest history and cannot grant installation authority. Validation at
 the applied-state boundary holds its read guard across the storage mutation and handle clearing.
-The state store validates the complete staged inventory before a single durable batch publishes
-it, and retains the successful generation for retry and stale-attempt rejection.
+The state store validates authority-bound receipts, checkpoint headers and ordered chunks before
+synchronizing the complete namespace. One small active-generation record then selects that set
+atomically and is synchronized before completion. It retains both authority and inventory for
+exact retry and stale-attempt rejection. Cancellation after selection preserves the closed start
+gate until the same authority completes durability and cleanup.
+
+Runtime storage has distinct initial and restored namespaces; restore installation generation is
+separate from guest-state generation and checkpoint revision. A current checkpoint is either an
+inline normal write or a segmented restore save with required revision, length and digest. A read
+uses one database view for namespace selection and payload data. A queued checkpoint job retains
+its selected namespace and validates that it remains current before writing. The storage format
+marker is required for nonempty checkpoint storage; corruption or absence fails explicitly and
+requires recreation rather than inventing a namespace for the stored keys.
 
 ## Qualification Evidence
 

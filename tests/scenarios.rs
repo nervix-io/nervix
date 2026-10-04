@@ -8958,6 +8958,16 @@ fn trapping_wasm_fixture() -> &'static [u8] {
 /// row tells which saved count a recreated instance restored. Written as text, it compiles quickly
 /// enough for a forced ownership recovery to validate its restore within the recovery budget.
 fn state_counting_wasm_fixture(output_relay: &str) -> Vec<u8> {
+    state_counting_wasm_fixture_with_size(output_relay, 4)
+}
+
+fn state_counting_wasm_fixture_with_size(output_relay: &str, state_bytes: usize) -> Vec<u8> {
+    let memory_bytes = state_bytes
+        .checked_add(65536)
+        .assured("the bounded fixture save fits beside its input and output buffers");
+    let pages = memory_bytes.div_ceil(65536);
+    let buffer_capacity = state_bytes.max(16384);
+    let token = 0x4a3b_2c1d_6e5f_8071_u64;
     let encoded = WasmEnvelope::output(
         Vec::new(),
         vec![WasmRoutedOutput::new(
@@ -8968,12 +8978,46 @@ fn state_counting_wasm_fixture(output_relay: &str) -> Vec<u8> {
             ],
             WasmAckSidecar {
                 rows: vec![WasmOutputRow::default()],
+                acked: vec![nervix_wasm::WasmAckTokenSet {
+                    tokens: vec![WasmAckToken(token)],
+                }],
                 ..WasmAckSidecar::default()
             },
         )],
     )
     .encode()
     .expect("state-counting WASM output fixture must encode");
+    let ack_only = WasmEnvelope::output(
+        Vec::new(),
+        vec![WasmRoutedOutput::new(
+            output_relay,
+            vec![
+                WasmOutputColumnRef::uninitialized(),
+                WasmOutputColumnRef::uninitialized(),
+            ],
+            WasmAckSidecar {
+                acked: vec![nervix_wasm::WasmAckTokenSet {
+                    tokens: vec![WasmAckToken(token)],
+                }],
+                ..WasmAckSidecar::default()
+            },
+        )],
+    )
+    .encode()
+    .assured("the fixture acknowledges a dropped row");
+    let token_offset = encoded
+        .windows(8)
+        .position(|bytes| bytes == token.to_le_bytes())
+        .assured("the encoded acknowledgment contains its token");
+    let ack_token_offset = ack_only
+        .windows(8)
+        .position(|bytes| bytes == token.to_le_bytes())
+        .assured("the acknowledgment contains its token");
+    let ack_wat = ack_only
+        .iter()
+        .map(|byte| format!("\\{byte:02x}"))
+        .collect::<String>();
+    let ack_len = ack_only.len();
     let encoded_wat = encoded
         .iter()
         .map(|byte| format!("\\{byte:02x}"))
@@ -8982,21 +9026,43 @@ fn state_counting_wasm_fixture(output_relay: &str) -> Vec<u8> {
 
     format!(
         r#"(module
-          (memory (export "memory") 1)
+          (memory (export "memory") {pages})
           (global $count (mut i32) (i32.const 0))
           (global $emitted (mut i32) (i32.const 0))
           (global $read_ptr (mut i32) (i32.const 0))
           (data (i32.const 32768) "{encoded_wat}")
+          (data (i32.const 40000) "{ack_wat}")
+          (func $field (param $table i32) (param $slot i32) (result i32)
+            local.get $table
+            local.get $table local.get $table i32.load i32.sub
+            i32.const 4 i32.add local.get $slot i32.const 2 i32.mul i32.add
+            i32.load16_u i32.add)
+          (func $follow (param $address i32) (result i32)
+            local.get $address local.get $address i32.load i32.add)
+          (func $ack_input (param $ptr i32) (local $token i64)
+            local.get $ptr i32.const 4 i32.add call $follow
+            i32.const 1 call $field call $follow
+            i32.const 1 call $field call $follow
+            i32.const 0 call $field call $follow
+            i32.const 4 i32.add call $follow
+            i32.const 0 call $field call $follow
+            i32.const 4 i32.add i64.load local.set $token
+            i32.const {token_address} local.get $token i64.store
+            i32.const {ack_token_address} local.get $token i64.store)
           (func (export "nervix_buffer_ptr") (result i32) global.get $read_ptr)
           (func (export "nervix_buffer_len") (result i32) (i32.const {encoded_len}))
-          (func (export "nervix_buffer_capacity") (result i32) (i32.const 16384))
-          (func (export "nervix_alloc") (param i32) (result i32)
-            i32.const 0
+          (func (export "nervix_buffer_capacity") (result i32) (i32.const {buffer_capacity}))
+          (func (export "nervix_alloc") (param $len i32) (result i32)
+            local.get $len
+            i32.const 16384
+            i32.gt_u
+            if (result i32) i32.const 65536 else i32.const 0 end
             global.set $read_ptr
-            i32.const 0)
+            global.get $read_ptr)
           (func (export "nervix_init") (param i32 i32) (result i32) (i32.const 0))
           (func (export "nervix_current_domain_time_nanos") (result i64) (i64.const 0))
-          (func (export "nervix_process_batch") (param i32 i32) (result i32)
+          (func (export "nervix_process_batch") (param $ptr i32) (param i32) (result i32)
+            local.get $ptr call $ack_input
             global.get $count
             i32.const 1
             i32.add
@@ -9005,6 +9071,7 @@ fn state_counting_wasm_fixture(output_relay: &str) -> Vec<u8> {
             i32.const 2
             i32.rem_u
             i32.eqz
+            if (result i32) i32.const 1 else i32.const 2 end
             global.set $emitted
             i32.const 0)
           (func (export "nervix_on_timeout") (param i64) (result i32) (i32.const 0))
@@ -9012,24 +9079,28 @@ fn state_counting_wasm_fixture(output_relay: &str) -> Vec<u8> {
           (func (export "nervix_read_emit") (result i32)
             global.get $emitted
             if (result i32)
-              i32.const 0
-              global.set $emitted
-              i32.const 32768
-              global.set $read_ptr
-              i32.const {encoded_len}
+              global.get $emitted i32.const 1 i32.eq
+              if (result i32)
+                i32.const 32768 global.set $read_ptr
+                i32.const {encoded_len}
+              else
+                i32.const 40000 global.set $read_ptr
+                i32.const {ack_len}
+              end
+              i32.const 0 global.set $emitted
             else
               i32.const 0
             end)
           (func (export "nervix_dump_state") (result i32)
-            i32.const 16
+            i32.const 65536
             global.get $count
             i32.store
-            i32.const 16
+            i32.const 65536
             global.set $read_ptr
-            i32.const 4)
+            i32.const {state_bytes})
           (func (export "nervix_load_state") (param $ptr i32) (param $len i32) (result i32)
             local.get $len
-            i32.const 4
+            i32.const {state_bytes}
             i32.ne
             if (result i32)
               i32.const {rejected}
@@ -9046,6 +9117,8 @@ fn state_counting_wasm_fixture(output_relay: &str) -> Vec<u8> {
             global.set $emitted
             i32.const 0)
         )"#,
+        token_address = 32768 + token_offset,
+        ack_token_address = 40000 + ack_token_offset,
         rejected = nervix_wasm::SavedStateRejection::ApplicationState.code()
     )
     .into_bytes()

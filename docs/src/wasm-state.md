@@ -62,8 +62,14 @@ A restore creates the target domain stopped and publishes its models and schedul
 state. It stages a complete replacement state set on each target node. It accepts a guest save
 only when its entity and schema fingerprint match the restored schedule, maps the saved branch to
 the generation that schedule names, and stages the checkpoint on the assigned owner and replicas.
-Branch lifecycle is staged first. Each node publishes lifecycle, offsets and saves together in one
-durable database batch, then clears its passive handles under the same installation authority.
+Branch lifecycle is staged first. Each node streams saves into bounded chunks in an invisible
+installation namespace, verifies the complete inventory, synchronizes the namespace and durably
+selects it with one atomic pointer. Lifecycle, offsets and saves become visible together. Passive
+handles are cleared only after pointer durability and bounded obsolete-namespace cleanup, under
+the same installation authority. The installation and publication jobs reserve 2 MiB independently
+of total guest bytes and checkpoint count; loading a saved guest at START still materializes its
+bytes under the WASM host's own limits. Snapshot readers retain one complete selected generation,
+and queued checkpoint writers cannot cross an installation namespace.
 The replicated start gate remains closed until every node completes publication, even if the
 restore fails or its mutation lease is released. Authority binds leader tenure, execution, lease
 and installation generation; stale local and remote requests cannot republish or clear handles. A

@@ -14,7 +14,7 @@ use error_stack::Report;
 use futures_util::stream;
 use meticulous::OptionExt as _;
 use nervix_backup::{RecordKind, SectionContent};
-use nervix_execution::{ChargedBytes, MemoryClass, Reservation, StorageClass};
+use nervix_execution::{ChargedBytes, MemoryClass};
 use nervix_interconnect::{
     HandlerRegistrationError, RemoteOperationFailure, RemoteOperationSubject,
     StatePlacementEnvelope, StreamHandlerError, StreamingResponse, Transport,
@@ -26,11 +26,12 @@ use nervix_primitives::{
 };
 
 use super::{
-    CaptureSectionKey, CapturedSectionStage, PlannedContent, state_sections::plan_state_sections,
+    CaptureSectionKey, CapturedSectionStage, PlannedContent, restore_storage::RestoredStateSource,
+    state_sections::plan_state_sections,
 };
 use crate::{
     application::session_service::SessionServiceImpl,
-    runtime::{CapturedRuntimeState, StagedArtifact, StagedSnapshotWriter},
+    runtime::{CapturedRuntimeState, RestoredRuntimeState, StagedArtifact, StagedSnapshotWriter},
 };
 
 /// A receiving node keeps one bounded install in its staging area until all chunks verify.
@@ -548,45 +549,18 @@ impl SessionServiceImpl {
                         "restored state upload digest differs",
                     ));
                 }
-                let working_bytes =
-                    restore_checkpoint_working_bytes(&request.domain, stage.length)?;
-                let charge = self
-                    .inner
-                    .runtime
-                    .executor()
-                    .reserve(MemoryClass::Bulk, working_bytes)
-                    .await
-                    .map_err(|error| failed(&request.domain, &error.to_string()))?;
-                let capacity = usize::try_from(stage.length).map_err(|_| {
-                    failed(
-                        &request.domain,
-                        "restored state length exceeds address space",
-                    )
-                })?;
-                let mut payload = Vec::with_capacity(capacity);
-                let mut reader = artifact
-                    .open_reader()
-                    .await
-                    .map_err(|error| failed(&request.domain, &error.to_string()))?;
-                while let Some(chunk) = reader
-                    .next_chunk(64 * 1024)
-                    .await
-                    .map_err(|error| failed(&request.domain, &error.to_string()))?
-                {
-                    nervix_primitives::task::consume_budget().await;
-                    payload.extend_from_slice(chunk.as_ref());
-                }
-                self.stage_reserved_restore_checkpoint(
+                self.stage_restored_state_checkpoint(
                     &request.authority,
-                    CapturedRuntimeState {
+                    RestoredRuntimeState {
                         placement: stage.placement.clone(),
                         branch_fingerprint: stage
                             .branch_fingerprint
                             .map(nervix_models::BranchKeyFingerprint::new),
                         revision: stage.revision,
-                        payload,
+                        length: stage.length,
+                        digest: stage.digest,
                     },
-                    charge,
+                    RestoredStateSource::Upload(artifact),
                 )
                 .await
             }
@@ -613,134 +587,6 @@ impl SessionServiceImpl {
         })
         .await
         .map_err(|_| failed(domain, "restore installation revision has not applied"))?
-    }
-
-    pub(in crate::application) async fn stage_restored_state_checkpoint(
-        &self,
-        authority: &RestoreStateAuthority,
-        checkpoint: CapturedRuntimeState,
-    ) -> Result<(), RemoteOperationFailure> {
-        let domain = &checkpoint.placement.domain;
-        let length = u64::try_from(checkpoint.payload.len())
-            .map_err(|_| failed(domain, "restore checkpoint exceeds address space"))?;
-        let bytes = restore_checkpoint_working_bytes(domain, length)?;
-        let charge = self
-            .inner
-            .runtime
-            .executor()
-            .reserve(MemoryClass::Bulk, bytes)
-            .await
-            .map_err(|error| failed(domain, &error.to_string()))?;
-        self.stage_reserved_restore_checkpoint(authority, checkpoint, charge)
-            .await
-    }
-
-    async fn stage_reserved_restore_checkpoint(
-        &self,
-        authority: &RestoreStateAuthority,
-        checkpoint: CapturedRuntimeState,
-        charge: Reservation,
-    ) -> Result<(), RemoteOperationFailure> {
-        let domain = checkpoint.placement.domain.clone();
-        let domain_owned = domain.clone();
-        let authority = authority.clone();
-        let service = self.clone();
-        self.inner
-            .runtime
-            .executor()
-            .run_storage(
-                StorageClass::Filesystem,
-                charge,
-                move |_charge, cancellation| {
-                    cancellation
-                        .check()
-                        .map_err(|error| failed(&domain_owned, &error.to_string()))?;
-                    service
-                        .inner
-                        .consensus
-                        .with_restore_state_installation(&domain_owned, &authority, || {
-                            service
-                                .inner
-                                .runtime
-                                .stage_restored_domain_state(&authority, checkpoint)
-                        })
-                        .map_err(|error| failed(&domain_owned, &error.to_string()))?
-                        .map_err(|error| failed(&domain_owned, &error.to_string()))
-                },
-            )
-            .await
-            .map_err(|error| failed(&domain, &error.to_string()))?
-    }
-
-    pub(in crate::application) async fn publish_restored_state_generation(
-        &self,
-        domain: &DomainName,
-        authority: &RestoreStateAuthority,
-        inventory: RestoreStateInventory,
-    ) -> Result<(), RemoteOperationFailure> {
-        // The complete database batch is admitted before validation at the mutation boundary.
-        let payload_bytes = inventory
-            .payload_bytes
-            .checked_mul(4)
-            .ok_or_else(|| failed(domain, "restore state publication exceeds address space"))?;
-        let metadata_bytes = inventory
-            .checkpoints
-            .checked_mul(64 * 1024)
-            .ok_or_else(|| failed(domain, "restore state publication exceeds address space"))?;
-        let bytes = payload_bytes
-            .checked_add(metadata_bytes)
-            .ok_or_else(|| failed(domain, "restore state publication exceeds address space"))?;
-        let charge = self
-            .inner
-            .runtime
-            .executor()
-            .reserve(MemoryClass::Bulk, bytes.max(1))
-            .await
-            .map_err(|error| failed(domain, &error.to_string()))?;
-        #[cfg(feature = "testing")]
-        self.inner
-            .runtime
-            .pause_restore_state_publication_if_armed(domain, &authority.leader)
-            .await;
-        let domain_owned = domain.clone();
-        let authority = authority.clone();
-        let service = self.clone();
-        self.inner
-            .runtime
-            .executor()
-            .run_storage(
-                StorageClass::Filesystem,
-                charge,
-                move |_charge, cancellation| {
-                    cancellation
-                        .check()
-                        .map_err(|error| failed(&domain_owned, &error.to_string()))?;
-                    service
-                        .inner
-                        .consensus
-                        .with_restore_state_installation(&domain_owned, &authority, || {
-                            service.inner.runtime.publish_restored_domain_state(
-                                &domain_owned,
-                                &authority,
-                                inventory,
-                            )
-                        })
-                        .map_err(|error| {
-                            #[cfg(feature = "testing")]
-                            service
-                                .inner
-                                .runtime
-                                .mark_restore_state_publication_refused(
-                                    &domain_owned,
-                                    &authority.leader,
-                                );
-                            failed(&domain_owned, &error.to_string())
-                        })?
-                        .map_err(|error| failed(&domain_owned, &error.to_string()))
-                },
-            )
-            .await
-            .map_err(|error| failed(domain, &error.to_string()))?
     }
 
     pub(in crate::application) fn sweep_captured_backup_sections(&self) {
@@ -782,18 +628,6 @@ async fn wait_for_capture_revision(
             "owner has not applied the cut revision within its deadline",
         )
     })?
-}
-
-fn restore_checkpoint_working_bytes(
-    domain: &DomainName,
-    length: u64,
-) -> Result<u64, RemoteOperationFailure> {
-    let payload_bytes = length
-        .checked_mul(4)
-        .ok_or_else(|| failed(domain, "restore checkpoint exceeds address space"))?;
-    payload_bytes
-        .checked_add(64 * 1024)
-        .ok_or_else(|| failed(domain, "restore checkpoint exceeds address space"))
 }
 
 #[cfg(all(test, not(feature = "loom")))]

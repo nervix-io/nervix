@@ -20,9 +20,9 @@ use arch_into::ArchInto as _;
 use bytes::Bytes;
 use error_stack::{Report, ResultExt as _};
 use futures_util::Stream;
-use meticulous::OptionExt as _;
+use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_backup::{
-    ArchiveContents, ArchiveReadError, DescribedRuntimeState, DescribedSection, SectionDigester,
+    ArchiveContents, ArchiveReadError, DescribedRuntimeState, DescribedSection,
     read_archive_contents,
 };
 use nervix_execution::{Cancellation, ChargedBytes, Executor, MemoryClass, StorageClass};
@@ -32,6 +32,7 @@ use nervix_models::{
     RestoreStep, Statement, Timestamp, TransactionImpactReport, UserName,
 };
 use nervix_nspl::client_statement::{ClientStatement, parse_client_statement_sources};
+use nervix_primitives::sync::Arc;
 use thiserror::Error;
 
 use super::{
@@ -75,7 +76,7 @@ pub(in crate::application) enum RestoreRefusal {
 
 /// An archive a restore stream staged and verified, with each domain's models parsed.
 pub(in crate::application) struct VerifiedArchive {
-    artifact: StagedArtifact,
+    artifact: Arc<StagedArtifact>,
     contents: ArchiveContents,
     models: BTreeMap<DomainName, Vec<Model<RequestedResourceVersion>>>,
 }
@@ -113,50 +114,51 @@ impl VerifiedArchive {
         }
     }
 
-    /// Re-reads a verified raw guest blob from the staged archive through the bulk storage
-    /// executor. The digest is checked again before the bytes become an installed checkpoint.
-    pub(in crate::application) async fn read_guest_blob(
+    /// Reads one bounded window for a remote installation. Local installation reads the file
+    /// directly inside its admitted storage job; neither path assembles a guest blob in memory.
+    pub(in crate::application) async fn read_guest_chunk(
         &self,
         runtime: &Runtime,
         section: &DescribedSection,
-    ) -> Result<Vec<u8>, Report<RestoreRefusal>> {
+        offset: u64,
+    ) -> Result<ChargedBytes, Report<RestoreRefusal>> {
+        let remaining = section
+            .length
+            .checked_sub(offset)
+            .ok_or_else(|| Report::new(RestoreRefusal::Unreadable))?;
+        let length = remaining.min(
+            u64::try_from(crate::runtime::RESTORE_STATE_CHUNK_BYTES).verified("chunk size fits"),
+        );
+        let position = section
+            .offset
+            .checked_add(offset)
+            .ok_or_else(|| Report::new(RestoreRefusal::Unreadable))?;
         let executor = runtime.executor().clone();
-        let path = self.artifact.path().to_path_buf();
-        let offset = section.offset;
-        let length =
-            usize::try_from(section.length).map_err(|_| Report::new(RestoreRefusal::Unreadable))?;
-        let digest = section.digest;
+        let artifact = self.artifact.clone();
+        let working_bytes = length
+            .checked_mul(2)
+            .ok_or_else(|| Report::new(RestoreRefusal::Unreadable))?;
         let reservation = executor
-            .reserve(MemoryClass::Bulk, section.length)
+            .reserve(MemoryClass::Bulk, working_bytes.max(1))
             .await
             .change_context(RestoreRefusal::Unreadable)?;
-        let read = executor
+        executor
             .run_storage(
                 StorageClass::Filesystem,
                 reservation,
-                move |_charge, cancellation| -> io::Result<Vec<u8>> {
-                    let mut file = std::fs::File::open(path)?;
-                    file.seek(SeekFrom::Start(offset))?;
-                    let mut bytes = vec![0; length];
-                    if cancellation.is_cancelled() {
-                        return Err(io::Error::new(
-                            io::ErrorKind::Interrupted,
-                            "restore was cancelled",
-                        ));
-                    }
+                move |charge, cancellation| -> io::Result<ChargedBytes> {
+                    cancellation.check().map_err(io::Error::other)?;
+                    let mut file = std::fs::File::open(artifact.path())?;
+                    file.seek(SeekFrom::Start(position))?;
+                    let capacity = usize::try_from(length).map_err(io::Error::other)?;
+                    let mut bytes = vec![0; capacity];
                     file.read_exact(&mut bytes)?;
-                    if SectionDigester::digest_of(&bytes) != digest {
-                        return Err(io::Error::new(
-                            io::ErrorKind::InvalidData,
-                            "guest blob digest changed",
-                        ));
-                    }
-                    Ok(bytes)
+                    Ok(ChargedBytes::from_owned(bytes, charge))
                 },
             )
             .await
-            .change_context(RestoreRefusal::Unreadable)?;
-        read.change_context(RestoreRefusal::Unreadable)
+            .change_context(RestoreRefusal::Unreadable)?
+            .change_context(RestoreRefusal::Unreadable)
     }
 
     /// When the backup that wrote the archive read its contents.
@@ -167,6 +169,11 @@ impl VerifiedArchive {
     /// The staged archive file, which holds every section at the offset its description names.
     pub(in crate::application) fn path(&self) -> &Path {
         self.artifact.path()
+    }
+
+    /// Keeps the verified archive and its disk quota alive through an admitted state read.
+    pub(in crate::application) fn artifact(&self) -> Arc<StagedArtifact> {
+        self.artifact.clone()
     }
 
     /// The NSPL of the archived domain `domain`, as the archive holds it.
@@ -282,7 +289,8 @@ impl SessionServiceImpl {
         artifact: StagedArtifact,
     ) -> Result<VerifiedArchive, Report<RestoreRefusal>> {
         let executor = self.inner.runtime.executor().clone();
-        let path = artifact.path().to_path_buf();
+        let artifact = Arc::new(artifact);
+        let reader_artifact = artifact.clone();
         let reservation = executor
             .reserve(
                 MemoryClass::Bulk,
@@ -295,7 +303,7 @@ impl SessionServiceImpl {
                 StorageClass::Filesystem,
                 reservation,
                 move |_charge, cancellation| {
-                    let file = match std::fs::File::open(&path) {
+                    let file = match std::fs::File::open(reader_artifact.path()) {
                         Ok(file) => file,
                         Err(error) => {
                             return Err(Report::new(error).change_context(ArchiveReadError::Read));
@@ -495,7 +503,6 @@ fn line_at(text: &str, offset: usize) -> usize {
 
 #[cfg(test)]
 mod tests {
-    use meticulous::ResultExt as _;
 
     use super::*;
 

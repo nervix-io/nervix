@@ -444,3 +444,14 @@ is subject to other work on the host; byte averages below are whole bytes per op
 The request measurement is approximately 4.0 times faster on this host. The allocation result,
 non-Clone intake type, and prepared-route reference probe establish that endpoint routing shares
 its prepared state. They do not claim an end-to-end ingestion throughput improvement.
+
+## Restore generation installation
+
+The restore failure-control map is `failed_restore_state_installations`, keyed by domain and
+holding a typed guest-staging or durable-publication failure. It is reached once at a guest staging
+boundary and once after durable generation publication, as test-only lifecycle control. It is not
+reached from record or acknowledgement execution. The receiver upload map retains its existing
+per-transfer lifetime and cadence; finalization moves the sealed file into the admitted storage job
+and keeps its disk-quota owner there. Successful generation publication clears runtime state maps
+under the same applied authority guard after durable pointer publication and bounded storage
+cleanup. Checkpoint reads and writes add no concurrent map lookup.
