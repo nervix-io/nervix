@@ -458,6 +458,18 @@ proves the record and replay path end to end. [Deterministic Interconnect
 Simulation](./interconnect-simulation.md) defines what the simulation controls, its fault model and
 limits, the scenario matrix, and how to investigate a failure.
 
+### SIMD kernel development
+
+[SIMD Kernels](./simd-kernels.md) owns the typed-buffer admission rule, caller catalog, dispatch
+and build-target matrix, result guarantees, and recorded performance evidence. New kernels need
+generated-instruction inspection, complete scalar/level differential checks including forced
+fallback, and a measured caller. Use its [qualification recipes](./simd-kernels.md#qualification)
+and [measurement recipes](./simd-kernels.md#measurement-and-recorded-evidence), retaining kache.
+Ordinary registered Bolero properties run on PRs; sanitizer CI requires the `fuzz` label, and a
+skip supplies no execution or coverage evidence. API-rejection checks use paired current
+`compile_fail` and compiling doctests. Publish new benchmark and validation artifacts on the
+corresponding ClickUp task; keep durable architectural conclusions in the chapter.
+
 ### Source coverage of the native extra checks
 
 The extra checks that execute Nervix code natively in ordinary mode, the compiler synchronization
