@@ -320,13 +320,13 @@ their `BuiltinLowering` behind shared pointers. Cloning a program therefore shar
 patterns, sets, matchers, and pattern caches. `CompiledPredicate` wraps a program privately, so a
 general construction program cannot be passed where only a read-only filter is allowed.
 
-The VM has no notion of plan activation. The host holds each program as a
-`triomphe::Arc<CompiledProgram>` inside a published typed processor plan. A prepared artifact lives
-exactly as long as that plan. An unchanged scheduled node reuses the exact plan allocation across a
-domain revision. A change to its topology, schema fingerprint, resolved branch contract or
-processor specification binds a fresh plan before publication. Existing branches adopt it by its
-typed revision identity between batches, while a newly appearing branch starts from the same
-published allocation.
+The VM has no notion of plan activation. The host holds each program as a shared
+`Arc<CompiledProgram>`, the primitive boundary's `nervix_primitives::sync::Arc`, inside a published
+typed processor plan. A prepared artifact lives exactly as long as that plan. An unchanged scheduled
+node reuses the exact plan allocation across a domain revision. A change to its topology, schema
+fingerprint, resolved branch contract or processor specification binds a fresh plan before
+publication. Existing branches adopt it by its typed revision identity between batches, while a
+newly appearing branch starts from the same published allocation.
 
 ### Where Programs Are Compiled
 
@@ -990,8 +990,10 @@ than encoding a different instant. No VM or datetime code calls `SystemTime` or 
 
 Processor and materialized relay tasks retain the installed domain clock that supplies each unit's
 snapshot. Filtered subscriptions retain its lifecycle owner so a subscription opened before
-`START DOMAIN` follows the subsequently installed generation. Batch evaluation reads these
-publications directly; it does not discover its clock through the runtime registry.
+`START DOMAIN` follows the subsequently installed generation. Each subscription generation also
+retains the node's executor and supplies it directly to predicate evaluation, preserving bounded
+admission for extension calls. Batch evaluation reads these publications directly; it does not
+discover its clock through the runtime registry.
 
 ### Deterministic And Volatile Functions
 
@@ -1035,6 +1037,16 @@ routes are ordinary set-only VM programs over the guest's output, and the host g
 columns with Arrow identity, slice, take, and concatenate. Guest execution, isolation, and state
 belong to [WASM Processor Guests](./wasm-processor-guests.md) and
 [WASM State And Recovery](./wasm-state.md).
+
+`FunctionInjector` and retained window accumulator traits declare recurring compiler contracts,
+so their implementations and dynamic callers retain the VM callback frequency across crate
+metadata. UDF result builders document the retained column and admitted execution bound; external
+Arrow, formatting and operator callback effects are declared at their owning callable. Paired
+Rust API doctests verify that injection accepts the domain timestamp with its selected-row error
+mask and rejects an unrelated scalar time. The annotations do not replace executor admission,
+selected-row validation or the concurrency checks.
+[Data-Plane Concurrency](./data-plane-concurrency.md#source-contracts) owns compiler contract syntax
+and diagnostics.
 
 ## Window Aggregates And Sketches
 
@@ -1184,6 +1196,12 @@ row views of its input and argument columns. It does not carry the accumulators 
 snapshot codec seals those views as bounded Arrow sections on the bulk executor. Only the
 histogram's delayed removals ride beside them in a typed section, because the retained rows cannot
 reproduce them.
+
+Each delayed removal archives its bucket index as a fixed-width 64-bit count, with checked native
+decoding. The current snapshot frame begins with `NVXWIN64`, and window state uses runtime-state
+kind tag `8`. These identify the current stored and transferred shape before decoding; an
+unrecognized frame fails validation, and stored state outside the current namespace must be
+recreated. The count contract is defined in [Archived Counts](./typed-states.md#archived-counts).
 
 A snapshot from an earlier incarnation of the branch restores an empty window and marks it for
 publication, so a late checkpoint of a previous lifetime cannot restore its panes. Otherwise,

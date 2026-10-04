@@ -12,7 +12,6 @@
 
 use std::{
     num::{NonZeroU32, NonZeroU64},
-    sync::Arc as StdArc,
     time::Duration,
 };
 
@@ -27,6 +26,7 @@ use nervix_models::{
     ClientProducerDescription, ClientProducerGrant, ClientProducerLimits, ClientProducerPolicy,
     ClientProducerRefusal, ClientSubmissionOutcome, ClientSubmissionRefusal, IngestorName,
 };
+use nervix_primitives::sync::StdArc;
 
 use super::{DEADLINE, Loopback, domain, field};
 use crate::{

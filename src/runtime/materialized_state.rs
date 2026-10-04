@@ -1,4 +1,11 @@
-use std::sync::Arc as StdArc;
+#![cfg_attr(
+    nervix_lint,
+    nervix::context(
+        lifecycle,
+        reason = "materialized assignment and snapshot installation establish state generations; \
+                  record operations override this default"
+    )
+)]
 
 use ahash::RandomState;
 use error_stack::Report;
@@ -7,9 +14,11 @@ use nervix_execution::Executor;
 use nervix_models::ClusterNodeName;
 use nervix_primitives::{
     collections::DashMap,
-    sync::atomic::{AtomicU64, Ordering},
+    sync::{
+        Arc, StdArc,
+        atomic::{AtomicU64, Ordering},
+    },
 };
-use triomphe::Arc;
 
 use super::{
     BranchKey, RuntimeStateOperationError, RuntimeStatePlacement, StateAssignmentAuthority,
@@ -154,6 +163,13 @@ impl ReplicatedMaterializedRelayState {
         }
     }
 
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            recurring,
+            reason = "running branches read or advance the retained materialized assignment"
+        )
+    )]
     pub(super) fn replication(&self) -> &CheckpointReplication {
         &self.replication
     }
@@ -184,6 +200,13 @@ impl ReplicatedMaterializedRelayState {
         }
     }
 
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            recurring,
+            reason = "running branches read or advance the retained materialized assignment"
+        )
+    )]
     pub(super) fn read(state: &Arc<Self>) -> MaterializedRelayStateRead {
         MaterializedRelayStateRead {
             state: state.clone(),
@@ -209,10 +232,24 @@ impl MaterializedRelayStateRead {
         &self.state.placement
     }
 
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            recurring,
+            reason = "running branches read or advance the retained materialized assignment"
+        )
+    )]
     pub(super) fn replication(&self) -> &CheckpointReplication {
         &self.state.replication
     }
 
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            recurring,
+            reason = "running branches read or advance the retained materialized assignment"
+        )
+    )]
     pub(super) fn schema(&self) -> &StdArc<arrow_schema::Schema> {
         &self.state.schema
     }
@@ -237,19 +274,28 @@ impl MaterializedRelayStateRead {
     /// The barrier is held only for the clone of the row views, which share the carrier columns
     /// rather than copying them. Encoding happens afterwards, against a value no later update can
     /// change, so updates and deletions proceed while a snapshot is being written out.
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            recurring,
+            reason = "running branches read or advance the retained materialized assignment"
+        )
+    )]
     pub(super) fn capture(&self) -> MaterializedGeneration {
         self.state.assignment.serialize_with(|binding| {
             let revision = self.state.current_lsm.current();
             let branch_generation = self.state.branch_generation.load(Ordering::SeqCst);
-            let mut records = self
-                .state
-                .entries
-                .iter()
-                .map(|entry| MaterializedGenerationRecord {
-                    branch: entry.key().clone(),
-                    row: entry.value().clone(),
-                })
-                .collect::<Vec<_>>();
+            let mut records = nervix_primitives::expect_lint!(
+                nervix::sync_acquisition,
+                "Typed Ratchet 04 https://app.clickup.com/t/86bc9eqp3: move materialized branch \
+                 records and reads onto their branch owners",
+                self.state.entries.iter()
+            )
+            .map(|entry| MaterializedGenerationRecord {
+                branch: entry.key().clone(),
+                row: entry.value().clone(),
+            })
+            .collect::<Vec<_>>();
             records.sort_by(|left, right| {
                 super::branch_key_display(&left.branch)
                     .cmp(super::branch_key_display(&right.branch))
@@ -270,6 +316,16 @@ impl MaterializedRelayStateRead {
     /// One build runs per placement: a requester arriving while another build is in flight waits
     /// for it and takes its result when it covers the same revision. A requester that is already
     /// current causes no scan of the entries and no encoding at all.
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            bounded,
+            reason = "the retained materialized assignment serializes snapshot publication",
+            key = "materialized state assignment and sealed revision",
+            bound = "one assignment builds or installs one monotonically selected sealed \
+                     generation"
+        )
+    )]
     pub(super) async fn seal_after(
         &self,
         executor: &Executor,
@@ -306,6 +362,16 @@ impl MaterializedRelayStateRead {
     ///
     /// A transfer names the revision it was described, so an owner that has moved on refuses
     /// instead of substituting a different generation under that description.
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            bounded,
+            reason = "the retained materialized assignment serializes snapshot publication",
+            key = "materialized state assignment and sealed revision",
+            bound = "one assignment builds or installs one monotonically selected sealed \
+                     generation"
+        )
+    )]
     pub(super) fn sealed_at(&self, revision: u64) -> Option<SealedMaterializedSnapshot> {
         self.state
             .sealed
@@ -318,6 +384,16 @@ impl MaterializedRelayStateRead {
     ///
     /// It answers only while it is still the current revision. A retained generation older than
     /// the live state would report stale contents as current, so it is rebuilt instead.
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            bounded,
+            reason = "the retained materialized assignment serializes snapshot publication",
+            key = "materialized state assignment and sealed revision",
+            bound = "one assignment builds or installs one monotonically selected sealed \
+                     generation"
+        )
+    )]
     fn usable_sealed(&self, after_revision: Option<u64>) -> Option<UsableSealedSnapshot> {
         let sealed = self.state.sealed.lock().clone()?;
         if sealed.descriptor.revision != self.state.current_lsm.current() {
@@ -332,20 +408,38 @@ impl MaterializedRelayStateRead {
     }
 
     /// Every record this state holds, each with the concrete branch it belongs to.
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            recurring,
+            reason = "running branches read or advance the retained materialized assignment"
+        )
+    )]
     pub(super) fn records(&self) -> Vec<MaterializedGenerationRecord> {
         self.capture().records().to_vec()
     }
 
     /// The record of exactly one branch. An absent key names the unbranched record, never every
     /// branch; a branch without a record simply has none.
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            recurring,
+            reason = "this owner is reached by recurring record, frame, acknowledgement or \
+                      state-poll work"
+        )
+    )]
     pub(super) fn record(&self, key: &Option<BranchKey>) -> Option<MaterializedGenerationRecord> {
-        self.state
-            .entries
-            .get(key)
-            .map(|row| MaterializedGenerationRecord {
-                branch: key.clone(),
-                row: row.clone(),
-            })
+        nervix_primitives::expect_lint!(
+            nervix::sync_acquisition,
+            "Typed Ratchet 04 https://app.clickup.com/t/86bc9eqp3: move materialized branch \
+             records and reads onto their branch owners",
+            self.state.entries.get(key)
+        )
+        .map(|row| MaterializedGenerationRecord {
+            branch: key.clone(),
+            row: row.clone(),
+        })
     }
 
     pub(super) fn restored_branch_watermarks(
@@ -371,6 +465,13 @@ struct UsableSealedSnapshot {
 }
 
 impl MaterializedRelayStateOriginator {
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            recurring,
+            reason = "running branches read or advance the retained materialized assignment"
+        )
+    )]
     pub(super) fn read(&self) -> &MaterializedRelayStateRead {
         &self.read
     }
@@ -404,6 +505,14 @@ impl MaterializedRelayStateOriginator {
         }
     }
 
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            recurring,
+            reason = "this owner is reached by recurring record, frame, acknowledgement or \
+                      state-poll work"
+        )
+    )]
     pub(super) fn remove_key(
         &self,
         key: &Option<BranchKey>,
@@ -412,7 +521,12 @@ impl MaterializedRelayStateOriginator {
         state
             .assignment
             .authorize_exclusive(self.assignment, StateCapability::Originate, || {
-                state.entries.remove(key)?;
+                nervix_primitives::expect_lint!(
+                    nervix::sync_acquisition,
+                    "Typed Ratchet 04 https://app.clickup.com/t/86bc9eqp3: move materialized \
+                     branch records and reads onto their branch owners",
+                    state.entries.remove(key)
+                )?;
                 state.advance_branch_generation();
                 Some(state.advance_revision())
             })
@@ -420,10 +534,24 @@ impl MaterializedRelayStateOriginator {
 }
 
 impl ReplicatedMaterializedRelayState {
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            recurring,
+            reason = "running branches read or advance the retained materialized assignment"
+        )
+    )]
     fn advance_revision(&self) -> u64 {
         self.current_lsm.advance()
     }
 
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            recurring,
+            reason = "running branches read or advance the retained materialized assignment"
+        )
+    )]
     fn advance_branch_generation(&self) {
         self.branch_generation
             .checked_advance("one process cannot apply 2^64 branch lifecycle changes to one relay");
@@ -431,12 +559,25 @@ impl ReplicatedMaterializedRelayState {
 
     /// Replace the record of a branch this state already holds when `record` is newer, or hand
     /// `record` back when the branch holds none.
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            recurring,
+            reason = "this owner is reached by recurring record, frame, acknowledgement or \
+                      state-poll work"
+        )
+    )]
     fn replace_existing_record(
         &self,
         key: &Option<BranchKey>,
         record: RuntimeRow,
     ) -> RecordReplacement {
-        let Some(mut existing) = self.entries.get_mut(key) else {
+        let Some(mut existing) = nervix_primitives::expect_lint!(
+            nervix::sync_acquisition,
+            "Typed Ratchet 04 https://app.clickup.com/t/86bc9eqp3: move materialized branch \
+             records and reads onto their branch owners",
+            self.entries.get_mut(key)
+        ) else {
             return RecordReplacement::BranchAbsent(record);
         };
         if !record.metadata().is_newer_than(existing.metadata()) {
@@ -451,13 +592,26 @@ impl ReplicatedMaterializedRelayState {
     ///
     /// Branches are only added and removed under the barrier, which this runs under, so a branch
     /// found absent here stays absent until this record adds it.
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            recurring,
+            reason = "this owner is reached by recurring record, frame, acknowledgement or \
+                      state-poll work"
+        )
+    )]
     fn add_branch_record(&self, key: &Option<BranchKey>, record: RuntimeRow) -> Option<u64> {
         match self.replace_existing_record(key, record) {
             RecordReplacement::Replaced(revision) => Some(revision),
             RecordReplacement::NotNewer => None,
             RecordReplacement::BranchAbsent(record) => {
                 self.advance_branch_generation();
-                self.entries.insert(key.clone(), record);
+                nervix_primitives::expect_lint!(
+                    nervix::sync_acquisition,
+                    "Typed Ratchet 04 https://app.clickup.com/t/86bc9eqp3: move materialized \
+                     branch records and reads onto their branch owners",
+                    self.entries.insert(key.clone(), record)
+                );
                 Some(self.advance_revision())
             }
         }
@@ -486,6 +640,13 @@ impl CheckedAdvance for AtomicU64 {
 }
 
 impl MaterializedRelaySnapshotInstaller {
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            recurring,
+            reason = "running branches read or advance the retained materialized assignment"
+        )
+    )]
     pub(super) fn read(&self) -> &MaterializedRelayStateRead {
         &self.read
     }
@@ -495,6 +656,16 @@ impl MaterializedRelaySnapshotInstaller {
     /// The decoding already happened; this is the publication step and it is atomic. A snapshot
     /// from an older branch lifecycle is refused rather than installed, so an evicted branch is
     /// never resurrected by a generation captured before it left.
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            bounded,
+            reason = "the retained materialized assignment serializes snapshot publication",
+            key = "materialized state assignment and sealed revision",
+            bound = "one assignment builds or installs one monotonically selected sealed \
+                     generation"
+        )
+    )]
     pub(super) fn install(
         &self,
         restored: RestoredMaterializedSnapshot,
@@ -542,6 +713,13 @@ impl MaterializedRelaySnapshotInstaller {
 }
 
 impl MaterializedRelayStatePersistence {
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            recurring,
+            reason = "running branches read or advance the retained materialized assignment"
+        )
+    )]
     pub(super) fn read(&self) -> &MaterializedRelayStateRead {
         &self.read
     }
@@ -860,10 +1038,10 @@ mod tests {
 
     #[cfg(feature = "shuttle")]
     mod shuttle_checks {
+        use nervix_model_harness::shuttle::check_interleavings;
         use nervix_primitives::{sync::blocking::mpsc, thread};
 
         use super::*;
-        use crate::shuttle_test::check_interleavings;
 
         /// An originator replaces a branch's record while another thread holds the assignment
         /// barrier, which that thread releases only after the update has returned.

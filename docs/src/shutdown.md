@@ -227,8 +227,9 @@ whose acknowledgement is still unresolved as of unknown outcome with cause `inte
 
 A raw quiesce buffer is not part of the drain. Payloads that a `BUFFER` mode retained during an
 earlier hold are outside runtime graph work: a shutdown does not replay them, and they are discarded
-and counted as dropped when the ingestor stops. Only work already admitted into the graph is
-drained.
+and counted as dropped when the ingestor stops. A retained payload whose unfolding was still waiting
+for the extension workers stays in the buffer, so the stop ends that wait at once and discards it
+with the rest. Only work already admitted into the graph is drained.
 
 ## Draining Admitted Work
 
@@ -720,6 +721,14 @@ as the new layout, served, replicated, handed over, or selected by a forced reco
 committed schedule of a running domain removes it. Until the node has applied a schedule that names
 an entity,
 it has no fingerprint for that entity's schema-bound state and does not place that state at all.
+
+Recovery also validates the current representation before decoding its counts. Registry Model
+frames and the dedicated consensus database identify their fixed-width 64-bit count shape;
+unrecognized stored state fails with an instruction to recreate it. Window checkpoints use the
+current runtime-state kind and `NVXWIN64` frame signature. Native decoding of an archived count is
+checked and cannot truncate it to fit the target. See
+[Archived Counts](./typed-states.md#archived-counts) and
+[Storage Layout And Compatibility](./consensus-storage-and-replication.md#storage-layout-and-compatibility).
 
 ### Interrupted Snapshot Installation
 

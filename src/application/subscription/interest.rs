@@ -26,8 +26,10 @@ use std::num::NonZeroUsize;
 use ahash::RandomState;
 use meticulous::OptionExt as _;
 use nervix_models::{DomainName, RelayName};
-use nervix_primitives::collections::{DashMap, dash_map::Entry};
-use triomphe::Arc;
+use nervix_primitives::{
+    collections::{DashMap, dash_map::Entry},
+    sync::Arc,
+};
 
 use crate::{cluster::ClusterHandle, metrics::RuntimeMetrics};
 

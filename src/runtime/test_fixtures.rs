@@ -5,9 +5,9 @@
 //! test needs before it can exercise anything. A fixture used by one module belongs in
 //! that module's own test module instead.
 
-use std::{collections::BTreeMap, num::NonZeroUsize, sync::Arc as StdArc};
+use std::{collections::BTreeMap, num::NonZeroUsize};
 
-use nervix_primitives::unmodeled::sync::OnceLock;
+use nervix_primitives::{sync::StdArc, unmodeled::sync::OnceLock};
 
 pub(in crate::runtime) const STUPID_CHANNEL_CAPACITY_REMOVE_ME: NonZeroUsize = NonZeroUsize::MIN;
 
@@ -26,14 +26,13 @@ use nervix_models::{
     ScheduledNode, SchemaField, SchemaFingerprint, SchemaName, Timestamp,
 };
 use nervix_primitives::{
-    sync::watch,
+    sync::{Arc, watch},
     time::{sleep, timeout},
 };
 use nervix_vm::window::lower_window_assignments;
 use nervix_wasm::{
     WasmAckSidecar, WasmEnvelope, WasmOutputColumnRef, WasmOutputRow, WasmRoutedOutput,
 };
-use triomphe::Arc;
 
 use super::{
     wasm_output::{WasmMaterializedOutput, WasmOutputError, WasmOutputValidator},
@@ -241,6 +240,26 @@ pub(super) fn u32_branch_key(field: &str, value: u32) -> Option<BranchKey> {
     branch_key([(named(field), RuntimeValue::U32(value))])
 }
 
+/// A branch lifecycle checkpoint at `lsm` naming `branches`.
+pub(super) fn branch_lifecycle_snapshot(
+    lsm: u64,
+    branches: &[Option<BranchKey>],
+) -> PersistedRuntimeStateEntry {
+    let mut entries = Vec::new();
+    for key in branches {
+        entries.push(BranchInstanceSnapshotEntry {
+            key: key.clone(),
+            last_ingestion: Timestamp::from_unix_nanos(1),
+            incarnation: 1,
+        });
+    }
+    PersistedRuntimeStateEntry {
+        lsm,
+        payload: encode_branch_lru_snapshot(&entries)
+            .expect("a current branch lifecycle checkpoint encodes"),
+    }
+}
+
 pub(super) fn key_label(key: &Option<BranchKey>) -> &str {
     key.as_ref().expect("test branch key must exist").as_str()
 }
@@ -308,7 +327,7 @@ pub(super) fn test_relay_boundary_services() -> Arc<super::RelayBoundaryServices
         0,
         Vec::new(),
         None,
-        triomphe::Arc::new(super::BranchPresence::new()),
+        nervix_primitives::sync::Arc::new(super::BranchPresence::new()),
     ))
 }
 

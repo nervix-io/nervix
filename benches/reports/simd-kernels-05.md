@@ -5,7 +5,7 @@
 The baseline is `d2d8d4722455d4bca9dcac43bded3612a3c9997b` (`origin/main` when the
 same-host A/B started); the candidate is the revision containing this report. The candidate's
 `Cargo.lock` blob is `6ecc62ecde1d8e8707f9dbac321e484af67ba790`. Measurements were made on
-2026-09-29 UTC on an Intel Core i9-14900HX with 32 logical CPUs, x86-64 Linux, rustc 1.98.0,
+2026-09-29 UTC on an Intel Core i9-14900HX with 32 logical CPUs, x86-64 Linux, rustc 1.99.0,
 LLVM 22.1.8, Arrow 58.4.0, and Criterion 0.5.1. Release builds use the repository's configured
 kache wrapper and `target-cpu=native`. Other worktrees were building on this host, so small
 timing differences are diagnostic rather than a stable speedup claim.

@@ -14,7 +14,7 @@
 
 mod response;
 
-use std::{net::SocketAddr, sync::Arc as StdArc, time::Duration};
+use std::{net::SocketAddr, time::Duration};
 
 use async_trait::async_trait;
 use error_stack::{Report, ResultExt as _};
@@ -25,7 +25,7 @@ use nervix_connector::{
 };
 use nervix_dns::DnsResolver;
 use nervix_models::ClientConfigEntry;
-use nervix_primitives::net::TcpStream;
+use nervix_primitives::{net::TcpStream, sync::StdArc};
 use rustls::ClientConfig as RustlsClientConfig;
 use rustls_pki_types::ServerName;
 use thiserror::Error;
@@ -208,6 +208,12 @@ impl HttpSink {
     /// The transport generates Host, Connection and, with a body, Content-Length. It defaults
     /// Accept to */* only when no application Accept header was prepared. It generates neither
     /// Accept-Encoding nor Content-Type, cookies or credentials.
+    #[cfg_attr(
+        nervix_lint,
+        nervix::dispatch(reason = "compares prepared header names through the external \
+                                   iterator; its local predicate is analyzed; no internal \
+                                   runtime ownership is inferred")
+    )]
     fn request_head(request: &SinkHttpRequest) -> Vec<u8> {
         let url = request.target.url();
         let authority = &url[Position::BeforeHost..Position::AfterPort];

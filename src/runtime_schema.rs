@@ -12,10 +12,9 @@
 
 use std::{
     cell::Cell,
-    fmt,
-    io::{self, Cursor, Write as _},
+    fmt, io,
+    io::{Cursor, Write as _},
     num::{NonZeroU32, NonZeroUsize},
-    sync::Arc as StdArc,
 };
 
 use ahash::HashMap;
@@ -61,6 +60,7 @@ use nervix_models::{
     RemoteRuntimeElementValue, RemoteRuntimeRecordMetadata, RemoteRuntimeValue,
     ResolvedCodecWireFormat, Timestamp, WireSchemaField, WireSchemaStrictness,
 };
+use nervix_primitives::sync::{Arc, StdArc};
 use nervix_wasm::{WasmProcessorField, WasmProcessorSchema, WasmProcessorType};
 use ordered_float::OrderedFloat;
 use prost::Message as ProstMessage;
@@ -75,7 +75,6 @@ use serde::{
 use serde_json::{Map as JsonMap, Number as JsonNumber, Value as JsonValue};
 use simd_json::{BorrowedValue, KnownKey, prelude::*};
 use thiserror::Error;
-use triomphe::Arc;
 
 mod arrow_body;
 mod batch_container;
@@ -651,6 +650,10 @@ impl CompiledSchema {
         )
     }
 
+    #[cfg_attr(
+        nervix_lint,
+        nervix::dispatch(reason = "the caller supplies the schema name conversion")
+    )]
     pub(crate) fn wasm_processor_schema(&self, name: impl Into<String>) -> WasmProcessorSchema {
         WasmProcessorSchema {
             name: name.into(),
@@ -1124,6 +1127,10 @@ impl CompiledCodecBatchEncoder<'_> {
 }
 
 /// Writes an encoding that was built whole into `output`.
+#[cfg_attr(
+    nervix_lint,
+    nervix::dispatch(reason = "the external writer interface encodes one admitted payload")
+)]
 fn write_payload(
     codec: &str,
     output: &mut impl io::Write,
@@ -1217,6 +1224,12 @@ impl RuntimeRecordBatch {
         batch_payload_bytes(&self.batch)
     }
 
+    #[cfg_attr(
+        nervix_lint,
+        nervix::dispatch(
+            reason = "external Arrow arrays and builders own their generic data access effects"
+        )
+    )]
     pub(crate) fn from_rows<'a>(
         expected_schema: StdArc<ArrowSchema>,
         rows: impl ExactSizeIterator<Item = &'a RuntimeRow>,
@@ -1616,6 +1629,12 @@ impl RuntimeRecordBatch {
 }
 
 /// The JSON subscription projection of a binary Arrow value, including binary list elements.
+#[cfg_attr(
+    nervix_lint,
+    nervix::dispatch(
+        reason = "external Arrow arrays and builders own their generic data access effects"
+    )
+)]
 fn json_value_from_binary_arrow(
     array: &dyn Array,
     ty: &ParseAsType,
@@ -1668,6 +1687,12 @@ fn json_value_from_binary_arrow(
 }
 
 impl RuntimeRow {
+    #[cfg_attr(
+        nervix_lint,
+        nervix::dispatch(
+            reason = "external Arrow arrays and builders own their generic data access effects"
+        )
+    )]
     pub(crate) fn new(
         batch: Arc<RuntimeRecordBatch>,
         row: usize,
@@ -3034,6 +3059,12 @@ struct ArrowCodecRow<'a> {
 }
 
 impl<'a> ArrowCodecRow<'a> {
+    #[cfg_attr(
+        nervix_lint,
+        nervix::dispatch(
+            reason = "external Arrow arrays and builders own their generic data access effects"
+        )
+    )]
     fn new(codec: &'a CompiledCodec, batch: &'a RuntimeRecordBatch, row_index: usize) -> Self {
         Self {
             codec,
@@ -3111,10 +3142,22 @@ struct ArrowCodecValue<'a> {
 }
 
 impl<'a> ArrowCodecValue<'a> {
+    #[cfg_attr(
+        nervix_lint,
+        nervix::dispatch(
+            reason = "the external Arrow column interface supplies the selected row null test"
+        )
+    )]
     fn is_null(&self) -> bool {
         self.array.is_null(self.row_index)
     }
 
+    #[cfg_attr(
+        nervix_lint,
+        nervix::dispatch(
+            reason = "the external Arrow column interface supplies the selected typed row value"
+        )
+    )]
     fn typed<T: 'static>(&self) -> error_stack::Result<&'a T, RuntimeSchemaError> {
         self.array.as_any().downcast_ref::<T>().ok_or_else(|| {
             Report::new(RuntimeSchemaError::ExactTypeMismatch {
@@ -3840,7 +3883,7 @@ fn append_json_value_to_arrow(
 
     macro_rules! append_primitive {
         ($builder:ty, $parsed:expr) => {{
-            let parsed = ($parsed).ok_or_else(&incompatible)?;
+            let parsed = ($parsed).ok_or_else(incompatible)?;
             typed_arrow_builder::<$builder>(builder, expected, location)?.append_value(parsed);
             Ok(())
         }};
@@ -3876,7 +3919,7 @@ fn append_json_value_to_arrow(
         ParseAsType::Bool => append_primitive!(BooleanBuilder, value.as_bool()),
         ParseAsType::String => append_primitive!(StringBuilder, value.as_str()),
         ParseAsType::Bytes => {
-            let encoded = value.as_str().ok_or_else(&incompatible)?;
+            let encoded = value.as_str().ok_or_else(incompatible)?;
             let decoded = base64_simd::STANDARD
                 .decode_to_vec(encoded.as_bytes())
                 .map_err(|_| {
@@ -3903,7 +3946,7 @@ fn append_json_value_to_arrow(
         }
         ParseAsType::F64 => append_primitive!(Float64Builder, value.as_f64()),
         ParseAsType::Array { element, len } => {
-            let values = value.as_array().ok_or_else(&incompatible)?;
+            let values = value.as_array().ok_or_else(incompatible)?;
             if values.len() != len.get().arch_into() {
                 return Err(Report::new(
                     RuntimeSchemaError::RuntimeArrayLengthMismatch {
@@ -3937,7 +3980,7 @@ fn append_json_value_to_arrow(
             Ok(())
         }
         ParseAsType::Vec { element } => {
-            let values = value.as_array().ok_or_else(&incompatible)?;
+            let values = value.as_array().ok_or_else(incompatible)?;
             let element_expected = sequence_element_data_type(expected, ty, location)?;
             let builder = typed_arrow_builder::<ListBuilder<Box<dyn ArrayBuilder>>>(
                 builder, expected, location,
@@ -3978,7 +4021,7 @@ fn append_borrowed_json_value_to_arrow(
 
     macro_rules! append_primitive {
         ($builder:ty, $parsed:expr) => {{
-            let parsed = ($parsed).ok_or_else(&incompatible)?;
+            let parsed = ($parsed).ok_or_else(incompatible)?;
             typed_arrow_builder::<$builder>(builder, expected, location)?.append_value(parsed);
             Ok(())
         }};
@@ -4014,15 +4057,15 @@ fn append_borrowed_json_value_to_arrow(
         ParseAsType::Bool => append_primitive!(BooleanBuilder, value.as_bool()),
         ParseAsType::String => append_primitive!(StringBuilder, value.as_str()),
         ParseAsType::Bytes => {
-            let encoded = value.as_str().ok_or_else(&incompatible)?;
+            let encoded = value.as_str().ok_or_else(incompatible)?;
             let builder = typed_arrow_builder::<BinaryBuilder>(builder, expected, location)?;
             append_base64_to_binary_builder(builder, encoded.as_bytes(), location)?;
             Ok(())
         }
         ParseAsType::Datetime => {
-            let value = value.as_str().ok_or_else(&incompatible)?;
+            let value = value.as_str().ok_or_else(incompatible)?;
             let value = DateTime::parse_from_rfc3339(value).map_err(|_| incompatible())?;
-            let value = value.timestamp_nanos_opt().ok_or_else(&incompatible)?;
+            let value = value.timestamp_nanos_opt().ok_or_else(incompatible)?;
             typed_arrow_builder::<TimestampNanosecondBuilder>(builder, expected, location)?
                 .append_value(value);
             Ok(())
@@ -4033,7 +4076,7 @@ fn append_borrowed_json_value_to_arrow(
         ),
         ParseAsType::F64 => append_primitive!(Float64Builder, value.cast_f64()),
         ParseAsType::Array { element, len } => {
-            let values = value.as_array().ok_or_else(&incompatible)?;
+            let values = value.as_array().ok_or_else(incompatible)?;
             if values.len() != len.get().arch_into() {
                 return Err(Report::new(
                     RuntimeSchemaError::RuntimeArrayLengthMismatch {
@@ -4067,7 +4110,7 @@ fn append_borrowed_json_value_to_arrow(
             Ok(())
         }
         ParseAsType::Vec { element } => {
-            let values = value.as_array().ok_or_else(&incompatible)?;
+            let values = value.as_array().ok_or_else(incompatible)?;
             let element_expected = sequence_element_data_type(expected, ty, location)?;
             let builder = typed_arrow_builder::<ListBuilder<Box<dyn ArrayBuilder>>>(
                 builder, expected, location,
@@ -4150,7 +4193,7 @@ fn append_avro_value_to_arrow(
 
     macro_rules! append_primitive {
         ($builder:ty, $parsed:expr) => {{
-            let parsed = ($parsed).ok_or_else(&incompatible)?;
+            let parsed = ($parsed).ok_or_else(incompatible)?;
             typed_arrow_builder::<$builder>(builder, &ty.arrow_data_type(), location)?
                 .append_value(parsed);
             Ok(())
@@ -4299,6 +4342,12 @@ fn append_avro_value_to_arrow(
     }
 }
 
+#[cfg_attr(
+    nervix_lint,
+    nervix::dispatch(
+        reason = "external Arrow arrays and builders own their generic data access effects"
+    )
+)]
 fn typed_arrow_builder<'a, T: 'static>(
     builder: &'a mut dyn ArrayBuilder,
     expected: &ArrowDataType,
@@ -4599,6 +4648,12 @@ pub(crate) struct RuntimeValueColumn {
 impl RuntimeValueColumn {
     /// Reads `array` under the name `field`, which names the column in the errors reading it
     /// raises.
+    #[cfg_attr(
+        nervix_lint,
+        nervix::dispatch(
+            reason = "external Arrow arrays and builders own their generic data access effects"
+        )
+    )]
     pub(crate) fn new(
         field: impl Into<String>,
         array: ArrayRef,
@@ -4620,6 +4675,12 @@ impl RuntimeValueColumn {
     }
 }
 
+#[cfg_attr(
+    nervix_lint,
+    nervix::dispatch(
+        reason = "external Arrow arrays and builders own their generic data access effects"
+    )
+)]
 pub(crate) fn runtime_value_from_arrow_array(
     array: &dyn Array,
     ty: &ParseAsType,
@@ -4716,6 +4777,12 @@ pub(crate) fn runtime_value_from_arrow_array(
     }
 }
 
+#[cfg_attr(
+    nervix_lint,
+    nervix::dispatch(
+        reason = "external Arrow arrays and builders own their generic data access effects"
+    )
+)]
 fn typed_arrow_array<'a, T: 'static>(
     array: &'a dyn Array,
     ty: &ParseAsType,
@@ -4733,6 +4800,12 @@ fn typed_arrow_array<'a, T: 'static>(
     })
 }
 
+#[cfg_attr(
+    nervix_lint,
+    nervix::dispatch(
+        reason = "external Arrow arrays and builders own their generic data access effects"
+    )
+)]
 fn runtime_values_from_arrow_slice(
     array: &dyn Array,
     element: &ParseAsType,

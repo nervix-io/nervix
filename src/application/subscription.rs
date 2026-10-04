@@ -51,6 +51,7 @@ use nervix_consensus::{
     CommandExecutionTransactionOperation, CommandExecutionTransactionRequest,
     CommandExecutionTransactionTarget, ReplicatedTransaction,
 };
+use nervix_execution::Executor;
 use nervix_interconnect::SubscriptionInterestVisibilityRequest as RemoteSubscriptionInterestVisibilityRequest;
 use nervix_models::{
     ClusterNodeIdentity, ClusterNodeName, CommandExecutionReference, CreateRelay, CreateSchema,
@@ -60,6 +61,7 @@ use nervix_models::{
 use nervix_nspl::client_statement::{ClientStatement, ParsedClientStatement};
 use nervix_primitives::{
     sync::{
+        Arc,
         atomic::{AtomicU64, Ordering},
         oneshot,
     },
@@ -68,7 +70,6 @@ use nervix_primitives::{
 use nervix_recovery::Discarded as _;
 use nonzero_ext::nonzero;
 use sorted_vec::SortedSet;
-use triomphe::Arc;
 
 use self::delivery::SubscriptionDelivery;
 pub(in crate::application) use self::interest::SubscriptionInterests;
@@ -615,11 +616,11 @@ struct SubscriptionSelection {
 /// evaluate is skipped and counted, and the first failure is reported for the batch. Sampling
 /// takes its draws from the node's `sampler`.
 async fn select_subscription_rows(
+    executor: &Executor,
     batch: &RelayRecordBatch,
     predicate: Option<&CompiledSubscriptionPredicate>,
     batch_sample_rate: Option<f64>,
     sampler: &SubscriptionSampler,
-    executor: &nervix_execution::Executor,
     clock: &Result<
         crate::runtime::DomainClockLifecycle,
         Report<crate::runtime::DomainClockAccessError>,

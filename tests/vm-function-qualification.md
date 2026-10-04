@@ -38,7 +38,7 @@ the cited feature explicitly tests a topology-specific event.
 | Windows and concrete branches | [Window statistics](features/runtime/window_statistics.feature), [window sketches](features/runtime/window_sketches.feature) | Interleaved branch state, nulls, eviction, restart and ownership change. |
 | Generator and materialized state | [Generator](features/runtime/generator.feature), [junction](features/runtime/junction.feature), [tolerant conversions](features/runtime/tolerant_conversions.feature) | Set-only construction, captured state, branch-local snapshots, defaults and error scopes. |
 | Emitters | [Checked numeric execution](features/runtime/checked_numeric_execution.feature), [Kafka emission](features/runtime/kafka_emission.feature) | Function errors route before the external boundary; emission keeps explicit header and leakage contracts. |
-| Read-only subscriptions and capability limits | [Membership and extrema](features/runtime/membership_ranges_extrema.feature), [subscription options](features/runtime/session_subscription_options.feature), [subscription capability compile-fail cases](ui/subscription_predicate_capabilities) | Filtered views only; the type boundary forbids a construction program or arbitrary predicate. |
+| Read-only subscriptions | [Membership and extrema](features/runtime/membership_ranges_extrema.feature), [subscription options](features/runtime/session_subscription_options.feature), [capability doctests](../src/runtime/mod.rs) | Filtered views with typed predicates and explicit delivery options; doctests reject conversion from general VM inputs and direct access to the inner predicate. |
 | Roto and WASM extensions | [UDF](features/runtime/udf.feature), [WASM processor](features/runtime/wasm_processor.feature) | Roto calls compose with builtins over columns; guest inputs, errors and branch state stay at the WASM boundary. |
 | Plan activation, schema mutation and prepared patterns | [VM function qualification](features/runtime/vm_function_qualification.feature), [alter running domain](features/runtime/alter_running_domain.feature) | A committed schema/codec/function change installs a new signature, and replacing a route installs its new prepared regex before ingestion resumes. Lookup rebinding is tracked by its own linked task. |
 | Final Client Wire | [Client conformance](features/runtime/client_conformance.feature), [client conformance ledger](client-conformance-ledger.md), [wire corpus](../crates/client-wire/conformance) | Native gRPC, binary WebSocket, C ABI bindings and independent Go/TypeScript clients verify widths, nullability, sensitivity, bytes, nanosecond timestamps, arrays and 64-bit extremes. |
@@ -61,8 +61,8 @@ one- and three-node clusters together with the other checked numeric and numeric
 (20 scenarios, 90 steps).
 
 The full `just test` run passed 1,986 scenarios and 21,628 steps, including the client conformance
-suite. The standalone client conformance run passed 19 scenarios; client wire tests, subscription
-capability compile-fail cases, the NSPL completion walk, `just ratchet`, and `just validate` passed.
+suite. The standalone client conformance run passed 19 scenarios; client wire tests, the NSPL
+completion walk, `just ratchet`, and `just validate` passed.
 The focused `just test-coverage-feature` run passed the new qualification, expression semantics,
 and client conformance features and produced `lcov.info`. This patch changes Cucumber specifications
 and Markdown only; it has no modified Rust source lines for Codecov patch coverage to measure.

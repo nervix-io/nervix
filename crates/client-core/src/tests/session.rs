@@ -26,7 +26,7 @@ use nervix_primitives::{
     net::TcpListener,
     stream::wrappers::{ReceiverStream, TcpListenerStream},
     sync::{
-        Mutex,
+        Arc, Mutex,
         atomic::{AtomicU64, Ordering},
         mpsc,
     },
@@ -41,7 +41,6 @@ use tonic::{
     server::{ClientStreamingService, Grpc, NamedService, StreamingService},
     transport::Server,
 };
-use triomphe::Arc;
 use url::Url;
 
 #[cfg(feature = "autocomplete")]
@@ -362,6 +361,7 @@ impl ClientStreamingService<VerifiedFrame<UploadFrame>> for InstallUpload {
             if reject {
                 return Err(Status::permission_denied("the upload is not authorized"));
             }
+            #[allow(deprecated)] // until try_update is stabilized
             if fail_upload_replies
                 .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |remaining| {
                     remaining.checked_sub(1)

@@ -91,12 +91,12 @@ pub(in crate::runtime) struct SnapshotStaging {
     root: PathBuf,
     executor: Executor,
     limits: SnapshotStagingLimits,
-    quota: triomphe::Arc<StagingQuota>,
+    quota: nervix_primitives::sync::Arc<StagingQuota>,
 }
 
 #[derive(Debug)]
 struct StagingQuota {
-    permits: std::sync::Arc<nervix_primitives::sync::Semaphore>,
+    permits: nervix_primitives::sync::StdArc<nervix_primitives::sync::Semaphore>,
 }
 
 impl SnapshotStaging {
@@ -113,8 +113,10 @@ impl SnapshotStaging {
             root,
             executor,
             limits,
-            quota: triomphe::Arc::new(StagingQuota {
-                permits: std::sync::Arc::new(nervix_primitives::sync::Semaphore::new(permits)),
+            quota: nervix_primitives::sync::Arc::new(StagingQuota {
+                permits: nervix_primitives::sync::StdArc::new(
+                    nervix_primitives::sync::Semaphore::new(permits),
+                ),
             }),
         }
     }
@@ -129,7 +131,7 @@ impl SnapshotStaging {
         length: u64,
     ) -> Result<StagedSnapshotWriter, Report<SnapshotStagingError>> {
         let blocks = self.quota_blocks(length)?;
-        let reservation = std::sync::Arc::clone(&self.quota.permits)
+        let reservation = nervix_primitives::sync::StdArc::clone(&self.quota.permits)
             .acquire_many_owned(blocks)
             .await
             .map_err(|_| {
@@ -148,7 +150,7 @@ impl SnapshotStaging {
         length: u64,
     ) -> Result<StagedSnapshotWriter, Report<SnapshotStagingError>> {
         let blocks = self.quota_blocks(length)?;
-        let reservation = std::sync::Arc::clone(&self.quota.permits)
+        let reservation = nervix_primitives::sync::StdArc::clone(&self.quota.permits)
             .try_acquire_many_owned(blocks)
             .map_err(|_| Report::new(SnapshotStagingError::Full { requested: length }))?;
         self.open(length, reservation).await

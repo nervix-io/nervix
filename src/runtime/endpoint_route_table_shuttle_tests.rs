@@ -2,15 +2,15 @@
 //!
 //! Layer: test harness.
 //! - **Owns.** Whole-table observations and admission through retained source lifetimes.
-//! - **Depends on.** The production endpoint publisher and the shared Shuttle runner.
+//! - **Depends on.** The production endpoint publisher and the model harness's Shuttle runner.
 //! - **Must not know.** HTTP sockets or the publication primitive's internal memory ordering.
 
 use meticulous::ResultExt as _;
+use nervix_model_harness::shuttle::check_interleavings;
 use nervix_models::{IngestorName, ModelKind};
 use nervix_primitives::thread;
 
 use super::*;
-use crate::shuttle_test::check_interleavings;
 
 const JOINS: &str = "Shuttle fails the execution when a model thread panics";
 

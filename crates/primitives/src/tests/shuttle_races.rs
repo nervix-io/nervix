@@ -11,9 +11,11 @@
 
 use std::{
     any::Any,
+    future::poll_fn,
     panic::{self, AssertUnwindSafe},
     pin::pin,
     sync::Arc,
+    task::Poll,
 };
 
 use meticulous::{OptionExt as _, ResultExt as _};
@@ -21,7 +23,7 @@ use shuttle::future::block_on;
 
 use crate::{
     sync::{
-        Notify,
+        AtomicWaker, Notify,
         atomic::{AtomicBool, Ordering},
         watch,
     },
@@ -202,6 +204,63 @@ fn shuttle_reaches_a_send_between_a_read_and_the_subscription() {
 #[test]
 fn shuttle_subscribing_before_reading_never_misses_a_send() {
     shuttle::check_dfs(subscribe_then_read, None);
+}
+
+/// The state a waiting task reads, and the waker registration its publisher wakes after changing
+/// it.
+#[derive(Default)]
+struct Awaited {
+    done: AtomicBool,
+    waiter: AtomicWaker,
+}
+
+impl Awaited {
+    fn start_publisher(self: &Arc<Self>) -> thread::JoinHandle<()> {
+        let awaited = Arc::clone(self);
+        thread::spawn(move || {
+            awaited.done.store(true, Ordering::SeqCst);
+            awaited.waiter.wake();
+        })
+    }
+}
+
+fn read_then_register_the_waker() {
+    let awaited = Arc::new(Awaited::default());
+    let publisher = awaited.start_publisher();
+    block_on(poll_fn(|context| {
+        if awaited.done.load(Ordering::SeqCst) {
+            return Poll::Ready(());
+        }
+        awaited.waiter.register(context.waker());
+        Poll::Pending
+    }));
+    publisher.join().assured(PUBLISHER_JOINS);
+}
+
+fn register_then_read_the_waker() {
+    let awaited = Arc::new(Awaited::default());
+    let publisher = awaited.start_publisher();
+    block_on(poll_fn(|context| {
+        awaited.waiter.register(context.waker());
+        if awaited.done.load(Ordering::SeqCst) {
+            return Poll::Ready(());
+        }
+        Poll::Pending
+    }));
+    publisher.join().assured(PUBLISHER_JOINS);
+}
+
+#[test]
+fn shuttle_reaches_a_wake_between_a_read_and_the_waker_registration() {
+    assert!(
+        some_schedule_deadlocks(read_then_register_the_waker),
+        "a task that registers its waker after it reads must lose a wake in some schedule"
+    );
+}
+
+#[test]
+fn shuttle_registering_the_waker_before_reading_never_misses_a_wake() {
+    shuttle::check_dfs(register_then_read_the_waker, None);
 }
 
 /// The last receiver is dropped while the sender waits for the channel to close. In every order the

@@ -348,8 +348,10 @@ pub(in crate::registry) fn validate_direct_values_sensitivity(
             reason: format!("emitter VALUES is invalid: {reason}"),
         })
     })?;
-    let empty_output =
-        std::sync::Arc::new(arrow_schema::Schema::new(Vec::<arrow_schema::Field>::new()));
+    let empty_output = nervix_primitives::sync::StdArc::new(arrow_schema::Schema::new(Vec::<
+        arrow_schema::Field,
+    >::new(
+    )));
     let bindings = [
         CompileBinding::writeonly("emitted", empty_output),
         readonly_binding_for_internal_schema("input", input_schema),

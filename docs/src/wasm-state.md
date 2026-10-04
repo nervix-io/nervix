@@ -240,13 +240,16 @@ node is reported durable and every later checkpoint there fails until the node r
 ### Replica Confirmation
 
 A replica acts on an announcement only while the placement is current on it and the announcing node
-is the owner its schedule names. It installs a revision newer than the one it holds, synchronizes
-its storage, and only then acknowledges; a replica that already holds the announced revision or a
-newer one synchronizes and acknowledges what it holds, so a lost acknowledgement is replaced by the
-next announcement. A checkpoint of a branch the replica's branch lifecycle does not name yet makes
-the replica fetch the owner's branch lifecycle first, and it refuses the checkpoint only when that
-lifecycle does not name the branch either, as for an evicted branch. A node without stable storage
-acknowledges nothing.
+is the owner its schedule names. The announcement wakes the replica task that keeps the processor's
+branches current, which fetches the checkpoint in its next round. That task also reads what changed
+in the owner's catalog of the processor's branch checkpoints at least once every replication poll
+interval, so a checkpoint whose announcement was lost still reaches the replica within one interval.
+The replica installs a revision newer than the one it holds, synchronizes its storage, and only then
+acknowledges; a replica that already holds the announced revision or a newer one synchronizes and
+acknowledges what it holds, so a lost acknowledgement is replaced by the next announcement. Each
+round synchronizes the owner's branch lifecycle before it installs a branch checkpoint, and the
+replica refuses a checkpoint only when that lifecycle does not name the branch, as for an evicted
+branch. A node without stable storage acknowledges nothing.
 
 While the checkpoint waits, it wakes on each replica report and rereads the schedule at least every
 100 milliseconds. A replica the schedule replaces is replaced in the wait. The wait fails when the
@@ -624,6 +627,10 @@ is unfinished, `AWAITING_USABLE_EXECUTION` when a selected single-scope checkpoi
 the reset is still `Publishing`, and `READY` once `Ready` is published; an all-branches reset stays
 `RESETTING` until then, because a sample of the current branches cannot prove every selected branch
 completed. Nervix exports no WASM-specific metric.
+
+Checkpoint stage totals and omitted-entry counts use the vocabulary's fixed-width 64-bit archive
+adapter, so an interconnect response preserves their complete native magnitude. Decoding refuses a
+count the receiving target cannot represent. See [Archived Counts](./typed-states.md#archived-counts).
 
 ## Guarantees And Limits
 

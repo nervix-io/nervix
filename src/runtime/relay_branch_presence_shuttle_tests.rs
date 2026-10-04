@@ -5,23 +5,24 @@
 //!   never an older step than one the owner finished, and never a replaced owner's branches once
 //!   its successor has claimed the presence.
 //! - **Depends on.** The production relay presence, the branch owner the relay owner task holds,
-//!   and the server Shuttle runner.
+//!   and the model harness's Shuttle runner.
 //! - **Must not know.** Relay buffers, fan-out, metrics, or how batches reach the owner.
 
 // Unmodeled atomics are not Shuttle scheduling points, so each step record below changes in the
 // same scheduling step as the publication it records.
-use std::{sync::Arc as StdArc, time::Duration};
+use std::time::Duration;
 
+use nervix_model_harness::shuttle::check_interleavings;
 use nervix_models::Timestamp;
 use nervix_primitives::{
+    sync::{Arc, StdArc},
     thread,
     unmodeled::sync::atomic::{AtomicBool, AtomicUsize, Ordering},
 };
 use nonzero_ext::nonzero;
-use triomphe::Arc;
 
 use super::*;
-use crate::{runtime_schema::RuntimeValue, shuttle_test::check_interleavings};
+use crate::runtime_schema::RuntimeValue;
 
 const MODEL_THREAD_JOINS: &str =
     "Shuttle fails the execution when a model thread panics, so no join observes one";

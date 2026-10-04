@@ -53,8 +53,10 @@ use hickory_resolver::{
 };
 use indexmap::IndexSet;
 use meticulous::ResultExt as _;
-use nervix_primitives::{sync::Semaphore, time::timeout};
-use triomphe::Arc;
+use nervix_primitives::{
+    sync::{Arc, Semaphore},
+    time::timeout,
+};
 
 mod configuration;
 mod dial;

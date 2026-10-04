@@ -13,8 +13,6 @@
 //! which retries temporary refusals itself. A producer opened by a `WebSocket session` speaks raw
 //! frames over the console WebSocket, as a browser client does, and sees every refusal.
 
-use std::sync::Arc as StdArc;
-
 use arrow_array::{
     ArrayRef, BooleanArray, Float64Array, Int32Array, Int64Array, RecordBatch, StringArray,
 };
@@ -34,7 +32,7 @@ use nervix_models::{
     ClientProducerRefusal, ClientSubmissionOutcome, ClientSubmissionRefusal, DomainName,
     IngestorName, ParseAsType, SchemaField, parse_duration_text,
 };
-use nervix_primitives::sync::watch;
+use nervix_primitives::sync::{StdArc, watch};
 
 use super::*;
 use crate::common::producer_session::{ProducerFrame, RawProducerSession};

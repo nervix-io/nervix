@@ -30,10 +30,9 @@ use nervix_models::{
     DomainAdmissionWindow, DomainClockObservation, DomainClockObservedState,
     DomainClockTickObservation, DomainName, PacedDomainClock, Timestamp,
 };
-use nervix_primitives::sync::{blocking::Mutex, watch};
+use nervix_primitives::sync::{Arc, blocking::Mutex, watch};
 use nervix_recovery::Discarded as _;
 use thiserror::Error;
-use triomphe::Arc;
 
 /// What a caller reads about the domain clocks the client follows.
 #[derive(Debug, Clone, PartialEq, Eq)]

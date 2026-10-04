@@ -11,13 +11,13 @@
 
 use meticulous::OptionExt as _;
 use nervix_primitives::sync::{
+    Arc,
     atomic::{AtomicU64, AtomicUsize, Ordering},
     blocking::Mutex,
     oneshot, watch,
 };
 use nervix_recovery::NoReceiver as _;
 use serde::{Deserialize, Serialize};
-use triomphe::Arc;
 
 const ACK_SHARES_FIT_IN_MEMORY: &str =
     "every pending ACK share has an in-memory owner, so their count fits in usize";
@@ -44,6 +44,15 @@ pub struct AckCompletion {
 }
 
 #[derive(Debug, Clone)]
+#[cfg_attr(
+    nervix_lint,
+    nervix::context(
+        bounded,
+        key = "acknowledgement root",
+        bound = "take one terminal sender from the root; the guard never crosses await",
+        reason = "all shares retain the exact root whose completion they resolve"
+    )
+)]
 pub struct AckHandle(Arc<AckState>);
 
 #[derive(Debug, Clone, Default)]
@@ -576,6 +585,11 @@ impl AckHandle {
         }
     }
 
+    #[cfg_attr(
+        nervix_lint,
+        nervix::dispatch(reason = "the caller supplies a typed reason or an iterator of \
+                                   retained acknowledgement handles")
+    )]
     pub fn no_ack(&self, reason: impl Into<String>) {
         self.complete(AckOutcome::NoAck(reason.into()));
     }
@@ -623,6 +637,13 @@ impl Drop for OwnershipHandoffTrackerReservation<'_> {
 }
 
 impl AckRequiredWaitGuard {
+    #[cfg_attr(
+        nervix_lint,
+        nervix::dispatch(
+            reason = "the caller supplies iteration over acknowledgement sets for this admitted \
+                      terminal obligation"
+        )
+    )]
     pub(crate) fn new<'a>(sets: impl IntoIterator<Item = &'a AckSet>) -> Self {
         let mut handles = Vec::new();
         for set in sets {
@@ -730,6 +751,11 @@ impl AckSet {
         AckRequiredWaitGuard::new([self])
     }
 
+    #[cfg_attr(
+        nervix_lint,
+        nervix::dispatch(reason = "the caller supplies a typed reason or an iterator of \
+                                   retained acknowledgement handles")
+    )]
     pub fn merged<I>(sets: I) -> Self
     where
         I: IntoIterator<Item = Self>,
@@ -753,6 +779,11 @@ impl AckSet {
         }
     }
 
+    #[cfg_attr(
+        nervix_lint,
+        nervix::dispatch(reason = "the caller supplies a typed reason or an iterator of \
+                                   retained acknowledgement handles")
+    )]
     pub fn no_ack(&self, reason: impl Into<String>) {
         let reason = reason.into();
         for handle in &self.handles {
@@ -765,8 +796,7 @@ impl AckSet {
 mod tests {
     use std::time::Duration;
 
-    use nervix_primitives::time::timeout;
-    use triomphe::Arc;
+    use nervix_primitives::{sync::Arc, time::timeout};
 
     use super::{AckOutcome, AckProgress, AckRootTracker, AckSet};
 
@@ -1008,14 +1038,16 @@ mod tests {
 #[cfg(all(test, feature = "shuttle"))]
 mod shuttle_tests {
     use meticulous::{OptionExt as _, ResultExt as _};
-    use nervix_primitives::{sync::oneshot::error::TryRecvError, thread};
-    use triomphe::Arc;
+    use nervix_model_harness::shuttle::{check_dfs, check_pct};
+    use nervix_primitives::{
+        sync::{Arc, oneshot::error::TryRecvError},
+        thread,
+    };
 
     use super::{
         AckCompletion, AckHandle, AckHandoffState, AckOutcome, AckRequiredWaitGuard,
         AckRootTracker, AckSet, Ordering,
     };
-    use crate::shuttle_test::{check_dfs, check_pct};
 
     // Models with more than three tasks have too many interleavings to enumerate, so they sample
     // schedules that need up to `PCT_DEPTH` ordering constraints to fail.

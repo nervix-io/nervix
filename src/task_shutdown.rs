@@ -80,16 +80,16 @@ fn report_join_failure(error: &JoinError, task: &str) {
 
 #[cfg(test)]
 mod tests {
-    use std::{io, sync::Arc};
+    use std::io;
 
-    use nervix_primitives::sync::blocking::Mutex;
+    use nervix_primitives::sync::{StdArc, blocking::Mutex};
     use tracing_subscriber::fmt::MakeWriter;
 
     use super::*;
 
     /// Collects everything a scoped subscriber writes so a test can assert on what was reported.
     #[derive(Clone, Default)]
-    struct CapturedLogs(Arc<Mutex<Vec<u8>>>);
+    struct CapturedLogs(StdArc<Mutex<Vec<u8>>>);
 
     impl CapturedLogs {
         fn contents(&self) -> String {

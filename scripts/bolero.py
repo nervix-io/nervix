@@ -234,7 +234,9 @@ def package_rust_sources(manifest: pathlib.Path) -> Iterator[pathlib.Path]:
         path = pathlib.Path(directory)
         children[:] = sorted(
             child for child in children
-            if path / child not in excluded and not (path / child / "Cargo.toml").is_file()
+            if path / child not in excluded
+            and child not in {".git", ".venv", ".nervix-deps", "node_modules", "__fuzz__"}
+            and not (path / child / "Cargo.toml").is_file()
         )
         for filename in sorted(files):
             if filename.endswith(".rs"):
@@ -712,18 +714,17 @@ def build_instrumented(
 
 
 def prepare_target(inventory: Inventory, target: Target) -> None:
-    """Prepare the identical sanitizer build without claiming campaign completion."""
+    """Record the selected sanitizer build without claiming campaign completion."""
     verify_tool(inventory)
     path = run_dir(target)
     started = time.monotonic()
-    args = bolero_args(inventory, target)
+    result = "failed preparation"
     try:
-        build_instrumented(inventory, target, path, timeout=7200)
-    except BoleroError:
-        metadata(path, target, args, "failed preparation", time.monotonic() - started)
-        raise
-    metadata(path, target, args, "prepared build", time.monotonic() - started)
-    print(f"{target.id}: build prepared; run just fuzz {target.id}; artifacts: {path}")
+        binary = build_instrumented(inventory, target, path)
+        result = "instrumented preparation"
+    finally:
+        metadata(path, target, bolero_args(inventory, target), result, time.monotonic() - started)
+    print(f"{target.id}: prepared {binary}; artifacts: {path}")
 
 
 def run_instrumented(
@@ -845,6 +846,7 @@ def replay(target: Target, failure: pathlib.Path) -> int:
     }
     result = command(args, env=env, timeout=240, allowed_status=(0, 101))
     output = result.stdout + result.stderr
+    print(output[-4000:])
     if hashlib.sha256(destination.read_bytes()).hexdigest() != digest:
         raise BoleroError(f"{target.id}: replay bytes changed during staging")
     if result.returncode != 0 and not re.search(
@@ -852,10 +854,9 @@ def replay(target: Target, failure: pathlib.Path) -> int:
     ):
         raise BoleroError(f"{target.id}: replay failed outside the selected property")
     if result.returncode == 0 and not re.search(
-        r"corpus inputs: [1-9]\d* \| rng inputs: 0", output
+        r"corpus inputs: [1-9]\d*(?: \| rng inputs: 0)?(?:\r?\n|$)", output
     ):
         raise BoleroError(f"{target.id}: saved input was not replayed")
-    print(output[-4000:])
     return result.returncode
 
 

@@ -29,5 +29,4 @@ nervix-vm = { workspace = true }
 regex = { workspace = true }
 roto = { workspace = true }
 thiserror = { workspace = true }
-triomphe = { workspace = true }
 uuid = { workspace = true, features = ["v4"] }

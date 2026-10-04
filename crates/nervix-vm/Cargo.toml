@@ -47,7 +47,6 @@ sorted-vec = { workspace = true }
 strum = { workspace = true, features = ["derive"] }
 thiserror = { workspace = true }
 tokio = { workspace = true, features = ["rt"] }
-triomphe = { workspace = true }
 unicode-normalization = { workspace = true }
 url = { workspace = true }
 uuid = { workspace = true, features = ["v4", "v7"] }

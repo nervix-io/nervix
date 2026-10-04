@@ -43,13 +43,14 @@ own Cucumber, Shuttle, Loom, Turmoil and external Chaos evidence.
 | `client-arrow-selection` | `nervix-server` whole-input typed rejection without partial output | invalid row bounds, order, duplicates and branch alignment, v1 | 128 | 512 bytes |
 | `client-binding-rows` | `nervix-client-ffi` complete column values and retained frame ownership | native scalar bits, states, string/bytes offsets, branch keys and nested cells, v1 | 128 | 512 bytes |
 | `client-processor-choice-request` | `nervix-client-wire` processor choice request round-trip equality | current targets with relay context, search, page and identity, v1 | 128 | 32 bytes |
-| `nspl-expression` | `nervix-nspl` expression render and reparse equality through a statement and the standalone expression, expression-list and route-construction readers | NSPL expressions of every form, v3 | 256 | 512 bytes |
-| `nspl-model` | `nervix-nspl` canonical `CREATE` render and client and server reparse equality | NSPL Models of every family, client emitters included, v4 | 256 | 2048 bytes |
-| `nspl-archive-model` | `nervix-nspl` archive document and reparse equality | ordered NSPL Models, client emitters included, v4 | 64 | 4096 bytes |
-| `nspl-statement` | `nervix-nspl` canonical statement render and client and server reparse equality | NSPL statements of every form, session-only forms included, v2 | 256 | 2048 bytes |
-| `nspl-statement-text` | `nervix-nspl` edited statement text is rejected with located diagnostics or reads as canonical statements | edited canonical text, v2 | 256 | 2048 bytes |
-| `nspl-format-document` | `nervix-nspl-format` keeps statements and comments and is idempotent | documents with gaps, comments and either line ending, v2 | 256 | 4096 bytes |
-| `nspl-format-text` | `nervix-nspl-format` refuses unparseable text or formats it keeping its statements | edited documents, v2 | 256 | 4096 bytes |
+| `nspl-expression` | `nervix-nspl` expression render and reparse equality through a statement and the standalone expression, expression-list and route-construction readers | NSPL expressions of every form, v4 | 256 | 512 bytes |
+| `nspl-model` | `nervix-nspl` canonical `CREATE` render and client and server reparse equality | NSPL Models of every family, client emitters included, v5 | 256 | 2048 bytes |
+| `nspl-archive-model` | `nervix-nspl` archive document and reparse equality | ordered NSPL Models, client emitters included, v5 | 64 | 4096 bytes |
+| `nspl-statement` | `nervix-nspl` canonical statement render and client and server reparse equality | NSPL statements of every form, session-only forms included, v3 | 256 | 2048 bytes |
+| `nspl-statement-text` | `nervix-nspl` edited statement text is rejected with located diagnostics or reads as canonical statements | edited canonical text, v3 | 256 | 2048 bytes |
+| `nspl-expression-text` | `nervix-nspl` edited expression text reads as the same expression, or as none, through a statement and the standalone expression, expression-list and route-construction readers | edited canonical expressions, v2 | 256 | 512 bytes |
+| `nspl-format-document` | `nervix-nspl-format` keeps statements and comments and is idempotent | documents with gaps, comments and either line ending, v3 | 256 | 4096 bytes |
+| `nspl-format-text` | `nervix-nspl-format` refuses unparseable text or formats it keeping its statements | edited documents, v3 | 256 | 4096 bytes |
 | `models-names` | `nervix-models` name text, conversion, JSON, archive and Model-name widening equality | every name type, v1 | 256 | 256 bytes |
 | `models-name-validation` | `nervix-models` name parsing matches the name rule; decoders accept only canonical text | arbitrary text, v1 | 256 | 256 bytes |
 | `models-timestamps` | `nervix-models` integer, RFC 3339, JSON, archive and chrono equality | every signed Unix nanosecond, v1 | 256 | 64 bytes |
@@ -64,15 +65,20 @@ own Cucumber, Shuttle, Loom, Turmoil and external Chaos evidence.
 | `models-batch-limit-validation` | `nervix-models` limit input reads in range or fails typed; decoders refuse out-of-range limits | arbitrary limits, v1 | 256 | 64 bytes |
 | `models-identities` | `nervix-models` execution reference, upload identity, endpoint and pool-bound equality | valid identities, v1 | 256 | 512 bytes |
 | `models-identity-validation` | `nervix-models` identity parsers and decoders accept exactly their rule | arbitrary identity text and bounds, v1 | 256 | 512 bytes |
-| `models-archived-models` | `nervix-models` Model and statement archive equality, resource-version widening and pinning | vocabulary Models and statements of every family and form, v2 | 256 | 4096 bytes |
+| `models-archived-models` | `nervix-models` Model and statement archive equality, resource-version widening and pinning | vocabulary Models and statements of every family and form, full-width counts included, v4 | 256 | 4096 bytes |
+| `models-archived-counts` | `nervix-models` count-bearing Model, statement, transaction identity and WASM inspection archive equality | zero where permitted, `u32::MAX + 1`, `u64::MAX` and generated native counts, v1 | 256 | 16 bytes |
+| `consensus-archived-counts` | `nervix-consensus` complete record equality through the production bounded storage codec | transaction commands, limits, positions, progress, failures, outcomes, plan and report headers with boundary and generated counts, v1 | 256 | 16 bytes |
+| `registry-archived-models` | `nervix-server` complete Model equality through the registry's sealed storage codec | every vocabulary Model family with pinned resource versions and full-width counts, v2 | 256 | 4096 bytes |
+| `runtime-window-archived-counts` | `nervix-server` histogram delayed-removal archive equality | current removals with arbitrary expiry and boundary and generated bucket indices, v1 | 256 | 32 bytes |
 | `backup-record-manifest` | `nervix-backup` record and manifest encode/decode equality | current domain record and manifest, v1 | 256 | 128 bytes |
 | `branch-membership` | `nervix-branch-instances` owner steps against the specified visible-set contract: each claim, admission, eviction, expiry and release publishes exactly the current owner lifetime's membership, and a step that changes none publishes nothing | bounded claim, admit, expire and release sequences over six branch keys, v1 | 256 | 256 bytes |
 | `task-status-transitions` | `nervix-server` task status publishes the complete healthy or failed status, preserving retry on error-only changes | 64 transition bytes over current status and retry values, v1 | 256 | 64 bytes |
 | `entity-freeze-transitions` | `nervix-server` freeze publications contain exactly the coordination owners whose holds remain active | 64 insert/remove bytes over eight coordination identities, v1 | 256 | 64 bytes |
 | `replica-progress` | `nervix-checkpoint-replication` replica reports, offers and announcer steps against the monotonic quorum contract: each replica's progress is the highest revision it reported, a count of replicas holding a revision never falls, and an offered revision keeps exactly one announcer until every assigned replica holds it or the replicated state is gone | bounded report, offer, step, cancel and retire sequences over four replicas and sixteen revisions, v1 | 256 | 256 bytes |
+| `replica-catch-up` | `nervix-server` an owner's catalog of branch checkpoints and a replica's catch-up rounds against convergence: whatever catalog reads and branch fetches fail and however announcements are lost, repeated or reordered, the replica holds every branch its lifecycle names at the owner's revision once reads and fetches succeed, never records holding what its storage does not, and every listing reaches it through its wire form and encoding unchanged | bounded start, publish, stop, catalog replacement, naming, eviction, lifecycle, announcement and round sequences over four branches, unbranched work included, v1 | 256 | 256 bytes |
 | `typed-report` | `nervix-lint-report` complete compiler-report serialization equality | bounded current findings, spans, expansions and completion metadata, v1 | 256 | 32 bytes |
-| `typed-catalog-scope` | `nervix-lint-report` complete catalog/scope parsing equality | resolved identities and all reviewed disposition variants, v1 | 256 | 32 bytes |
-| `typed-site-union` | `nervix-lint-report` authored-site deduplication preserves every configuration and review | repeated ordinary/modeled findings over bounded current sites, v1 | 256 | 32 bytes |
+| `typed-source-contract` | `nervix-lint-report` complete source-contract parsing equality | bounded current execution-contract annotations, v1 | 256 | 32 bytes |
+| `typed-site-union` | `nervix-lint-report` authored-site deduplication preserves every configuration | repeated ordinary/modeled findings over bounded current sites, v1 | 256 | 32 bytes |
 
 Each target declares its Cargo manifest. Product targets use the root workspace; the synchronization
 properties use `tools/nervix-lint/Cargo.toml`. The shared runner discovers declared tooling workspaces
@@ -85,10 +91,10 @@ tests in folders and explicitly configured library or test paths. A missing or a
 target or executable fails the run before the campaign starts.
 
 The CI sanitizer job budgets cold ordinary and instrumented builds separately from each target's
-bounded campaign. Its overall limit is two hours; per-build, per-case and per-campaign deadlines
-remain enforced by the shared runner. Validation uses a 16-CPU runner and the same overall limit
-to complete Clippy, compiled discovery and the declared compiler synchronization matrix from a
-cold cache.
+bounded campaign. Its overall limit is three hours; per-build, per-case and per-campaign deadlines
+remain enforced by the shared runner. Validation uses an 8-CPU runner and a two-hour limit
+to complete Clippy and the declared compiler synchronization matrix from a cold cache. Bolero
+inventory and compiled discovery run through the dedicated Bolero commands and workflow.
 The native extra-checks job retains its 8-CPU allocation and the same two-hour limit for ordinary
 instrumentation and the full modeled suite.
 
@@ -134,15 +140,33 @@ embeds an expression, including a call to a built-in named like a keyword that b
 clause, such as `max`, `right` or `replace`, and a field in the `output` or `right` scope. Routes
 are generated in every shape a node family allows: transforming and set-only construction,
 `INHERIT`, ordered `SET`, `FLUSH EACH` and `FLUSH IMMEDIATE`, and branches declared per route or
-node-wide. Names reach both length limits, and counts reach the largest value their field holds.
+node-wide. A name of any kind may spell any NSPL keyword, statement and expression keywords alike,
+and a field, UDF or function name inside an expression or a route construction may also hold a `-`,
+`~` or `.`, or begin with a digit, which canonical NSPL writes between backticks. Names reach both
+length limits, and counts reach the largest value their field holds.
 The language properties also sweep sixteen deterministic byte sequences through every Model
 family, every emitter sink and every statement form on every ordinary run, so none is left to the
 random cases.
+
+Relay capacities in both domains reach `u64::MAX` on native 64-bit targets. Archived native counts
+use the vocabulary's fixed-width [count representation](./typed-states.md#archived-counts).
+Dedicated count properties assert complete current-record equality at zero where permitted,
+`u32::MAX + 1`, `u64::MAX`, and generated values. The public scenario **Relay capacities keep every
+bit through replication and a full cluster restart** checks creation and alteration at both positive
+boundaries in one-node and three-node clusters, including a follower read and full restart.
 
 Rejection targets start from valid canonical text and edit up to three characters, inserting,
 deleting or replacing delimiters, quotes, comment markers, line endings, digits and non-ASCII
 characters. The result is mostly no longer NSPL and sometimes still is, so both the rejection and
 the acceptance paths are exercised.
+
+The expression-text target edits a canonical expression up to four times, deleting a character or
+inserting a piece or putting one in a character's place. The pieces are whitespace and line
+comments, a `.` with and without spaces beside it, exponent letters, digits and a minus, statement
+punctuation an expression never reads, and keywords only an expression reserves beside ones it reads
+as names. It asserts that every entry point agrees on the result: a subscription's `WHERE`, the
+standalone expression reader, a one-element expression list and a route construction's `WHERE` read
+it as the same expression, or none of them reads it as one.
 
 ## Uncovered Boundaries
 
@@ -152,19 +176,39 @@ recorded boundary, not a claim:
 - Canonical NSPL writes a negative literal, `-0.0` included, as `-` applied to its magnitude, and
   reads it back that way. NaN and the infinities have no spelling, and rendering them fails with a
   typed error. The NSPL domain therefore holds only non-negative finite literals.
-- Names inside generated Models and statements are, in both domains, one lower-case ASCII
-  identifier that no keyword can match. The name rule admits more, such as `-`, `~`, `.` and a
-  leading digit; the name properties cover it on each name type directly.
+- Outside an expression or a route construction, a generated name is one lower-case ASCII
+  identifier, because canonical NSPL writes a name holding a `-`, `~` or `.`, or beginning with a
+  digit, between backticks only inside one. The name properties cover the whole name rule on each
+  name type directly. In the NSPL domain a relay is never named `message` or `branch`, and a
+  placement member is never named like an `ALTER` operation keyword, because NSPL reads those words
+  there as its own.
 - `DROP` has no form for branches, generators, hash maps, signaling protocols, WASM processors or
-  window processors, an HTTP emitter has no `BATCH` clause, and a correlator's filter has no
-  spelling. Only the vocabulary domain generates those states, for the archive properties.
-- The archived form of a `usize` count, such as a relay's `CAPACITY`, is 32 bits wide and
-  truncates a larger count without an error. The vocabulary domain draws those counts only from the
-  range the archive keeps.
+  window processors, an HTTP emitter has no `BATCH` clause, a correlator's filter has no
+  spelling, and a Postgres `ON CONFLICT DO UPDATE` whose target names every mapped column is
+  rejected, because it leaves no column to update. Only the vocabulary domain generates those
+  states, for the archive properties.
 - A time rate's JSON form is not asserted: `serde_json` reads a float without correct rounding, so
   it may land one unit in the last place away. Its text and archived forms keep every bit.
 
 ## Commands And Enforcement
+
+Server properties embed the real web console assets. The Bolero recipes build them before
+discovery, requiring Trunk and the repository Rust toolchain's `wasm32-unknown-unknown` target.
+Both CI modes install those prerequisites.
+Asset builds stage Trunk's complete output and preserve byte-identical published files, including
+their timestamps, so preparing assets again keeps the native server's compiled artifacts reusable.
+
+On a shared host, a cold sanitizer build can exceed the runner's build deadline.
+`just prepare-bolero <id>` prepares one exact registered target through the same instrumented
+build path that runs its campaigns. `CARGO_BUILD_JOBS=1 just prepare-archive-counts-fuzz` uses that
+command for the declared server library shared by the registry and window count properties.
+Then run the registered campaigns with `just fuzz`. Preparation records its own build log and
+metadata with a 7,200-second compilation deadline; it does not count as a completed fuzz campaign.
+The sanitizer CI job runs only on PRs labeled `fuzz`, prepares that server binary with one Cargo
+build job to bound compiler memory, and allows 180 minutes for preparation, all target campaigns,
+failure qualification and artifact upload. An expected sanitizer skip contributes no execution or
+coverage evidence. The Check workflow's validation job and the dedicated Bolero discovery job
+retain their separate scopes and limits.
 
 The fuzz profile uses one codegen unit, optimization level two and debug level one. The full
 server package uses optimization level one and no debug output to keep its instrumented build
@@ -210,7 +254,8 @@ corpus paths different from Bolero's actual work directory. Discovery executes o
 `bolero_` tests of the registered library and integration-test targets under Bolero's selection
 mode; it cannot start the server's scenario harness. It reports discovered, selected, executed and
 completed counts.
-`just validate` and `just validate-ci` include this gate. The inventory includes server-owned Arrow
+`just validate` and `just validate-ci` do not run Bolero checks. Bolero commands perform discovery
+before their selected action, and the dedicated ordinary Bolero CI job owns this check. The inventory includes server-owned Arrow
 properties, so Bolero recipes prepare the web console assets the server library embeds through
 `just bolero-deps`. This compiles assets only; it starts no live service. Both Bolero CI jobs install
 Trunk, the browser Rust target and native server build dependencies before compiled discovery.
@@ -235,15 +280,18 @@ registered harness; they do not compile or invoke the server's Cucumber executab
 On a shared host, a cold server build can exceed the campaign runner's 30-minute compilation
 limit. `just prepare-bolero <id>` prepares that same pinned, scoped sanitizer build with a two-hour
 limit and retains its log and preparation metadata. It does not run a campaign or record fuzz
-completion. The target must subsequently pass `just fuzz <id>` with the ordinary build and case
+completion. `just prepare-archive-counts-fuzz` uses this shared path for the declared registry library harness.
+CI prepares the server library with both the empty and `testing` feature sets.
+The target must subsequently pass `just fuzz <id>` with the ordinary build and case
 limits; CI campaigns continue to use that bounded runner.
 
-PR CI runs a required ordinary randomized/corpus job and a separate required sanitizer
-libFuzzer job. Each target gets 30 seconds of engine time on PRs and five minutes in scheduled or
-manual campaigns. The sanitizer job prepares both declared server harnesses, with the empty and
-`testing` feature sets, before campaigns with one Cargo build job. It allows three hours for PRs
-and six hours for scheduled or manual
-campaigns; the complete inventory's engine time must fit with compilation, artifacts and cleanup. A
+PR CI runs a required ordinary randomized/corpus job. The sanitizer libFuzzer job runs only when
+the PR has the `fuzz` label, with 30 seconds of engine time per target. Both jobs use the native
+[CI linker](./developing-nervix.md#validation-and-tests), including sanitizer builds that supply
+their own compiler flags. Adding or removing the
+label reevaluates the jobs; the gate requires sanitizer success when the label is present and
+accepts a skipped sanitizer job otherwise. Scheduled and manual workflow runs execute the ordinary
+properties. Job limits reserve additional time for compilation, artifacts and cleanup. A
 cache may seed a campaign but cannot skip a target or replace checked-in regressions. An empty
 selection, timeout, engine failure, sanitizer finding or property failure fails the job.
 

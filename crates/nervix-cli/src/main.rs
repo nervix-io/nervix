@@ -9,6 +9,14 @@
 //! - **Must not know.** The server. It speaks the session API through the client core and nothing
 //!   else.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::context(
+        outside,
+        reason = "CLI session and terminal coordination belong to the client edge"
+    )
+)]
+
 use std::{
     collections::BTreeSet,
     io,
@@ -42,6 +50,7 @@ use nervix_nspl::client_statement::{
 use nervix_primitives::{
     runtime::Handle,
     sync::{
+        Arc,
         atomic::{AtomicBool, AtomicU64, Ordering},
         blocking::Mutex,
     },
@@ -55,7 +64,6 @@ use reedline::{
 };
 use thiserror::Error;
 use tokio::signal;
-use triomphe::Arc;
 
 mod backup;
 mod restore;
@@ -64,6 +72,8 @@ use self::{
     backup::{BackupRequest, CliBackupScope, CliReportFormat},
     restore::{CliExistingUsers, CliRestoreScope, RestoreRequest},
 };
+
+nervix_primitives::product_binary!("nervix-cli");
 
 const HISTORY_FILE: &str = ".nervix_client_history";
 const EVENT_BUFFER_RECORDS: usize = 128;
@@ -1321,12 +1331,14 @@ impl EventLineSender {
 
     /// Event readers never wait for a terminal. A full queue drops the new line and records the
     /// gap for the printer; every retained line has a fixed maximum byte length.
+    #[allow(deprecated)] // until try_update is stabilized
     fn push(&self, mut line: String) {
         if line.len() > EVENT_LINE_BYTES {
             let boundary = line.floor_char_boundary(EVENT_LINE_PREFIX_BYTES);
             line.truncate(boundary);
             line.push_str(EVENT_LINE_SUFFIX);
         }
+        #[allow(deprecated)] // until try_update is stabilized
         match self.sender.try_send(line) {
             Ok(()) => {}
             Err(nervix_primitives::sync::mpsc::error::TrySendError::Full(_)) => {

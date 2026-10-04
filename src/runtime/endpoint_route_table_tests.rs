@@ -9,7 +9,7 @@ use std::collections::BTreeMap;
 
 use meticulous::ResultExt as _;
 use nervix_models::{IngestorName, ModelKind};
-use triomphe::Arc;
+use nervix_primitives::sync::Arc;
 
 use super::*;
 

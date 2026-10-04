@@ -138,6 +138,23 @@ updated together. A previously stored shape that cannot supply required identity
 clearly and must be recreated; it is not defaulted into the current state. Tests construct the
 current shape and assert its behavior.
 
+## Archived Counts
+
+Native `usize` and `NonZeroUsize` counts use the vocabulary's `CountAsU64` archive adapter. Every
+count-bearing archived field selects it explicitly, so its stored width is 64 bits independently
+of the archive's pointer width. Zero remains valid for an ordinary count; a nonzero count uses the
+archive's validated `NonZeroU64` representation. Encoding preserves every bit of a supported
+native count. Decoding converts once with `usize::try_from` and returns `ArchivedCountError` if the
+receiving target cannot represent the value. No narrowing cast, clamp, or default supplies a count.
+
+This contract covers relay capacity, transaction positions and operation numbers, queue limits,
+application progress and outcomes, plan and report counts, topology counts, WASM inspection totals
+and omitted-entry counts, and histogram delayed-removal bucket indices. The owning stored
+namespaces and frame signatures identify the current count-bearing shape before decoding, and the
+interconnect's wire fingerprint fences it between nodes. Unrecognized stored state fails clearly
+and must be recreated. Complete equality properties exercise the production representations at
+their range boundaries; see [Property Testing And Fuzzing](./property-testing-and-fuzzing.md).
+
 ## Atomic States On The Data Plane
 
 An ACK root's ownership handoff can be tracking a bounded number of active shares or be complete.
@@ -259,6 +276,11 @@ the required runtime-state identity. Runtime owners enforce transitions that dep
 execution or recovery. Connectors and the session edge validate external representations when
 they decode or publish them. A caller does not compensate for a failed lookup, absent required
 field, type mismatch, or conversion by supplying a default zero, empty value, or null.
+
+Generated compiler findings carry a required execution-context field. An explicit null means that
+analysis has not established a source contract; it is an unknown effect, not a cold classification.
+The report decoder requires that field even though its value is optional. Complete compiler,
+configuration and worktree identities are also required before generated evidence is reusable.
 
 A vocabulary type that validates its value when it is parsed or constructed validates it again when
 it is decoded, from JSON and from the archive alike. Every name type, a command execution reference,

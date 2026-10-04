@@ -14,7 +14,8 @@
 //! excludes from its claim. It never carries the protocol under test, chooses its branches, supplies
 //! its wakeups, or establishes an ordering an assertion relies on.
 //!
-//! The atomics are portable; the rest is the `native` capability, like the selected families.
+//! The atomics, the one-time initialization and the [`futures`] families are portable; the rest is
+//! the `native` capability, like the selected families.
 
 pub mod sync {
     //! Real synchronization primitives.
@@ -82,6 +83,19 @@ pub mod net {
     //! processes. No simulation carries them.
 
     pub use std::net::TcpListener;
+}
+
+pub mod futures {
+    //! The `futures` crate's own channels, `select!` and abort handles, for a program whose event
+    //! loop no execution mode runs: the browser console. A native build selects these families
+    //! from Tokio instead, so a native task reaches the boundary's `sync`, `task` and `select!`.
+    //! Portable, like the atomics.
+
+    pub use futures_channel::mpsc;
+    pub use futures_util::{
+        future::{AbortHandle, Abortable},
+        select,
+    };
 }
 
 /// Tokio's own `select!`, for a task of [`task`] that waits on real primitives.

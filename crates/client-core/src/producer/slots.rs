@@ -10,12 +10,12 @@
 //! A submission's credit comes back exactly once: when the application takes its outcome, when it
 //! releases a resolved submission, or when the outcome of a submission it released earlier arrives.
 
-use std::{collections::BTreeMap, num::NonZeroU64, sync::Arc as StdArc};
+use std::{collections::BTreeMap, num::NonZeroU64};
 
 use error_stack::Report;
 use meticulous::OptionExt as _;
 use nervix_primitives::sync::{
-    Notify, OwnedSemaphorePermit, Semaphore, blocking::Mutex as SyncMutex,
+    Notify, OwnedSemaphorePermit, Semaphore, StdArc, blocking::Mutex as SyncMutex,
 };
 
 use super::{PendingSubmission, ProducerError, ProducerOutcome, SubmissionId};

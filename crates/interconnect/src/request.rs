@@ -7,10 +7,7 @@
 //! - **Depends on.** The authenticated HTTP/2 transport and rkyv payload vocabulary.
 //! - **Must not know.** The runtime meaning of a request or response.
 
-use std::{
-    collections::BTreeSet, future::Future, marker::PhantomData, pin::Pin, sync::Arc as StdArc,
-    time::Duration,
-};
+use std::{collections::BTreeSet, future::Future, marker::PhantomData, pin::Pin, time::Duration};
 
 use ahash::HashMap;
 use error_stack::Report;
@@ -20,7 +17,7 @@ use nervix_execution::{BudgetedBuffer, ChargedBytes, Executor, Reservation};
 use nervix_models::{ClusterNodeIdentity, ClusterNodeName, CoordinationIdentity};
 use nervix_primitives::{
     publication::{ArcSwap, ArcSwapOption},
-    sync::{Notify, OwnedSemaphorePermit, Semaphore},
+    sync::{Arc, Notify, OwnedSemaphorePermit, Semaphore, StdArc},
     time::{Instant, timeout},
 };
 use rkyv::{
@@ -31,7 +28,6 @@ use rkyv::{
 };
 use strum::{AsRefStr, EnumCount, EnumIter, IntoEnumIterator as _};
 use thiserror::Error;
-use triomphe::Arc;
 
 use super::{
     ActivateOwnershipHandoffStateRequest, CaptureOwnershipHandoffStateRequest,

@@ -13,7 +13,7 @@ use nervix_client_core::{
     wire::{CellView, ServerEvent, ServerMessage, SessionLimits, SubscriptionRowsEncoder},
 };
 use nervix_models::Timestamp;
-use triomphe::Arc;
+use nervix_primitives::sync::Arc;
 
 use super::{Shared, handle, name, schema, succeeded};
 use crate::{Event, nx_event_frame, nx_event_release, nx_event_retain, schema::Part};

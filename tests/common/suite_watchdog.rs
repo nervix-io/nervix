@@ -37,14 +37,16 @@
 //! suite finishes inside it with [`SUITE_SLACK`] to spare.
 
 use std::{
-    collections::BTreeMap, fmt, future::Future, io::Write as _, str::FromStr, sync::Arc as StdArc,
-    time::Duration,
+    collections::BTreeMap, fmt, future::Future, io::Write as _, str::FromStr, time::Duration,
 };
 
 use error_stack::Report;
 use meticulous::OptionExt as _;
 use nervix_models::DurationTextError;
-use nervix_primitives::sync::blocking::{LazyLock, Mutex};
+use nervix_primitives::sync::{
+    StdArc,
+    blocking::{LazyLock, Mutex},
+};
 use nervix_recovery::Reported as _;
 
 use super::{

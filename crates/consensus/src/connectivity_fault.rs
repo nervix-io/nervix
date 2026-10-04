@@ -23,8 +23,10 @@ pub use enabled::ConnectivityFault;
 
 #[cfg(any(test, feature = "testing"))]
 mod enabled {
-    use nervix_primitives::sync::atomic::{AtomicBool, Ordering};
-    use triomphe::Arc;
+    use nervix_primitives::sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    };
 
     use super::*;
 

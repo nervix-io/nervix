@@ -13,6 +13,15 @@
 //! This module breaks its own contract: recording is infrastructure the data plane calls inward,
 //! but the Prometheus exposition beside it is an edge. The two separate when the crate does.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::context(
+        observer,
+        reason = "metrics registration, snapshot and inspection observe membership; recurring \
+                  series recorders carry their own contract"
+    )
+)]
+
 use std::{
     cmp::Ordering,
     collections::VecDeque,
@@ -32,6 +41,7 @@ use nervix_models::{
 use nervix_primitives::{
     collections::{DashMap, dash_map::Entry},
     sync::{
+        Arc,
         atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering as AtomicOrdering},
         blocking::Mutex,
     },
@@ -48,7 +58,6 @@ use prometheus::{
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 use strum::{AsRefStr, EnumIter, IntoEnumIterator};
 use tikv_jemalloc_ctl::{epoch, epoch_mib, stats};
-use triomphe::Arc;
 
 mod interconnection;
 
@@ -269,6 +278,14 @@ struct WallEma {
 }
 
 impl WallEma {
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            lifecycle,
+            reason = "metric handle installation, inventory snapshots and teardown run outside \
+                      record observation"
+        )
+    )]
     fn new(series_started_at: Instant, tau_seconds: f64) -> Self {
         Self {
             tau_seconds,
@@ -278,6 +295,13 @@ impl WallEma {
         }
     }
 
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            lifecycle,
+            reason = "snapshot installation constructs one retained metric generation"
+        )
+    )]
     fn from_snapshot(
         snapshot: &WallEmaSnapshot,
         series_started_at: Instant,
@@ -376,6 +400,14 @@ struct DomainEma {
 }
 
 impl DomainEma {
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            lifecycle,
+            reason = "metric handle installation, inventory snapshots and teardown run outside \
+                      record observation"
+        )
+    )]
     fn new(tau_seconds: f64) -> Self {
         Self {
             tau_seconds,
@@ -384,6 +416,13 @@ impl DomainEma {
         }
     }
 
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            lifecycle,
+            reason = "snapshot installation constructs one retained metric generation"
+        )
+    )]
     fn from_snapshot(snapshot: &DomainEmaSnapshot, tau_seconds: f64) -> Self {
         Self {
             tau_seconds,
@@ -511,6 +550,14 @@ struct RollingRates {
 }
 
 impl RollingRates {
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            lifecycle,
+            reason = "metric handle installation, inventory snapshots and teardown run outside \
+                      record observation"
+        )
+    )]
     fn new(series_started_at: Instant) -> Self {
         Self {
             wall_1m: WallEma::new(series_started_at, rate_decay_tau_seconds(ONE_MINUTE)),
@@ -520,6 +567,13 @@ impl RollingRates {
         }
     }
 
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            lifecycle,
+            reason = "snapshot installation constructs one retained metric generation"
+        )
+    )]
     fn from_snapshot(snapshot: Option<&RollingRatesSnapshot>, series_started_at: Instant) -> Self {
         let Some(snapshot) = snapshot else {
             return Self::new(series_started_at);
@@ -685,6 +739,13 @@ impl HistogramSamples<'_> {
         Some(Self::One(units))
     }
 
+    #[cfg_attr(
+        nervix_lint,
+        nervix::dispatch(
+            reason = "histogram recording iterates the retained external histogram bucket \
+                      interface"
+        )
+    )]
     fn record_into(self, histogram: &mut HdrHistogram<u64>) {
         // The configured maximum is the top of this metric's bucket ladder, so a sample above it
         // belongs in the top bucket exactly as one past the last explicit boundary does. Clamping
@@ -718,6 +779,14 @@ struct TimeRollingHistogram {
 }
 
 impl TimeRollingHistogram {
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            lifecycle,
+            reason = "metric handle installation, inventory snapshots and teardown run outside \
+                      record observation"
+        )
+    )]
     fn new(window: Duration, step: Duration, buckets: &'static [f64]) -> Self {
         Self {
             window,
@@ -727,6 +796,13 @@ impl TimeRollingHistogram {
         }
     }
 
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            lifecycle,
+            reason = "snapshot installation constructs one retained metric generation"
+        )
+    )]
     fn from_snapshot(
         snapshot: &[RollingHistogramBucketSnapshot],
         window: Duration,
@@ -856,12 +932,27 @@ struct WallRollingHistogram {
 }
 
 impl WallRollingHistogram {
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            lifecycle,
+            reason = "metric handle installation, inventory snapshots and teardown run outside \
+                      record observation"
+        )
+    )]
     fn new(window: Duration, step: Duration, buckets: &'static [f64]) -> Self {
         Self {
             inner: TimeRollingHistogram::new(window, step, buckets),
         }
     }
 
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            lifecycle,
+            reason = "snapshot installation constructs one retained metric generation"
+        )
+    )]
     fn from_snapshot(
         snapshot: &WallRollingHistogramSnapshot,
         window: Duration,
@@ -897,12 +988,27 @@ struct DomainRollingHistogram {
 }
 
 impl DomainRollingHistogram {
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            lifecycle,
+            reason = "metric handle installation, inventory snapshots and teardown run outside \
+                      record observation"
+        )
+    )]
     fn new(window: Duration, step: Duration, buckets: &'static [f64]) -> Self {
         Self {
             inner: TimeRollingHistogram::new(window, step, buckets),
         }
     }
 
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            lifecycle,
+            reason = "snapshot installation constructs one retained metric generation"
+        )
+    )]
     fn from_snapshot(
         snapshot: &DomainRollingHistogramSnapshot,
         window: Duration,
@@ -946,6 +1052,14 @@ struct RollingHistograms {
 }
 
 impl RollingHistograms {
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            lifecycle,
+            reason = "metric handle installation, inventory snapshots and teardown run outside \
+                      record observation"
+        )
+    )]
     fn new(buckets: &'static [f64]) -> Self {
         Self {
             wall_1m: WallRollingHistogram::new(ONE_MINUTE, WALL_HISTOGRAM_1M_STEP, buckets),
@@ -959,6 +1073,13 @@ impl RollingHistograms {
         }
     }
 
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            lifecycle,
+            reason = "snapshot installation constructs one retained metric generation"
+        )
+    )]
     fn from_snapshot(
         snapshot: Option<&RollingHistogramsSnapshot>,
         _series_started_at: Instant,
@@ -1043,6 +1164,14 @@ struct AggregatedRollingHistograms {
 }
 
 impl AggregatedRollingHistograms {
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            lifecycle,
+            reason = "metric handle installation, inventory snapshots and teardown run outside \
+                      record observation"
+        )
+    )]
     fn new(buckets: &'static [f64]) -> Self {
         Self {
             wall_1m: TimeRollingHistogram::new(ONE_MINUTE, WALL_HISTOGRAM_1M_STEP, buckets),
@@ -1151,6 +1280,13 @@ impl Default for CounterSeries {
 }
 
 impl CounterSeries {
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            lifecycle,
+            reason = "snapshot installation constructs one retained metric generation"
+        )
+    )]
     fn from_snapshot(snapshot: &MetricCounterSnapshot) -> Self {
         let started_at = match snapshot
             .started_at_wall_nanos
@@ -1221,6 +1357,16 @@ impl CounterSeries {
 }
 
 #[derive(Debug)]
+#[cfg_attr(
+    nervix_lint,
+    nervix::context(
+        bounded,
+        key = "one retained metric series",
+        bound = "fixed rolling histogram buckets and one admitted observation or batch; no guard \
+                 crosses await",
+        reason = "the recorder retains this series instead of discovering it per observation"
+    )
+)]
 struct HistogramSeries {
     started_at: Instant,
     domain_started_at_nanos: AtomicI64,
@@ -1233,6 +1379,14 @@ struct HistogramSeries {
 }
 
 impl HistogramSeries {
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            lifecycle,
+            reason = "metric handle installation, inventory snapshots and teardown run outside \
+                      record observation"
+        )
+    )]
     fn new(buckets: &'static [f64]) -> Self {
         Self {
             started_at: Instant::now(),
@@ -1272,6 +1426,13 @@ impl HistogramSeries {
         self.observed.store(true, AtomicOrdering::Relaxed);
     }
 
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            lifecycle,
+            reason = "snapshot installation constructs one retained metric generation"
+        )
+    )]
     fn from_snapshot(snapshot: &MetricHistogramSnapshot) -> Self {
         let started_at = match snapshot
             .started_at_wall_nanos
@@ -1513,6 +1674,14 @@ impl Default for RuntimeMetrics {
 }
 
 impl PrometheusMetrics {
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            lifecycle,
+            reason = "metric handle installation, inventory snapshots and teardown run outside \
+                      record observation"
+        )
+    )]
     fn new() -> Self {
         let registry = Registry::new();
         let messages_total = IntCounterVec::new(
@@ -2082,6 +2251,14 @@ impl PrometheusMetrics {
 }
 
 impl JemallocMetricsCollector {
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            lifecycle,
+            reason = "metric handle installation, inventory snapshots and teardown run outside \
+                      record observation"
+        )
+    )]
     fn new() -> Self {
         let mut descs = Vec::new();
         let active_gauge = jemalloc_gauge(
@@ -2309,6 +2486,13 @@ impl HistogramRecorder {
         }
     }
 
+    #[cfg_attr(
+        nervix_lint,
+        nervix::dispatch(
+            reason = "latency recording iterates the selected timestamp projection without \
+                      changing its retained histogram owner"
+        )
+    )]
     fn observe_delivery_latencies(&self, latencies: &DeliveryLatencies<'_>) {
         self.series.record(
             HistogramSamples::Elapsed(&latencies.buckets),
@@ -2342,6 +2526,13 @@ impl HistogramRecorders {
         }
     }
 
+    #[cfg_attr(
+        nervix_lint,
+        nervix::dispatch(
+            reason = "latency recording iterates the selected timestamp projection without \
+                      changing its retained histogram owner"
+        )
+    )]
     fn observe_delivery_latencies(&self, latencies: &DeliveryLatencies<'_>) {
         self.primary.observe_delivery_latencies(latencies);
         if let Some(secondary) = &self.secondary {
@@ -2770,6 +2961,14 @@ impl RuntimeMetrics {
         }
     }
 
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            lifecycle,
+            reason = "this operation installs, snapshots or retires retained execution state at \
+                      an explicit lifetime boundary"
+        )
+    )]
     fn resolve_global_counter(&self, key: MetricKey) -> CounterRecorder {
         let prometheus = self
             .series
@@ -2790,6 +2989,14 @@ impl RuntimeMetrics {
         }
     }
 
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            lifecycle,
+            reason = "this operation installs, snapshots or retires retained execution state at \
+                      an explicit lifetime boundary"
+        )
+    )]
     fn resolve_branch_counter(&self, branch_key: &str, key: MetricKey) -> CounterRecorder {
         let key = BranchMetricKey {
             branch_key: branch_key.to_string(),
@@ -2809,6 +3016,14 @@ impl RuntimeMetrics {
         }
     }
 
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            lifecycle,
+            reason = "this operation installs, snapshots or retires retained execution state at \
+                      an explicit lifetime boundary"
+        )
+    )]
     fn resolve_global_histogram(&self, key: MetricKey) -> HistogramRecorder {
         let prometheus =
             self.series.prometheus.histogram(&key).assured(
@@ -2829,6 +3044,14 @@ impl RuntimeMetrics {
         }
     }
 
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            lifecycle,
+            reason = "this operation installs, snapshots or retires retained execution state at \
+                      an explicit lifetime boundary"
+        )
+    )]
     fn resolve_branch_histogram(&self, branch_key: &str, key: MetricKey) -> HistogramRecorder {
         let buckets = internal_buckets_for_metric(key.metric);
         let key = BranchMetricKey {
@@ -3048,6 +3271,14 @@ impl RuntimeMetrics {
         }
     }
 
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            lifecycle,
+            reason = "this operation installs or retires the exact retained task or branch \
+                      lifetime"
+        )
+    )]
     pub(crate) fn observe_branch_instance_created(
         &self,
         domain: &DomainName,
@@ -3085,6 +3316,14 @@ impl RuntimeMetrics {
         }
     }
 
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            lifecycle,
+            reason = "this operation installs or retires the exact retained task or branch \
+                      lifetime"
+        )
+    )]
     pub(crate) fn observe_branch_instance_removed(
         &self,
         domain: &DomainName,
@@ -3138,6 +3377,14 @@ impl RuntimeMetrics {
         }
     }
 
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            lifecycle,
+            reason = "this operation installs or retires the exact retained task or branch \
+                      lifetime"
+        )
+    )]
     pub(crate) fn observe_branch_instance_detached(
         &self,
         domain: &DomainName,
@@ -3253,6 +3500,14 @@ impl RuntimeMetrics {
         self.series.prometheus.interconnection.install(observations);
     }
 
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            lifecycle,
+            reason = "this operation installs, snapshots or retires retained execution state at \
+                      an explicit lifetime boundary"
+        )
+    )]
     pub fn snapshot_global_target(
         &self,
         domain: &DomainName,
@@ -3338,6 +3593,14 @@ impl RuntimeMetrics {
         }
     }
 
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            lifecycle,
+            reason = "this operation installs, snapshots or retires retained execution state at \
+                      an explicit lifetime boundary"
+        )
+    )]
     pub fn apply_global_target_snapshot(
         &self,
         domain: &DomainName,
@@ -3390,6 +3653,14 @@ impl RuntimeMetrics {
         }
     }
 
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            lifecycle,
+            reason = "this operation installs, snapshots or retires retained execution state at \
+                      an explicit lifetime boundary"
+        )
+    )]
     pub fn has_global_target_measurements(
         &self,
         domain: &DomainName,
@@ -4643,6 +4914,14 @@ struct ClientSubmissionCounters {
 }
 
 impl ClientSubmissionCounters {
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            lifecycle,
+            reason = "metric handle installation, inventory snapshots and teardown run outside \
+                      record observation"
+        )
+    )]
     fn new(vector: &IntCounterVec, domain: &DomainName, ingestor: &IngestorName) -> Self {
         use nervix_models::{
             ClientBatchDefect, ClientOutcomeUncertainty, ClientProcessingFailure,

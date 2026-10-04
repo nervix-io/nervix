@@ -9,15 +9,14 @@
 //! - **Depends on.** The VM compiler and its constant folding.
 //! - **Must not know.** How execution evaluates a call.
 
-use std::sync::Arc;
-
 use arrow_schema::{DataType, Field, Schema};
+use nervix_primitives::sync::StdArc;
 
 use super::*;
 use crate::test_support::parse_program;
 
-fn operand_schema() -> Arc<Schema> {
-    Arc::new(Schema::new(vec![
+fn operand_schema() -> StdArc<Schema> {
+    StdArc::new(Schema::new(vec![
         Field::new("u8", DataType::UInt8, true),
         Field::new("i8", DataType::Int8, true),
         Field::new("u16", DataType::UInt16, true),
@@ -45,7 +44,7 @@ fn compile_assignment(
     fields.push(Field::new("out", output_type, true));
     compile_program_for_bindings(
         &program,
-        Arc::new(Schema::new(fields)),
+        StdArc::new(Schema::new(fields)),
         [CompileBinding::writable("input", input)],
     )
 }
@@ -191,8 +190,8 @@ fn calls_that_cannot_fail_fold_over_literals_and_calls_that_can_fail_do_not() {
          trunc(2.5), rounded = round(2.675, 2)",
     )
     .expect("must parse");
-    let input = Arc::new(Schema::new(Vec::<Field>::new()));
-    let output = Arc::new(Schema::new(vec![
+    let input = StdArc::new(Schema::new(Vec::<Field>::new()));
+    let output = StdArc::new(Schema::new(vec![
         Field::new("masked", DataType::Int64, true),
         Field::new("inverted", DataType::Int64, true),
         Field::new("ones", DataType::Int64, true),

@@ -6,7 +6,7 @@ use nervix_jaq::{JaqNativeFormat, StatefulJaqProgram};
 use nervix_models::{
     SignalingProtocolName, SignalingProtocolOnConnect, SignalingWireFormat, parse_duration_text,
 };
-use nervix_primitives::time;
+use nervix_primitives::{sync::Arc, time};
 use prost::Message as ProstMessage;
 use prost_reflect::{
     DeserializeOptions as ProtobufDeserializeOptions, DynamicMessage, MessageDescriptor,
@@ -19,7 +19,6 @@ use tokio_tungstenite::{
     WebSocketStream,
     tungstenite::{Error as WebSocketError, Message},
 };
-use triomphe::Arc;
 
 /// How much of a rejection value is carried into the failure reason.
 const MAX_REJECTION_REASON_BYTES: usize = 512;
@@ -460,6 +459,13 @@ impl SessionState {
 ///
 /// A trait rather than a closure: the returned future borrows the sink under one concrete
 /// lifetime, which keeps it `Send` inside the spawned connection tasks that drive signaling.
+#[cfg_attr(
+    nervix_lint,
+    nervix::context(
+        recurring,
+        reason = "the selected sink accepts each admitted signaling payload"
+    )
+)]
 pub trait SignalingDataSink {
     fn accept(&self, payload: Vec<u8>) -> impl Future<Output = ()> + Send;
 }
@@ -723,14 +729,12 @@ fn truncate_on_char_boundary(mut value: String, max_bytes: usize) -> String {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc as StdArc;
-
     use nervix_models::{
         CreateSignalingProtocol, DurationTextError, ModelName, ResourceName,
         SignalingProtobufConfig, SignalingProtocolName, SignalingProtocolOnConnect, SignalingStep,
         SignalingWaitStep, SignalingWireFormat,
     };
-    use nervix_primitives::sync::blocking::Mutex;
+    use nervix_primitives::sync::{StdArc, blocking::Mutex};
     use serde_json::json;
     use tokio_tungstenite::tungstenite::protocol::Role;
 

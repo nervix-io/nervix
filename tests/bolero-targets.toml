@@ -24,6 +24,21 @@ test_target = "lib"
 
 [[target]]
 case_timeout_seconds = 10
+corpus = "src/runtime/state_replication/__fuzz__/runtime__state_replication__replica_branch_checkpoints__tests__bolero_a_replica_catches_up_every_named_branch_with_its_owner/corpus"
+domain_version = 1
+features = []
+id = "replica-catch-up"
+invariant = "Whatever catalog reads and branch fetches fail and however announcements are lost, repeated or reordered, a replica holds every branch its lifecycle names at its owner's revision once reads and fetches succeed, never records holding what its storage does not, and every listing reaches it through its wire form unchanged."
+manifest = "Cargo.toml"
+max_input_bytes = 256
+package = "nervix-server"
+random_iterations = 256
+source = "src/runtime/state_replication/replica_branch_checkpoints_tests.rs"
+test = "runtime::state_replication::replica_branch_checkpoints::tests::bolero_a_replica_catches_up_every_named_branch_with_its_owner"
+test_target = "lib"
+
+[[target]]
+case_timeout_seconds = 10
 corpus = "crates/client-wire/src/tests/__fuzz__/tests__consumers__bolero_native_emitter_frames_round_trip/corpus"
 domain_version = 1
 features = []
@@ -40,7 +55,7 @@ test_target = "lib"
 [[target]]
 case_timeout_seconds = 10
 corpus = "crates/nspl/src/__fuzz__/canonical_round_trip_tests__bolero_expression_roundtrip_minimal_parentheses/corpus"
-domain_version = 3
+domain_version = 4
 features = []
 id = "nspl-expression"
 invariant = "A generated current expression of every form renders to text that a statement and every standalone expression reader read back as the complete structured expression."
@@ -55,7 +70,7 @@ test_target = "lib"
 [[target]]
 case_timeout_seconds = 10
 corpus = "crates/nspl/src/__fuzz__/canonical_round_trip_tests__bolero_model_roundtrip_canonical_nspl/corpus"
-domain_version = 4
+domain_version = 5
 features = []
 id = "nspl-model"
 invariant = "Canonical NSPL of a generated Model of every family reparses through the client and server grammars to the complete CREATE statement."
@@ -70,7 +85,7 @@ test_target = "lib"
 [[target]]
 case_timeout_seconds = 10
 corpus = "crates/nspl/src/backup/__fuzz__/backup__tests__bolero_models_exported_through_an_archive_reparse_to_themselves/corpus"
-domain_version = 4
+domain_version = 5
 features = []
 id = "nspl-archive-model"
 invariant = "An archived canonical document of generated Models of every family reparses to the complete ordered Model sequence."
@@ -114,6 +129,21 @@ test_target = "lib"
 
 [[target]]
 case_timeout_seconds = 10
+corpus = "crates/client-ffi/src/tests/__fuzz__/tests__batches__bolero_host_columns_round_trip_through_builder_and_stream/corpus"
+domain_version = 1
+features = []
+id = "client-ffi-host-columns"
+invariant = "Every column a host builds, of every scalar, text, bytes and nested list type, nullable or not, reads back level by level unchanged from the built batch and from the batch its canonical Arrow IPC stream decodes to."
+manifest = "Cargo.toml"
+max_input_bytes = 512
+package = "nervix-client-ffi"
+random_iterations = 256
+source = "crates/client-ffi/src/tests/batches.rs"
+test = "tests::batches::bolero_host_columns_round_trip_through_builder_and_stream"
+test_target = "lib"
+
+[[target]]
+case_timeout_seconds = 10
 corpus = "crates/branch-instances/src/__fuzz__/membership__tests__bolero_owned_branches_publish_exactly_the_current_owners_membership/corpus"
 domain_version = 1
 features = []
@@ -130,7 +160,7 @@ test_target = "lib"
 [[target]]
 case_timeout_seconds = 10
 corpus = "crates/nspl/src/__fuzz__/canonical_round_trip_tests__bolero_statement_roundtrip_canonical_nspl/corpus"
-domain_version = 2
+domain_version = 3
 features = []
 id = "nspl-statement"
 invariant = "Canonical NSPL of every generated current statement form, session-only forms included, reparses through the client and server grammars to the complete statement."
@@ -144,8 +174,23 @@ test_target = "lib"
 
 [[target]]
 case_timeout_seconds = 10
-corpus = "crates/nspl/src/__fuzz__/canonical_round_trip_tests__bolero_statement_text_is_canonical_or_rejected/corpus"
+corpus = "crates/nspl/src/__fuzz__/canonical_round_trip_tests__bolero_expression_text_reads_alike_at_every_entry_point/corpus"
 domain_version = 2
+features = []
+id = "nspl-expression-text"
+invariant = "Edited expression text reads as the same expression through a statement and every standalone expression reader, or none of them reads it as one."
+manifest = "Cargo.toml"
+max_input_bytes = 512
+package = "nervix-nspl"
+random_iterations = 256
+source = "crates/nspl/src/canonical_round_trip_tests.rs"
+test = "canonical_round_trip_tests::bolero_expression_text_reads_alike_at_every_entry_point"
+test_target = "lib"
+
+[[target]]
+case_timeout_seconds = 10
+corpus = "crates/nspl/src/__fuzz__/canonical_round_trip_tests__bolero_statement_text_is_canonical_or_rejected/corpus"
+domain_version = 3
 features = []
 id = "nspl-statement-text"
 invariant = "Edited canonical text is either rejected with located diagnostics or read as statements whose canonical NSPL reparses to them."
@@ -160,7 +205,7 @@ test_target = "lib"
 [[target]]
 case_timeout_seconds = 10
 corpus = "crates/nspl-format/src/__fuzz__/format_round_trip_tests__bolero_formatted_documents_keep_their_statements/corpus"
-domain_version = 2
+domain_version = 3
 features = []
 id = "nspl-format-document"
 invariant = "Formatting a generated document with gaps, comments and either line ending keeps its statements and comments and is idempotent."
@@ -175,7 +220,7 @@ test_target = "lib"
 [[target]]
 case_timeout_seconds = 10
 corpus = "crates/nspl-format/src/__fuzz__/format_round_trip_tests__bolero_formatter_text_is_formatted_or_rejected/corpus"
-domain_version = 2
+domain_version = 3
 features = []
 id = "nspl-format-text"
 invariant = "Edited documents are either refused as unparseable or formatted without changing their statements, idempotently."
@@ -400,7 +445,7 @@ test_target = "test:representations"
 [[target]]
 case_timeout_seconds = 10
 corpus = "crates/models/tests/representations/__fuzz__/models__bolero_models_and_statements_round_trip_through_their_archives/corpus"
-domain_version = 2
+domain_version = 4
 features = []
 id = "models-archived-models"
 invariant = "Every generated Model family and statement form keeps every field through its archive, and a stored Model widens to requested versions and pins back to itself."
@@ -459,6 +504,66 @@ test_target = "lib"
 
 [[target]]
 case_timeout_seconds = 10
+corpus = "crates/models/tests/representations/__fuzz__/models__bolero_archived_counts_round_trip/corpus"
+domain_version = 1
+features = []
+id = "models-archived-counts"
+invariant = "Every vocabulary count preserves its complete native value in its owning Model, statement, transaction identity, plan header and WASM inspection archive."
+manifest = "Cargo.toml"
+max_input_bytes = 16
+package = "nervix-models"
+random_iterations = 256
+source = "crates/models/tests/representations/models.rs"
+test = "models::bolero_archived_counts_round_trip"
+test_target = "test:representations"
+
+[[target]]
+case_timeout_seconds = 10
+corpus = "crates/consensus/src/__fuzz__/archive_count_tests__bolero_consensus_counts_round_trip/corpus"
+domain_version = 1
+features = []
+id = "consensus-archived-counts"
+invariant = "Every native count in current consensus commands, outcomes, limits, progress, report headers and topology headers survives the production bounded storage codec with complete record equality."
+manifest = "Cargo.toml"
+max_input_bytes = 16
+package = "nervix-consensus"
+random_iterations = 256
+source = "crates/consensus/src/archive_count_tests.rs"
+test = "archive_count_tests::bolero_consensus_counts_round_trip"
+test_target = "lib"
+
+[[target]]
+case_timeout_seconds = 10
+corpus = "src/runtime/__fuzz__/runtime__window_state__tests__bolero_window_archive_counts_round_trip/corpus"
+domain_version = 1
+features = []
+id = "runtime-window-archived-counts"
+invariant = "A current typed histogram delayed-removal section keeps the complete timestamp and native bucket index through its archive, including count boundaries above u32::MAX."
+manifest = "Cargo.toml"
+max_input_bytes = 32
+package = "nervix-server"
+random_iterations = 256
+source = "src/runtime/window_state.rs"
+test = "runtime::window_state::tests::bolero_window_archive_counts_round_trip"
+test_target = "lib"
+
+[[target]]
+case_timeout_seconds = 10
+corpus = "src/registry/__fuzz__/registry__storage__tests__bolero_registry_archived_models_round_trip/corpus"
+domain_version = 2
+features = []
+id = "registry-archived-models"
+invariant = "The registry's current tagged Model archive restores the complete generated vocabulary Model, including full-width counts and pinned resource bindings."
+manifest = "Cargo.toml"
+max_input_bytes = 4096
+package = "nervix-server"
+random_iterations = 256
+source = "src/registry/storage.rs"
+test = "registry::storage::tests::bolero_registry_archived_models_round_trip"
+test_target = "lib"
+
+[[target]]
+case_timeout_seconds = 10
 corpus = "tools/nervix-lint/report/src/__fuzz__/tests__bolero_compiler_reports_round_trip/corpus"
 domain_version = 1
 features = []
@@ -475,17 +580,17 @@ test_target = "lib"
 
 [[target]]
 case_timeout_seconds = 10
-corpus = "tools/nervix-lint/report/src/__fuzz__/tests__bolero_catalog_and_scopes_round_trip/corpus"
+corpus = "tools/nervix-lint/report/src/__fuzz__/tests__bolero_source_contracts_round_trip/corpus"
 domain_version = 1
 features = []
-id = "typed-catalog-scope"
-invariant = "Current API catalog and reviewed scope values round trip completely and classification requires resolved definition identity."
+id = "typed-source-contract"
+invariant = "Current source contracts round trip completely and preserve their frequency and acquisition semantics."
 manifest = "tools/nervix-lint/Cargo.toml"
 max_input_bytes = 32
 package = "nervix-lint-report"
 random_iterations = 256
 source = "tools/nervix-lint/report/src/tests.rs"
-test = "tests::bolero_catalog_and_scopes_round_trip"
+test = "tests::bolero_source_contracts_round_trip"
 test_target = "lib"
 
 
@@ -495,7 +600,7 @@ corpus = "tools/nervix-lint/report/src/__fuzz__/tests__bolero_authored_sites_pre
 domain_version = 1
 features = []
 id = "typed-site-union"
-invariant = "Aggregation is idempotent at authored sites, preserves every compiled configuration and validates reviewed scope freshness."
+invariant = "Aggregation is idempotent at authored sites and preserves complete findings and source contracts in every compiled configuration."
 manifest = "tools/nervix-lint/Cargo.toml"
 max_input_bytes = 32
 package = "nervix-lint-report"

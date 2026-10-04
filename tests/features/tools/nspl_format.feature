@@ -248,6 +248,40 @@ Feature: NSPL file formatting
       """
     And the NSPL file "broken.nspl" is unchanged
 
+  Scenario: An expression a statement embeds is reported at its own offending token
+    Given an NSPL file "broken.nspl" containing
+      """
+      create subscription readings to metrics where input.value = = 1;
+      """
+    When nervix-nspl-format formats the NSPL file "broken.nspl"
+    Then the formatter exits with code 3
+    And the last command error contains
+      """
+      broken.nspl:1:61
+      """
+    And the last command error contains
+      """
+      found =
+      """
+    And the NSPL file "broken.nspl" is unchanged
+
+  Scenario: A number split at its dot is not a float in a statement's expression
+    Given an NSPL file "broken.nspl" containing
+      """
+      create subscription readings to metrics where input.value = 1 .5;
+      """
+    When nervix-nspl-format formats the NSPL file "broken.nspl"
+    Then the formatter exits with code 3
+    And the last command error contains
+      """
+      broken.nspl:1:63
+      """
+    And the last command error contains
+      """
+      found .
+      """
+    And the NSPL file "broken.nspl" is unchanged
+
   Scenario: A file that cannot be lexed is reported at the lex stage and left untouched
     Given an NSPL file "unlexable.nspl" containing
       """
@@ -466,4 +500,115 @@ Feature: NSPL file formatting
       ALTER JUNCTION peaks SET FILTER WHERE concat(input.name, replace(input.name, 'a', 'b')) != '', SET DETACHED;
       """
     When nervix-nspl-format checks the NSPL file "pipeline.nspl"
+    Then the formatter exits with code 0
+
+  Scenario: Fields named like clause keywords stay in their expressions
+    Given an NSPL file "trips.nspl" containing
+      """
+      create junction route_trips from trips where input.to > 0 and on > by
+        filter where output.to != max unbranched
+        to routed set to = input.to, on = to + 1, by = input.by where on > 0
+        flush immediate on message error log;
+      create deduplicator distinct_trips from trips deduplicate on input.to, by max time 10m
+        unbranched to distinct_trips_out inherit to, on flush immediate on message error log;
+      create reorderer ordered_trips from trips by input.by, max max time 10s unbranched
+        to ordered_trips_out inherit all except on flush immediate on message error log;
+      create correlator matched_trips left from trips where left.to > 0 right from stops
+        correlate where left.to = right.match match earliest max time 5s
+        on correlation timeout drop, drop unbranched to matched set to = left.to
+        flush immediate on message error log;
+      create attached emitter trip_requests from routed to http api method mode path path
+        mode ack retry policy backoff 250ms max 30s without body
+        invoke write_header('X-Trip-Mode', mode)
+        flush immediate on message error log on general error log;
+      alter junction route_trips set filter where input.to > on,
+        add route to archive set to = input.to flush immediate on message error log,
+        set detached;
+      """
+    When nervix-nspl-format formats the NSPL file "trips.nspl"
+    Then the formatter exits with code 0
+    And the NSPL file "trips.nspl" contains
+      """
+      CREATE ATTACHED JUNCTION route_trips
+        FROM trips WHERE input.to > 0 AND on > by
+        FILTER WHERE output.to != max
+        UNBRANCHED
+        TO routed
+          SET to = input.to,
+              on = to + 1,
+              by = input.by
+          WHERE on > 0
+          FLUSH IMMEDIATE
+          ON MESSAGE ERROR LOG;
+      CREATE ATTACHED DEDUPLICATOR distinct_trips
+        FROM trips
+        DEDUPLICATE ON input.to, by
+        MAX TIME 10m
+        UNBRANCHED
+        TO distinct_trips_out
+          INHERIT to, on
+          FLUSH IMMEDIATE
+          ON MESSAGE ERROR LOG;
+      CREATE ATTACHED REORDERER ordered_trips
+        FROM trips
+        BY input.by, max
+        MAX TIME 10s
+        UNBRANCHED
+        TO ordered_trips_out
+          INHERIT ALL EXCEPT on
+          FLUSH IMMEDIATE
+          ON MESSAGE ERROR LOG;
+      CREATE ATTACHED CORRELATOR matched_trips
+        LEFT FROM trips WHERE left.to > 0
+        RIGHT FROM stops
+        CORRELATE WHERE left.to = right.match
+        MATCH EARLIEST
+        MAX TIME 5s
+        ON CORRELATION TIMEOUT DROP, DROP
+        UNBRANCHED
+        TO matched
+          SET to = left.to
+          FLUSH IMMEDIATE
+          ON MESSAGE ERROR LOG;
+      CREATE ATTACHED EMITTER trip_requests
+        FROM routed
+        TO HTTP api METHOD mode PATH path
+          MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s
+          WITHOUT BODY
+        INVOKE write_header('X-Trip-Mode', mode)
+        FLUSH IMMEDIATE
+        ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
+      ALTER JUNCTION route_trips SET FILTER WHERE input.to > on, ADD ROUTE TO archive SET to = input.to FLUSH IMMEDIATE ON MESSAGE ERROR LOG, SET DETACHED;
+      """
+    When nervix-nspl-format checks the NSPL file "trips.nspl"
+    Then the formatter exits with code 0
+
+  Scenario: Names spelled like reserved words are written between backticks
+    Given an NSPL file "spans.nspl" containing
+      """
+      create junction closed_spans from spans where input.end > input.from and `end` > 0
+        unbranched using materialized state limits default { `end` = 1 }
+        to closed set `end` = input.end, `from` = input.from, `status` = udf::case(input.in)
+        where `in` > 0 flush immediate on message error log;
+      create subscription watch to closed where `end` > 0 and input.from = 1;
+      """
+    When nervix-nspl-format formats the NSPL file "spans.nspl"
+    Then the formatter exits with code 0
+    And the NSPL file "spans.nspl" contains
+      """
+      CREATE ATTACHED JUNCTION closed_spans
+        FROM spans WHERE input.end > input.from AND `end` > 0
+        UNBRANCHED
+        USING MATERIALIZED STATE limits DEFAULT { `end` = 1 }
+        TO closed
+          SET `end` = input.end,
+              `from` = input.from,
+              status = udf::case(input.in)
+          WHERE `in` > 0
+          FLUSH IMMEDIATE
+          ON MESSAGE ERROR LOG;
+      CREATE SUBSCRIPTION watch TO closed WHERE `end` > 0 AND input.from = 1;
+      """
+    When nervix-nspl-format checks the NSPL file "spans.nspl"
     Then the formatter exits with code 0

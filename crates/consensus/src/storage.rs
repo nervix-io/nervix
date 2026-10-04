@@ -17,6 +17,7 @@ use futures_util::{FutureExt as _, Stream, StreamExt as _, stream};
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_execution::{Executor, MemoryClass, Reservation, StorageClass};
 use nervix_primitives::sync::{
+    Arc,
     atomic::{AtomicBool, AtomicU64, Ordering},
     blocking::{Mutex, RwLock},
     watch,
@@ -34,7 +35,6 @@ use openraft::{
 };
 use rkyv::{Archive, Deserialize, Serialize};
 use thiserror::Error;
-use triomphe::Arc;
 
 #[cfg(test)]
 use crate::apply_consensus_command;
@@ -86,10 +86,10 @@ const KEY_INSTALLING: &[u8] = b"installing";
 const KEY_VOTE: &[u8] = b"vote";
 const KEY_COMMITTED: &[u8] = b"committed";
 const KEY_LAST_PURGED: &[u8] = b"last_purged";
-const KEYSPACE_LOGS: &str = "raft_logs";
-const KEYSPACE_META: &str = "raft_meta";
-const KEYSPACE_STATE_MACHINE: &str = "raft_state_machine";
-const KEYSPACE_SNAPSHOT: &str = "raft_snapshot";
+const KEYSPACE_LOGS: &str = "raft_count_logs";
+const KEYSPACE_META: &str = "raft_count_meta";
+const KEYSPACE_STATE_MACHINE: &str = "raft_count_state";
+const KEYSPACE_SNAPSHOT: &str = "raft_count_snapshots";
 /// Working memory reserved for ordinary metadata and log storage relative to its operation unit.
 const STORAGE_RESERVATION_MULTIPLIER: u64 = 4;
 
@@ -122,7 +122,7 @@ const KEYSPACE_NAMES: [&str; 4] = [
 #[derive(Debug, Clone, Archive, Serialize, Deserialize)]
 #[repr(u8)]
 enum StateEncoding {
-    TypedCommandOutcomes = 5,
+    WideCounts = 6,
 }
 
 #[derive(Debug)]
@@ -177,7 +177,7 @@ impl TryFrom<StateMetadataRecord> for StateMetadata {
 impl From<&StateMachineData> for StateMetadata {
     fn from(state: &StateMachineData) -> Self {
         Self {
-            encoding: StateEncoding::TypedCommandOutcomes,
+            encoding: StateEncoding::WideCounts,
             last_applied_log_id: state.last_applied_log_id.clone(),
             last_membership: state.last_membership.clone(),
             runtime_revision: state.runtime_revision,
@@ -206,7 +206,7 @@ impl StateMetadata {
 impl StateMachineData {
     fn load(sm: &Keyspace, metadata: StateMetadata) -> io::Result<Self> {
         let StateMetadata {
-            encoding: StateEncoding::TypedCommandOutcomes,
+            encoding: StateEncoding::WideCounts,
             last_applied_log_id,
             last_membership,
             runtime_revision,
@@ -841,6 +841,7 @@ impl StoreInner {
     /// The view is opened on the ordered consensus storage worker, so its records, applied index
     /// and membership belong to one committed revision. Each worker turn seals and synchronizes
     /// one section from that view, releasing its bulk reservation before the next turn.
+    #[allow(deprecated)] // until try_update is stabilized
     async fn seal_generation(&self) -> io::Result<SnapshotManifest> {
         let section_limit = self.executor.limits().snapshot_section_bytes.as_u64();
         let generation = self.snapshots.claim_generation();
@@ -855,6 +856,7 @@ impl StoreInner {
             let log_bytes_at_open = seal.log_bytes_at_open;
             let manifest = seal.into_manifest(generation);
             self.publish_manifest(manifest.clone(), None).await?;
+            #[allow(deprecated)] // until try_update is stabilized
             self.log_bytes_since_snapshot
                 .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
                     current.checked_sub(log_bytes_at_open)

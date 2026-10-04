@@ -5,10 +5,7 @@
 //! - **Depends on.** Arrow, the production subscription adapter, wire views and vocabulary.
 //! - **Must not know.** Session scheduling, live services or an alternative payload carrier.
 
-use std::{
-    num::{NonZeroU32, NonZeroUsize},
-    sync::Arc as StdArc,
-};
+use std::num::{NonZeroU32, NonZeroUsize};
 
 use arrow_array::{
     Array, ArrayRef, BinaryArray, BooleanArray, FixedSizeListArray, Float32Array, Float64Array,
@@ -24,6 +21,7 @@ use nervix_client_wire::{
     SubscribeDisposition, SubscribeOutcome, SubscriptionHandle,
 };
 use nervix_models::{ParseAsType, SchemaField, Timestamp};
+use nervix_primitives::sync::StdArc;
 
 use super::{SubscriptionRowEncodingError, SubscriptionRowOpening, SubscriptionRowSelection};
 use crate::{runtime::BranchKey, runtime_schema::RuntimeValue};

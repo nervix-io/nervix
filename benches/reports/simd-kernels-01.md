@@ -4,7 +4,7 @@
 
 Baseline `db3247192e728808588b3bcbbf84a987e7360077`; candidate is this change. The
 candidate `Cargo.lock` blob is `81a5b59c9f9745ceb4af981ec6563a0e1ddd414f`. Measurements were made on
-2026-09-26 on a 32-logical-CPU Intel Core i9-14900HX, x86-64 Linux, with rustc 1.98.0,
+2026-09-26 on a 32-logical-CPU Intel Core i9-14900HX, x86-64 Linux, with rustc 1.99.0,
 LLVM 22.1.8, Arrow 58.4.0, and simd-json 0.17.3. Other worktrees were compiling and testing on
 the host during the measurements, so the observed spread limits the precision of the comparison.
 

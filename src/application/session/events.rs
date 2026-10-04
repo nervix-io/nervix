@@ -28,11 +28,10 @@ use nervix_dataflow_graph::DataflowGraph;
 use nervix_execution::{CpuClass, MemoryClass};
 use nervix_models::{DomainName, DomainStatus, RelayName, RequestedResourceVersion};
 use nervix_primitives::{
-    sync::broadcast::error::RecvError,
+    sync::{Arc, broadcast::error::RecvError},
     time::{MissedTickBehavior, interval},
 };
 use tracing::{debug, warn};
-use triomphe::Arc;
 
 use super::{SessionShared, SessionTransport, outcome::leader_endpoints};
 use crate::{

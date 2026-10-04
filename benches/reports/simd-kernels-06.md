@@ -7,7 +7,7 @@ update); the candidate is the revision containing this report. The earlier basel
 `8803d2afd2a437104212fdea89f116db812a8312` compiles the inspected kernels to the same instruction
 counts, since the update does not touch them. Measurements were made on
 2026-09-29 UTC on an AMD Ryzen AI 9 HX 370 (Zen 5, AVX-512) with 24 logical CPUs, x86-64 Linux,
-rustc 1.98.1, LLVM 22.1.8, Arrow 58.4.0, and Criterion 0.5.1. Release builds use the repository's
+rustc 1.99.0, LLVM 22.1.8, Arrow 58.4.0, and Criterion 0.5.1. Release builds use the repository's
 configured kache wrapper; the timed binaries use `target-cpu=native`, and the inspected binaries
 also use the Docker image's `x86-64-v3` payload target.
 

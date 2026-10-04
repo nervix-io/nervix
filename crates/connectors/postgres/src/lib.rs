@@ -304,6 +304,12 @@ fn connect_options(addr: &str, config: &[ClientConfigEntry]) -> SinkStartResult<
 }
 
 impl PostgresSink {
+    #[cfg_attr(
+        nervix_lint,
+        nervix::dispatch(
+            reason = "external Arrow access and PostgreSQL driver preparation own their effects"
+        )
+    )]
     pub fn new(
         config: PostgresSinkConfig,
         connections: Box<dyn PostgresConnections>,
@@ -328,6 +334,12 @@ impl PostgresSink {
 
     /// The declared type of each mapped column, read on a connection borrowed for this lookup
     /// alone and returned before the inserts that follow it.
+    #[cfg_attr(
+        nervix_lint,
+        nervix::dispatch(
+            reason = "external Arrow access and PostgreSQL driver preparation own their effects"
+        )
+    )]
     async fn column_types(
         &self,
         columns: &[String],
@@ -399,6 +411,12 @@ impl PostgresSink {
 
     /// One insert of `members`, on a connection borrowed for that insert and returned after it, so
     /// a write of several inserts lets other local emitters through between them.
+    #[cfg_attr(
+        nervix_lint,
+        nervix::dispatch(
+            reason = "external Arrow access and PostgreSQL driver preparation own their effects"
+        )
+    )]
     async fn insert(
         &self,
         inserts: &UnnestInserts,
@@ -707,6 +725,12 @@ struct MappedTextColumns<'a> {
 }
 
 impl<'a> MappedTextColumns<'a> {
+    #[cfg_attr(
+        nervix_lint,
+        nervix::dispatch(
+            reason = "external Arrow access and PostgreSQL driver preparation own their effects"
+        )
+    )]
     fn new(
         batch: &'a RecordBatch,
         target_columns: &[String],
@@ -753,6 +777,12 @@ enum MappedTextColumn<'a> {
 }
 
 impl<'a> MappedTextColumn<'a> {
+    #[cfg_attr(
+        nervix_lint,
+        nervix::dispatch(
+            reason = "external Arrow access and PostgreSQL driver preparation own their effects"
+        )
+    )]
     fn new(array: &'a ArrayRef) -> Option<Self> {
         let array = array.as_ref();
         if let Some(values) = array.as_any().downcast_ref::<BooleanArray>() {
@@ -932,10 +962,9 @@ fn float_text(value: f64) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc as StdArc;
-
     use arrow_array::builder::{BinaryBuilder, ListBuilder};
     use arrow_schema::{DataType, Field, Schema, TimeUnit};
+    use nervix_primitives::sync::StdArc;
 
     use super::*;
 

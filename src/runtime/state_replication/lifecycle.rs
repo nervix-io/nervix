@@ -3,12 +3,27 @@
 //! May depend on: runtime state carriers, the state store, and vocabulary models.
 //! Must not know: control-plane transactions, NSPL parsing, or edge protocols.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::context(
+        lifecycle,
+        reason = "state and branch generation registration installs retained lifecycle owners"
+    )
+)]
+
 use super::*;
 
 impl Runtime {
     /// Drop the published generation of a concrete window branch after its empty eviction
     /// checkpoint has been flushed. The checkpoint remains available to a later appearance of the
     /// same key, but evicted branches no longer occupy the owner's in-memory state map.
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            lifecycle,
+            reason = "concrete branch eviction withdraws its exact window placement"
+        )
+    )]
     pub(in crate::runtime) fn release_evicted_window_state(
         &self,
         domain: &DomainName,
@@ -28,12 +43,23 @@ impl Runtime {
         Ok(())
     }
 
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            recurring,
+            reason = "this owner is reached by recurring record, frame, acknowledgement or \
+                      state-poll work"
+        )
+    )]
     pub(in crate::runtime) fn relay_state_epoch(&self, domain: &DomainName) -> Arc<AtomicU64> {
-        self.inner
-            .relay_state_epochs
-            .entry(domain.clone())
-            .or_insert_with(|| Arc::new(AtomicU64::new(0)))
-            .clone()
+        nervix_primitives::expect_lint!(
+            nervix::sync_acquisition,
+            "Typed Ratchet 04 https://app.clickup.com/t/86bc9eqp3: retain the branch relay state \
+             epoch instead of looking up its shared table",
+            self.inner.relay_state_epochs.entry(domain.clone())
+        )
+        .or_insert_with(|| Arc::new(AtomicU64::new(0)))
+        .clone()
     }
 
     pub(in crate::runtime) fn bump_relay_state_epoch(&self, domain: &DomainName) {

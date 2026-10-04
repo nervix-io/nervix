@@ -7,7 +7,7 @@
 //! - **Depends on.** The resource store for bytes and the interconnect to publish and fetch them.
 //! - **Must not know.** What a model does with the resource once it is installed.
 
-use std::{collections::BTreeMap, path::Path, sync::Arc as StdArc};
+use std::{collections::BTreeMap, path::Path};
 
 use ahash::HashMap;
 use error_stack::{Report, ResultExt};
@@ -18,7 +18,7 @@ use nervix_models::{
     ResourceName, ResourceNodeState, ResourceNodeStatus, ResourceReplicaKey, ResourceUploadKey,
     ResourceUploadState, UploadResource,
 };
-use nervix_primitives::sync::{Mutex as AsyncMutex, OwnedMutexGuard};
+use nervix_primitives::sync::{Mutex as AsyncMutex, OwnedMutexGuard, StdArc};
 use thiserror::Error;
 
 use super::{

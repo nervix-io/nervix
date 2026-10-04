@@ -47,9 +47,8 @@ use nervix_models::{
     TransactionInspection, TransactionLifecycle, TransactionOperationNumber, TransactionPosition,
     TransactionPreviewIdentity, TransactionStatus,
 };
-use nervix_primitives::sync::{blocking::Mutex, mpsc, watch};
+use nervix_primitives::sync::{Arc, blocking::Mutex, mpsc, watch};
 use tonic::{Status, transport::Channel};
-use triomphe::Arc;
 use url::Url;
 
 use crate::{

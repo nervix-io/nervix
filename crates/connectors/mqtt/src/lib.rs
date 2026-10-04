@@ -43,6 +43,7 @@ use nervix_dns::DnsResolver;
 use nervix_models::{ClientConfigEntry, Timestamp, TopicName};
 use nervix_primitives::{
     sync::{
+        Arc,
         atomic::{AtomicU32, Ordering},
         watch,
     },
@@ -59,7 +60,6 @@ pub use source::{
 };
 use thiserror::Error;
 use tracing::warn;
-use triomphe::Arc;
 use url::{Host, Url};
 
 const MQTT: &str = "mqtt";
@@ -585,6 +585,13 @@ impl MqttSink {
             .attach_printable(error.to_string())
     }
 
+    #[cfg_attr(
+        nervix_lint,
+        nervix::dispatch(
+            reason = "formats the typed external MQTT driver failure; no internal runtime \
+                      ownership is inferred"
+        )
+    )]
     fn publish_error(error: impl std::fmt::Display) -> Report<SinkPublishError> {
         Report::new(SinkPublishError::Publish { sink: MQTT }).attach_printable(error.to_string())
     }

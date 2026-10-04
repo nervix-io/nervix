@@ -23,7 +23,7 @@ delivery can fail during schedule application.
 | Vocabulary Models and the execution-graph description | Alterations the stored Model refuses; invalid placement members, inferencer tensor schemas, and upload identities; values canonical NSPL cannot spell; and execution-graph encoding or decoding | Refuse the command and keep the stored Model unchanged, or report which statement or graph could not be rendered or decoded. |
 | NSPL language and formatter | Source text the lexer or parser rejects, with the stage that rejected it, the rejected text, and every diagnostic's message and byte span; statements the formatter cannot render, and formatted output that does not reparse to the statements it came from | Report the stage and underline each diagnostic in the text that was submitted, or leave a file unchanged and report the formatter defect. |
 | Arrow record and batch layer | Schema, field, column, row, and batch construction or decoding failures | Reject a malformed batch or a field operation without inventing a replacement value. |
-| Bounded execution | A memory charge a class could not grant (`AdmissionError`), a job refused because its class's wait queue is full, a closed pool, a job that panicked on its worker (`ExecutionError`), and a job that stopped at a `Cancelled` check because its caller stopped waiting | The job's owner maps each to its own typed outcome. A refusal judged nothing, so it stays retryable: an emitter keeps its rows, an ingested payload fails its dispatch rather than its decode and an endpoint answers it as a retryable rejection, and a credential check answers `UNAVAILABLE` rather than failing authentication. A panic is the job's own defect. |
+| Bounded execution | A memory charge a class could not grant (`AdmissionError`), a job refused because its class's wait queue is full, a closed pool, a job that panicked on its worker (`ExecutionError`), and a job that stopped at a `Cancelled` check because its caller stopped waiting | The job's owner maps each to its own typed outcome. A refusal judged nothing, so it stays retryable: an emitter keeps its rows, an ingested payload fails its dispatch rather than its decode and an endpoint answers it as a retryable rejection, and a credential check answers `UNAVAILABLE` rather than failing authentication. The unfolding of a payload a quiesce buffer retained is not refused at all: nothing could present it again, so it waits for a place. A panic is the job's own defect. |
 | Expression VM frontend and runtime bridge | Invalid expression scopes, types, sensitivity, compiled program inputs, and evaluation failures | Refuse a model during validation, or classify an affected row or batch during execution. [VM Functions](./vm-functions.md) owns execution detail. |
 | Stateful processors | Branch-local deduplication, ordering, window, correlation, inference, and WASM execution or state failures | Apply the processor's message or node policy, or fail a checkpoint and its held acknowledgements. |
 | Connector crates and host | Integration-specific configuration, decoding, external source and sink outcomes; host-owned routing, retry, flush, and acknowledgement failures | Separate a record rejection from a source or sink failure and follow the configured retry or acknowledgement contract. [Connector Crates And The Connector Contract](./connector-contract.md) owns those contracts. |
@@ -121,6 +121,16 @@ output branch and route construction, and WASM guest-state generation before run
 These failures name the owning node and relevant relay, codec, or field. A missing
 lookup file is rejected during candidate binding validation; malformed records remain a loader
 failure when the pinned file is decoded. Neither failure silently selects another resource version.
+
+The vocabulary's `ArchivedCountError` reports a fixed-width archived count that the receiving
+target's `usize` cannot represent. Archive decoding retains it beneath the owning storage or
+transport failure. Registry Model records validate their current frame signature and report
+`RegistryError::InvalidModelArchive` with a recreation instruction for an unrecognized shape.
+Consensus validates its complete current keyspace namespace and state encoding and reports
+`StorageFailure::InvalidState` with a recreation instruction. Window snapshot decoding reports
+`WindowSnapshotIssue::Header` with a recreation instruction for an invalid current frame signature.
+These boundaries reject unrecognized data before its counts can be reinterpreted; none clamps,
+truncates, or supplies a replacement value. See [Archived Counts](./typed-states.md#archived-counts).
 
 Schemaful JSON parsing has one codec decode failure carrying the simd-json source. Malformed
 syntax, invalid UTF-8, and invalid escapes enter through that failure; object shape, missing or
@@ -342,9 +352,17 @@ diagnostic's message and byte span into it. A batch of statements is lexed once 
 is parsed from its own run of those tokens, so a diagnostic indexes the whole submitted text
 wherever in the batch the rejected statement starts. The session edge turns the stage into the
 failed command's `lex error` or `parse error` message and passes every span through unchanged, so a
-client underlines it in the text it sent. A statement grammar that embeds an expression reports the
-expression's first diagnostic at the whole embedded region, because a statement diagnostic carries
-one message and one span. A caller that owns a larger operation adds its own context above the
+client underlines it in the text it sent. A statement grammar reads an expression it embeds from
+the statement's own tokens, with the grammar a standalone expression uses, for as long as that
+grammar can go on, and its next clause begins where the expression ends. Where the expression
+cannot begin at all, the diagnostic expects the placeholder the clause names, such as
+`where_expression`. Where the expression goes on with a token and then fails, the statement reports
+the expression grammar's first diagnostic at the tokens of the statement where it failed, with the
+message the standalone reader gives the same text. Where a complete expression is followed by a token
+no clause of the statement expects, the statement reports that token with its own expectations. An
+expression's diagnostic carries no expectations of the expression grammar, so completion inside an
+unfinished expression offers nothing rather than guessing at expression syntax. A caller that owns
+a larger operation adds its own context above the
 language's report instead of copying the diagnostics into its error: splitting a client batch reports
 that the batch could not be split, and the formatter reports a source that did not parse, the line
 of a statement the vocabulary could not render, or a rendering defect whose output changed meaning
@@ -581,8 +599,10 @@ the answering node, unavailable there, temporarily not ready, or executed and fa
 can use class and subject for routing, retry, and recovery without parsing text. Only an executed
 failure carries the answering node's opaque operator description. That text is an explicit wire
 boundary for an already classified failure; it is not used to recover a new class. Runtime-state
-replication and materialized-snapshot description use this envelope, and local errors retain the
-remote class alongside their target and placement. [Cluster Interconnect](./interconnect.md)
+replication, a replica's branch checkpoint listing included, and materialized-snapshot description
+use this envelope, and local errors retain the remote class alongside their target and placement. A
+listing that arrives but names a branch key that does not decode is a failure of its own, distinct
+from a failed request. [Cluster Interconnect](./interconnect.md)
 defines the exchange forms, limits, deadlines, and relay acknowledgement boundaries. A record
 acknowledgement lost between two nodes becomes an ordinary negative acknowledgement: the node that
 forwarded it fails it once the receiver has reported nothing about it for fifteen seconds, with a
@@ -721,6 +741,23 @@ each member. IPC encoding failures and an output row above the declared byte lim
 policy, without quoting the row. Owner or forwarder loss revokes the attempt; the delivery remains
 volatile, and a client must not interpret a lost ACK reply as successful processing.
 
+The shared C binding converts the producers' and consumers' reports at its reporting boundary as it
+converts a clock-event wait's. A refused open is `NX_ERROR_REJECTED`, and `nx_error_open_refusal`
+reads its typed refusal. A batch built for another schema, or with too many rows or bytes, a
+builder input that does not fill its level or is not UTF-8, and an identity the producer does not
+hold are `NX_ERROR_INVALID_ARGUMENT`, and nothing is sent. A stream a host submits is not checked
+before it is sent: the producer answers it with its outcome, which a submission reports as a value
+rather than a failure, `NX_SUBMISSION_NOT_ADMITTED` with its batch defect for a stream that is not
+the canonical one. A closed or ended producer is `NX_ERROR_CLOSED`, and a consumer read past its
+close is too. `ConsumerInterrupted` is `NX_ERROR_INTERRUPTED` and `ConsumerReopenRequired` or a
+producer that must be opened again is `NX_ERROR_REOPEN_REQUIRED`, read with the handle's reopen
+reason; a consumer whose bounded reconnect failed is `NX_ERROR_CONNECT`. A settlement of an
+expired reference is `NX_ERROR_REJECTED`, and `SettlementUnknown` is `NX_ERROR_UNCERTAIN`. A
+cancelled or expired wait returns `NX_ERROR_CANCELLED` or `NX_ERROR_DEADLINE` without writing its
+output. A submission cancelled that way sent nothing, and an outcome wait leaves its submission
+with the producer. A read stays with the consumer, which hands its reply to the next read, and a
+settlement may still have reached the server.
+
 If a paced clock cannot convert one period through its rate, the authority can still emit its
 already-due first tick. Scheduling a later tick then reports a rate-conversion or cadence error and
 stops production. A next-boundary overflow reports its own clock arithmetic error. None of these
@@ -739,13 +776,13 @@ defines the available metrics and their aggregation.
 
 ## Recovery, Panics, And Enforcement
 
-The compiler synchronization gate has its own typed tooling failures for malformed catalogs and
-scopes, conflicting reports, incomplete compiler passes, and missing, stale or unobserved reviewed
-sites. Reports preserve those classifications with source location, resolved receiver/operation,
-owner and compiled configuration context. Its CLI prints the error-stack attachments and fails;
-missing analysis never becomes a zero debt count. These are repository validation errors and do
-not add runtime failure variants. [Data-Plane Concurrency](data-plane-concurrency.md) owns the gate's
-coverage and synchronization policy.
+The compiler synchronization gate owns typed tooling failures for invalid source contracts,
+conflicting findings and incomplete compiler passes. `ContractProblem` retains the specific
+argument, kind or missing contract coordinate inside an `error-stack` report until the Rust
+diagnostic boundary formats it. Reports preserve source location, resolved receiver/operation,
+owner and compiled configuration context. Missing or stale analysis fails rather than becoming a
+zero debt count. These are repository validation errors and add no runtime failure variants.
+[Data-Plane Concurrency](data-plane-concurrency.md) owns the gate's coverage and synchronization policy.
 
 Some outcomes are intentionally not propagated. `discarded` records why an already handled or
 irrelevant result owes no further action. `reported` is used when the recovering call is the only
@@ -786,6 +823,15 @@ meaning; whether it is an ordinary outcome, a recoverable failure, or a broken i
 typed fields let the caller act; which context must cross each boundary; and which public
 diagnostic or recovery class closes the path. That classification must preserve branch and
 sensitivity rules, and it must not add a second form of a failure the owner already represents.
+
+The isolated architecture compiler emits ordinary Rust tool diagnostics:
+`nervix::sync_acquisition`, `nervix::lifecycle_call`, `nervix::unknown_effect` and
+`nervix::invalid_contract`. Source contracts and narrow reason-bearing expectations own the
+architectural classification. Invalid contracts, unfulfilled or widened expectations, incomplete
+compiler reports and changed inputs fail the repository command; they are tooling failures, with
+no runtime error or public protocol disposition. The diagnostic gate rejects unresolved Nervix
+warnings too. [Data-Plane Concurrency](./data-plane-concurrency.md#diagnostics-and-reviewed-exceptions)
+states the rule boundary and the claims the compiler does not make.
 
 ## Connector Status Observation
 

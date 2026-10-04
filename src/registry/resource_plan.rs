@@ -14,13 +14,13 @@ use nervix_models::{
     FieldName, FlushPolicy, GeneratorName, LookupName, MessageErrorPolicy, Model, ModelKind,
     ModelName, RelayName, ResolvedBranching, ResourceId, ScheduledNode, ScheduledNodes,
 };
+use nervix_primitives::sync::Arc;
 use nervix_roto::UdfProgram;
 use nervix_vm::{
     lower_set_only_route,
     program::{Program, SpannedNode},
 };
 use thiserror::Error;
-use triomphe::Arc;
 
 use super::DomainActivationPlan;
 use crate::runtime_schema::CompiledSchema;

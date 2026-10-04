@@ -2,11 +2,11 @@
 //!
 //! Layer: edges.
 //!
-//! - **Owns.** The kinds of failure the header names, how every client error and every refused
-//!   read of an attached domain clock is classified into one, and the message and execution
-//!   reference a host reads from it.
-//! - **Depends on.** The Rust client's errors, its domain clock read errors, and the reports that
-//!   carry them.
+//! - **Owns.** The kinds of failure the header names, how every client error, producer error and
+//!   refused read of an attached domain clock is classified into one, and the message, execution
+//!   reference and refusal of an open a host reads from it.
+//! - **Depends on.** The Rust client's errors, its producer errors and domain clock read errors,
+//!   the reports that carry them, and the endpoint vocabulary the header names.
 //! - **Must not know.** How a host reacts to a failure.
 //!
 //! A failure is the reporting boundary of the binding: the client's typed error, with every cause
@@ -15,10 +15,11 @@
 
 use error_stack::Report;
 use nervix_client_core::{
-    BackupDownloadError, ClientError, CommandExecutionReference, DomainClockReadError,
+    BackupDownloadError, ClientError, CommandExecutionReference, DomainClockReadError, ProducerEnd,
+    ProducerError,
 };
 
-use crate::abi;
+use crate::{abi, endpoint::OpenRefusal};
 
 /// The kinds of failure the header names, with its values.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -35,6 +36,8 @@ pub enum FailureKind {
     Protocol = 9,
     Type = 10,
     Closed = 11,
+    Interrupted = 12,
+    ReopenRequired = 13,
 }
 
 /// A failed call, as the host reads it through `nx_error`.
@@ -44,6 +47,8 @@ pub struct Failure {
     message: String,
     /// The command the failure concerns, when it concerns one.
     execution_reference: Option<CommandExecutionReference>,
+    /// Why the server refused to open a producer or a consumer, when that is the failure.
+    open_refusal: Option<OpenRefusal>,
 }
 
 impl Failure {
@@ -52,6 +57,7 @@ impl Failure {
             kind,
             message: message.into(),
             execution_reference: None,
+            open_refusal: None,
         }
     }
 
@@ -88,6 +94,10 @@ impl Failure {
         self.execution_reference.as_ref()
     }
 
+    pub fn open_refusal(&self) -> Option<OpenRefusal> {
+        self.open_refusal
+    }
+
     /// The kind a client error reports to a host. Every variant is named, so a new one has to be
     /// classified before it can be returned.
     fn classify(error: &ClientError) -> FailureKind {
@@ -117,9 +127,10 @@ impl Failure {
             | ClientError::SubscriptionOperation(_)
             | ClientError::Transport(_)
             | ClientError::RequestInterrupted { .. }
-            | ClientError::ConsumerInterrupted
             | ClientError::UploadResource(_)
             | ClientError::Restore(_) => FailureKind::Transport,
+            ClientError::ConsumerInterrupted => FailureKind::Interrupted,
+            ClientError::ConsumerReopenRequired(_) => FailureKind::ReopenRequired,
             ClientError::RequestDeadline { .. } | ClientError::RetryDeadline => {
                 FailureKind::Deadline
             }
@@ -131,7 +142,6 @@ impl Failure {
             | ClientError::RequestRejected { .. }
             | ClientError::ProducerRefused { .. }
             | ClientError::ConsumerRefused { .. }
-            | ClientError::ConsumerReopenRequired(_)
             | ClientError::DeliveryReferenceExpired { .. } => FailureKind::Rejected,
             ClientError::RequestCancelled { .. } => FailureKind::Cancelled,
             ClientError::UnexpectedReply { .. }
@@ -142,6 +152,25 @@ impl Failure {
             ClientError::SessionClosed => FailureKind::Closed,
             ClientError::ConsumerSessionUnavailable => FailureKind::Connect,
             ClientError::BackupDownload { source, .. } => Self::classify_download(source),
+        }
+    }
+
+    /// The kind a producer error reports. None of them sent anything: a batch the producer
+    /// refuses, or a submission it does not hold, is the host's argument, and a producer that
+    /// ended either was closed or has to be opened again.
+    fn classify_producer(error: &ProducerError) -> FailureKind {
+        match error {
+            ProducerError::Ended(ProducerEnd::ReopenRequired(_)) => FailureKind::ReopenRequired,
+            ProducerError::Ended(
+                ProducerEnd::Closed | ProducerEnd::Ended { .. } | ProducerEnd::SessionLost,
+            ) => FailureKind::Closed,
+            ProducerError::BatchTooLarge { .. }
+            | ProducerError::EmptyBatch
+            | ProducerError::UnknownSubmission(_)
+            | ProducerError::SchemaMismatch
+            | ProducerError::TooManyRows { .. }
+            | ProducerError::Encode => FailureKind::InvalidArgument,
+            ProducerError::SessionUnavailable => FailureKind::Connect,
         }
     }
 
@@ -179,13 +208,26 @@ impl From<Report<ClientError>> for Failure {
             | ClientError::BackupDownload { reference, .. } => Some(reference.clone()),
             _ => None,
         };
+        let open_refusal = match error {
+            ClientError::ProducerRefused { refusal, .. } => Some(OpenRefusal::from(*refusal)),
+            ClientError::ConsumerRefused { refusal, .. } => Some(OpenRefusal::from(*refusal)),
+            _ => None,
+        };
         Self {
             kind: Self::classify(error),
             // The alternate form joins every context of the report, and a report holds the causes
             // of the error it was created from as contexts of their own.
             message: format!("{report:#}"),
             execution_reference,
+            open_refusal,
         }
+    }
+}
+
+impl From<Report<ProducerError>> for Failure {
+    fn from(report: Report<ProducerError>) -> Self {
+        let kind = Self::classify_producer(report.current_context());
+        Self::new(kind, format!("{report:#}"))
     }
 }
 
@@ -256,6 +298,24 @@ pub unsafe extern "C" fn nx_error_execution_reference(
 
 /// # Safety
 ///
+/// `error` is a live error this library returned; a non-null `refusal` is writable.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn nx_error_open_refusal(
+    error: *const Failure,
+    refusal: *mut OpenRefusal,
+) -> bool {
+    // SAFETY: the header requires a live error.
+    let error = unsafe { abi::accessor(error) };
+    let Some(open_refusal) = error.open_refusal else {
+        return false;
+    };
+    // SAFETY: the header requires a writable out-parameter.
+    unsafe { abi::write(refusal, open_refusal) };
+    true
+}
+
+/// # Safety
+///
 /// A non-null `error` is an error this library returned that has not been freed.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn nx_error_free(error: *mut Failure) {
@@ -274,14 +334,14 @@ mod endpoint_recovery_tests {
     fn client_endpoint_recovery_failures_keep_their_actionable_kind() {
         let reference = Uuid::from_bytes([9; 16]);
         let cases = [
-            (ClientError::ConsumerInterrupted, FailureKind::Transport),
+            (ClientError::ConsumerInterrupted, FailureKind::Interrupted),
             (
                 ClientError::ConsumerSessionUnavailable,
                 FailureKind::Connect,
             ),
             (
                 ClientError::ConsumerReopenRequired(ConsumerReopenReason::GenerationChanged),
-                FailureKind::Rejected,
+                FailureKind::ReopenRequired,
             ),
             (
                 ClientError::DeliveryReferenceExpired { reference },

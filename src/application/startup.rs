@@ -10,7 +10,6 @@
 use std::{
     net::SocketAddr,
     path::{Path, PathBuf},
-    sync::Arc as StdArc,
 };
 
 use error_stack::{Report, ResultExt};
@@ -20,9 +19,9 @@ use nervix_dns::{DnsConfiguration, NameServers};
 use nervix_execution::{Executor, MemoryClass, StorageClass};
 use nervix_interconnect::{HandlerRegistrationError, Transport};
 use nervix_models::NodeEndpoint;
+use nervix_primitives::sync::{Arc, StdArc};
 use nervix_recovery::Discarded as _;
 use thiserror::Error;
-use triomphe::Arc;
 
 use super::{Application, Args, error, error::AppError, shutdown::ShutdownCoordinator};
 use crate::{
@@ -437,8 +436,10 @@ mod tests {
     #[nervix_primitives::test]
     async fn stores_are_closed_on_the_filesystem_storage_workers() {
         let executor = Executor::default();
-        let closed = std::sync::Arc::new(nervix_primitives::sync::atomic::AtomicBool::new(false));
-        let closing = std::sync::Arc::clone(&closed);
+        let closed = nervix_primitives::sync::StdArc::new(
+            nervix_primitives::sync::atomic::AtomicBool::new(false),
+        );
+        let closing = nervix_primitives::sync::StdArc::clone(&closed);
 
         ApplicationStartup::close_stores(&executor, move || {
             closing.store(true, nervix_primitives::sync::atomic::Ordering::Release);

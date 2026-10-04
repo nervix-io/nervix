@@ -17,6 +17,7 @@ Generators and Arrow dependencies remain in their owning test harnesses.
 | Runtime Arrow to Row | `client-arrow-rows` | Original Arrow logical values and validity recursively compared with production cells; complete opening metadata, selected order, interleaved concrete branches, frame segmentation, explicit sensitivity redaction and retained frames |
 | Arrow selection rejection | `client-arrow-selection` | Typed whole-input failure on bounds/order/duplicates and branch-count mismatch; a subsequent complete encoding succeeds |
 | Shared C binding | `client-binding-rows` | Exact schema, column states, native scalar bits, variable bytes and offsets, branch values and retained frame bytes after releasing the original reference |
+| Shared C binding batch builder and Arrow IPC | `client-ffi-host-columns` | Existing owning property compares complete host columns at every nested level with the built batch and its canonical Arrow IPC stream, after overwriting the input buffers |
 | Every FlatBuffers root under hostile bytes | `client-arbitrary-frames`, `client-frame-corruption` | Production verification and actual decoding under fixed frame, string, collection and depth budgets; typed failure or deterministic acceptance, including Row validation |
 | Request union tags | `client-discriminators` | All byte-valued tags structurally verified before use; unknown tags return the owning typed union error |
 

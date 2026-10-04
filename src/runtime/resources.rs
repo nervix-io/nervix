@@ -1,3 +1,12 @@
+#![cfg_attr(
+    nervix_lint,
+    nervix::context(
+        lifecycle,
+        reason = "resource bindings are resolved and loaded while an execution revision is \
+                  installed"
+    )
+)]
+
 use error_stack::ResultExt as _;
 use nervix_connector::{ClientResourceMounts, ResolvedClientConfig, render_client_config_template};
 use nervix_connector_websockets::{CompiledSignalingProtocol, SignalingProtobufDescriptors};

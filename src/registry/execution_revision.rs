@@ -15,8 +15,8 @@ use nervix_models::{
     OwnershipTransition, ResolvedBranching, ScheduledNode, SchemaFingerprint, StatePurge,
     WasmStateGenerations, WasmStateReset,
 };
+use nervix_primitives::sync::Arc;
 use thiserror::Error;
-use triomphe::Arc;
 
 use super::{
     ActiveGraph, DomainActivationPlan, EntrypointPlans, MessageErrorRouteSpecs,

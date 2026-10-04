@@ -18,7 +18,7 @@ ONNX Runtime build for the host and stop on any other.
 Install:
 
 - Rust via `rustup`
-- `just`
+- `just` (latest release)
 - `zellij`
 
 ## Start The Server
@@ -191,6 +191,27 @@ For repository-wide validation:
 just validate
 ```
 
+CI installs the latest `just` release. `just validate`, `just validate-ci`, `just lint` and
+`just cargo-clippy` default to four concurrent recipe bodies across the `[parallel]` groups.
+Pass a job count, such as `just validate 2`, or use `just --jobs 2 validate` to select another
+limit. `JUST_JOBS` also supplies the default. Validation runs the product and compiler tooling
+Clippy recipes in one invocation, so they share the same limit.
+
+Each package and configuration is a separate parallel dependency of one shared Clippy recipe.
+The `[parallel]` groups map package lists onto that recipe, including the packages checked with
+`--all-features` and the compiler tooling packages. Feature, target, profile and compiler selections
+stay separate, so mutually exclusive execution modes never share a Cargo invocation.
+
+Clippy uses `clippy/<package>/<configuration_hash>` beneath `CARGO_TARGET_DIR`, or the repository's
+`target` directory when that variable is unset. The hash includes the Cargo arguments and compiler,
+so each configuration has its own build directory lock. `just cargo-clippy-package <package>
+[arguments ...]` runs a focused check of all targets through the same recipe. The compiler driver
+builds keep their separate `typed-ratchet/driver` directory. All builds retain the configured kache
+wrapper. Cargo's compiler job limit applies separately within each invocation. On CI, where nothing
+reads a build directory after its lint and the runner's disk cannot hold every configuration's at
+once, a target that passed deletes its own; a failed target keeps its directory, and a local run
+keeps them all for the next one.
+
 `just validate-nspl-docs` scans `docs/src` and parses every exact `nspl` code fence directly with
 the parser crate. Use `nspl,ignore` only for loose grammar synopses and statement fragments that
 are intentionally not complete NSPL scripts; the fence remains identified as NSPL in the rendered
@@ -205,7 +226,14 @@ just test
 For representation properties and sanitizer fuzzing, see
 [Property Testing And Fuzzing](./property-testing-and-fuzzing.md). The focused entry points are
 `just test-bolero [filter]`, `just fuzz-list` and
-`just fuzz <target> [duration]`. `just help` lists the recipes.
+`just fuzz <target> [duration]`. These commands and the dedicated Bolero workflow own target
+discovery; repository validation does not run Bolero checks. `just help` lists the recipes.
+
+Native CI builds for validation, unit tests, scenarios, client conformance, Turmoil, Bolero and
+extra checks use Clang 23 with Wild. Cargo's `x86_64-unknown-linux-gnu` linker points to
+`scripts/ci_linker.sh`, which selects Wild independently of `RUSTFLAGS` and
+`CARGO_ENCODED_RUSTFLAGS` supplied by coverage, simulation or sanitizer tooling. Browser targets
+use their own linker. `just validate-workflows` checks the Actions workflow definitions.
 
 Connector crates have a focused recipe. `just test-connectors` runs the unit tests of the
 `nervix-connector` contract crate and of every `nervix-connector-*` integration crate. Arguments are
@@ -217,77 +245,93 @@ just test-connectors <filter>
 
 ### Compiler synchronization gate
 
-`just ratchet`, `just validate` and `just validate-ci` run the same synchronization gate. The
-compiler-resolved acquisition inventory and reviewed owner/frequency scopes live in the isolated
-`tools/nervix-lint` workspace. `just typed-ratchet-setup` installs the dated nightly with compiler
-libraries and matching LLVM tools. The product toolchain remains stable, and tooling, analysis and
-product artifacts occupy separate target directories. Prepare the ordinary build prerequisites,
-including `just build-web-console`, before analyzing the server.
+`just ratchet`, `just validate` and `just validate-ci` run the same source-driven compiler
+synchronization gate in the isolated `tools/nervix-lint` workspace. Product builds
+remain stable. Tooling, analysis and product artifacts occupy separate target directories.
+Prepare the ordinary server build prerequisites, including `just build-web-console`.
 
 ```bash
 just ratchet
-just ratchet --show data_plane_lock_acquisitions
 just typed-ratchet --show
 just typed-ratchet --configuration shuttle --inventory
 just test-typed-ratchet
+just test-typed-ratchet-docs
 just qualify-typed-ratchet-cache
 ```
 
-The JSON report records resolved receivers, operations, spans, owner variants, expansion origins,
-compiled configurations and generated/external exclusions. The human listing includes frequency,
-rationale, debt delivery, and each bounded fence's key and bound. Partial configuration selections
-are inventory only. The policy gate requires the whole declared matrix and complete current
-compiler/Cargo evidence, even for zero sites. See [Data-Plane Concurrency](data-plane-concurrency.md)
-for its matrix, review rules, calibration and exclusions.
+Declare `#[cfg_attr(nervix_lint, nervix::context(...))]` at the source's owning execution boundary.
+Choose recurring, lifecycle, observer, outside or bounded; every kind requires a reason, and
+bounded protocols also require their identity key and bound. Trait/type/module inheritance and
+local call relationships supply defaults. Hot callers of lifecycle-only helpers, unknown dispatch,
+invalid annotations and recurring acquisitions produce ordinary Rust diagnostics. Use a narrow
+`nervix_primitives::expect_lint!` with a meaningful reason and owning repair task for retained debt.
+An expectation covering multiple operations or no operation fails. See
+[Data-Plane Concurrency](data-plane-concurrency.md#source-contracts) for the complete authoring
+contract, inheritance, supported call effects and limitations.
 
-The compiler workspace wrapper nests beneath configured kache. Completion hashes the compiler,
-driver, validator, catalog, source/dependency/configuration inputs, Cargo configuration and build
-flags; policy review is checked on every run. Cargo-fresh artifacts can reuse matching side reports.
-Missing reports cause the gate to establish analysis using `KACHE_KEY_SALT` and to rebuild only its
-isolated authored artifacts. `--fresh` reruns Cargo; `--recompile` discards those authored artifacts
-so fixture qualification executes the compiler callback. Neither changes `RUSTC_WRAPPER`.
+The JSON output records resolved APIs, spans, owner variants, expansions, source contracts,
+compiled configurations and generated/external exclusions. It is generated evidence under
+`target/`, not an approval database. Partial selections are inventories; the required diagnostic
+gate needs the complete matrix and complete current compiler/Cargo evidence, including zero.
 
-Frequency review also depends on `review-context.json`, which fingerprints product callers and
-declarations. When it is stale, trace the changed callers, update affected scopes and record the
-reviewed inputs. An unchanged helper body does not establish that its callers remain cold.
+The workspace wrapper nests beneath configured kache. Completion identities cover current source,
+annotations, rule code, compiler, driver, validator, dependencies, Cargo configuration and flags.
+Cargo-fresh artifacts reuse matching complete side reports. Missing reports establish analysis
+using `KACHE_KEY_SALT` and rebuild only isolated authored artifacts. `--fresh` reruns Cargo;
+`--recompile` discards those authored artifacts to execute the callback. Every path preserves
+`RUSTC_WRAPPER`. Changing a caller, callee, annotation or source location needs only a new run.
 
-The cache qualification checks fresh and Cargo-fresh runs, an actual kache dependency hit, recovery
-from a missing side report, cross-worktree rejection, and the same trybuild diagnostic twice in each
-of two worktrees. Kache 0.28 executes workspace-wrapper chains directly while caching ordinary
-dependencies; the gate also rejects incomplete cached compiler evidence independently of that
-implementation choice. The known trybuild path problem is investigated with the configured wrapper
-and recorded qualification evidence, without a direct-rustc retry.
+Cache qualification exercises fresh and Cargo-fresh analysis, an actual kache dependency hit,
+changed source/annotation/rule/dependency/configuration inputs, missing and interrupted output,
+fixture doctests twice, and cross-worktree rejection in two isolated worktrees. Kache 0.28 runs
+workspace-wrapper chains directly while caching ordinary dependencies; complete evidence is
+validated independently of that detail. Compiler semantic fixtures qualify resolved lints and
+cross-crate metadata.
+
+### Capability doctests
+
+`just test-capability-docs` checks runtime state handles, logical and physical deadlines,
+subscription predicates, and the UDF execution context with `compile_fail` doctests beside their
+APIs. Paired compiling examples check that the imports and current signatures remain valid. These
+checks cover the specific rejected operations in each snippet. They run in `just test` and CI;
+the runtime examples require the `testing` feature, which the recipe enables.
 
 ### Deterministic concurrency checks
 
-Run the in-process scheduling checks for the execution, interconnect, and server crates with:
+Run every registered Shuttle check of the execution, interconnect, Rust client and server crates
+with:
 
 ```bash
 just test-shuttle
 ```
 
-Each check runs in its own process under bounded Shuttle schedules, then runs through the
-uncontrolled-nondeterminism detector. A substring selects a focused check or protocol family:
+Each check runs in its own process under the exploration it declares, then again under the
+uncontrolled-nondeterminism detector. `crates/model-harness/shuttle-inventory.toml` registers every
+check by package and test name, and the run fails when a registered check is missing, ignored or did
+not complete its exploration, and when a `shuttle_` test is not registered; add a new check to its
+package's list, and rename a renamed one there, in the same change. The command reports how many
+checks it discovered, selected, executed and saw complete. A substring selects a focused check or
+protocol family in every package, and a substring that selects nothing fails:
 
 ```bash
 just test-shuttle force_flush
 ```
 
-On failure, the runner writes a schedule below
-`target/shuttle-failures/<package>/<fully-qualified-test-name>/`. Pass the resulting schedule file
-to the replay recipe; its parent directories identify the exact package and check:
+On failure, the runner keeps the schedule Shuttle persisted, the run's output and its metadata below
+`target/shuttle-failures/<package>/<fully-qualified-test-name>/`. Pass the schedule file to the
+replay recipe; its parent directories identify the exact package and check:
 
 ```bash
 just test-shuttle-replay target/shuttle-failures/<package>/<fully-qualified-test-name>/<schedule-file>
 ```
 
 Keep the schedule with the failure report while fixing the owning protocol, then run the focused
-check and the full suite. To verify schedule persistence and replay without changing a protocol,
-set `SHUTTLE_FORCE_FAILURE=1` for a focused run, which deliberately fails after its invariant has
-completed, and replay the written schedule with the same variable set. Remove the variable for
-normal verification. Use `SHUTTLE_REPORT_STEPS=1` to inspect the highest explored step count when
-setting a check's iteration and step budgets. [Data-Plane Concurrency](./data-plane-concurrency.md)
-defines what these checks model, their limits, and the invariant held by each protocol.
+check and the full suite. `just test-shuttle-replay-check` proves persistence and replay without
+changing a protocol: it fails one check deliberately after its invariant held, through
+`SHUTTLE_FORCE_FAILURE=1`, and requires the one schedule it persisted to reproduce the failure in a
+fresh process. Use `SHUTTLE_REPORT_STEPS=1` to inspect the highest explored step count when setting
+a check's iteration and step budgets. [Data-Plane Concurrency](./data-plane-concurrency.md) defines
+what these checks model, their limits, and the invariant held by each protocol.
 
 ### Memory-ordering models
 
@@ -316,7 +360,17 @@ just test-loom-replay target/loom-failures/<package>/<test>
 `just test-loom-qualification` applies each registered weakening to a copy of the working tree and
 requires its model to fail.
 
-### Primitive boundary
+### Primitive boundary and execution modes
+
+Every execution-sensitive primitive comes from `nervix-primitives`, and every mode is its own build.
+`just validate` runs the checks that keep it that way: `just validate-primitive-boundary` for import
+origin, permissions, manifests, global cfgs, the analysis cfg and release binaries, over every
+authored source including the isolated analysis workspace,
+`just validate-execution-mode-dependencies` for the ordinary and portable dependency graphs of the
+workspace and of every package, and `just validate-execution-mode-conflicts` for the diagnostics of
+combined modes, of a mode or the native capability requested for the browser's target, and of a
+modeled product binary. `just lint` lints each mode in its own build, including the Shuttle builds
+and checks in `just cargo-clippy-shuttle` and the Loom builds in `just cargo-clippy-loom`.
 
 `just test-primitives` builds `nervix-primitives` once per execution mode and runs its conformance
 checks: which backend each mode selects, the same contract scripts of every family against the
@@ -361,10 +415,16 @@ replays it in a fresh process with exactly its recorded inputs:
 just test-turmoil-replay target/turmoil-failures/<test>/<case>-seed-<seed>.json
 ```
 
-`just test-turmoil-sweep` runs every scenario over sixty-four seeds from 1000 in place of its
-committed seeds, and `just test-turmoil-replay-check` proves the record and replay path end to end.
-[Deterministic Interconnect Simulation](./interconnect-simulation.md) defines what the simulation
-controls, its fault model and limits, the scenario matrix, and how to investigate a failure.
+The suite reports how many tests each of its invocations and the whole suite discovered, selected,
+executed and completed, and keeps each invocation's output under `target/turmoil-suite`.
+`tests/turmoil-inventory.toml` registers the tests each invocation runs and leaves ignored: the
+suite fails when a registered test did not run or ran ignored, when a simulation test ran
+unregistered, and when an invocation executed no test, and a `just test-turmoil-simulation`
+selection that matches nothing fails too. `just test-turmoil-sweep` runs every scenario over
+sixty-four seeds from 1000 in place of its committed seeds, and `just test-turmoil-replay-check`
+proves the record and replay path end to end. [Deterministic Interconnect
+Simulation](./interconnect-simulation.md) defines what the simulation controls, its fault model and
+limits, the scenario matrix, and how to investigate a failure.
 
 ### Source coverage of the native extra checks
 
@@ -383,10 +443,10 @@ Name producers to run only those, one or more of `test-typed-ratchet`, `bench-sm
 just coverage-native-extras nspl-completion-walk
 ```
 
-A producer runs its check exactly as `just <producer>` does and fails when the check fails. The
-recipe first adds the `llvm-tools` component to the toolchain `rust-toolchain.toml` pins, with
-`just llvm-tools`, because only the compiler's own LLVM tools read its profiles. What the check
-needs first, such as the web console the server benches link, is built normally. The recipe
+A producer runs its check exactly as `just <producer>` does and fails when the check fails.
+`rust-toolchain.toml` includes the `llvm-tools` component because only the compiler's own LLVM
+tools read its profiles. What the check needs first, such as the web console the server benches
+link, is built normally. The recipe
 that executes Nervix code then runs in the environment `cargo llvm-cov show-env --sh
 --no-rustc-wrapper` describes: every crate is compiled with source coverage instrumentation into
 `target/native-coverage-build`, and the configured kache wrapper stays in place. The parts of a
@@ -446,6 +506,12 @@ is tested with:
 ```bash
 just test-native-coverage
 ```
+
+The unit and scenario coverage recipes export `lcov-workspace.info` with every workspace package
+selected. CI merges those reports with the native extra reports, checks complexity against that
+complete report, and uploads it to Codecov. The separate `lcov.info` report selects the server,
+CLI and console for focused inspection; it does not replace the workspace export.
+Run the same complexity check locally with `just check-coverage <merged-workspace-report>`.
 
 ### The scenario suite's execution budget
 

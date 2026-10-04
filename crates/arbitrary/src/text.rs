@@ -3,9 +3,18 @@
 use std::{fmt::Debug, num::NonZeroU64, str::FromStr};
 
 use meticulous::{OptionExt as _, ResultExt as _};
-use nervix_models::{DomainClockPeriod, DomainClockSkew, RequestedResourceVersion};
+use nervix_models::{
+    BranchName, BuiltinFunctionName, ChannelName, ClientName, ClusterNodeName, CodecName,
+    CollectionName, ConsumerGroupName, CorrelatorName, DeduplicatorName, DomainClockPeriod,
+    DomainClockSkew, DomainName, EmitterName, EndpointName, FieldName, GeneratorName,
+    InferencerName, IngestorName, JunctionName, LookupName, ModelName, PlacementName,
+    PulsarSubscriptionName, QueueGroupName, QueueName, ReingestorName, RelayName, ReordererName,
+    RequestedResourceVersion, ResourceName, SchemaName, SignalingProtocolName, SubjectName,
+    SubscriptionName, TableName, TopicName, UdfName, UserName, VhostName, WasmProcessorName,
+    WindowProcessorName, WireSchemaName,
+};
 
-use crate::Arbitrary;
+use crate::{Arbitrary, Domain};
 
 /// The longest name the vocabulary accepts, in bytes. It mirrors the bound every name type
 /// enforces; a generated name past it fails to parse, loudly, the moment the two disagree.
@@ -14,8 +23,434 @@ const NAME_BYTES: u64 = 128;
 /// The characters a generated name continues with after its keyword-proof head.
 const NAME_TAIL: &[u8] = b"abcdefghijklmnopqrstuvwxyz0123456789_";
 
+/// Every keyword NSPL reads, statement and expression keywords alike, spelled as a name spells it:
+/// in lower case. `nervix-nspl` checks this list against the one lexer's keyword set, so a keyword
+/// the language adds is generated as a name as soon as it exists.
+pub const KEYWORDS: [&str; 354] = [
+    "create",
+    "delete",
+    "add",
+    "alter",
+    "drop",
+    "rename",
+    "cordon",
+    "uncordon",
+    "drain",
+    "rebind",
+    "relocate",
+    "relocation",
+    "use",
+    "list",
+    "attach",
+    "detach",
+    "begin",
+    "start",
+    "stop",
+    "describe",
+    "lookup",
+    "upload",
+    "backup",
+    "restore",
+    "existing",
+    "dry",
+    "run",
+    "resource",
+    "resources",
+    "show",
+    "if",
+    "exists",
+    "cluster",
+    "status",
+    "node",
+    "version",
+    "paced",
+    "unpaced",
+    "domain",
+    "domains",
+    "clock",
+    "transaction",
+    "transactions",
+    "operation",
+    "placement",
+    "placements",
+    "rank",
+    "require",
+    "prefer",
+    "suggest",
+    "preferences",
+    "follow",
+    "onto",
+    "colocation",
+    "separation",
+    "neutral",
+    "user",
+    "password",
+    "period",
+    "skew",
+    "intersection",
+    "at",
+    "now",
+    "time",
+    "rate",
+    "timestamp",
+    "session",
+    "subscription",
+    "vhost",
+    "endpoint",
+    "signaling",
+    "protocol",
+    "generator",
+    "inferencer",
+    "wasm",
+    "reingestor",
+    "reorderer",
+    "on",
+    "connect",
+    "message",
+    "input",
+    "branch",
+    "branches",
+    "general",
+    "global",
+    "error",
+    "ignore",
+    "log",
+    "rejected",
+    "preserve",
+    "reset",
+    "in",
+    "sensitive",
+    "branched",
+    "unbranched",
+    "path",
+    "method",
+    "without",
+    "body",
+    "http",
+    "websockets",
+    "kafka_broker",
+    "addresses",
+    "with",
+    "materialized",
+    "state",
+    "last",
+    "tls",
+    "jaq",
+    "transformations",
+    "ingestion",
+    "emitting",
+    "strict",
+    "loose",
+    "json",
+    "yaml",
+    "toml",
+    "xml",
+    "avro",
+    "cbor",
+    "raw",
+    "protobuf",
+    "wire",
+    "schema",
+    "field",
+    "codec",
+    "ingestor",
+    "ingestors",
+    "into",
+    "relay",
+    "route",
+    "processor",
+    "window",
+    "junction",
+    "deduplicator",
+    "correlator",
+    "decode",
+    "using",
+    "from",
+    "left",
+    "right",
+    "rfc3339",
+    "file",
+    "inputs",
+    "inner_input",
+    "inner_output",
+    "dense",
+    "tensor",
+    "hash",
+    "key",
+    "kafka",
+    "pulsar",
+    "clickhouse",
+    "postgres",
+    "mysql",
+    "mongodb",
+    "s3",
+    "gcs",
+    "azure_blob",
+    "iceberg",
+    "iceberg_rest",
+    "prometheus",
+    "mqtt",
+    "nats",
+    "rabbitmq",
+    "redis",
+    "pubsub",
+    "zeromq",
+    "sqs",
+    "sentry",
+    "syslog",
+    "otel",
+    "logs",
+    "traces",
+    "metric",
+    "attributes",
+    "scope",
+    "gauge",
+    "sum",
+    "histogram",
+    "unit",
+    "description",
+    "monotonic",
+    "delta",
+    "cumulative",
+    "collect",
+    "collection",
+    "broker",
+    "capacity",
+    "ttl",
+    "topic",
+    "subject",
+    "queue",
+    "channel",
+    "offset",
+    "consumer",
+    "group",
+    "instances",
+    "evict",
+    "lru",
+    "clean",
+    "persistent",
+    "qos",
+    "mode",
+    "quiesce",
+    "suspend",
+    "buffer",
+    "overflow",
+    "oldest",
+    "newest",
+    "reject",
+    "after",
+    "ack",
+    "no_ack",
+    "jetstream",
+    "parallel",
+    "sequential",
+    "single",
+    "batch",
+    "fifo",
+    "dynamic",
+    "sample",
+    "blocking",
+    "dropping",
+    "flush",
+    "commit",
+    "revert",
+    "immediate",
+    "retry",
+    "policy",
+    "backoff",
+    "max",
+    "fuel",
+    "memory",
+    "min",
+    "query",
+    "every",
+    "each",
+    "for",
+    "set",
+    "replace",
+    "inherit",
+    "except",
+    "leak",
+    "invoke",
+    "output",
+    "attached",
+    "detached",
+    "processed",
+    "by",
+    "sliding_window",
+    "size",
+    "pool",
+    "step",
+    "width",
+    "duration",
+    "filter",
+    "where",
+    "and",
+    "or",
+    "not",
+    "true",
+    "false",
+    "case",
+    "when",
+    "then",
+    "else",
+    "end",
+    "between",
+    "is",
+    "distinct",
+    "try_cast",
+    "json_value",
+    "try_json_value",
+    "json_exists",
+    "deduplicate",
+    "match",
+    "correlate",
+    "first",
+    "all",
+    "earliest",
+    "latest",
+    "correlation",
+    "conflict",
+    "send",
+    "wait",
+    "fail",
+    "capture",
+    "accept",
+    "data",
+    "format",
+    "text",
+    "required",
+    "skip",
+    "default",
+    "emitter",
+    "encode",
+    "emit",
+    "insert",
+    "to",
+    "do",
+    "update",
+    "nothing",
+    "timeout",
+    "parse",
+    "as",
+    "messages",
+    "oneof",
+    "client",
+    "type",
+    "mount",
+    "config",
+    "table",
+    "catalog",
+    "same",
+    "location",
+    "values",
+    "optional",
+    "string",
+    "number",
+    "integer",
+    "object",
+    "array",
+    "vec",
+    "boolean",
+    "null",
+    "int",
+    "long",
+    "float",
+    "double",
+    "bytes",
+    "record",
+    "enum",
+    "map",
+    "fixed",
+    "u8",
+    "i8",
+    "u16",
+    "i16",
+    "u32",
+    "i32",
+    "u64",
+    "i64",
+    "bool",
+    "datetime",
+    "f32",
+    "f64",
+    "udf",
+    "udfs",
+    "args",
+    "returns",
+    "volatile",
+    "code",
+    "roto_0_13",
+];
+
+/// The words NSPL reserves wherever it reads a relay, so a relay is never named by one.
+const RESERVED_RELAY_WORDS: [&str; 2] = ["message", "branch"];
+
+/// A kind of name the generators build, and the keyword spellings NSPL refuses for that kind.
+pub trait GeneratedName: FromStr<Err: Debug> {
+    /// The keywords NSPL refuses as a name of this kind. A name in the NSPL domain never spells one;
+    /// the vocabulary holds them, and so does the vocabulary domain. Every such list holds at most
+    /// a handful of words.
+    const REFUSED_IN_NSPL: &'static [&'static str] = &[];
+}
+
+/// Declares name kinds NSPL writes in every spelling a generated name takes, keywords included.
+macro_rules! spelled_like_any_word {
+    ($($name:ident),+ $(,)?) => {
+        $(impl GeneratedName for $name {})+
+    };
+}
+
+spelled_like_any_word!(
+    BranchName,
+    BuiltinFunctionName,
+    ChannelName,
+    ClientName,
+    ClusterNodeName,
+    CodecName,
+    CollectionName,
+    ConsumerGroupName,
+    CorrelatorName,
+    DeduplicatorName,
+    DomainName,
+    EmitterName,
+    EndpointName,
+    FieldName,
+    GeneratorName,
+    InferencerName,
+    IngestorName,
+    JunctionName,
+    LookupName,
+    ModelName,
+    PlacementName,
+    PulsarSubscriptionName,
+    QueueGroupName,
+    QueueName,
+    ReingestorName,
+    ReordererName,
+    ResourceName,
+    SchemaName,
+    SignalingProtocolName,
+    SubjectName,
+    SubscriptionName,
+    TableName,
+    TopicName,
+    UdfName,
+    UserName,
+    VhostName,
+    WasmProcessorName,
+    WindowProcessorName,
+    WireSchemaName,
+);
+
+/// NSPL reads `message` and `branch` as the keywords of its scopes and clauses wherever it reads a
+/// relay, so it refuses them as a relay's name.
+impl GeneratedName for RelayName {
+    const REFUSED_IN_NSPL: &'static [&'static str] = &RESERVED_RELAY_WORDS;
+}
+
 /// Pieces a generated string is assembled from. Beside plain text they hold every character the
-/// NSPL lexers treat specially: both quote styles, the dollar-quote delimiters a renderer picks
+/// NSPL lexer treats specially: both quote styles, the dollar-quote delimiters a renderer picks
 /// and prefixes of them, backslashes and the escapes they could start, line breaks, a comma and
 /// braces that separate configuration entries, and text outside ASCII, including a combining mark
 /// and characters Unicode classes as whitespace.
@@ -34,23 +469,77 @@ const DURATION_UNITS: [&str; 14] = [
 const BYTE_SIZE_UNITS: [&str; 9] = ["B", "KB", "KiB", "MB", "MiB", "GB", "GiB", "TB", "TiB"];
 
 impl Arbitrary<'_> {
-    /// A name NSPL spells in every position that reads a name: one lower-case ASCII identifier that
-    /// no keyword of either NSPL lexer can match.
-    ///
-    /// A name is one letter, a letter and an underscore followed by more, or an underscore
-    /// followed by more. No keyword is a single letter or starts with either head, so no
-    /// generated name reads as a keyword, and the length reaches the vocabulary's bound.
-    pub fn name<N>(&mut self) -> N
-    where
-        N: FromStr,
-        N::Err: Debug,
-    {
-        let text = self.name_text();
+    /// A name of kind `N`: one lower-case ASCII identifier, which may spell any NSPL keyword. In the
+    /// NSPL domain it never spells a keyword NSPL refuses for that kind of name.
+    pub fn name<N: GeneratedName>(&mut self) -> N {
+        self.name_refusing(N::REFUSED_IN_NSPL)
+    }
+
+    /// A name of kind `N` that, in the NSPL domain, spells none of `refused` either, for a position
+    /// that refuses more words than the kind does. `refused` holds at most a handful of words.
+    pub fn name_refusing<N: GeneratedName>(&mut self, refused: &[&str]) -> N {
+        let text = self.name_text_refusing::<N>(refused);
         N::from_str(&text).assured("a generated name is a lower-case identifier within the bound")
     }
 
-    /// The text of a name [`Self::name`] would build.
+    /// The text of a name [`Self::name_refusing`] would build. A refused keyword gains a trailing
+    /// underscore, which no keyword ends with.
+    pub(crate) fn name_text_refusing<N: GeneratedName>(&mut self, refused: &[&str]) -> String {
+        let mut text = self.name_text();
+        if self.domain == Domain::Nspl
+            && (refused.contains(&text.as_str()) || N::REFUSED_IN_NSPL.contains(&text.as_str()))
+        {
+            text.push('_');
+        }
+        text
+    }
+
+    /// A name of kind `N` as an expression or a route construction writes it. Besides any name
+    /// [`Self::name`] builds, it may hold what only its spelling between backticks can: a `-`, a `~`
+    /// or a `.`, or a leading digit.
+    pub fn expression_name<N: GeneratedName>(&mut self) -> N {
+        let text = self.expression_name_text::<N>();
+        N::from_str(&text).assured("a generated name holds only name characters within the bound")
+    }
+
+    /// The text of a name [`Self::expression_name`] would build.
+    ///
+    /// Holding such a character is one choice among eight and never the first, so a name read from
+    /// bytes that ran out is still a plain identifier.
+    pub(crate) fn expression_name_text<N: GeneratedName>(&mut self) -> String {
+        let mut text = self.name_text_refusing::<N>(&[]);
+        if self.entropy.byte() % 8 != 7 {
+            return text;
+        }
+        let length = u64::try_from(text.len()).assured("a name's length fits in u64");
+        if length >= NAME_BYTES {
+            text.pop();
+        }
+        match self.entropy.byte() % 4 {
+            0 => {
+                let digit = char::from(
+                    b'0'.checked_add(self.entropy.byte() % 10)
+                        .assured("a digit offset below ten stays inside the ASCII digits"),
+                );
+                text.insert(0, digit);
+            }
+            1 => text.push('-'),
+            2 => text.insert(0, '~'),
+            _ => text.push('.'),
+        }
+        text
+    }
+
+    /// The text of a name [`Self::name`] would build: an NSPL keyword, one letter, a letter and an
+    /// underscore followed by more, or an underscore followed by more, so the length reaches the
+    /// vocabulary's bound.
+    ///
+    /// A keyword is one choice among four and never the first, so a name read from bytes that ran
+    /// out is a single letter, the smallest name there is.
     pub fn name_text(&mut self) -> String {
+        if self.entropy.byte() % 4 == 3 {
+            return self.entropy.pick(KEYWORDS).to_string();
+        }
         let letter = char::from(
             b'a'.checked_add(self.entropy.byte() % 26)
                 .assured("a letter offset below 26 stays inside the ASCII lower-case range"),

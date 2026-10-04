@@ -281,6 +281,12 @@ impl MySqlPool {
 }
 
 impl MySqlSink {
+    #[cfg_attr(
+        nervix_lint,
+        nervix::dispatch(
+            reason = "external Arrow access and MySQL driver insertion own their effects"
+        )
+    )]
     pub fn new(
         config: MySqlSinkConfig,
         connections: Box<dyn MySqlConnections>,
@@ -330,6 +336,12 @@ impl MySqlSink {
 
     /// One insert of `rows` rows binding `params`, on a connection borrowed for that insert and
     /// returned after it.
+    #[cfg_attr(
+        nervix_lint,
+        nervix::dispatch(
+            reason = "external Arrow access and MySQL driver insertion own their effects"
+        )
+    )]
     async fn insert(
         &self,
         statement: &MultiRowInsert,
@@ -660,6 +672,12 @@ struct MappedMySqlColumns<'a> {
 }
 
 impl<'a> MappedMySqlColumns<'a> {
+    #[cfg_attr(
+        nervix_lint,
+        nervix::dispatch(
+            reason = "external Arrow access and MySQL driver insertion own their effects"
+        )
+    )]
     fn new(
         batch: &'a RecordBatch,
         target_columns: &[String],
@@ -715,6 +733,12 @@ enum MappedMySqlColumn<'a> {
 }
 
 impl<'a> MappedMySqlColumn<'a> {
+    #[cfg_attr(
+        nervix_lint,
+        nervix::dispatch(
+            reason = "external Arrow access and MySQL driver insertion own their effects"
+        )
+    )]
     fn new(array: &'a ArrayRef) -> Option<Self> {
         let array = array.as_ref();
         if let Some(values) = array.as_any().downcast_ref::<BooleanArray>() {
@@ -894,10 +918,9 @@ impl<'a> MappedMySqlColumn<'a> {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc as StdArc;
-
     use arrow_array::builder::{BinaryBuilder, ListBuilder};
     use arrow_schema::{DataType, Field, Schema, TimeUnit};
+    use nervix_primitives::sync::StdArc;
 
     use super::*;
 

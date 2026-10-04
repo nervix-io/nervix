@@ -158,7 +158,7 @@ impl WireValues<'_> {
                 ClientRequest::SettleEmitterBatch(settle) => {
                     settle.consumer = ConsumerId::opened_by(self.request_id());
                     settle.reference = uuid::Uuid::from_bytes(self.digest());
-                    let reason = self.arbitrary.string();
+                    let reason = self.arbitrary.non_empty_string();
                     settle.decision = self.arbitrary.entropy().pick([
                         EmitterBatchDecision::Ack,
                         EmitterBatchDecision::Retry,

@@ -109,10 +109,12 @@ class InventoryTests(unittest.TestCase):
             "nspl-archive-model",
             "backup-record-manifest",
             "client-processor-choice-request",
+            "client-ffi-host-columns",
             "branch-membership",
-            "typed-report", "typed-catalog-scope", "typed-site-union",
+            "typed-report", "typed-source-contract", "typed-site-union",
             "nspl-statement",
             "nspl-statement-text",
+            "nspl-expression-text",
             "nspl-format-document",
             "nspl-format-text",
             "models-names",
@@ -130,9 +132,14 @@ class InventoryTests(unittest.TestCase):
             "models-identities",
             "models-identity-validation",
             "models-archived-models",
+            "models-archived-counts",
+            "consensus-archived-counts",
+            "registry-archived-models",
+            "runtime-window-archived-counts",
             "simd-constant-division",
             "simd-checked-lanes",
             "replica-progress",
+            "replica-catch-up",
         })
         self.assertEqual({target.package for target in inventory.targets}, {
             "nervix-client-wire",
@@ -143,9 +150,10 @@ class InventoryTests(unittest.TestCase):
             "nervix-models",
             "nervix-backup",
             "nervix-branch-instances",
-            "nervix-simd-kernels",
+            "nervix-consensus",
             "nervix-lint-report",
             "nervix-server",
+            "nervix-simd-kernels",
             "nervix-checkpoint-replication",
         })
         for target in inventory.targets:
@@ -401,6 +409,26 @@ class DiscoveryTests(unittest.TestCase):
                 (manifest.parent / "lib.rs").write_text(content)
                 with self.assertRaisesRegex(bolero.BoleroError, message):
                     bolero.static_targets(manifest)
+
+    def test_source_scan_stays_within_its_package(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            manifest = root / "Cargo.toml"
+            manifest.write_text("[package]\nname = 'root'\n")
+            source = root / "src/lib.rs"
+            source.parent.mkdir()
+            source.write_text("fn bolero_root() { bolero::check!(); }")
+            nested = root / "crates/nested/Cargo.toml"
+            nested.parent.mkdir(parents=True)
+            nested.write_text("[package]\nname = 'nested'\n")
+            nested_source = nested.parent / "src/lib.rs"
+            nested_source.parent.mkdir()
+            nested_source.write_text("fn bolero_nested() { bolero::check!(); }")
+            generated = root / "target/generated.rs"
+            generated.parent.mkdir()
+            generated.write_text("fn bolero_generated() { bolero::check!(); }")
+            self.assertEqual(bolero.static_targets(manifest), {"bolero_root": source})
+            self.assertEqual(bolero.static_targets(nested), {"bolero_nested": nested_source})
 
     def test_compiled_selection_must_match_inventory_and_work_directory(self) -> None:
         def listed(package: str, test_target: str, ignored: bool, features, manifest: pathlib.Path | None = None) -> list[str]:
@@ -794,11 +822,64 @@ class ExecutionTests(unittest.TestCase):
                             bolero.prepare_target(self.inventory, self.target)
                     else:
                         bolero.prepare_target(self.inventory, self.target)
-                    build.assert_called_once_with(self.inventory, self.target, run, timeout=7200)
+                    build.assert_called_once_with(self.inventory, self.target, run)
                     execute.assert_not_called()
                     self.assertEqual(metadata.call_args.args[3],
-                                     "failed preparation" if failure else "prepared build")
+                                     "failed preparation" if failure else "instrumented preparation")
                     self.assertFalse((run / "corpus").exists())
+    def test_preparation_records_the_selected_binary_without_running_a_campaign(self) -> None:
+        target = next(item for item in self.inventory.targets if item.id == "models-archived-counts")
+        with tempfile.TemporaryDirectory() as directory:
+            run = pathlib.Path(directory)
+            binary = run / "representations-2222"
+            binary.touch()
+            build = subprocess.CompletedProcess([], 0,
+                f"Executable tests/representations/main.rs ({binary})\n", "")
+            execute_build = self.command_with_build(build)
+
+            def execute(args, **kwargs):
+                if args[:2] == ["git", "rev-parse"]:
+                    return subprocess.CompletedProcess(args, 0, "revision\n", "")
+                return execute_build(args, **kwargs)
+
+            with (
+                mock.patch.object(bolero, "run_dir", return_value=run),
+                mock.patch.object(bolero, "verify_tool"),
+                mock.patch.object(bolero, "command", side_effect=execute) as commands,
+                mock.patch.object(bolero, "run_instrumented") as campaign,
+                contextlib.redirect_stdout(io.StringIO()),
+            ):
+                bolero.prepare_target(self.inventory, target)
+            campaign.assert_not_called()
+            report = json.loads((run / "metadata.json").read_text())
+            self.assertEqual(report["result"], "instrumented preparation")
+            self.assertEqual(report["target"], target.id)
+            self.assertEqual(report["test_target"], "test:representations")
+            self.assertEqual(report["features"], list(target.features))
+            args = next(call.args[0] for call in commands.call_args_list
+                        if call.args[0][:3] == ["cargo", "bolero", "test"])
+            self.assertEqual(args[args.index("--runs") + 1], "0")
+            self.assertEqual(args[args.index("--toolchain") + 1], self.inventory.nightly)
+            self.assertEqual(args[args.index("--sanitizer") + 1], self.inventory.sanitizer)
+
+    def test_failed_preparation_keeps_evidence_and_propagates_the_failure(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            run = pathlib.Path(directory)
+            with (
+                mock.patch.object(bolero, "run_dir", return_value=run),
+                mock.patch.object(bolero, "verify_tool"),
+                mock.patch.object(bolero, "build_instrumented",
+                                  side_effect=bolero.BoleroError("build failed")),
+                mock.patch.object(bolero, "command",
+                                  return_value=subprocess.CompletedProcess([], 0, "revision\n", "")),
+                mock.patch.object(bolero, "run_instrumented") as campaign,
+            ):
+                with self.assertRaisesRegex(bolero.BoleroError, "build failed"):
+                    bolero.prepare_target(self.inventory, self.target)
+            campaign.assert_not_called()
+            report = json.loads((run / "metadata.json").read_text())
+            self.assertEqual(report["result"], "failed preparation")
+            self.assertEqual(report["target"], self.target.id)
 
     def test_fuzz_copies_seed_corpus_and_requires_engine_completion(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -855,6 +936,15 @@ class ExecutionTests(unittest.TestCase):
             self.assertEqual(execute.call_args.kwargs["env"]["BOLERO_RANDOM_ITERATIONS"],
                              "0")
 
+            for summary in (
+                "corpus inputs: 7\n",
+                "corpus inputs: 7 | rng inputs: 0\n",
+            ):
+                with mock.patch.object(
+                    bolero, "command", return_value=subprocess.CompletedProcess([], 0, summary, "")
+                ):
+                    self.assertEqual(bolero.replay(target, input_file), 0)
+
     def test_replay_rejects_missing_large_or_unconfirmed_input(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             temporary = pathlib.Path(directory)
@@ -871,6 +961,8 @@ class ExecutionTests(unittest.TestCase):
                 (subprocess.CompletedProcess([], 101, "unrelated test failed", ""),
                  "outside the selected property"),
                 (subprocess.CompletedProcess([], 0, "test result: ok. 1 passed", ""),
+                 "saved input was not replayed"),
+                (subprocess.CompletedProcess([], 0, "corpus inputs: 7 | rng inputs: 1\n", ""),
                  "saved input was not replayed"),
             ):
                 with self.subTest(message=message), mock.patch.object(
@@ -945,6 +1037,14 @@ class CliTests(unittest.TestCase):
             prepare.assert_called_once_with(self.inventory, selected)
             with self.assertRaisesRegex(bolero.BoleroError, "unknown Bolero target"):
                 self.invoke("prepare", "absent")
+    def test_preparation_requires_an_exact_registered_target(self) -> None:
+        with mock.patch.object(bolero, "prepare_target") as prepare:
+            self.assertEqual(self.invoke("prepare", "models-archived-counts"), 0)
+            selected = next(target for target in self.inventory.targets
+                            if target.id == "models-archived-counts")
+            prepare.assert_called_once_with(self.inventory, selected)
+            with self.assertRaisesRegex(bolero.BoleroError, "unknown Bolero target"):
+                self.invoke("prepare", "models-archive")
 
     def test_fuzz_routes_select_targets_and_reject_zero_duration(self) -> None:
         with mock.patch.object(bolero, "fuzz_targets") as fuzz:

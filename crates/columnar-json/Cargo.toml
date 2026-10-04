@@ -23,6 +23,7 @@ thiserror = { workspace = true }
 
 [dev-dependencies]
 criterion = { workspace = true }
+nervix-primitives = { workspace = true }
 serde = { workspace = true }
 
 [[bench]]

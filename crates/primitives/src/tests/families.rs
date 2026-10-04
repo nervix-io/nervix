@@ -4,16 +4,16 @@
 //! operating-system thread in ordinary execution and a modeled thread under Shuttle. The ordinary
 //! build runs the scripts directly and the Shuttle build inside a Shuttle execution.
 
-use std::{cell::Cell, collections::hash_map::RandomState, pin::pin, sync::Arc};
+use std::{cell::Cell, collections::hash_map::RandomState, pin::pin, sync::Arc, task::Waker};
 
 use meticulous::{OptionExt as _, ResultExt as _};
 
-use super::notification::{poll_once, ready};
+use super::notification::{WakeCount, poll_once, ready};
 use crate::{
     collections::{ConcurrentQueue, DashMap, PopError, PushError, dash_map::Entry},
     publication::{ArcSwap, ArcSwapOption, Cache},
     sync::{
-        CancellationToken,
+        AtomicWaker, CancellationToken,
         blocking::{Barrier, Condvar, Mutex, Once, OnceLock, RwLock, mpsc},
     },
     thread,
@@ -236,6 +236,31 @@ pub(super) fn a_cancellation_token_has_clone_identity_and_cancels_its_children()
     assert!(output.is_none());
 }
 
+/// A waker registration wakes the waker registered last, once: a wake clears the registration, a
+/// later registration replaces an earlier one without waking it, a take hands the waker out
+/// without waking it, and a wake with nothing registered leaves nothing for a later registration.
+pub(super) fn a_waker_registration_wakes_the_last_registered_waker_once() {
+    let registration = AtomicWaker::new();
+    registration.wake();
+    let earlier = Arc::new(WakeCount::default());
+    let later = Arc::new(WakeCount::default());
+    registration.register(&Waker::from(Arc::clone(&earlier)));
+    assert_eq!(earlier.count(), 0);
+    registration.register(&Waker::from(Arc::clone(&later)));
+    registration.wake();
+    assert_eq!(earlier.count(), 0);
+    assert_eq!(later.count(), 1);
+    registration.wake();
+    assert_eq!(later.count(), 1);
+
+    registration.register(&Waker::from(Arc::clone(&earlier)));
+    let taken = registration.take().assured("a waker was registered above");
+    assert!(registration.take().is_none());
+    assert_eq!(earlier.count(), 0);
+    taken.wake();
+    assert_eq!(earlier.count(), 1);
+}
+
 /// A detached thread runs its body without anyone joining it.
 pub(super) fn a_detached_thread_runs_its_body() {
     let (sender, receiver) = mpsc::channel();
@@ -276,6 +301,7 @@ pub(super) fn keep_their_contracts() {
     a_publication_serves_the_latest_value();
     a_publication_starts_from_a_value_and_updates_in_place();
     a_cancellation_token_has_clone_identity_and_cancels_its_children();
+    a_waker_registration_wakes_the_last_registered_waker_once();
     a_detached_thread_runs_its_body();
     each_thread_sees_its_own_thread_local();
 }

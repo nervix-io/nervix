@@ -5,6 +5,15 @@
 //! - **Depends on.** Execution plans, branch-local state and runtime metric collectors.
 //! - **Must not know.** NSPL parsing, persistence mutations or external telemetry transport.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::context(
+        observer,
+        reason = "runtime inspection reads published state and lifecycle membership for operator \
+                  reports"
+    )
+)]
+
 use super::*;
 
 #[derive(Debug, thiserror::Error)]
@@ -93,6 +102,13 @@ impl Runtime {
         }
     }
 
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            lifecycle,
+            reason = "one concrete branch lifetime registers its metric identity"
+        )
+    )]
     pub(super) fn observe_branch_instance_created(
         &self,
         domain: &DomainName,
@@ -110,6 +126,13 @@ impl Runtime {
         }
     }
 
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            lifecycle,
+            reason = "one concrete branch lifetime withdraws or detaches its metric identity"
+        )
+    )]
     pub(super) fn observe_branch_instance_removed(
         &self,
         domain: &DomainName,
@@ -198,6 +221,19 @@ impl DataflowNodeTransientState {
 }
 
 impl Runtime {
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            lifecycle,
+            reason = "this operation installs, snapshots or retires retained execution state at \
+                      an explicit lifetime boundary"
+        )
+    )]
+    #[cfg_attr(
+        nervix_lint,
+        nervix::dispatch(reason = "the caller supplies the typed model-name conversion during \
+                                   handle installation")
+    )]
     pub(super) fn branch_metrics_mark(
         &self,
         domain: &DomainName,
@@ -739,8 +775,8 @@ mod tests {
     use fjall::Database;
     use futures_util::FutureExt as _;
     use nervix_models::{ClusterNodeName, IngestorName, ModelKind, ModelName, ParseAsType};
+    use nervix_primitives::sync::Arc;
     use tempfile::tempdir;
-    use triomphe::Arc;
 
     use super::*;
     use crate::metrics::RuntimeMetrics;

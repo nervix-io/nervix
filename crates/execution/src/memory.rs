@@ -1,16 +1,15 @@
 //! The byte budgets an operation is charged against before it allocates.
 
-use std::{io, ops::Deref, sync::Arc as StdArc};
+use std::{io, ops::Deref};
 
 use arch_into::ArchInto as _;
 use error_stack::Report;
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_primitives::sync::{
-    OwnedSemaphorePermit, Semaphore, TryAcquireError,
+    Arc, OwnedSemaphorePermit, Semaphore, StdArc, TryAcquireError,
     atomic::{AtomicU64, Ordering},
 };
 use thiserror::Error;
-use triomphe::Arc;
 
 use crate::{MemoryClass, executor::SemaphoreRef};
 

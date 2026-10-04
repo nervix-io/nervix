@@ -5,38 +5,22 @@ use nervix_models::{
 };
 
 use crate::{
-    lexer::{Identifier, Token, Word},
+    lexer::{Identifier, Token},
     parser_support::{
         LexedInput, ParseError, ParseFromSourceError, ack_mode, alter_expression_list,
         alter_op_separator, alter_processor_operation, branch_selection, completion_context,
-        completion_tokens, deduplicator_name, deduplicator_ref, duration_lit, filter_where_clause,
-        flushed_processor_outputs, from_relay_clauses, if_not_exists_clause, into_parse_error, kw,
-        kw_phrase2, lex_input, materialized_state_dependencies, nested_expression_tokens,
-        render_expression_tokens, suggest_from, suggestions_from_errors, tok,
+        completion_tokens, deduplicator_name, deduplicator_ref, duration_lit, expression_list,
+        filter_where_clause, flushed_processor_outputs, from_relay_clauses, if_not_exists_clause,
+        into_parse_error, kw, kw_phrase2, lex_input, materialized_state_dependencies, suggest_from,
+        suggestions_from_errors, tok,
     },
 };
-
-fn boundary_token(token: &Token) -> bool {
-    matches!(
-        token,
-        Token::Semicolon
-            | Token::Word(Word::KnownWord {
-                iden: Identifier::Max,
-                ..
-            })
-    )
-}
 
 fn deduplicate_on_exprs<'src>()
 -> impl Parser<'src, &'src [Token], Vec<nervix_models::Expression>, extra::Err<ParseError<'src>>> + Clone
 {
     kw_phrase2(Identifier::Deduplicate, Identifier::On)
-        .ignore_then(nested_expression_tokens(boundary_token).labelled("deduplicate_on"))
-        .try_map(|tokens, span| {
-            crate::parse_expression_list(&render_expression_tokens(&tokens)).map_err(|error| {
-                Rich::custom(span, error.current_context().embedded_expression_message())
-            })
-        })
+        .ignore_then(expression_list("deduplicate_on"))
 }
 
 pub fn create_deduplicator_parser<'src>()
@@ -100,10 +84,7 @@ pub fn alter_deduplicator_parser<'src>()
 -> impl Parser<'src, &'src [Token], AlterDeduplicator, extra::Err<ParseError<'src>>> + Clone {
     let set_deduplicate_on = kw(Identifier::Set)
         .ignore_then(kw_phrase2(Identifier::Deduplicate, Identifier::On))
-        .ignore_then(alter_expression_list(
-            alter_op_separator(),
-            "deduplicate_on",
-        ))
+        .ignore_then(alter_expression_list("deduplicate_on"))
         .map(|expressions| AlterDeduplicatorOperation::SetDeduplicateOn { expressions });
     let set_max_time = kw(Identifier::Set)
         .ignore_then(kw_phrase2(Identifier::Max, Identifier::Time))
@@ -298,16 +279,30 @@ mod tests {
     }
 
     #[test]
-    fn a_bare_max_still_begins_max_time() {
-        assert!(
-            parse_create_deduplicator(
-                "CREATE DEDUPLICATOR distinct_peaks FROM readings DEDUPLICATE ON input.id, max \
-                 MAX TIME 10m UNBRANCHED TO distinct_readings INHERIT ALL FLUSH IMMEDIATE ON \
-                 MESSAGE ERROR LOG;"
-            )
-            .is_err(),
-            "a bare max heads the MAX TIME clause, so the key before it ends in a comma"
+    fn a_bare_max_after_a_comma_is_a_key_and_the_next_max_begins_max_time() {
+        let parsed = parse_create_deduplicator(
+            "CREATE DEDUPLICATOR distinct_peaks FROM readings DEDUPLICATE ON input.id, max MAX \
+             TIME 10m UNBRANCHED TO distinct_readings INHERIT ALL FLUSH IMMEDIATE ON MESSAGE \
+             ERROR LOG;",
+        )
+        .expect("a key is due after the comma, so the bare max is a field");
+
+        assert_eq!(
+            parsed.deduplicate_on,
+            crate::parse_expression_list("input.id, max").expect("valid expressions")
         );
+        assert_eq!(parsed.max_time, "10m");
+    }
+
+    #[test]
+    fn completion_after_a_keyword_named_key_offers_max() {
+        let input =
+            "CREATE DEDUPLICATOR distinct_peaks FROM readings DEDUPLICATE ON input.id, max ";
+        let suggestions = suggest_create_deduplicator(input, input.len());
+        assert!(suggestions.contains(&"MAX".to_string()), "{suggestions:?}");
+        let input = "CREATE DEDUPLICATOR distinct_peaks FROM readings DEDUPLICATE ON ";
+        let suggestions = suggest_create_deduplicator(input, input.len());
+        assert_eq!(suggestions, vec!["deduplicate_on".to_string()]);
     }
 
     #[test]

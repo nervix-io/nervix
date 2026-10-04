@@ -24,6 +24,15 @@
 //! notification that chose it before it observed the notification passes on to the next registered
 //! waiter, or becomes the stored permit when none is left, as in Tokio.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::context(
+        outside,
+        reason = "notification backend implementation is a primitive mechanism rather than graph \
+                  policy"
+    )
+)]
+
 use std::{
     collections::BTreeMap,
     future::Future,

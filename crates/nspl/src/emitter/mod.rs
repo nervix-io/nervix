@@ -16,14 +16,13 @@ use crate::{
     lexer::{Identifier, Token, Word},
     parser_support::{
         LexedInput, ParseError, ParseFromSourceError, ack_mode, ack_timeout, ack_window,
-        alter_op_separator, bodyless_route_construction, boxed_choice, braced_list_value_tokens,
-        byte_size_lit, channel_ref, client_ref, codec_ref, collect_for, collection_ref,
-        duration_lit, emitter_name, emitter_ref, expression_before_clause, flush_each,
-        from_relay_clauses, general_error_policy, if_not_exists_clause, into_parse_error, kw,
-        kw_phrase2, kw_phrase3, lex_input, materialized_state_dependencies, message_error_policy,
-        queue_ref, relay_ref, render_expression_tokens, retry_policy, route_construction,
-        schema_ref, string_lit, subject_ref, suggest_from, table_ref, tok, topic_ref, u64_value,
-        where_expression, where_only_route_construction, word_raw,
+        alter_op_separator, bodyless_route_construction, boxed_choice, byte_size_lit, channel_ref,
+        client_ref, codec_ref, collect_for, collection_ref, duration_lit, embedded_expression,
+        emitter_name, emitter_ref, flush_each, from_relay_clauses, general_error_policy,
+        if_not_exists_clause, into_parse_error, kw, kw_phrase2, kw_phrase3, lex_input,
+        materialized_state_dependencies, message_error_policy, queue_ref, relay_ref, retry_policy,
+        route_construction, schema_ref, string_lit, subject_ref, suggest_from, table_ref, tok,
+        topic_ref, u64_value, where_expression, where_only_route_construction, word_raw,
     },
 };
 
@@ -259,28 +258,17 @@ fn syslog_emit_sink_parser<'src>()
 fn sqs_fifo_group_expression<'src>()
 -> impl Parser<'src, &'src [Token], nervix_models::Expression, extra::Err<ParseError<'src>>> + Clone
 {
-    any()
-        .and_is(kw(Identifier::Mode).not())
-        .filter(|token: &Token| !matches!(token, Token::Semicolon))
-        .repeated()
-        .at_least(1)
-        .collect::<Vec<_>>()
-        .labelled("fifo_group_expression")
-        .try_map(|tokens, span| {
-            let source = render_expression_tokens(&tokens);
-            crate::parse_expression(&source).map_err(|error| {
-                Rich::custom(span, error.current_context().embedded_expression_message())
-            })
-        })
-        .boxed()
+    embedded_expression("fifo_group_expression")
 }
 
 fn sqs_fifo_group_clause<'src>()
 -> impl Parser<'src, &'src [Token], SqsFifoGroup, extra::Err<ParseError<'src>>> + Clone {
+    // The expression is tried first: an embedded rejection raised at the token where `FROM BRANCH`
+    // had already failed would take that failure's span.
     kw_phrase2(Identifier::Fifo, Identifier::Group)
         .ignore_then(choice((
-            kw_phrase2(Identifier::From, Identifier::Branch).to(SqsFifoGroup::FromBranch),
             sqs_fifo_group_expression().map(SqsFifoGroup::Expression),
+            kw_phrase2(Identifier::From, Identifier::Branch).to(SqsFifoGroup::FromBranch),
         )))
         .boxed()
 }
@@ -473,12 +461,7 @@ fn otel_emit_sink_parser<'src>()
 fn clickhouse_value_expr<'src>()
 -> impl Parser<'src, &'src [Token], nervix_models::Expression, extra::Err<ParseError<'src>>> + Clone
 {
-    braced_list_value_tokens().try_map(|tokens, span| {
-        let source = render_expression_tokens(&tokens);
-        crate::parse_expression(&source).map_err(|error| {
-            Rich::custom(span, error.current_context().embedded_expression_message())
-        })
-    })
+    embedded_expression("value_expression")
 }
 
 fn clickhouse_value_mapping<'src>()
@@ -486,7 +469,7 @@ fn clickhouse_value_mapping<'src>()
     string_lit()
         .labelled("column_name")
         .then_ignore(tok(Token::Eq))
-        .then(clickhouse_value_expr().labelled("value_expression"))
+        .then(clickhouse_value_expr())
         .map(|(column, expression)| ClickHouseValueMapping { column, expression })
 }
 
@@ -884,34 +867,14 @@ fn encode_using_clause<'src>()
         .boxed()
 }
 
-fn method_boundary(token: &Token) -> bool {
-    matches!(
-        token,
-        Token::Word(Word::KnownWord {
-            iden: Identifier::Path,
-            ..
-        })
-    )
-}
-
-fn path_boundary(token: &Token) -> bool {
-    matches!(
-        token,
-        Token::Word(Word::KnownWord {
-            iden: Identifier::Mode,
-            ..
-        })
-    )
-}
-
 fn http_sink_parser<'src>()
 -> impl Parser<'src, &'src [Token], SinkWithPublishingMode, extra::Err<ParseError<'src>>> + Clone {
     kw(Identifier::Http)
         .ignore_then(client_ref())
         .then_ignore(kw(Identifier::Method))
-        .then(expression_before_clause(method_boundary))
+        .then(embedded_expression("string_expression"))
         .then_ignore(kw(Identifier::Path))
-        .then(expression_before_clause(path_boundary))
+        .then(embedded_expression("string_expression"))
         .then_ignore(kw(Identifier::Mode))
         .then(request_ack_publishing_mode())
         .map(
@@ -1168,7 +1131,7 @@ pub fn alter_emitter_parser<'src>()
     let add_from = kw(Identifier::Add)
         .ignore_then(kw(Identifier::From))
         .ignore_then(relay_ref())
-        .then(where_expression(alter_op_separator()).or_not())
+        .then(where_expression().or_not())
         .map(|(relay, where_clause)| AlterEmitterOperation::AddFrom {
             relay,
             where_clause,
@@ -1182,7 +1145,7 @@ pub fn alter_emitter_parser<'src>()
         .ignore_then(relay_ref())
         .then(choice((
             kw(Identifier::Set)
-                .ignore_then(where_expression(alter_op_separator()))
+                .ignore_then(where_expression())
                 .map(Some),
             kw(Identifier::Drop)
                 .ignore_then(kw(Identifier::Where))
@@ -1460,6 +1423,77 @@ mod tests {
             let reparsed = parse_create_emitter(&canonical).expect("canonical HTTP should parse");
             assert_eq!(parsed, reparsed);
         }
+    }
+
+    #[test]
+    fn fields_named_like_the_request_clauses_stay_in_the_http_request() {
+        let parsed = parse_create_emitter(
+            "CREATE EMITTER send FROM source TO HTTP api METHOD method PATH path MODE ACK RETRY \
+             POLICY BACKOFF 250ms MAX 30s WITHOUT BODY INVOKE write_header('X-Mode', mode) FLUSH \
+             IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;",
+        )
+        .expect("bare method and path fields complete their expressions");
+
+        let EmitSink::Http { method, path, .. } = parsed.sink.as_ref() else {
+            panic!("the sink must be HTTP, got {:?}", parsed.sink);
+        };
+        assert_eq!(
+            method,
+            &crate::parse_expression("method").expect("valid expression")
+        );
+        assert_eq!(
+            path,
+            &crate::parse_expression("path").expect("valid expression")
+        );
+
+        let input = "CREATE EMITTER send FROM source TO HTTP api METHOD method ";
+        let suggestions = suggest_create_emitter(input, input.len());
+        assert!(suggestions.contains(&"PATH".to_string()), "{suggestions:?}");
+        let input = "CREATE EMITTER send FROM source TO HTTP api METHOD method PATH path ";
+        let suggestions = suggest_create_emitter(input, input.len());
+        assert!(suggestions.contains(&"MODE".to_string()), "{suggestions:?}");
+    }
+
+    #[test]
+    fn fields_named_like_keywords_stay_in_a_fifo_group_and_values() {
+        let parsed = parse_create_emitter(&complete_codec_emitter(
+            "SQS broker QUEUE events.fifo FIFO GROUP concat(input.mode, mode) MODE SINGLE RETRY \
+             POLICY BACKOFF 250ms MAX 30s",
+        ))
+        .expect("a bare mode completes the group before MODE");
+        let EmitSink::Sqs {
+            fifo_group: Some(nervix_models::SqsFifoGroup::Expression(group)),
+            ..
+        } = parsed.sink.as_ref()
+        else {
+            panic!(
+                "the sink must be SQS with a group expression, got {:?}",
+                parsed.sink
+            );
+        };
+        assert_eq!(
+            group,
+            &crate::parse_expression("concat(input.mode, mode)").expect("valid expression")
+        );
+
+        let parsed = parse_create_emitter(
+            "CREATE EMITTER emit FROM p99 TO CLICKHOUSE db INSERT TO TABLE events VALUES { 'to' = \
+             to, 'end' = input.end, 'from' = `from` } MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s \
+             BATCH MAX MESSAGES 100 MAX SIZE 1MiB FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL \
+             ERROR LOG;",
+        )
+        .expect("values named like keywords stay in their entries");
+        let EmitSink::ClickHouse { values, .. } = parsed.sink.as_ref() else {
+            panic!("the sink must be ClickHouse, got {:?}", parsed.sink);
+        };
+        let expressions = values
+            .iter()
+            .map(|mapping| mapping.expression.clone())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            expressions,
+            crate::parse_expression_list("to, input.end, `from`").expect("valid expressions")
+        );
     }
 
     #[test]

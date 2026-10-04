@@ -13,7 +13,7 @@
 //! once and shared: every destination and every retry sends the same allocation, charged once, and
 //! reserves its own outstanding-delivery bytes separately.
 
-use std::{io::Cursor, num::NonZeroUsize, sync::Arc as StdArc};
+use std::{io::Cursor, num::NonZeroUsize};
 
 use arch_into::ArchInto as _;
 use arrow_array::{RecordBatch, RecordBatchOptions};
@@ -21,6 +21,7 @@ use arrow_ipc::{reader::StreamReader, writer::StreamWriter};
 use arrow_schema::Schema as ArrowSchema;
 use error_stack::{Report, ResultExt as _};
 use nervix_execution::{BudgetedBuffer, ChargedBytes, CpuClass, Executor, MemoryClass};
+use nervix_primitives::sync::StdArc;
 use thiserror::Error;
 
 use super::{CompiledSchema, RuntimeRecordBatch, batch_payload_bytes};
@@ -55,6 +56,12 @@ impl ArrowBodyError {
         })
     }
 
+    #[cfg_attr(
+        nervix_lint,
+        nervix::dispatch(
+            reason = "the caller supplies the typed Arrow decoding failure conversion"
+        )
+    )]
     fn decoding(error: impl ToString) -> Report<Self> {
         Report::new(Self::Decode {
             reason: error.to_string(),
