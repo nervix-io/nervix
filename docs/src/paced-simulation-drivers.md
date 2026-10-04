@@ -16,6 +16,9 @@ either one can continue a run the other began. They are complete programs meant 
 public scenarios in `tests/features/runtime/paced_simulation.feature` run them as published against
 the published graph, on one node and on three.
 
+The [Client Ingestors And Emitters](./client-io-architecture.md) architecture chapter explains
+the endpoint ownership, ACK, credit, ALTER and recovery contracts these programs exercise.
+
 ## The Graph
 
 `examples/paced-simulation/paced_simulation.nspl` creates the paced domain `paced_simulation`
@@ -69,13 +72,19 @@ ingestor admitted it at, `admitted_at`. Clock observations and deliveries are se
 with no order between them, so an application that needs an output's event time reads it from the
 output.
 
-The graph needs nothing outside Nervix. Load it, then start the clock at the pace the simulation
-should run at:
+The graph needs nothing outside Nervix. Its file includes separate domain bootstrap and `USE`
+phases. Create the domain, load the transaction beginning at `BEGIN` with the CLI's domain
+selection, then start the clock at the pace the simulation should run at:
 
 ```bash
-nervix-cli --domain paced_simulation --command "$(cat examples/paced-simulation/paced_simulation.nspl)"
+nervix-cli --command "CREATE PACED DOMAIN paced_simulation WITH PERIOD 100ms SKEW 100ms;"
+nervix-cli --domain paced_simulation --command \
+  "$(sed -n '/^BEGIN;/,$p' examples/paced-simulation/paced_simulation.nspl)"
 nervix-cli --domain paced_simulation --command "START AT NOW TIME RATE 4.0;"
 ```
+
+Check the printed command dispositions: ordinary `--command` currently prints a refusal without
+a nonzero exit status. `USE` must run on its own when entered as an NSPL command.
 
 ## Running The Drivers
 

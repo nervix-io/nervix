@@ -8552,18 +8552,20 @@ async fn given_node_has_invalid_wasm_processor_fixture_resource_directory(
 }
 
 #[given(
-    expr = "node {string} has malformed-output WASM processor fixture resource directory {string}"
+    expr = "node {string} has a WASM fixture emitting a {int} byte malformed envelope in resource \
+            directory {string}"
 )]
 async fn given_node_has_malformed_output_wasm_processor_fixture_resource_directory(
     world: &mut ScenarioWorld,
     node_id: String,
+    length: u32,
     placeholder: String,
 ) {
     place_generated_wasm_processor_fixture(
         world,
         &node_id,
         &placeholder,
-        malformed_output_wasm_fixture().to_vec(),
+        malformed_output_wasm_fixture(length),
     )
     .await;
 }
@@ -8740,15 +8742,29 @@ async fn place_generated_wasm_processor_fixture(
         .insert(placeholder.to_string(), resource_dir.display().to_string());
 }
 
-fn malformed_output_wasm_fixture() -> &'static [u8] {
-    br#"(module
+fn malformed_output_wasm_fixture(length: u32) -> Vec<u8> {
+    assert!(
+        (1..12).contains(&length),
+        "the fixture emits a short header"
+    );
+    let mut bytes = vec![0; usize::try_from(length).assured("a short header fits usize")];
+    if length >= 4 {
+        let declared = length - 4;
+        bytes[..4].copy_from_slice(&declared.to_le_bytes());
+    }
+    let encoded = bytes
+        .iter()
+        .map(|byte| format!("\\{byte:02x}"))
+        .collect::<String>();
+    format!(
+        r#"(module
       (import "env" "nervix_domain_time_nanos" (func $domain_time (result i64)))
       (import "env" "nervix_timeout_after_nanos" (func $timeout (param i64) (result i64)))
       (memory (export "memory") 1)
       (global $emitted (mut i32) (i32.const 0))
-      (data (i32.const 0) "\01")
-      (func (export "nervix_buffer_ptr") (result i32) (i32.const 0))
-      (func (export "nervix_buffer_len") (result i32) (i32.const 1))
+      (data (i32.const 32768) "{encoded}")
+      (func (export "nervix_buffer_ptr") (result i32) (i32.const 32768))
+      (func (export "nervix_buffer_len") (result i32) (i32.const {length}))
       (func (export "nervix_buffer_capacity") (result i32) (i32.const 65536))
       (func (export "nervix_alloc") (param i32) (result i32) (i32.const 0))
       (func (export "nervix_init") (param i32 i32) (result i32) (i32.const 0))
@@ -8764,7 +8780,7 @@ fn malformed_output_wasm_fixture() -> &'static [u8] {
         if (result i32)
           i32.const 0
           global.set $emitted
-          i32.const 1
+          i32.const {length}
         else
           i32.const 0
         end)
@@ -8772,6 +8788,8 @@ fn malformed_output_wasm_fixture() -> &'static [u8] {
       (func (export "nervix_load_state") (param i32 i32) (result i32) (i32.const 0))
       (func (export "nervix_reset_state") (result i32) (i32.const 0))
     )"#
+    )
+    .into_bytes()
 }
 
 fn historical_time_tokenless_wasm_fixture(output_relay: &str) -> Vec<u8> {

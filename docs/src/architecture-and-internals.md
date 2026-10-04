@@ -10,6 +10,8 @@ Use it for:
 - [typed absence, semantic states, validation boundaries, state identity, and boundary encodings](./typed-states.md)
 - [connector crate ownership, the shared source and sink contract, and host execution](./connector-contract.md)
 - [HTTP emitter request preparation, delivery, lifecycle, and qualification](./http-emitter-architecture.md)
+- [client ingestors and emitters: native batches, application ACKs, credits, forwarding,
+  restoration, buffered ALTER and paced workflows](./client-io-architecture.md)
 - domain-clock mapping, authority, lifecycle, progress, and execution-time semantics
 - cluster interconnect security, traffic isolation, and delivery semantics
 - [host name resolution: the node's asynchronous DNS resolver, its configuration, cache and bounds,

@@ -156,6 +156,23 @@ class InventoryTests(unittest.TestCase):
             "deadlock-order-bounds",
             "deadlock-evidence-malformed",
             "deadlock-evidence-bounds",
+            "wasm-protocol-malformed",
+            "wasm-branch-metadata",
+            "wasm-envelopes",
+            "wasm-snapshots",
+            "wasm-abi-codes",
+            "wasm-host-schema",
+            "wasm-host-envelopes",
+            "wasm-sdk-snapshots",
+            "wasm-sdk-rejections",
+            "wasm-sdk-input",
+            "wasm-sdk-output",
+            "wasm-state-descriptors",
+            "wasm-state-descriptors-malformed",
+            "wasm-protocol-corruption",
+            "wasm-protocol-tags",
+            "wasm-stored-checkpoints",
+            "wasm-stored-checkpoints-malformed",
         })
         self.assertEqual({target.package for target in inventory.targets}, {
             "nervix-client-wire",
@@ -175,6 +192,9 @@ class InventoryTests(unittest.TestCase):
             "nervix-checkpoint-replication",
             "nervix-connector-syslog",
             "nervix-paced-simulation",
+            "nervix-wasm-protocol",
+            "nervix-wasm",
+            "nervix-wasm-sdk",
         })
         for target in inventory.targets:
             self.assertTrue(target.source.is_file())
