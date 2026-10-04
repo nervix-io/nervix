@@ -8,6 +8,12 @@ state, metric, and connector handles have been resolved.
 [Execution Plans](./execution-plans.md) describes the revision that installs and publishes those
 handles before record and batch work begins.
 
+[SIMD Kernels](./simd-kernels.md) defines the pure buffer boundary that folds batch latency and
+computes admission, arithmetic, and byte masks. Its cached CPU level is process-wide detection
+under an unmodeled permission; it carries no protocol state. Batch-local reductions preserve this
+chapter's ownership and bounded synchronization rules, including one accumulator lock and one
+wall-clock read per delivery-latency series per batch.
+
 The hot paths are:
 
 - accepting one record from an ingestor
