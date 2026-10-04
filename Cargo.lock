@@ -7249,10 +7249,12 @@ name = "nervix-deadlock"
 version = "0.1.0-dev"
 dependencies = [
  "bolero",
+ "clap",
  "error-stack",
  "humantime",
  "meticulous",
  "nervix-arbitrary",
+ "nervix-model-harness",
  "nervix-primitives",
  "nix",
  "rkyv",

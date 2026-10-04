@@ -21,10 +21,12 @@ use std::{
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_deadlock::{
     ACTIVE_DEADLOCK_EXIT_STATUS, DIAGNOSTIC_FAILURE_EXIT_STATUS, DeadlockEvidence, DiagnosticError,
-    DiagnosticRun, EvidenceDirectory,
+    DiagnosticRun, EvidenceDirectory, RecordedFinding as Finding,
 };
+#[cfg(feature = "deloxide-order")]
+use nervix_deadlock::{PotentialTriage, ProofBasis, TriageProof};
 use nervix_primitives::{
-    deadlock::{Access, ActiveCycle, Finding, LockKind},
+    deadlock::{Access, ActiveCycle, LockKind},
     sync::{
         Arc,
         blocking::{Barrier, Condvar, Mutex, RwLock, mpsc},
@@ -71,7 +73,12 @@ fn workload() {
         assert_eq!(*refusal.current_context(), DiagnosticError::RecordStart);
         return;
     }
-    let run = DiagnosticRun::start(directory).assured("the child starts its run once");
+    let selection = nervix_primitives::deadlock::DiagnosticSelection::for_build(matches!(
+        workload.as_str(),
+        "instrumented_active_only" | "instrumented_self_wait"
+    ));
+    let run = DiagnosticRun::start_selected(directory, selection)
+        .assured("the child starts its run once");
     match workload.as_str() {
         "two_mutexes_in_opposite_orders" => two_mutexes_in_opposite_orders(),
         "a_mutex_relocked_by_its_holder" => a_mutex_relocked_by_its_holder(),
@@ -79,6 +86,22 @@ fn workload() {
         "a_writer_and_a_reader_across_two_locks" => a_writer_and_a_reader_across_two_locks(),
         "a_notified_waiter_and_its_notifier" => a_notified_waiter_and_its_notifier(),
         "two_mutexes_in_one_order" => two_mutexes_in_one_order(),
+        "serial_inversion" => serial_inversion(run),
+        "many_worker_contexts" => many_worker_contexts(run),
+        "instrumented_active_only" => serial_orders(),
+        "instrumented_self_wait" => a_mutex_relocked_by_its_holder(),
+        "shared_order_inversion" => shared_order_inversion(),
+        "mixed_order_inversion" => mixed_order_inversion(run),
+        "separate_lifetimes" => separate_lifetimes(),
+        "held_guard_overload" => held_guard_overload(),
+        "witness_overload" => witness_overload(),
+        "history_overload" => history_overload(),
+        "retention_overload" => retention_overload(),
+        "blocked_report_output" => retention_overload(),
+        "failed_report_output" => {
+            serial_orders();
+            thread::park();
+        }
         "a_condition_handed_between_threads" => a_condition_handed_between_threads(),
         "readers_sharing_a_lock" => readers_sharing_a_lock(),
         "quiet_standard_output" => println!("probe output after the detector started"),
@@ -226,6 +249,369 @@ struct Signal {
 
 const CONTROL_ROUNDS: u32 = 2_000;
 
+fn serial_orders() {
+    let first = Mutex::new(());
+    let second = Mutex::new(());
+    {
+        let _first = first.lock();
+        let _second = second.lock();
+    }
+    {
+        let _second = second.lock();
+        let _first = first.lock();
+    }
+}
+
+fn serial_inversion(run: &DiagnosticRun) {
+    serial_orders();
+    wait_for_potential(run);
+}
+
+const WORKER_CONTEXTS: usize = 32;
+
+fn many_worker_contexts(run: &DiagnosticRun) {
+    let locks = Arc::new([Mutex::new(()), Mutex::new(())]);
+    for _ in 0..WORKER_CONTEXTS {
+        let locks = Arc::clone(&locks);
+        thread::spawn(move || {
+            let _first = locks[0].lock();
+            let _second = locks[1].lock();
+        })
+        .join()
+        .assured(PARTICIPANT_JOINS);
+    }
+    {
+        let _second = locks[1].lock();
+        let _first = locks[0].lock();
+    }
+    wait_for_potential(run);
+}
+
+fn wait_for_potential(run: &DiagnosticRun) {
+    let file = run
+        .evidence_file()
+        .assured("the probe provides an evidence directory");
+    let deadline = nervix_primitives::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        let bytes = std::fs::read(file).assured("the probe's evidence is readable");
+        let evidence = DeadlockEvidence::decode(&bytes).assured("the run writes valid evidence");
+        if !evidence.findings().is_empty() {
+            println!("workload continued after a potential finding");
+            return;
+        }
+        assert!(
+            nervix_primitives::time::Instant::now() < deadline,
+            "serial inversion produced no potential evidence"
+        );
+        thread::yield_now();
+    }
+}
+
+#[cfg(feature = "deloxide-order")]
+#[test]
+fn serial_inverse_order_retains_potential_evidence_and_the_workload_continues() {
+    let directory = tempfile::tempdir().assured("a temporary directory can be created");
+    let child = run_child("serial_inversion", Some(directory.path()));
+    assert_eq!(child.exit_code(), 0, "{}", child.describe());
+    let evidence = only_evidence(directory.path(), &child);
+    let [
+        Finding::Potential {
+            cycle,
+            repetitions,
+            triage,
+        },
+    ] = evidence.findings()
+    else {
+        panic!("a retained potential cycle: {evidence:?}")
+    };
+    assert_eq!(repetitions.get(), 1);
+    assert_eq!(*triage, PotentialTriage::Unreviewed);
+    assert_eq!(cycle.edges().len(), 2);
+    assert!(cycle.has_complete_context(), "{cycle:?}");
+    for edge in cycle.edges() {
+        assert_ne!(edge.before.id, edge.after.id);
+        assert!(
+            edge.before
+                .site
+                .as_ref()
+                .assured("construction retained")
+                .constructed_at
+                .file
+                .as_str()
+                .ends_with(THIS_FILE)
+        );
+        for witness in edge.witnesses() {
+            assert_eq!(witness.held.access, Access::Exclusive);
+            assert_eq!(witness.requested.access, Access::Exclusive);
+            assert_eq!(witness.held_count.get(), 1);
+            assert!(witness.held.at.file.as_str().ends_with(THIS_FILE));
+            assert!(witness.requested.at.file.as_str().ends_with(THIS_FILE));
+        }
+    }
+    assert!(!evidence.qualifies());
+    assert!(
+        child.stderr.contains("potential lock-order"),
+        "{}",
+        child.describe()
+    );
+    assert!(
+        child
+            .stdout
+            .contains("workload continued after a potential finding"),
+        "{}",
+        child.describe()
+    );
+}
+
+fn shared_order_inversion() {
+    let first = RwLock::new(());
+    let second = RwLock::new(());
+    {
+        let _first: Vec<_> = (0..2).map(|_| first.read()).collect();
+        let _second = second.read();
+    }
+    {
+        let _second = second.read();
+        let _first = first.read();
+    }
+}
+
+#[cfg(feature = "deloxide-order")]
+#[test]
+fn a_historical_edge_retains_every_context_from_thirty_two_workers() {
+    let directory = tempfile::tempdir().assured("temporary evidence directory");
+    let child = run_child("many_worker_contexts", Some(directory.path()));
+    assert_eq!(child.exit_code(), 0, "{}", child.describe());
+    let evidence = only_evidence(directory.path(), &child);
+    let [Finding::Potential { cycle, .. }] = evidence.findings() else {
+        panic!("one complete historical cycle: {evidence:?}")
+    };
+    assert!(cycle.has_complete_context(), "{cycle:?}");
+    let mut counts: Vec<_> = cycle
+        .edges()
+        .iter()
+        .map(|edge| edge.witnesses().len())
+        .collect();
+    counts.sort_unstable();
+    assert_eq!(counts, [1, WORKER_CONTEXTS]);
+    for edge in cycle.edges() {
+        let mut threads: Vec<_> = edge
+            .witnesses()
+            .iter()
+            .map(|witness| witness.thread)
+            .collect();
+        threads.sort_unstable();
+        threads.dedup();
+        assert_eq!(threads.len(), edge.witnesses().len());
+        assert!(edge.witnesses().iter().all(|witness| {
+            witness.held.at.file.as_str().ends_with(THIS_FILE)
+                && witness.requested.at.file.as_str().ends_with(THIS_FILE)
+                && witness.held.access == Access::Exclusive
+                && witness.requested.access == Access::Exclusive
+                && witness.held_count.get() == 1
+        }));
+    }
+    assert!(!evidence.qualifies());
+}
+
+fn mixed_order_inversion(run: &DiagnosticRun) {
+    let first = RwLock::new(());
+    let second = Mutex::new(());
+    {
+        let _first: Vec<_> = (0..2).map(|_| first.read()).collect();
+        let _second = second.lock();
+    }
+    {
+        let _second = second.lock();
+        let _first = first.write();
+    }
+    wait_for_potential(run);
+}
+
+fn separate_lifetimes() {
+    fn pair() -> [Mutex<()>; 2] {
+        [Mutex::new(()), Mutex::new(())]
+    }
+    {
+        let locks = pair();
+        let _first = locks[0].lock();
+        let _second = locks[1].lock();
+    }
+    {
+        let locks = pair();
+        let _second = locks[1].lock();
+        let _first = locks[0].lock();
+    }
+}
+
+fn held_guard_overload() {
+    let locks: Vec<_> = (0..65).map(|_| Mutex::new(())).collect();
+    let _held: Vec<_> = locks.iter().map(Mutex::lock).collect();
+    thread::park();
+}
+
+fn witness_overload() {
+    let locks = Arc::new([Mutex::new(()), Mutex::new(())]);
+    for _ in 0..=nervix_primitives::deadlock::MAX_ORDER_WITNESSES {
+        let locks = Arc::clone(&locks);
+        thread::spawn(move || {
+            let _first = locks[0].lock();
+            let _second = locks[1].lock();
+        })
+        .join()
+        .assured(PARTICIPANT_JOINS);
+    }
+    thread::park();
+}
+
+fn history_overload() {
+    let locks: Vec<_> = (0..129).map(|_| Mutex::new(())).collect();
+    for (index, first) in locks.iter().enumerate() {
+        for second in &locks[index + 1..] {
+            let _first = first.lock();
+            let _second = second.lock();
+        }
+    }
+    thread::park();
+}
+
+fn retention_overload() {
+    let locks: Vec<_> = (0..32).map(|_| Mutex::new(())).collect();
+    for pair in locks.as_chunks::<2>().0 {
+        {
+            let _first = pair[0].lock();
+            let _second = pair[1].lock();
+        }
+        {
+            let _second = pair[1].lock();
+            let _first = pair[0].lock();
+        }
+    }
+    thread::park();
+}
+
+#[cfg(feature = "deloxide-order")]
+#[test]
+fn shared_read_orders_complete_without_an_order_finding() {
+    completed("shared_order_inversion");
+}
+
+#[cfg(feature = "deloxide-order")]
+#[test]
+fn mixed_order_history_retains_modes_multiplicity_and_a_serial_non_overlap_proof() {
+    let directory = tempfile::tempdir().assured("temporary evidence directory");
+    let child = run_child("mixed_order_inversion", Some(directory.path()));
+    assert_eq!(child.exit_code(), 0, "{}", child.describe());
+    let mut evidence = only_evidence(directory.path(), &child);
+    let [Finding::Potential { cycle, .. }] = evidence.findings() else {
+        panic!("shared order history: {evidence:?}")
+    };
+    assert!(
+        cycle
+            .edges()
+            .iter()
+            .flat_map(|edge| edge.witnesses())
+            .any(|witness| witness.held.access == Access::Shared && witness.held_count.get() == 2)
+    );
+    assert!(
+        cycle
+            .edges()
+            .iter()
+            .flat_map(|edge| edge.witnesses())
+            .all(|witness| witness.requested.access == Access::Exclusive)
+    );
+    assert_eq!(
+        cycle
+            .edges()
+            .iter()
+            .map(|edge| edge
+                .witnesses()
+                .iter()
+                .map(|witness| witness.held_count.get())
+                .sum::<u64>())
+            .max(),
+        Some(2)
+    );
+    let reference = "active_cycles::mixed_order_history_retains_modes_multiplicity_and_a_serial_non_overlap_proof";
+    let readers = TriageProof::new(
+        ProofBasis::SharedReaders,
+        "These acquisitions share reads.",
+        reference,
+    )
+    .assured("a bounded review");
+    assert!(
+        evidence.triage(0, readers).is_err(),
+        "exclusive access cannot receive a reader proof"
+    );
+    let proof = TriageProof::new(
+        ProofBasis::NonOverlap,
+        "The probe owns all acquisitions on one thread, in sequential scopes, with no other \
+         participants.",
+        reference,
+    )
+    .assured("specific proof and retained regression");
+    evidence
+        .triage(0, proof)
+        .assured("complete source evidence supports explicit review");
+    assert!(evidence.qualifies());
+}
+
+#[cfg(feature = "deloxide-order")]
+#[test]
+fn reused_construction_sites_keep_separate_lock_lifetimes() {
+    completed("separate_lifetimes");
+}
+
+#[cfg(feature = "deloxide-order")]
+#[test]
+fn runtime_active_only_reports_the_instrumented_selection() {
+    let directory = tempfile::tempdir().assured("temporary evidence directory");
+    let child = run_child("instrumented_active_only", Some(directory.path()));
+    assert_eq!(child.exit_code(), 0, "{}", child.describe());
+    let evidence = only_evidence(directory.path(), &child);
+    assert_eq!(
+        evidence.process().selection,
+        nervix_primitives::deadlock::DiagnosticSelection::OrderInstrumentedActiveOnly
+    );
+    assert!(evidence.findings().is_empty());
+    let (_, evidence) = deadlocked("instrumented_self_wait");
+    assert_eq!(
+        evidence.process().selection,
+        nervix_primitives::deadlock::DiagnosticSelection::OrderInstrumentedActiveOnly
+    );
+    assert_eq!(only_cycle(&evidence).threads().len(), 1);
+}
+
+#[cfg(feature = "deloxide-order")]
+#[test]
+fn order_context_and_retention_overload_leave_failure_evidence() {
+    for workload in [
+        "held_guard_overload",
+        "witness_overload",
+        "history_overload",
+        "retention_overload",
+    ] {
+        let directory = tempfile::tempdir().assured("temporary evidence directory");
+        let child = run_child(workload, Some(directory.path()));
+        assert_eq!(
+            child.exit_code(),
+            DIAGNOSTIC_FAILURE_EXIT_STATUS,
+            "{}",
+            child.describe()
+        );
+        let evidence = only_evidence(directory.path(), &child);
+        assert!(
+            evidence
+                .findings()
+                .iter()
+                .any(|finding| matches!(finding, Finding::Overflow { .. })),
+            "{evidence:?}"
+        );
+        assert!(!evidence.qualifies());
+        assert!(child.stderr.contains("overload"), "{}", child.describe());
+    }
+}
+
 fn two_mutexes_in_one_order() {
     let first = Arc::new(Mutex::new(0_u32));
     let second = Arc::new(Mutex::new(0_u32));
@@ -352,9 +738,25 @@ fn run_child(workload: &str, evidence: Option<&Path>) -> Child {
     if let Some(evidence) = evidence {
         command.env(EVIDENCE, evidence);
     }
+    if workload == "failed_report_output" {
+        command.stderr(Stdio::from(
+            std::fs::OpenOptions::new()
+                .write(true)
+                .open("/dev/full")
+                .assured("the diagnostic failure fixture exists"),
+        ));
+    }
     let mut child = command.spawn().assured("the test binary can start itself");
     let stdout = read_in_background(child.stdout.take().assured("stdout is piped"));
-    let stderr = read_in_background(child.stderr.take().assured("stderr is piped"));
+    let stderr = match child.stderr.take() {
+        Some(stderr) if workload == "blocked_report_output" => {
+            nix::fcntl::fcntl(&stderr, nix::fcntl::FcntlArg::F_SETPIPE_SZ(4096))
+                .assured("the test bounds the output pipe");
+            StderrCapture::Stalled(stderr)
+        }
+        Some(stderr) => StderrCapture::Reading(read_in_background(stderr)),
+        None => StderrCapture::Uncaptured,
+    };
     let process = nix::unistd::Pid::from_raw(
         i32::try_from(child.id()).assured("process identifiers fit a pid_t"),
     );
@@ -372,7 +774,7 @@ fn run_child(workload: &str, evidence: Option<&Path>) -> Child {
             killed.assured("a child that has not ended can be killed");
             waiter.join().assured(PARTICIPANT_JOINS);
             let stdout = stdout.join().assured(PARTICIPANT_JOINS);
-            let stderr = stderr.join().assured(PARTICIPANT_JOINS);
+            let stderr = stderr.finish();
             panic!(
                 "workload {workload} did not end within \
                  {CHILD_BOUND:?}\nstdout:\n{stdout}\nstderr:\n{stderr}"
@@ -380,10 +782,67 @@ fn run_child(workload: &str, evidence: Option<&Path>) -> Child {
         }
     };
     waiter.join().assured(PARTICIPANT_JOINS);
-    Child {
+    let child = Child {
         status,
         stdout: stdout.join().assured(PARTICIPANT_JOINS),
-        stderr: stderr.join().assured(PARTICIPANT_JOINS),
+        stderr: stderr.finish(),
+    };
+    if let Some(root) = env::var_os("NERVIX_DEADLOCK_PROBE_ARTIFACTS") {
+        let artifact = std::path::PathBuf::from(root).join(workload);
+        std::fs::create_dir_all(&artifact).assured("probe artifacts have an owned directory");
+        std::fs::write(artifact.join("output.log"), child.describe())
+            .assured("probe output is retained");
+        if let Some(evidence) = evidence
+            && evidence.is_dir()
+        {
+            for file in EvidenceDirectory::new(evidence)
+                .files()
+                .assured("probe evidence is listable")
+            {
+                let name = file.file_name().assured("each evidence file has a name");
+                std::fs::copy(&file, artifact.join(name))
+                    .assured("probe evidence is retained before its fixture ends");
+            }
+        }
+    }
+    child
+}
+
+enum StderrCapture {
+    Reading(thread::JoinHandle<String>),
+    Stalled(std::process::ChildStderr),
+    Uncaptured,
+}
+
+impl StderrCapture {
+    fn finish(self) -> String {
+        match self {
+            Self::Reading(reader) => reader.join().assured(PARTICIPANT_JOINS),
+            Self::Stalled(mut stream) => {
+                let mut output = String::new();
+                stream
+                    .read_to_string(&mut output)
+                    .assured("the exited child closed its output");
+                output
+            }
+            Self::Uncaptured => String::new(),
+        }
+    }
+}
+
+#[cfg(feature = "deloxide-order")]
+#[test]
+fn diagnostic_output_failure_and_a_blocked_descriptor_end_with_failure() {
+    for workload in ["failed_report_output", "blocked_report_output"] {
+        let directory = tempfile::tempdir().assured("temporary evidence directory");
+        let child = run_child(workload, Some(directory.path()));
+        assert_eq!(
+            child.exit_code(),
+            DIAGNOSTIC_FAILURE_EXIT_STATUS,
+            "{}",
+            child.describe()
+        );
+        assert!(!only_evidence(directory.path(), &child).qualifies());
     }
 }
 

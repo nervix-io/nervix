@@ -13,10 +13,11 @@ fn main() -> Result<(), Report<AppError>> {
     // A diagnostic node installs its deadlock detector before any tracked lock or runtime worker
     // exists, and after the signals, so the detector's threads never see one by its default action.
     #[cfg(feature = "deloxide")]
-    nervix_deadlock::DiagnosticRun::start(
+    nervix_deadlock::DiagnosticRun::start_selected(
         args.deadlock_evidence
             .clone()
             .map(nervix_deadlock::EvidenceDirectory::new),
+        nervix_primitives::deadlock::DiagnosticSelection::for_build(args.deadlock_active_only),
     )
     .change_context(AppError::StartDeadlockDiagnostics)?;
     let runtime = Builder::new_multi_thread()

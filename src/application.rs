@@ -523,6 +523,14 @@ pub struct Args {
         help = "Existing directory a diagnostic node records its deadlock evidence in"
     )]
     pub deadlock_evidence: Option<PathBuf>,
+
+    /// Disable runtime order checking in an order-instrumented diagnostic artifact.
+    #[cfg(feature = "deloxide")]
+    #[clap(
+        long,
+        help = "Check active cycles only; compiled order instrumentation retains its cost"
+    )]
+    pub deadlock_active_only: bool,
     #[command(subcommand)]
     pub subcommand: Option<Command>,
 }

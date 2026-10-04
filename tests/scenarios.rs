@@ -152,6 +152,7 @@ mod common;
 mod database_batches;
 #[cfg(feature = "deloxide")]
 mod deadlock_diagnostics;
+mod deadlock_reports;
 mod domain_clock_attachment;
 mod endpoint_intake;
 mod ingestion_time;
@@ -444,6 +445,7 @@ struct ScenarioWorld {
     last_interconnect_attempt_error: Option<String>,
     server_process: Option<ServerProcess>,
     server_process_cluster: Option<ServerProcessCluster>,
+    deadlock_report: Option<deadlock_reports::ReportFixture>,
     node_trace_export: Option<NodeTraceExport>,
     server_process_http_load: Option<ServerProcessHttpLoad>,
     held_resource_upload: Option<HeldResourceUpload>,
@@ -28011,6 +28013,14 @@ async fn run_scenarios(parallelism: TestParallelism) -> SuiteOutcome {
                 let Some(world) = world else {
                     return;
                 };
+                #[cfg(feature = "deloxide")]
+                if let Some(cluster) = &world.server_process_cluster {
+                    cluster
+                        .retain_deadlock_diagnostics()
+                        .unwrap_or_else(|error| {
+                            panic!("diagnostic process evidence could not be retained: {error}")
+                        });
+                }
                 world.enter_phase(ScenarioPhase::BodyComplete, &format!("result={body}"));
 
                 world.enter_phase(ScenarioPhase::TeardownStarted, "");

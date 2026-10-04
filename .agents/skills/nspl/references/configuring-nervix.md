@@ -334,6 +334,14 @@ relay. Do not use them to scan across branches.
 
 ## Verification and troubleshooting
 
+For a diagnostic node's lock findings, read
+[Data-Plane Concurrency](https://docs.nervix.io/data-plane-concurrency.html#diagnostic-deadlock-detection).
+Use the local `nervix-deadlock-report inspect`, `triage`, and `qualify` commands on retained
+artifacts. A potential cycle requires an explicit source-based correction or infeasibility review
+with a retained regression. Preserve the original whole-process evidence: filtered exports cannot
+qualify its run. Combine qualification with the actual process outcome and the detector's stated
+coverage limits, including requested-read historical edges and untracked async synchronization.
+
 Choose checks relevant to the configured graph:
 
 - `SHOW CREATE <kind> <name>;` confirms the stored canonical definition.

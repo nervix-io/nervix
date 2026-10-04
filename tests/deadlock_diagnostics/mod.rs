@@ -50,14 +50,17 @@ fn given_scenario_process_tracks_blocking_locks(_world: &mut ScenarioWorld) {
     let run = DiagnosticRun::current();
     let run = run.verified("the detector is installed only by the process's diagnostic run");
     assert_eq!(run.process().id, std::process::id());
+    assert_eq!(
+        run.process().selection,
+        nervix_primitives::deadlock::DiagnosticSelection::for_build(false)
+    );
 }
 
 #[then("the scenario process has recorded no deadlock findings")]
 fn then_scenario_process_recorded_no_findings(_world: &mut ScenarioWorld) {
     let run = DiagnosticRun::current();
     let run = run.verified("a preceding step checked the process runs its diagnostics");
-    // A finding would already have ended the process; this reads what its evidence says while it
-    // runs: the process, and nothing found.
+    // Potential findings leave the process running, so inspect the actual cumulative evidence.
     let Some(file) = run.evidence_file() else {
         return;
     };
@@ -150,6 +153,10 @@ fn then_every_server_process_recorded_running_detector(world: &mut ScenarioWorld
         let program = program
             .unwrap_or_else(|| panic!("evidence of process {} names no program", process.id));
         assert_eq!(program.as_str(), SERVER_PROGRAM);
+        assert_eq!(
+            process.selection,
+            nervix_primitives::deadlock::DiagnosticSelection::for_build(false)
+        );
         assert!(
             evidence.findings().is_empty(),
             "server process {} recorded {:?}",

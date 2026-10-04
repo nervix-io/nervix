@@ -1,5 +1,5 @@
 [package]
-description = "Deadlock diagnostics: the evidence a diagnostic Nervix process records when its tracked locks deadlock, and the run that records it and ends the process"
+description = "Bounded active-deadlock and potential-order evidence, local review, and diagnostic process reporting"
 edition.workspace = true
 license-file.workspace = true
 name = "nervix-deadlock"
@@ -10,6 +10,13 @@ workspace = true
 
 [features]
 default = []
+deloxide-order = ["deloxide", "nervix-primitives/deloxide-order"]
+report-tool = ["dep:clap"]
+shuttle = [
+  "nervix-primitives/native",
+  "nervix-primitives/shuttle",
+  "nervix-model-harness/shuttle",
+]
 # The diagnostic run: in a build that selects the `deloxide` mode, install the deadlock detector and
 # record what it finds. Without it the crate reads and describes evidence other processes recorded.
 deloxide = [
@@ -20,6 +27,7 @@ deloxide = [
 ]
 
 [dependencies]
+clap = { workspace = true, features = ["derive"], optional = true }
 error-stack = { workspace = true }
 humantime = { workspace = true }
 meticulous = { workspace = true }
@@ -32,6 +40,7 @@ thiserror = { workspace = true }
 [dev-dependencies]
 bolero = { workspace = true }
 nervix-arbitrary = { workspace = true }
+nervix-model-harness = { workspace = true }
 # The probes' watchdog kills a child that outlives its bound.
 nix = { workspace = true, features = ["signal"] }
 tempfile = { workspace = true }
@@ -39,3 +48,12 @@ tempfile = { workspace = true }
 [[test]]
 name = "active_cycles"
 required-features = ["deloxide"]
+
+[[test]]
+name = "report_cli"
+required-features = ["report-tool"]
+
+[[bin]]
+name = "nervix-deadlock-report"
+path = "src/main.rs"
+required-features = ["report-tool"]

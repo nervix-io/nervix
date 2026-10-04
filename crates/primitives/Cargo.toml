@@ -52,6 +52,9 @@ turmoil = ["dep:turmoil"]
 # a diagnostic form builds and runs as a product does. It requires the `native` capability and is
 # exclusive with every other mode.
 deloxide = ["dep:deloxide", "dep:error-stack", "dep:nix", "dep:thiserror"]
+# Compile historical order instrumentation into the diagnostic locks. Runtime disabling retains
+# that instrumentation's cost; an active-only build selects `deloxide` alone.
+deloxide-order = ["deloxide", "deloxide/lock-order-graph"]
 
 [dependencies]
 # The `futures` channels, `select!` and abort handles of the unmodeled surface, and the waker
