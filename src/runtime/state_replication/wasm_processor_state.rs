@@ -38,67 +38,72 @@ impl Runtime {
         lsm: u64,
         deadline: Instant,
     ) -> error_stack::Result<(), StateReplicationError> {
-        if !self.runtime_state_placement_is_current(placement) {
-            return Err(Report::new(StateReplicationError::Superseded {
+        let superseded = || {
+            Report::new(StateReplicationError::Superseded {
                 placement: placement.clone(),
-            }));
+            })
+        };
+        let route = self
+            .inner
+            .state_replication_routing
+            .resolve(placement)
+            .ok_or_else(superseded)?;
+        if !route.is_current() {
+            return Err(superseded());
         }
         let Some(dispatcher) = self.inner.remote_dispatcher.load_full() else {
             return Ok(());
         };
-        let replicas = {
-            let execution = self
-                .inner
-                .executions
-                .get(&placement.domain)
-                .ok_or_else(|| {
-                    Report::new(StateReplicationError::Superseded {
+        let state = route.state().ok_or_else(superseded)?;
+        let replication = state.replication();
+        let assigned = route
+            .owned_replicas(dispatcher.local_node_id())
+            .ok_or_else(superseded)?;
+        let WasmCheckpointBoundary::Replicas(mut replicas) =
+            WasmCheckpointBoundary::assigned(assigned)
+        else {
+            return Ok(());
+        };
+        loop {
+            nervix_primitives::task::consume_budget().await;
+            let progressed = replication.progress_signal().notified();
+            tokio::pin!(progressed);
+            progressed.as_mut().enable();
+            let assigned = route
+                .owned_replicas(dispatcher.local_node_id())
+                .ok_or_else(superseded)?;
+            replicas = replicas
+                .followed(WasmCheckpointBoundary::assigned(assigned))
+                .map_err(|shrunk| {
+                    Report::new(StateReplicationError::ReplicaPlanShrunk {
                         placement: placement.clone(),
+                        lsm,
+                        required: shrunk.required,
+                        assigned: shrunk.assigned,
                     })
                 })?;
-            let node = execution
-                .revision
-                .nodes
-                .get(&NodeRef::new(placement.kind, placement.identifier.clone()))
-                .ok_or_else(|| {
-                    Report::new(StateReplicationError::Superseded {
-                        placement: placement.clone(),
-                    })
-                })?;
-            if !node.is_primary_on(dispatcher.local_node_id()) {
-                return Err(Report::new(StateReplicationError::Superseded {
+            let awaiting =
+                replication.with_progress(|progress| progress.awaiting(replicas.nodes(), lsm));
+            if awaiting.is_empty() {
+                return Ok(());
+            }
+            let now = Instant::now();
+            if now >= deadline {
+                return Err(Report::new(StateReplicationError::ReplicaConfirmation {
                     placement: placement.clone(),
+                    lsm,
+                    awaiting: AwaitedReplicas(awaiting),
                 }));
             }
-            node.replica_nodes()
-                .into_iter()
-                .cloned()
-                .collect::<BTreeSet<_>>()
-        };
-        if replicas.is_empty() {
-            return Ok(());
+            let recheck = now
+                .checked_add(WASM_CHECKPOINT_REPLAN_INTERVAL)
+                .assured("a fraction-of-a-second recheck stays within Instant")
+                .min(deadline);
+            nervix_primitives::select! {
+                _ = &mut progressed => {}
+                _ = sleep_until(recheck) => {}
+            }
         }
-        let lifecycle = self.replicated_branch_lifecycle(placement);
-        let replication = lifecycle.replication();
-        let every_replica_holds =
-            |progress: &ReplicaProgress| progress.holding(&replicas, lsm) == replicas.len();
-        let confirmed = nervix_primitives::time::timeout_at(
-            deadline,
-            replication.wait_until(every_replica_holds),
-        )
-        .await;
-        if confirmed.is_ok() {
-            return Ok(());
-        }
-        let awaiting = replication.with_progress(|progress| progress.awaiting(&replicas, lsm));
-        if awaiting.is_empty() {
-            return Ok(());
-        }
-        Err(Report::new(StateReplicationError::ReplicaConfirmation {
-            placement: placement.clone(),
-            lsm,
-            awaiting: AwaitedReplicas(awaiting),
-        }))
     }
 
     pub(super) async fn prepare_ownership_handoff_wasm_guests(
@@ -407,7 +412,11 @@ impl Runtime {
         );
         self.inner
             .replicated_wasm_processor_states
-            .insert(placement, state.clone());
+            .insert(placement.clone(), state.clone());
+        self.publish_state_replication_route(
+            &placement,
+            ReplicatedState::WasmProcessor(state.clone()),
+        );
         Ok(state)
     }
 }

@@ -79,7 +79,7 @@ tests = [
   "transport::isolation::stalled_peer_cannot_consume_unrelated_capacity_or_leak_reservations",
   "transport::multiple_peers_keep_remote_failure_classes_and_reject_invalid_authentication",
   "transport::network_disruption_respects_deadlines_and_repairs_authenticated_service",
-  "transport::production_transport_exchanges_typed_arrow_batch_over_simulated_tcp",
+  "transport::production_transport_exchanges_typed_arrow_batch_and_state_frames_over_simulated_tcp",
   "transport::relay::relay_reconciliation_and_cancellation_survive_lost_replies",
   "transport::relay::relay_restart_fences_unresolved_delivery_and_accepts_fresh_work",
 ]

@@ -1837,13 +1837,13 @@ async fn state_sync_request_returns_latest_snapshot_only_when_lsm_advances() {
         .replicated_deduplicator_state(placement.clone())
         .expect("deduplicator state should initialize");
     let initial = runtime
-        .handle_state_sync_request(&placement, None)
+        .capture_state_checkpoint(&placement, None)
         .await
         .expect("initial state sync request should succeed")
         .expect("an explicit empty checkpoint should be returned");
     assert_eq!(initial.lsm, 0);
     let unchanged_initial = runtime
-        .handle_state_sync_request(&placement, Some(0))
+        .capture_state_checkpoint(&placement, Some(0))
         .await
         .expect("state sync request at the initial LSM should succeed");
     assert!(unchanged_initial.is_none());
@@ -1854,7 +1854,7 @@ async fn state_sync_request_returns_latest_snapshot_only_when_lsm_advances() {
         Duration::from_secs(600),
     ));
     let unpublished = runtime
-        .handle_state_sync_request(&placement, Some(0))
+        .capture_state_checkpoint(&placement, Some(0))
         .await
         .expect("state sync request before the branch publishes should succeed");
     assert!(
@@ -1865,14 +1865,14 @@ async fn state_sync_request_returns_latest_snapshot_only_when_lsm_advances() {
     let lsm = state.generations.load().revision;
 
     let first = runtime
-        .handle_state_sync_request(&placement, Some(0))
+        .capture_state_checkpoint(&placement, Some(0))
         .await
         .expect("state sync request should succeed")
         .expect("snapshot should be returned");
     assert_eq!(first.lsm, lsm);
 
     let none = runtime
-        .handle_state_sync_request(&placement, Some(lsm))
+        .capture_state_checkpoint(&placement, Some(lsm))
         .await
         .expect("state sync request should succeed");
     assert!(none.is_none());
@@ -1937,7 +1937,7 @@ async fn an_owner_reads_storage_only_for_a_placement_it_holds_no_state_for() {
         .expect("a checkpoint of a branch without state persists");
 
     let answered = runtime
-        .handle_state_sync_request(&held, Some(0))
+        .capture_state_checkpoint(&held, Some(0))
         .await
         .expect("a held window answers");
     assert_eq!(
@@ -1945,13 +1945,13 @@ async fn an_owner_reads_storage_only_for_a_placement_it_holds_no_state_for() {
         "a placement with state is answered from that state, not from storage"
     );
     let stored = runtime
-        .handle_state_sync_request(&unheld, Some(1))
+        .capture_state_checkpoint(&unheld, Some(1))
         .await
         .expect("a stored checkpoint answers")
         .expect("storage holds a newer checkpoint of a placement without state");
     assert_eq!(stored.lsm, 3);
     let nothing_newer = runtime
-        .handle_state_sync_request(&unheld, Some(3))
+        .capture_state_checkpoint(&unheld, Some(3))
         .await
         .expect("a stored checkpoint answers");
     assert_eq!(nothing_newer, None);
@@ -1974,7 +1974,7 @@ async fn an_owner_reads_storage_only_for_a_placement_it_holds_no_state_for() {
         .persist_latest_snapshot(&lifecycle, 7, &[7])
         .expect("a newer lifecycle persists");
     let held_lifecycle = runtime
-        .handle_state_sync_request(&lifecycle, Some(2))
+        .capture_state_checkpoint(&lifecycle, Some(2))
         .await
         .expect("a held lifecycle answers");
     assert_eq!(

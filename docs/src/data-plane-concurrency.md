@@ -325,17 +325,27 @@ stable storage, and offers the placement's newest checkpoint to the replicas tha
 yet. On a replica, it carries the owner's announcements to the task that keeps the replica's copy
 current. It lives and ends with the state it replicates, so a WASM checkpoint or a Kafka offset
 commit offers its revision through the state it already holds, and no checkpoint, commit,
-offer enters a node-wide announcement or progress map. Incoming frames still resolve their
-placement in the existing state registry, and announcer steps still resolve the execution's
-replicas; those recurring lookups are debt owned by Typed Ratchet 15.
+offer enters a node-wide announcement or progress map. State installation publishes a resolved
+route containing the actual state handle and the entity's existing assignment slot. Frames select
+that route from one immutable publication, never from the state, execution or identity registries.
+An announcer retains its selected route for its whole lifetime and reads the current primary and
+replica set from the assignment slot.
+
+Branch-aggregate byte capture keeps the existing narrow `lifecycle_call` expectation for
+scanning the metrics inventory at an explicit snapshot boundary. State-route selection uses the
+installed state handle and retained assignment slot.
 
 A replica's progress only rises. Acknowledgements travel independently, and a replica acknowledges
 what it holds again whenever it is offered a checkpoint, so an acknowledgement of an older revision
 can arrive after a newer one; it leaves the newer one in place. Each wait for replicas registers for
 the next report before it reads the progress: a WASM checkpoint waiting for the replicas its
 boundary names, a Kafka offset commit waiting for its replica quorum, and a WASM state reset waiting
-for the branch lifecycle that authorizes its first checkpoint. A report that lands between the read
-and the wait therefore wakes the wait instead of leaving it to its deadline.
+for the branch lifecycle that authorizes its first checkpoint. The reset wait retains its route,
+follows the current replica assignment and rejects loss of identity or primary ownership. A
+checkpoint promised to replicas never confirms with fewer replicas, using the same typed boundary
+as a guest checkpoint. A 100-millisecond recheck observes assignment changes even without a replica
+report. A report that lands between the read and the wait therefore wakes the wait instead of
+leaving it to its deadline.
 
 One announcer at a time offers a placement's revision. An offer raises the revision the running
 announcer offers or, with none running, starts one. The announcer sends the revision to the
@@ -349,17 +359,24 @@ The announcement, the progress and the announcer's handover change together unde
 that belongs to the one placement and is never held across an await. The placement's originator,
 its one announcer and its replicas' acknowledgements are the only participants; unrelated
 placements never share it. An acknowledgement or an announcement names its placement, and the node
-that receives it finds the placement's state in the registry that already keeps that kind of state,
-through a borrowed read that creates nothing. On a replica, an announcement of a branch lifecycle or
-of the state of one of its branches finds the entity's lifecycle, which the entity's replica task
-retains. An announcement of a placement a node holds no state for wakes nothing.
+that receives it uses the handle resolved when that state was installed. The assignment and the
+placement must still name the same schema and guest-state generation. Cold replacement or teardown
+ends the route before withdrawing it, so a retained route never attaches to its successor, including
+when the successor has the same placement key. A frame already admitted through a borrowed state
+may finish on that exact state. On a replica, announcements of a lifecycle or one of its branches
+use the published entity lifecycle, which the entity's replica task retains. An announcement of an
+entity a node holds no state for wakes nothing and creates no state.
 
 A replica installs a branch checkpoint only while the branch lifecycle it holds names the branch.
 Each lifecycle checkpoint a node holds is decoded once into the set of branches it names, so
 installing a branch checkpoint looks its branch up in that set, through the lifecycle handle the
 replica task retains, instead of copying and decoding the lifecycle each time. Holding a replica's
-copy of a branch checkpoint compares revisions and moves the newer checkpoint in; its payload is
-never copied under the registry's guard.
+copy of a branch checkpoint compares revisions and moves the newer payload into an immutable
+publication owned by the entity lifecycle. Lifecycle pruning visits only that entity's passive
+copies without acquiring a registry shard. Catch-up steps and installation read the assignment
+slot the lifecycle retains. Cold assignment cleanup also discards superseded passive generations,
+while an already borrowed checkpoint can finish. Cold promotion consumes the passive copy;
+non-branch handoff snapshots remain in a cold recovery registry.
 
 ### Replica catch-up
 
@@ -821,8 +838,9 @@ Task handles remove recurring status, freeze, metric and checkpoint lookups. Sou
 registry reads during polling remain operation-specific debt for Typed Ratchet 03, alongside
 relay/channel selection. Typed Ratchet 04 owns materialized branch discovery and Typed Ratchet 05
 owns remaining remote acknowledgement/admission discovery. Replica catch-up retains the entity's
-lifecycle handle and its own record of each branch, and Typed Ratchet 15 owns state-replication
-frame, synchronization, listing and announcer registry reads.
+lifecycle handle, assignment slot and its own record of each branch. Replication frames,
+synchronization and listing requests select published state handles; announcers retain their route
+and assignment slot. Their runtime registries handle installation, replacement and teardown.
 Bounded retained placement progress remains explicitly documented. Testing fault selectors name
 their exact emitter, ingestor, domain/branch, checkpoint window or acknowledgement link and finite
 read/removal steps; they release map guards before a scenario-controlled pause. These contracts
@@ -1477,6 +1495,7 @@ A family of names means each member runs independently through the recipe.
 | Rust client attachment recovery (`crates/client-core/src/producer.rs`, `consumer.rs`) | `shuttle_close_fences_a_producer_restore_started_on_the_same_exchange` and `shuttle_close_fences_a_consumer_restore_started_on_the_same_exchange` race close against beginning restoration. `shuttle_close_fences_a_producer_restore_interrupted_by_another_loss` and `shuttle_close_fences_a_consumer_restore_interrupted_by_another_loss` race close against another loss while restoring. Each check uses the production lifecycle owner and requires the final phase to remain closed, with subsequent restoration refused. |
 | Relay branch presence (`src/runtime/relay_branch_presence_shuttle_tests.rs`) | `shuttle_an_observer_sees_every_owner_step_whole_and_never_an_older_one` races an owner at capacity one through admission, eviction, recreation and release against an observer that registers and reads throughout: every read is a membership the owner published whole and never older than the step the owner had finished. `shuttle_capacity_and_expiry_publish_whole_memberships` keeps every read within the owner's capacity and drops an expired branch from every read after the expiry. `shuttle_a_replaced_owner_never_publishes_over_its_successor` races a predecessor's admissions, expiry and release against its successor's claim: once the claim is visible no read holds a branch only the predecessor admitted, and the successor's branch survives the predecessor's release. |
 | Checkpoint replication (`src/runtime/kafka_offset_state.rs`, `src/runtime/state_replication/checkpoint_announcement_shuttle_tests.rs`) | `shuttle_a_replica_acknowledgement_racing_the_quorum_wait_is_never_missed` races a Kafka offset commit's replica quorum wait against its replica's acknowledgement: the wait registers before it reads, so it completes without its deadline, which a Shuttle timeout only reaches when a check triggers it. `shuttle_an_offer_racing_the_end_of_an_announcement_is_always_announced` races a second offer against the announcer of the first finding its replica caught up: the second revision is always announced and acknowledged. `shuttle_a_retired_replication_ends_its_announcer` ends an announcer whose replicated state goes away while its replica never acknowledges. `shuttle_an_announcement_racing_the_replica_wait_is_never_missed` races an owner's announcement against the replica task's synchronization and wait: an announcement that lands before the wait is kept as its permit. |
+| Resolved state replication (`src/runtime/state_replication/routing_shuttle_tests.rs`) | `shuttle_state_replacement_and_retirement_fence_frames_in_flight` exercises the production routing owner: a frame can complete only on its selected lifetime, never change a successor, and cannot enter a route after retirement. ArcSwap internals remain opaque; this check covers owner use and scheduling, with no new Nervix-owned memory-ordering claim. |
 | Replica catch-up announcements (`src/runtime/branch_lifecycle_state_shuttle_tests.rs`) | `shuttle_an_announced_branch_racing_the_replica_round_is_never_missed` races an owner's announcement of a branch checkpoint against the replica task taking the pending announcements and waiting for the next: the task takes it whether it lands before the take, between the take and the wait, or during the wait. `shuttle_announcements_of_one_branch_keep_the_newest_pending` delivers two announcements of one branch in either order while the task takes them: an older one never replaces a newer one still pending. |
 | Backup capture and restore publication (`src/runtime/backup_capture_fence.rs`, `crates/consensus/src/restore.rs`) | `shuttle_backup_cut_includes_pre_cut_branch_publication` requires every registered publication observed before a cut to be present in its view. `shuttle_restore_publication_and_handle_clear_cannot_cross_a_successors_start` drives the production applied-state authority guard against a new restore generation and START, so stale publication changes neither checkpoints nor runtime handles. Both register in the shared Shuttle inventory and run through its exploration, nondeterminism and replay contract. |
 | Domain clock (`src/runtime/domain_clock.rs`) | `shuttle_lifecycle_tests::concurrent_reads_of_one_installed_generation_never_decrease` checks the nondecreasing watermark; `a_clock_bound_to_a_replaced_generation_is_refused_by_revalidation` rejects a superseded generation; `readers_never_observe_an_installation_older_than_one_they_observed` prevents publication regression. `shuttle_delivery_sends_state_before_ticks_without_regressing_progress` explores the production observer and attachment delivery order across accepted ticks, same-generation unassignment and reassignment, and a generation change. `shuttle_an_attach_waiting_for_the_first_installation_observes_its_domains` races an attach's wait and lookup against the node's first installation of the committed domains and requires the lookup to find the domain and its clock. `a_logical_waiter_wakes_when_its_generation_stops`, `a_logical_waiter_wakes_when_its_generation_is_replaced`, `a_logical_waiter_wakes_when_its_domain_is_removed`, and `a_logical_waiter_wakes_when_a_replacement_mapping_reaches_its_deadline` cover each lifecycle wakeup. |

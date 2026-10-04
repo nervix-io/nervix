@@ -102,6 +102,10 @@ pub(in crate::runtime) struct RuntimeInner {
         Arc<DashMap<DomainName, ActiveDomainAlter, RandomState>>,
     pub(in crate::runtime) state_identities:
         DashMap<DomainNodeRef, SharedStateAssignment, RandomState>,
+    /// Immutable routes retain the state installed for each replication relationship. Frames and
+    /// announcers share those handles with the executing tasks until cold teardown retires them.
+    pub(in crate::runtime) state_replication_routing:
+        state_replication::routing::StateReplicationRouting,
     /// The endpoint task of every client ingestor this node executes, kept while the ingestor
     /// restarts so its producers stay attached.
     pub(in crate::runtime) client_ingestors:

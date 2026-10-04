@@ -1477,7 +1477,7 @@ client-wire-tls-cost output_dir="target/client-wire-tls-cost":
 # Measure runtime-state replication on the owner and on a replica: a Kafka offset commit its one
 # replica acknowledges, and the branch lifecycle check a replica makes before it installs each
 # branch checkpoint, for lifecycles of 16, 128 and 1,024 branches.
-bench-state-replication *args:
+bench-state-replication *args: build-web-console
     cargo bench --package nervix-server --bench state_replication --features benchmarks -- {{ args }}
 
 # Measure durable WASM guest-state checkpoints against unsynchronized writes of the same states. The

@@ -127,6 +127,7 @@ checks = [
   "runtime::state_replication::checkpoint_announcement::shuttle_tests::shuttle_a_retired_replication_ends_its_announcer",
   "runtime::state_replication::checkpoint_announcement::shuttle_tests::shuttle_an_announcement_racing_the_replica_wait_is_never_missed",
   "runtime::state_replication::checkpoint_announcement::shuttle_tests::shuttle_an_offer_racing_the_end_of_an_announcement_is_always_announced",
+  "runtime::state_replication::routing::shuttle_tests::shuttle_state_replacement_and_retirement_fence_frames_in_flight",
   "runtime::state_store::durability::shuttle_tests::shuttle_a_failed_synchronization_refuses_every_uncovered_writer",
   "runtime::state_store::durability::shuttle_tests::shuttle_an_abandoned_synchronization_frees_the_barrier",
   "runtime::state_store::durability::shuttle_tests::shuttle_concurrent_writers_are_reported_durable_only_after_a_covering_synchronization",

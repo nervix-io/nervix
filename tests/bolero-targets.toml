@@ -803,3 +803,18 @@ random_iterations = 256
 source = "examples/paced-simulation/rust/src/file_records_tests.rs"
 test = "file_records_tests::bolero_ledger_and_effect_records_read_back_whole"
 test_target = "lib"
+
+[[target]]
+case_timeout_seconds = 10
+corpus = "src/runtime/state_replication/__fuzz__/runtime__state_replication__routing__tests__bolero_frame_sequences_preserve_assignments_and_exact_state_lifetimes/corpus"
+domain_version = 1
+features = []
+id = "state-replication-routing"
+invariant = "Frame acknowledgements reach only the current installed state; replacement, identity publication and teardown never attach a retained route to its successor, across interleaved entities and branches."
+manifest = "Cargo.toml"
+max_input_bytes = 64
+package = "nervix-server"
+random_iterations = 256
+source = "src/runtime/state_replication/routing_tests.rs"
+test = "runtime::state_replication::routing::tests::bolero_frame_sequences_preserve_assignments_and_exact_state_lifetimes"
+test_target = "lib"

@@ -336,7 +336,7 @@ impl Runtime {
             identifier: branch_lru.identifier.clone(),
             branch_key: step.branch.clone(),
         };
-        if !self.runtime_state_placement_is_current(&placement) {
+        if !lifecycle.placement_is_current(&placement) {
             return StepOutcome::Stale;
         }
         let held = match step.held {
@@ -346,7 +346,7 @@ impl Runtime {
                     nervix::lifecycle_call,
                     "a replica task reads what this node holds of a branch once, when it first \
                      looks at the branch, and keeps that record itself from then on",
-                    self.held_branch_checkpoint(&placement)
+                    self.held_branch_checkpoint(&placement, lifecycle)
                 );
                 match held {
                     Ok(held) => held,

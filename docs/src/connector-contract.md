@@ -743,6 +743,11 @@ sequenceDiagram
   committed partition schedule. The leader observes partition topology and commits assignments;
   executing sources follow that schedule. Offset snapshots can lag a crash, so this mode remains
   at least once. [Kafka ingestion](./ingestors.md#kafka) defines the recovery details.
+  Replica ACKs reach that installed offset state through a resolved, retired-on-ending route and
+  the existing assignment publication. The host's announcer retains its route and follows replica
+  assignment changes without reading node-wide state or execution registries. The Kafka commit and
+  acknowledgement boundary remains the state's highest durable replica progress.
+
 - **Pulsar client.** The Pulsar source and sink build on Nervix's fork of `pulsar-rs`,
   `nervix-io/pulsar-rs`, because the released crate discards `CommandConnected`. The fork keeps each
   connection's announced `maxMessageSize`, refuses a message whose serialized metadata and payload

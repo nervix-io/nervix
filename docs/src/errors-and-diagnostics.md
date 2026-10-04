@@ -880,3 +880,12 @@ Reporting a different error without selecting a new retry preserves the active r
 renders error, backoff and remaining wait from one immutable observation. A failed record obtains
 its prepared message-error route from its task's retained routing publication and preserves that
 plan while its VM program and delivery execute.
+
+## Replication Routing
+
+Replication frame routing treats an absent state, an ended route or a replaced assignment as an
+ordinary non-admission: it creates no state and records no replica progress. Synchronization
+request admission retains the existing rejected-assignment outcome. A WASM reset lifecycle wait
+reports the existing typed superseded-state failure when its retained assignment loses identity
+or primary ownership, the existing replica-plan-shrunk failure when its promised boundary loses
+replicas, and the existing replica-confirmation failure when its deadline expires.

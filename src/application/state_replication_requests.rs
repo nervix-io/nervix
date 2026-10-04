@@ -39,19 +39,19 @@ impl SessionServiceImpl {
                             };
                         }
                     };
-                    if !service
+                    let Some(admitted) = service
                         .inner
                         .runtime
-                        .runtime_state_placement_is_assigned_locally(&placement)
-                    {
+                        .resolve_state_replication_request(&placement)
+                    else {
                         return StateSyncResponse {
                             result: Err(RemoteOperationFailure::rejected(subject)),
                         };
-                    }
+                    };
                     let snapshot = service
                         .inner
                         .runtime
-                        .handle_state_sync_request(&placement, request.after_lsm)
+                        .answer_state_sync_request(admitted, request.after_lsm)
                         .await
                         .map_err(|error| error.current_context().as_remote_failure(subject));
                     StateSyncResponse {
@@ -84,19 +84,19 @@ impl SessionServiceImpl {
                             };
                         }
                     };
-                    if !service
+                    let Some(admitted) = service
                         .inner
                         .runtime
-                        .runtime_state_placement_is_assigned_locally(&placement)
-                    {
+                        .resolve_state_replication_request(&placement)
+                    else {
                         return BranchCheckpointListingResponse {
                             result: Err(RemoteOperationFailure::rejected(subject)),
                         };
-                    }
+                    };
                     let listing = service
                         .inner
                         .runtime
-                        .handle_branch_checkpoint_listing(&placement, request.after);
+                        .answer_branch_checkpoint_listing(admitted, request.after);
                     BranchCheckpointListingResponse {
                         result: Ok(listing),
                     }

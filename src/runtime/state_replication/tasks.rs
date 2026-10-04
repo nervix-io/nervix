@@ -614,6 +614,9 @@ impl Runtime {
         self.inner
             .state_identities
             .insert(node.clone(), slot.clone());
+        self.inner
+            .state_replication_routing
+            .register_assignment(node, &slot);
         slot
     }
 
@@ -657,7 +660,8 @@ impl Runtime {
                         schema_fingerprint: Self::state_schema_fingerprint(node, start_version),
                         wasm_state_generations: node.wasm_state_generations().cloned(),
                     },
-                    checkpoint_owners: Some(WasmCheckpointOwners {
+                    checkpoint_owners: Some(CheckpointOwners {
+                        primary: node.execution_node().cloned(),
                         executors,
                         replicas,
                     }),
@@ -771,6 +775,7 @@ impl Runtime {
                 slot.store(None);
             }
             self.inner.state_identities.remove(&key);
+            self.inner.state_replication_routing.withdraw_entity(&key);
         }
     }
 
@@ -861,30 +866,20 @@ impl Runtime {
         &self,
         placement: &RuntimeStatePlacement,
     ) -> bool {
-        let node = DomainNodeRef::node_in(
-            placement.domain.clone(),
-            placement.kind,
-            placement.identifier.clone(),
-        );
-        let branch = placement.branch_key.as_ref().map(BranchKey::fingerprint);
-        let Some(identity) = nervix_primitives::expect_lint!(
-            nervix::sync_acquisition,
-            "Typed Ratchet 15 https://app.clickup.com/t/86bca1web: retain the current assignment \
-             generation for frame admission",
-            self.inner.state_identities.get(&node)
-        ) else {
+        let Some(slot) = self.inner.state_replication_routing.assignment(placement) else {
             return false;
         };
-        let Some(assignment) = identity.load_full() else {
+        let Some(assignment) = slot.load_full() else {
             return false;
         };
-        assignment.identity.names(placement.state, branch.as_ref())
+        assignment.names(placement)
     }
 
     pub(in crate::runtime) fn purge_stale_runtime_state(
         &self,
         domain: &DomainName,
     ) -> Result<(), error_stack::Report<RuntimePersistenceError>> {
+        self.inner.state_replication_routing.purge_stale(domain);
         let stale_deduplicators = self
             .inner
             .replicated_deduplicator_states
@@ -1005,6 +1000,7 @@ impl Runtime {
     }
 
     pub(in crate::runtime) fn clear_runtime_state_for_domain(&self, domain: &DomainName) {
+        self.inner.state_replication_routing.retire_domain(domain);
         let placements = self
             .inner
             .replicated_deduplicator_states
