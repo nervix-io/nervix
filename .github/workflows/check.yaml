@@ -173,7 +173,6 @@ jobs:
     timeout-minutes: 45
     permissions:
       contents: read
-      id-token: write
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -242,20 +241,6 @@ jobs:
         run: just coverage-deadlock
         env:
           NERVIX_DEADLOCK_PROBE_ARTIFACTS: target/diagnostic-evidence/probes
-
-      - name: Install verified Codecov CLI
-        id: codecov-cli
-        uses: ./.github/actions/setup-codecov
-
-      - name: Upload diagnostic coverage to Codecov
-        uses: codecov/codecov-action@v5
-        with:
-          binary: ${{ steps.codecov-cli.outputs.binary }}
-          disable_search: true
-          fail_ci_if_error: true
-          files: target/deadlock.lcov
-          flags: diagnostic-evidence
-          use_oidc: true
 
       - name: Upload diagnostic evidence
         if: always()
@@ -633,12 +618,12 @@ jobs:
     timeout-minutes: 20
     permissions:
       contents: read
-      id-token: write
+      pull-requests: write
     steps:
       - name: Checkout
         uses: actions/checkout@v4
         with:
-          fetch-depth: 2
+          fetch-depth: 0
 
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@1.99
@@ -675,7 +660,7 @@ jobs:
           name: coverage-shuttle
           path: coverage-inputs/shuttle
 
-      - name: Merge coverage and check CRAP
+      - name: Merge coverage
         run: |
           lcov --add-tracefile coverage-inputs/tests/lcov-workspace.info \
             --add-tracefile coverage-inputs/scenarios/lcov-workspace.info \
@@ -687,20 +672,20 @@ jobs:
             lcov --add-tracefile lcov-workspace.info --add-tracefile "$report" --output-file lcov-workspace.info
             lcov --add-tracefile lcov.info --add-tracefile "$report" --output-file lcov.info
           done < <(find coverage-inputs/native-extras -path '*/ordinary/*/lcov.info' -o -name python.lcov)
-          just check-coverage
 
-      - name: Install verified Codecov CLI
-        id: codecov-cli
-        uses: ./.github/actions/setup-codecov
+      - name: Report patch line coverage
+        if: always()
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: just coverage-patch "$BASE_SHA" lcov-workspace.info --repo "$GH_REPO" --pr "$PR_NUMBER" --pr-head "$PR_HEAD_SHA"
 
-      - name: Upload coverage to Codecov
-        uses: codecov/codecov-action@v5
-        with:
-          binary: ${{ steps.codecov-cli.outputs.binary }}
-          disable_search: true
-          fail_ci_if_error: true
-          files: ./lcov-workspace.info
-          use_oidc: true
+      - name: Check CRAP
+        run: just check-coverage
 
       - name: Upload merged coverage
         if: always()
@@ -710,6 +695,7 @@ jobs:
           path: |
             lcov-workspace.info
             lcov.info
+            target/patch-coverage.md
           if-no-files-found: warn
 
   # The cross-language client probes: C, C++, Python, Java and Ruby over the shared Rust binding,
@@ -994,6 +980,9 @@ jobs:
       - name: Setup uv for runner coverage
         uses: astral-sh/setup-uv@v6
 
+      - name: Patch coverage reporter
+        run: just coverage-patch-runner
+
       # The collector that the steps below run their checks through, including its refusal of
       # every incomplete collection.
       - name: Native coverage collector
@@ -1054,6 +1043,7 @@ jobs:
             target/typed-ratchet/python.lcov
             target/model-coverage/python.lcov
             target/primitive-boundary/python.lcov
+            target/patch-coverage/python.lcov
             target/typed-ratchet/cache-qualification/**/qualification.json
           if-no-files-found: warn
 

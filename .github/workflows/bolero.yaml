@@ -109,7 +109,6 @@ jobs:
       CARGO_BUILD_JOBS: "1"
     permissions:
       contents: read
-      id-token: write
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -198,26 +197,14 @@ jobs:
         run: |
           just coverage-bolero 30
 
-      - name: Install verified Codecov CLI
-        id: codecov-cli
-        uses: ./.github/actions/setup-codecov
-
-      - name: Upload runner coverage to Codecov
-        uses: codecov/codecov-action@v5
-        with:
-          binary: ${{ steps.codecov-cli.outputs.binary }}
-          disable_search: true
-          fail_ci_if_error: true
-          files: target/bolero/python.lcov
-          flags: bolero
-          use_oidc: true
-
       - name: Upload all fuzz and qualification artifacts
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: bolero-runs
-          path: target/bolero/runs/
+          path: |
+            target/bolero/runs/
+            target/bolero/python.lcov
           if-no-files-found: warn
 
   bolero-gate:

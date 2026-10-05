@@ -586,9 +586,44 @@ just test-native-coverage
 
 The unit and scenario coverage recipes export `lcov-workspace.info` with every workspace package
 selected. CI merges those reports with the native extra reports, checks complexity against that
-complete report, and uploads it to Codecov. The separate `lcov.info` report selects the server,
+complete report, and retains it as the `coverage-merged` artifact. The separate `lcov.info` report selects the server,
 CLI and console for focused inspection; it does not replace the workspace export.
 Run the same complexity check locally with `just check-coverage <merged-workspace-report>`.
+
+### Patch line coverage
+
+CI runs `just coverage-patch` against the merged ordinary workspace report and updates one PR
+comment with patch line coverage, project line coverage, per-file totals and uncovered added line
+numbers. The comment names the merge base and tested commit and links to the workflow artifacts.
+Patch coverage is advisory: no percentage is a build gate, and a missing report or a failed comment
+publication does not fail CI. The independent complexity check retains its own verdict.
+
+Run the same calculation manually after collecting coverage for the committed source revision:
+
+```bash
+just coverage-patch origin/main lcov-workspace.info
+just coverage-patch origin/main lcov-workspace.info --pr 123 --repo nervix-io/nervix
+```
+
+The first command prints the Markdown report and writes `target/patch-coverage.md`; the second also
+creates or updates the authenticated publisher's marked PR comment through `gh`. Additional
+`--report <path>` arguments union line hits from multiple LCOV reports. Coverage must describe the
+tested commit's line coordinates. For reports collected in another checkout, use
+`--source-root <original-checkout-path>` to remap absolute source paths explicitly.
+
+The command compares the base's merge base to `HEAD`, or to `--head <commit>`. Only added lines with
+LCOV `DA` counters enter its denominator; repeated records count each file/line once, and a hit in
+any report covers the line. Deleted lines, unchanged lines and non-executable additions do not
+enter it. A changed file absent from LCOV is shown as unavailable. An empty measured patch has no
+percentage. Project coverage describes the tracked files present in the supplied reports; no
+baseline project report is assumed.
+
+CI compares the PR base to the tested synthetic merge commit, so the diff uses the same line
+coordinates as the collected coverage. It passes the PR head separately with `--pr-head` and checks
+that the PR is still open at that head before publication. Fork PR tokens may lack comment access;
+the local report, workflow summary and artifact remain available. `just test-patch-coverage`
+exercises accounting and publication, and `just coverage-patch-runner` exports the reporter's
+measured Python coverage for CI.
 
 ### The scenario suite's execution budget
 
