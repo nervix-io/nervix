@@ -268,7 +268,6 @@ jobs:
           flags: diagnostic-evidence
           url: https://codecov.io
           use_oidc: true
-          url: https://codecov.io
 
       - name: Upload diagnostic evidence
         if: always()
@@ -715,7 +714,6 @@ jobs:
           files: ./lcov-workspace.info
           url: https://codecov.io
           use_oidc: true
-          url: https://codecov.io
 
       - name: Upload merged coverage
         if: always()
