@@ -609,7 +609,11 @@ The first command prints the Markdown report and writes `target/patch-coverage.m
 creates or updates the authenticated publisher's marked PR comment through `gh`. Additional
 `--report <path>` arguments union line hits from multiple LCOV reports. Coverage must describe the
 tested commit's line coordinates. For reports collected in another checkout, use
-`--source-root <original-checkout-path>` to remap absolute source paths explicitly.
+`--source-root <original-checkout-path>` to remap absolute source paths explicitly. Repeat it when
+reports come from multiple source roots. CI producers retain `coverage-source-root.txt` beside
+their reports, and the reporter receives each producer's metadata with `--source-root-file`.
+This accounts for the different checkout paths of Blacksmith and GitHub-hosted runners without
+guessing a file's origin. The merged artifact retains those source-root files for manual reuse.
 
 The command compares the base's merge base to `HEAD`, or to `--head <commit>`. Only added lines with
 LCOV `DA` counters enter its denominator; repeated records count each file/line once, and a hit in

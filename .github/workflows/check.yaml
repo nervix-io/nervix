@@ -369,6 +369,7 @@ jobs:
 
       - name: Tests coverage
         run: |
+          pwd > coverage-source-root.txt
           just toolchains-install
           just test-coverage
 
@@ -380,6 +381,7 @@ jobs:
           path: |
             lcov-workspace.info
             lcov.info
+            coverage-source-root.txt
           if-no-files-found: warn
 
       - name: Publish runner load
@@ -542,6 +544,7 @@ jobs:
 
       - name: Scenario coverage
         run: |
+          pwd > coverage-source-root.txt
           just toolchains-install
           just test-scenarios-coverage
 
@@ -554,6 +557,7 @@ jobs:
           path: |
             lcov-workspace.info
             lcov.info
+            coverage-source-root.txt
           if-no-files-found: warn
 
       - name: Publish runner load
@@ -682,7 +686,12 @@ jobs:
           PR_NUMBER: ${{ github.event.pull_request.number }}
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
           PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
-        run: just coverage-patch "$BASE_SHA" lcov-workspace.info --repo "$GH_REPO" --pr "$PR_NUMBER" --pr-head "$PR_HEAD_SHA"
+        run: |
+          just coverage-patch "$BASE_SHA" lcov-workspace.info \
+            --repo "$GH_REPO" --pr "$PR_NUMBER" --pr-head "$PR_HEAD_SHA" \
+            --source-root-file coverage-inputs/tests/coverage-source-root.txt \
+            --source-root-file coverage-inputs/scenarios/coverage-source-root.txt \
+            --source-root-file coverage-inputs/native-extras/coverage-source-root.txt
 
       - name: Check CRAP
         run: just check-coverage
@@ -697,6 +706,7 @@ jobs:
             lcov-workspace.info
             lcov.info
             target/patch-coverage.md
+            coverage-inputs/**/coverage-source-root.txt
           if-no-files-found: warn
 
   # The cross-language client probes: C, C++, Python, Java and Ruby over the shared Rust binding,
@@ -982,7 +992,9 @@ jobs:
         uses: astral-sh/setup-uv@v6
 
       - name: Patch coverage reporter
-        run: just coverage-patch-runner
+        run: |
+          just coverage-patch-runner
+          pwd > target/coverage-source-root.txt
 
       # The collector that the steps below run their checks through, including its refusal of
       # every incomplete collection.
@@ -1045,6 +1057,7 @@ jobs:
             target/model-coverage/python.lcov
             target/primitive-boundary/python.lcov
             target/patch-coverage/python.lcov
+            target/coverage-source-root.txt
             target/typed-ratchet/cache-qualification/**/qualification.json
           if-no-files-found: warn
 

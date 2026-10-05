@@ -83,18 +83,21 @@ class Coverage:
     lines: dict[str, dict[int, int]]
 
     @classmethod
-    def load(cls, root: Path, reports: Sequence[Path], source_root: Path | None = None) -> Coverage:
+    def load(cls, root: Path, reports: Sequence[Path], source_roots: Sequence[Path] | None = None) -> Coverage:
         tracked = set(command(["git", "ls-files", "-z"], root=root).split("\0"))
-        source_root = (source_root or root).resolve()
+        origins = sorted({path.resolve() for path in source_roots or [root]}, key=lambda path: len(path.parts), reverse=True)
         merged: dict[str, dict[int, int]] = {}
         for report in reports:
             with (root / report).open(encoding="utf-8") as content:
                 for record in lcov_records(content):
                     path = Path(record.source)
                     if path.is_absolute():
-                        if not path.is_relative_to(source_root):
+                        for origin in origins:
+                            if path.is_relative_to(origin):
+                                path = path.relative_to(origin)
+                                break
+                        else:
                             continue
-                        path = path.relative_to(source_root)
                     source = path.as_posix()
                     if source not in tracked:
                         continue
@@ -224,7 +227,8 @@ def main(arguments: Sequence[str] | None = None, *, root: Path = ROOT) -> int:
     parser.add_argument("--base", default="origin/main")
     parser.add_argument("--head", default="HEAD")
     parser.add_argument("--report", type=Path, action="append")
-    parser.add_argument("--source-root", type=Path)
+    parser.add_argument("--source-root", type=Path, action="append")
+    parser.add_argument("--source-root-file", type=Path, action="append", help="producer artifact containing its absolute checkout path; repeat for each producer")
     parser.add_argument("--output", type=Path, default=Path("target/patch-coverage.md"))
     parser.add_argument("--repo", default=os.environ.get("GITHUB_REPOSITORY"))
     parser.add_argument("--pr", type=int)
@@ -232,7 +236,14 @@ def main(arguments: Sequence[str] | None = None, *, root: Path = ROOT) -> int:
     options = parser.parse_args(arguments)
     try:
         patch = Patch.load(root, options.base, options.head)
-        coverage = Coverage.load(root, options.report or [root / "lcov-workspace.info"], options.source_root)
+        origins = options.source_root or []
+        for metadata in options.source_root_file or []:
+            value = (root / metadata).read_text(encoding="utf-8").strip()
+            origin = Path(value)
+            if not value or not origin.is_absolute():
+                raise ValueError(f"{metadata} must contain an absolute coverage source root")
+            origins.append(origin)
+        coverage = Coverage.load(root, options.report or [root / "lcov-workspace.info"], origins)
         measured = coverage.measure(patch)
         repo = options.repo
         body = measured.markdown(repo)

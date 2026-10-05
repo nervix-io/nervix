@@ -5,6 +5,7 @@
 /.coverage
 **/__fuzz__/**/crashes/
 /lcov.info
+/coverage-source-root.txt
 mutants.out*
 .nervix-db
 .nervix-deps

@@ -46,7 +46,8 @@ class PatchCoverageTests(unittest.TestCase):
 
     def measure(self, *reports: Path, source_root: Path | None = None):
         patch = patch_coverage.Patch.load(self.root, self.base, "HEAD")
-        return patch_coverage.Coverage.load(self.root, reports, source_root).measure(patch)
+        roots = [source_root] if source_root is not None else None
+        return patch_coverage.Coverage.load(self.root, reports, roots).measure(patch)
 
     def test_only_added_executable_lines_count_and_repeated_reports_union_hits(self) -> None:
         self.source.write_text("def answer():\n    result = 2\n\n    return result\n")
@@ -131,6 +132,27 @@ class PatchCoverageTests(unittest.TestCase):
         self.assertEqual(measured.project_executable, 2)
         self.assertIsNone(self.measure(report).files[0].executable)
 
+    def test_artifact_source_roots_union_reports_from_distinct_ci_workspaces(self) -> None:
+        self.source.write_text("def answer():\n    result = 2\n    return result\n")
+        self.commit()
+        unit = self.report("unit.lcov", "/unit/_work/nervix/nervix/src/sample.py", {1: 1, 2: 1, 3: 0})
+        scenario = self.report("scenario.lcov", "/scenario/work/nervix/nervix/src/sample.py", {1: 1, 2: 0, 3: 1})
+        unit_root = self.root / "unit-source-root.txt"
+        unit_root.write_text("/unit/_work/nervix/nervix\n")
+        scenario_root = self.root / "scenario-source-root.txt"
+        scenario_root.write_text("/scenario/work/nervix/nervix\n")
+        output = self.root / "target" / "patch.md"
+        with redirect_stdout(io.StringIO()):
+            status = patch_coverage.main(
+                ["--base", self.base, "--report", str(unit), "--report", str(scenario),
+                 "--source-root-file", str(unit_root), "--source-root-file", str(scenario_root),
+                 "--output", str(output)],
+                root=self.root,
+            )
+        self.assertEqual(status, 0)
+        self.assertIn("100.00%", output.read_text())
+        self.assertIn("2 / 2", output.read_text())
+
     def test_missing_and_malformed_reports_leave_the_command_successful_with_diagnostics(self) -> None:
         malformed = self.root / "broken.lcov"
         malformed.write_text("SF:src/sample.py\nDA:2,no-hits\nend_of_record\n")
@@ -141,6 +163,17 @@ class PatchCoverageTests(unittest.TestCase):
                 )
                 self.assertEqual(status, 0)
                 self.assertIn("patch coverage:", errors.getvalue())
+
+    def test_invalid_source_root_metadata_is_advisory_and_never_supplies_a_default(self) -> None:
+        metadata = self.root / "source-root.txt"
+        for value in ("", "relative/workspace"):
+            metadata.write_text(value)
+            with self.subTest(value=value), redirect_stderr(io.StringIO()) as errors:
+                status = patch_coverage.main(
+                    ["--base", self.base, "--source-root-file", str(metadata)], root=self.root
+                )
+                self.assertEqual(status, 0)
+                self.assertIn("must contain an absolute coverage source root", errors.getvalue())
 
     def test_zero_coverage_succeeds_and_retains_a_markdown_report_and_step_summary(self) -> None:
         self.source.write_text("def answer():\n    return 2\n")
@@ -242,13 +275,16 @@ class WorkflowTests(unittest.TestCase):
         report = step_section(coverage, "Report patch line coverage")
         self.assertIn("continue-on-error: true", report)
         self.assertIn("if: always()", report)
-        self.assertIn("run: just coverage-patch", report)
+        self.assertIn('just coverage-patch "$BASE_SHA"', report)
         self.assertIn('--pr-head "$PR_HEAD_SHA"', report)
         self.assertIn("pull-requests: write", coverage)
         self.assertIn("fetch-depth: 0", coverage)
         self.assertIn("target/patch-coverage.md", coverage)
+        self.assertIn("--source-root-file coverage-inputs/tests/coverage-source-root.txt", report)
+        self.assertIn("--source-root-file coverage-inputs/scenarios/coverage-source-root.txt", report)
+        self.assertIn("--source-root-file coverage-inputs/native-extras/coverage-source-root.txt", report)
         extras = job_section(workflow, "extra-tests")
-        self.assertIn("run: just coverage-patch-runner", extras)
+        self.assertIn("just coverage-patch-runner", step_section(extras, "Patch coverage reporter"))
         self.assertIn("target/patch-coverage/python.lcov", extras)
 
 
