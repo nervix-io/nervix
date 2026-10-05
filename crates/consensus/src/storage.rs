@@ -122,7 +122,7 @@ const KEYSPACE_NAMES: [&str; 4] = [
 #[derive(Debug, Clone, Archive, Serialize, Deserialize)]
 #[repr(u8)]
 enum StateEncoding {
-    RestoreCounts = 7,
+    RestoredLifecycle = 8,
 }
 
 #[derive(Debug)]
@@ -177,7 +177,7 @@ impl TryFrom<StateMetadataRecord> for StateMetadata {
 impl From<&StateMachineData> for StateMetadata {
     fn from(state: &StateMachineData) -> Self {
         Self {
-            encoding: StateEncoding::RestoreCounts,
+            encoding: StateEncoding::RestoredLifecycle,
             last_applied_log_id: state.last_applied_log_id.clone(),
             last_membership: state.last_membership.clone(),
             runtime_revision: state.runtime_revision,
@@ -206,7 +206,7 @@ impl StateMetadata {
 impl StateMachineData {
     fn load(sm: &Keyspace, metadata: StateMetadata) -> io::Result<Self> {
         let StateMetadata {
-            encoding: StateEncoding::RestoreCounts,
+            encoding: StateEncoding::RestoredLifecycle,
             last_applied_log_id,
             last_membership,
             runtime_revision,
@@ -608,6 +608,13 @@ impl GenerationSeal {
 impl StoreInner {
     pub(super) fn state(&self) -> StateMachineData {
         self.state_machine.read().clone()
+    }
+
+    pub(super) fn with_restore_state_reclamation<T>(
+        &self,
+        reclaim: impl FnOnce(&crate::RestoreStateRetention<'_>) -> T,
+    ) -> T {
+        crate::restore::with_restore_state_reclamation(&self.state_machine, reclaim)
     }
 
     pub(super) fn with_restore_state_installation<T>(

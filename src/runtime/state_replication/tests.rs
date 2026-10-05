@@ -826,8 +826,12 @@ fn forced_recovery_replay_preserves_source_offsets_and_branch_processor_state() 
         let db = Database::builder(dir.path())
             .open()
             .expect("database should open");
-        let store = RuntimeStateStore::from_database(db, Executor::default())
-            .expect("state store should open");
+        let store = RuntimeStateStore::from_database(
+            db,
+            Executor::default(),
+            crate::runtime::DEFAULT_RESTORE_STAGING_MAX_BYTES,
+        )
+        .expect("state store should open");
         store
             .persist_forced_recovery_preparation(
                 &kafka_recovery,
@@ -887,8 +891,12 @@ fn forced_recovery_replay_preserves_source_offsets_and_branch_processor_state() 
         let db = Database::builder(dir.path())
             .open()
             .expect("database should reopen");
-        let store = RuntimeStateStore::from_database(db, Executor::default())
-            .expect("state store should reopen");
+        let store = RuntimeStateStore::from_database(
+            db,
+            Executor::default(),
+            crate::runtime::DEFAULT_RESTORE_STAGING_MAX_BYTES,
+        )
+        .expect("state store should reopen");
         let replayed_kafka_recovery = ForcedRuntimeStateRecoveryTransition {
             destination_incarnation: ClusterNodeIncarnation::new(43),
             target_schedule_fingerprint: [10; 32],
@@ -985,8 +993,12 @@ fn forced_recovery_refuses_missing_or_stale_preparation_without_changing_state()
     let db = Database::builder(dir.path())
         .open()
         .expect("database should open");
-    let store =
-        RuntimeStateStore::from_database(db, Executor::default()).expect("state store should open");
+    let store = RuntimeStateStore::from_database(
+        db,
+        Executor::default(),
+        crate::runtime::DEFAULT_RESTORE_STAGING_MAX_BYTES,
+    )
+    .expect("state store should open");
     let domain = domain("default");
     let source = named::<ClusterNodeName>("node-1");
     let destination = named::<ClusterNodeName>("node-2");
@@ -1118,8 +1130,12 @@ fn runtime_state_store_persists_latest_snapshot_with_monotonic_lsm() {
     let db = Database::builder(dir.path())
         .open()
         .expect("db should open");
-    let store =
-        RuntimeStateStore::from_database(db, Executor::default()).expect("state store should open");
+    let store = RuntimeStateStore::from_database(
+        db,
+        Executor::default(),
+        crate::runtime::DEFAULT_RESTORE_STAGING_MAX_BYTES,
+    )
+    .expect("state store should open");
     let placement = RuntimeStatePlacement {
         domain: domain("default"),
         state: RuntimeState::Deduplicator {
@@ -1297,7 +1313,7 @@ async fn materialized_relay_snapshot_task_owns_persistence() {
             None,
         )
         .expect("materialized relay state should initialize");
-    let state = assignment
+    let mut state = assignment
         .originator
         .take()
         .expect("branch-local state should grant authoritative access");
@@ -1312,7 +1328,7 @@ async fn materialized_relay_snapshot_task_owns_persistence() {
     )]);
 
     runtime
-        .apply_materialized_stream_records(&state, &None, [record])
+        .apply_materialized_stream_records(&mut state, &None, [record])
         .await
         .expect("the materialized state assignment should remain authoritative");
 
@@ -1577,8 +1593,12 @@ fn runtime_state_store_purges_only_stale_schema_fingerprints() {
     let db = Database::builder(dir.path())
         .open()
         .expect("db should open");
-    let store =
-        RuntimeStateStore::from_database(db, Executor::default()).expect("state store should open");
+    let store = RuntimeStateStore::from_database(
+        db,
+        Executor::default(),
+        crate::runtime::DEFAULT_RESTORE_STAGING_MAX_BYTES,
+    )
+    .expect("state store should open");
     let base = RuntimeStatePlacement {
         domain: domain("default"),
         state: RuntimeState::Deduplicator {
@@ -1640,8 +1660,12 @@ fn runtime_state_store_purges_only_the_requested_entity() {
     let db = Database::builder(dir.path())
         .open()
         .expect("db should open");
-    let store =
-        RuntimeStateStore::from_database(db, Executor::default()).expect("state store should open");
+    let store = RuntimeStateStore::from_database(
+        db,
+        Executor::default(),
+        crate::runtime::DEFAULT_RESTORE_STAGING_MAX_BYTES,
+    )
+    .expect("state store should open");
     let removed = RuntimeStatePlacement {
         domain: domain("default"),
         state: RuntimeState::MaterializedRelay {
@@ -1693,8 +1717,12 @@ fn kafka_offset_state_roundtrips_partition_schedule_through_fjall() {
     let db = Database::builder(dir.path())
         .open()
         .expect("db should open");
-    let store =
-        RuntimeStateStore::from_database(db, Executor::default()).expect("state store should open");
+    let store = RuntimeStateStore::from_database(
+        db,
+        Executor::default(),
+        crate::runtime::DEFAULT_RESTORE_STAGING_MAX_BYTES,
+    )
+    .expect("state store should open");
     let placement = RuntimeStatePlacement {
         domain: domain("default"),
         state: RuntimeState::KafkaOffset,

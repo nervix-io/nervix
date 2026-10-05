@@ -163,10 +163,11 @@ pub use resource::{
     ResourceVersionResolutionError, ResourceVersionStatus,
 };
 pub use resource_binding::ResourceRebinding;
+/// Restore policy, fenced state installation and lifecycle reporting.
 pub use restore::{
-    ExistingUserPolicy, Restore, RestoreArchive, RestoreMode, RestoreReport, RestoreScope,
-    RestoreState, RestoreStateAuthority, RestoreStep, RestoreStepOutcome, RestoreStepReport,
-    RestoredDomain, RestoredUsers,
+    ExistingUserPolicy, Restore, RestoreArchive, RestoreLifecycle, RestoreMode, RestoreReport,
+    RestoreScope, RestoreState, RestoreStateAuthority, RestoreStep, RestoreStepOutcome,
+    RestoreStepReport, RestoredDomain, RestoredUsers,
 };
 pub use schema::{
     AlterSchema, AlterSchemaError, AlterSchemaOperation, AlterWireSchema, AlterWireSchemaError,

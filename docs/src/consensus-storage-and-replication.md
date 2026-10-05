@@ -99,6 +99,20 @@ without inferring them from a client timeout. These records contain control-plan
 attribution, and non-sensitive diagnostics only. Runtime payloads, acknowledgement maps, connector
 buffers, and handoff bytes remain volatile data-plane state.
 
+### Restore Checkpoint Reclamation
+
+Restore checkpoint reclamation borrows the applied state through `with_restore_state_reclamation`
+and retains its read guard across node-local bounded storage deletion. Its caller takes the
+checkpoint installation barrier after this guard, in the same order as staging and publication.
+The retention view keeps the current generation of every applying restore and any generation
+ahead of the applied log; without an applied log it keeps all generations. Leadership and lease
+expiry alone do not end an applying execution's retry lifetime. Terminal, expired, missing or
+superseded executions no longer retain an applied unpublished generation. The runtime store
+protects its selected durable publication independently. This adds no consensus record or log
+mutation and never removes a replicated incomplete-installation gate. See
+[Backup And Restore](backup-and-restore.md#restore-checkpoint-storage-quota-and-metrics) for the
+quota, metrics and node-local cleanup boundary.
+
 ### Coordinated WASM Reset Publications
 
 An NSPL reset first records a typed ordered transaction step with its captured planning inputs,
@@ -317,7 +331,7 @@ the bounded storage executor, but consensus has its own single ordered worker.
 
 The dedicated database owns exactly four current keyspaces: `raft_count_logs`, `raft_count_meta`,
 `raft_count_state`, and `raft_count_snapshots`. Opening it validates the complete keyspace namespace
-before reading any records. Its state metadata requires the current `RestoreCounts` encoding,
+before reading any records. Its state metadata requires the current `RestoredLifecycle` encoding,
 including the durable restore installation gate. Native counts in commands, queued transactions, progress, outcomes, and plan, report and topology headers
 are archived as fixed-width 64-bit values with checked native decoding. Log replay, state recovery
 and snapshot installation therefore retain their complete magnitudes. See
@@ -418,4 +432,6 @@ release or terminal execution failure. Runtime state bytes remain in the node-ow
 A local storage mutation holds the applied-state read guard through its authority validation,
 checkpoint mutation and handle clearing; a newer applied authority or start-gate release cannot
 cross that boundary. The current state encoding requires these records and rejects a database
-whose encoding does not match, requiring recreation under the alpha persistence contract.
+whose encoding does not match, requiring recreation under the alpha persistence contract. The current encoding also requires a restore's explicit lifecycle policy and its
+installed-state effect's clock. RESUME changes the domain to running and removes its complete-set
+installation gate in that single applied effect; it preserves the archived generation and mapping.

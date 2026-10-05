@@ -449,32 +449,39 @@ mode observes, and every model's claim.
 
 ### Deadlock diagnostics
 
-A diagnostic node is the server built in the `deloxide` mode: every thread-blocking lock is tracked
-by a deadlock detector, and the first active deadlock it reports is described on standard error,
-recorded as evidence and ends the process with status `3`. Build one, in its own target directory so
-it never replaces the ordinary binary, and run it with an evidence directory that already exists:
+Diagnostic builds select `deloxide` for active cycles or `deloxide-order` for active and historical
+order analysis. Build and run one with an existing local evidence directory:
 
 ```bash
-just build-diagnostic-server
+just build-diagnostic-server deloxide-order
 target/deloxide/debug/nervix-server --deadlock-evidence /var/tmp/nervix-deadlocks ...
 ```
 
-Run the diagnostic mode's checks with:
+The order build's `--deadlock-active-only` option disables checking at runtime but keeps compiled
+instrumentation and its cost. Ordinary product performance is measured separately. An active cycle
+exits `3`; a potential cycle retains evidence and continues; lost evidence or failed diagnostics
+exit `4`.
+
+Run both applicable selections after changes to tracked blocking synchronization, acquisition order
+or lifecycle ownership:
 
 ```bash
 just test-deloxide
+just test-deloxide-order
+just deadlock-report inspect /var/tmp/nervix-deadlocks/deadlock-PID-TIME.rkyv --source potential
 ```
 
-It builds under `target/deloxide` and runs the deadlock probes, each workload in a disposable
-process that must report its real cycle or end cleanly, then the `@deadlock_diagnostics` scenarios
-on in-process nodes and real diagnostic server processes of one and three nodes, without retries. It
-fails when an invocation executed no check or a scenario did not run and pass, keeps every
-invocation's output and the scenario binary's evidence under `target/deloxide/test-deloxide`, and
-exits with `124` once its budget, 2,400 seconds by default, expires. Run it after any change that adds
-or alters blocking synchronization, a lock's acquisition order, or a lifecycle or ownership path that
-uses tracked locks, and record what it covered and what it cannot see.
-[Data-Plane Concurrency](./data-plane-concurrency.md#diagnostic-deadlock-detection) describes the
-detector, its evidence and the locks it does not track.
+Each command retains a fresh attempt under `target/deloxide/test-deloxide`, with probe output,
+artifacts and diagnostic scenario evidence. Probes and one-/three-node diagnostic/restore scenarios
+run without retries; zero checks, failed accounting, overload or unreviewed workload findings do
+not qualify. The execution budget is 2,400 seconds by default; expiry exits `124`.
+The ordinary report tool also exports selected artifacts, records explicit proofs in reviewed
+copies and qualifies whole-process evidence. `just coverage-deadlock` measures the diagnostic
+implementation and the ordinary report command in separate instrumented builds through the native
+collector. It retains each producer's completion record and exports their combined report with
+the diagnostic-evidence flag, separately from ordinary product coverage.
+[Data-Plane Concurrency](./data-plane-concurrency.md#diagnostic-deadlock-detection) has the complete
+local commands, proof requirements, current graph limits and the paths detection does not cover.
 
 ### Deterministic network simulation
 
@@ -533,7 +540,9 @@ just coverage-native-extras
 ```
 
 Name producers to run only those: `test-typed-ratchet`, `bench-smoke`, `nspl-completion-walk`,
-`test-shuttle`, `test-loom`, or an individual `test-primitives-<mode>` recipe. `test-primitives`
+`test-shuttle`, `test-loom`, `test-deadlock-evidence-order`, `test-deadlock-report`, or an individual
+`test-primitives-<mode>` recipe. The focused diagnostic owner and probes use the `deloxide-order`
+build; the local report command uses the ordinary build. `test-primitives`
 selects native conformance in ordinary, Shuttle, Loom, Turmoil and Deloxide execution:
 
 ```bash
@@ -629,9 +638,48 @@ just test-native-coverage
 
 The unit and scenario coverage recipes export `lcov-workspace.info` with every workspace package
 selected. CI merges those reports with the native extra reports, checks complexity against that
-complete report, and uploads it to Codecov. The separate `lcov.info` report selects the server,
+complete report, and retains it as the `coverage-merged` artifact. The separate `lcov.info` report selects the server,
 CLI and console for focused inspection; it does not replace the workspace export.
 Run the same complexity check locally with `just check-coverage <merged-workspace-report>`.
+
+### Patch line coverage
+
+CI runs `just coverage-patch` against the merged ordinary workspace report and updates one PR
+comment with patch line coverage, project line coverage, per-file totals and uncovered added line
+numbers. The comment names the merge base and tested commit and links to the workflow artifacts.
+Patch coverage is advisory: no percentage is a build gate, and a missing report or a failed comment
+publication does not fail CI. The independent complexity check retains its own verdict.
+
+Run the same calculation manually after collecting coverage for the committed source revision:
+
+```bash
+just coverage-patch origin/main lcov-workspace.info
+just coverage-patch origin/main lcov-workspace.info --pr 123 --repo nervix-io/nervix
+```
+
+The first command prints the Markdown report and writes `target/patch-coverage.md`; the second also
+creates or updates the authenticated publisher's marked PR comment through `gh`. Additional
+`--report <path>` arguments union line hits from multiple LCOV reports. Coverage must describe the
+tested commit's line coordinates. For reports collected in another checkout, use
+`--source-root <original-checkout-path>` to remap absolute source paths explicitly. Repeat it when
+reports come from multiple source roots. Ordinary CI inputs retain `coverage-source-root.txt` beside
+their reports, and the reporter receives each producer's metadata with `--source-root-file`.
+This accounts for the different checkout paths of Blacksmith and GitHub-hosted runners without
+guessing a file's origin. The merged artifact retains those source-root files for manual reuse.
+
+The command compares the base's merge base to `HEAD`, or to `--head <commit>`. Only added lines with
+LCOV `DA` counters enter its denominator; repeated records count each file/line once, and a hit in
+any report covers the line. Deleted lines, unchanged lines and non-executable additions do not
+enter it. A changed file absent from LCOV is shown as unavailable. An empty measured patch has no
+percentage. Project coverage describes the tracked files present in the supplied reports; no
+baseline project report is assumed.
+
+CI compares the PR base to the tested synthetic merge commit, so the diff uses the same line
+coordinates as the collected coverage. It passes the PR head separately with `--pr-head` and checks
+that the PR is still open at that head before publication. Fork PR tokens may lack comment access;
+the local report, workflow summary and artifact remain available. `just test-patch-coverage`
+exercises accounting and publication, and `just coverage-patch-runner` exports the reporter's
+measured Python coverage for CI.
 
 ### The scenario suite's execution budget
 

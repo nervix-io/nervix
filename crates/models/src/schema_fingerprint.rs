@@ -42,6 +42,15 @@ impl SchemaFingerprint {
     pub const fn as_digest(&self) -> &[u8; 32] {
         &self.0
     }
+
+    /// The materialized state identity for this exact schema and domain start.
+    pub fn materialized_at(self, start_version: u64) -> Self {
+        let mut hasher = blake3::Hasher::new();
+        hasher.update(b"nervix/materialized-state/start-version");
+        hasher.update(self.as_digest());
+        hasher.update(&start_version.to_be_bytes());
+        Self::from_digest(*hasher.finalize().as_bytes())
+    }
 }
 
 /// A fingerprint reads as its hexadecimal digest, so a placement in a diagnostic stays legible.
@@ -52,5 +61,26 @@ impl fmt::Debug for SchemaFingerprint {
             write!(formatter, "{byte:02x}")?;
         }
         formatter.write_str(")")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn materialized_identity_binds_the_exact_schema_and_start_generation() {
+        let schema = SchemaFingerprint::from_digest([7; 32]);
+        let archived = schema.materialized_at(37);
+        assert_eq!(
+            archived,
+            SchemaFingerprint::from_digest([7; 32]).materialized_at(37)
+        );
+        assert_ne!(archived, schema.materialized_at(38));
+        assert_ne!(
+            archived,
+            SchemaFingerprint::from_digest([8; 32]).materialized_at(37)
+        );
+        assert_ne!(schema.materialized_at(0), schema.materialized_at(u64::MAX));
     }
 }

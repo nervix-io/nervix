@@ -22,7 +22,9 @@ use crate::common::{
     raw_session::{TestDownload, TestDownloadEnd, download_backup},
 };
 
+mod materialized;
 pub(crate) mod restore;
+mod staging;
 
 /// The backup a scenario ran through its own session.
 #[derive(Debug, Clone)]

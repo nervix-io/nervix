@@ -1361,6 +1361,12 @@ table RestoredUsers {
   replaced: ulong;
 }
 
+enum DomainStatus : ubyte {
+  Stopped,
+  Running,
+  Paused
+}
+
 /// One domain a restore recreates.
 table RestoredDomain {
   /// The domain's name in the archive.
@@ -1371,6 +1377,10 @@ table RestoredDomain {
   resource_versions: ulong;
   /// The models applied.
   models: ulong;
+  /// Required; lifecycle after complete publication, or the dry run's planned lifecycle.
+  status: DomainStatus = null;
+  /// Required; the archived start generation.
+  start_version: ulong = null;
   /// For a dry run, the transaction planner's report on the domain's model run. Absent when the
   /// restore applies, and when the domain holds no models.
   planned_models: TransactionImpactReport;
@@ -1762,11 +1772,7 @@ table ChoiceOutcome {
   page_cursor: string;
 }
 
-enum DomainStatus : ubyte {
-  Stopped,
-  Running,
-  Paused
-}
+
 
 table UnpacedDomain {}
 
@@ -1786,6 +1792,8 @@ table DomainInfo {
   /// Required.
   status: DomainStatus = null;
   pace: DomainPace (required);
+  /// Required lifecycle generation.
+  start_version:ulong = null;
 }
 
 table DomainList {

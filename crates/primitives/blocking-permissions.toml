@@ -173,11 +173,18 @@ path = "crates/consensus/src/restore.rs"
 reason = "Test participants exercise this owner concurrently outside a node executor; model participants use the selected scheduler."
 
 [[permission]]
-bound = "The recorder handles one finding per process and starts at most one watchdog; it sleeps for the ten-second recording budget, then exits the process."
-items = ["thread::spawn_detached"]
+bound = "The recorder serially handles one delivery at a time, with at most one watchdog. It waits at most ten seconds; successful potential recording cancels and joins it, and timeout or a terminal finding exits the process."
+items = ["thread::Builder"]
 owner = "The diagnostic run recording-deadline watchdog."
 path = "crates/deadlock/src/run.rs"
 reason = "A deadlock finding must end its process even when recording cannot progress; a tracked executor or runtime worker cannot enforce that deadline."
+
+[[permission]]
+bound = "Each case starts two producers and one consumer, or one producer and one closer, and joins every participant. Shuttle uses registered finite exploration and nondeterminism checks without wall-clock progress assumptions."
+items = ["thread::spawn"]
+owner = "The production diagnostic handoff's unit and Shuttle checks."
+path = "crates/deadlock/src/handoff_tests.rs"
+reason = "Fixed test participants exercise bounded delivery, refusal accounting and close through the primitive-selected scheduler outside a node executor."
 
 [[permission]]
 bound = "Each probe creates its fixed participants; successful probes join them, and the parent watchdog kills a probe that does not end within its deadline."
@@ -304,6 +311,20 @@ items = ["thread::spawn"]
 owner = "Materialized-state publication Shuttle checks."
 path = "src/runtime/materialized_state.rs"
 reason = "Test participants exercise this owner concurrently outside a node executor; model participants use the selected scheduler."
+
+[[permission]]
+bound = "Each model creates one finite writer participant and joins it before returning; the registered runner bounds exploration."
+items = ["thread::spawn"]
+owner = "Materialized branch publication and assignment Shuttle checks."
+path = "src/runtime/materialized_state_publication_tests.rs"
+reason = "The writer races the production capture and assignment owners under the selected scheduler."
+
+[[permission]]
+bound = "One capture participant per finite sample takes sixteen snapshots and is joined before returning; the caller performs ten thousand bounded row updates."
+items = ["thread::spawn"]
+owner = "Same-host materialized capture and update measurement."
+path = "src/runtime/materialized_state_cost_tests.rs"
+reason = "A benchmark participant measures concurrent synchronous capture outside a node executor; it carries no production execution work."
 
 [[permission]]
 bound = "Each test or model creates its fixed finite participants for one case and joins them before it returns; modeled exploration and its watchdog use the registered runner bounds."

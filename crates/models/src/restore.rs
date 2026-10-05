@@ -33,8 +33,8 @@ pub struct RestoreStateAuthority {
     pub generation: u64,
 }
 
-/// `RESTORE CLUSTER FROM '<file>' [ON EXISTING USER FAIL | SKIP | REPLACE] [DRY RUN]` or
-/// `RESTORE DOMAIN <name> [AS <new_name>] FROM '<file>' [DRY RUN]`.
+/// `RESTORE CLUSTER FROM '<file>' [RESUME] [ON EXISTING USER FAIL | SKIP | REPLACE] [DRY RUN]` or
+/// `RESTORE DOMAIN <name> [AS <new_name>] FROM '<file>' [RESUME] [DRY RUN]`.
 ///
 /// The client that sent the statement reads the archive from `source` and streams it to the
 /// leader, which never reads the path.
@@ -48,6 +48,28 @@ pub struct Restore {
     pub mode: RestoreMode,
     /// Which archived runtime state the restore installs.
     pub state: RestoreState,
+    /// The lifecycle installed after the complete state generation is published.
+    pub lifecycle: RestoreLifecycle,
+}
+
+/// Whether restoration leaves a domain stopped or resumes its archived start.
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    Serialize,
+    Deserialize,
+    Archive,
+    RkyvSerialize,
+    RkyvDeserialize,
+)]
+pub enum RestoreLifecycle {
+    #[default]
+    Stopped,
+    Resume,
 }
 
 /// The runtime state a restore installs into each stopped domain.
@@ -285,6 +307,10 @@ pub struct RestoredDomain {
     pub resource_versions: u64,
     /// The models the restore applies.
     pub models: u64,
+    /// The lifecycle after complete publication, or planned lifecycle for a dry run.
+    pub status: crate::DomainStatus,
+    /// The archived start generation, preserved even when restoration resumes execution.
+    pub start_version: u64,
     /// For a dry run, the transaction planner's report on the domain's model run. Absent when the
     /// restore applies, and when the domain holds no models.
     pub planned_models: Option<TransactionImpactReport>,

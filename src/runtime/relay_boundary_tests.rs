@@ -1129,6 +1129,7 @@ async fn relay_owner_expires_branch_presence_by_ttl() {
         Duration::from_secs(60),
         fault_injection,
         PathBuf::from(DEFAULT_TEMP_DIR),
+        DEFAULT_RESTORE_STAGING_MAX_BYTES,
     )
     .expect("runtime should build");
     let domain = domain("default");
@@ -1441,13 +1442,14 @@ async fn relay_state_shutdown_drains_every_ready_batch() {
         .originator
         .take()
         .expect("branch-local state should grant authoritative access");
+    let read = state.read().clone();
     let broadcast = RelayBroadcast::with_capacity(nonzero_capacity(2));
     let receiver = RelayRuntimeFanIn::new(broadcast.new_receiver());
     let task = runtime.spawn_relay_state_task(
         &domain,
         RelayStateTaskSpec {
             relay: relay.clone(),
-            state: state.clone(),
+            state,
             retention: RelayRetention::default(),
             receiver,
         },
@@ -1475,8 +1477,8 @@ async fn relay_state_shutdown_drains_every_ready_batch() {
         .await
         .expect("relay state task should drain before the shutdown deadline");
 
-    assert!(state.read().record(&acme).is_some());
-    assert!(state.read().record(&beta).is_some());
+    assert!(read.record(&acme).is_some());
+    assert!(read.record(&beta).is_some());
     assert_eq!(
         runtime
             .node_quiesce_counters(&domain, NodeRef::new(ModelKind::Relay, &relay))
@@ -2028,6 +2030,12 @@ async fn an_unscheduled_materialized_record_is_visible_only_while_its_owner_hold
     let presence = runtime
         .relay_branch_presence(&domain, &relay)
         .expect("the relay's state identity is published");
+    let routing = DomainRoutingSnapshot {
+        relay_services: [(relay.clone(), services_reporting_to(presence.clone()))]
+            .into_iter()
+            .collect(),
+        ..DomainRoutingSnapshot::default()
+    };
     let placement_of = |relay: &RelayName| {
         runtime
             .state_placement(
@@ -2052,12 +2060,16 @@ async fn an_unscheduled_materialized_record_is_visible_only_while_its_owner_hold
         .expect("the test constructor cannot fail");
 
     let placement = placement_of(&relay);
-    assert!(runtime.materialized_stream_key_is_visible(None, &placement, &acme));
-    assert!(!runtime.materialized_stream_key_is_visible(None, &placement, &beta));
+    assert!(runtime.materialized_stream_key_is_visible(Some(&routing), &placement, &acme));
+    assert!(!runtime.materialized_stream_key_is_visible(Some(&routing), &placement, &beta));
     assert!(
-        runtime.materialized_stream_key_is_visible(None, &placement_of(&untracked), &beta),
+        runtime.materialized_stream_key_is_visible(
+            Some(&routing),
+            &placement_of(&untracked),
+            &beta
+        ),
         "a relay without a presence restricts nothing"
     );
     drop(owner);
-    assert!(!runtime.materialized_stream_key_is_visible(None, &placement, &acme));
+    assert!(!runtime.materialized_stream_key_is_visible(Some(&routing), &placement, &acme));
 }

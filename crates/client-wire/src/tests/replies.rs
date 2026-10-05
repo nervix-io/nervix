@@ -456,16 +456,19 @@ fn domain_lists_and_selections_round_trip() {
     assert_round_trips(ReplyBody::DomainList(DomainList {
         domains: vec![
             DomainInfo {
+                start_version: 1,
                 domain: name("stopped"),
                 status: DomainStatus::Stopped,
                 pace: DomainPace::Unpaced,
             },
             DomainInfo {
+                start_version: 1,
                 domain: name("running"),
                 status: DomainStatus::Running,
                 pace: paced,
             },
             DomainInfo {
+                start_version: 1,
                 domain: name("paused"),
                 status: DomainStatus::Paused,
                 pace: slowest,
@@ -501,6 +504,7 @@ fn a_paced_domain_needs_a_period() {
             status: Some(wire::DomainStatus::Running),
             pace_type: wire::DomainPace::PacedDomain,
             pace: Some(paced.as_union_value()),
+            start_version: Some(1),
         },
     );
     let domains = builder.create_vector(&[info]);

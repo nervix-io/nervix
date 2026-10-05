@@ -62,6 +62,7 @@
   - [Typed States And Validation Boundaries](./typed-states.md)
   - [Connector Crates And The Connector Contract](./connector-contract.md)
   - [HTTP Emitter Architecture](./http-emitter-architecture.md)
+  - [Client Ingestors And Emitters](./client-io-architecture.md)
   - [Domain Clock](./domain-clock.md)
   - [Cluster Interconnect](./interconnect.md)
   - [Name Resolution](./name-resolution.md)

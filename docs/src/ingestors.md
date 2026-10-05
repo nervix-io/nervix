@@ -469,6 +469,9 @@ CREATE IF NOT EXISTS CLIENT http_tls
 
 ## Client Ingestors
 
+The [Client Ingestors And Emitters](./client-io-architecture.md) architecture chapter follows a
+complete native graph through admission, application ACK, credit, forwarding and recovery.
+
 A client ingestor admits typed batches that applications submit through a Nervix session instead of
 reading an external system. There is no `CREATE CLIENT`, codec, transport header, or `NO_ACK` mode:
 a submitted batch already carries the ingestor's input schema, and every batch is acknowledged.

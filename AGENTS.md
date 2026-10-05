@@ -940,12 +940,20 @@ build and the existing tests, and nothing in it changes behavior.
   external Chaos suite against an immutable product image for real-process recovery.
 - A change that adds or alters thread-blocking synchronization, a `sync::blocking` lock or
   condition variable, the order in which tracked locks are acquired, or a lifecycle or ownership
-  path that uses tracked locks runs `just test-deloxide`, and extends its probes or its diagnostic
-  scenarios where they do not yet reach the changed path. The change records what the diagnostic
+  path that uses tracked locks runs `just test-deloxide` and `just test-deloxide-order`, and extends
+  their probes or diagnostic scenarios where they do not yet reach the changed path. The change records what the diagnostic
   run covered, what it cannot see, and the evidence it retained under
   `target/deloxide/test-deloxide`. An active cycle it reports is fixed in the owner, never
   suppressed, retried away or excluded from the run. A run that executed no check, lost a finding
   or could not record one is a failed diagnostic execution, never a clean result. Every
+  potential-order finding remains visible until its owner fixes it or records a specific
+  non-overlap, shared-reader or lifecycle proof together with retained regression evidence. A
+  historical cycle alone does not declare an active outage or end an operator's workload. Missing
+  source context, truncated cycles, overload and unreviewed findings prevent qualification. Order
+  evidence preserves run-local lock instances and lifetimes, thread identities, acquisition modes
+  and multiplicity; repeated source lines never stand in for lock identity. A build with graph
+  instrumentation and runtime checking disabled remains instrumented, and its cost is reported
+  separately from an active-only diagnostic build and ordinary execution. Every
   concurrency-related change states whether this applies: async-only or otherwise untracked work,
   such as Tokio's locks, channels and `Notify`, DashMap, atomic protocols or network waits, records
   that the detector does not see it and keeps its Shuttle, Loom, Turmoil, Chaos and Bolero
@@ -1053,6 +1061,17 @@ build and the existing tests, and nothing in it changes behavior.
   validation job. A random seed identifies one generated case, not an entire
   entropy-driven campaign. Keep failures, their minimization and revision/toolchain/flag metadata
   before cleanup.
+- Live `just fuzz` / `just fuzz-all` campaigns collect Rust source coverage with the pinned
+  sanitizer toolchain. `scripts/bolero_coverage.py` reuses the native exporter for their exact
+  hashed executables and required objects. Each selected target and the aggregate retain
+  `completion.json`, `executions.jsonl`, `lcov.info` and `export.log` beneath
+  `target/native-coverage/bolero-fuzz/fuzz/<nightly>/<attempt>/`. Only a `complete` record
+  beside a report is successful evidence. Discovery, build probes, replay and deliberate failure
+  qualification supply no campaign counters; stable and nightly raw profiles never mix.
+  A failed or interrupted campaign retains its failure and cannot produce a complete aggregate.
+  Check calls the reusable Bolero workflow with its tested SHA, event and label snapshot;
+  randomized checks are required and a deliberate sanitizer skip publishes no fuzz coverage.
+  Keep native fuzz reports and the Python runner report distinct from ordinary coverage and CRAP.
 - Use `just validate` for formatting and validation.
 - Architecture debt is counted and only decreases. `just ratchet` counts oversized files, `as`
   casts outside imports and qualified paths, bare `unwrap` and `expect`, outcomes dropped with
@@ -1108,7 +1127,9 @@ build and the existing tests, and nothing in it changes behavior.
 - A change to a primitive adapter or a synchronization protocol runs the checks of every mode it
   affects: `just test-shuttle [filter]` for interleavings, `just test-loom [filter]` for
   memory-ordering claims, `just test-turmoil` for the simulated network, and `just test-deloxide`
-  for active deadlocks among tracked locks, beside the ordinary suite. `just test-primitives` runs the boundary's own conformance checks once per mode. Every mode
+  for active deadlocks and `just test-deloxide-order` for potential acquisition-order cycles among
+  tracked locks, beside the ordinary suite. `just test-primitives` runs the boundary's own
+  conformance checks once per mode. Every mode
   command reports how many checks it discovered, selected, executed and saw complete; a selection
   that executes nothing across its whole scope fails, though a package with no match inside a
   nonempty selection is fine. `just test-shuttle` runs every registered check in its own process
@@ -1130,7 +1151,8 @@ build and the existing tests, and nothing in it changes behavior.
   in a check fails validation.
 - `just coverage-native-extras [producer ...]` runs eligible native extra checks under LLVM source
   instrumentation: `test-typed-ratchet`, `bench-smoke`, `nspl-completion-walk`, the canonical
-  `test-shuttle` and `test-loom` runners, and each `test-primitives-<mode>` conformance recipe.
+  `test-shuttle` and `test-loom` runners, each `test-primitives-<mode>` conformance recipe,
+  `test-deadlock-evidence-order` and `test-deadlock-report`.
   `test-primitives` selects every native conformance mode. CI runs these checks through collection;
   primitive compile/browser checks, replay qualification and Loom weakening qualification retain
   independent verdicts outside its instrumentation. Each run writes `lcov.info`, `completion.json`,
@@ -1149,6 +1171,13 @@ build and the existing tests, and nothing in it changes behavior.
   instrumented build directory; model and diagnostic reports never enter the ordinary coverage or
   CRAP gate. Coverage bookkeeping stays outside model processes and supplies no synchronization
   to the invariant.
+- `just coverage-patch [base] [report]` measures added executable lines from ordinary LCOV reports
+  and retains an advisory Markdown report under target. `--pr <number>` publishes or updates the
+  authenticated publisher's marked PR comment, after verifying the current PR head. CI uses the
+  same command with the tested merge commit's coordinates and a separate PR head fence. Coverage
+  percentages and reporting failures never fail a build; the complexity check remains independent.
+  `just test-patch-coverage` exercises accounting and publication, and
+  `just coverage-patch-runner` collects its Python line coverage.
 - Every public interface or NSPL surface change must update the relevant `docs/src` pages and the
   user-facing NSPL skill in the same change. Keep `.agents/skills/nspl/SKILL.md` and its references
   accurate for users configuring Nervix, then regenerate `docs/book` with `just book`.

@@ -42,6 +42,7 @@ use background_task::{
 };
 use clap::{CommandFactory, Parser, Subcommand, ValueEnum};
 use clap_complete::{Shell, generate};
+use cli_values::{parse_human_bytes, parse_human_duration, parse_trace_sample_ratio};
 use client_consumers::ClientConsumerRouter;
 use client_producers::ClientProducerRouter;
 use domain_clock::{
@@ -93,8 +94,7 @@ use nervix_interconnect::{
     Transport, TransportIdentity,
 };
 use nervix_models::{
-    ClusterNodeName, DomainName, DomainStatus, DurationTextError, ModelKind, NodeEndpoint,
-    NodeServiceUrl, UserName, parse_duration_text,
+    ClusterNodeName, DomainName, DomainStatus, ModelKind, NodeEndpoint, NodeServiceUrl, UserName,
 };
 use nervix_primitives::{
     collections::DashMap,
@@ -140,6 +140,7 @@ mod admitted_connection;
 mod authentication;
 mod background_task;
 mod backup;
+mod cli_values;
 mod client_consumers;
 mod client_producers;
 mod cluster_status;
@@ -384,6 +385,14 @@ pub struct Args {
     pub state_snapshot_interval: Duration,
     #[arg(
         long,
+        env = "NERVIX_RESTORE_STAGING_MAX_BYTES",
+        default_value = "128GiB",
+        value_parser = parse_human_bytes,
+        help = "Maximum unpublished restore checkpoint key and value bytes per node"
+    )]
+    pub restore_staging_max_bytes: ubyte::ByteUnit,
+    #[arg(
+        long,
         env = "NERVIX_MEMORY_HIGH_WATERMARK",
         value_parser = parse_human_bytes,
         help = "Allocated jemalloc bytes that pause all ingestors"
@@ -523,6 +532,14 @@ pub struct Args {
         help = "Existing directory a diagnostic node records its deadlock evidence in"
     )]
     pub deadlock_evidence: Option<PathBuf>,
+
+    /// Disable runtime order checking in an order-instrumented diagnostic artifact.
+    #[cfg(feature = "deloxide")]
+    #[clap(
+        long,
+        help = "Check active cycles only; compiled order instrumentation retains its cost"
+    )]
+    pub deadlock_active_only: bool,
     #[command(subcommand)]
     pub subcommand: Option<Command>,
 }
@@ -619,6 +636,8 @@ pub struct Application {
     pub replica_count: usize,
     #[builder(default = Duration::from_secs(30))]
     pub state_snapshot_interval: Duration,
+    #[builder(default = crate::runtime::DEFAULT_RESTORE_STAGING_MAX_BYTES)]
+    pub restore_staging_max_bytes: u64,
     #[builder(default)]
     pub memory_pressure: Option<MemoryPressureConfig>,
     pub cluster_bootstrap_host: Option<String>,
@@ -638,47 +657,6 @@ pub struct Application {
     pub graceful_shutdown_drain: bool,
     #[builder(default = shutdown::DEFAULT_DRAIN_TIMEOUT)]
     pub drain_timeout: Duration,
-}
-
-#[derive(Debug, thiserror::Error)]
-enum CliValueError {
-    #[error("invalid duration: {source}")]
-    Duration { source: DurationTextError },
-    #[error("invalid byte quantity")]
-    Bytes,
-    #[error("invalid trace sample ratio: {source}")]
-    TraceSampleRatio { source: std::num::ParseFloatError },
-    #[error("trace sample ratio must be between 0.0 and 1.0")]
-    TraceSampleRatioRange,
-}
-
-/// Reads a duration option. Clap prints only the outermost context of a rejected value, so that
-/// context carries the reason the text names no duration.
-fn parse_human_duration(input: &str) -> error_stack::Result<Duration, CliValueError> {
-    match parse_duration_text(input) {
-        Ok(duration) => Ok(duration),
-        Err(report) => {
-            let source = report.current_context().clone();
-            Err(report.change_context(CliValueError::Duration { source }))
-        }
-    }
-}
-
-fn parse_human_bytes(input: &str) -> error_stack::Result<ubyte::ByteUnit, CliValueError> {
-    input
-        .parse::<ubyte::ByteUnit>()
-        .map_err(|_| Report::new(CliValueError::Bytes))
-}
-
-fn parse_trace_sample_ratio(input: &str) -> error_stack::Result<f64, CliValueError> {
-    let ratio = input
-        .parse::<f64>()
-        .map_err(|source| Report::new(CliValueError::TraceSampleRatio { source }))?;
-    if (0.0..=1.0).contains(&ratio) {
-        Ok(ratio)
-    } else {
-        Err(Report::new(CliValueError::TraceSampleRatioRange))
-    }
 }
 
 #[cfg(test)]
@@ -778,6 +756,7 @@ impl Application {
         let transaction_max_open = self.transaction_max_open;
         let replica_count = self.replica_count;
         let state_snapshot_interval = self.state_snapshot_interval;
+        let restore_staging_max_bytes = self.restore_staging_max_bytes;
         let memory_pressure_controller = self
             .memory_pressure
             .map(MemoryPressureController::new)
@@ -923,6 +902,7 @@ impl Application {
             state_snapshot_interval,
             fault_injection.clone(),
             temp_dir.clone(),
+            restore_staging_max_bytes,
         )
         .map_err(|error| {
             error!(error = %error, "failed to initialize runtime persistence");
@@ -2452,6 +2432,22 @@ impl Application {
                 nervix_primitives::select! {
                     _ = transaction_shutdown.cancelled() => break,
                     _ = sleep(Duration::from_millis(250)) => {}
+                }
+            }
+        }));
+
+        let restore_maintenance_service = service.clone();
+        let restore_maintenance_shutdown = shutdown.clone();
+        background_tasks.push(nervix_primitives::task::spawn(async move {
+            loop {
+                nervix_primitives::task::consume_budget().await;
+                nervix_primitives::select! {
+                    _ = restore_maintenance_shutdown.cancelled() => break,
+                    _ = restore_maintenance_service.sweep_restore_checkpoint_staging() => {}
+                }
+                nervix_primitives::select! {
+                    _ = restore_maintenance_shutdown.cancelled() => break,
+                    _ = sleep(Duration::from_secs(1)) => {}
                 }
             }
         }));

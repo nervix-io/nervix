@@ -8,6 +8,8 @@ source diagnostics, generated reports, semantic fixtures and paired API doctests
 compiler's matching LLVM tools; `bench-smoke` exercises every Criterion body once,
 `test-primitives` runs the primitive boundary's conformance checks, and `nspl-completion-walk`
 walks the NSPL completion graph. `test-shuttle` and `test-loom` collect the canonical inventories,
+`test-deadlock-evidence-order` executes diagnostic owners and disposable-process probes, and
+`test-deadlock-report` exercises the ordinary local report command in its own build.
 and `test-primitives` selects the native conformance producers of every mode. Without names every producer runs. A producer runs
 its check exactly as `just <producer>` does and fails when the check fails, which is why CI's
 extra-tests job runs those checks through this command instead of beside it.
@@ -222,6 +224,14 @@ PRODUCERS: tuple[Producer, ...] = (
     Producer(
         name="test-loom", mode="loom", prepare=("build-web-console",),
         instrumented="test-loom-models", finish=(), filterable=True,
+    ),
+    Producer(
+        name="test-deadlock-evidence-order", mode="deloxide-order", prepare=(),
+        instrumented="test-deadlock-evidence-order", finish=(),
+    ),
+    Producer(
+        name="test-deadlock-report", mode="ordinary", prepare=(),
+        instrumented="test-deadlock-report", finish=(),
     ),
 )
 

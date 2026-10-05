@@ -49,6 +49,11 @@ For transaction preview scopes, operation and step impact, actual engagement, an
 inspection, read [Transaction Quiescence And Impact Inspection](https://docs.nervix.io/transaction-quiescence.html)
 directly. It is an architecture chapter and is outside the curated NSPL index.
 
+For native application graphs, endpoint ownership, Arrow/credit limits, ACK boundaries, ALTER,
+restoration and replay, read [Client Ingestors And Emitters](https://docs.nervix.io/client-io-architecture.html)
+directly. Follow the same documentation version as the selected index; this architecture chapter
+is outside the curated NSPL index.
+
 Prefer the narrow indexed topic over an old copied snippet. Do not leave the immutable version
 selected by the documentation index when following related material.
 
@@ -334,6 +339,14 @@ relay. Do not use them to scan across branches.
 
 ## Verification and troubleshooting
 
+For a diagnostic node's lock findings, read
+[Data-Plane Concurrency](https://docs.nervix.io/data-plane-concurrency.html#diagnostic-deadlock-detection).
+Use the local `nervix-deadlock-report inspect`, `triage`, and `qualify` commands on retained
+artifacts. A potential cycle requires an explicit source-based correction or infeasibility review
+with a retained regression. Preserve the original whole-process evidence: filtered exports cannot
+qualify its run. Combine qualification with the actual process outcome and the detector's stated
+coverage limits, including requested-read historical edges and untracked async synchronization.
+
 Choose checks relevant to the configured graph:
 
 - `SHOW CREATE <kind> <name>;` confirms the stored canonical definition.
@@ -356,20 +369,33 @@ Choose checks relevant to the configured graph:
 - `BACKUP CLUSTER TO '<file>';` or `BACKUP DOMAIN [<name>] TO '<file>' [WITHOUT RESOURCES]
   [WITHOUT STATE | WITHOUT PAUSE | TIMEOUT <duration>];` writes an archive on the client's machine,
   sent alone from `nervix-cli` or a native client. A normal backup quiesces each running domain
-  before capturing WASM guest state, Kafka domain source offsets, and branch lifecycle. `WITHOUT
+  before capturing WASM guest state, Kafka domain source offsets, branch lifecycle and fresh
+  materialized relay generations. `WITHOUT
   PAUSE` reads published checkpoints while execution continues; `WITHOUT STATE` captures only
   configuration. `DESCRIBE BACKUP '<file>';` verifies one offline and inventories its state,
   domains, users, and resource versions. Treat an archive as a secret.
-- `RESTORE CLUSTER FROM '<file>' [ON EXISTING USER FAIL | SKIP | REPLACE] [DRY RUN]
+- `RESTORE CLUSTER FROM '<file>' [RESUME] [ON EXISTING USER FAIL | SKIP | REPLACE] [DRY RUN]
   [WITHOUT STATE | WITHOUT SOURCE OFFSETS];` or
-  `RESTORE DOMAIN <name> [AS <new_name>] FROM '<file>' [DRY RUN]
+  `RESTORE DOMAIN <name> [AS <new_name>] FROM '<file>' [RESUME] [DRY RUN]
   [WITHOUT STATE | WITHOUT SOURCE OFFSETS];` recreates users, domains,
   resource versions under their archived numbers, models, and compatible runtime state from an archive, sent alone from
-  `nervix-cli` or a native client. Restored domains are stopped; `START` remains blocked until the complete state installation
+  `nervix-cli` or a native client. The default leaves restored domains stopped. `RESUME` makes them
+  running at the archived start generation and clock mapping after complete publication, preserving
+  materialized rows. Paced mappings project downtime; normal `START` establishes a new generation
+  and clears materialized state. `START` remains blocked until the complete state installation
   succeeds, including after a failed restore or restart. A domain name that exists is
   refused, so copy a domain with `AS`. A fresh cluster already has its bootstrap user, so a cluster
   restore there needs `ON EXISTING USER SKIP` or `REPLACE`. Run `DRY RUN` first to see the plan and
   each domain's impact report without changing anything.
+  Failed unpublished checkpoint data is reclaimed on every node while the failed target's
+  `START` gate stays closed. Size the server's `--restore-staging-max-bytes` or
+  `NERVIX_RESTORE_STAGING_MAX_BYTES` allowance for all concurrent unpublished checkpoints on that
+  node; it defaults to `128GiB` and counts keys and values, including incomplete chunks. It is
+  separate from archive-file staging and does not bound snapshot retention or filesystem
+  overhead. Observe `nervix_restore_staging_bytes`, `nervix_restore_staging_limit_bytes` and
+  `nervix_restore_staging_reclaimed_bytes_total` at `/metrics`; the backup chapter distinguishes
+  logical usage from SST allocation. Recover an uncertain applying restore with its exact
+  execution reference; after a terminal failed restore, restore into a fresh target name.
 - `SHOW UDFS`, `DESCRIBE UDF <name>`, and `SHOW CREATE UDF <name>` inspect trusted Roto functions.
   Creation itself is the test gate: a rejecting Roto `test` block prevents persistence.
 - `SHOW PLACEMENTS`, `DESCRIBE PLACEMENT <name>`, `SHOW CREATE PLACEMENT <name>`, and

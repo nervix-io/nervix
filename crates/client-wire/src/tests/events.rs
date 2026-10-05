@@ -55,6 +55,7 @@ fn every_leadership_observation_round_trips() {
 fn domain_and_cluster_observations_round_trip() {
     let observed = DomainsObserved {
         domains: vec![DomainInfo {
+            start_version: 1,
             domain: name("tenant"),
             status: DomainStatus::Running,
             pace: DomainPace::Unpaced,

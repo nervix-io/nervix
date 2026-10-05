@@ -82,6 +82,7 @@ mod client_batch;
 mod jaq_unfold;
 mod syslog;
 
+pub(crate) use arrow_body::ArrowBodyError;
 pub(crate) use batch_container::{
     BatchContainerError, BatchMember, BatchMemberEncoding, BoundedBatchEncoding,
 };

@@ -13,6 +13,9 @@ AI coding agents can use the portable [NSPL Agent Skill](nspl-agent-skill.md) to
 review, and troubleshoot Nervix configurations. The guide explains installation without cloning
 this repository, skill invocation, useful request details, expected output, and updates.
 
+For application-owned producers and consumers, [Client Ingestors And Emitters](./client-io-architecture.md)
+connects the native endpoint grammar to a complete graph and its execution contracts.
+
 The current top-level surface includes:
 
 - domain lifecycle statements
@@ -765,15 +768,18 @@ Backup and restore commands, which read and write archive files on the client's 
 BACKUP CLUSTER TO '<file>' [WITHOUT RESOURCES] [WITHOUT STATE | WITHOUT PAUSE | TIMEOUT <duration>];
 BACKUP DOMAIN [<name>] TO '<file>' [WITHOUT RESOURCES] [WITHOUT STATE | WITHOUT PAUSE | TIMEOUT <duration>];
 DESCRIBE BACKUP '<file>' [FORMAT TEXT | JSON];
-RESTORE CLUSTER FROM '<file>' [ON EXISTING USER FAIL | SKIP | REPLACE] [DRY RUN] [WITHOUT STATE | WITHOUT SOURCE OFFSETS];
-RESTORE DOMAIN <name> [AS <new_name>] FROM '<file>' [DRY RUN] [WITHOUT STATE | WITHOUT SOURCE OFFSETS];
+RESTORE CLUSTER FROM '<file>' [RESUME] [ON EXISTING USER FAIL | SKIP | REPLACE] [DRY RUN] [WITHOUT STATE | WITHOUT SOURCE OFFSETS];
+RESTORE DOMAIN <name> [AS <new_name>] FROM '<file>' [RESUME] [DRY RUN] [WITHOUT STATE | WITHOUT SOURCE OFFSETS];
 ```
 
 `BACKUP` is admitted and run by the leader like other persistent commands, and the client
 downloads the archive it assembles. `DESCRIBE BACKUP` runs in `nervix-cli` without a server.
 `RESTORE` streams the archive to the leader, which verifies and plans the whole restore before it
 changes anything, and then recreates the users, the domains stopped, their resource versions under
-their archived numbers, their models, and their compatible runtime checkpoints. A normal backup
+their archived numbers, their models, and their compatible runtime checkpoints, including
+materialized relay rows. `RESUME` makes a complete restored domain running at its archived start
+generation and clock mapping. A normal `START` advances that generation and clears materialized
+state. A normal backup
 quiesces each running domain for the state cut. See [Backup And Restore](backup-and-restore.md).
 
 Session-only commands:

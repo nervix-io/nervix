@@ -58,6 +58,10 @@ when the session needs an explicitly configured resolver. Browser sessions use b
 Use the CLI's `subscribe` and `domain-clock` subcommands for shell streams of relay records and
 the selected domain's clock. See the Command Line Client chapter for their line formats.
 
+For diagnostic-node lock findings, follow the local report inspection and triage guidance in
+[references/configuring-nervix.md](references/configuring-nervix.md#verification-and-troubleshooting).
+Retain each potential cycle's source evidence and regression-backed review before qualification.
+
 Build configuration in dependency order:
 
 1. Create the domain, then select it with `USE <domain>;` as a separate client command. `BEGIN`
@@ -86,6 +90,15 @@ Build configuration in dependency order:
 6. Define ingestors, processors, generators, and emitters in graph order.
 7. Define placement rules after every referenced runtime node, including each relay, exists.
 8. Commit the graph, inspect it, and start the active domain only when prerequisites exist.
+
+For backup recovery, `RESTORE ... FROM '<file>' RESUME` (CLI `--resume`) installs compatible
+materialized relay rows on owners and replicas, then makes the domain running at its archived
+start generation and latest start point. Paced recovery retains the wall/logical mapping and time
+rate verbatim and projects downtime under a newly selected clock authority. The default restore
+leaves the domain stopped; a normal `START` advances the generation and clears materialized state
+while preserving compatible WASM state, source offsets and branch lifecycle. `RESUME` precedes
+the user policy and `DRY RUN`; the dry run reports the planned status and generation. Read
+[Backup And Restore](https://docs.nervix.io/backup-and-restore.html) for format and memory limits.
 
 Use `BEGIN; ... COMMIT;` when sending multiple queueable configuration statements. A transaction
 belongs to one already-existing domain: `BEGIN` binds it to the selected domain and every queued

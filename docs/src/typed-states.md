@@ -39,6 +39,12 @@ that result is part of the function contract. Arrow values under a null or failu
 also do not encode absence in the numeric lane: the mask does. An `Option` or enum is needed when
 the *state* is absent or different, not merely because a literal looks special.
 
+The guest protocol keeps an absent branch key and an absent source token distinct from present
+values. Empty application-state bytes remain present inside the Rust SDK's snapshot envelope.
+Reset acceptance, reset refusal, an unusable snapshot envelope and rejected application state have
+distinct typed ABI verdicts. Protocol decoding checks the complete size-prefixed header before
+identifier access and verifies offsets and counts before constructing owned values.
+
 ## Absence And Distinct States
 
 **Node trace export.** A tracing guard either has no trace export or owns its provider and resolver
@@ -279,6 +285,21 @@ drafts become the existing semantic Model only when every required choice and ex
 Changing the captured domain or a dependent reference invalidates selected references while
 keeping the operator's draft text visible for correction.
 
+### Diagnostic evidence states
+
+The diagnostic owner distinguishes active cycles, potential order and overload. Potential records
+carry `Unreviewed` or `Reviewed(TriageProof)`, with a bounded explicit basis, reason and retained
+regression reference. New source/lifetime context revokes a review. `Live`, `Ended` and `Unrecorded`
+lock instances preserve different observations; absent construction or acquisition context stays
+absent. Reused source sites never replace run-local instance identity.
+
+`ProcessRecord` requires its compile-time/runtime diagnostic selection, and an artifact requires
+whole-process or selected scope. A selected export cannot qualify a source process whose other
+findings it omitted. The current version-2 wire conversion checks every required field, bound,
+identity and review once; unsupported versions fail from their header without another shape or a
+default. [Data-Plane Concurrency](./data-plane-concurrency.md#diagnostic-deadlock-detection) owns the
+current representation, qualification policy and coverage limits.
+
 ## Validation And Failure Boundaries
 
 The registry rejects unresolved or contradictory contracts before a graph becomes active. It
@@ -324,6 +345,14 @@ same plan shape feeds running and passive builds. Passive builds retain the plan
 relay identities and endpoint routes, while admission remains stopped. A server-side listener stays
 bound on every live node independently of graph placement or domain leadership.
 
+Materialized origination is an exclusive task capability: moving it transfers the mutable branch
+selections, while reads and snapshot installation remain independently retainable. Read publications
+carry an immutable row with its Arrow schema and watermarks. Branch membership and an ended row
+publication are distinct states; absence in live state owns the answer even when storage retains an
+earlier checkpoint. Recreating a branch allocates a fresh publication. Installation validates
+assignment capability, branch generation, captured fence and revision before replacing any row;
+the current branch lifecycle and revision cannot move backwards.
+
 Server endpoint configuration and source availability are distinct states. The immutable route
 table contains configured definitions; a bound source lifetime contains an optional prepared intake.
 Source ending publishes absence through that lifetime before removing its route binding. A retained
@@ -363,6 +392,16 @@ target by name and requires explicit leakage; neither error needs the source pay
 
 ## Restore Installation Authority
 
+`RestoreLifecycle` is a closed `Stopped`/`Resume` policy in the semantic restore Model. Text omitting
+`RESUME` selects `Stopped` at the language boundary. The restore plan carries distinct initial
+stopped state and activation state. Both require the archived start generation and latest start
+point; paced activation also requires the archived mapping. Required report and `DomainInfo`
+generation fields are validated at their wire boundary, including the valid generation zero.
+Materialized archive descriptors and row identities are archive-owned types. Their raw schema
+fingerprint binds once to the archived start generation for native storage, independently of the
+installation authority; payload values stay exact-schema Arrow columns. Typed branch identities,
+watermark ordering, counts and framing are validated before those values reach the runtime.
+
 A restored domain has a replicated `Pending` installation from creation and an `Installing`
 authority once its state generation is admitted. Neither state permits `START`. Completion of the
 exact current generation removes the installation; terminal command failure does not. Authority
@@ -382,6 +421,17 @@ uses one database view for namespace selection and payload data. A queued checkp
 its selected namespace and validates that it remains current before writing. The storage format
 marker is required for nonempty checkpoint storage; corruption or absence fails explicitly and
 requires recreation rather than inventing a namespace for the stored keys.
+
+Restore reclamation receives a borrowed `RestoreStateRetention` from one locked applied revision.
+Absence of an applied log means catch-up is unknown and retains all generations. A generation
+ahead of that log is also retained. Once applied, only the exact generation of an applying restore
+requires unpublished storage; terminal, expired or absent execution records do not. Publication
+identity remains a separate node-store protection, and reclamation never converts an incomplete
+installation into a completed one. Key/value usage is reconstructed from current namespace keys,
+including partial chunks without a receipt, rather than a defaulted persisted counter.
+Namespace cursors use the vocabulary's canonical `decode` entry point for the required domain
+name. It requires lowercase stored text and retains the typed `NameError` beneath the storage
+format failure.
 
 ## Qualification Evidence
 

@@ -73,7 +73,9 @@ conversion. A codec or runtime caller retains that report under its operation co
 errors remain typed values in the batch outcome and are formatted only when a message error is
 reported; this conversion does not turn them into report allocations per row.
 
-The WASM FlatBuffers decoder reports protocol failures with their verified payload cause. The Rust
+The WASM FlatBuffers decoder reports protocol failures with their verified payload cause. It checks
+the complete header length before reading the identifier; a truncated header returns the typed
+length or identifier error even when its size prefix matches the received bytes. The Rust
 guest SDK retains that report beneath its envelope or snapshot meaning, and its `Processor`
 callbacks return guest-error reports. It renders a failure only when returning an ABI code or
 global-error reason; rejected snapshot bytes and rejected application state keep their distinct
@@ -307,6 +309,23 @@ archive as `NX_ERROR_PROTOCOL`, and a write failure as `NX_ERROR_INVALID_ARGUMEN
 execution reference so a host can run the backup again. No diagnostic of a backup includes archive
 contents, password hashes, or resource bytes.
 
+A captured-section opening refused only for Snapshot request capacity retains its inventory and
+retries within one 30-second opening deadline. The typed capacity classification determines this
+retry; other request failures end the fetch. Deadline expiry remains a capture failure, and an
+admitted or partially consumed response is never reopened by this admission retry.
+
+Materialized archive descriptors and identities reject invalid counts, names, typed branch fields,
+watermark order and supported record headers before runtime installation. `RestorePlanError::MissingClock`
+refuses a paced `RESUME` without its committed mapping. `RestoreRefusal::MaterializedState` names
+the domain and relay when preflight conversion fails; `MaterializedRestoreError` distinguishes
+invalid section lengths, identities, Arrow schema or row counts, metadata limits, admission,
+cancellation, framing and staging. A preflight admission refusal records no restore progress and
+can be presented again; it is reported as preparation refusal without judging the archive invalid.
+Native `MaterializedSnapshotError` checks framing, metadata bounds, unique keys,
+counts, exact schemas and complete container consumption. Diagnostics carry typed causes and
+entity identities, without payload columns or branch field values. Replica installation refuses
+a revision older than its currently installed materialized revision.
+
 A restore's failures are owned where they are decided, in the order the restore meets them. The
 restore stream refuses what its frames get wrong with a typed `RestoreUploadFailure`:
 `InvalidStream`, `InvalidStatement`, `SizeMismatch`, `DigestMismatch`, `QuotaExceeded`, or
@@ -334,6 +353,12 @@ chunk set or a conflicting publication inventory. `RestoreRead`, `Cancelled`, `S
 storage admission preserve their owning failure boundary. `CheckpointPlacementTooLarge` rejects
 an encoding beyond the bounded storage key allowance. `InvalidStorageFormat` requires recreation
 of the node state directory when the required current format marker is missing or invalid.
+`RestoreStagingQuota` carries the node's unpublished checkpoint limit, current usage and incoming
+checkpoint footprint; `RestoreStagingSize` rejects an unrepresentable accounting sum. A quota
+failure remains a storage failure beneath the admitted restore step and leaves its activation
+gate closed. Node-local maintenance logs admission, cancellation or storage failure and retries
+on its next sweep without changing the command outcome or gate. Metrics are updated only for a
+completed sweep, so a partial cancelled deletion cannot claim a completed reclamation count.
 Staging or publication failure leaves the durable start gate in place, including a failure after
 the complete generation's pointer became durable but before runtime handles were cleared. Exact
 publication retry completes durability and bounded cleanup under the same authority and inventory. The steps before it stay
@@ -425,6 +450,13 @@ reports them with relay and placement context; a branch-local read includes the 
 The same key accompanies branch-local processor and relay failures, so another branch cannot be
 mistaken for the failed one. Unbranched work has no branch key. [Data Plane](./data-plane.md) owns
 branch execution and [Cluster Interconnect](./interconnect.md) owns snapshot exchange.
+
+The materialized installation owner refuses a lower snapshot revision with
+`RuntimeStateOperationError::MaterializedSnapshotRevision { received, current }`, preserving both
+values in its diagnostic. It checks this before publishing any restored row, alongside assignment,
+branch-generation and ownership-fence validation. A cached snapshot from another assignment is
+rebuilt under the current fence rather than reported as current; a fence change during encoding
+remains the snapshot owner's typed `OwnershipChanged` failure.
 
 ```mermaid
 sequenceDiagram
@@ -671,6 +703,9 @@ the kind of a conflicting reference as typed consensus conflicts. The session re
 leader change lets the replicated check discover the conflict after the leader's local check. A
 client never has to classify those refusals from message text. Consensus reports also keep Raft
 leadership, fatal storage, and other write failures distinct through the control plane. A
+command attempt that returns `OutcomeUnknown`, a leader redirect, or `TransactionDetached`
+preserves that disposition at finalization and leaves its admitted execution applying. Recovery
+determines its terminal outcome under the same reference, including during reconciliation. A
 transaction mutation refusal crosses the Raft response as its exact typed outcome and becomes a
 new report on the proposing node; the client still receives the same disposition and
 acknowledgement semantics. [Command
@@ -868,18 +903,33 @@ typed fields let the caller act; which context must cross each boundary; and whi
 diagnostic or recovery class closes the path. That classification must preserve branch and
 sensitivity rules, and it must not add a second form of a failure the owner already represents.
 
-A diagnostic node's deadlock findings are neither errors nor recoverable outcomes. The detector
-hands each finding to the diagnostic run's recorder, which describes it on standard error, records
-it as evidence and ends the process with status `3`; a finding it cannot record, or findings the
-detector lost, end it with status `4`, a failed diagnostic execution that is never taken for a clean
-run. Nothing on that path returns an error to the code whose locks deadlocked, writes a log, or
-waits for a lock a blocked thread could hold, and the detector's callback cannot panic: Deloxide
-would catch the panic and carry on. Two diagnostic failures are panics by design. A tracked lock
-constructed in a process that has not installed the detector panics, naming the configuration
-failure, as a modeled primitive used outside its model does; and a sink that panics while handling a
-finding aborts the process, because a finding it failed to handle must not pass for no finding.
-[Data-Plane Concurrency](./data-plane-concurrency.md#diagnostic-deadlock-detection) owns the
-detector, its bounds and what it does not cover.
+A diagnostic node's findings retain a typed source. `WaitForGraph`/`ActiveCycle` establishes an
+active tracked-lock cycle and ends the diagnostic process with status `3` after recording.
+`LockOrderViolation`/`PotentialCycle` is historical order, retained as unreviewed evidence while the
+operator's workload continues. It never becomes a confirmed outage merely because the history is
+cyclic. Local qualification requires a correction or explicit non-overlap/shared-reader/lifecycle
+proof and a retained regression reference, keeping the original cycle. Missing or truncated source
+context, unreviewed potential order and active findings cannot qualify; selected exports cannot
+qualify the source process by hiding another finding.
+
+An overload identifies the handoff, order history or evidence/output retention owner. Lost context,
+failed output/recording and a recording deadline are diagnostic execution failures, exit status
+`4`, never a clean run. The recorder writes directly to the standard error descriptor and uses a
+cancellable ten-second deadline for each finding. Expiry exits without another write, because the
+same descriptor may be blocked. No error is returned to the code whose locks deadlocked. Nothing
+logs protected application values or uploads artifacts. The detector callback performs bounded
+handoff rather than reporting I/O; a sink panic aborts so a swallowed callback failure cannot look
+clean. A tracked constructor before installation panics with a configuration failure.
+
+`nervix-deadlock` owns `EvidenceError` and review refusals: unsupported format version, malformed or
+out-of-bound current values, invalid proof, missing finding, nonpotential finding, incomplete
+context, and an exclusive mode contradicting a reader proof. The ordinary local report tool
+preserves these in `error_stack::Report`, exits `4` on an operation failure and `5` when valid
+evidence does not qualify. It does not reinterpret a prior evidence shape.
+[Data-Plane Concurrency](./data-plane-concurrency.md#diagnostic-deadlock-detection) owns the selections,
+source correlations, deduplication, bounds, triage examples and detection gaps, including omitted
+requested-read edges and the upstream dispatcher backlog. Qualification is about recorded evidence
+and requires the run's completion/coverage record too.
 
 The isolated architecture compiler emits ordinary Rust tool diagnostics:
 `nervix::sync_acquisition`, `nervix::lifecycle_call`, `nervix::unknown_effect` and

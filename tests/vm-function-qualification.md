@@ -65,4 +65,4 @@ suite. The standalone client conformance run passed 19 scenarios; client wire te
 completion walk, `just ratchet`, and `just validate` passed.
 The focused `just test-coverage-feature` run passed the new qualification, expression semantics,
 and client conformance features and produced `lcov.info`. This patch changes Cucumber specifications
-and Markdown only; it has no modified Rust source lines for Codecov patch coverage to measure.
+and Markdown only; it has no modified Rust source lines for patch coverage to measure.

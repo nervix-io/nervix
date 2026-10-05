@@ -668,10 +668,22 @@ strongly consistent, selected runtime state is checkpointed, and the hot path is
 | Durable handoff and forced-recovery preparations | Preserved, then reconciled or activated | Preserved, then reconciled or activated |
 | Runtime-state checkpoints: Kafka domain offsets, deduplicator and window state, materialized relay records | Flushed again as runtime tasks stop | Reopen at the last completed periodic checkpoint |
 | WASM guest-state checkpoints | Every checkpoint that released an acknowledgement is already synchronized | Reopen at the newest checkpoint on the node's storage, which covers every acknowledged input |
-| Restored backup state: WASM guest saves, Kafka domain offsets and branch lifecycle | A restore synchronizes a complete chunked namespace and its atomic active-generation pointer before releasing the stopped domain's START gate | Reopens pointer and checkpoints from one complete database view on each assigned owner and replica; a durable pointer alone does not release an incomplete replicated installation gate. Once installation completes, the next START continues saved guest state, source positions and branch incarnations |
+| Restored backup state: materialized relay rows, WASM guest saves, Kafka domain offsets and branch lifecycle | A restore synchronizes a complete chunked namespace and its atomic active-generation pointer before releasing the stopped domain's START gate or resuming its archived lifecycle | Reopens pointer and checkpoints from one complete database view on each assigned owner and replica; a durable pointer alone does not release an incomplete replicated installation gate. A resumed domain retains every restored kind. A normal START continues saved guest state, source positions and branch incarnations, and resets materialized rows |
 | External source offsets and sink commits | Complete when the drain succeeds | Only the external connector's own delivery and transaction guarantee applies |
 | Relay batches, queued payload attempts, suspended work, ACK guards, ACK tokens, ACK maps, handoff payloads, gate leases, clock progress | The drain tries to resolve them before its deadline | Volatile; lost |
 | Client producers, their credit and queued batches, producer links | Ended as `shutting down` after the drain, or detached with their sessions | Volatile; lost with the process. Every producer another node forwarded here ends there as `owner lost`: its batches that node never cleared for admission are refused as `producer ended`, and only the cleared ones are of unknown outcome. The node's own sessions end, so their clients report every batch they sent without an outcome as of unknown outcome, and the nodes executing the ingestors detach those producers and finish what they admitted |
+
+A materialized backup captures the current relay generation independently of the periodic
+snapshot interval. Restore streams its complete sealed container into the generation store,
+including containers larger than the bulk memory budget. `RESUME` activates the archived domain
+generation only after every assigned owner and replica has published its complete set. These
+rows reopen from one pinned database snapshot across a node restart; the stored clock mapping
+projects downtime under the recovered authority. A failed installation retains its durable
+activation gate across restart. A normal `START` creates a new generation and clears materialized
+rows while retaining compatible WASM, offset and branch lifecycle state. Periodic materialized
+flushes seal to quota-owned files and write bounded database segments, synchronizing their data
+before the replacement header, so a large relay has the same shutdown durability boundary. See
+[Backup And Restore](backup-and-restore.md#publishing-the-state-generation).
 
 Durability is not uniform across those rows, and the difference is operationally visible:
 
@@ -797,6 +809,17 @@ A backup archive a node retains for download is a temporary file in its staging 
 durable. Stopping the node, gracefully or not, loses it: a later download is refused, while the
 backup's recorded outcome stays retained under its execution reference. See
 [Backup And Restore](./backup-and-restore.md#downloading-the-archive).
+
+Unpublished restore checkpoint namespaces remain in the runtime database after an interrupted
+installation. Every restarted node's admitted maintenance borrows its applied consensus revision
+before taking the checkpoint installation barrier. It retains selected publications, applying
+installations and generations ahead of catch-up; without an applied log it retains all generations.
+Terminal or superseded applied attempts are reclaimed in bounded deletion batches, including
+chunks without receipts. Terminal teardown cancels the maintenance caller, and its storage job
+checks cancellation between bounded units. A later startup resumes from the remaining keys.
+Reclamation preserves snapshot readers and never completes an installation or opens its `START`
+gate. See [restore checkpoint storage](backup-and-restore.md#restore-checkpoint-storage-quota-and-metrics)
+for quotas, metrics and physical storage limits.
 
 ### Domain Time
 

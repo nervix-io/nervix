@@ -24,7 +24,7 @@ Feature: Bounded complete restore generations
       CREATE CODEC metric_codec FROM WIRE JSON SCHEMA metric_wire TO SCHEMA metric;
       CREATE SCHEMA tenant_branch ( tenant STRING );
       CREATE BRANCH by_tenant SCHEMA tenant_branch TTL 30m;
-      CREATE RELAY raw_metrics SCHEMA metric BRANCHED BY by_tenant;
+      CREATE RELAY raw_metrics SCHEMA metric BRANCHED BY by_tenant WITH MATERIALIZED STATE LAST BY TIMESTAMP;
       CREATE RELAY filtered_metrics SCHEMA result BRANCHED BY by_tenant;
       CREATE CLIENT kafka_ingress TYPE KAFKA CONFIG {
         'bootstrap.servers' = '{{kafka_addr}}',
@@ -84,14 +84,27 @@ Feature: Bounded complete restore generations
     And the cluster is replaced by a fresh <cluster_size> node cluster whose nodes are named "restored"
     Then the current leader node is saved as placeholder "leader"
     Given the restore coordinator uses remote placement in a multi-node cluster
-    When the CLI restores "domain {{domain}} --as {{domain}}_copy" from "stateful.nvxb" on node "{{leader}}" reporting JSON with memory measurements
+    When the CLI restores "domain {{domain}} --as {{domain}}_copy --resume" from "stateful.nvxb" on node "{{leader}}" reporting JSON with memory measurements
     Then the CLI restore succeeded, restoring domain "{{domain}}_copy" with 1 resource versions and 11 models
+    And the CLI restore reports domain "{{domain}}_copy" as "RUNNING" at start version 1
     Given the active domain is "{{domain}}_copy"
     When the cluster is restarted
     And these NSPL commands are executed on the leader node
       """
       CREATE SUBSCRIPTION filtered_metrics_subscription TO filtered_metrics;
+      """
+    Then within "30s" node "restored-1" eventually reports materialized state for relay "raw_metrics" containing
+      """
+      key={"tenant":"restore-tenant-0"} payload={"tenant":"restore-tenant-0","value":2}
+      """
+    When these NSPL commands are executed on the leader node
+      """
+      STOP;
       START;
+      """
+    Then within "30s" node "restored-1" eventually reports materialized state for relay "raw_metrics" containing
+      """
+      relay 'raw_metrics' materialized state is empty
       """
     Then within "10s" DESCRIBE INGESTOR "metric_source" on the leader node contains
       """

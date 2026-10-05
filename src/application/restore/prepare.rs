@@ -72,6 +72,11 @@ pub(in crate::application) enum RestoreRefusal {
     Plan,
     #[error("the models of domain '{domain}' do not form a valid configuration")]
     ModelRun { domain: DomainName },
+    #[error("materialized state of relay '{entity}' in domain '{domain}' could not be prepared")]
+    MaterializedState {
+        domain: DomainName,
+        entity: nervix_models::ModelName,
+    },
 }
 
 /// An archive a restore stream staged and verified, with each domain's models parsed.
@@ -373,6 +378,8 @@ impl SessionServiceImpl {
         &self,
         plan: &RestorePlan,
         owner: &UserName,
+        archive: &VerifiedArchive,
+        state: nervix_models::RestoreState,
     ) -> Result<Vec<Option<TransactionImpactReport>>, Report<RestoreRefusal>> {
         let mut reports = Vec::with_capacity(plan.domains.len());
         for domain in plan.domains.values() {
@@ -403,6 +410,58 @@ impl SessionServiceImpl {
                 .await
                 .change_context_lazy(refusal)?;
             let report = planned.report().change_context_lazy(refusal)?;
+            if state != nervix_models::RestoreState::ConfigurationOnly {
+                let schedule = planned
+                    .steps()
+                    .iter()
+                    .rev()
+                    .find_map(|step| match &step.kind {
+                        crate::registry::PlannedTransactionStepKind::Models { plan } => {
+                            plan.schedule.as_ref()
+                        }
+                        _ => None,
+                    });
+                for captured in archive.states_for(&domain.source) {
+                    let nervix_backup::DescribedRuntimeState::Materialized {
+                        descriptor,
+                        groups,
+                        ..
+                    } = captured
+                    else {
+                        continue;
+                    };
+                    let reference = nervix_models::NodeRef::new(
+                        nervix_models::ModelKind::Relay,
+                        descriptor.entity.clone(),
+                    );
+                    let Some(node) = schedule.and_then(|schedule| schedule.nodes.get(&reference))
+                    else {
+                        continue;
+                    };
+                    if node.schema_fingerprint != descriptor.schema {
+                        continue;
+                    }
+                    let Some(schema) = domain.materialized_schemas.get(&descriptor.entity) else {
+                        continue;
+                    };
+                    // Validate the same bounded conversion used by installation before admission.
+                    // Its temporary file drops here; no checkpoint namespace is published.
+                    super::materialized::prepare_materialized_checkpoint(
+                        &self.inner.runtime,
+                        archive,
+                        descriptor,
+                        groups,
+                        schema.clone(),
+                    )
+                    .await
+                    .change_context_lazy(|| {
+                        RestoreRefusal::MaterializedState {
+                            domain: domain.source.clone(),
+                            entity: descriptor.entity.clone(),
+                        }
+                    })?;
+                }
+            }
             reports.push(Some(report));
         }
         Ok(reports)

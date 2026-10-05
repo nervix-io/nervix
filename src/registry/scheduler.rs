@@ -22,6 +22,20 @@ use crate::registry::{
     graph::{ActiveGraph, ActiveNode, EdgeKind, is_schedulable_model, schedulable_depth},
     placement::{PlacementPair, ResolvedPlacementPair},
 };
+
+/// Server intakes follow live membership even when a node cannot receive placed work.
+pub(crate) fn assign_server_listener_nodes(
+    schedule: &mut DomainSchedule,
+    live_nodes: &[ClusterNodeName],
+) {
+    let live_nodes = SortedSet::from_unsorted(live_nodes.to_vec()).into_vec();
+    for node in schedule.nodes.values_mut() {
+        if node.config.executes_on_every_cluster_node() {
+            node.primary_node = live_nodes.first().cloned();
+            node.assigned_nodes = live_nodes.clone();
+        }
+    }
+}
 #[cfg(feature = "testing")]
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub enum SchedulerMode {
@@ -1136,6 +1150,25 @@ mod tests {
                 named::<ClusterNodeName>("node-3")
             ]
         );
+
+        let live_nodes = [named("node-1"), named("node-2"), named("node-3")];
+        for eligible in [Vec::new(), vec![named("node-2")]] {
+            let mut schedule =
+                graph.schedule_for_domain(&domain, &eligible, 0, PlacementPolicy::Neutral);
+            super::assign_server_listener_nodes(&mut schedule, &live_nodes);
+            let listener = scheduled_node(&schedule, ModelKind::Ingestor, "http_ing");
+            assert_eq!(listener.assigned_nodes, live_nodes);
+            assert!(live_nodes.iter().all(|node| listener.executes_on(node)));
+            assert_eq!(
+                scheduled_node(&schedule, ModelKind::Relay, "notifications").assigned_nodes,
+                eligible
+            );
+            super::assign_server_listener_nodes(&mut schedule, &live_nodes[..2]);
+            assert_eq!(
+                scheduled_node(&schedule, ModelKind::Ingestor, "http_ing").assigned_nodes,
+                live_nodes[..2]
+            );
+        }
 
         let _ = fs::remove_dir_all(path);
     }

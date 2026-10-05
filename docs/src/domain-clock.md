@@ -77,6 +77,15 @@ classified as physical policy.
 
 ## Establishing A Generation
 
+`RESTORE ... RESUME` activates the archived start generation and latest start point after complete
+state publication. A paced restore installs its committed wall/logical mapping and time rate
+verbatim; elapsed downtime advances its projection. The leader selects a new authority from this
+cluster's live voter incarnations. Archived authority and frontier never establish that authority
+or reset the mapping. A paced archive missing its mapping is refused before restore admission.
+Default restoration leaves the domain stopped with no installed mapping; a subsequent `START`
+establishes a new generation by the procedure below. See
+[Backup And Restore](backup-and-restore.md#what-a-restore-recreates).
+
 A direct or transactional `START` reaches the same replicated lifecycle transition. A transaction
 resolves the concrete start, paced mapping, and initial authority while its complete commit plan is
 admitted, then persists that decision with the frozen step. Restart and leadership recovery execute

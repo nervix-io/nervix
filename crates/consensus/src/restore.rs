@@ -108,6 +108,47 @@ pub(crate) fn with_restore_state_installation<T>(
     Ok(result)
 }
 
+/// A borrowed applied revision that cannot change while a storage sweep uses it.
+/// Publication identity is owned by the node store and must be protected separately.
+pub struct RestoreStateRetention<'a> {
+    state: &'a StateMachineData,
+}
+
+impl RestoreStateRetention<'_> {
+    /// Keep installations ahead of this node's applied revision and the current generation of
+    /// every applying restore. Leadership or lease expiry alone never ends retry liveness.
+    pub fn retains(&self, domain: &DomainName, generation: u64) -> bool {
+        let Some(applied) = &self.state.last_applied_log_id else {
+            return true;
+        };
+        if generation > applied.index {
+            return true;
+        }
+        let Some(DomainRestoreInstallation::Installing(authority)) =
+            self.state.domain_restore_installations.get(domain)
+        else {
+            return false;
+        };
+        if authority.generation != generation {
+            return false;
+        }
+        self.state
+            .command_executions
+            .get(&authority.execution)
+            .is_some_and(|execution| {
+                execution.is_applying() && execution.restore_execution().is_some()
+            })
+    }
+}
+
+pub(crate) fn with_restore_state_reclamation<T>(
+    applied: &nervix_primitives::sync::blocking::RwLock<StateMachineData>,
+    reclaim: impl FnOnce(&RestoreStateRetention<'_>) -> T,
+) -> T {
+    let state = applied.read();
+    reclaim(&RestoreStateRetention { state: &state })
+}
+
 pub(crate) fn validate_restored_domain_start(
     state: &StateMachineData,
     domain: &DomainName,
@@ -207,7 +248,10 @@ pub enum RestoreStepEffect {
     /// or its models.
     Completion,
     /// Releases the durable START gate after this complete state generation reached every node.
-    InstalledState(nervix_models::RestoreStateAuthority),
+    InstalledState {
+        authority: nervix_models::RestoreStateAuthority,
+        clock: Option<nervix_models::DomainClockState>,
+    },
 }
 
 /// A resource a restored domain declares, with the version its next upload receives. Every
@@ -294,13 +338,44 @@ pub(crate) fn apply_restore_step(
             None
         }
         (RestoreStep::ImportResources(_), RestoreStepEffect::Completion) => None,
-        (RestoreStep::ApplyModels(domain), RestoreStepEffect::InstalledState(authority)) => {
+        (
+            RestoreStep::ApplyModels(domain),
+            RestoreStepEffect::InstalledState { authority, clock },
+        ) => {
             if authority.execution != *reference
                 || validate_restore_state_installation(state, domain, authority).is_err()
             {
                 return Err(Report::new(RestoreStepConflict::Installation {
                     domain: domain.clone(),
                 }));
+            }
+            let lifecycle = applying_restore(state, reference)?.restore.lifecycle;
+            let restored = state
+                .domains
+                .get_mut(domain)
+                .assured("installation validation requires the stopped domain");
+            match lifecycle {
+                nervix_models::RestoreLifecycle::Stopped => {
+                    if clock.is_some() {
+                        return Err(Report::new(RestoreStepConflict::Installation {
+                            domain: domain.clone(),
+                        }));
+                    }
+                }
+                nervix_models::RestoreLifecycle::Resume => {
+                    if matches!(
+                        restored.config.pace,
+                        nervix_models::DomainPace::Paced { .. }
+                    ) != clock.is_some()
+                    {
+                        return Err(Report::new(RestoreStepConflict::Installation {
+                            domain: domain.clone(),
+                        }));
+                    }
+                    restored.status = nervix_models::DomainStatus::Running;
+                    restored.clock = clock.clone();
+                    changes.domains_changed = true;
+                }
             }
             state.domain_restore_installations.remove(domain);
             None
@@ -313,7 +388,7 @@ pub(crate) fn apply_restore_step(
             RestoreStepEffect::Users { .. }
             | RestoreStepEffect::Domain { .. }
             | RestoreStepEffect::Completion
-            | RestoreStepEffect::InstalledState(_),
+            | RestoreStepEffect::InstalledState { .. },
         ) => {
             return Err(Report::new(RestoreStepConflict::EffectMismatch {
                 step: step.clone(),
@@ -534,6 +609,7 @@ mod tests {
                 source: "archive.nvxb".to_string(),
                 mode: RestoreMode::Apply,
                 state: nervix_models::RestoreState::All,
+                lifecycle: nervix_models::RestoreLifecycle::Stopped,
             },
             RestoreArchive {
                 total_bytes: NonZeroU64::MIN,
@@ -696,14 +772,17 @@ mod tests {
     }
 
     fn preparing_restore() -> (StateMachineData, CommandExecutionReference) {
+        preparing_restore_with_lifecycle(nervix_models::RestoreLifecycle::Stopped)
+    }
+
+    fn preparing_restore_with_lifecycle(
+        lifecycle: nervix_models::RestoreLifecycle,
+    ) -> (StateMachineData, CommandExecutionReference) {
         let mut state = StateMachineData::default();
         let reference = reference_at(45);
-        admit(
-            &mut state,
-            &reference,
-            cluster_restore(ExistingUserPolicy::Fail),
-            &["prod"],
-        );
+        let mut restore = cluster_restore(ExistingUserPolicy::Fail);
+        restore.restore.lifecycle = lifecycle;
+        admit(&mut state, &reference, restore, &["prod"]);
         assert_eq!(
             step(
                 &mut state,
@@ -732,6 +811,184 @@ mod tests {
             ConsensusResponse::Applied
         );
         (state, reference)
+    }
+
+    #[test]
+    fn restore_retention_tracks_applied_generations_and_durable_execution_liveness() {
+        let (mut state, reference) = preparing_restore();
+        let authority = begin_installation(&mut state, &reference, 3, 12);
+        let retained = RestoreStateRetention { state: &state };
+        assert!(retained.retains(&domain("prod"), authority.generation));
+        assert!(retained.retains(&domain("ahead"), authority.generation + 1));
+        assert!(!retained.retains(&domain("prod"), authority.generation - 1));
+        assert!(!retained.retains(&domain("another"), authority.generation));
+        state.domain_mutations.remove(&domain("prod"));
+        assert!(
+            RestoreStateRetention { state: &state }.retains(&domain("prod"), 12),
+            "loss of the lease alone does not end an applying restore's retry lifetime"
+        );
+        let (mut successor, _) = preparing_restore();
+        begin_installation(&mut successor, &reference, 4, 13);
+        state = successor;
+        assert!(!RestoreStateRetention { state: &state }.retains(&domain("prod"), 12));
+        assert!(RestoreStateRetention { state: &state }.retains(&domain("prod"), 13));
+        let response = apply_consensus_command(
+            &mut state,
+            &ConsensusCommand::FinishCommandExecution {
+                reference: reference.clone(),
+                owner: user("operator"),
+                request_digest: [9; 32],
+                at: Timestamp::from_unix_nanos(1_700_000_011_000_000_000),
+                result: Box::new(crate::CommandExecutionResult {
+                    disposition: crate::CommandExecutionDisposition::Failed,
+                    message: "installation failed".to_string(),
+                    diagnostics: Vec::new(),
+                    statements: Vec::new(),
+                    transaction: None,
+                    transaction_admission: None,
+                    backup: None,
+                    restore: None,
+                }),
+            },
+        )
+        .response;
+        assert_eq!(response, ConsensusResponse::Applied);
+        assert!(!RestoreStateRetention { state: &state }.retains(&domain("prod"), 13));
+        state.command_executions = Default::default();
+        assert!(!RestoreStateRetention { state: &state }.retains(&domain("prod"), 13));
+        assert!(
+            validate_restored_domain_start(&state, &domain("prod")).is_err(),
+            "reclamation eligibility never opens the failed target's activation gate"
+        );
+        state.last_applied_log_id = None;
+        assert!(RestoreStateRetention { state: &state }.retains(&domain("prod"), 13));
+    }
+
+    #[cfg(feature = "shuttle")]
+    #[test]
+    fn shuttle_restore_reclamation_holds_the_revision_through_queued_installation() {
+        use nervix_primitives::{
+            sync::{
+                Arc,
+                blocking::{Mutex, RwLock},
+            },
+            thread,
+        };
+        let invariant = || {
+            let (mut state, reference) = preparing_restore();
+            begin_installation(&mut state, &reference, 3, 12);
+            let applied = Arc::new(RwLock::new(state));
+            let staged = Arc::new(Mutex::new(BTreeSet::from([12_u64])));
+            let installed_revision = Arc::new(Mutex::new(12_u64));
+            let sweeper = thread::spawn({
+                let applied = applied.clone();
+                let staged = staged.clone();
+                let installed_revision = installed_revision.clone();
+                move || {
+                    with_restore_state_reclamation(&applied, |retention| {
+                        let revision = *installed_revision.lock();
+                        let mut staged = staged.lock();
+                        staged.retain(|generation| retention.retains(&domain("prod"), *generation));
+                        thread::yield_now();
+                        assert_eq!(
+                            *installed_revision.lock(),
+                            revision,
+                            "the applied revision stays fixed through namespace deletion"
+                        );
+                    })
+                }
+            });
+            let authority = {
+                let mut state = applied.write();
+                let authority = begin_installation(&mut state, &reference, 4, 13);
+                *installed_revision.lock() = authority.generation;
+                authority
+            };
+            with_restore_state_installation(
+                &applied,
+                &domain("prod"),
+                &authority,
+                || {
+                    Some(crate::LeaderTenure {
+                        leader_id: authority.leader.clone(),
+                        term: authority.term,
+                    })
+                },
+                || {
+                    staged.lock().insert(authority.generation);
+                },
+            )
+            .assured("the queued current installation is admitted");
+            sweeper
+                .join()
+                .assured("the sweep completes under the model");
+            assert!(
+                staged.lock().contains(&13),
+                "maintenance cannot delete the queued current installation"
+            );
+        };
+        nervix_model_harness::shuttle::check_interleavings(invariant);
+    }
+
+    #[test]
+    fn resume_activation_and_gate_release_are_one_fenced_consensus_effect() {
+        let (mut state, reference) =
+            preparing_restore_with_lifecycle(nervix_models::RestoreLifecycle::Resume);
+        let authority = begin_installation(&mut state, &reference, 3, 12);
+        let before = state
+            .domains
+            .get(&domain("prod"))
+            .assured("restored domain exists")
+            .clone();
+        assert_eq!(before.status, DomainStatus::Stopped);
+        let effect = RestoreStepEffect::InstalledState {
+            authority: authority.clone(),
+            clock: None,
+        };
+        assert_eq!(
+            step(
+                &mut state,
+                &reference,
+                RestoreStep::ApplyModels(domain("prod")),
+                effect.clone()
+            ),
+            ConsensusResponse::Applied
+        );
+        let restored = state
+            .domains
+            .get(&domain("prod"))
+            .assured("restored domain exists");
+        assert_eq!(restored.status, DomainStatus::Running);
+        assert_eq!(restored.start_version, before.start_version);
+        assert_eq!(restored.last_start, before.last_start);
+        assert_eq!(restored.clock, None);
+        assert!(
+            !state
+                .domain_restore_installations
+                .contains_key(&domain("prod"))
+        );
+        assert!(validate_restore_state_installation(&state, &domain("prod"), &authority).is_err());
+        let complete = state
+            .domains
+            .get(&domain("prod"))
+            .assured("restored domain exists")
+            .clone();
+        assert_eq!(
+            step(
+                &mut state,
+                &reference,
+                RestoreStep::ApplyModels(domain("prod")),
+                effect
+            ),
+            ConsensusResponse::Applied
+        );
+        assert_eq!(
+            state
+                .domains
+                .get(&domain("prod"))
+                .assured("restored domain exists"),
+            &complete
+        );
     }
 
     #[test]
@@ -783,7 +1040,10 @@ mod tests {
             &mut state,
             &reference,
             RestoreStep::ApplyModels(domain("prod")),
-            RestoreStepEffect::InstalledState(authority),
+            RestoreStepEffect::InstalledState {
+                authority,
+                clock: None,
+            },
         );
         assert!(conflict_text(&refused).contains("installation"));
         assert!(validate_restored_domain_start(&state, &domain("prod")).is_err());
@@ -792,7 +1052,10 @@ mod tests {
                 &mut state,
                 &reference,
                 RestoreStep::ApplyModels(domain("prod")),
-                RestoreStepEffect::InstalledState(newer)
+                RestoreStepEffect::InstalledState {
+                    authority: newer,
+                    clock: None
+                }
             ),
             ConsensusResponse::Applied
         );
@@ -802,7 +1065,7 @@ mod tests {
 
     #[cfg(feature = "shuttle")]
     #[test]
-    fn shuttle_restore_publication_and_handle_clear_cannot_cross_a_successors_start() {
+    fn shuttle_restore_publication_and_handle_clear_precede_resume_and_fence_delayed_publishers() {
         use nervix_primitives::{
             sync::{
                 Arc,
@@ -811,7 +1074,8 @@ mod tests {
             thread,
         };
         let invariant = || {
-            let (mut state, reference) = preparing_restore();
+            let (mut state, reference) =
+                preparing_restore_with_lifecycle(nervix_models::RestoreLifecycle::Resume);
             let authority = begin_installation(&mut state, &reference, 3, 12);
             let applied = Arc::new(RwLock::new(state));
             let published = Arc::new(Mutex::new((0_u64, 0_u64)));
@@ -845,30 +1109,80 @@ mod tests {
                     }
                 }
             });
+            let activation_reader = thread::spawn({
+                let applied = applied.clone();
+                let published = published.clone();
+                move || {
+                    let state = applied.read();
+                    if state
+                        .domains
+                        .get(&domain("prod"))
+                        .assured("domain exists")
+                        .status
+                        == DomainStatus::Running
+                    {
+                        validate_restored_domain_start(&state, &domain("prod"))
+                            .assured("activation exposes the completed installation");
+                        assert_eq!(
+                            *published.lock(),
+                            (13, 13),
+                            "a reader admitted by RESUME observes installed state and cleared \
+                             handles"
+                        );
+                    } else {
+                        assert!(
+                            validate_restored_domain_start(&state, &domain("prod")).is_err(),
+                            "a stopped incomplete domain cannot admit branch execution"
+                        );
+                    }
+                }
+            });
             {
                 let mut state = applied.write();
                 let newer = begin_installation(&mut state, &reference, 4, 13);
+                *published.lock() = (newer.generation, newer.generation);
                 assert_eq!(
                     step(
                         &mut state,
                         &reference,
                         RestoreStep::ApplyModels(domain("prod")),
-                        RestoreStepEffect::InstalledState(newer.clone())
+                        RestoreStepEffect::InstalledState {
+                            authority: newer.clone(),
+                            clock: None
+                        }
                     ),
                     ConsensusResponse::Applied
                 );
-                let mut running = stopped("prod");
-                running.status = DomainStatus::Running;
-                state.domains.insert(domain("prod"), running);
-                *published.lock() = (newer.generation, newer.generation);
+                assert_eq!(
+                    state
+                        .domains
+                        .get(&domain("prod"))
+                        .assured("domain exists")
+                        .status,
+                    DomainStatus::Running
+                );
+                assert_eq!(
+                    *published.lock(),
+                    (13, 13),
+                    "RESUME observes complete publication and cleared runtime handles"
+                );
+                assert!(
+                    state
+                        .domain_restore_installations
+                        .get(&domain("prod"))
+                        .is_none()
+                );
             }
             publisher
                 .join()
                 .assured("publisher completes under the model");
+            activation_reader
+                .join()
+                .assured("activation reader completes under the model");
             assert_eq!(
                 *published.lock(),
                 (13, 13),
-                "stale publication changed checkpoints or runtime handles after START"
+                "publication and handles retain the generation RESUME made active"
             );
         };
         nervix_model_harness::shuttle::check_interleavings(invariant);
@@ -981,7 +1295,10 @@ mod tests {
             &mut state,
             &reference,
             RestoreStep::ApplyModels(domain("prod")),
-            RestoreStepEffect::InstalledState(admitted_authority()),
+            RestoreStepEffect::InstalledState {
+                authority: admitted_authority(),
+                clock: None,
+            },
         );
         assert!(conflict_text(&models_first).contains("import resource versions of domain"));
 
@@ -1016,7 +1333,10 @@ mod tests {
                 &mut state,
                 &reference,
                 models.clone(),
-                RestoreStepEffect::InstalledState(authority)
+                RestoreStepEffect::InstalledState {
+                    authority,
+                    clock: None
+                }
             ),
             ConsensusResponse::Applied
         );

@@ -5,6 +5,205 @@
 
 use super::*;
 
+#[test]
+fn materialized_relay_publication_retains_exact_routes_and_reclaims_ended_branches() {
+    use crate::{
+        runtime::materialized_state::ReplicatedMaterializedRelayState,
+        runtime_schema::{RuntimeValue, test_runtime_row},
+    };
+
+    let routes = StateReplicationRouting::default();
+    let slot = Arc::new(ArcSwapOption::from(Some(assigned(1))));
+    let placements = [
+        None,
+        string_branch_key("tenant", "acme"),
+        string_branch_key("tenant", "beta"),
+    ]
+    .map(|branch_key| RuntimeStatePlacement {
+        kind: ModelKind::Relay,
+        identifier: named("profiles"),
+        state: RuntimeState::MaterializedRelay {
+            schema: SchemaFingerprint::from_digest([1; 32]),
+        },
+        branch_key,
+        ..placed(0, 0, 1)
+    });
+    let entity = placements[0].entity();
+    routes.register_assignment(&entity, &slot);
+    let published = routes
+        .materialized(&entity)
+        .assured("assignment publishes a retained relay index");
+    for (index, placement) in placements.iter().enumerate() {
+        let row = test_runtime_row([(
+            "value".to_string(),
+            RuntimeValue::I64(i64::try_from(index).assured("three placements")),
+        )]);
+        let state = Arc::new(ReplicatedMaterializedRelayState::new(
+            placement.clone(),
+            row.arrow_schema(),
+        ));
+        let mut originator = ReplicatedMaterializedRelayState::bind(
+            &state,
+            StateReplicationRoles::owned_by(None),
+            None,
+        )
+        .originator
+        .assured("local origination");
+        originator
+            .update_last_by_timestamp(&placement.branch_key, row)
+            .assured("current assignment");
+        routes.install(
+            placement.clone(),
+            slot.clone(),
+            ReplicatedState::MaterializedRelay(state),
+        );
+    }
+    assert_eq!(published.states().len(), 3);
+    for (index, placement) in placements.iter().enumerate() {
+        assert!(published.has_state_for(&placement.branch_key));
+        assert_eq!(
+            published
+                .record(&placement.branch_key)
+                .assured("exact branch record")
+                .row
+                .value_at(0)
+                .assured("valid column"),
+            Some(RuntimeValue::I64(
+                i64::try_from(index).assured("three placements")
+            ))
+        );
+    }
+    let retiring = routes
+        .resolve(&placements[1])
+        .assured("installed exact route");
+    let row = test_runtime_row([("value".to_string(), RuntimeValue::I64(7))]);
+    let state = Arc::new(ReplicatedMaterializedRelayState::new(
+        placements[1].clone(),
+        row.arrow_schema(),
+    ));
+    let mut originator =
+        ReplicatedMaterializedRelayState::bind(&state, StateReplicationRoles::owned_by(None), None)
+            .originator
+            .assured("local origination");
+    originator
+        .update_last_by_timestamp(&placements[1].branch_key, row)
+        .assured("current assignment");
+    routes.install(
+        placements[1].clone(),
+        slot.clone(),
+        ReplicatedState::MaterializedRelay(state),
+    );
+    published.retire(&retiring);
+    assert!(!retiring.is_current());
+    assert_eq!(
+        published
+            .record(&placements[1].branch_key)
+            .assured("replacement route remains installed")
+            .row
+            .value_at(0)
+            .assured("valid column"),
+        Some(RuntimeValue::I64(7))
+    );
+    routes.retire(&placements[1]);
+    assert!(published.record(&placements[1].branch_key).is_none());
+    assert_eq!(published.states().len(), 2);
+    slot.store(Some(assigned(2)));
+    assert!(published.record(&placements[2].branch_key).is_none());
+    routes.purge_stale(&placements[0].domain);
+    assert!(published.states().is_empty());
+    assert!(!published.has_state_for(&None));
+    assert!(published.current.load().is_empty());
+    routes.retire_entity(&entity);
+    routes.retire_domain(&placements[0].domain);
+    routes.withdraw_entity(&entity);
+    assert!(routes.materialized(&entity).is_none());
+    routes.clear();
+}
+
+#[test]
+fn a_materialized_branch_publication_owns_absence_beside_the_relay_snapshot() {
+    let routes = StateReplicationRouting::default();
+    let slot = Arc::new(ArcSwapOption::from(Some(assigned(1))));
+    let acme = string_branch_key("tenant", "acme");
+    let beta = string_branch_key("tenant", "beta");
+    let root_placement = RuntimeStatePlacement {
+        kind: ModelKind::Relay,
+        identifier: named("profiles"),
+        state: RuntimeState::MaterializedRelay {
+            schema: SchemaFingerprint::from_digest([1; 32]),
+        },
+        branch_key: None,
+        ..placed(0, 0, 1)
+    };
+    let row = |value| test_runtime_row([("value".to_string(), RuntimeValue::I64(value))]);
+    let root = Arc::new(ReplicatedMaterializedRelayState::new(
+        root_placement.clone(),
+        row(7).arrow_schema(),
+    ));
+    let mut relay_owner =
+        ReplicatedMaterializedRelayState::bind(&root, StateReplicationRoles::owned_by(None), None)
+            .originator
+            .assured("the relay originates");
+    relay_owner
+        .update_last_by_timestamp(&acme, row(7))
+        .assured("current relay assignment");
+    relay_owner
+        .update_last_by_timestamp(&beta, row(8))
+        .assured("current relay assignment");
+    routes.install(
+        root_placement.clone(),
+        slot.clone(),
+        ReplicatedState::MaterializedRelay(root),
+    );
+    let branch_placement = RuntimeStatePlacement {
+        branch_key: acme.clone(),
+        ..root_placement.clone()
+    };
+    let branch = Arc::new(ReplicatedMaterializedRelayState::new(
+        branch_placement.clone(),
+        row(9).arrow_schema(),
+    ));
+    let mut branch_owner = ReplicatedMaterializedRelayState::bind(
+        &branch,
+        StateReplicationRoles::owned_by(None),
+        None,
+    )
+    .originator
+    .assured("the concrete branch originates");
+    routes.install(
+        branch_placement,
+        slot,
+        ReplicatedState::MaterializedRelay(branch),
+    );
+    let published = routes
+        .materialized(&root_placement.entity())
+        .assured("the installed relay publishes its states");
+    assert!(published.has_state_for(&acme));
+    assert!(
+        published.record(&acme).is_none(),
+        "the concrete owner owns absence"
+    );
+    assert!(published.record(&beta).is_some());
+    branch_owner
+        .update_last_by_timestamp(&acme, row(9))
+        .assured("current branch assignment");
+    assert_eq!(
+        published
+            .record(&acme)
+            .assured("current branch row")
+            .row
+            .value_at(0)
+            .assured("valid field"),
+        Some(RuntimeValue::I64(9))
+    );
+    branch_owner
+        .remove_key(&acme)
+        .assured("current branch assignment");
+    assert!(published.record(&acme).is_none());
+    assert!(relay_owner.read().record(&acme).is_some());
+    assert!(published.record(&beta).is_some());
+}
+
 pub(super) fn placed(entity: usize, branch: usize, generation: u8) -> RuntimeStatePlacement {
     RuntimeStatePlacement {
         domain: domain("routes"),

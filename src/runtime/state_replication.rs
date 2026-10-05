@@ -688,7 +688,7 @@ impl Runtime {
         for (placement, state) in materialized {
             nervix_primitives::task::consume_budget().await;
             let sealed = state
-                .seal_after(&self.inner.executor, None)
+                .seal_after(&self.inner.executor, &self.inner.snapshot_staging, None)
                 .await
                 .map_err(|error| OwnershipHandoffError::checkpoint(error.to_string()))?
                 .ok_or_else(|| {
@@ -696,7 +696,13 @@ impl Runtime {
                         "the materialized relay state produced no checkpoint generation",
                     )
                 })?;
-            checkpoints.push((placement, sealed.into_persisted_entry()));
+            checkpoints.push((
+                placement,
+                sealed
+                    .into_persisted_entry(&self.inner.executor)
+                    .await
+                    .map_err(|error| OwnershipHandoffError::checkpoint(error.to_string()))?,
+            ));
         }
         let mut windows = Vec::new();
         for state in self.inner.replicated_window_processor_states.iter() {
@@ -2547,7 +2553,7 @@ impl Runtime {
     )]
     pub(in crate::runtime) async fn apply_materialized_stream_records(
         &self,
-        state: &MaterializedRelayStateOriginator,
+        state: &mut MaterializedRelayStateOriginator,
         key: &Option<BranchKey>,
         records: impl IntoIterator<Item = RuntimeRow>,
     ) -> Result<(), error_stack::Report<StateAuthorityError>> {
@@ -2572,7 +2578,7 @@ impl Runtime {
 
     pub(in crate::runtime) fn delete_materialized_stream_key(
         &self,
-        state: &MaterializedRelayStateOriginator,
+        state: &mut MaterializedRelayStateOriginator,
         key: &Option<BranchKey>,
     ) -> Result<(), error_stack::Report<StateAuthorityError>> {
         if state.remove_key(key)?.is_some() {
@@ -2679,8 +2685,16 @@ impl Runtime {
         {
             return Ok(());
         }
-        let sealed = match self.take_transferred_runtime_state_snapshot(placement) {
-            Some(snapshot) => Some(snapshot),
+        let source = match self.take_transferred_runtime_state_snapshot(placement) {
+            Some(snapshot) => {
+                let sealed = self
+                    .inner
+                    .executor
+                    .charge_owned(nervix_execution::MemoryClass::Bulk, snapshot.payload)
+                    .await
+                    .map_err(|error| RuntimePersistenceError::DecodeState(error.to_string()))?;
+                SealedSource::memory(sealed)
+            }
             None => {
                 if self
                     .inner
@@ -2689,26 +2703,46 @@ impl Runtime {
                 {
                     return Ok(());
                 }
-                self.stored_runtime_state_snapshot(placement)
-                    .map_err(|error| error.current_context().clone())?
+                let Some(store) = self.inner.state_store.as_ref() else {
+                    return Ok(());
+                };
+                let store = store.clone();
+                let placement = placement.clone();
+                let charge = self
+                    .inner
+                    .executor
+                    .reserve(
+                        nervix_execution::MemoryClass::Bulk,
+                        crate::runtime::RESTORE_STATE_WORKING_BYTES,
+                    )
+                    .await
+                    .map_err(|error| RuntimePersistenceError::DecodeState(error.to_string()))?;
+                let reader = self
+                    .inner
+                    .executor
+                    .run_storage(
+                        nervix_execution::StorageClass::Filesystem,
+                        charge,
+                        move |_charge, cancellation| {
+                            cancellation
+                                .check()
+                                .change_context(RuntimePersistenceError::Cancelled)?;
+                            store.checkpoint_reader(&placement)
+                        },
+                    )
+                    .await
+                    .map_err(|error| RuntimePersistenceError::DecodeState(error.to_string()))?
+                    .map_err(|error| error.current_context().clone())?;
+                let Some(reader) = reader else {
+                    return Ok(());
+                };
+                SealedSource::stored(self.inner.executor.clone(), reader)
             }
         };
-        let Some(sealed) = sealed else {
-            return Ok(());
-        };
-        let sealed = self
-            .inner
-            .executor
-            .charge_owned(nervix_execution::MemoryClass::Bulk, sealed.payload)
-            .await
-            .map_err(|error| RuntimePersistenceError::DecodeState(error.to_string()))?;
-        let restored = RestoredMaterializedSnapshot::open(
-            &self.inner.executor,
-            schema,
-            SealedSource::memory(sealed),
-        )
-        .await
-        .map_err(|error| RuntimePersistenceError::DecodeState(error.to_string()))?;
+        let restored =
+            RestoredMaterializedSnapshot::open_relay(&self.inner.executor, schema, source)
+                .await
+                .map_err(|error| RuntimePersistenceError::DecodeState(error.to_string()))?;
         self.inner
             .restored_materialized_stream_states
             .insert(placement.clone(), restored);

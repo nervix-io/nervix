@@ -28,11 +28,18 @@ use thiserror::Error;
 use super::{Arc, BranchKey, StdArc, WasmGuestState};
 
 mod backup;
+pub(super) mod checkpoint_reader;
+mod checkpoint_stream;
 mod durability;
 pub(super) mod generation;
+mod maintenance;
+
+#[cfg(test)]
+mod wasm_properties;
 
 use durability::DurabilityBarrier;
 use generation::{StoredCheckpoint, index_key, physical_placement, read_checkpoint};
+pub(crate) use maintenance::DEFAULT_RESTORE_STAGING_MAX_BYTES;
 
 /// The byte that opens the generation segment of a WASM guest state key. A key without it was not
 /// written in the current shape and fails to decode instead of addressing the current lifetime.
@@ -595,6 +602,10 @@ pub(in crate::runtime) enum RuntimeStateOperationError {
     Authority(#[from] StateAuthorityError),
     #[error(transparent)]
     Persistence(#[from] RuntimePersistenceError),
+    #[error(
+        "refused materialized snapshot revision {received} while revision {current} is installed"
+    )]
+    MaterializedSnapshotRevision { received: u64, current: u64 },
     #[error("runtime state checkpoint failed: {0}")]
     Checkpoint(String),
     #[error("runtime state replication failed: {0}")]
@@ -668,6 +679,17 @@ pub(crate) enum RuntimePersistenceError {
     CheckpointPlacementTooLarge,
     #[error("checkpoint chunks are incomplete or differ from their declared length and digest")]
     InvalidCheckpointChunks,
+    #[error("restore checkpoint staging byte accounting overflowed")]
+    RestoreStagingSize,
+    #[error(
+        "restore checkpoint staging quota of {limit} bytes cannot hold {requested} more bytes \
+         with {used} bytes already staged"
+    )]
+    RestoreStagingQuota {
+        limit: u64,
+        used: u64,
+        requested: u64,
+    },
     #[error("restore storage work was cancelled between bounded units")]
     Cancelled,
     #[error("failed to read the restore checkpoint stream")]
@@ -720,6 +742,7 @@ pub(in crate::runtime) struct RuntimeStateStore {
     restore_staging: Keyspace,
     restore_publications: Keyspace,
     checkpoint_chunks: Keyspace,
+    restore_staging_max_bytes: u64,
     handoff_preparations: Keyspace,
     handoff_activations: Keyspace,
     forced_recovery_preparations: Keyspace,
@@ -1088,6 +1111,7 @@ impl RuntimeStateStore {
     pub(in crate::runtime) fn from_database(
         db: Database,
         executor: Executor,
+        restore_staging_max_bytes: u64,
     ) -> Result<Self, RuntimePersistenceError> {
         let latest = db
             .keyspace("runtime_state_latest", KeyspaceCreateOptions::default)
@@ -1175,6 +1199,7 @@ impl RuntimeStateStore {
             restore_staging,
             restore_publications,
             checkpoint_chunks,
+            restore_staging_max_bytes,
             handoff_preparations,
             handoff_activations,
             forced_recovery_preparations,
@@ -2291,3 +2316,7 @@ mod tests;
 #[cfg(all(test, feature = "shuttle"))]
 #[path = "state_store_shuttle_tests.rs"]
 mod shuttle_tests;
+
+#[cfg(all(test, feature = "loom"))]
+#[path = "state_store_loom_models.rs"]
+mod loom_models;
