@@ -245,6 +245,13 @@ must be a positive integer and affects only compilation; the inventory's case li
 requested campaign duration remain enforced. CI uses the default deadline. The runner prints the
 effective compilation deadline alongside the build command and retains timeout evidence.
 
+The campaign process has a deadline of its requested duration plus the greater of 30 seconds
+and three case timeouts. The runner passes `-print_funcs=0` to libFuzzer for preparation,
+campaigns, minimization and failure qualification. This disables the `NEW_FUNC` progress
+messages that otherwise start expensive symbolization on large sanitizer binaries. Crash
+reports and exact replay retain symbolization where a symbolizer is available; sanitizer CI
+exposes its installed LLVM symbolizer under the executable name libFuzzer discovers.
+
 Ordinary execution prepares each selected package, harness and exact feature set once with
 `cargo test --no-run`, under a separate 1,800-second compilation deadline. Discovery can require
 the union of a package's features; its binary does not prepare a target with a different declared
