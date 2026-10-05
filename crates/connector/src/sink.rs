@@ -27,8 +27,6 @@ use nervix_models::{
 use nervix_primitives::{sync::Arc, time::Instant};
 use thiserror::Error;
 
-use crate::physical_time::PhysicalDeadline;
-
 /// How many publishes may await confirmation at once, and how long each one may take.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct AckConfirmation {
@@ -326,8 +324,8 @@ pub struct MappedSinkCarrier<'a> {
     pub batch_index: usize,
     pub batch: &'a RecordBatch,
     pub selected_rows: &'a [usize],
-    /// When the host evaluated the mapping, which a rejected row is reported with and a sink whose
-    /// commit cadence is a domain duration measures that cadence from.
+    /// When the host evaluated the mapping, which a rejected row is reported with and a commit
+    /// report names as the domain time of the rows it published.
     pub occurred_at: Timestamp,
     /// The acknowledgements of `selected_rows`, handed over to a sink that declares
     /// [`SinkLifecycle::retains_acknowledgements`]. The host builds them for no other sink, so a
@@ -408,11 +406,19 @@ pub struct SinkCommitReport {
     pub domain_timestamp: Timestamp,
 }
 
-/// A sink-owned deadline the host includes in the task's next wake.
+/// What a sink that stages its writes holds for its next commit.
+///
+/// The sink reports what it staged and the host owns the cadence: it measures
+/// [`SinkStagedCommit::Cadence`] on the emitter's domain clock from the first cadence check that
+/// finds the rows staged, which follows the write that staged them. Rows the emitter's buffer held
+/// before releasing them therefore wait the whole cadence after they are staged, not after the
+/// domain time their batch was accepted at.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SinkDeadline {
-    Domain(Timestamp),
-    Physical(PhysicalDeadline),
+pub enum SinkStagedCommit {
+    /// Staged rows whose commit is due once this domain duration has passed since they were staged.
+    Cadence(Duration),
+    /// Staged rows that reached the sink's maximum commit size, so their commit is due now.
+    SizeReached,
 }
 
 /// Why a connector could not initialize its sink client.
@@ -481,11 +487,13 @@ pub trait SinkLifecycle: Send {
         false
     }
 
-    /// When what this sink staged has to be published.
+    /// What this sink holds for its next commit, absent while it has nothing staged.
     ///
-    /// The host includes the deadline in the emitter task's next wake and asks for the commit once
-    /// the deadline is reached. A sink that has nothing staged declares none.
-    fn commit_deadline(&self) -> Option<SinkDeadline> {
+    /// The host reads it after every write its cadence releases. It arms the cadence this names at
+    /// the first such check that finds rows staged, includes that deadline in the emitter task's
+    /// next wake, and asks for the commit once the deadline is reached or the sink reports its size
+    /// boundary. A sink that writes each batch as it arrives stages nothing.
+    fn staged_commit(&self) -> Option<SinkStagedCommit> {
         None
     }
 
@@ -512,9 +520,10 @@ pub trait SinkLifecycle: Send {
 
     /// Publishes everything this sink staged and resolves the acknowledgements it retained.
     ///
-    /// The host calls this when [`SinkLifecycle::commit_deadline`] is reached and once more for a
-    /// drain, which commits whatever is staged without waiting for that deadline. A sink that
-    /// writes each batch as it arrives stages nothing and has nothing to commit.
+    /// The host calls this when the commit [`SinkLifecycle::staged_commit`] describes is due, and
+    /// for a retry or a drain, which commit whatever is staged without waiting for the cadence or
+    /// reading the domain clock. A sink that writes each batch as it arrives stages nothing and has
+    /// nothing to commit.
     async fn commit(&mut self) -> SinkPublishResult<Option<SinkCommitReport>> {
         Ok(None)
     }
