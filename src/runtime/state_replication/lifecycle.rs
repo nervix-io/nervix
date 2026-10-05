@@ -47,20 +47,16 @@ impl Runtime {
     #[cfg_attr(
         nervix_lint,
         nervix::context(
-            recurring,
-            reason = "this owner is reached by recurring record, frame, acknowledgement or \
-                      state-poll work"
+            lifecycle,
+            reason = "domain routing installation retains its materialized membership epoch"
         )
     )]
     pub(in crate::runtime) fn relay_state_epoch(&self, domain: &DomainName) -> Arc<AtomicU64> {
-        nervix_primitives::expect_lint!(
-            nervix::sync_acquisition,
-            "Typed Ratchet 04 https://app.clickup.com/t/86bc9eqp3: retain the branch relay state \
-             epoch instead of looking up its shared table",
-            self.inner.relay_state_epochs.entry(domain.clone())
-        )
-        .or_insert_with(|| Arc::new(AtomicU64::new(0)))
-        .clone()
+        self.inner
+            .relay_state_epochs
+            .entry(domain.clone())
+            .or_insert_with(|| Arc::new(AtomicU64::new(0)))
+            .clone()
     }
 
     pub(in crate::runtime) fn bump_relay_state_epoch(&self, domain: &DomainName) {

@@ -665,7 +665,8 @@ pub(crate) use domain_clock::{
 };
 pub(crate) use domain_execution::LookupRuntime;
 /// Opaque runtime state capabilities used by paired API examples.
-/// Each capability is retained independently; cloning preserves its authority.
+/// Read and installation capabilities can be retained independently. Materialized origination
+/// transfers exclusive ownership to the executing task.
 ///
 /// ```
 /// use nervix_server::runtime::state_capability_compile_tests::KafkaOffsetStateRead;
@@ -689,7 +690,14 @@ pub(crate) use domain_execution::LookupRuntime;
 ///
 /// ```
 /// use nervix_server::runtime::state_capability_compile_tests::MaterializedRelayStateOriginator;
-/// fn retain(value: &MaterializedRelayStateOriginator) -> MaterializedRelayStateOriginator { value.clone() }
+/// fn retain(value: MaterializedRelayStateOriginator) -> MaterializedRelayStateOriginator { value }
+/// ```
+///
+/// An originating task keeps exclusive mutable ownership of its branch records.
+///
+/// ```compile_fail
+/// use nervix_server::runtime::state_capability_compile_tests::MaterializedRelayStateOriginator;
+/// fn duplicate(value: &MaterializedRelayStateOriginator) -> MaterializedRelayStateOriginator { value.clone() }
 /// ```
 ///
 /// ```

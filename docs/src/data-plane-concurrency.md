@@ -504,15 +504,68 @@ reads a membership that holds its branch.
 ### Materialized relay entries
 
 One assigned materialized-relay originator owns updates. The state contains at most one latest
-record for each concrete branch. Replacing an existing branch's record is admitted under the
-originator's assignment generation. Adding the first record for a branch or evicting a branch also
+record for each concrete branch. Its origination capability moves into the branch runtime or the
+scheduled relay-state task and cannot be cloned. That task owns an ordinary map of mutable branch
+records. An established branch retains its row publication: timestamp comparison uses the owner's
+record, then publishes one immutable Arrow-backed row view. It acquires no shared-map shard and
+does not republish or scan branch membership. A larger high watermark wins, then a larger low
+watermark; equal watermarks retain the first record and advance no revision.
+
+Replacing an existing branch's record is admitted under the originator's assignment generation.
+Adding the first record for a branch or evicting a branch also
 changes the branch lifecycle, so that narrower operation uses the assignment barrier and advances a
-branch generation.
+branch generation. The persistent membership publication changes only at those boundaries or a
+snapshot installation. Eviction first clears the exact row publication, then withdraws that member.
+Recreation allocates a new publication; a retained ended member never attaches to it. Rebinding
+waits for operations admitted under the preceding assignment before rebuilding the new task's
+mutable selections from the published views. Previous writer tokens refuse further mutations.
+
+Domain routing retains one materialized publication per relay and its relay-state epoch. The
+installed state-replication routes supply the relay's immutable branch index. Dependency reads and
+generator ticks load that retained relay index and the installed row views, rather than looking
+up or iterating node-wide materialized-state, presence or epoch registries. Presence comes from the
+retained relay services; placement identity comes from the shared immutable assignment publication.
+Live state owns absence: an empty concrete branch does not fall back to the relay snapshot, and a
+missing live row does not fall back to a pre-eviction stored snapshot.
+Cold installation and public observation retain their lifecycle registries.
 
 A snapshot capture holds the assignment boundary only long enough to take immutable row views,
 their revision, their ownership fence, and their branch generation. The Arrow columns stay shared,
 and sealing and encoding happen after the boundary is released. A snapshot from an earlier
 assignment or branch generation cannot restore state that a newer owner or eviction superseded.
+Installation also refuses a lower revision within the same fence and branch generation. A cached
+sealed snapshot answers a current read only when its revision and assignment fence still match.
+One sealed generation is cached and one build is admitted per placement; outstanding readers and
+captures keep only their selected row views and shared Arrow carriers. Publication never copies a
+row payload or a whole relay for an established update. Snapshot archives and storage ownership
+retain the current container and backup contract.
+
+The required-wait observation creates its notification before reading dependencies. The primitive
+boundary registers a `notify_waiters` observer at future creation, so an update after the read and
+before its first poll still wakes it. Broadcast publication occurs once after each changed batch
+and after a deletion. Periodic rechecks also cover remote changes; they do not establish the local
+wake invariant.
+
+The registered `materialized-publication-lifetimes` property exercises bounded updates, captures,
+deletes and rebinding, then restores every captured schema, logical value, watermark and branch.
+Production-owner Shuttle checks cover update/capture, eviction/recreation, assignment replacement
+and required-wait registration without a polling timer. The Loom invariant
+`server.state-assignment.drained-publication` proves the synchronous admission drain observes
+preceding writes; its relaxed completion weakening must fail. ArcSwap internals are opaque to
+these models. Supported Turmoil transfer checks establish network framing and replacement scope,
+not disk durability or whole-cluster recovery. Typed Ratchet 10 owns mandatory immutable-image
+materialized smoke/soak qualification. The same-host `just bench-materialized-state` measures row
+and batch cost for 1, 256 and 4096 branches, allocation and captured-carrier retention; instrumented
+benchmark smoke execution supplies coverage, not performance evidence. Assignment/capture
+barriers and sealed-cache locks are tracked by Deloxide; async notifications and opaque publication
+internals remain outside its detector.
+`just test-deloxide` and `just test-deloxide-order` include the materialized-publication diagnostic
+process, which starts the detector and exercises timestamp replacement, capture, sealing,
+installation lifetimes, rebinding, lazy relay installation, branch eviction and bounded complete
+snapshot properties. The latter also checks potential acquisition-order cycles among tracked lock
+instances. Each selection retains its own evidence alongside the other diagnostic processes under
+`target/deloxide/test-deloxide`; these instrumented executions supply correctness evidence, while
+the ordinary native benchmark supplies the row-publication cost measurements.
 
 ### Acknowledgement state
 
@@ -908,8 +961,9 @@ second operation fails even when Rust would regard the expectation as fulfilled.
 
 Task handles remove recurring status, freeze, metric and checkpoint lookups. Source readiness,
 relay channels, buffered error delivery, domain selection and transport leasing use retained handles
-or immutable publications. Typed Ratchet 04 owns materialized branch discovery and Typed Ratchet 05
-owns remaining remote acknowledgement/admission discovery. Replica catch-up retains the entity's
+or immutable publications. Materialized writers own their mutable branch records and readers
+retain per-relay publications. Typed Ratchet 05 owns remaining remote acknowledgement/admission
+discovery. Replica catch-up retains the entity's
 lifecycle handle, assignment slot and its own record of each branch. Replication frames,
 synchronization and listing requests select published state handles; announcers retain their route
 and assignment slot. Their runtime registries handle installation, replacement and teardown.
@@ -1320,9 +1374,12 @@ line was reused.
 
 **Bounds and handoff.** The live registry owns the live lock, waiting attempt and thread records;
 none of its shard guards cross a tracked acquisition. Order instrumentation adds a run-bounded
-history of at most 8,192 directed instance edges, 64 source witnesses per edge, and 64 guard
+history of at most 8,192 directed instance edges, 1,024 source witnesses per edge, and 64 guard
 leases per thread. Ending a lock does not reclaim the historical edge budget. Refused history or
-count overflow becomes an explicit overload finding.
+count overflow becomes an explicit overload finding. The witness budget retains distinct storage
+worker identities across checkpoint staging. Its process regression retains all 512 worker
+contexts in one historical edge; a separate 1,025-context workload must record order-history
+overload and fail qualification. The independent edge and held-guard limits remain fatal too.
 
 The vendor dispatcher has an unbounded channel and swallows callback panics. The boundary callback
 therefore only retains bounded identity vectors, submits to its lock-free `ReportHandoff` of 64

@@ -563,7 +563,9 @@ fn a_refused_context_merge_preserves_the_complete_preceding_snapshot() {
     let full = OrderEdge::new(edge.before.clone(), edge.after.clone(), contexts.clone(), 0)
         .assured("exactly the witness bound fits");
     let mut next = contexts[0].clone();
-    next.thread = TrackedThreadId::new(number(99));
+    next.thread = TrackedThreadId::new(number(
+        u64::try_from(MAX_ORDER_WITNESSES + 1).assured("the witness bound fits a thread identity"),
+    ));
     let mut repeated = contexts[0].clone();
     repeated.attempts = number(10);
     let incoming = OrderEdge::new(

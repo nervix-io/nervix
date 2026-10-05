@@ -817,13 +817,11 @@ impl Runtime {
             | RuntimeStateKind::WindowProcessor
             | RuntimeStateKind::BranchLru => {
                 let node = DomainNodeRef::node_in(domain.clone(), kind, identifier.clone());
-                let assignment = nervix_primitives::expect_lint!(
-                    nervix::sync_acquisition,
-                    "Typed Ratchet 04 https://app.clickup.com/t/86bc9eqp3: retain the published \
-                     state placement before recurring branch work",
-                    self.inner.state_identities.get(&node)
-                )
-                .and_then(|slot| slot.load_full());
+                let assignment = self
+                    .inner
+                    .state_replication_routing
+                    .assignment_for_entity(&node)
+                    .and_then(|slot| slot.load_full());
                 let Some(assignment) = assignment else {
                     return Err(Report::new(
                         StateIdentityError::SchemaFingerprintUnpublished {
