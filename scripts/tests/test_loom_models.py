@@ -341,13 +341,24 @@ def listing(*tests: str) -> Outcome:
 
 
 class QualificationTests(unittest.TestCase):
-    def test_a_failed_qualification_restores_its_source_and_builds_apart(self) -> None:
+    def test_each_weakening_builds_apart_from_restored_source_and_leaves_no_copy(self) -> None:
+        second = (
+            "\n[[qualification]]\n"
+            'id = "execution.cancellation.relaxed-observation"\n'
+            'invariant = "execution.cancellation.publication"\n'
+            'path = "crates/execution/src/cancellation.rs"\n'
+            'original = "load(Ordering::Acquire)"\n'
+            'weakened = "load(Ordering::Relaxed)"\n'
+            'failure = "observed its cancellation without the write"\n'
+        )
         with TemporaryDirectory() as temporary:
             root = Path(temporary)
             (root / "Cargo.toml").write_text("[workspace]\n", encoding="utf-8")
             source = root / "crates/execution/src/cancellation.rs"
             source.parent.mkdir(parents=True)
-            source.write_text("store(true, Ordering::Release)", encoding="utf-8")
+            source.write_text(
+                "store(true, Ordering::Release) load(Ordering::Acquire)", encoding="utf-8"
+            )
             for generated in GENERATED_INPUTS:
                 (root / generated).mkdir(parents=True)
             build = root / "target/loom-qualification-build"
@@ -362,17 +373,23 @@ class QualificationTests(unittest.TestCase):
 
             commands = ScriptedCommands(root, respond)
             with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
-                status = qualify(commands, inventory(), root / "target")
+                status = qualify(commands, parse_inventory(INVENTORY + second), root / "target")
 
             self.assertEqual(status, 1)
-            self.assertEqual(built, ["store(true, Ordering::Relaxed)"])
-            self.assertEqual(copied.read_text(encoding="utf-8"), "store(true, Ordering::Release)")
+            self.assertEqual(
+                built,
+                [
+                    "store(true, Ordering::Relaxed) load(Ordering::Acquire)",
+                    "store(true, Ordering::Release) load(Ordering::Relaxed)",
+                ],
+            )
+            self.assertFalse((build / "tree").exists())
             builds = [
                 (command, environment)
                 for command, environment in zip(commands.commands, commands.environments)
                 if command[0] == "cargo"
             ]
-            self.assertEqual(len(builds), 1)
+            self.assertEqual(len(builds), 2)
             for command, environment in builds:
                 self.assertEqual(command[command.index("--profile") + 1], "loom")
                 self.assertEqual(environment["CARGO_TARGET_DIR"], str(build / "target"))

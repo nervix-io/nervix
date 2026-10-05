@@ -26,7 +26,8 @@ it. The copy builds into a target directory of its own, so a weakened build neve
 working tree's, and every file it copies or restores takes a fresh modification time, so Cargo
 rebuilds exactly what a weakening changed and never mistakes a weakened build for a restored one.
 Qualifications that apply the same weakening share one weakened build. The copy links the generated
-inputs the ignore rules leave out but a package embeds, such as the built web console.
+inputs the ignore rules leave out but a package embeds, such as the built web console, and is removed
+when the qualification ends; its target directory stays, so a later run reuses its dependencies.
 Discovery, execution, replay and qualification use the same build profile.
 """
 
@@ -600,20 +601,24 @@ def qualify(commands: Commands, inventory: Inventory, target: Path) -> int:
     manifest = tree / "Cargo.toml"
     environment = {"CARGO_TARGET_DIR": str(build / "target")}
     problems: list[str] = []
-    for weakening, qualifications in weakenings(inventory.qualifications):
-        mutated = tree / weakening.path
-        source = mutated.read_text(encoding="utf-8")
-        mutated.write_text(weaken(source, qualifications[0]), encoding="utf-8")
-        try:
-            for qualification in qualifications:
-                problem = qualify_one(
-                    commands, inventory, target, qualification, manifest, environment
-                )
-                if problem is not None:
-                    problems.append(problem)
-        finally:
-            # Written anew, so its time is newer than the weakened build and Cargo rebuilds it.
-            mutated.write_text(source, encoding="utf-8")
+    try:
+        for weakening, qualifications in weakenings(inventory.qualifications):
+            mutated = tree / weakening.path
+            source = mutated.read_text(encoding="utf-8")
+            mutated.write_text(weaken(source, qualifications[0]), encoding="utf-8")
+            try:
+                for qualification in qualifications:
+                    problem = qualify_one(
+                        commands, inventory, target, qualification, manifest, environment
+                    )
+                    if problem is not None:
+                        problems.append(problem)
+            finally:
+                # Written anew, so its time is newer than the weakened build and Cargo rebuilds it.
+                mutated.write_text(source, encoding="utf-8")
+    finally:
+        # A later run copies the tree afresh, so the copy is removed and only its build stays.
+        shutil.rmtree(tree, ignore_errors=True)
     for problem in problems:
         print(f"loom: {problem}", file=sys.stderr)
     if problems:

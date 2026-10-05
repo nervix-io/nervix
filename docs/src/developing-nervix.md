@@ -363,7 +363,8 @@ target directory of its own there, so a weakened build never stands in for the w
 Every file the copy takes or restores gets a fresh modification time, so each weakening rebuilds only
 what it changed, and qualifications that register the same weakening share one weakened build. The
 server's models embed the built web console, which the copy links rather than copies; the Loom
-recipes build it first.
+recipes build it first. The copied sources are removed when the qualification ends, and the target
+directory stays, so a later run reuses the dependencies it built.
 
 ### Primitive boundary and execution modes
 
