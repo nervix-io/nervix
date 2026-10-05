@@ -1090,11 +1090,16 @@ jobs:
           path: target/native-coverage-build-loom/loom-failures
           if-no-files-found: ignore
 
-  # The proof that each Loom model fails under the ordering weakening it exists to detect. A job
-  # of its own because every qualification that weakens the server rebuilds the server library in
-  # Loom's test mode with its one weakening applied, which outlasts the other extra tests.
+  # The proof that each Loom model fails under the ordering weakening it exists to detect. Jobs of
+  # their own because every qualification that weakens the server rebuilds the server library in
+  # Loom's test mode with its one weakening applied, which outlasts the other extra tests; the
+  # shards split those rebuilds.
   loom-qualification:
-    name: loom-qualification
+    name: loom-qualification (${{ matrix.shard }} of ${{ strategy.job-total }})
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2]
     runs-on: blacksmith-8vcpu-ubuntu-2404
     timeout-minutes: 120
     permissions:
@@ -1182,7 +1187,7 @@ jobs:
           sync: "false"
           cache-executables: "true"
           max-size: "1TiB"
-          manifest-key: ${{ github.job }}-${{ runner.os }}-${{ runner.arch }}
+          manifest-key: ${{ github.job }}-${{ matrix.shard }}-${{ runner.os }}-${{ runner.arch }}
           pr-comment: "false"
           s3-bucket: ${{ vars.KACHE_BUCKET }}
           s3-prefix: "artifacts"
@@ -1194,7 +1199,7 @@ jobs:
       - name: Loom ordering qualification
         run: |
           just toolchains-install
-          just test-loom-qualification
+          just test-loom-qualification ${{ matrix.shard }}/${{ strategy.job-total }}
 
       - name: Publish kache report
         if: always()
@@ -1204,7 +1209,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: kache-${{ github.job }}-${{ runner.os }}-${{ runner.arch }}
+          name: kache-${{ github.job }}-${{ matrix.shard }}-${{ runner.os }}-${{ runner.arch }}
           path: ${{ runner.temp }}/kache-report
           if-no-files-found: warn
 
@@ -1214,7 +1219,7 @@ jobs:
         if: failure()
         uses: actions/upload-artifact@v4
         with:
-          name: loom-qualification-failures
+          name: loom-qualification-failures-${{ matrix.shard }}
           path: |
             target/loom-qualification/*/*.log
             target/loom-qualification/*/*.json

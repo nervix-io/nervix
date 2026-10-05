@@ -16,6 +16,7 @@ from scripts.loom_models import (
     Inventory,
     Outcome,
     RunnerError,
+    Shard,
     Weakening,
     completion,
     copy_working_tree,
@@ -340,59 +341,87 @@ def listing(*tests: str) -> Outcome:
     return Outcome(0, "".join(f"{test}: test\n" for test in tests))
 
 
+SECOND_WEAKENING = (
+    "\n[[qualification]]\n"
+    'id = "execution.cancellation.relaxed-observation"\n'
+    'invariant = "execution.cancellation.publication"\n'
+    'path = "crates/execution/src/cancellation.rs"\n'
+    'original = "load(Ordering::Acquire)"\n'
+    'weakened = "load(Ordering::Relaxed)"\n'
+    'failure = "observed its cancellation without the write"\n'
+)
+
+
 class QualificationTests(unittest.TestCase):
+    def qualify_tree(
+        self, inventory_text: str, shard: Shard
+    ) -> tuple[int, list[str], ScriptedCommands, Path]:
+        """Qualifies a tree whose one source both weakenings apply to, and returns the status, the
+        source each build saw, the commands and the build directory."""
+
+        directory = TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        root = Path(directory.name)
+        (root / "Cargo.toml").write_text("[workspace]\n", encoding="utf-8")
+        source = root / "crates/execution/src/cancellation.rs"
+        source.parent.mkdir(parents=True)
+        source.write_text("store(true, Ordering::Release) load(Ordering::Acquire)", encoding="utf-8")
+        for generated in GENERATED_INPUTS:
+            (root / generated).mkdir(parents=True)
+        build = root / "target/loom-qualification-build"
+        copied = build / "tree/crates/execution/src/cancellation.rs"
+        built: list[str] = []
+
+        def respond(arguments: Sequence[str]) -> Outcome:
+            if arguments[:2] == ["git", "ls-files"]:
+                return Outcome(0, "Cargo.toml\0crates/execution/src/cancellation.rs\0")
+            built.append(copied.read_text(encoding="utf-8"))
+            return Outcome(0, "     Running unittests src/lib.rs\n")
+
+        commands = ScriptedCommands(root, respond)
+        with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
+            status = qualify(commands, parse_inventory(inventory_text), root / "target", shard)
+        return status, built, commands, build
+
     def test_each_weakening_builds_apart_from_restored_source_and_leaves_no_copy(self) -> None:
-        second = (
-            "\n[[qualification]]\n"
-            'id = "execution.cancellation.relaxed-observation"\n'
-            'invariant = "execution.cancellation.publication"\n'
-            'path = "crates/execution/src/cancellation.rs"\n'
-            'original = "load(Ordering::Acquire)"\n'
-            'weakened = "load(Ordering::Relaxed)"\n'
-            'failure = "observed its cancellation without the write"\n'
+        status, built, commands, build = self.qualify_tree(INVENTORY + SECOND_WEAKENING, Shard(1, 1))
+
+        self.assertEqual(status, 1)
+        self.assertEqual(
+            built,
+            [
+                "store(true, Ordering::Relaxed) load(Ordering::Acquire)",
+                "store(true, Ordering::Release) load(Ordering::Relaxed)",
+            ],
         )
-        with TemporaryDirectory() as temporary:
-            root = Path(temporary)
-            (root / "Cargo.toml").write_text("[workspace]\n", encoding="utf-8")
-            source = root / "crates/execution/src/cancellation.rs"
-            source.parent.mkdir(parents=True)
-            source.write_text(
-                "store(true, Ordering::Release) load(Ordering::Acquire)", encoding="utf-8"
-            )
-            for generated in GENERATED_INPUTS:
-                (root / generated).mkdir(parents=True)
-            build = root / "target/loom-qualification-build"
-            copied = build / "tree/crates/execution/src/cancellation.rs"
-            built: list[str] = []
+        self.assertFalse((build / "tree").exists())
+        builds = [
+            (command, environment)
+            for command, environment in zip(commands.commands, commands.environments)
+            if command[0] == "cargo"
+        ]
+        self.assertEqual(len(builds), 2)
+        for command, environment in builds:
+            self.assertEqual(command[command.index("--profile") + 1], "loom")
+            self.assertEqual(environment["CARGO_TARGET_DIR"], str(build / "target"))
+            self.assertEqual(environment["CARGO_INCREMENTAL"], "1")
 
-            def respond(arguments: Sequence[str]) -> Outcome:
-                if arguments[:2] == ["git", "ls-files"]:
-                    return Outcome(0, "Cargo.toml\0crates/execution/src/cancellation.rs\0")
-                built.append(copied.read_text(encoding="utf-8"))
-                return Outcome(0, "     Running unittests src/lib.rs\n")
+    def test_shards_split_the_distinct_weakenings(self) -> None:
+        _, first, _, _ = self.qualify_tree(INVENTORY + SECOND_WEAKENING, Shard(1, 2))
+        _, second, _, _ = self.qualify_tree(INVENTORY + SECOND_WEAKENING, Shard(2, 2))
 
-            commands = ScriptedCommands(root, respond)
-            with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
-                status = qualify(commands, parse_inventory(INVENTORY + second), root / "target")
+        self.assertEqual(first, ["store(true, Ordering::Relaxed) load(Ordering::Acquire)"])
+        self.assertEqual(second, ["store(true, Ordering::Release) load(Ordering::Relaxed)"])
 
-            self.assertEqual(status, 1)
-            self.assertEqual(
-                built,
-                [
-                    "store(true, Ordering::Relaxed) load(Ordering::Acquire)",
-                    "store(true, Ordering::Release) load(Ordering::Relaxed)",
-                ],
-            )
-            self.assertFalse((build / "tree").exists())
-            builds = [
-                (command, environment)
-                for command, environment in zip(commands.commands, commands.environments)
-                if command[0] == "cargo"
-            ]
-            self.assertEqual(len(builds), 2)
-            for command, environment in builds:
-                self.assertEqual(command[command.index("--profile") + 1], "loom")
-                self.assertEqual(environment["CARGO_TARGET_DIR"], str(build / "target"))
+    def test_a_shard_that_selects_no_weakening_fails(self) -> None:
+        with self.assertRaisesRegex(RunnerError, "selects none of the 1 weakenings"):
+            self.qualify_tree(INVENTORY, Shard(2, 2))
+
+    def test_a_shard_is_a_number_of_a_count(self) -> None:
+        self.assertEqual(Shard.parse("2/3"), Shard(2, 3))
+        for text in ("0/2", "3/2", "1/0", "1", "a/b", "/2"):
+            with self.subTest(text=text), self.assertRaises(RunnerError):
+                Shard.parse(text)
 
 
 class RunTests(unittest.TestCase):

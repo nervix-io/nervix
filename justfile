@@ -611,9 +611,10 @@ test-loom-replay failure: build-web-console
 
 # Show that each qualified Loom model detects its ordering or stack capacity fault. Every weakening is
 # applied to a copy of the working tree, the model must fail with its registered message, and the
-# checkpoint of that failure must replay it.
-test-loom-qualification: build-web-console
-    python3 -m scripts.loom_models --target-dir {{ quote(cargo_target_dir) }} qualify
+# checkpoint of that failure must replay it. `shard`, NUMBER/COUNT, qualifies one part of the
+# distinct weakenings, so CI can split their rebuilds across jobs; the default qualifies them all.
+test-loom-qualification shard="1/1": build-web-console
+    python3 -m scripts.loom_models --target-dir {{ quote(cargo_target_dir) }} qualify --shard {{ quote(shard) }}
 
 # Run the Turmoil suite: the primitive boundary's simulated-host checks, the execution and library
 # simulation checks, then every interconnect scenario over its committed regression seeds. Tokio's

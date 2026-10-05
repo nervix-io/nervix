@@ -28,6 +28,8 @@ rebuilds exactly what a weakening changed and never mistakes a weakened build fo
 Qualifications that apply the same weakening share one weakened build. The copy links the generated
 inputs the ignore rules leave out but a package embeds, such as the built web console, and is removed
 when the qualification ends; its target directory stays, so a later run reuses its dependencies.
+The copy compiles incrementally, and `--shard NUMBER/COUNT` qualifies one part of the distinct
+weakenings, so separate jobs can split the rebuilds.
 Discovery, execution, replay and qualification use the same build profile.
 """
 
@@ -580,6 +582,33 @@ def weakenings(
     return list(grouped.items())
 
 
+@dataclass(frozen=True)
+class Shard:
+    """One part of the qualification, so separate jobs can share its weakened builds.
+
+    Shard `number` of `count`, numbered from 1, takes the distinct weakenings at the inventory
+    positions that leave `number - 1` when divided by `count`.
+    """
+
+    number: int
+    count: int
+
+    @classmethod
+    def parse(cls, text: str) -> Shard:
+        number, separator, count = text.partition("/")
+        if not separator or not number.isdigit() or not count.isdigit():
+            raise RunnerError(f"a qualification shard is NUMBER/COUNT, such as 1/2, not `{text}`")
+        shard = cls(number=int(number), count=int(count))
+        if shard.count < 1 or not 1 <= shard.number <= shard.count:
+            raise RunnerError(
+                f"qualification shard {text} names no part: NUMBER runs from 1 to COUNT"
+            )
+        return shard
+
+    def selects(self, position: int) -> bool:
+        return position % self.count == self.number - 1
+
+
 def qualification_failure(outcome: Outcome, qualification: Qualification) -> str | None:
     """Why a weakened model's run does not qualify it, or `None` when it failed as it must."""
 
@@ -592,17 +621,36 @@ def qualification_failure(outcome: Outcome, qualification: Qualification) -> str
     return None
 
 
-def qualify(commands: Commands, inventory: Inventory, target: Path) -> int:
+def qualify(
+    commands: Commands, inventory: Inventory, target: Path, shard: Shard = Shard(1, 1)
+) -> int:
     if not inventory.qualifications:
         raise RunnerError(f"{INVENTORY} registers no qualification")
+    distinct = weakenings(inventory.qualifications)
+    selected: list[tuple[Weakening, list[Qualification]]] = []
+    for position, group in enumerate(distinct):
+        if shard.selects(position):
+            selected.append(group)
+    if not selected:
+        raise RunnerError(
+            f"qualification shard {shard.number}/{shard.count} selects none of the "
+            f"{len(distinct)} weakenings"
+        )
+    print(
+        f"loom: qualification shard {shard.number} of {shard.count} applies {len(selected)} of "
+        f"{len(distinct)} weakenings",
+        flush=True,
+    )
     build = target / QUALIFICATION_BUILD
     tree = build / "tree"
     copy_working_tree(commands, tree)
     manifest = tree / "Cargo.toml"
-    environment = {"CARGO_TARGET_DIR": str(build / "target")}
+    # A weakened build serves this run alone, so the copy compiles incrementally: each weakening
+    # recompiles what it changed rather than the whole crate it changed.
+    environment = {"CARGO_TARGET_DIR": str(build / "target"), "CARGO_INCREMENTAL": "1"}
     problems: list[str] = []
     try:
-        for weakening, qualifications in weakenings(inventory.qualifications):
+        for weakening, qualifications in selected:
             mutated = tree / weakening.path
             source = mutated.read_text(encoding="utf-8")
             mutated.write_text(weaken(source, qualifications[0]), encoding="utf-8")
@@ -697,7 +745,8 @@ def main(
     run_parser.add_argument("--report", type=Path)
     replay_parser = subcommands.add_parser("replay")
     replay_parser.add_argument("failure", type=Path)
-    subcommands.add_parser("qualify")
+    qualify_parser = subcommands.add_parser("qualify")
+    qualify_parser.add_argument("--shard", default="1/1")
     arguments = parser.parse_args(argv)
 
     root = arguments.root or repository_root()
@@ -709,7 +758,7 @@ def main(
             return run_models(commands, inventory, target, arguments.filter, arguments.report)
         if arguments.command == "replay":
             return replay(commands, inventory, arguments.failure.resolve())
-        return qualify(commands, inventory, target)
+        return qualify(commands, inventory, target, Shard.parse(arguments.shard))
     except RunnerError as error:
         print(f"loom: {error}", file=sys.stderr)
         return 1

@@ -160,7 +160,7 @@ The CI jobs divide the work at the scenario boundary:
 | `scenarios` | Instrumented server, CLI and paced simulation drivers, the unsharded scenario suite at factor 2, and scenario logs |
 | `coverage` | After tests, scenarios and extra tests, merge their ordinary-mode workspace reports for CRAP, retained artifacts and an advisory patch line coverage comment |
 | `extra-tests` | Native coverage collectors plus capability doctests, Miri, mutation, compiler, and Loom checks |
-| `loom-qualification` | Loom weakening qualifications, one weakened server build for each, and the runs of a failed qualification |
+| `loom-qualification` | Two shards of the Loom weakening qualifications, one weakened server build for each, and the runs of a failed qualification |
 | `shuttle` | Modeled in-process concurrency checks, uncontrolled-nondeterminism rechecks, and failure schedules |
 
 The `tests` and `scenarios` jobs also sample runner CPU utilization and steal time every five
