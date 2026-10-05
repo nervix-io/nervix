@@ -288,6 +288,27 @@ pub(crate) struct ProducerSignals {
     end: watch::Sender<Option<ProducerEnd>>,
 }
 
+/// Whether a producer had ended when one waiter looked, and otherwise how it observes the end.
+enum ProducerEndWatch {
+    Ended(ProducerEnd),
+    /// The producer was running; the receiver observes its end.
+    Running(watch::Receiver<Option<ProducerEnd>>),
+}
+
+impl ProducerSignals {
+    /// Reports the producer's end, or a subscription that observes it.
+    ///
+    /// It subscribes before it reads: a subscription marks the end published so far as seen, so an
+    /// end published between a read and a later subscription would never reach the waiter.
+    fn watch_end(&self) -> ProducerEndWatch {
+        let mut end = self.end.subscribe();
+        if let Some(ended) = end.borrow_and_update().clone() {
+            return ProducerEndWatch::Ended(ended);
+        }
+        ProducerEndWatch::Running(end)
+    }
+}
+
 impl ProducerRegistry {
     /// Registers the producer an open reply announced, before the reply reaches its waiter, so no
     /// event the server sent after the reply can arrive before the producer is registered.
@@ -1235,12 +1256,14 @@ impl Producer {
             let bytes = u32::try_from(ipc.len()).assured(
                 "a batch within the granted bytes, which one session's budget bounds, fits u32",
             );
-            if let Some(ended) = attachment.end() {
-                self.inner
-                    .attachment_ended(&attachment.generation, attachment.id, ended);
-                continue;
-            }
-            let mut end = attachment.signals.end.subscribe();
+            let mut end = match attachment.signals.watch_end() {
+                ProducerEndWatch::Ended(ended) => {
+                    self.inner
+                        .attachment_ended(&attachment.generation, attachment.id, ended);
+                    continue;
+                }
+                ProducerEndWatch::Running(end) => end,
+            };
             let credit = nervix_primitives::select! {
                 acquired = self.inner.slots.credit(bytes) => {
                     let Some(credit) = acquired else {
@@ -1404,9 +1427,49 @@ mod arrow_batch {
 
 #[cfg(all(test, feature = "shuttle"))]
 mod shuttle_tests {
+    use std::num::NonZeroU64;
+
+    use meticulous::OptionExt as _;
+    use nervix_client_wire::RequestId;
     use nervix_model_harness::shuttle::check_random_and_pct;
 
     use super::*;
+
+    /// A submission checks whether its producer ended while the application closes it: the
+    /// submission sees the end, or its wait for the end observes it.
+    #[test]
+    fn shuttle_a_submission_racing_its_producers_end_observes_the_end() {
+        check_random_and_pct(|| {
+            shuttle::future::block_on(async {
+                let registry = ProducerRegistry::default();
+                let generation = Arc::new(());
+                let producer = ProducerId::opened_by(RequestId::new(NonZeroU64::MIN));
+                registry.opened(&generation, producer, ClientProducerAdmission::Open);
+                let signals = registry
+                    .signals(&generation, producer)
+                    .assured("the producer was registered above");
+                let submitting = nervix_primitives::task::spawn(async move {
+                    match signals.watch_end() {
+                        ProducerEndWatch::Ended(_) => {}
+                        ProducerEndWatch::Running(mut end) => {
+                            end.changed()
+                                .await
+                                .assured("the signals keep the sender of the producer's end");
+                        }
+                    }
+                });
+                let closing = nervix_primitives::task::spawn(async move {
+                    registry.closed(&generation, producer);
+                });
+                closing
+                    .await
+                    .assured("the closing side only closes the producer");
+                submitting
+                    .await
+                    .assured("the submitting side only waits for the end");
+            });
+        });
+    }
 
     #[test]
     fn shuttle_close_fences_a_producer_restore_started_on_the_same_exchange() {

@@ -37,10 +37,13 @@ pub(super) struct StreamSlotQuotas {
 
 struct StreamSlotQuotasInner {
     /// Raised when the connection begins to drain and never lowered, because a drained connection
-    /// is closed rather than reused. A lease reads it only after taking its slot, and the drain
-    /// raises it before taking any slot back. With sequentially consistent reads and writes, a
-    /// lease therefore either finds it raised and returns its slot, or took its slot before the
-    /// drain began and is one the drain waits for.
+    /// is closed rather than reused.
+    ///
+    /// The semaphores decide what the drain waits for: it takes every permit back, so a lease
+    /// whose slot came first is one the drain waits for, and a lease after the drain holds every
+    /// permit finds none left. A lease also reads this after taking its slot and returns the slot
+    /// when it is raised, which stops leasing as soon as the drain begins rather than once the
+    /// drain holds every permit.
     draining: AtomicBool,
     partition: StreamSlotPartition,
 }

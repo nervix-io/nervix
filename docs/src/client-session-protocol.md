@@ -1079,7 +1079,9 @@ server acknowledged and did not end, and fences its restoration by generation: a
 attempt the caller has since cancelled is followed by a deletion before the name can be reused, and
 rows of a generation the client no longer holds are ignored. A restoration the new session refuses
 is reported as a restoration failure and sent again on that session after a growing wait, as
-[Reconnecting A Session](#reconnecting-a-session) describes.
+[Reconnecting A Session](#reconnecting-a-session) describes. Each interruption and refused attempt
+reaches the caller's next read as soon as the client records it, without waiting for another change
+to the subscriptions it holds.
 
 A generation the server ended is never restored, because a new session would not change why it
 ended: its relay was redefined, so the announced schema no longer describes its rows, or the relay
@@ -1399,11 +1401,14 @@ attachment receives its reply instead of sending a read of its own; a read of an
 has since ended is dropped with it. Closing a consumer, like closing a producer, sends the close
 from a task of its own, so a caller that stops waiting still releases the attachment, and a second
 close, or a close while the handle waits to be restored, finds nothing attached and returns at once.
+The close also ends every read left with the consumer, including one left while the close ran, so
+no read outlives the close of its consumer.
 
 Consumer and producer operations can share one session. A read awaiting output runs beside
 commands, producer submissions and their outcomes, clock observations, and consumer settlement.
 Each server attachment is bound to its session exchange. The Rust client keeps a desired consumer
-across reconnects and emitter relocation, reports an interruption before the next delivery, and
+across reconnects and emitter relocation, reports one interruption before the next delivery for each
+exchange it lost, whether the loss or a reply racing it is observed first, and
 opens a new attachment only while the generation, contract, schema and granted behavior still
 match its original open. Removed or changed endpoints require an explicit new consumer. A delivery
 reference remains bound to the exchange that delivered it; the client never sends its ACK on the

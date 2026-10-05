@@ -30,7 +30,7 @@ deloxide-order = [
   "nervix-deadlock/deloxide-order",
   "nervix-primitives/deloxide-order",
 ]
-# Selects Loom's primitives for the whole graph, including the backup cut's atomic owner.
+# Selects Loom's primitives for the whole graph, and runs the Loom models of the server's owners.
 loom = [
   "nervix-consensus/loom",
   "nervix-execution/loom",

@@ -1,6 +1,7 @@
+use error_stack::Report;
 use nervix_checkpoint_replication::CheckpointReplication;
 use nervix_models::ClusterNodeName;
-use nervix_primitives::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use nervix_primitives::sync::atomic::{AtomicU64, Ordering};
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 
 use super::{
@@ -30,7 +31,6 @@ pub(super) struct ReplicatedBranchAggregatedState {
     pub(super) physical_node_id: ClusterNodeName,
     pub(super) current_lsm: LsmSequence,
     pub(super) last_persisted_lsm: AtomicU64,
-    pub(super) dirty: AtomicBool,
     /// What each replica reported holding and the offer of the newest snapshot to them while this
     /// node aggregates the metrics, and the owner's announcements while it replicates them.
     replication: CheckpointReplication,
@@ -74,7 +74,6 @@ impl ReplicatedBranchAggregatedState {
             physical_node_id,
             current_lsm: LsmSequence::restored(current_lsm),
             last_persisted_lsm: AtomicU64::new(last_persisted_lsm),
-            dirty: AtomicBool::new(false),
             replication: CheckpointReplication::new(),
         })
     }
@@ -91,10 +90,50 @@ impl ReplicatedBranchAggregatedState {
         &self.replication
     }
 
+    /// The snapshot a flush persists now, or `None` when its revision is no newer than the last one
+    /// persisted.
+    ///
+    /// The decision compares revisions, and a snapshot reads its revision before the metrics, so
+    /// an update a flush's snapshot missed has a newer revision than the one it persisted and the
+    /// next flush persists it.
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            lifecycle,
+            reason = "branch aggregate snapshot work executes outside per-record metric \
+                      accumulation"
+        )
+    )]
+    pub(super) fn snapshot_to_persist(
+        &self,
+        metrics: &RuntimeMetrics,
+    ) -> Result<Option<PersistedRuntimeStateEntry>, Report<RuntimePersistenceError>> {
+        let persisted = self.last_persisted_lsm.load(Ordering::SeqCst);
+        if self.current_lsm.current() <= persisted {
+            return Ok(None);
+        }
+        let snapshot = self.latest_snapshot(metrics).map_err(Report::new)?;
+        if snapshot.lsm <= persisted {
+            return Ok(None);
+        }
+        Ok(Some(snapshot))
+    }
+
+    /// Records that the snapshot at revision `lsm` is persisted.
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            lifecycle,
+            reason = "branch aggregate snapshot work executes outside per-record metric \
+                      accumulation"
+        )
+    )]
+    pub(super) fn persisted(&self, lsm: u64) {
+        self.last_persisted_lsm.fetch_max(lsm, Ordering::SeqCst);
+    }
+
     pub(super) fn mark_metrics_updated(&self) -> u64 {
-        let lsm = self.current_lsm.advance();
-        self.dirty.store(true, Ordering::SeqCst);
-        lsm
+        self.current_lsm.advance()
     }
 
     #[cfg_attr(
@@ -109,6 +148,9 @@ impl ReplicatedBranchAggregatedState {
         &self,
         metrics: &RuntimeMetrics,
     ) -> Result<PersistedRuntimeStateEntry, RuntimePersistenceError> {
+        // The revision is read first, so an update whose metrics this snapshot misses has a newer
+        // revision than the one the snapshot is stamped with.
+        let lsm = self.current_lsm.current();
         let snapshot = BranchAggregatedRuntimeStateSnapshot {
             metrics: metrics.snapshot_global_target(
                 &self.placement.domain,
@@ -118,7 +160,7 @@ impl ReplicatedBranchAggregatedState {
             ),
         };
         Ok(PersistedRuntimeStateEntry {
-            lsm: self.current_lsm.current(),
+            lsm,
             payload: encode_branch_aggregated_snapshot(&snapshot)?,
         })
     }
@@ -146,7 +188,6 @@ impl ReplicatedBranchAggregatedState {
             snapshot.metrics,
         );
         self.current_lsm.adopt(lsm);
-        self.dirty.store(true, Ordering::SeqCst);
         Ok(())
     }
 
@@ -184,7 +225,6 @@ impl ReplicatedBranchAggregatedState {
         self.current_lsm.adopt(snapshot.lsm);
         self.last_persisted_lsm
             .store(snapshot.lsm, Ordering::SeqCst);
-        self.dirty.store(false, Ordering::SeqCst);
         Ok(())
     }
 }
