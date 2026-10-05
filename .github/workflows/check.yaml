@@ -255,6 +255,7 @@ jobs:
           fail_ci_if_error: true
           files: target/deadlock.lcov
           flags: diagnostic-evidence
+          url: https://codecov.io
           use_oidc: true
 
       - name: Upload diagnostic evidence
@@ -700,6 +701,7 @@ jobs:
           disable_search: true
           fail_ci_if_error: true
           files: ./lcov-workspace.info
+          url: https://codecov.io
           use_oidc: true
 
       - name: Upload merged coverage
