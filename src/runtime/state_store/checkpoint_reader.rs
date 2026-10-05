@@ -111,10 +111,20 @@ impl RuntimeStateStore {
         else {
             return Ok(None);
         };
-        let reader = match StoredCheckpoint::decode(&raw)? {
+        self.checkpoint_reader_at(view, &key, &raw).map(Some)
+    }
+
+    /// Reuse the caller's selected view and namespace throughout the checkpoint's lifetime.
+    pub(in crate::runtime) fn checkpoint_reader_at(
+        &self,
+        view: fjall::Snapshot,
+        key: &[u8],
+        raw: &[u8],
+    ) -> error_stack::Result<CheckpointReader, RuntimePersistenceError> {
+        let reader = match StoredCheckpoint::decode(raw)? {
             StoredCheckpoint::Inline(entry) => CheckpointReader::Inline(Cursor::new(entry.payload)),
             StoredCheckpoint::Segmented(metadata) => CheckpointReader::Segmented {
-                prefix: chunk_prefix(&key, metadata.lsm),
+                prefix: chunk_prefix(key, metadata.lsm),
                 metadata,
                 view,
                 chunks: self.checkpoint_chunks.clone(),
@@ -123,7 +133,7 @@ impl RuntimeStateStore {
                 hasher: Box::new(blake3::Hasher::new()),
             },
         };
-        Ok(Some(reader))
+        Ok(reader)
     }
 }
 

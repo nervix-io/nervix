@@ -6526,12 +6526,16 @@ name = "nervix-backup"
 version = "0.1.0-dev"
 dependencies = [
  "arch-into",
+ "arrow-array",
+ "arrow-ipc",
+ "arrow-schema",
  "blake3",
  "bolero",
  "error-stack",
  "meticulous",
  "nervix-arbitrary",
  "nervix-models",
+ "nervix-primitives",
  "rkyv",
  "rstest",
  "strum 0.26.3",

@@ -30,9 +30,10 @@ FILE_LIMIT = 100
 RANGE_LIMIT = 20
 
 
-def command(arguments: Sequence[str], *, root: Path = ROOT, input_text: str | None = None) -> str:
+def command(arguments: Sequence[str], *, root: Path = ROOT, input_text: str | None = None, encoding_errors: str = "strict") -> str:
     result = subprocess.run(
-        arguments, cwd=root, input=input_text, capture_output=True, text=True, timeout=60
+        arguments, cwd=root, input=input_text, capture_output=True, text=True,
+        encoding="utf-8", errors=encoding_errors, timeout=60,
     )
     if result.returncode:
         raise RuntimeError(result.stderr.strip() or f"{arguments[0]} exited {result.returncode}")
@@ -55,6 +56,8 @@ class Patch:
              "--no-color", "--find-renames", "--unified=0", "--inter-hunk-context=0",
              "--src-prefix=a/", "--dst-prefix=b/", merge_base, head_sha, "--"],
             root=root,
+            # Only patch headers and hunk coordinates are interpreted; corpus content is opaque.
+            encoding_errors="replace",
         )
         added: dict[str, set[int]] = {}
         source: str | None = None

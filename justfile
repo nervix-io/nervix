@@ -1009,7 +1009,7 @@ coverage-patch-runner:
     set -euo pipefail
     mkdir -p "{{ cargo_target_dir }}/patch-coverage"
     coverage=(uvx --from coverage==7.11.0 coverage)
-    "${coverage[@]}" run --data-file "{{ cargo_target_dir }}/patch-coverage/python.coverage" --branch --source=scripts.patch_coverage -m unittest scripts.tests.test_patch_coverage
+    "${coverage[@]}" run --data-file "{{ cargo_target_dir }}/patch-coverage/python.coverage" --branch --source=scripts.patch_coverage,scripts.tests.test_patch_coverage -m unittest scripts.tests.test_patch_coverage
     "${coverage[@]}" lcov --data-file "{{ cargo_target_dir }}/patch-coverage/python.coverage" -o "{{ cargo_target_dir }}/patch-coverage/python.lcov"
 
 # Measure changed server and CLI lines against the server's unit tests and selected Cucumber
@@ -1156,6 +1156,42 @@ coverage-visual-create-report output="target/visual-create.lcov":
 # a change to those packages without the scenario suite that `test-coverage` runs.
 coverage-lib output *args:
     cargo llvm-cov --lib --lcov --output-path {{ output }} {{ args }}
+
+# Complete public archive representation and restore/re-export coverage, including test sources.
+coverage-backup-archives output="target/backup-archives.lcov": tests-deps
+    #!/usr/bin/env bash
+    set -euo pipefail
+    export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
+    cargo llvm-cov clean --workspace
+    just coverage-cli-binary
+    export NERVIX_TEST_CLI_PATH={{ quote(cargo_target_dir + "/llvm-cov-target/debug/nervix-cli") }}
+    cargo llvm-cov --no-report --lib --package nervix-backup
+    cargo llvm-cov --no-report --lib --package nervix-nspl -- backup
+    cargo llvm-cov --no-report --features testing --package nervix-server --test scenarios -- \
+        --input tests/features/cluster/backup.feature \
+        --name 'A quiesced backup restores two WASM branches and Kafka domain offsets' \
+        --concurrency 2 --retry 0
+    cargo llvm-cov --no-report --features testing --package nervix-server --lib -- materialized_snapshot
+    cargo llvm-cov --no-report --features testing --package nervix-server --lib -- backup
+    cargo llvm-cov --no-report --features testing --package nervix-server --lib -- runtime::state_store::checkpoint_reader
+    cargo llvm-cov --no-report --features testing --package nervix-server --test scenarios -- \
+        --input tests/features/cluster/backup_materialized.feature \
+        --name 'A resumed materialized cut preserves interleaved branches and generators through restart|Materialized generations larger than the bulk budget resume on every assigned owner and replica' \
+        --concurrency 2 --retry 0
+    cargo llvm-cov report --no-default-ignore-filename-regex --lcov --output-path {{ quote(output) }} \
+        --package nervix-backup --package nervix-nspl --package nervix-server
+
+# Append current checkpoint-reader and backup ownership tests to retained archive profiles.
+coverage-backup-archives-state-append output="target/backup-archives.lcov":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
+    cargo llvm-cov --no-report --lib --package nervix-backup
+    cargo llvm-cov --no-report --features testing --package nervix-server --lib -- materialized_snapshot
+    cargo llvm-cov --no-report --features testing --package nervix-server --lib -- backup
+    cargo llvm-cov --no-report --features testing --package nervix-server --lib -- runtime::state_store::checkpoint_reader
+    cargo llvm-cov report --no-default-ignore-filename-regex --lcov --output-path {{ quote(output) }} \
+        --package nervix-backup --package nervix-nspl --package nervix-server
 
 # Ordinary representation coverage includes the protocol's integration-test target and the
 # native host, SDK, archive descriptors and current checkpoint storage codecs.

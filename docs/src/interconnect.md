@@ -894,6 +894,12 @@ staged-reader reservation. Incomplete transfers expire under the node's staging 
 Materialized restoration first converts archive-owned identities and exact-schema Arrow sections
 to a staged native sealed file. That file uses these same begin/chunk/finish requests, preserving
 its revision and branch generation and establishing its ownership fence in the new cluster.
+For a stopped domain, owner capture selects materialized checkpoint readers from the same database
+snapshot as the other captured state. Each reader retains its selected namespace and chunks until
+bounded identity conversion and raw Arrow staging finish. Running and paused domains use fresh generation
+capture under their assignment barriers. The capture inventory carries both through the existing
+materialized section kinds and Snapshot stream contract. Stored capture never activates the domain.
+
 Large materialized containers never use the encoded metadata install request.
 
 After all checkpoints are staged, the leader sends each target node a publish request with the
