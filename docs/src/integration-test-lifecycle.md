@@ -158,7 +158,7 @@ The CI jobs divide the work at the scenario boundary:
 | --- | --- |
 | `tests` | Instrumented workspace build and all tests except the scenario target |
 | `scenarios` | Instrumented server, CLI and paced simulation drivers, the unsharded scenario suite at factor 2, and scenario logs |
-| `coverage` | After tests, scenarios and extra tests, merge their ordinary-mode workspace reports for CRAP and one Codecov upload |
+| `coverage` | After tests, scenarios and extra tests, merge their ordinary-mode workspace reports for CRAP, retained artifacts and an advisory patch line coverage comment |
 | `extra-tests` | Native coverage collectors plus capability doctests, Miri, mutation, compiler, and Loom checks |
 | `loom-qualification` | Loom weakening qualifications, one weakened server build for each, and the runs of a failed qualification |
 | `shuttle` | Modeled in-process concurrency checks, uncontrolled-nondeterminism rechecks, and failure schedules |
@@ -1031,14 +1031,15 @@ Both CI collectors export `lcov-workspace.info` with an explicit `--workspace` r
 reports cannot make executed library properties appear uncovered because their files were filtered.
 Executing a crate's tests does not include that crate in a report whose package selection names
 only the root package. The coverage job merges these workspace reports with completed native
-extra reports and uploads that combined workspace report to Codecov, so library properties
+extra reports and passes that combined workspace report to `just coverage-patch`, so library properties
 contribute to patch coverage alongside server and client tests. The separate `lcov.info` artifact
-retains the focused server, CLI and web-console view.
-
-The ordinary `coverage` job and the separately flagged `diagnostic-evidence` job upload through the
-verified Codecov CLI to the explicit `https://codecov.io` API origin. OIDC uses that same audience,
-TLS certificates are verified, and `fail_ci_if_error: true` makes an upload failure fail the job.
-Both jobs upload their report artifacts regardless of that verdict.
+retains the focused server, CLI and web-console view. Patch coverage and comment publication are
+advisory and never change the build verdict; the complexity check is independent. The PR comment
+and workflow summary identify the exact comparison and the `coverage-merged` artifact retains the
+reports and `target/patch-coverage.md`.
+Each ordinary coverage input also retains its absolute checkout path as `coverage-source-root.txt`.
+The advisory reporter reads these origins explicitly when matching LCOV sources from Blacksmith
+to files on its GitHub-hosted runner.
 
 | Part of the job | Budget | Basis |
 | --- | --- | --- |
@@ -1063,8 +1064,8 @@ harness's copy of it change together.
 
 A same-commit rerun of the scenarios job replaces that job's four report artifacts: scenario logs,
 runner load, kache report, and scenario coverage. This lets a rerun publish its own diagnostics
-under GitHub Actions' immutable artifact names while the first run's merged Codecov upload stays
-single.
+under GitHub Actions' immutable artifact names. When the coverage job is rerun, its advisory
+reporter updates its marked PR comment for the same PR head instead of adding a comment.
 
 ## How Failure Reaches CI Output
 

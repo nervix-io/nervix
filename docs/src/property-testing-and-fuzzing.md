@@ -376,8 +376,8 @@ the live measurement.
 
 CI publishes `coverage-bolero-fuzz` for live campaign reports and completion evidence,
 `bolero-runs` for corpus/crash and qualification artifacts, and `bolero-selection` for the exact
-eligible producer verdicts, including deliberate skips. The native report uses the `bolero-fuzz`
-Codecov flag; the Python report keeps `bolero`. Fuzz reports remain separate from ordinary
+eligible producer verdicts, including deliberate skips. `bolero-runs` also retains the Python
+runner report as `python.lcov`. Fuzz reports remain separate from ordinary
 workspace coverage and its CRAP gate. A sanitizer skip publishes no fuzz coverage artifact.
 
 ## Adding A Target

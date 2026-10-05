@@ -279,13 +279,12 @@ class WorkflowTests(unittest.TestCase):
                 self.assertNotEqual(result.returncode, 0)
                 self.assertFalse((pathlib.Path(directory) / "selection.json").exists())
 
-    def test_check_forwards_sha_event_labels_and_permissions_to_one_reusable_bolero_call(self) -> None:
+    def test_check_forwards_sha_event_and_labels_to_one_reusable_bolero_call(self) -> None:
         check = (bolero.ROOT / ".github/workflows/check.yaml").read_text()
         self.assertEqual(check.count("uses: ./.github/workflows/bolero.yaml"), 1)
         self.assertIn("tested-sha: ${{ github.sha }}", check)
         self.assertIn("event-name: ${{ github.event_name }}", check)
         self.assertIn("labels-json: ${{ toJSON(github.event.pull_request.labels.*.name) }}", check)
-        self.assertIn("id-token: write", check.split("  conventional-pr-title:")[0])
         self.assertIn("if: inputs.event-name == 'pull_request' && contains(fromJSON(inputs.labels-json || '[]'), 'fuzz')", self.workflow)
         self.assertIn("name: coverage-bolero-fuzz", self.workflow)
         self.assertIn("just coverage-bolero 30", self.workflow)

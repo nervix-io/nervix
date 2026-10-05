@@ -21,7 +21,6 @@ jobs:
     uses: ./.github/workflows/bolero.yaml
     permissions:
       contents: read
-      id-token: write
     secrets: inherit
     with:
       tested-sha: ${{ github.sha }}
@@ -184,7 +183,6 @@ jobs:
     timeout-minutes: 45
     permissions:
       contents: read
-      id-token: write
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -253,21 +251,6 @@ jobs:
         run: just coverage-deadlock
         env:
           NERVIX_DEADLOCK_PROBE_ARTIFACTS: target/diagnostic-evidence/probes
-
-      - name: Install verified Codecov CLI
-        id: codecov-cli
-        uses: ./.github/actions/setup-codecov
-
-      - name: Upload diagnostic coverage to Codecov
-        uses: codecov/codecov-action@v5
-        with:
-          binary: ${{ steps.codecov-cli.outputs.binary }}
-          disable_search: true
-          fail_ci_if_error: true
-          files: target/deadlock.lcov
-          flags: diagnostic-evidence
-          url: https://codecov.io
-          use_oidc: true
 
       - name: Upload diagnostic evidence
         if: always()
@@ -396,6 +379,7 @@ jobs:
 
       - name: Tests coverage
         run: |
+          pwd > coverage-source-root.txt
           just toolchains-install
           just test-coverage
 
@@ -407,6 +391,7 @@ jobs:
           path: |
             lcov-workspace.info
             lcov.info
+            coverage-source-root.txt
           if-no-files-found: warn
 
       - name: Publish runner load
@@ -569,6 +554,7 @@ jobs:
 
       - name: Scenario coverage
         run: |
+          pwd > coverage-source-root.txt
           just toolchains-install
           just test-scenarios-coverage
 
@@ -581,6 +567,7 @@ jobs:
           path: |
             lcov-workspace.info
             lcov.info
+            coverage-source-root.txt
           if-no-files-found: warn
 
       - name: Publish runner load
@@ -640,17 +627,17 @@ jobs:
 
   coverage:
     name: coverage
-    needs: [tests, scenarios, extra-tests, shuttle, diagnostic-evidence, bolero]
+    needs: [tests, scenarios, extra-tests, shuttle]
     runs-on: ubuntu-latest
     timeout-minutes: 20
     permissions:
       contents: read
-      id-token: write
+      pull-requests: write
     steps:
       - name: Checkout
         uses: actions/checkout@v4
         with:
-          fetch-depth: 2
+          fetch-depth: 0
 
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@1.99
@@ -687,7 +674,7 @@ jobs:
           name: coverage-shuttle
           path: coverage-inputs/shuttle
 
-      - name: Merge coverage and check CRAP
+      - name: Merge coverage
         run: |
           lcov --add-tracefile coverage-inputs/tests/lcov-workspace.info \
             --add-tracefile coverage-inputs/scenarios/lcov-workspace.info \
@@ -699,39 +686,37 @@ jobs:
             lcov --add-tracefile lcov-workspace.info --add-tracefile "$report" --output-file lcov-workspace.info
             lcov --add-tracefile lcov.info --add-tracefile "$report" --output-file lcov.info
           done < <(find coverage-inputs/native-extras -path '*/ordinary/*/lcov.info' -o -name python.lcov)
-          just check-coverage
 
-      - name: Install verified Codecov CLI
-        id: codecov-cli
-        uses: ./.github/actions/setup-codecov
+      - name: Report patch line coverage
+        if: always()
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          just coverage-patch "$BASE_SHA" lcov-workspace.info \
+            --repo "$GH_REPO" --pr "$PR_NUMBER" --pr-head "$PR_HEAD_SHA" \
+            --source-root-file coverage-inputs/tests/coverage-source-root.txt \
+            --source-root-file coverage-inputs/scenarios/coverage-source-root.txt \
+            --source-root-file coverage-inputs/native-extras/coverage-source-root.txt
 
-      - name: Upload coverage to Codecov
-        uses: codecov/codecov-action@v5
-        with:
-          binary: ${{ steps.codecov-cli.outputs.binary }}
-          disable_search: true
-          fail_ci_if_error: true
-          files: ./lcov-workspace.info
-          url: https://codecov.io
-          use_oidc: true
-
-      - name: Finalize complete Codecov coverage checks
-        uses: codecov/codecov-action@v5
-        with:
-          binary: ${{ steps.codecov-cli.outputs.binary }}
-          run_command: send-notifications
-          fail_ci_if_error: true
-          url: https://codecov.io
-          use_oidc: true
+      - name: Check CRAP
+        run: just check-coverage
 
       - name: Upload merged coverage
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: coverage-merged
+          overwrite: true
           path: |
             lcov-workspace.info
             lcov.info
+            target/patch-coverage.md
+            coverage-inputs/**/coverage-source-root.txt
           if-no-files-found: warn
 
   # The cross-language client probes: C, C++, Python, Java and Ruby over the shared Rust binding,
@@ -896,7 +881,7 @@ jobs:
   extra-tests:
     name: extra-tests
     # Half the suite job's cores saves capacity. Budget cold ordinary instrumentation,
-    # compiler checks and modeled primitive builds.
+    # compiler checks and modeled primitive and Loom builds.
     runs-on: blacksmith-8vcpu-ubuntu-2404
     timeout-minutes: 120
     permissions:
@@ -1016,6 +1001,11 @@ jobs:
       - name: Setup uv for runner coverage
         uses: astral-sh/setup-uv@v6
 
+      - name: Patch coverage reporter
+        run: |
+          just coverage-patch-runner
+          pwd > target/coverage-source-root.txt
+
       # The collector that the steps below run their checks through, including its refusal of
       # every incomplete collection.
       - name: Native coverage collector
@@ -1073,6 +1063,8 @@ jobs:
             target/typed-ratchet/python.lcov
             target/model-coverage/python.lcov
             target/primitive-boundary/python.lcov
+            target/patch-coverage/python.lcov
+            target/coverage-source-root.txt
             target/typed-ratchet/cache-qualification/**/qualification.json
           if-no-files-found: warn
 

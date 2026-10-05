@@ -76,7 +76,7 @@ class ModelCoverageTests(unittest.TestCase):
         self.assertIn("just test-loom-qualification", qualification)
         coverage = job_section(workflow, "coverage")
         self.assertIn(
-            "needs: [tests, scenarios, extra-tests, shuttle, diagnostic-evidence, bolero]",
+            "needs: [tests, scenarios, extra-tests, shuttle]",
             coverage,
         )
         self.assertIn("-path '*/ordinary/*/lcov.info'", coverage)

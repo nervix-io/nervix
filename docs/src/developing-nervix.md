@@ -593,23 +593,48 @@ just test-native-coverage
 
 The unit and scenario coverage recipes export `lcov-workspace.info` with every workspace package
 selected. CI merges those reports with the native extra reports, checks complexity against that
-complete report, and uploads it to Codecov. The separate `lcov.info` report selects the server,
+complete report, and retains it as the `coverage-merged` artifact. The separate `lcov.info` report selects the server,
 CLI and console for focused inspection; it does not replace the workspace export.
 Run the same complexity check locally with `just check-coverage <merged-workspace-report>`.
 
-Both ordinary and diagnostic coverage uploads use the verified Codecov CLI and explicitly select
-`https://codecov.io` as the API origin and OIDC audience. The diagnostic upload retains its
-`diagnostic-evidence` flag. Uploads require TLS verification and `fail_ci_if_error: true`; transport,
-authentication and upload failures fail their jobs. Each job retains its coverage artifacts with an
-`always()` upload so the report remains available for diagnosis.
+### Patch line coverage
 
-Codecov statuses and comments use its explicit notification boundary. The PR coverage job waits
-for every report producer, including diagnostic evidence and the shared Bolero gate, uploads the
-complete merged workspace report, and then sends notifications with the same verified CLI and
-OIDC authentication. This prevents an early diagnostic or runner upload from judging the patch
-before ordinary coverage arrives. Standalone scheduled and manual Bolero runs send notifications
-after their own gate succeeds. Finalization errors fail CI, and the configured patch target and
-threshold still apply to the completed report.
+CI runs `just coverage-patch` against the merged ordinary workspace report and updates one PR
+comment with patch line coverage, project line coverage, per-file totals and uncovered added line
+numbers. The comment names the merge base and tested commit and links to the workflow artifacts.
+Patch coverage is advisory: no percentage is a build gate, and a missing report or a failed comment
+publication does not fail CI. The independent complexity check retains its own verdict.
+
+Run the same calculation manually after collecting coverage for the committed source revision:
+
+```bash
+just coverage-patch origin/main lcov-workspace.info
+just coverage-patch origin/main lcov-workspace.info --pr 123 --repo nervix-io/nervix
+```
+
+The first command prints the Markdown report and writes `target/patch-coverage.md`; the second also
+creates or updates the authenticated publisher's marked PR comment through `gh`. Additional
+`--report <path>` arguments union line hits from multiple LCOV reports. Coverage must describe the
+tested commit's line coordinates. For reports collected in another checkout, use
+`--source-root <original-checkout-path>` to remap absolute source paths explicitly. Repeat it when
+reports come from multiple source roots. Ordinary CI inputs retain `coverage-source-root.txt` beside
+their reports, and the reporter receives each producer's metadata with `--source-root-file`.
+This accounts for the different checkout paths of Blacksmith and GitHub-hosted runners without
+guessing a file's origin. The merged artifact retains those source-root files for manual reuse.
+
+The command compares the base's merge base to `HEAD`, or to `--head <commit>`. Only added lines with
+LCOV `DA` counters enter its denominator; repeated records count each file/line once, and a hit in
+any report covers the line. Deleted lines, unchanged lines and non-executable additions do not
+enter it. A changed file absent from LCOV is shown as unavailable. An empty measured patch has no
+percentage. Project coverage describes the tracked files present in the supplied reports; no
+baseline project report is assumed.
+
+CI compares the PR base to the tested synthetic merge commit, so the diff uses the same line
+coordinates as the collected coverage. It passes the PR head separately with `--pr-head` and checks
+that the PR is still open at that head before publication. Fork PR tokens may lack comment access;
+the local report, workflow summary and artifact remain available. `just test-patch-coverage`
+exercises accounting and publication, and `just coverage-patch-runner` exports the reporter's
+measured Python coverage for CI.
 
 ### The scenario suite's execution budget
 
