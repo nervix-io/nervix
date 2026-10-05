@@ -1036,7 +1036,7 @@ retains the focused server, CLI and web-console view. Patch coverage and comment
 advisory and never change the build verdict; the complexity check is independent. The PR comment
 and workflow summary identify the exact comparison and the `coverage-merged` artifact retains the
 reports and `target/patch-coverage.md`.
-Each coverage producer also retains its absolute checkout path as `coverage-source-root.txt`.
+Each ordinary coverage input also retains its absolute checkout path as `coverage-source-root.txt`.
 The advisory reporter reads these origins explicitly when matching LCOV sources from Blacksmith
 to files on its GitHub-hosted runner.
 

@@ -610,7 +610,7 @@ creates or updates the authenticated publisher's marked PR comment through `gh`.
 `--report <path>` arguments union line hits from multiple LCOV reports. Coverage must describe the
 tested commit's line coordinates. For reports collected in another checkout, use
 `--source-root <original-checkout-path>` to remap absolute source paths explicitly. Repeat it when
-reports come from multiple source roots. CI producers retain `coverage-source-root.txt` beside
+reports come from multiple source roots. Ordinary CI inputs retain `coverage-source-root.txt` beside
 their reports, and the reporter receives each producer's metadata with `--source-root-file`.
 This accounts for the different checkout paths of Blacksmith and GitHub-hosted runners without
 guessing a file's origin. The merged artifact retains those source-root files for manual reuse.

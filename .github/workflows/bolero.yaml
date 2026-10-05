@@ -1,8 +1,24 @@
 name: Bolero
 
 on:
-  pull_request:
-    types: [opened, synchronize, reopened, labeled, unlabeled]
+  workflow_call:
+    inputs:
+      tested-sha:
+        type: string
+        required: true
+      event-name:
+        type: string
+        required: true
+      labels-json:
+        type: string
+        required: true
+    outputs:
+      randomized-result:
+        value: ${{ jobs.bolero-gate.outputs.randomized-result }}
+      sanitizer-result:
+        value: ${{ jobs.bolero-gate.outputs.sanitizer-result }}
+      sanitizer-required:
+        value: ${{ jobs.bolero-gate.outputs.sanitizer-required }}
   schedule:
     - cron: "0 3 * * 0"
   workflow_dispatch:
@@ -20,6 +36,9 @@ env:
   NO_COLOR: "1"
   CARGO_TERM_COLOR: never
   RUST_LOG_STYLE: never
+  BOLERO_TESTED_SHA: ${{ inputs.tested-sha || github.sha }}
+  BOLERO_EVENT_NAME: ${{ inputs.event-name || github.event_name }}
+  BOLERO_LABELS: ${{ inputs.labels-json || '[]' }}
 
 jobs:
   bolero-random:
@@ -29,6 +48,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tested-sha || github.sha }}
 
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@1.99
@@ -101,10 +122,11 @@ jobs:
 
   bolero-fuzz:
     name: bolero-fuzz
-    if: github.event_name == 'pull_request' && contains(github.event.pull_request.labels.*.name, 'fuzz')
+    if: inputs.event-name == 'pull_request' && contains(fromJSON(inputs.labels-json || '[]'), 'fuzz')
     runs-on: blacksmith-16vcpu-ubuntu-2404
-    # Cold sanitizer builds precede the full per-target campaign and qualification.
-    timeout-minutes: 180
+    # The measured 68-target campaign took 125 minutes after preparation; the
+    # 85-target run needs room for cold builds, qualification and report uploads.
+    timeout-minutes: 300
     env:
       CARGO_BUILD_JOBS: "1"
     permissions:
@@ -112,6 +134,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tested-sha || github.sha }}
 
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@1.99
@@ -122,6 +146,7 @@ jobs:
         uses: dtolnay/rust-toolchain@nightly
         with:
           toolchain: nightly-2026-09-17
+          components: llvm-tools
 
       - name: Install tools
         uses: taiki-e/install-action@v2
@@ -197,6 +222,14 @@ jobs:
         run: |
           just coverage-bolero 30
 
+      - name: Upload live campaign coverage and completion evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-bolero-fuzz
+          path: target/native-coverage/bolero-fuzz/
+          if-no-files-found: error
+
       - name: Upload all fuzz and qualification artifacts
         if: always()
         uses: actions/upload-artifact@v4
@@ -212,12 +245,18 @@ jobs:
     if: always()
     needs: [bolero-random, bolero-fuzz]
     runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      randomized-result: ${{ steps.selection.outputs.randomized-result }}
+      sanitizer-result: ${{ steps.selection.outputs.sanitizer-result }}
+      sanitizer-required: ${{ steps.selection.outputs.sanitizer-required }}
     steps:
       - name: Require ordinary properties and requested fuzzing
+        id: selection
         env:
           RANDOM_RESULT: ${{ needs.bolero-random.result }}
           FUZZ_RESULT: ${{ needs.bolero-fuzz.result }}
-          FUZZ_REQUIRED: ${{ github.event_name == 'pull_request' && contains(github.event.pull_request.labels.*.name, 'fuzz') }}
+          FUZZ_REQUIRED: ${{ inputs.event-name == 'pull_request' && contains(fromJSON(inputs.labels-json || '[]'), 'fuzz') }}
         run: |
           test "$RANDOM_RESULT" = success
           if [[ "$FUZZ_REQUIRED" == "true" ]]; then
@@ -225,3 +264,25 @@ jobs:
           else
             test "$FUZZ_RESULT" = skipped
           fi
+          python3 - <<'PYTHON'
+          import json, os, pathlib
+          record = {
+              "producer": "bolero-selection", "verdict": "complete",
+              "tested_sha": os.environ["BOLERO_TESTED_SHA"],
+              "run": os.environ["GITHUB_RUN_ID"], "attempt": os.environ["GITHUB_RUN_ATTEMPT"],
+              "event": os.environ["BOLERO_EVENT_NAME"], "labels": json.loads(os.environ["BOLERO_LABELS"]),
+              "randomized": os.environ["RANDOM_RESULT"], "sanitizer": os.environ["FUZZ_RESULT"],
+              "sanitizer_required": os.environ["FUZZ_REQUIRED"] == "true",
+          }
+          pathlib.Path("selection.json").write_text(json.dumps(record, indent=2) + "\n")
+          with open(os.environ["GITHUB_OUTPUT"], "a") as output:
+              for name, value in [("randomized-result", record["randomized"]), ("sanitizer-result", record["sanitizer"]), ("sanitizer-required", os.environ["FUZZ_REQUIRED"])]:
+                  output.write(f"{name}={value}\n")
+          PYTHON
+
+      - name: Publish eligible execution or deliberate skip
+        uses: actions/upload-artifact@v4
+        with:
+          name: bolero-selection
+          path: selection.json
+          if-no-files-found: error

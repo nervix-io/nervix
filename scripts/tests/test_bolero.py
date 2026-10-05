@@ -763,6 +763,22 @@ class ExecutionTests(unittest.TestCase):
                 )
                 self.assertEqual(invocation.call_args.kwargs["timeout"], 7200)
 
+    def test_source_instrumentation_preserves_the_sanitizer_build_contract(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            run = pathlib.Path(directory)
+            binary = run / "nervix_backup-1234"
+            binary.touch()
+            target = next(item for item in self.inventory.targets if item.id == "backup-record-manifest")
+            build = subprocess.CompletedProcess([], 0, f"Executable unittests src/lib.rs ({binary})\n", "")
+            with mock.patch.object(bolero, "command", side_effect=self.command_with_build(build)) as commands:
+                self.assertEqual(bolero.build_instrumented(self.inventory, target, run), binary)
+            call = commands.call_args
+            self.assertIn("-C instrument-coverage", call.kwargs.get("env", {}).get("RUSTFLAGS", ""))
+            self.assertEqual(call.kwargs["env"]["LLVM_PROFILE_FILE"], "/dev/null")
+            args = call.args[0]
+            self.assertEqual(args[args.index("--sanitizer") + 1], self.inventory.sanitizer)
+            self.assertEqual(args[args.index("--profile") + 1], "fuzz")
+
     def test_build_deadline_changes_only_the_compilation_budget(self) -> None:
         target = dataclasses.replace(self.target, package="nervix-nspl-format")
         with tempfile.TemporaryDirectory() as directory:
@@ -843,6 +859,7 @@ class ExecutionTests(unittest.TestCase):
             with (
                 mock.patch.object(bolero, "run_dir", return_value=pathlib.Path(directory)),
                 mock.patch.object(bolero, "verify_tool"),
+                mock.patch.object(bolero.coverage, "Campaign"),
                 mock.patch.object(bolero, "build_instrumented",
                                   side_effect=bolero.BoleroError("build failed")),
                 mock.patch.object(bolero, "metadata") as metadata,
@@ -938,6 +955,7 @@ class ExecutionTests(unittest.TestCase):
                 mock.patch.object(bolero, "build_instrumented",
                                   return_value=bolero.ROOT / "fake-binary"),
                 mock.patch.object(bolero, "verify_tool"),
+                mock.patch.object(bolero.coverage, "Campaign"),
                 mock.patch.object(bolero, "metadata"),
                 mock.patch.object(bolero, "command", return_value=success) as execute,
             ):
@@ -960,6 +978,7 @@ class ExecutionTests(unittest.TestCase):
                 mock.patch.object(bolero, "build_instrumented",
                                   return_value=bolero.ROOT / "fake-binary"),
                 mock.patch.object(bolero, "verify_tool"),
+                mock.patch.object(bolero.coverage, "Campaign"),
                 mock.patch.object(bolero, "metadata"),
                 mock.patch.object(bolero, "command", return_value=incomplete),
             ):
