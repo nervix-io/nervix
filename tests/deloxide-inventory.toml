@@ -71,6 +71,9 @@ tags = [
   "@restore_installation",
   "@client_ingestor_alter_drain",
   "@deadlock_reports",
+  "@memory_pressure_pause",
+  "@client_io_03_consumer_restore",
+  "@client_io_03_generation",
 ]
 target = "test:scenarios"
 
@@ -410,6 +413,36 @@ scenario = "A rejected <failure> releases buffered client admission and retains 
 selections = ["deloxide", "deloxide-order"]
 
 [[workload]]
+coverage = "Memory backpressure pausing a scheduled ingestor that starts and runs above the high watermark."
+examples = 2
+feature = "tests/features/runtime/memory_pressure.feature"
+id = "scenario.memory-pressure-pause"
+invariant = "An HTTP ingestor started above the memory high watermark on one and three nodes is quiesced by memory pressure with backpressure active, rejects posted intake and counts the rejection."
+invocation = "scenarios"
+scenario = "Memory high watermark pauses scheduled ingestors"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
+coverage = "Rust client consumers, producers and the attached domain clock resuming across a cluster restart."
+examples = 2
+feature = "tests/features/runtime/client_emitters.feature"
+id = "scenario.client-consumer-restore"
+invariant = "After a cluster restart on one and three nodes, a Rust client's producer and consumer resume their unchanged endpoint: the consumer reports its attachment interruption and delivers the batch submitted after the restart, and the attached domain clock reports its interruption and ticks again."
+invocation = "scenarios"
+scenario = "A producer and consumer resume their unchanged endpoint after a session restart"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
+coverage = "Rust client and WebSocket consumers closed by a domain stop and reopened after its restart."
+examples = 2
+feature = "tests/features/runtime/client_emitters.feature"
+id = "scenario.client-consumer-generation"
+invariant = "Stopping a domain ends its consumers, refuses new ones while it is stopped, and requires an explicit new open after START, on one and three nodes."
+invocation = "scenarios"
+scenario = "Stopping and restarting a domain closes the consumer and creates a new endpoint"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
 coverage = "The Rust client library in a diagnostic paced driver, and the nodes it drives, across a reopen."
 examples = 4
 feature = "tests/features/runtime/paced_simulation.feature"
@@ -462,7 +495,12 @@ workloads = ["paced.reopen-generation", "paced.delayed-refusal"]
 
 [[owner]]
 path = "crates/client-core/src/consumer.rs"
-workloads = ["paced.reopen-generation", "paced.reopen-failure"]
+workloads = [
+  "scenario.client-consumer-restore",
+  "scenario.client-consumer-generation",
+  "paced.reopen-generation",
+  "paced.reopen-failure",
+]
 
 [[owner]]
 path = "crates/client-core/src/domain_clock.rs"
@@ -661,7 +699,11 @@ path = "src/runtime/inferencer.rs"
 
 [[owner]]
 path = "src/runtime/ingestor_quiesce.rs"
-workloads = ["scenario.client-alter-drain", "scenario.diagnostic-nodes"]
+workloads = [
+  "scenario.client-alter-drain",
+  "scenario.diagnostic-nodes",
+  "scenario.memory-pressure-pause",
+]
 
 [[owner]]
 path = "src/runtime/materialized_state.rs"

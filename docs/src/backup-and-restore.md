@@ -66,8 +66,8 @@ entries at the cut, including updates since the periodic snapshot; it never wait
 An empty relay contributes an explicit empty generation. A live capture obtains the same complete
 relay generation under that barrier, while its domain-wide cut retains live capture semantics.
 The drain uses the shutdown admitted-work view: active intake and generators, active source ACK
-roots, relay and node buffers, and emitter buffers or publishes. Parked `REQUIRED WAIT` messages
-are exempt. Once every node reports no admitted work, the leader requests a confirming force-flush
+roots, relay and node buffers, relays that admitted a batch while the node read that view, and
+emitter buffers or publishes. Parked `REQUIRED WAIT` messages are exempt. Once every node reports no admitted work, the leader requests a confirming force-flush
 generation on every node and waits for its obligations to finish before asking owners to capture.
 An unavailable sink keeps its publish and ACK counts outstanding until `TIMEOUT` expires; the
 failed backup reports those counts and resumes the domain.

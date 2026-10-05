@@ -403,14 +403,24 @@ just test-loom cancellation.publication
 The run fails when a registered invariant is missing, ignored or did not complete its exploration,
 and when a `loom_*` test is not registered in `crates/model-harness/loom-inventory.toml`. A failed
 model leaves its Loom checkpoint, output and `metadata.json` below
-`target/loom-failures/<package>/<test>/`; replay it with location tracking and tracing enabled:
+`target/loom-failures/<package>/<invariant>/`; replay it with location tracking and tracing enabled:
 
 ```bash
-just test-loom-replay target/loom-failures/<package>/<test>
+just test-loom-replay target/loom-failures/<package>/<invariant>
 ```
 
 `just test-loom-qualification` applies each registered weakening to a copy of the working tree and
-requires its model to fail.
+requires its model to fail. The copy lives below `target/loom-qualification-build/` and builds into a
+target directory of its own there, so a weakened build never stands in for the working tree's.
+Every file the copy takes or restores gets a fresh modification time, so each weakening rebuilds only
+what it changed, and qualifications that register the same weakening share one weakened build. The
+server's models embed the built web console, which the copy links rather than copies; the Loom
+recipes build it first. The copied sources are removed when the qualification ends, and the target
+directory stays, so a later run reuses the dependencies it built. The copy compiles incrementally,
+because its weakened builds serve that run alone, so a weakening recompiles what it changed rather
+than the whole crate. `just test-loom-qualification NUMBER/COUNT` qualifies one shard of the distinct
+weakenings, the ones at the inventory positions that leave `NUMBER - 1` when divided by `COUNT`; the
+default, `1/1`, qualifies them all.
 
 ### Primitive boundary and execution modes
 
@@ -643,7 +653,9 @@ hash, and `llvm-cov` warns that they have mismatched data and reads the function
 executables that ran it.
 
 CI's extra-tests job collects native extras, per-mode primitive conformance and the complete Loom
-inventory, and runs primitive compile checks and Loom weakening qualification independently.
+inventory, and runs primitive compile checks independently. Two loom-qualification jobs split Loom
+weakening qualification into shards, because it rebuilds the server once for each weakening of a
+server owner.
 The Shuttle job collects its complete inventory, including random/PCT exploration and paired
 nondeterminism checking, and runs schedule replay qualification independently. The jobs upload
 `lcov.info`, `completion.json`, `executions.jsonl`, `export.log` and model evidence as

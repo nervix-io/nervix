@@ -420,7 +420,8 @@ test-primitives-compile:
 # every workload in a disposable child that must report its cycle, record its evidence and end as
 # its contract says; the diagnostic owner tests each install their detector in a fresh process; and
 # the scenario binary runs the `@deadlock_diagnostics`, `@restore_installation`,
-# `@client_ingestor_alter_drain` and `@deadlock_reports` scenarios and then the
+# `@client_ingestor_alter_drain`, `@deadlock_reports`, `@memory_pressure_pause`,
+# `@client_io_03_consumer_restore` and `@client_io_03_generation` scenarios and then the
 # `@paced_simulation_reopen` scenarios with the diagnostic Rust paced driver, without retries, on
 # in-process nodes and real diagnostic server processes of one and three nodes. Every process runs in
 # a session of its own within its bound and the inventory's budget, and the lane fails on an active
@@ -513,7 +514,8 @@ test-shuttle-replay-check:
 # whole run fails when a registered invariant is missing, ignored or incomplete, or when a model is
 # unregistered. A non-empty `filter` runs the models whose test name or invariant contains it and
 # fails when it selects none. A failed model leaves its Loom checkpoint, output and metadata under
-# target/loom-failures for `test-loom-replay`.
+# target/loom-failures for `test-loom-replay`. The server's models need the web console its library
+# embeds.
 test-loom filter="": build-web-console (test-loom-models filter)
 
 [private]
@@ -537,14 +539,15 @@ coverage-loom-runner:
 
 # Replay a failure `test-loom` recorded: Loom resumes from the checkpoint of the failed execution,
 # with location tracking and tracing enabled, so that execution runs first.
-test-loom-replay failure:
+test-loom-replay failure: build-web-console
     python3 -m scripts.loom_models --target-dir {{ quote(cargo_target_dir) }} replay {{ quote(failure) }}
 
 # Show that each qualified Loom model detects its ordering or stack capacity fault. Every weakening is
 # applied to a copy of the working tree, the model must fail with its registered message, and the
-# checkpoint of that failure must replay it.
-test-loom-qualification: build-web-console
-    python3 -m scripts.loom_models --target-dir {{ quote(cargo_target_dir) }} qualify
+# checkpoint of that failure must replay it. `shard`, NUMBER/COUNT, qualifies one part of the
+# distinct weakenings, so CI can split their rebuilds across jobs; the default qualifies them all.
+test-loom-qualification shard="1/1": build-web-console
+    python3 -m scripts.loom_models --target-dir {{ quote(cargo_target_dir) }} qualify --shard {{ quote(shard) }}
 
 # Run the Turmoil suite: the primitive boundary's simulated-host checks, the execution and library
 # simulation checks, then every interconnect scenario over its committed regression seeds. Tokio's

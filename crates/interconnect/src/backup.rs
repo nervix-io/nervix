@@ -37,6 +37,9 @@ pub struct BackupDrainStatus {
     pub admitting_ingestors: u64,
     pub active_generators: u64,
     pub admitted_acks: u64,
+    /// Relays that admitted a batch while the node read this view, so work may have reached a
+    /// count after the read that would have counted it.
+    pub admitting_relays: u64,
     pub buffered_relay_batches: u64,
     pub node_work_items: u64,
     pub buffered_emitter_messages: u64,
@@ -51,6 +54,7 @@ impl BackupDrainStatus {
         self.admitting_ingestors != 0
             || self.active_generators != 0
             || self.admitted_acks != 0
+            || self.admitting_relays != 0
             || self.buffered_relay_batches != 0
             || self.node_work_items != 0
             || self.buffered_emitter_messages != 0
@@ -329,6 +333,7 @@ mod tests {
             admitting_ingestors: 0,
             active_generators: 0,
             admitted_acks: 0,
+            admitting_relays: 0,
             buffered_relay_batches: 0,
             node_work_items: 0,
             buffered_emitter_messages: 0,
@@ -340,6 +345,9 @@ mod tests {
         status.admitted_acks = 1;
         assert!(status.holds_admitted_work());
         status.admitted_acks = 0;
+        status.admitting_relays = 1;
+        assert!(status.holds_admitted_work());
+        status.admitting_relays = 0;
         status.node_work_items = 1;
         assert!(status.holds_admitted_work());
         status.node_work_items = 0;

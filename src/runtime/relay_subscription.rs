@@ -158,7 +158,7 @@ mod tests {
 
     use super::*;
 
-    fn definition(sensitive: bool) -> RelaySubscriptionDefinition {
+    pub(super) fn definition(sensitive: bool) -> RelaySubscriptionDefinition {
         let schema = CreateSchema {
             name: named("event"),
             fields: vec![SchemaField {
@@ -265,5 +265,43 @@ mod tests {
             Some(RelaySubscriptionRefusal::NotDeclared)
         );
         subscriptions.withdraw();
+    }
+}
+
+#[cfg(all(test, feature = "shuttle"))]
+mod shuttle_tests {
+    use meticulous::ResultExt as _;
+    use nervix_model_harness::shuttle::check_random_and_pct;
+    use nervix_primitives::sync::Arc;
+
+    use super::{RelaySubscriptions, RelayTryRecv, tests::definition};
+
+    /// A subscriber attaches while the relay is redeclared with a field that became sensitive. The
+    /// attachment is refused, or it attached under the definition the redeclaration replaced and
+    /// the redeclaration closes its receiver: a subscriber that describes rows by the replaced
+    /// definition never receives a batch of the new one.
+    #[test]
+    fn shuttle_an_attachment_racing_a_redefinition_is_refused_or_closed_by_it() {
+        check_random_and_pct(|| {
+            shuttle::future::block_on(async {
+                let subscriptions = Arc::new(RelaySubscriptions::new());
+                subscriptions.declare(definition(false));
+                let attaching_subscriptions = Arc::clone(&subscriptions);
+                let attaching = nervix_primitives::task::spawn(async move {
+                    attaching_subscriptions.attach(&definition(false))
+                });
+                subscriptions.declare(definition(true));
+                let attached = attaching
+                    .await
+                    .assured("the attaching side only attaches one subscriber");
+                if let Ok(mut receiver) = attached {
+                    assert!(
+                        matches!(receiver.try_recv(), RelayTryRecv::Closed),
+                        "a subscriber attached under a replaced definition outlived its \
+                         replacement"
+                    );
+                }
+            });
+        });
     }
 }

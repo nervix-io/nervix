@@ -56,12 +56,15 @@ records its own evidence under its root, and is a diagnostic node only when the 
 scenario binary was built for the mode. The ordinary suite leaves the `@deadlock_diagnostics`
 scenarios out by default: their steps assert a detector an ordinary build does not have.
 
-The [diagnostic lane](#diagnostic-lane) also selects the ordinary `@restore_installation` and
-`@client_ingestor_alter_drain` scenarios and the local `@deadlock_reports`
+The [diagnostic lane](#diagnostic-lane) also selects the ordinary `@restore_installation`,
+`@client_ingestor_alter_drain`, `@memory_pressure_pause`, `@client_io_03_consumer_restore` and
+`@client_io_03_generation` scenarios and the local `@deadlock_reports`
 inspection/export/triage workflow. They exercise
 the blocking applied-state guard through interrupted checkpoint staging, complete publication and
 runtime handle clearing, including a delayed coordinator after leadership transfer and a
-successor's START. The report tool is an ordinary local executable, even when the scenario process
+successor's START, the memory-pressure pause of starting and running ingestors, and Rust client
+consumers restored after a cluster restart and closed by a domain stop. The report tool is an
+ordinary local executable, even when the scenario process
 selects order analysis. Potential findings remain recorded without ending the process; any
 unreviewed workload finding prevents diagnostic qualification. Real server children and the
 scenario process record the same compile-time/runtime selection. The ordinary CLI built by the test
@@ -159,7 +162,9 @@ The CI jobs divide the work at the scenario boundary:
 | `scenarios` | Instrumented server, CLI and paced simulation drivers, the unsharded scenario suite at factor 2, and scenario logs |
 | `coverage` | After tests, scenarios and extra tests, merge their ordinary-mode workspace reports for CRAP, retained artifacts and an advisory patch line coverage comment |
 | `extra-tests` | Native coverage collectors plus capability doctests, Miri, mutation, compiler, and Loom checks |
+| `loom-qualification` | Two shards of the Loom weakening qualifications, one weakened server build for each, and the runs of a failed qualification |
 | `shuttle` | Modeled in-process concurrency checks, uncontrolled-nondeterminism rechecks, and failure schedules |
+| `deloxide` | The [diagnostic lane](#diagnostic-lane) of each Deloxide selection side by side: its diagnostic builds, probes, owner tests and tagged one- and three-node scenarios under the native coverage collector, the supervision qualification, and every attempt's record and evidence |
 
 The `tests` and `scenarios` jobs also sample runner CPU utilization and steal time every five
 seconds. Every kache-backed job uses kache 0.28.1, records `doctor` output without making it a

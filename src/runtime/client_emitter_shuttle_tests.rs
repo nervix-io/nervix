@@ -1,14 +1,15 @@
 //! Consumer credit races under Shuttle.
 //!
 //! Layer: test harness.
-//! - **Owns.** The node consumer credit invariant while competing sessions attach and release.
+//! - **Owns.** The node consumer credit invariant while competing sessions attach and release, and
+//!   the wakeup a reservation waiting for a full node budget takes from a released reservation.
 //! - **Depends on.** The production consumer budget and the server's Shuttle runner.
 //! - **Must not know.** Session frames, scheduling decisions, or an emitter's Arrow contents.
 
 use std::{num::NonZeroU64, time::Duration};
 
 use bytes::Bytes;
-use meticulous::OptionExt as _;
+use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_model_harness::shuttle::check_interleavings;
 use nervix_models::{
     AckWindow, CLIENT_CONSUMER_NODE_BYTES, DomainName, EmitterName, FieldName, ParseAsType,
@@ -62,6 +63,36 @@ fn shuttle_competing_consumer_grants_never_exceed_the_node_budget() {
                 worker.await.expect("consumer grant task completes");
             }
             assert_eq!(budget.granted.load(Ordering::Acquire), 0);
+        });
+    });
+}
+
+/// A reservation that finds the node budget full waits for the budget to change. It registers for
+/// that change before it reads the budget, so a reservation released between its read and its wait
+/// still wakes it, and it takes the released bytes.
+#[test]
+fn shuttle_a_reservation_waiting_for_a_full_budget_takes_the_bytes_a_release_returns() {
+    check_interleavings(|| {
+        shuttle::future::block_on(async {
+            let budget = ClientEmitterBudget::default();
+            let whole_budget =
+                NonZeroU64::new(CLIENT_CONSUMER_NODE_BYTES).assured("the node budget is nonzero");
+            let held = budget
+                .reserve(whole_budget)
+                .await
+                .assured("an unused budget admits the whole node budget");
+            let waiting_budget = budget.clone();
+            let waiting = nervix_primitives::task::spawn(async move {
+                waiting_budget.reserve(NonZeroU64::MIN).await
+            });
+            drop(held);
+            let reservation = waiting
+                .await
+                .assured("the waiting side only reserves one byte")
+                .assured("one byte fits once the whole-budget reservation is released");
+            assert_eq!(budget.used(), NonZeroU64::MIN.get());
+            drop(reservation);
+            assert_eq!(budget.used(), 0);
         });
     });
 }
