@@ -115,6 +115,18 @@ impl RuntimeStateStore {
             } = metadata;
             let checkpoint = StoredCheckpoint::Segmented(metadata);
             let placement_key = StateNamespace::Restored(authority.generation).key(placement)?;
+            let header = checkpoint.encode()?;
+            let receipt = StagedRestoreCheckpoint {
+                authority: authority.clone(),
+                metadata,
+            };
+            let encoded = rkyv::to_bytes::<rkyv::rancor::Error>(&receipt)
+                .map_err(|error| RuntimePersistenceError::EncodeState(error.to_string()))?;
+            if encoded.len() > RESTORE_STATE_CHUNK_BYTES {
+                return Err(Report::new(
+                    RuntimePersistenceError::CheckpointPlacementTooLarge,
+                ));
+            }
             let receipt_key = placement_key.clone();
             // A failed retry cannot leave the receipt of a different byte stream marked complete.
             self.restore_staging
@@ -122,11 +134,28 @@ impl RuntimeStateStore {
                 .map_err(|_| RuntimePersistenceError::WriteValue)?;
             let mut all_chunks = placement_key.clone();
             all_chunks.push(0);
+            self.latest
+                .remove(&placement_key)
+                .map_err(|_| RuntimePersistenceError::WriteValue)?;
+            remove_bounded(
+                &self.db,
+                &self.lsm_index,
+                &all_chunks,
+                |_| Ok(true),
+                &mut check,
+            )?;
             remove_bounded(
                 &self.db,
                 &self.checkpoint_chunks,
                 &all_chunks,
                 |_| Ok(true),
+                &mut check,
+            )?;
+            self.admit_restore_checkpoint(
+                &placement_key,
+                metadata,
+                header.len(),
+                encoded.len(),
                 &mut check,
             )?;
             let prefix = chunk_prefix(&placement_key, lsm);
@@ -161,19 +190,8 @@ impl RuntimeStateStore {
                     RuntimePersistenceError::InvalidCheckpointChunks,
                 ));
             }
-            let receipt = StagedRestoreCheckpoint {
-                authority: authority.clone(),
-                metadata,
-            };
-            let encoded = rkyv::to_bytes::<rkyv::rancor::Error>(&receipt)
-                .map_err(|error| RuntimePersistenceError::EncodeState(error.to_string()))?;
-            if encoded.len() > RESTORE_STATE_CHUNK_BYTES {
-                return Err(Report::new(
-                    RuntimePersistenceError::CheckpointPlacementTooLarge,
-                ));
-            }
             let mut batch = self.db.batch();
-            batch.insert(&self.latest, placement_key.clone(), checkpoint.encode()?);
+            batch.insert(&self.latest, placement_key.clone(), header);
             batch.insert(
                 &self.lsm_index,
                 index_key(&placement_key, lsm),
@@ -420,6 +438,7 @@ mod tests {
         a_missing_or_corrupt_required_format_marker_fails_to_open_the_current_store();
         malformed_current_namespace_keys_and_oversize_placements_fail_at_the_storage_boundary();
         super::super::tests::diagnostic_installation_writers_and_purges();
+        super::super::maintenance::tests::diagnostic_restore_reclamation();
     }
 
     #[derive(Debug, bolero::TypeGenerator)]
@@ -599,6 +618,7 @@ mod tests {
         RuntimeStateStore::from_database(
             Database::builder(path).open().assured("database opens"),
             Executor::default(),
+            crate::runtime::DEFAULT_RESTORE_STAGING_MAX_BYTES,
         )
         .assured("state store opens")
     }
@@ -806,8 +826,12 @@ mod tests {
         let db = Database::builder(dir.path())
             .open()
             .assured("state database opens");
-        let store = RuntimeStateStore::from_database(db, Executor::default())
-            .assured("runtime state store opens");
+        let store = RuntimeStateStore::from_database(
+            db,
+            Executor::default(),
+            crate::runtime::DEFAULT_RESTORE_STAGING_MAX_BYTES,
+        )
+        .assured("runtime state store opens");
         let domain = DomainName::parse("orders").assured("test domain is valid");
         let schema = SchemaFingerprint::from_digest([4; 32]);
         let kafka = placement("orders", RuntimeState::KafkaOffset);
@@ -1402,6 +1426,7 @@ mod tests {
                     .open()
                     .assured("database opens"),
                 Executor::default(),
+                crate::runtime::DEFAULT_RESTORE_STAGING_MAX_BYTES,
             );
             let Err(error) = result else {
                 panic!("a damaged current format marker must fail to open");

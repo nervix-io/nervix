@@ -290,8 +290,18 @@ bounded deletion batches. A snapshot can retain the data it still reads after th
 Within the selected namespace, chunks whose checkpoint was replaced by a normal inline write or
 purged remain on disk until a later generation removes that namespace. Reclaiming these unreferenced
 chunks belongs to the staging and checkpoint storage maintenance work.
-Maintenance of failed unpublished installations remains a separate staging-lifecycle concern; it
-never releases the start gate. Runtime storage requires its current format marker. A missing or
+Every node runs restore checkpoint maintenance at startup and then one second after each completed
+sweep, independently of leadership. It borrows one applied consensus revision and then takes the
+same installation barrier as checkpoint writers and publishers. A generation is retained while
+its exact installation belongs to an applying restore, even when leadership or its mutation lease
+has changed. A generation ahead of the node's applied log is retained until catch-up establishes
+its outcome; a node without an applied log retains every generation. The selected durable
+publication is always retained. Terminal, expired, missing and superseded attempts become
+reclaimable once the node has applied their generation. Cleanup covers headers, revision indices,
+receipts and chunks, including chunks written before a receipt existed. It uses bounded deletion
+batches and synchronizes completed deletion; cancellation or restart resumes from remaining keys.
+Cursors seek past initial and selected namespaces; deletion also seeks past retained applying or future generations. Readers keep their complete database snapshots. Reclamation never releases the start gate.
+Runtime storage requires its current format marker. A missing or
 invalid marker in nonempty checkpoint storage fails with an instruction to recreate the node state
 directory.
 
@@ -304,6 +314,43 @@ lifecycle and offset conversion, database caches, and loading a guest when the d
 their own allocation bounds. Encoded lifecycle and offset staging reserves twice the encoded
 payload size plus 2 MiB; it can be refused if that individual conversion does not fit the bulk
 budget. The generation publisher has no aggregate-payload admission limit.
+
+### Restore Checkpoint Storage Quota And Metrics
+
+`nervix-server --restore-staging-max-bytes <bytes>` and
+`NERVIX_RESTORE_STAGING_MAX_BYTES` set the node-local unpublished checkpoint limit, defaulting to
+`128GiB`. This is separate from the quota for archive and transfer files. Admission counts the
+current key and value bytes of every unpublished restored namespace across all domains, including
+partial chunks, headers, indices and receipts. It measures value lengths without assembling
+payloads. The complete incoming checkpoint footprint must fit before the first chunk is written;
+the installation barrier prevents concurrent jobs from oversubscribing the allowance. An exact
+staging retry first removes its own incomplete checkpoint data and reuses that allowance.
+Published checkpoint data is outside this quota; leftover receipts remain staging until removed.
+Lowering the allowance on restart preserves retained installations that already exceed it and
+refuses additional staging until usage fits or those attempts end.
+A quota refusal reports the limit, used bytes and requested bytes and leaves the target stopped
+with its installation gate closed. After terminal failure, maintenance reclaims the attempt.
+Use the retained execution reference to recover an uncertain applying command; a terminal failed
+restore requires a fresh target domain for another restore.
+
+The public `/metrics` endpoint reports these node-local series after completed sweeps:
+
+| Series | Meaning |
+| --- | --- |
+| `nervix_restore_staging_bytes` | Current unpublished checkpoint key and value bytes |
+| `nervix_restore_staging_keys` | Current unpublished checkpoint key count |
+| `nervix_restore_staging_limit_bytes` | Configured unpublished checkpoint allowance |
+| `nervix_restore_staging_reclaimed_bytes_total` | Bytes removed by completed sweeps since node start |
+| `nervix_restore_staging_sweeps_total` | Completed sweeps since node start |
+| `nervix_restore_keyspaces_disk_bytes` | SST allocation of shared checkpoint and publication keyspaces |
+
+Logical usage excludes tombstones, database overhead and the bytes older snapshots retain. The
+SST allocation includes initial and published checkpoints, retained snapshot data and space
+awaiting compaction. Fjall reports its current LSM levels; files awaiting final unlink need not
+appear. It excludes the shared journal and other keyspaces. This quota bounds live
+unpublished data and does not impose a hard filesystem limit. Physical space falls as snapshots
+close and database compaction reclaims files. A cancelled or failed sweep updates no series and
+does not count its partial deletion; the next completed sweep reconstructs current usage.
 
 ### Order Of Steps
 
@@ -538,6 +585,7 @@ secrets. Store it as a secret.
 | Streamed guest installation and complete generation publication per node | Fixed 2 MiB bulk working-memory reservation; 64 KiB checkpoint chunks |
 | Encoded lifecycle and offset staging per node | Twice the encoded record size plus 2 MiB |
 | Physical checkpoint placement encoding | 60 KiB, including domain and installation namespace |
+| Unpublished restore checkpoint keys and values per node | 128 GiB by default; configurable with `--restore-staging-max-bytes` |
 
 A backup larger than the staging quota fails. A backup that fits waits while the leader's staging
 area is full, until retained archives are downloaded or expire and snapshot transfers finish.

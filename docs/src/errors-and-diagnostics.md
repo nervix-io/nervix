@@ -336,6 +336,12 @@ chunk set or a conflicting publication inventory. `RestoreRead`, `Cancelled`, `S
 storage admission preserve their owning failure boundary. `CheckpointPlacementTooLarge` rejects
 an encoding beyond the bounded storage key allowance. `InvalidStorageFormat` requires recreation
 of the node state directory when the required current format marker is missing or invalid.
+`RestoreStagingQuota` carries the node's unpublished checkpoint limit, current usage and incoming
+checkpoint footprint; `RestoreStagingSize` rejects an unrepresentable accounting sum. A quota
+failure remains a storage failure beneath the admitted restore step and leaves its activation
+gate closed. Node-local maintenance logs admission, cancellation or storage failure and retries
+on its next sweep without changing the command outcome or gate. Metrics are updated only for a
+completed sweep, so a partial cancelled deletion cannot claim a completed reclamation count.
 Staging or publication failure leaves the durable start gate in place, including a failure after
 the complete generation's pointer became durable but before runtime handles were cleared. Exact
 publication retry completes durability and bounded cleanup under the same authority and inventory. The steps before it stay
