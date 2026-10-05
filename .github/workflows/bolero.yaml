@@ -261,9 +261,14 @@ jobs:
         run: |
           just coverage-bolero 30
 
+      - name: Install verified Codecov CLI
+        id: codecov-cli
+        uses: ./.github/actions/setup-codecov
+
       - name: Upload runner coverage to Codecov
         uses: codecov/codecov-action@v5
         with:
+          binary: ${{ steps.codecov-cli.outputs.binary }}
           disable_search: true
           fail_ci_if_error: true
           files: target/bolero/python.lcov

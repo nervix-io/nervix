@@ -6,13 +6,13 @@ use std::{
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_arbitrary::Entropy;
 use nervix_primitives::deadlock::{
-    Access, ActiveCycle, BlockedAttempt, BlockedThread, BoundedText, Finding, LockKind, LockSite,
+    Access, ActiveCycle, BlockedAttempt, BlockedThread, BoundedText, LockKind, LockSite,
     MAX_CYCLE_THREADS, MAX_TEXT_BYTES, SourceSite, TrackedLockId, TrackedThreadId, WaitedLock,
 };
 
 use crate::{
     DeadlockEvidence, EvidenceDirectory, EvidenceError, EvidenceOutOfBounds, MAX_FINDINGS,
-    ProcessRecord, render_finding,
+    ProcessRecord, RecordedFinding as Finding, render_finding,
     wire::{
         CycleWire, EvidenceWire, FindingWire, ProcessWire, TextWire, ThreadWire, WaitedLockWire,
         decode_wire, encode_wire,
@@ -35,11 +35,12 @@ fn site(file: &str, line: u32) -> SourceSite {
     }
 }
 
-fn process() -> ProcessRecord {
+pub(super) fn process() -> ProcessRecord {
     ProcessRecord {
         id: 4_242,
         program: Some(BoundedText::new("nervix-server")),
         started_at: at(1_700_000_000_000_000_000),
+        selection: nervix_primitives::deadlock::DiagnosticSelection::ActiveOnly,
     }
 }
 
@@ -101,7 +102,10 @@ fn evidence_with_every_variant() -> DeadlockEvidence {
         vec![
             Finding::ActiveCycle(two_thread_cycle()),
             Finding::ActiveCycle(longest),
-            Finding::Overflow { lost: id(2) },
+            Finding::Overflow {
+                source: crate::EvidenceLossSource::Handoff,
+                lost: id(2),
+            },
         ],
     )
     .assured("three findings are within the bound")
@@ -144,7 +148,7 @@ fn a_header_of_other_bytes_is_refused_before_the_payload_is_read() {
             other_version,
             EvidenceError::UnsupportedVersion {
                 found: 9,
-                supported: 1,
+                supported: 2,
             },
         ),
     ];
@@ -177,10 +181,16 @@ fn a_finding_past_the_bound_is_refused() {
     for lost in 1..=MAX_FINDINGS {
         let lost = u64::try_from(lost).assured("the bound fits u64");
         evidence = evidence
-            .with_finding(Finding::Overflow { lost: id(lost) })
+            .with_finding(Finding::Overflow {
+                source: crate::EvidenceLossSource::Handoff,
+                lost: id(lost),
+            })
             .assured("findings up to the bound are recorded");
     }
-    let refused = evidence.with_finding(Finding::Overflow { lost: id(1) });
+    let refused = evidence.with_finding(Finding::Overflow {
+        source: crate::EvidenceLossSource::Handoff,
+        lost: id(1),
+    });
     assert_eq!(
         refused,
         Err(EvidenceOutOfBounds::TooManyFindings {
@@ -244,11 +254,14 @@ fn a_cycle_of_one_omitted_threads_and_lost_findings_say_so() {
         "{rendered}"
     );
 
-    let rendered = render_finding(&Finding::Overflow { lost: id(4) });
+    let rendered = render_finding(&Finding::Overflow {
+        source: crate::EvidenceLossSource::Handoff,
+        lost: id(4),
+    });
     assert_eq!(
         rendered,
-        "nervix deadlock detector: 4 more findings were made while the hand-off to the recorder \
-         was full; they are not described\n"
+        "nervix deadlock detector: overload in Handoff: at least 4 findings or source contexts \
+         were lost; this run cannot qualify\n"
     );
 }
 
@@ -412,13 +425,32 @@ fn generated_evidence(entropy: &mut Entropy<'_>) -> DeadlockEvidence {
         id: u32::try_from(entropy.up_to(u64::from(u32::MAX))).assured("drawn below u32::MAX"),
         program: generated_optional_text(entropy),
         started_at: at(entropy.any_u64()),
+        selection: entropy.pick([
+            nervix_primitives::deadlock::DiagnosticSelection::ActiveOnly,
+            nervix_primitives::deadlock::DiagnosticSelection::OrderAnalysis,
+            nervix_primitives::deadlock::DiagnosticSelection::OrderInstrumentedActiveOnly,
+        ]),
     };
-    DeadlockEvidence::new(process, findings).assured("at most the bound of findings is drawn")
+    DeadlockEvidence::new(process, findings)
+        .assured("at most the bound of findings is drawn")
+        .with_scope(entropy.pick([
+            crate::EvidenceScope::WholeProcess,
+            crate::EvidenceScope::ActiveSelection,
+            crate::EvidenceScope::PotentialSelection,
+        ]))
 }
 
 fn generated_finding(entropy: &mut Entropy<'_>) -> Finding {
+    if entropy.byte().is_multiple_of(3) {
+        return super::order_tests::generated_finding(entropy);
+    }
     if entropy.flag() {
         return Finding::Overflow {
+            source: entropy.pick([
+                crate::EvidenceLossSource::Handoff,
+                crate::EvidenceLossSource::OrderHistory,
+                crate::EvidenceLossSource::Retention,
+            ]),
             lost: generated_id(entropy),
         };
     }
@@ -522,7 +554,7 @@ fn bolero_malformed_deadlock_evidence_is_refused_or_round_trips() {
         .with_iterations(256)
         .with_max_len(1_024)
         .for_each(|bytes: &[u8]| {
-            let mut headed = b"NVXDLEVD\x01\x00\x01\x00".to_vec();
+            let mut headed = b"NVXDLEVD\x01\x00\x02\x00".to_vec();
             headed.extend_from_slice(bytes);
             for candidate in [bytes, headed.as_slice()] {
                 // Whatever decodes is evidence within every bound, and encodes back to itself.
@@ -553,7 +585,13 @@ fn out_of_bounds_wire(entropy: &mut Entropy<'_>, evidence: &DeadlockEvidence) ->
     match entropy.byte() % 9 {
         0 => {
             let past = MAX_FINDINGS.checked_add(1).assured("the bound is small");
-            wire.findings = vec![FindingWire::Overflow { lost: 1 }; past];
+            wire.findings = vec![
+                FindingWire::Overflow {
+                    source: crate::wire::OverflowWire::Handoff,
+                    lost: 1
+                };
+                past
+            ];
         }
         1 => wire.findings.push(FindingWire::ActiveCycle(CycleWire {
             threads: Vec::new(),
@@ -586,7 +624,10 @@ fn out_of_bounds_wire(entropy: &mut Entropy<'_>, evidence: &DeadlockEvidence) ->
             }],
             ..cycle
         })),
-        6 => wire.findings.push(FindingWire::Overflow { lost: 0 }),
+        6 => wire.findings.push(FindingWire::Overflow {
+            source: crate::wire::OverflowWire::Handoff,
+            lost: 0,
+        }),
         7 => {
             let past = MAX_TEXT_BYTES.checked_add(1).assured("the bound is small");
             wire.process = ProcessWire {

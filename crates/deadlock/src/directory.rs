@@ -53,8 +53,16 @@ impl EvidenceDirectory {
 
     /// Record `evidence` in its process's file, replacing what the file held. Returns the file.
     pub fn record(&self, evidence: &DeadlockEvidence) -> Result<PathBuf, Report<EvidenceError>> {
-        let bytes = evidence.encode()?;
         let path = self.file_of(evidence)?;
+        self.record_at(evidence, path)
+    }
+
+    fn record_at(
+        &self,
+        evidence: &DeadlockEvidence,
+        path: PathBuf,
+    ) -> Result<PathBuf, Report<EvidenceError>> {
+        let bytes = evidence.encode()?;
         let partial = path.with_extension(PARTIAL_EXTENSION);
         let write_failed = || EvidenceError::Write { path: path.clone() };
         let mut file = File::create(&partial).change_context_lazy(write_failed)?;
@@ -93,6 +101,21 @@ impl EvidenceDirectory {
             evidence.push(read_file(&path)?);
         }
         Ok(evidence)
+    }
+}
+
+impl DeadlockEvidence {
+    pub fn read_file(path: &Path) -> Result<Self, Report<EvidenceError>> {
+        read_file(path)
+    }
+
+    /// Write a complete local export beside its temporary file, then atomically replace it.
+    pub fn write_file(&self, path: &Path) -> Result<PathBuf, Report<EvidenceError>> {
+        let parent = match path.parent() {
+            Some(parent) if !parent.as_os_str().is_empty() => parent,
+            Some(_) | None => Path::new("."),
+        };
+        EvidenceDirectory::new(parent).record_at(self, path.to_path_buf())
     }
 }
 

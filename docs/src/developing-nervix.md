@@ -397,32 +397,39 @@ mode observes, and every model's claim.
 
 ### Deadlock diagnostics
 
-A diagnostic node is the server built in the `deloxide` mode: every thread-blocking lock is tracked
-by a deadlock detector, and the first active deadlock it reports is described on standard error,
-recorded as evidence and ends the process with status `3`. Build one, in its own target directory so
-it never replaces the ordinary binary, and run it with an evidence directory that already exists:
+Diagnostic builds select `deloxide` for active cycles or `deloxide-order` for active and historical
+order analysis. Build and run one with an existing local evidence directory:
 
 ```bash
-just build-diagnostic-server
+just build-diagnostic-server deloxide-order
 target/deloxide/debug/nervix-server --deadlock-evidence /var/tmp/nervix-deadlocks ...
 ```
 
-Run the diagnostic mode's checks with:
+The order build's `--deadlock-active-only` option disables checking at runtime but keeps compiled
+instrumentation and its cost. Ordinary product performance is measured separately. An active cycle
+exits `3`; a potential cycle retains evidence and continues; lost evidence or failed diagnostics
+exit `4`.
+
+Run both applicable selections after changes to tracked blocking synchronization, acquisition order
+or lifecycle ownership:
 
 ```bash
 just test-deloxide
+just test-deloxide-order
+just deadlock-report inspect /var/tmp/nervix-deadlocks/deadlock-PID-TIME.rkyv --source potential
 ```
 
-It builds under `target/deloxide` and runs the deadlock probes, each workload in a disposable
-process that must report its real cycle or end cleanly, then the `@deadlock_diagnostics` scenarios
-on in-process nodes and real diagnostic server processes of one and three nodes, without retries. It
-fails when an invocation executed no check or a scenario did not run and pass, keeps every
-invocation's output and the scenario binary's evidence under `target/deloxide/test-deloxide`, and
-exits with `124` once its budget, 2,400 seconds by default, expires. Run it after any change that adds
-or alters blocking synchronization, a lock's acquisition order, or a lifecycle or ownership path that
-uses tracked locks, and record what it covered and what it cannot see.
-[Data-Plane Concurrency](./data-plane-concurrency.md#diagnostic-deadlock-detection) describes the
-detector, its evidence and the locks it does not track.
+Each command retains a fresh attempt under `target/deloxide/test-deloxide`, with probe output,
+artifacts and diagnostic scenario evidence. Probes and one-/three-node diagnostic/restore scenarios
+run without retries; zero checks, failed accounting, overload or unreviewed workload findings do
+not qualify. The execution budget is 2,400 seconds by default; expiry exits `124`.
+The ordinary report tool also exports selected artifacts, records explicit proofs in reviewed
+copies and qualifies whole-process evidence. `just coverage-deadlock` measures the diagnostic
+implementation and the ordinary report command in separate instrumented builds through the native
+collector. It retains each producer's completion record and exports their combined report with
+the diagnostic-evidence flag, separately from ordinary product coverage.
+[Data-Plane Concurrency](./data-plane-concurrency.md#diagnostic-deadlock-detection) has the complete
+local commands, proof requirements, current graph limits and the paths detection does not cover.
 
 ### Deterministic network simulation
 
@@ -481,7 +488,9 @@ just coverage-native-extras
 ```
 
 Name producers to run only those: `test-typed-ratchet`, `bench-smoke`, `nspl-completion-walk`,
-`test-shuttle`, `test-loom`, or an individual `test-primitives-<mode>` recipe. `test-primitives`
+`test-shuttle`, `test-loom`, `test-deadlock-evidence-order`, `test-deadlock-report`, or an individual
+`test-primitives-<mode>` recipe. The focused diagnostic owner and probes use the `deloxide-order`
+build; the local report command uses the ordinary build. `test-primitives`
 selects native conformance in ordinary, Shuttle, Loom, Turmoil and Deloxide execution:
 
 ```bash

@@ -4,7 +4,7 @@ Feature: Diagnostic nodes track their blocking locks for active deadlocks
   in one wait-for graph, and the process installs its deadlock detector once, before any tracked
   lock or runtime worker exists. The first active deadlock the detector reports is described on
   standard error, recorded as evidence, and ends the process. These scenarios run only in a scenario
-  binary built for that mode, through `just test-deloxide`; the ordinary suite leaves them out.
+  binary built for that mode, through `just test-deloxide` or `just test-deloxide-order`; the ordinary suite leaves them out.
   Deadlocks are provoked only in the disposable processes of nervix-deadlock's probes: no node can be
   made to deadlock on request.
 

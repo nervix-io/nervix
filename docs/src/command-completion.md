@@ -36,6 +36,11 @@ Report retention is a separate contract: a transaction's report follows
 the transaction tombstone retention, so inspection can still read it after its command reference
 has expired, and a report that inspection no longer knows does not make its reference executable.
 
+Finalization accepts a terminal command result. An `OutcomeUnknown`, leader redirect, or detached
+transaction leaves the execution applying and preserves the disposition and diagnostics for its
+current waiter. Reconciliation and repetition under the same reference resume that execution;
+an interrupted attempt never supplies a definitive failure for the execution ledger.
+
 The retained history is bounded. Once it holds as many applying, finished, and expired executions as
 its capacity allows, a new reference is refused with an explicit capacity error. Admitted work is
 never evicted to make room, and repeating an admitted request still joins it or returns its
