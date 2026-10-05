@@ -149,6 +149,24 @@ boundary blocking locks; Fjall's internal locks, async authority ordering and me
 their separate ordinary, Shuttle, Loom and Turmoil checks. Measurements and diagnostic artifacts
 are delivered to the owning task.
 
+Materialized capture shares row carriers under the existing assignment barrier, together with the
+revision, ownership fence and branch generation. Membership insertion and eviction use that same
+barrier; ordinary updates of existing branches keep their existing admission protocol. Fresh
+backup capture admits its bounded row-view metadata before allocation. Archive conversion stages
+one identity/Arrow group at a time. Native loading independently bounds typed-key and row-view
+metadata to 8 MiB, charges retained decoded columns to relay memory through installation, and
+uses bulk memory for one section's decoding scratch. A cumulative relay admission refusal ends
+loading instead of waiting while retaining earlier groups. A pinned database reader retains one
+snapshot and one stored chunk through all section reads. Replica installation checks monotonic
+revision under the existing exclusive assignment barrier before replacing any entry.
+
+`RESUME` changes the domain to running at its archived lifecycle in the consensus effect that
+records complete publication and releases the installation gate. No atomic field or memory
+ordering in the capture epoch, assignment protocol or relay revision changed. Existing Loom
+models continue to qualify their ordering; new Shuttle checks qualify branch membership capture,
+replica revision races and publication before activation. Paused generators release their
+admitted-work guard after flushing and reacquire it before producing more output.
+
 The backup coordinator waits for each node's admitted-work counters to reach zero, then orders one
 confirming force-flush generation across the cluster. The generation's obligations use the same
 atomic counters as shutdown; a parked `REQUIRED WAIT` batch stays visible separately and cannot
@@ -566,6 +584,19 @@ snapshot properties. The latter also checks potential acquisition-order cycles a
 instances. Each selection retains its own evidence alongside the other diagnostic processes under
 `target/deloxide/test-deloxide`; these instrumented executions supply correctness evidence, while
 the ordinary native benchmark supplies the row-publication cost measurements.
+
+Sealing retains bounded identity and Arrow pieces on quota-owned staging disk and concatenates
+through one 64 KiB read buffer. Row projection and its IPC result share one bulk admission and
+one CPU job; projected columns never wait for a second grant while holding the first. Typed
+identity conversion is charged before it allocates. The sealed cache holds the immutable file and descriptor, so its
+memory does not grow with container size. Periodic writers select their namespace before executor
+admission, write one 64 KiB database chunk per batch, synchronize the chunks, then synchronize the
+replacement checkpoint header. A queued writer whose namespace was replaced is inert, and a
+pinned reader continues through the same database snapshot. Replica installation rejects a lower
+revision before clearing its current entries.
+An incoming materialized snapshot releases its response stream at EOF, before local verification
+or Arrow decoding. Those local operations retain their own staging and memory admission; they do
+not keep Snapshot request or connection-stream permits while waiting for executor work.
 
 ### Acknowledgement state
 
@@ -1704,7 +1735,7 @@ A family of names means each member runs independently through the recipe.
 | Checkpoint replication (`src/runtime/kafka_offset_state.rs`, `src/runtime/state_replication/checkpoint_announcement_shuttle_tests.rs`) | `shuttle_a_replica_acknowledgement_racing_the_quorum_wait_is_never_missed` races a Kafka offset commit's replica quorum wait against its replica's acknowledgement: the wait registers before it reads, so it completes without its deadline, which a Shuttle timeout only reaches when a check triggers it. `shuttle_an_offer_racing_the_end_of_an_announcement_is_always_announced` races a second offer against the announcer of the first finding its replica caught up: the second revision is always announced and acknowledged. `shuttle_a_retired_replication_ends_its_announcer` ends an announcer whose replicated state goes away while its replica never acknowledges. `shuttle_an_announcement_racing_the_replica_wait_is_never_missed` races an owner's announcement against the replica task's synchronization and wait: an announcement that lands before the wait is kept as its permit. `shuttle_checkpoint_announcement_close_cancels_pending_dispatch` exercises the production task owner with close racing the first poll and close after dispatch starts: both cancel a dispatch that never becomes ready and release its retained announcer. |
 | Resolved state replication (`src/runtime/state_replication/routing_shuttle_tests.rs`) | `shuttle_state_replacement_and_retirement_fence_frames_in_flight` exercises the production routing owner: a frame can complete only on its selected lifetime, never change a successor, and cannot enter a route after retirement. ArcSwap internals remain opaque; this check covers owner use and scheduling, with no new Nervix-owned memory-ordering claim. |
 | Replica catch-up announcements (`src/runtime/branch_lifecycle_state_shuttle_tests.rs`) | `shuttle_an_announced_branch_racing_the_replica_round_is_never_missed` races an owner's announcement of a branch checkpoint against the replica task taking the pending announcements and waiting for the next: the task takes it whether it lands before the take, between the take and the wait, or during the wait. `shuttle_announcements_of_one_branch_keep_the_newest_pending` delivers two announcements of one branch in either order while the task takes them: an older one never replaces a newer one still pending. |
-| Backup capture, restore publication and reclamation (`src/runtime/backup_capture_fence.rs`, `crates/consensus/src/restore.rs`) | `shuttle_backup_cut_includes_pre_cut_branch_publication` requires every registered publication observed before a cut to be present in its view. `shuttle_restore_publication_and_handle_clear_cannot_cross_a_successors_start` drives the production applied-state authority guard against a new restore generation and START, so stale publication changes neither checkpoints nor runtime handles. `shuttle_restore_reclamation_holds_the_revision_through_queued_installation` races the production reclamation guard with a successor's applied generation and queued installer, requiring the borrowed revision to stay fixed through deletion and preserving the current installation. They register in the shared Shuttle inventory and run through its exploration, nondeterminism and replay contract. |
+| Backup capture, restore publication and reclamation (`src/runtime/backup_capture_fence.rs`, `crates/consensus/src/restore.rs`, `materialized_state.rs`) | `shuttle_backup_cut_includes_pre_cut_branch_publication` includes every registered publication before a cut. `shuttle_restore_publication_and_handle_clear_precede_resume_and_fence_delayed_publishers` drives the applied-state authority guard against a successor generation and RESUME, requiring complete publication and cleared handles before activation. `shuttle_materialized_capture_names_exactly_its_branch_generation` races capture with an update and eviction. `shuttle_replica_synchronization_preserves_the_restored_materialized_revision` races delayed and current owner snapshots. `shuttle_restore_reclamation_holds_the_revision_through_queued_installation` races the reclamation guard with a successor generation and queued installer, requiring the borrowed revision to stay fixed through deletion and preserving the current installation. They register in the shared Shuttle inventory and use its exploration, nondeterminism and replay contract. |
 | Domain clock (`src/runtime/domain_clock.rs`) | `shuttle_lifecycle_tests::concurrent_reads_of_one_installed_generation_never_decrease` checks the nondecreasing watermark; `a_clock_bound_to_a_replaced_generation_is_refused_by_revalidation` rejects a superseded generation; `readers_never_observe_an_installation_older_than_one_they_observed` prevents publication regression. `shuttle_delivery_sends_state_before_ticks_without_regressing_progress` explores the production observer and attachment delivery order across accepted ticks, same-generation unassignment and reassignment, and a generation change. `shuttle_an_attach_waiting_for_the_first_installation_observes_its_domains` races an attach's wait and lookup against the node's first installation of the committed domains and requires the lookup to find the domain and its clock. `a_logical_waiter_wakes_when_its_generation_stops`, `a_logical_waiter_wakes_when_its_generation_is_replaced`, `a_logical_waiter_wakes_when_its_domain_is_removed`, and `a_logical_waiter_wakes_when_a_replacement_mapping_reaches_its_deadline` cover each lifecycle wakeup. |
 
 The checks of WASM checkpoint holds and the durability barrier use the same runner and replay

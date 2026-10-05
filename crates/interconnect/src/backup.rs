@@ -115,6 +115,9 @@ pub enum CapturedStateSectionKind {
     KafkaOffsets,
     BranchLifecycle,
     WasmGuestBlob,
+    MaterializedDescriptor,
+    MaterializedIdentities,
+    MaterializedColumns,
 }
 
 impl InterconnectRequest for CaptureInventoryRequest {

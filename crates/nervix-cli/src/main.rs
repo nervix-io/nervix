@@ -224,6 +224,9 @@ enum Command {
         /// when omitted
         #[arg(long, value_enum)]
         on_existing_user: Option<CliExistingUsers>,
+        /// Resume the archived start and clock mapping after installing all state
+        #[arg(long)]
+        resume: bool,
         /// Verify the archive and plan the restore, changing nothing
         #[arg(long)]
         dry_run: bool,
@@ -530,6 +533,7 @@ async fn main() -> Result<(), StackReport<ClientError>> {
             target,
             on_existing_user,
             dry_run,
+            resume,
             without_state,
             without_source_offsets,
             format,
@@ -545,6 +549,7 @@ async fn main() -> Result<(), StackReport<ClientError>> {
                 input,
                 existing_users: on_existing_user,
                 dry_run,
+                resume,
                 without_state,
                 without_source_offsets,
                 format,

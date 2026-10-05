@@ -112,8 +112,11 @@ async fn then_every_server_process_exits_with_status(world: &mut ScenarioWorld, 
         assert_eq!(
             status.code(),
             Some(expected),
-            "server process {node_id} ended with {}",
-            describe_exit(status)
+            "server process {node_id} ended with {}\n{}",
+            describe_exit(status),
+            cluster.log(&node_id).unwrap_or_else(|error| {
+                format!("the server process log could not be read: {error}")
+            }),
         );
     }
 }

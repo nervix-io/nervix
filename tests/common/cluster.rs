@@ -3699,10 +3699,15 @@ pub(crate) async fn publish_http_uri_with_headers(
     let response = request.send().await.map_err(io::Error::other)?;
 
     if response.status() != reqwest::StatusCode::ACCEPTED {
-        return Err(io::Error::other(format!(
-            "unexpected http status {}",
-            response.status()
-        )));
+        let kind = if response.status() == reqwest::StatusCode::SERVICE_UNAVAILABLE {
+            io::ErrorKind::WouldBlock
+        } else {
+            io::ErrorKind::Other
+        };
+        return Err(io::Error::new(
+            kind,
+            format!("unexpected http status {}", response.status()),
+        ));
     }
 
     Ok(())

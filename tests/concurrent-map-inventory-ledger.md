@@ -188,7 +188,7 @@ the task in its next round, and `pending_state_replica_syncs` is deleted. See
 | Map | Hottest access | Delivery |
 | --- | --- | --- |
 | `ReplicatedMaterializedRelayState::entries` (immutable publication) | retained row views for reads and captures; membership changes at branch installation, deletion or snapshot installation | completed: Typed Ratchet 04 |
-| `RuntimeInner::replicated_materialized_stream_states` | cold installation and public observation; dependency readers and generators retain the per-relay publication | retain: lifecycle registry |
+| `RuntimeInner::replicated_materialized_stream_states` | cold installation, public observation and lifecycle backup capture; dependency readers and generators retain the per-relay publication | retain: lifecycle registry |
 | `RuntimeInner::relay_branch_presences` | domain construction retains presence in relay services; materialized reads load those services | retain: lifecycle registry |
 | `RuntimeInner::state_identities` | cold assignment registration and observation; materialized placement reads use the shared immutable assignment publication | retain: lifecycle registry |
 | `RuntimeInner::relay_state_epochs` | domain routing retains the epoch once; branches load their routing epoch directly | retain: lifecycle registry |
@@ -228,10 +228,10 @@ the task in its next round, and `pending_state_replica_syncs` is deleted. See
 
 | Map | Readers and writers | Frequency | Handle, owner and generation | Guard and bound | Disposition |
 | --- | --- | --- | --- | --- | --- |
-| `ReplicatedMaterializedRelayState::entries` (immutable persistent index) | lifecycle publishes branch row slots; readers and captures load them | membership changes only | one exclusive originator task; assignment fence, branch generation and installed revision | established replacements mutate task-local selection and publish one Arrow view; capture holds the assignment barrier while sharing views | completed publication: Typed Ratchet 04 |
-| `RuntimeInner::replicated_materialized_stream_states` | installation, cold recovery and public observation | lifecycle, observer | writers, snapshots and relay routing retain installed state; assignment identity fences replacement | cloned out only at cold boundaries | retain: lifecycle registry |
+| `ReplicatedMaterializedRelayState::entries` (immutable persistent index) | lifecycle publishes branch row slots; readers and captures load them | membership changes only | one exclusive originator task; assignment fence, branch generation and installed revision | established replacements mutate task-local selection and publish one Arrow view; capture holds the assignment barrier while sharing views; backup admits at most 8 MiB of generation metadata before capture | completed publication: Typed Ratchet 04 |
+| `RuntimeInner::replicated_materialized_stream_states` | installation, cold recovery, public observation and lifecycle backup capture | lifecycle, observer | writers, snapshots and relay routing retain installed state; assignment identity fences replacement | cloned out only at cold boundaries | retain: lifecycle registry |
 | `RuntimeInner::relay_branch_presences` | get-or-insert at domain build under the schedule lock | lifecycle | retained relay services share the presence across rebuilds | no dependency or generator shard lookup | retain: lifecycle registry |
-| `RuntimeInner::restored_materialized_stream_states` | insert after an asynchronous open; take at build | lifecycle | schedule application | short | retain: lifecycle registry |
+| `RuntimeInner::restored_materialized_stream_states` | lookup before native preparation; insert after bounded asynchronous open of a pinned checkpoint reader; take at build; clear after durable restore publication | lifecycle | schedule application and generation replacement | short | retain: lifecycle registry |
 | `RuntimeInner::relay_state_epochs` | created during domain routing installation; bumped at schedule application | lifecycle | routing retains the shared epoch; each branch caches the observed number | no branch dispatch registry access | retain: lifecycle registry |
 | `RuntimeInner::state_identities` | schedule installation publishes assignment slots; state construction binds them; observation reads identity | lifecycle, observer | one entity slot publishes identity, primary, executors and replicas; frames, catch-up and materialized placement use immutable routing | no recurring registry guard | retain: lifecycle registry |
 | `RuntimeInner::replicated_deduplicator_states`, `replicated_window_processor_states`, `replicated_wasm_processor_states`, `replicated_kafka_offset_states` | get-then-insert at branch or source start; cold replacement, recovery and teardown; frames use installed route handles | lifecycle | executing tasks and resolved replication routes retain the actual state; fingerprint and guest generation fence assignment; exact intake ends before withdrawal | no frame registry acquisition | retain: lifecycle registry |
@@ -468,8 +468,8 @@ its prepared state. They do not claim an end-to-end ingestion throughput improve
 ## Restore generation installation
 
 The restore failure-control map is `failed_restore_state_installations`, keyed by domain and
-holding a typed guest-staging or durable-publication failure. It is reached once at a guest staging
-boundary and once after durable generation publication, as test-only lifecycle control. It is not
+holding a typed guest-staging, materialized-staging or durable-publication failure. It is reached
+once at the corresponding guest or materialized staging boundary and once after durable generation publication, as test-only lifecycle control. It is not
 reached from record or acknowledgement execution. The receiver upload map retains its existing
 per-transfer lifetime and cadence; finalization moves the sealed file into the admitted storage job
 and keeps its disk-quota owner there. Successful generation publication clears runtime state maps

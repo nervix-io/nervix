@@ -157,6 +157,43 @@ fn given_restored_wasm_checkpoint_fails(world: &mut ScenarioWorld, domain: Strin
         .fail_restored_wasm_checkpoint(scenario_domain(world, &domain));
 }
 
+#[given(
+    expr = "restoring domain {string} fails before installing its first materialized checkpoint"
+)]
+fn given_restored_materialized_checkpoint_fails(world: &mut ScenarioWorld, domain: String) {
+    world
+        .fault_injection
+        .fail_restored_materialized_checkpoint(scenario_domain(world, &domain));
+}
+
+#[then(expr = "client {string} observes resumed clock progress beyond backup {string}'s frontier")]
+fn then_resumed_clock_projects_downtime(world: &mut ScenarioWorld, client: String, file: String) {
+    let archive = nervix_backup::describe_archive(
+        std::fs::File::open(archive_path(world, &file)).assured("archive opens"),
+    )
+    .assured("archive verifies");
+    let domain = scenario_domain(world, &world.domain);
+    let archived = archive
+        .domains
+        .iter()
+        .find(|entry| entry.record.domain == domain)
+        .assured("archived domain exists");
+    let frontier = archived
+        .record
+        .logical_frontier
+        .assured("paced cut has a frontier");
+    let clock = world
+        .transaction_clients
+        .get(&client)
+        .assured("clock client is connected")
+        .domain_clock(&domain)
+        .assured("client attached the restored domain clock");
+    assert!(
+        clock.frontier().assured("resumed clock has progressed") > frontier,
+        "the archived mapping projects elapsed downtime beyond the saved cut"
+    );
+}
+
 #[given(expr = "restoring domain {string} by coordinator {string} pauses before state publication")]
 fn given_restore_publication_pauses(
     world: &mut ScenarioWorld,
@@ -270,6 +307,28 @@ fn then_restored_checkpoints_match(world: &mut ScenarioWorld, before: String, af
         checkpoints(&archive_path(world, &before)),
         checkpoints(&archive_path(world, &after)),
         "a stale installer did not change published state"
+    );
+}
+
+#[then(expr = "backup archives {string} and {string} have identical materialized generations")]
+fn then_restored_materialized_generations_match(
+    world: &mut ScenarioWorld,
+    before: String,
+    after: String,
+) {
+    fn generations(path: &Path) -> BTreeMap<String, Vec<u8>> {
+        let entries = copy_of_archive(path)
+            .sections
+            .into_iter()
+            .filter(|(path, _)| path.contains("/state/materialized_relay/"))
+            .collect::<BTreeMap<_, _>>();
+        assert!(!entries.is_empty(), "materialized sections are visible");
+        entries
+    }
+    assert_eq!(
+        generations(&archive_path(world, &before)),
+        generations(&archive_path(world, &after)),
+        "a stale installer cannot replace the active materialized generation"
     );
 }
 
@@ -745,6 +804,91 @@ fn then_cli_restore_succeeded(
     assert_eq!(restored["models"], models, "the report: {report}");
 }
 
+#[then(expr = "the CLI restore reports domain {string} as {string} at start version {int}")]
+fn then_cli_restore_lifecycle(
+    world: &mut ScenarioWorld,
+    domain: String,
+    status: String,
+    version: u64,
+) {
+    let domain = expand_placeholders(world, &domain);
+    let report = succeeded_restore(world);
+    let restored = reported_domain(&report, &domain);
+    assert_eq!(restored["status"], status, "the report: {report}");
+    assert_eq!(restored["start_version"], version, "the report: {report}");
+    assert_every_step(
+        &report,
+        if report["mode"] == "dry_run" {
+            "planned"
+        } else {
+            "applied"
+        },
+    );
+}
+
+#[then(expr = "every node reports the resumed lifecycle archived in {string}")]
+async fn then_every_node_reports_the_archived_lifecycle(world: &mut ScenarioWorld, file: String) {
+    let description = nervix_backup::describe_archive(
+        std::fs::File::open(archive_path(world, &file)).expect("archive opens"),
+    )
+    .expect("archive describes");
+    let archived = &description
+        .domains
+        .iter()
+        .find(|domain| domain.record.domain.as_str() == world.domain)
+        .expect("the archive contains the active domain")
+        .record;
+    for node in world.cluster().node_ids() {
+        let output = world
+            .cluster()
+            .run_command(&node, &world.domain, "DESCRIBE DOMAIN;")
+            .await
+            .expect("the restored domain describes");
+        assert!(output.contains("status: running"), "{node}: {output}");
+        assert!(
+            output.contains(&format!("start version: {}", archived.start_version)),
+            "{node}: {output}"
+        );
+        assert!(
+            output.contains(&format!("start point: {:?}", archived.start_point)),
+            "{node}: {output}"
+        );
+        let state = match &archived.clock {
+            Some(mapping) => {
+                let nervix_models::DomainPace::Paced { period, skew } = archived.pace else {
+                    panic!("a mapped archive is paced");
+                };
+                nervix_models::DomainClockObservedState::Paced(nervix_models::PacedDomainClock {
+                    period,
+                    skew,
+                    mapping: mapping.clone(),
+                })
+            }
+            None => nervix_models::DomainClockObservedState::Unpaced,
+        };
+        let expected = nervix_models::DomainClockObservation {
+            generation: archived.start_version,
+            state,
+        };
+        let deadline = nervix_primitives::time::Instant::now() + Duration::from_secs(60);
+        loop {
+            let clock = world
+                .cluster()
+                .run_command(&node, &world.domain, "ATTACH DOMAIN CLOCK;")
+                .await
+                .expect("the restored clock attaches");
+            if clock.contains(&expected.to_string()) {
+                break;
+            }
+            assert!(
+                nervix_primitives::time::Instant::now() < deadline,
+                "{node}: {clock}; expected {expected}"
+            );
+            nervix_primitives::time::sleep(Duration::from_millis(50)).await;
+        }
+    }
+}
+
 #[then(expr = "the CLI restore warns that saved state has a mismatched schema")]
 fn then_cli_restore_warns_about_state_schema(world: &mut ScenarioWorld) {
     let report = succeeded_restore(world);
@@ -863,6 +1007,9 @@ fn restore_stream_request(
     let path = archive_path(world, file);
     let archive = std::fs::read(&path).expect("the archive exists");
     let scope = expand_placeholders(world, restore);
+    let (scope, lifecycle) = scope
+        .strip_suffix(" RESUME")
+        .map_or((scope.as_str(), ""), |scope| (scope, " RESUME"));
     let node = expand_placeholders(world, node);
     let reference = crate::command_execution_reference(world, reference);
     RestoreStreamRequest {
@@ -872,7 +1019,7 @@ fn restore_stream_request(
             .expect("the scenario names a cluster node"),
         reference: CommandExecutionReference::parse(reference)
             .expect("scenario execution references are valid"),
-        statement: format!("RESTORE {scope} FROM '{}';", path.display()),
+        statement: format!("RESTORE {scope} FROM '{}'{lifecycle};", path.display()),
         archive,
     }
 }

@@ -299,9 +299,10 @@ mod subscription_predicate;
 mod test_fixtures;
 
 pub(crate) use backup_state::{
-    BackupBranchLifecycleEntry, CapturedRuntimeState, RESTORE_STATE_CHUNK_BYTES,
-    RESTORE_STATE_WORKING_BYTES, RestoredRuntimeState, decode_backup_branch_lifecycle,
-    decode_backup_kafka_offsets, encode_restored_branch_lifecycle, encode_restored_kafka_offsets,
+    BackupBranchLifecycleEntry, CapturedDomainState, CapturedMaterializedRelay,
+    CapturedRuntimeState, RESTORE_STATE_CHUNK_BYTES, RESTORE_STATE_WORKING_BYTES,
+    RestoredRuntimeState, decode_backup_branch_lifecycle, decode_backup_kafka_offsets,
+    encode_restored_branch_lifecycle, encode_restored_kafka_offsets,
 };
 use branch_aggregated_state::{
     BranchAggregatedRuntimeStateSnapshot, ReplicatedBranchAggregatedState,
@@ -448,6 +449,10 @@ use local_drain::LocalIntake;
 use lookup_hash_map::{
     LookupHashMapCall, LookupHashMapCallKey, collect_program_field_refs,
     compile_lookup_hash_map_calls, rewrite_lookup_hash_map_program,
+};
+pub(crate) use materialized_snapshot::{
+    MaterializedGeneration, materialized_columns_frame, materialized_container_header,
+    materialized_identity_section,
 };
 use materialized_snapshot::{
     MaterializedGenerationRecord, RestoredMaterializedSnapshot, SealedSource,

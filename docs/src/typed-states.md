@@ -392,6 +392,16 @@ target by name and requires explicit leakage; neither error needs the source pay
 
 ## Restore Installation Authority
 
+`RestoreLifecycle` is a closed `Stopped`/`Resume` policy in the semantic restore Model. Text omitting
+`RESUME` selects `Stopped` at the language boundary. The restore plan carries distinct initial
+stopped state and activation state. Both require the archived start generation and latest start
+point; paced activation also requires the archived mapping. Required report and `DomainInfo`
+generation fields are validated at their wire boundary, including the valid generation zero.
+Materialized archive descriptors and row identities are archive-owned types. Their raw schema
+fingerprint binds once to the archived start generation for native storage, independently of the
+installation authority; payload values stay exact-schema Arrow columns. Typed branch identities,
+watermark ordering, counts and framing are validated before those values reach the runtime.
+
 A restored domain has a replicated `Pending` installation from creation and an `Installing`
 authority once its state generation is admitted. Neither state permits `START`. Completion of the
 exact current generation removes the installation; terminal command failure does not. Authority

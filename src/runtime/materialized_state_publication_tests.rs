@@ -340,6 +340,7 @@ async fn each_materialized_relay_installs_its_branch_owner_in_the_same_routing_e
 async fn rebinding_reseals_the_current_revision_under_its_current_fence() {
     let executor = Executor::new(nervix_execution::ExecutionConfig::default())
         .assured("valid executor budgets");
+    let runtime = super::super::Runtime::new();
     let first = row(1, 1, 1);
     let state = Arc::new(ReplicatedMaterializedRelayState::new(
         placement(),
@@ -351,7 +352,7 @@ async fn rebinding_reseals_the_current_revision_under_its_current_fence() {
         .assured("current assignment");
     let sealed = predecessor
         .read()
-        .seal_after(&executor, None)
+        .seal_after(&executor, &runtime.inner.snapshot_staging, None)
         .await
         .assured("seal succeeds")
         .assured("one revision exists");
@@ -364,7 +365,7 @@ async fn rebinding_reseals_the_current_revision_under_its_current_fence() {
     assert!(predecessor.remove_key(&None).is_err());
     let current = successor
         .read()
-        .seal_after(&executor, None)
+        .seal_after(&executor, &runtime.inner.snapshot_staging, None)
         .await
         .assured("seal succeeds")
         .assured("one revision exists");
@@ -391,13 +392,20 @@ fn bolero_materialized_sequences_preserve_selection_lifetimes_and_complete_snaps
                 .assured("a bounded test runtime builds");
             let executor = Executor::new(nervix_execution::ExecutionConfig::default())
                 .assured("valid executor budgets");
+            let snapshot_runtime = super::super::Runtime::new();
             let first = row(0, 0, 0);
             let state = Arc::new(ReplicatedMaterializedRelayState::new(
                 placement(),
                 first.arrow_schema(),
             ));
             let mut originator = owner(&state);
-            let keys = [None, key("acme"), key("beta")];
+            // One relay is either unbranched or has concrete branch identities throughout its
+            // lifecycle. Exercise both layouts while preserving that public container contract.
+            let keys = if bytes.first().is_some_and(|byte| byte & 1 == 0) {
+                vec![key("acme"), key("beta"), key("gamma")]
+            } else {
+                vec![None]
+            };
             let mut expected = HashMap::<Option<BranchKey>, RuntimeRow>::default();
             let mut revision = 0;
             let mut branch_generation = 0;
@@ -475,17 +483,22 @@ fn bolero_materialized_sequences_preserve_selection_lifetimes_and_complete_snaps
             for (captured, expected, branch_generation) in captures {
                 assert_records(captured.records(), &expected);
                 let sealed = runtime
-                    .block_on(captured.seal(&executor))
+                    .block_on(captured.seal(&executor, &snapshot_runtime.inner.snapshot_staging))
                     .assured("a current generation seals");
                 assert_eq!(sealed.descriptor.revision, captured.revision());
                 assert_eq!(sealed.descriptor.fence, captured.fence());
                 assert_eq!(sealed.descriptor.branch_generation, branch_generation);
                 let restored = runtime
-                    .block_on(RestoredMaterializedSnapshot::open(
-                        &executor,
-                        &first.arrow_schema(),
-                        SealedSource::memory(sealed.bytes),
-                    ))
+                    .block_on(async {
+                        RestoredMaterializedSnapshot::open_relay(
+                            &executor,
+                            &first.arrow_schema(),
+                            SealedSource::artifact(sealed.artifact)
+                                .await
+                                .assured("the retained sealed artifact opens"),
+                        )
+                        .await
+                    })
                     .assured("a sealed generation opens");
                 assert_eq!(restored.revision, captured.revision());
                 assert_eq!(restored.fence, captured.fence());

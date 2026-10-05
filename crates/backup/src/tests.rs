@@ -546,6 +546,151 @@ fn cluster_archive(resources: BackupResources) -> (ArchiveLayout, Vec<u8>) {
     write_archive(manifest, &sections)
 }
 
+fn materialized_sections(groups: u32) -> Vec<TestSection> {
+    let domain = domain("prod");
+    let entity = ModelName::parse("state").assured("relay name is valid");
+    let descriptor = crate::MaterializedRelayDescriptor {
+        domain: domain.clone(),
+        entity: entity.clone(),
+        schema: SchemaFingerprint::from_digest([9; 32]),
+        revision: 17,
+        fence: 23,
+        branch_generation: 7,
+        record_count: u64::from(groups),
+        groups,
+    };
+    let mut sections = vec![
+        record_section(SectionPath::domain_record(&domain), &unpaced_domain("prod")),
+        bytes_section(
+            SectionPath::domain_models(&domain),
+            SectionContent::Nspl,
+            Vec::new(),
+        ),
+        record_section(
+            SectionPath::materialized_descriptor(&domain, &entity),
+            &descriptor,
+        ),
+    ];
+    for group in 0..groups {
+        let identity = crate::MaterializedIdentitiesRecord {
+            domain: domain.clone(),
+            entity: entity.clone(),
+            group,
+            identities: vec![crate::MaterializedRecordIdentity {
+                branch: Some(vec![StateField {
+                    name: "tenant".into(),
+                    value: StateValue::U32(group),
+                }]),
+                watermarks: nervix_models::RemoteRuntimeRecordMetadata {
+                    ingested_at_low_watermark: Timestamp::from_unix_nanos(100),
+                    ingested_at_high_watermark: Timestamp::from_unix_nanos(200),
+                },
+            }],
+        };
+        // The archive owns opaque column sections. The restore boundary validates their IPC schema.
+        sections.push(bytes_section(
+            SectionPath::materialized_columns(&domain, &entity, group),
+            SectionContent::MaterializedColumns,
+            vec![1, 3, 5, 7],
+        ));
+        sections.push(record_section(
+            SectionPath::materialized_identities(&domain, &entity, group),
+            &identity,
+        ));
+    }
+    sections
+}
+
+fn describe_materialized_sections(
+    sections: &[TestSection],
+) -> Result<crate::ArchiveDescription, Report<ArchiveReadError>> {
+    let manifest = manifest_of(
+        ArchiveScope::Domain(domain("prod")),
+        sections
+            .iter()
+            .map(|section| section.entry.clone())
+            .collect(),
+    );
+    let (_, bytes) = write_archive(manifest, sections);
+    describe_archive(bytes.as_slice())
+}
+
+#[test]
+fn materialized_groups_are_described_in_row_order_with_columns_in_either_section_order() {
+    for reverse in [false, true] {
+        let mut sections = materialized_sections(2);
+        if reverse {
+            sections[3..].reverse();
+        }
+        let described =
+            describe_materialized_sections(&sections).assured("independent sections assemble");
+        let crate::DescribedRuntimeState::Materialized {
+            descriptor,
+            record,
+            groups,
+        } = &described.domains[0].state[0]
+        else {
+            panic!("the relay has a materialized descriptor");
+        };
+        assert_eq!(descriptor.revision, 17);
+        assert_eq!(descriptor.fence, 23);
+        assert_eq!(descriptor.branch_generation, 7);
+        assert_eq!(descriptor.schema, SchemaFingerprint::from_digest([9; 32]));
+        assert_eq!(descriptor.record_count, 2);
+        assert_eq!(
+            record.path,
+            SectionPath::materialized_descriptor(&domain("prod"), &descriptor.entity)
+        );
+        for (index, group) in groups.iter().enumerate() {
+            let index = u32::try_from(index).assured("bounded index fits");
+            assert_eq!(
+                group.identities.path,
+                SectionPath::materialized_identities(&domain("prod"), &descriptor.entity, index)
+            );
+            assert_eq!(
+                group.columns.path,
+                SectionPath::materialized_columns(&domain("prod"), &descriptor.entity, index)
+            );
+            assert_eq!(group.record_count, 1);
+            assert_eq!(group.columns.length, 4);
+            assert_eq!(
+                group.columns.digest,
+                SectionDigester::digest_of(&[1, 3, 5, 7])
+            );
+        }
+    }
+}
+
+#[test]
+fn an_empty_materialized_generation_has_a_descriptor_and_no_groups() {
+    let described = describe_materialized_sections(&materialized_sections(0))
+        .assured("empty generation assembles");
+    let crate::DescribedRuntimeState::Materialized {
+        descriptor, groups, ..
+    } = &described.domains[0].state[0]
+    else {
+        panic!("empty relay has a descriptor");
+    };
+    assert_eq!(descriptor.record_count, 0);
+    assert_eq!(descriptor.groups, 0);
+    assert!(groups.is_empty());
+}
+
+#[test]
+fn a_materialized_archive_requires_all_identities_and_columns() {
+    for missing in [3, 4] {
+        let mut sections = materialized_sections(1);
+        sections.remove(missing);
+        let error = describe_materialized_sections(&sections)
+            .err()
+            .assured("an incomplete group is refused");
+        assert!(matches!(
+            error.current_context(),
+            ArchiveReadError::IncompleteDomain { .. }
+        ));
+    }
+}
+
 #[test]
 fn an_archive_is_exactly_as_long_as_its_layout_says_and_starts_with_its_manifest() {
     let (layout, bytes) = cluster_archive(BackupResources::Included);

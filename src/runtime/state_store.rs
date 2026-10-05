@@ -28,6 +28,8 @@ use thiserror::Error;
 use super::{Arc, BranchKey, StdArc, WasmGuestState};
 
 mod backup;
+pub(super) mod checkpoint_reader;
+mod checkpoint_stream;
 mod durability;
 pub(super) mod generation;
 mod maintenance;

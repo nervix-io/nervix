@@ -848,7 +848,7 @@ async fn post_timestamped_event(
     path: &str,
     sequence: i64,
     occurred_at: Timestamp,
-) {
+) -> std::io::Result<()> {
     let host = expand_placeholders(world, host);
     let path = expand_placeholders(world, path);
     let payload = serde_json::json!({
@@ -856,14 +856,19 @@ async fn post_timestamped_event(
         "occurred_at": occurred_at.to_rfc3339(),
     })
     .to_string();
+    let node = world
+        .cluster()
+        .node_ids()
+        .first()
+        .expect("the scenario has a live node")
+        .clone();
     append_cucumber_log_line(&format!(
-        "http publish: node=node-1 host={host} path={path} payload={payload}"
+        "http publish: node={node} host={host} path={path} payload={payload}"
     ));
     world
         .cluster()
-        .publish_http("node-1", &host, &path, &payload)
+        .publish_http(&node, &host, &path, &payload)
         .await
-        .unwrap_or_else(|error| panic!("event {sequence} was not accepted: {error}"));
 }
 
 #[when(
@@ -877,10 +882,29 @@ async fn when_client_posts_event_at_newest_center(
     host: String,
     path: String,
 ) {
-    let window = client_admission_window(world, &name);
-    let occurred_at = window.latest_center();
-    assert!(window.contains(occurred_at));
-    post_timestamped_event(world, &host, &path, sequence, occurred_at).await;
+    let deadline = Instant::now() + CLOCK_REPLY_TIMEOUT;
+    loop {
+        let window = client_admission_window(world, &name);
+        let occurred_at = window.latest_center();
+        assert!(window.contains(occurred_at));
+        let posted = nervix_primitives::time::timeout_at(
+            deadline,
+            post_timestamped_event(world, &host, &path, sequence, occurred_at),
+        )
+        .await
+        .unwrap_or_else(|_| panic!("event {sequence} did not reach ready intake within 60s"));
+        match posted {
+            Ok(()) => return,
+            Err(unavailable) if unavailable.kind() == std::io::ErrorKind::WouldBlock => {
+                assert!(
+                    Instant::now() < deadline,
+                    "event {sequence} did not reach ready intake within 60s: {unavailable}"
+                );
+                nervix_primitives::time::sleep(Duration::from_millis(50)).await;
+            }
+            Err(error) => panic!("event {sequence} was not accepted: {error}"),
+        }
+    }
 }
 
 #[when(
@@ -905,7 +929,9 @@ async fn when_client_posts_event_past_skew(
         .checked_add(past_skew)
         .expect("the scenario frontier is far from the timestamp maximum");
     assert!(!window.contains(occurred_at));
-    post_timestamped_event(world, &host, &path, sequence, occurred_at).await;
+    post_timestamped_event(world, &host, &path, sequence, occurred_at)
+        .await
+        .unwrap_or_else(|error| panic!("event {sequence} was not accepted: {error}"));
 }
 
 #[then(expr = "within {string} client {string} observes a server error containing")]

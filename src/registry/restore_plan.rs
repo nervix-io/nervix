@@ -33,7 +33,7 @@ use nervix_consensus::{RestoredResource, UserCredentials};
 use nervix_models::{
     BackupResources, DomainConfig, DomainName, DomainState, DomainStatus, ExistingUserPolicy,
     Model, ModelName, RequestedResourceVersion, ResourceId, ResourceName, ResourceVersion, Restore,
-    RestoreScope, RestoreStep, RestoredUsers, UserName,
+    RestoreLifecycle, RestoreScope, RestoreStep, RestoredUsers, UserName,
 };
 use thiserror::Error;
 
@@ -46,6 +46,8 @@ pub(crate) enum RestorePlanError {
          restore it with RESTORE DOMAIN"
     )]
     NotAClusterArchive { domain: DomainName },
+    #[error("domain '{domain}' has no archived paced clock mapping to RESUME")]
+    MissingClock { domain: DomainName },
     #[error("the archive holds no domain '{domain}'")]
     DomainNotInArchive { domain: DomainName },
     #[error("domain '{domain}' already exists; restore it AS another name")]
@@ -177,12 +179,17 @@ pub(crate) struct PlannedDomain {
     pub(crate) target: DomainName,
     /// The domain as the restore creates it: stopped, with its archived configuration.
     pub(crate) state: DomainState,
+    /// The state atomically installed when the complete restore generation is ready.
+    pub(crate) activation: DomainState,
     /// Every resource the domain declares, with the version its next upload receives.
     pub(crate) resources: Vec<RestoredResource>,
     /// Every completed version, imported under its archived number, in archive order.
     pub(crate) versions: Vec<PlannedVersion>,
     /// The domain's models, each binding versions by number, in archive order.
     pub(crate) models: Vec<Model<u64>>,
+    /// Exact Arrow schemas resolved once from the archived relay and schema Models.
+    pub(crate) materialized_schemas:
+        BTreeMap<ModelName, nervix_primitives::sync::StdArc<arrow_schema::Schema>>,
 }
 
 /// One completed resource version a restore imports.
@@ -228,6 +235,7 @@ impl RestorePlan {
                 target.clone(),
                 models,
                 description.manifest.resources,
+                restore.lifecycle,
             )?;
             domains.insert(target, planned);
         }
@@ -329,6 +337,7 @@ fn plan_domain(
     target: DomainName,
     models: &[Model<RequestedResourceVersion>],
     resource_bytes: BackupResources,
+    lifecycle: RestoreLifecycle,
 ) -> Result<PlannedDomain, Report<RestorePlanError>> {
     let record = &described.record;
     let source = record.domain.clone();
@@ -375,23 +384,55 @@ fn plan_domain(
     for model in models {
         pinned.push(pin_model(&source, model, &restored_versions)?);
     }
+    let mut materialized_schemas = BTreeMap::new();
+    for model in &pinned {
+        let Model::Relay(relay) = model else {
+            continue;
+        };
+        if relay.materialized_state.is_none() {
+            continue;
+        }
+        if let Some(schema) = pinned.iter().find_map(|model| match model {
+            Model::Schema(schema) if schema.name == relay.schema => Some(schema),
+            _ => None,
+        }) {
+            materialized_schemas.insert(
+                ModelName::from(&relay.name),
+                crate::runtime_schema::compile_schema(schema).arrow_schema(),
+            );
+        }
+    }
+    let state = DomainState {
+        id: target.clone(),
+        config: DomainConfig {
+            pace: record.pace,
+            placement: record.placement,
+        },
+        status: DomainStatus::Stopped,
+        start_version: record.start_version,
+        last_start: record.start_point.clone(),
+        clock: None,
+    };
+    let mut activation = state.clone();
+    if lifecycle == RestoreLifecycle::Resume {
+        if matches!(record.pace, nervix_models::DomainPace::Paced { .. }) && record.clock.is_none()
+        {
+            return Err(Report::new(RestorePlanError::MissingClock {
+                domain: source,
+            }));
+        }
+        activation.status = DomainStatus::Running;
+        activation.clock = record.clock.clone();
+    }
     Ok(PlannedDomain {
         source,
-        state: DomainState {
-            id: target.clone(),
-            config: DomainConfig {
-                pace: record.pace,
-                placement: record.placement,
-            },
-            status: DomainStatus::Stopped,
-            start_version: record.start_version,
-            last_start: record.start_point.clone(),
-            clock: None,
-        },
+        state,
+        activation,
         target,
         resources,
         versions,
         models: pinned,
+        materialized_schemas,
     })
 }
 
@@ -681,6 +722,7 @@ mod tests {
             source: "cluster.nvxb".to_string(),
             mode: nervix_models::RestoreMode::Apply,
             state: nervix_models::RestoreState::All,
+            lifecycle: nervix_models::RestoreLifecycle::Stopped,
         }
     }
 
@@ -693,6 +735,7 @@ mod tests {
             source: "domain.nvxb".to_string(),
             mode: nervix_models::RestoreMode::Apply,
             state: nervix_models::RestoreState::All,
+            lifecycle: nervix_models::RestoreLifecycle::Stopped,
         }
     }
 
@@ -783,6 +826,81 @@ mod tests {
         assert_eq!(
             planned.target_domains(),
             BTreeSet::from([domain("prod"), domain("staging")])
+        );
+    }
+
+    #[test]
+    fn resume_preserves_the_archived_generation_start_point_and_mapping() {
+        use nervix_models::{DomainClockState, DomainTimeRate, Timestamp};
+        let mut archive = cluster_archive();
+        let rate = DomainTimeRate::try_from(2.5).assured("the finite rate is positive");
+        let start = Timestamp::from_unix_nanos(1_234_567_890);
+        let mapping = DomainClockState::new(Timestamp::from_unix_nanos(9_876_543_210), start, rate);
+        let record = &mut archive.domains[0].record;
+        record.pace = DomainPace::Paced {
+            period: nervix_models::DomainClockPeriod::from_nanos(version(100_000_000)),
+            skew: nervix_models::DomainClockSkew::from_nanos(0),
+        };
+        record.start_version = 37;
+        record.start_point = DomainStartPoint::At {
+            timestamp: start,
+            time_rate: rate,
+        };
+        record.clock = Some(mapping.clone());
+        let mut restore = domain_restore("prod", Some("copy"));
+        restore.lifecycle = RestoreLifecycle::Resume;
+        let planned =
+            plan(&restore, &archive, &Cluster::empty()).assured("a mapped paced domain resumes");
+        let restored = &planned.domains[&domain("copy")];
+        assert_eq!(restored.state.status, DomainStatus::Stopped);
+        assert_eq!(restored.state.clock, None);
+        assert_eq!(restored.activation.status, DomainStatus::Running);
+        assert_eq!(restored.activation.start_version, 37);
+        assert_eq!(
+            restored.activation.last_start,
+            archive.domains[0].record.start_point
+        );
+        assert_eq!(restored.activation.clock, Some(mapping));
+        restore.lifecycle = RestoreLifecycle::Stopped;
+        let planned =
+            plan(&restore, &archive, &Cluster::empty()).assured("the default restore plans");
+        assert_eq!(
+            planned.domains[&domain("copy")].activation,
+            planned.domains[&domain("copy")].state
+        );
+    }
+
+    #[test]
+    fn an_unpaced_resume_preserves_its_generation_without_a_mapping() {
+        let mut restore = cluster_restore(ExistingUserPolicy::Fail);
+        restore.lifecycle = RestoreLifecycle::Resume;
+        let planned =
+            plan(&restore, &cluster_archive(), &Cluster::empty()).assured("unpaced domains resume");
+        for domain in planned.domains.values() {
+            assert_eq!(domain.activation.status, DomainStatus::Running);
+            assert_eq!(domain.activation.clock, None);
+            assert_eq!(domain.activation.start_version, domain.state.start_version);
+            assert_eq!(domain.activation.last_start, domain.state.last_start);
+        }
+    }
+
+    #[test]
+    fn a_paced_resume_requires_its_archived_mapping() {
+        let mut archive = cluster_archive();
+        archive.domains[0].record.pace = DomainPace::Paced {
+            period: nervix_models::DomainClockPeriod::from_nanos(version(100_000_000)),
+            skew: nervix_models::DomainClockSkew::from_nanos(0),
+        };
+        let mut restore = domain_restore("prod", None);
+        restore.lifecycle = RestoreLifecycle::Resume;
+        let error = plan(&restore, &archive, &Cluster::empty())
+            .err()
+            .assured("a missing mapping is refused");
+        assert_eq!(
+            error.current_context(),
+            &RestorePlanError::MissingClock {
+                domain: domain("prod")
+            }
         );
     }
 

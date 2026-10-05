@@ -1,3 +1,10 @@
+//! Reading an installed materialized dependency from its selected state owner.
+//!
+//! Layer: data plane.
+//! - **Owns.** Resolving local or remote materialized rows and reporting dependency-read failures.
+//! - **Depends on.** Prepared materialized plans, runtime row carriers, state placement and exchange.
+//! - **Must not know.** Models, NSPL parsing or archive restore policy.
+
 #![cfg_attr(
     nervix_lint,
     nervix::context(
@@ -325,29 +332,49 @@ impl Runtime {
         let Some(store) = &self.inner.state_store else {
             return Ok(None);
         };
-        let Some(snapshot) = store.latest_snapshot(placement).change_context(
-            MaterializedReadError::StoredSnapshot {
-                placement: placement.clone(),
-            },
-        )?
-        else {
-            return Ok(None);
-        };
         let Some(schema) = self.materialized_relay_schema(routing, placement) else {
             return Ok(None);
         };
-        let sealed = self
+        let store = store.clone();
+        let selected = placement.clone();
+        let charge = self
             .inner
             .executor
-            .charge_owned(nervix_execution::MemoryClass::Bulk, snapshot.payload)
+            .reserve(
+                nervix_execution::MemoryClass::Bulk,
+                RESTORE_STATE_WORKING_BYTES,
+            )
             .await
             .change_context(MaterializedReadError::StoredSnapshot {
                 placement: placement.clone(),
             })?;
-        RestoredMaterializedSnapshot::open(
+        let reader = self
+            .inner
+            .executor
+            .run_storage(
+                nervix_execution::StorageClass::Filesystem,
+                charge,
+                move |_charge, cancellation| {
+                    cancellation
+                        .check()
+                        .change_context(RuntimePersistenceError::Cancelled)?;
+                    store.checkpoint_reader(&selected)
+                },
+            )
+            .await
+            .change_context(MaterializedReadError::StoredSnapshot {
+                placement: placement.clone(),
+            })?
+            .change_context(MaterializedReadError::StoredSnapshot {
+                placement: placement.clone(),
+            })?;
+        let Some(reader) = reader else {
+            return Ok(None);
+        };
+        RestoredMaterializedSnapshot::open_relay(
             &self.inner.executor,
             &schema,
-            SealedSource::memory(sealed),
+            SealedSource::stored(self.inner.executor.clone(), reader),
         )
         .await
         .map(Some)
@@ -1059,6 +1086,92 @@ mod tests {
         runtime_ack::{AckOutcome, AckSet},
         runtime_schema::{RuntimeRecordMetadata, RuntimeValue},
     };
+
+    #[nervix_primitives::test]
+    async fn stored_materialized_reads_open_containers_larger_than_the_bulk_budget() {
+        use meticulous::ResultExt as _;
+
+        use super::super::state_store::generation::CheckpointMetadata;
+        use crate::runtime_schema::test_runtime_row;
+
+        let root = tempfile::tempdir().expect("database directory opens");
+        let db = fjall::Database::builder(root.path())
+            .open()
+            .expect("database opens");
+        let runtime = Runtime::with_persistence(Some(db), DEFAULT_STATE_SNAPSHOT_INTERVAL)
+            .expect("persistent runtime opens");
+        let rows = (0..80)
+            .map(|index| MaterializedGenerationRecord {
+                branch: string_branch_key("tenant", &format!("tenant-{index:02}")),
+                row: test_runtime_row([(
+                    "payload".to_string(),
+                    RuntimeValue::String("p".repeat(512 * 1024)),
+                )]),
+            })
+            .collect::<Vec<_>>();
+        let schema = rows[0].row.arrow_schema();
+        let generation = MaterializedGeneration::new(80, 0, 80, schema.clone(), rows);
+        let sealed = generation
+            .seal(runtime.executor(), &runtime.inner.snapshot_staging)
+            .await
+            .assured("bounded groups seal");
+        assert!(sealed.descriptor.length > 32 * 1024 * 1024);
+        let placement = RuntimeStatePlacement {
+            domain: domain("default"),
+            state: RuntimeState::MaterializedRelay {
+                schema: SchemaFingerprint::from_digest([7; 32]).materialized_at(37),
+            },
+            kind: ModelKind::Relay,
+            identifier: named("state"),
+            branch_key: None,
+        };
+        runtime
+            .inner
+            .state_store
+            .as_ref()
+            .expect("store exists")
+            .checkpoint_stream_writer()
+            .publish_checkpoint_stream(
+                &placement,
+                CheckpointMetadata {
+                    lsm: sealed.descriptor.revision,
+                    length: sealed.descriptor.length,
+                    digest: sealed.descriptor.digest,
+                },
+                std::fs::File::open(sealed.artifact.path()).expect("sealed file opens"),
+                || Ok(()),
+            )
+            .assured("segmented checkpoint publishes");
+        let routing = DomainRoutingSnapshot {
+            materialized_stream_specs: HashMap::from_iter([(
+                named("state"),
+                RuntimeMaterializedRelaySpec::new(
+                    schema,
+                    VmSchemaSensitivity::default(),
+                    test_branching(&[("tenant", ParseAsType::String)]),
+                ),
+            )]),
+            ..DomainRoutingSnapshot::default()
+        };
+        let restored = runtime
+            .open_stored_materialized_snapshot(Some(&routing), &placement)
+            .await
+            .assured("stored read fits the default bulk budget")
+            .expect("the persisted generation exists");
+        assert_eq!(restored.revision, 80);
+        assert_eq!(restored.branch_generation, 80);
+        assert_eq!(restored.records.len(), 80);
+        for (index, record) in restored.records.iter().enumerate() {
+            assert_eq!(
+                record.branch,
+                string_branch_key("tenant", &format!("tenant-{index:02}"))
+            );
+            assert_eq!(
+                record.row.value_at(0).expect("payload reads"),
+                Some(RuntimeValue::String("p".repeat(512 * 1024)))
+            );
+        }
+    }
 
     #[test]
     fn remote_materialized_read_distinguishes_assignment_gaps_from_failures() {

@@ -320,6 +320,9 @@ jobs:
     needs: [bolero-random, bolero-fuzz]
     runs-on: ubuntu-latest
     timeout-minutes: 5
+    permissions:
+      contents: read
+      id-token: write
     outputs:
       randomized-result: ${{ steps.selection.outputs.randomized-result }}
       sanitizer-result: ${{ steps.selection.outputs.sanitizer-result }}
@@ -360,3 +363,25 @@ jobs:
           name: bolero-selection
           path: selection.json
           if-no-files-found: error
+
+      - name: Checkout standalone notification sources
+        if: github.event_name == 'workflow_dispatch' || github.event_name == 'schedule'
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ env.BOLERO_TESTED_SHA }}
+
+      - name: Install verified Codecov CLI for standalone notifications
+        if: github.event_name == 'workflow_dispatch' || github.event_name == 'schedule'
+        id: codecov-cli
+        uses: ./.github/actions/setup-codecov
+
+      - name: Finalize standalone Codecov coverage checks
+        if: github.event_name == 'workflow_dispatch' || github.event_name == 'schedule'
+        uses: codecov/codecov-action@v5
+        with:
+          binary: ${{ steps.codecov-cli.outputs.binary }}
+          run_command: send-notifications
+          fail_ci_if_error: true
+          override_commit: ${{ env.BOLERO_TESTED_SHA }}
+          url: https://codecov.io
+          use_oidc: true

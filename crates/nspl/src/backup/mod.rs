@@ -12,7 +12,7 @@
 use chumsky::prelude::*;
 use nervix_models::{
     Backup, BackupCapture, BackupResources, BackupScope, DescribeBackup, ExistingUserPolicy,
-    InspectionFormat, Restore, RestoreMode, RestoreScope, RestoreState,
+    InspectionFormat, Restore, RestoreLifecycle, RestoreMode, RestoreScope, RestoreState,
 };
 
 use crate::{
@@ -88,6 +88,10 @@ pub fn backup_parser<'src>()
 /// reference to an existing domain.
 pub fn restore_parser<'src>()
 -> impl Parser<'src, &'src [Token], Restore, extra::Err<ParseError<'src>>> + Clone {
+    let lifecycle = kw(Identifier::Resume).or_not().map(|resume| match resume {
+        Some(()) => RestoreLifecycle::Resume,
+        None => RestoreLifecycle::Stopped,
+    });
     let dry_run =
         kw_phrase2(Identifier::Dry, Identifier::Run)
             .or_not()
@@ -113,28 +117,36 @@ pub fn restore_parser<'src>()
     let cluster = kw(Identifier::Cluster)
         .ignore_then(kw(Identifier::From))
         .ignore_then(local_path())
+        .then(lifecycle.clone())
         .then(existing_users)
         .then(dry_run.clone())
         .then(state.clone())
-        .map(|(((source, existing_users), mode), state)| Restore {
-            scope: RestoreScope::Cluster { existing_users },
-            source,
-            mode,
-            state,
-        });
+        .map(
+            |((((source, lifecycle), existing_users), mode), state)| Restore {
+                scope: RestoreScope::Cluster { existing_users },
+                source,
+                mode,
+                state,
+                lifecycle,
+            },
+        );
     let domain = kw(Identifier::Domain)
         .ignore_then(domain_name())
         .then(kw(Identifier::As).ignore_then(domain_name()).or_not())
         .then_ignore(kw(Identifier::From))
         .then(local_path())
+        .then(lifecycle)
         .then(dry_run)
         .then(state)
-        .map(|((((domain, target), source), mode), state)| Restore {
-            scope: RestoreScope::Domain { domain, target },
-            source,
-            mode,
-            state,
-        });
+        .map(
+            |(((((domain, target), source), lifecycle), mode), state)| Restore {
+                scope: RestoreScope::Domain { domain, target },
+                source,
+                mode,
+                state,
+                lifecycle,
+            },
+        );
     kw(Identifier::Restore)
         .ignore_then(choice((cluster, domain)))
         .then_ignore(tok(Token::Semicolon).or_not())
@@ -201,6 +213,11 @@ pub(crate) fn restore_tail(restore: &Restore, tokens: &[Token]) -> Vec<String> {
         "WITHOUT SOURCE OFFSETS".to_string(),
     ];
     if restore.mode == RestoreMode::Apply {
+        if restore.lifecycle == RestoreLifecycle::Stopped
+            && !writes_keyword(tokens, Identifier::Existing)
+        {
+            tail.push("RESUME".to_string());
+        }
         match &restore.scope {
             RestoreScope::Cluster { .. } if !writes_keyword(tokens, Identifier::Existing) => {
                 tail.push("ON EXISTING USER".to_string());
@@ -518,6 +535,7 @@ mod tests {
             source: source.to_string(),
             mode,
             state: RestoreState::default(),
+            lifecycle: nervix_models::RestoreLifecycle::Stopped,
         })
     }
 
@@ -665,6 +683,14 @@ mod tests {
 
     #[rstest]
     #[case::cluster("RESTORE CLUSTER FROM '/tmp/c.nvxb';")]
+    #[case::cluster_resume("RESTORE CLUSTER FROM '/tmp/c.nvxb' RESUME;")]
+    #[case::resume_policy_dry_run(
+        "RESTORE CLUSTER FROM '/tmp/c.nvxb' RESUME ON EXISTING USER REPLACE DRY RUN WITHOUT \
+         SOURCE OFFSETS;"
+    )]
+    #[case::resume_domain(
+        "RESTORE DOMAIN prod AS copy FROM '/tmp/p.nvxb' RESUME DRY RUN WITHOUT STATE;"
+    )]
     #[case::cluster_skip("RESTORE CLUSTER FROM '/tmp/c.nvxb' ON EXISTING USER SKIP;")]
     #[case::cluster_replace_dry_run(
         "RESTORE CLUSTER FROM '/tmp/c.nvxb' ON EXISTING USER REPLACE DRY RUN;"
@@ -704,6 +730,10 @@ mod tests {
     #[case::domain_source("RESTORE DOMAIN prod ", "FROM")]
     #[case::renamed_domain_source("RESTORE DOMAIN prod AS copy ", "FROM")]
     #[case::source_path("RESTORE CLUSTER FROM ", "local_path")]
+    #[case::cluster_resume("RESTORE CLUSTER FROM 'c.nvxb' ", "RESUME")]
+    #[case::domain_resume("RESTORE DOMAIN prod FROM 'p.nvxb' ", "RESUME")]
+    #[case::resume_policy("RESTORE CLUSTER FROM 'c.nvxb' RESUME ", "ON EXISTING USER")]
+    #[case::resume_dry_run("RESTORE DOMAIN prod FROM 'p.nvxb' RESUME ", "DRY RUN")]
     #[case::cluster_policy("RESTORE CLUSTER FROM 'c.nvxb' ", "ON EXISTING USER")]
     #[case::cluster_dry_run("RESTORE CLUSTER FROM 'c.nvxb' ", "DRY RUN")]
     #[case::without_state("RESTORE CLUSTER FROM 'c.nvxb' ", "WITHOUT STATE")]

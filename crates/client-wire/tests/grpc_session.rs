@@ -181,6 +181,7 @@ fn answer(frame: &VerifiedFrame<ClientFrame>) -> Option<Reply> {
     let body = match message.request {
         ClientRequest::ListDomains => ReplyBody::DomainList(DomainList {
             domains: vec![DomainInfo {
+                start_version: 1,
                 domain: nervix_models::DomainName::parse("tenant").assured("a valid domain"),
                 status: DomainStatus::Running,
                 pace: DomainPace::Unpaced,

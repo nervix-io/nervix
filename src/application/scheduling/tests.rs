@@ -608,6 +608,51 @@ fn merge_existing_schedule_data_preserves_matching_ingestor_schedule_and_assignm
 }
 
 #[test]
+fn server_intakes_follow_live_membership_through_schedule_reconciliation() {
+    let domain = named::<DomainName>("payments");
+    let template = scheduled_node("source", ModelKind::Ingestor);
+    let Model::Ingestor(mut ingestor) = template.config.as_ref().clone() else {
+        panic!("the fixture creates an ingestor");
+    };
+    ingestor.input =
+        nervix_models::IngestorInput::Transport(nervix_models::TransportIngestorInput {
+            source: nervix_models::IngestSource::Endpoint {
+                endpoint: named("ingress"),
+                mode: nervix_models::EndpointIngestMode::NoAckSequential,
+                quiesce: nervix_models::IngestQuiesceMode::EndpointBuffer {
+                    max_size: "1MiB".to_string(),
+                },
+            },
+            codec: named("event_codec"),
+        });
+    let desired = DomainSchedule::new(
+        domain,
+        vec![
+            nervix_models::ScheduledNode::new(
+                Model::Ingestor(ingestor),
+                template.schema_fingerprint,
+            )
+            .placed_on(Some(node_named("node-2")), vec![node_named("node-2")]),
+        ],
+        Vec::new(),
+    );
+    let live = [
+        node_named("node-1"),
+        node_named("node-2"),
+        node_named("node-3"),
+    ];
+    for predecessor in [None, Some(&desired)] {
+        let mut next = desired.clone();
+        SessionServiceImpl::merge_existing_schedule_data(&mut next, predecessor, &live);
+        assert_eq!(next.nodes[0].assigned_nodes, live);
+        assert!(live.iter().all(|node| next.nodes[0].executes_on(node)));
+        let previous = next.clone();
+        SessionServiceImpl::merge_existing_schedule_data(&mut next, Some(&previous), &live[..2]);
+        assert_eq!(next.nodes[0].assigned_nodes, live[..2]);
+    }
+}
+
+#[test]
 fn merge_existing_schedule_data_ignores_non_matching_nodes() {
     let domain = DomainName::parse("payments").expect("valid domain");
     let mut next = DomainSchedule::new(

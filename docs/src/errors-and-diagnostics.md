@@ -309,6 +309,23 @@ archive as `NX_ERROR_PROTOCOL`, and a write failure as `NX_ERROR_INVALID_ARGUMEN
 execution reference so a host can run the backup again. No diagnostic of a backup includes archive
 contents, password hashes, or resource bytes.
 
+A captured-section opening refused only for Snapshot request capacity retains its inventory and
+retries within one 30-second opening deadline. The typed capacity classification determines this
+retry; other request failures end the fetch. Deadline expiry remains a capture failure, and an
+admitted or partially consumed response is never reopened by this admission retry.
+
+Materialized archive descriptors and identities reject invalid counts, names, typed branch fields,
+watermark order and supported record headers before runtime installation. `RestorePlanError::MissingClock`
+refuses a paced `RESUME` without its committed mapping. `RestoreRefusal::MaterializedState` names
+the domain and relay when preflight conversion fails; `MaterializedRestoreError` distinguishes
+invalid section lengths, identities, Arrow schema or row counts, metadata limits, admission,
+cancellation, framing and staging. A preflight admission refusal records no restore progress and
+can be presented again; it is reported as preparation refusal without judging the archive invalid.
+Native `MaterializedSnapshotError` checks framing, metadata bounds, unique keys,
+counts, exact schemas and complete container consumption. Diagnostics carry typed causes and
+entity identities, without payload columns or branch field values. Replica installation refuses
+a revision older than its currently installed materialized revision.
+
 A restore's failures are owned where they are decided, in the order the restore meets them. The
 restore stream refuses what its frames get wrong with a typed `RestoreUploadFailure`:
 `InvalidStream`, `InvalidStatement`, `SizeMismatch`, `DigestMismatch`, `QuotaExceeded`, or

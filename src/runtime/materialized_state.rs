@@ -1,7 +1,10 @@
+//! Branch-owned materialized relay rows and immutable snapshot generations.
+//!
 //! Layer: data plane.
-//! Owns: exclusive materialized branch records and immutable row and membership publications.
-//! May depend on: assignment fences, Arrow row views, snapshot codecs and execution admission.
-//! Must not know: Models, NSPL, control-plane transactions or transport framing.
+//! - **Owns.** Exclusive branch records and immutable row and membership publications,
+//!   assignment-fenced installation, exact branch-generation capture and sealed artifact retention.
+//! - **Depends on.** Typed placements, assignment fences, Arrow row views, codecs and admission.
+//! - **Must not know.** Models, NSPL text, archive layouts or consensus restore policies.
 
 #![cfg_attr(
     nervix_lint,
@@ -16,7 +19,7 @@ use ahash::RandomState;
 use error_stack::Report;
 use imbl::{GenericHashMap, shared_ptr::DefaultSharedPtr};
 use nervix_checkpoint_replication::CheckpointReplication;
-use nervix_execution::Executor;
+use nervix_execution::{Executor, MemoryClass, Reservation};
 use nervix_models::ClusterNodeName;
 use nervix_primitives::{
     publication::{ArcSwap, ArcSwapOption},
@@ -340,31 +343,71 @@ impl MaterializedRelayStateRead {
         )
     )]
     pub(super) fn capture(&self) -> MaterializedGeneration {
+        self.state
+            .assignment
+            .serialize_with(|binding| self.capture_generation(binding.fence()))
+    }
+
+    /// Admit the row-view and grouping arrays before capturing a backup cut. Carrier columns and
+    /// branch identities remain shared; the charge follows the immutable generation until its
+    /// archive sections have been staged. One capture cannot monopolize the bulk worker budget.
+    pub(super) fn capture_for_backup(
+        &self,
+        executor: &Executor,
+    ) -> Result<(MaterializedGeneration, Reservation), Report<MaterializedSnapshotError>> {
         self.state.assignment.serialize_with(|binding| {
-            let revision = self.state.current_lsm.current();
-            let branch_generation = self.state.branch_generation.load(Ordering::SeqCst);
-            let entries = self.state.entries.load();
-            let mut records = Vec::with_capacity(entries.len());
-            for (branch, published) in entries.iter() {
-                if let Some(row) = published.load_full() {
-                    records.push(MaterializedGenerationRecord {
-                        branch: branch.clone(),
-                        row: (*row).clone(),
-                    });
-                }
+            let bytes = self
+                .state
+                .entries
+                .load()
+                .len()
+                .checked_mul(
+                    std::mem::size_of::<MaterializedGenerationRecord>()
+                        + std::mem::size_of::<std::ops::Range<usize>>(),
+                )
+                .ok_or_else(|| Report::new(MaterializedSnapshotError::MetadataTooLarge))?;
+            let bytes = u64::try_from(bytes)
+                .map_err(|_| Report::new(MaterializedSnapshotError::MetadataTooLarge))?;
+            if bytes > 8 * 1024 * 1024 {
+                return Err(Report::new(MaterializedSnapshotError::MetadataTooLarge));
             }
-            records.sort_by(|left, right| {
-                super::branch_key_display(&left.branch)
-                    .cmp(super::branch_key_display(&right.branch))
-            });
-            MaterializedGeneration::new(
-                revision,
-                binding.fence(),
-                branch_generation,
-                self.state.schema.clone(),
-                records,
-            )
+            let charge = executor
+                .try_reserve(MemoryClass::Bulk, bytes.max(1))
+                .map_err(|error| error.change_context(MaterializedSnapshotError::Admission))?;
+            Ok((self.capture_generation(binding.fence()), charge))
         })
+    }
+
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            recurring,
+            reason = "snapshot callers hold the assignment barrier while sharing branch row views"
+        )
+    )]
+    fn capture_generation(&self, fence: u64) -> MaterializedGeneration {
+        let revision = self.state.current_lsm.current();
+        let branch_generation = self.state.branch_generation.load(Ordering::SeqCst);
+        let entries = self.state.entries.load();
+        let mut records = Vec::with_capacity(entries.len());
+        for (branch, published) in entries.iter() {
+            if let Some(row) = published.load_full() {
+                records.push(MaterializedGenerationRecord {
+                    branch: branch.clone(),
+                    row: (*row).clone(),
+                });
+            }
+        }
+        records.sort_unstable_by(|left, right| {
+            super::branch_key_display(&left.branch).cmp(super::branch_key_display(&right.branch))
+        });
+        MaterializedGeneration::new(
+            revision,
+            fence,
+            branch_generation,
+            self.state.schema.clone(),
+            records,
+        )
     }
 
     /// Seal a generation of this state that is newer than `after_revision`, or report that the
@@ -386,6 +429,7 @@ impl MaterializedRelayStateRead {
     pub(super) async fn seal_after(
         &self,
         executor: &Executor,
+        staging: &super::snapshot_staging::SnapshotStaging,
         after_revision: Option<u64>,
     ) -> Result<Option<SealedMaterializedSnapshot>, Report<MaterializedSnapshotError>> {
         if let Some(usable) = self.usable_sealed(after_revision) {
@@ -400,7 +444,7 @@ impl MaterializedRelayStateRead {
         if after_revision.is_some_and(|after| generation.revision() <= after) {
             return Ok(None);
         }
-        let sealed = generation.seal(executor).await?;
+        let sealed = generation.seal(executor, staging).await?;
         // Sealing runs outside the barrier, so the assignment that authorized this capture may
         // have been superseded while it ran. Serving that generation would present state this
         // node no longer owns as current.
@@ -680,6 +724,13 @@ impl MaterializedRelaySnapshotInstaller {
             self.assignment,
             StateCapability::InstallSnapshot,
             || {
+                let installed_revision = self.read.state.current_lsm.current();
+                if restored.revision < installed_revision {
+                    return Err(RuntimeStateOperationError::MaterializedSnapshotRevision {
+                        received: restored.revision,
+                        current: installed_revision,
+                    });
+                }
                 let installed_branch_generation =
                     self.read.state.branch_generation.load(Ordering::SeqCst);
                 if restored.branch_generation < installed_branch_generation {
@@ -696,13 +747,6 @@ impl MaterializedRelaySnapshotInstaller {
                          while fence {installed_fence} is installed",
                         restored.fence,
                     )));
-                }
-                let current = self.read.state.current_lsm.current();
-                if restored.revision < current {
-                    return Err(RuntimeStateOperationError::MaterializedSnapshotRevision {
-                        received: restored.revision,
-                        current,
-                    });
                 }
                 let mut entries = MaterializedBranches::default();
                 for record in restored.records {
@@ -765,7 +809,10 @@ mod tests {
     use meticulous::{OptionExt as _, ResultExt as _};
     use nervix_models::{DomainName, ModelKind, ModelName, RelayName};
 
-    use super::{super::materialized_snapshot::SealedSource, *};
+    use super::{
+        super::{Runtime, materialized_snapshot::SealedSource},
+        *,
+    };
     use crate::runtime_schema::{RuntimeValue, test_runtime_row};
 
     fn test_placement(relay: &str) -> RuntimeStatePlacement {
@@ -783,14 +830,136 @@ mod tests {
         }
     }
 
+    fn timestamped_row(value: i64) -> RuntimeRow {
+        let row = test_runtime_row([("value".into(), RuntimeValue::I64(value))]);
+        RuntimeRow::new(
+            Arc::new(row.one_row_batch()),
+            0,
+            crate::runtime_schema::RuntimeRecordMetadata::from_remote(
+                nervix_models::RemoteRuntimeRecordMetadata {
+                    ingested_at_low_watermark: nervix_models::Timestamp::from_unix_nanos(value),
+                    ingested_at_high_watermark: nervix_models::Timestamp::from_unix_nanos(value),
+                },
+            ),
+        )
+        .assured("timestamped row exists")
+    }
+
+    fn captured_revision(
+        executor: &Executor,
+        state: &Arc<ReplicatedMaterializedRelayState>,
+    ) -> RestoredMaterializedSnapshot {
+        RestoredMaterializedSnapshot::from_captured_generation(
+            executor,
+            ReplicatedMaterializedRelayState::read(state).capture(),
+        )
+    }
+
+    fn replica_race_preserves_the_restored_revision() {
+        let executor = Executor::default();
+        let row = timestamped_row(1);
+        let schema = row.arrow_schema();
+        let owner = Arc::new(ReplicatedMaterializedRelayState::new(
+            test_placement("state"),
+            schema.clone(),
+        ));
+        let mut originator = ReplicatedMaterializedRelayState::bind(
+            &owner,
+            StateReplicationRoles::owned_by(None),
+            None,
+        )
+        .originator
+        .assured("owner originates");
+        let alpha = super::super::string_branch_key("tenant", "alpha");
+        let beta = super::super::string_branch_key("tenant", "beta");
+        originator
+            .update_last_by_timestamp(&alpha, row)
+            .assured("alpha starts");
+        originator
+            .update_last_by_timestamp(&beta, timestamped_row(2))
+            .assured("beta starts");
+        let earlier = captured_revision(&executor, &owner);
+        originator
+            .update_last_by_timestamp(&alpha, timestamped_row(3))
+            .assured("alpha advances");
+        let restored = captured_revision(&executor, &owner);
+        let replica = Arc::new(ReplicatedMaterializedRelayState::restored(
+            test_placement("state"),
+            schema,
+            Some(restored),
+        ));
+        let local = ClusterNodeName::parse("replica").assured("node is valid");
+        let installer = ReplicatedMaterializedRelayState::bind(
+            &replica,
+            StateReplicationRoles::new(
+                Some(ClusterNodeName::parse("owner").assured("node is valid")),
+                vec![local.clone()],
+                0,
+            ),
+            Some(&local),
+        )
+        .installer
+        .assured("replica installs");
+        originator
+            .update_last_by_timestamp(&alpha, timestamped_row(4))
+            .assured("restored owner advances");
+        let latest = captured_revision(&executor, &owner);
+        #[cfg(feature = "shuttle")]
+        {
+            let delayed = nervix_primitives::thread::spawn({
+                let installer = installer.clone();
+                move || {
+                    assert!(installer.install(earlier).is_err());
+                }
+            });
+            installer
+                .install(latest)
+                .assured("latest owner revision installs");
+            delayed
+                .join()
+                .assured("delayed replica synchronization completes");
+        }
+        #[cfg(not(feature = "shuttle"))]
+        {
+            assert!(installer.install(earlier).is_err());
+            installer
+                .install(latest)
+                .assured("latest owner revision installs");
+        }
+        let read = ReplicatedMaterializedRelayState::read(&replica);
+        assert_eq!(read.current_lsm(), 4);
+        assert_eq!(
+            read.record(&alpha)
+                .assured("alpha remains")
+                .row
+                .value_at(0)
+                .assured("value loads"),
+            Some(RuntimeValue::I64(4))
+        );
+        assert_eq!(
+            read.record(&beta)
+                .assured("beta remains")
+                .row
+                .value_at(0)
+                .assured("value loads"),
+            Some(RuntimeValue::I64(2))
+        );
+    }
+
+    #[test]
+    fn replica_synchronization_preserves_a_restored_materialized_revision() {
+        replica_race_preserves_the_restored_revision();
+    }
+
     #[test]
     fn snapshot_installation_keeps_the_newest_revision_of_one_branch_generation() {
-        use super::super::materialized_snapshot::RestoredMaterializedRecord;
-
+        let executor = Executor::new(nervix_execution::ExecutionConfig::default())
+            .assured("valid executor budgets");
         let first = test_runtime_row([("value".to_string(), RuntimeValue::I64(1))]);
+        let schema = first.arrow_schema();
         let state = Arc::new(ReplicatedMaterializedRelayState::new(
             test_placement("tenant_state"),
-            first.arrow_schema(),
+            schema.clone(),
         ));
         let local = ClusterNodeName::try_from("node-2".to_string())
             .assured("the test node satisfies the node grammar");
@@ -810,23 +979,32 @@ mod tests {
             .installer
             .take()
             .assured("the local node is a replica");
-        let earlier = RestoredMaterializedSnapshot {
-            revision: 1,
-            fence: 1,
-            branch_generation: 1,
-            records: vec![RestoredMaterializedRecord {
-                branch: None,
-                row: first,
-            }],
-        };
-        let newer = RestoredMaterializedSnapshot {
-            revision: 2,
-            records: vec![RestoredMaterializedRecord {
-                branch: None,
-                row: test_runtime_row([("value".to_string(), RuntimeValue::I64(2))]),
-            }],
-            ..earlier.clone()
-        };
+        let earlier = RestoredMaterializedSnapshot::from_captured_generation(
+            &executor,
+            MaterializedGeneration::new(
+                1,
+                1,
+                1,
+                schema.clone(),
+                vec![MaterializedGenerationRecord {
+                    branch: None,
+                    row: first,
+                }],
+            ),
+        );
+        let newer = RestoredMaterializedSnapshot::from_captured_generation(
+            &executor,
+            MaterializedGeneration::new(
+                2,
+                1,
+                1,
+                schema,
+                vec![MaterializedGenerationRecord {
+                    branch: None,
+                    row: test_runtime_row([("value".to_string(), RuntimeValue::I64(2))]),
+                }],
+            ),
+        );
         installer
             .install(newer)
             .assured("a newer snapshot is admissible");
@@ -876,15 +1054,17 @@ mod tests {
             .assured("the first record should update state");
         let sealed = originator
             .read()
-            .seal_after(&executor, None)
+            .seal_after(&executor, &Runtime::new().inner.snapshot_staging, None)
             .await
             .assured("unbranched materialized state should seal")
             .assured("a sealed generation should exist");
 
-        let restored = RestoredMaterializedSnapshot::open(
+        let restored = RestoredMaterializedSnapshot::open_relay(
             &executor,
             &schema,
-            SealedSource::memory(sealed.bytes),
+            SealedSource::artifact(sealed.artifact)
+                .await
+                .assured("the artifact opens"),
         )
         .await
         .assured("the sealed generation should open");
@@ -994,7 +1174,7 @@ mod tests {
 
         assert_eq!(captured.records().len(), 1);
         let sealed = captured
-            .seal(&executor)
+            .seal(&executor, &Runtime::new().inner.snapshot_staging)
             .await
             .assured("a captured generation should seal");
         assert_eq!(sealed.descriptor.revision, captured.revision());
@@ -1031,7 +1211,11 @@ mod tests {
         assert!(
             originator
                 .read()
-                .seal_after(&executor, Some(revision))
+                .seal_after(
+                    &executor,
+                    &Runtime::new().inner.snapshot_staging,
+                    Some(revision)
+                )
                 .await
                 .assured("an already-current requester is answered")
                 .is_none()
@@ -1073,7 +1257,7 @@ mod tests {
             .assured("the first record should update state");
         let earlier = originator
             .read()
-            .seal_after(&executor, None)
+            .seal_after(&executor, &Runtime::new().inner.snapshot_staging, None)
             .await
             .assured("the owner should seal")
             .assured("a sealed generation should exist");
@@ -1106,10 +1290,12 @@ mod tests {
             .installer
             .take()
             .assured("a replica may install snapshots");
-        let restored = RestoredMaterializedSnapshot::open(
+        let restored = RestoredMaterializedSnapshot::open_relay(
             &executor,
             &schema,
-            SealedSource::memory(earlier.bytes),
+            SealedSource::artifact(earlier.artifact)
+                .await
+                .assured("the artifact opens"),
         )
         .await
         .assured("the sealed generation should open");
@@ -1193,6 +1379,65 @@ mod tests {
         #[test]
         fn shuttle_an_originator_update_proceeds_while_the_assignment_barrier_is_held() {
             check_interleavings(originator_update_under_a_held_barrier);
+        }
+
+        #[test]
+        fn shuttle_replica_synchronization_preserves_the_restored_materialized_revision() {
+            check_interleavings(replica_race_preserves_the_restored_revision);
+        }
+
+        #[test]
+        fn shuttle_materialized_capture_names_exactly_its_branch_generation() {
+            check_interleavings(|| {
+                let row = timestamped_row(1);
+                let state = Arc::new(ReplicatedMaterializedRelayState::new(
+                    test_placement("state"),
+                    row.arrow_schema(),
+                ));
+                let mut originator = ReplicatedMaterializedRelayState::bind(
+                    &state,
+                    StateReplicationRoles::owned_by(None),
+                    None,
+                )
+                .originator
+                .assured("owner originates");
+                let alpha = super::super::super::string_branch_key("tenant", "alpha");
+                let beta = super::super::super::string_branch_key("tenant", "beta");
+                originator
+                    .update_last_by_timestamp(&alpha, row)
+                    .assured("alpha starts");
+                originator
+                    .update_last_by_timestamp(&beta, timestamped_row(2))
+                    .assured("beta starts");
+                let writer = thread::spawn({
+                    let alpha = alpha.clone();
+                    let beta = beta.clone();
+                    move || {
+                        originator
+                            .update_last_by_timestamp(&alpha, timestamped_row(3))
+                            .assured("existing branch updates during capture");
+                        originator
+                            .remove_key(&beta)
+                            .assured("beta leaves its lifecycle");
+                    }
+                });
+                let generation = ReplicatedMaterializedRelayState::read(&state).capture();
+                let branches = generation
+                    .records()
+                    .iter()
+                    .map(|record| record.branch.clone())
+                    .collect::<Vec<_>>();
+                assert_eq!(
+                    branches,
+                    match generation.branch_generation() {
+                        2 => vec![alpha.clone(), beta],
+                        3 => vec![alpha],
+                        other => panic!("unexpected branch generation {other}"),
+                    }
+                );
+                assert!(generation.revision() >= 2);
+                writer.join().assured("writer finishes");
+            });
         }
     }
 }

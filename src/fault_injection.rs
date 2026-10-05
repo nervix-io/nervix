@@ -398,10 +398,16 @@ impl Default for FaultInjection {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum RestoreStateFailure {
     GuestStaging,
+    MaterializedStaging,
     DurablePublication,
 }
 
 impl FaultInjection {
+    pub fn fail_restored_materialized_checkpoint(&self, domain: DomainName) {
+        self.inner
+            .failed_restore_state_installations
+            .insert(domain, RestoreStateFailure::MaterializedStaging);
+    }
     pub fn fail_restored_wasm_checkpoint(&self, domain: DomainName) {
         self.inner
             .failed_restore_state_installations
@@ -514,6 +520,15 @@ impl FaultInjection {
             .failed_restore_state_installations
             .remove_if(domain, |_, fault| {
                 *fault == RestoreStateFailure::GuestStaging
+            })
+            .is_some()
+    }
+
+    pub(crate) fn restored_materialized_checkpoint_fails(&self, domain: &DomainName) -> bool {
+        self.inner
+            .failed_restore_state_installations
+            .remove_if(domain, |_, fault| {
+                *fault == RestoreStateFailure::MaterializedStaging
             })
             .is_some()
     }

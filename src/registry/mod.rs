@@ -29,6 +29,7 @@ mod resource_plan;
 mod restore_plan;
 mod schedule_delta;
 mod scheduler;
+pub(crate) use scheduler::assign_server_listener_nodes;
 mod storage;
 #[cfg(test)]
 mod test_fixtures;

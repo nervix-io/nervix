@@ -431,6 +431,10 @@ mod tests {
         domain_view_keeps_current_state_kinds_and_empty_restore_leaves_other_domains();
         cancellation_on_both_sides_of_publication_preserves_complete_snapshot_views();
         a_queued_checkpoint_writer_is_fenced_by_its_selected_namespace();
+        super::super::checkpoint_reader::tests::a_materialized_reader_retains_its_generation_across_publication_and_queued_writes();
+        super::super::checkpoint_reader::tests::current_checkpoint_readers_validate_chunks_lengths_and_digests();
+        super::super::checkpoint_reader::tests::inline_and_empty_current_checkpoints_read_without_a_segment_allocation();
+        super::super::checkpoint_stream::tests::materialized_periodic_streams_preserve_readers_retries_and_failed_publications();
         chunk_corruption_cannot_select_an_incomplete_generation();
         cleanup_commits_bounded_batches_across_many_checkpoint_keys();
         interrupted_cleanup_retains_future_staging_and_retries_the_published_generation();

@@ -246,6 +246,7 @@ impl SessionServiceImpl {
                 domain,
                 status: state.status,
                 pace: state.config.pace,
+                start_version: state.start_version,
             });
         }
         infos

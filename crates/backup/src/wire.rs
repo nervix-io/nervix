@@ -74,6 +74,7 @@ pub(crate) enum SectionContentWire {
     Nspl,
     ResourceArchive,
     WasmGuestBlob,
+    MaterializedColumns,
 }
 
 #[derive(Debug, Clone, PartialEq, Archive, Serialize, Deserialize)]
@@ -222,13 +223,13 @@ pub(crate) struct BranchLifecycleEntryWire {
     pub(crate) incarnation: u64,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Archive, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Archive, Serialize, Deserialize)]
 pub struct StateField {
     pub name: String,
     pub value: StateValue,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Archive, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Archive, Serialize, Deserialize)]
 #[rkyv(serialize_bounds(
     __S: rkyv::ser::Writer + rkyv::ser::Allocator,
     __S::Error: rkyv::rancor::Source,
