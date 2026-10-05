@@ -15,11 +15,63 @@ cd nervix
 Nervix is developed on Linux x86_64, Linux aarch64, and macOS arm64. The `just` recipes fetch an
 ONNX Runtime build for the host and stop on any other.
 
+The server uses `ort` 2.0.0-rc.13 with its highest supported C API level, 28. The downloader pins
+ONNX Runtime 1.30.0 and installs it under `.nervix-deps/onnxruntime`. Download the CPU package or,
+on Linux x86_64, the CUDA 13 package:
+
+```bash
+just download-onnxruntime
+just download-onnxruntime gpu_cuda13
+```
+
+The optional second argument selects an upstream platform: `host` (the default), `linux-x64`,
+`linux-aarch64`, or `osx-arm64`. For example, `just download-onnxruntime cpu linux-aarch64`
+downloads for Linux ARM64 from another supported development host. CUDA packages are available
+only for `linux-x64`. Version and destination are fixed; update the runtime pin together with the
+selected `ort` API level.
+
 Install:
 
 - Rust via `rustup`
 - `just` (latest release)
 - `zellij`
+
+## Build Container Images
+
+```bash
+just docker-build-debian
+just docker-build-cuda
+```
+
+Both recipes require the repository's remote compiler-cache configuration: `KACHE_S3_BUCKET`,
+`KACHE_S3_REGION`, `KACHE_S3_ENDPOINT`, `KACHE_S3_ACCESS_KEY`, and `KACHE_S3_SECRET_KEY`. They build
+and load a local image by default; the existing tag, platform, push, and BuildKit cache arguments
+are available for publishing builds.
+
+`Dockerfile.debian` has two complete image targets: `cpu` (the default) and `cuda`. The recipes
+select them with `--target cpu` and `--target cuda`, respectively. Both targets copy the same
+binaries and Sonic bundle from the shared `builder` stage using `COPY --link`, so those artifact
+layers are shared across the images. Each target has its own runtime base and ONNX Runtime
+download stage; building the CPU target requires only the CPU stages.
+
+Both images pin their builder, downloader, and runtime base to `debian:trixie-20260918-slim`,
+with its multi-platform digest fixed in `Dockerfile.debian`. The Debian image contains the CPU
+runtime and supports AMD64 and ARM64. The CUDA image is AMD64 only. It installs pinned CUDA
+13.2.2 and cuDNN 9.25.1 packages from NVIDIA's Debian 13 repository in one filesystem layer
+directly above the Debian base. The next layer runs `apt-get update` and `apt-get upgrade` before
+installing Nervix's dependencies. CUDA packages are held at their pinned versions during that
+upgrade. Nervix's user, ONNX Runtime libraries, and binaries follow, so application changes reuse
+the large CUDA layer. Both images obtain ONNX Runtime through the same pinned downloader.
+
+The CPU layer order is Debian → Debian updates → Nervix; the GPU layer order is
+Debian → CUDA/cuDNN → Debian updates → Nervix. The CUDA layer is built by Nervix and reused
+across its image builds.
+
+`just test-onnxruntime` checks package selection and recipe targets. `just test-onnxruntime-docker`
+builds both final targets with fixture binaries replacing the compiler stage. It verifies shared
+binary layers, Debian upgrades immediately after the selected base, preserved CUDA pins, and
+runtime shared-library dependencies without requiring remote compiler-cache credentials. The
+host NVIDIA driver is provided at container startup by the NVIDIA Container Toolkit.
 
 ## Start The Server
 

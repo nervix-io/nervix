@@ -558,6 +558,12 @@ captures keep only their selected row views and shared Arrow carriers. Publicati
 row payload or a whole relay for an established update. Snapshot archives and storage ownership
 retain the current container and backup contract.
 
+A stopped backup selects materialized checkpoint readers alongside its other state from one
+immutable database view. Those readers keep the selected namespace, metadata and chunks through
+bounded group conversion, even if a later publication replaces or reclaims the generation.
+They retain one stored chunk and one charged group at a time and publish no runtime state.
+Running and paused backup capture continues to borrow current row views under the assignment barrier.
+
 The required-wait observation creates its notification before reading dependencies. The primitive
 boundary registers a `notify_waiters` observer at future creation, so an update after the read and
 before its first poll still wakes it. Broadcast publication occurs once after each changed batch

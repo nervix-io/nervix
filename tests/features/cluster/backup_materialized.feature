@@ -124,6 +124,9 @@ Feature: Materialized backup and archived lifecycle resumption
     When the CLI restores "domain {{domain}}" from "materialized.nvxb" on node "{{leader}}" reporting JSON
     Then the CLI restore succeeded, restoring domain "{{domain}}" with 0 resource versions and 11 models
     And the CLI restore reports domain "{{domain}}" as "STOPPED" at start version 1
+    When the CLI backs up "domain {{domain}}" from node "{{leader}}" into "materialized-stopped.nvxb" reporting JSON
+    Then the CLI backup succeeded with a JSON report naming domain "{{domain}}"
+    And backup archives "materialized.nvxb" and "materialized-stopped.nvxb" preserve complete domain "{{domain}}" restored as stopped domain "{{domain}}"
     When these NSPL commands are executed on the leader node
       """
       START;
@@ -213,6 +216,14 @@ Feature: Materialized backup and archived lifecycle resumption
     Given the restore coordinator uses remote placement in a multi-node cluster
     Given the active domain is "{{source_domain}}"
     Then the current leader node is saved as placeholder "leader"
+    When the CLI restores "domain {{domain}} --as {{domain}}_stopped" from "large-materialized.nvxb" on node "{{leader}}" reporting JSON
+    Then the CLI restore reports domain "{{domain}}_stopped" as "STOPPED" at start version 1
+    When the CLI backs up "domain {{domain}}_stopped --timeout 60s" from node "{{leader}}" into "large-stopped.nvxb" reporting JSON
+    Then the CLI backup succeeded with a JSON report naming domain "{{domain}}_stopped"
+    And backup archives "large-materialized.nvxb" and "large-stopped.nvxb" preserve complete domain "{{domain}}" restored as stopped domain "{{domain}}_stopped"
+    Given the cluster is replaced by a fresh <cluster_size> node cluster whose nodes are named "restored"
+    Then the current leader node is saved as placeholder "leader"
+    Given the restore coordinator uses remote placement in a multi-node cluster
     When restore "DOMAIN {{domain}} RESUME" of backup archive "large-materialized.nvxb" is streamed to node "{{leader}}" under execution reference "large-resume"
     Then the restore stream's outcome is "completed" as "executed"
     And the restore stream's report shows every step applied
