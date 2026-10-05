@@ -57,6 +57,10 @@ pub enum RecordKind {
     MaterializedRelayDescriptor = 8,
     #[strum(serialize = "materialized record identities")]
     MaterializedIdentities = 9,
+    #[strum(serialize = "deduplicator keyspace descriptor")]
+    DeduplicatorStateDescriptor = 10,
+    #[strum(serialize = "window state descriptor")]
+    WindowStateDescriptor = 11,
 }
 
 impl RecordKind {
@@ -72,6 +76,8 @@ impl RecordKind {
             Self::BranchLifecycle => 7,
             Self::MaterializedRelayDescriptor => 8,
             Self::MaterializedIdentities => 9,
+            Self::DeduplicatorStateDescriptor => 10,
+            Self::WindowStateDescriptor => 11,
         }
     }
 }

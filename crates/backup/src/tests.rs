@@ -853,6 +853,114 @@ fn an_unsupported_wasm_descriptor_skips_its_guest_blob_together() {
 }
 
 #[test]
+fn unsupported_deduplicator_and_window_descriptors_skip_their_groups_together() {
+    let prod = domain("prod");
+    let deduplicator = ModelName::parse("unique_payments").assured("the test entity is valid");
+    let window = ModelName::parse("latency_window").assured("the test entity is valid");
+    let keyspace = crate::DeduplicatorStateDescriptor {
+        domain: prod.clone(),
+        entity: deduplicator.clone(),
+        schema: SchemaFingerprint::from_digest([3; 32]),
+        branch_fingerprint: None,
+        branch: None,
+        revision: 5,
+        keys: 1,
+        groups: 1,
+    };
+    let rows = crate::WindowStateDescriptor {
+        domain: prod.clone(),
+        entity: window.clone(),
+        schema: SchemaFingerprint::from_digest([4; 32]),
+        model: nervix_models::WindowModelDigest::from_digest([5; 32]),
+        branch_fingerprint: None,
+        branch: None,
+        revision: 6,
+        incarnation: 1,
+        first_sequence: Some(0),
+        next_sequence: 1,
+        rows: vec![nervix_models::RemoteRuntimeRecordMetadata {
+            ingested_at_low_watermark: Timestamp::from_unix_nanos(1),
+            ingested_at_high_watermark: Timestamp::from_unix_nanos(2),
+        }],
+        groups: 1,
+        accumulators: vec![crate::WindowAccumulatorRecord::Retained],
+    };
+    let mut keyspace_bytes = keyspace.encode().assured("the descriptor encodes");
+    keyspace_bytes[10..12].copy_from_slice(&999_u16.to_le_bytes());
+    let mut rows_bytes = rows.encode().assured("the descriptor encodes");
+    rows_bytes[10..12].copy_from_slice(&999_u16.to_le_bytes());
+    let keyspace_path = SectionPath::deduplicator_descriptor(&prod, &deduplicator, None);
+    let rows_path = SectionPath::window_descriptor(&prod, &window, None);
+    let sections = vec![
+        record_section(SectionPath::domain_record(&prod), &unpaced_domain("prod")),
+        bytes_section(
+            SectionPath::domain_models(&prod),
+            SectionContent::Nspl,
+            Vec::new(),
+        ),
+        bytes_section(
+            keyspace_path.clone(),
+            SectionContent::Record(RecordKind::DeduplicatorStateDescriptor),
+            keyspace_bytes,
+        ),
+        bytes_section(
+            SectionPath::deduplicator_keys(&prod, &deduplicator, None, 0),
+            SectionContent::DeduplicatorKeys,
+            vec![7; 32],
+        ),
+        bytes_section(
+            rows_path.clone(),
+            SectionContent::Record(RecordKind::WindowStateDescriptor),
+            rows_bytes,
+        ),
+        bytes_section(
+            SectionPath::window_input_rows(&prod, &window, None, 0),
+            SectionContent::WindowInputRows,
+            vec![8; 32],
+        ),
+        bytes_section(
+            SectionPath::window_argument_columns(&prod, &window, None, 0),
+            SectionContent::WindowArgumentColumns,
+            vec![9; 32],
+        ),
+    ];
+    let mut manifest = manifest_of(
+        ArchiveScope::Domain(prod),
+        sections
+            .iter()
+            .map(|section| section.entry.clone())
+            .collect(),
+    );
+    manifest.domains[0].cut = nervix_models::BackupCut::Stopped;
+    let (_, archive) = write_archive(manifest, &sections);
+    let description = describe_archive(archive.as_slice())
+        .assured("unsupported descriptors and their Arrow groups are skipped together");
+    assert!(description.domains[0].state.is_empty());
+    let skipped = &description.domains[0].skipped_state;
+    assert_eq!(
+        skipped.len(),
+        2,
+        "each descriptor is reported once: {skipped:?}"
+    );
+    assert_eq!(skipped[0].path, keyspace_path);
+    assert_eq!(
+        skipped[0].reason,
+        SkippedStateReason::UnsupportedVersion {
+            found: 999,
+            supported: crate::DeduplicatorStateDescriptor::VERSION,
+        }
+    );
+    assert_eq!(skipped[1].path, rows_path);
+    assert_eq!(
+        skipped[1].reason,
+        SkippedStateReason::UnsupportedVersion {
+            found: 999,
+            supported: crate::WindowStateDescriptor::VERSION,
+        }
+    );
+}
+
+#[test]
 fn a_long_path_travels_in_a_gnu_long_name_entry() {
     let long_domain = domain(&"d".repeat(100));
     let long_resource = resource(&"r".repeat(128));

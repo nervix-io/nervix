@@ -597,7 +597,7 @@ and fails one the receiver reports nothing about for fifteen seconds, as
 [Acknowledgement Registrations](#acknowledgement-registrations) describes. Progress keeps a live
 attempt from being mistaken for a disconnected one; it does not change the delivery outcome.
 For an attached acknowledgement, progress also carries a monotonic sequence and whether all of its
-remaining handoff shares are parked on `REQUIRED WAIT`. Each upstream node parks or reactivates its
+remaining handoff shares are parked, on `REQUIRED WAIT` or in a window that retains their rows. Each upstream node parks or reactivates its
 own attached share in sequence order, so a domain drain excludes a parked chain across relay hops.
 The eventual terminal acknowledgement still resolves every share; parking does not acknowledge the
 source or persist an acknowledgement. Admission progress carries no parked state.

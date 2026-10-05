@@ -522,7 +522,8 @@ and has no intake to pause;
 quiescing. A retry still uses the command execution's stable identity and outcome.
 The backup drain reads admitted work on every live node and uses a separate confirming force-flush
 round after the cluster first appears quiet. A parked materialized-state wait is reported but does
-not keep the cut open. If work reappears, the leader drains and confirms again. Each drain request
+not keep the cut open, and neither do the rows a window retains, which the cut captures as window
+state. If work reappears, the leader drains and confirms again. Each drain request
 is bound to the authenticated coordinator process; a successor cannot reuse its cut identity.
 The cut captures each materialized relay's fresh Arrow views and scalar identities under its
 assignment barrier. Paused generators release their admitted-work guard after flushing, so the

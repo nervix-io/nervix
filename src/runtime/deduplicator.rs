@@ -1,7 +1,7 @@
 use std::time::Duration;
 
 use error_stack::{Report, ResultExt as _};
-use meticulous::OptionExt as _;
+use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_checkpoint_replication::CheckpointReplication;
 use nervix_expiry_map::ExpiryMap;
 use nervix_models::{Expression, ModelName, RelayName, Timestamp};
@@ -24,6 +24,37 @@ pub(super) struct DeduplicatorKey(Vec<ReorderKeyPart>);
 impl DeduplicatorKey {
     pub(super) fn new(parts: Vec<ReorderKeyPart>) -> Self {
         Self(parts)
+    }
+
+    /// The key's normalized parts, one per `DEDUPLICATE ON` expression.
+    pub(super) fn parts(&self) -> &[ReorderKeyPart] {
+        &self.0
+    }
+
+    /// What the key occupies as Arrow column values: eight bytes for a fixed-width or null part,
+    /// and its length for text and bytes.
+    pub(super) fn estimated_bytes(&self) -> u64 {
+        let mut bytes = 0_u64;
+        for part in &self.0 {
+            let part_bytes = match part {
+                ReorderKeyPart::Utf8(value) => u64::try_from(value.len())
+                    .assured("an addressable string's length fits 64 bits"),
+                ReorderKeyPart::Bytes(value) => u64::try_from(value.len())
+                    .assured("an addressable byte string's length fits 64 bits"),
+                ReorderKeyPart::Null
+                | ReorderKeyPart::Boolean(_)
+                | ReorderKeyPart::Int64(_)
+                | ReorderKeyPart::UInt64(_)
+                | ReorderKeyPart::Float64(_)
+                | ReorderKeyPart::Datetime(_) => 8,
+            };
+            bytes = bytes
+                .checked_add(part_bytes)
+                .assured("an addressable key's parts total fewer than 2^64 bytes");
+        }
+        bytes
+            .checked_add(8)
+            .assured("an addressable key and its seen_at time total fewer than 2^64 bytes")
     }
 }
 
@@ -56,8 +87,8 @@ pub(super) struct ReplicatedDeduplicatorState {
 /// keyspace rather than copied from it.
 #[derive(Debug)]
 pub(super) struct PublishedDeduplicatorKey {
-    key: Arc<DeduplicatorKey>,
-    seen_at: Timestamp,
+    pub(super) key: Arc<DeduplicatorKey>,
+    pub(super) seen_at: Timestamp,
 }
 
 /// The keys one deduplicator branch admitted within its `MAX TIME`, owned by the branch task.
@@ -241,7 +272,7 @@ impl ReplicatedDeduplicatorState {
         nervix::dispatch(reason = "the retained expiry map supplies its snapshot iterator for \
                                    one published generation")
     )]
-    fn published_keys(
+    pub(super) fn published_keys(
         recent_keys: &ExpiryMap<DeduplicatorKey, Timestamp>,
     ) -> Vec<PublishedDeduplicatorKey> {
         let mut published = Vec::with_capacity(recent_keys.len());
@@ -337,7 +368,7 @@ impl DeduplicatorKeyspace {
     }
 }
 
-fn encode_deduplicator_snapshot(
+pub(super) fn encode_deduplicator_snapshot(
     keys: &[PublishedDeduplicatorKey],
 ) -> Result<Vec<u8>, RuntimePersistenceError> {
     let mut entries = Vec::with_capacity(keys.len());
@@ -359,7 +390,7 @@ fn encode_deduplicator_snapshot(
     Ok(payload)
 }
 
-fn decode_deduplicator_snapshot(
+pub(super) fn decode_deduplicator_snapshot(
     payload: &[u8],
 ) -> Result<ExpiryMap<DeduplicatorKey, Timestamp>, RuntimePersistenceError> {
     let archive = payload

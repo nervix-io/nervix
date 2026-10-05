@@ -399,12 +399,30 @@ pub(super) async fn encode_window_processor_snapshot(
     Ok(sealed.as_ref().to_vec())
 }
 
+/// Which branch lifetime a decoded window snapshot must belong to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum WindowSnapshotLifetime {
+    /// The lifetime of the branch restoring the window. A snapshot of another lifetime decodes as
+    /// nothing, without its Arrow sections being opened.
+    Branch(u64),
+    /// Whatever lifetime the snapshot names, as a backup reads a stored window.
+    Recorded,
+}
+
+/// The schemas a window snapshot's two Arrow sections are laid out by.
+#[derive(Debug, Clone, Copy)]
+pub(super) struct WindowSnapshotSchemas<'a> {
+    /// The window's input relay schema.
+    pub(super) input: &'a StdArc<ArrowSchema>,
+    /// The argument columns of every aggregate demand, as `WindowArgumentColumns` saves them.
+    pub(super) arguments: &'a StdArc<ArrowSchema>,
+}
+
 pub(super) async fn decode_window_processor_snapshot(
     payload: &[u8],
     executor: &Executor,
-    plan: &WindowAccumulatorPlan,
-    input_schema: &crate::runtime_schema::CompiledSchema,
-    expected_incarnation: u64,
+    schemas: WindowSnapshotSchemas<'_>,
+    lifetime: WindowSnapshotLifetime,
 ) -> Result<Option<WindowProcessorStateSnapshot>, Report<WindowSnapshotError>> {
     let invalid = |issue| Report::new(WindowSnapshotError::Invalid { issue });
     if payload.len() < WINDOW_SNAPSHOT_FRAME_BYTES
@@ -435,8 +453,17 @@ pub(super) async fn decode_window_processor_snapshot(
             section: WindowSnapshotSection::Header,
         },
     )?;
-    if header.incarnation != Some(expected_incarnation) {
-        return Ok(None);
+    match lifetime {
+        WindowSnapshotLifetime::Branch(expected) => {
+            if header.incarnation != Some(expected) {
+                return Ok(None);
+            }
+        }
+        WindowSnapshotLifetime::Recorded => {
+            if header.incarnation.is_none() {
+                return Ok(None);
+            }
+        }
     }
     let input_end = header_end
         .checked_add(
@@ -536,7 +563,7 @@ pub(super) async fn decode_window_processor_snapshot(
         .ok_or_else(|| invalid(WindowSnapshotIssue::ArrowSection))?;
     let input = RestoredMaterializedSnapshot::open(
         executor,
-        &input_schema.arrow_schema(),
+        schemas.input,
         SealedSource::borrowed(executor, input),
     )
     .await
@@ -545,7 +572,7 @@ pub(super) async fn decode_window_processor_snapshot(
     })?;
     let arguments = RestoredMaterializedSnapshot::open(
         executor,
-        &super::WindowArgumentColumns::snapshot_schema(plan),
+        schemas.arguments,
         SealedSource::borrowed(executor, arguments),
     )
     .await
@@ -645,12 +672,15 @@ impl ReplicatedWindowProcessorState {
         let snapshot = match snapshot {
             WindowPublishedSnapshot::Live(snapshot) => snapshot.clone(),
             WindowPublishedSnapshot::Sealed(payload) => {
+                let arguments = super::WindowArgumentColumns::snapshot_schema(plan);
                 let decoded = decode_window_processor_snapshot(
                     payload,
                     executor,
-                    plan,
-                    input_schema,
-                    incarnation,
+                    WindowSnapshotSchemas {
+                        input: &input_schema.arrow_schema(),
+                        arguments: &arguments,
+                    },
+                    WindowSnapshotLifetime::Branch(incarnation),
                 )
                 .await
                 .map_err(|error| {
@@ -757,8 +787,31 @@ mod tests {
     use super::*;
     use crate::{
         runtime::{WindowArgumentColumns, test_schema, window_plan},
-        runtime_schema::{RuntimeRecordBatch, RuntimeRecordMetadata, RuntimeRow, RuntimeValue},
+        runtime_schema::{
+            CompiledSchema, RuntimeRecordBatch, RuntimeRecordMetadata, RuntimeRow, RuntimeValue,
+        },
     };
+
+    /// Decodes `payload` as the branch lifetime `incarnation` of a window compiled from `plan`.
+    async fn decode_for_branch(
+        payload: &[u8],
+        executor: &Executor,
+        plan: &WindowAccumulatorPlan,
+        input_schema: &CompiledSchema,
+        incarnation: u64,
+    ) -> Result<Option<WindowProcessorStateSnapshot>, Report<WindowSnapshotError>> {
+        let arguments = WindowArgumentColumns::snapshot_schema(plan);
+        decode_window_processor_snapshot(
+            payload,
+            executor,
+            WindowSnapshotSchemas {
+                input: &input_schema.arrow_schema(),
+                arguments: &arguments,
+            },
+            WindowSnapshotLifetime::Branch(incarnation),
+        )
+        .await
+    }
 
     #[test]
     fn bolero_window_archive_counts_round_trip() {
@@ -827,11 +880,10 @@ mod tests {
         let payload = encode_window_processor_snapshot(&snapshot, 3, &executor)
             .await
             .expect("the current snapshot should seal");
-        let restored =
-            decode_window_processor_snapshot(&payload, &executor, &plan, &input_schema, 7)
-                .await
-                .expect("the current snapshot should open")
-                .expect("the incarnation matches");
+        let restored = decode_for_branch(&payload, &executor, &plan, &input_schema, 7)
+            .await
+            .expect("the current snapshot should open")
+            .expect("the incarnation matches");
         assert_eq!(restored.entries.len(), 1);
         assert_eq!(restored.entries[0].sequence, 5);
         assert_eq!(restored.entries[0].timestamp, at);
@@ -855,7 +907,7 @@ mod tests {
         assert_eq!(live.incarnation, 7);
 
         assert!(
-            decode_window_processor_snapshot(&payload, &executor, &plan, &input_schema, 8)
+            decode_for_branch(&payload, &executor, &plan, &input_schema, 8)
                 .await
                 .expect("the sealed header is valid")
                 .is_none(),
@@ -863,8 +915,7 @@ mod tests {
         );
         let mut malformed = payload;
         malformed[0] = b'X';
-        let Err(error) =
-            decode_window_processor_snapshot(&malformed, &executor, &plan, &input_schema, 7).await
+        let Err(error) = decode_for_branch(&malformed, &executor, &plan, &input_schema, 7).await
         else {
             panic!("a damaged current snapshot header must fail before section decoding");
         };
@@ -905,11 +956,10 @@ mod tests {
         let payload = encode_window_processor_snapshot(&snapshot, 4, &executor)
             .await
             .expect("an empty window with typed state should seal");
-        let restored =
-            decode_window_processor_snapshot(&payload, &executor, &plan, &input_schema, 9)
-                .await
-                .expect("the typed section should open")
-                .expect("the branch lifetime matches");
+        let restored = decode_for_branch(&payload, &executor, &plan, &input_schema, 9)
+            .await
+            .expect("the typed section should open")
+            .expect("the branch lifetime matches");
         assert!(restored.entries.is_empty());
         assert_eq!(restored.next_sequence, 12);
         match &restored.accumulators[0] {
@@ -928,7 +978,7 @@ mod tests {
 
         let truncated = &payload[..payload.len() - 1];
         assert!(
-            decode_window_processor_snapshot(truncated, &executor, &plan, &input_schema, 9)
+            decode_for_branch(truncated, &executor, &plan, &input_schema, 9)
                 .await
                 .is_err(),
             "a truncated typed section must fail to load"

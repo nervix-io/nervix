@@ -996,7 +996,7 @@ impl Runtime {
                 }
                 MaterializedDependencyResolution::Wait => {
                     if required_wait.is_none() {
-                        required_wait = Some(AckRequiredWaitGuard::new(batch.acks.iter()));
+                        required_wait = Some(AckParkGuard::new(batch.acks.iter()));
                         if let Some(work) = quiesce_work.as_deref_mut() {
                             work.park_for_required_materialized_state();
                         }

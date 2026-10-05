@@ -903,6 +903,39 @@ fn then_cli_restore_warns_about_state_schema(world: &mut ScenarioWorld) {
     );
 }
 
+/// The warnings a successful restore the CLI ran reported.
+fn restore_warnings(world: &ScenarioWorld) -> Vec<String> {
+    let report = succeeded_restore(world);
+    let warnings = report["warnings"]
+        .as_array()
+        .unwrap_or_else(|| panic!("the restore report lists warnings: {report}"));
+    warnings
+        .iter()
+        .map(|warning| {
+            warning
+                .as_str()
+                .unwrap_or_else(|| panic!("a warning is text: {report}"))
+                .to_string()
+        })
+        .collect()
+}
+
+#[then(expr = "the CLI restore warns {string}")]
+fn then_cli_restore_warns(world: &mut ScenarioWorld, expected: String) {
+    let expected = expand_placeholders(world, &expected);
+    let warnings = restore_warnings(world);
+    assert!(
+        warnings.iter().any(|warning| warning.contains(&expected)),
+        "no restore warning contains {expected:?}: {warnings:?}"
+    );
+}
+
+#[then(expr = "the CLI restore reports no warnings")]
+fn then_cli_restore_reports_no_warnings(world: &mut ScenarioWorld) {
+    let warnings = restore_warnings(world);
+    assert!(warnings.is_empty(), "the restore warned: {warnings:?}");
+}
+
 #[then(
     expr = "the CLI restore succeeded with users {int} created, {int} skipped and {int} replaced"
 )]
@@ -1396,6 +1429,43 @@ fn given_archive_with_unsupported_kafka_state(
     assert!(
         !replaced.is_empty(),
         "the archive contains Kafka domain offsets"
+    );
+    write_archive(&copy, &replaced, &archive_path(world, &target));
+}
+
+#[given(
+    expr = "backup archive {string} is copied to {string} with the archived branch incarnations \
+            of window processor {string} advanced"
+)]
+fn given_archive_with_advanced_window_incarnations(
+    world: &mut ScenarioWorld,
+    source: String,
+    target: String,
+    processor: String,
+) {
+    let copy = copy_of_archive(&archive_path(world, &source));
+    let suffix = format!("/state/branch_lifecycle/window_processor/{processor}/branches.rkyv");
+    let mut replaced = BTreeMap::new();
+    for (path, bytes) in &copy.sections {
+        if !path.ends_with(&suffix) {
+            continue;
+        }
+        let mut lifecycle = BranchLifecycleRecord::decode(path, bytes)
+            .expect("the archived branch lifecycle decodes");
+        for branch in &mut lifecycle.branches {
+            branch.incarnation = branch
+                .incarnation
+                .checked_add(1)
+                .expect("an archived incarnation is below the largest u64");
+        }
+        replaced.insert(
+            path.clone(),
+            lifecycle.encode().expect("the advanced lifecycle encodes"),
+        );
+    }
+    assert!(
+        !replaced.is_empty(),
+        "the archive holds the branch lifecycle of window processor '{processor}'"
     );
     write_archive(&copy, &replaced, &archive_path(world, &target));
 }

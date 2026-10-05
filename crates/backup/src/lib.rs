@@ -17,6 +17,7 @@
 //!   The records are shaped by the archive's contract rather than by any internal store, and the
 //!   conversions into them are the only place an internal shape reaches the format.
 
+mod branch_state;
 mod describe;
 mod error;
 mod layout;
@@ -29,10 +30,15 @@ mod section;
 mod state;
 mod wire;
 
+pub use branch_state::{
+    BRANCH_STATE_GROUP_BYTES, DEDUPLICATOR_SEEN_AT_COLUMN, DeduplicatorStateDescriptor,
+    DelayedHistogramRemoval, WindowAccumulatorRecord, WindowStateDescriptor,
+    deduplicator_key_column,
+};
 pub use describe::{
     ArchiveContents, ArchiveDescription, DescribedDomain, DescribedMaterializedGroup,
-    DescribedResourceVersion, DescribedRuntimeState, DescribedSection, SkippedStateReason,
-    SkippedStateSection, describe_archive, read_archive_contents,
+    DescribedResourceVersion, DescribedRuntimeState, DescribedSection, DescribedWindowGroup,
+    SkippedStateReason, SkippedStateSection, describe_archive, read_archive_contents,
 };
 pub use error::{ArchiveReadError, ArchiveWriteError};
 pub use layout::{ArchiveLayout, ArchivePiece, SectionSink};
@@ -71,6 +77,12 @@ mod materialized_values;
 
 #[cfg(test)]
 mod materialized_faults;
+
+#[cfg(test)]
+mod branch_state_values;
+
+#[cfg(test)]
+mod branch_state_faults;
 
 #[cfg(test)]
 mod archive_properties;

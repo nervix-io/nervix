@@ -81,6 +81,17 @@ fn section_kind(content: SectionContent) -> Option<CapturedStateSectionKind> {
             Some(CapturedStateSectionKind::MaterializedIdentities)
         }
         SectionContent::MaterializedColumns => Some(CapturedStateSectionKind::MaterializedColumns),
+        SectionContent::Record(RecordKind::DeduplicatorStateDescriptor) => {
+            Some(CapturedStateSectionKind::DeduplicatorDescriptor)
+        }
+        SectionContent::DeduplicatorKeys => Some(CapturedStateSectionKind::DeduplicatorKeys),
+        SectionContent::Record(RecordKind::WindowStateDescriptor) => {
+            Some(CapturedStateSectionKind::WindowDescriptor)
+        }
+        SectionContent::WindowInputRows => Some(CapturedStateSectionKind::WindowInputRows),
+        SectionContent::WindowArgumentColumns => {
+            Some(CapturedStateSectionKind::WindowArgumentColumns)
+        }
         _ => None,
     }
 }
@@ -102,6 +113,15 @@ pub(super) fn section_content(kind: CapturedStateSectionKind) -> SectionContent 
             SectionContent::Record(RecordKind::MaterializedIdentities)
         }
         CapturedStateSectionKind::MaterializedColumns => SectionContent::MaterializedColumns,
+        CapturedStateSectionKind::DeduplicatorDescriptor => {
+            SectionContent::Record(RecordKind::DeduplicatorStateDescriptor)
+        }
+        CapturedStateSectionKind::DeduplicatorKeys => SectionContent::DeduplicatorKeys,
+        CapturedStateSectionKind::WindowDescriptor => {
+            SectionContent::Record(RecordKind::WindowStateDescriptor)
+        }
+        CapturedStateSectionKind::WindowInputRows => SectionContent::WindowInputRows,
+        CapturedStateSectionKind::WindowArgumentColumns => SectionContent::WindowArgumentColumns,
     }
 }
 
@@ -345,6 +365,14 @@ impl SessionServiceImpl {
                 );
             }
         }
+        staged.extend(
+            self.stage_branch_state_sections(
+                state.branch_states,
+                capture.schedule.domain(&request.domain),
+                &request,
+            )
+            .await?,
+        );
         self.inner.captured_backup_sections.retain(|key, _| {
             key.coordination != request.coordination || key.domain != request.domain
         });
@@ -725,5 +753,31 @@ mod tests {
             .err()
             .assured("an owner that does not catch up reaches its deadline");
         assert!(failure.to_string().contains("within its deadline"));
+    }
+
+    #[test]
+    fn every_captured_state_kind_names_its_archive_content_and_back() {
+        let kinds = [
+            CapturedStateSectionKind::WasmDescriptor,
+            CapturedStateSectionKind::KafkaOffsets,
+            CapturedStateSectionKind::BranchLifecycle,
+            CapturedStateSectionKind::WasmGuestBlob,
+            CapturedStateSectionKind::MaterializedDescriptor,
+            CapturedStateSectionKind::MaterializedIdentities,
+            CapturedStateSectionKind::MaterializedColumns,
+            CapturedStateSectionKind::DeduplicatorDescriptor,
+            CapturedStateSectionKind::DeduplicatorKeys,
+            CapturedStateSectionKind::WindowDescriptor,
+            CapturedStateSectionKind::WindowInputRows,
+            CapturedStateSectionKind::WindowArgumentColumns,
+        ];
+        for kind in kinds {
+            assert_eq!(section_kind(section_content(kind)), Some(kind));
+        }
+        assert_eq!(
+            section_kind(SectionContent::Nspl),
+            None,
+            "configuration never travels as captured runtime state"
+        );
     }
 }

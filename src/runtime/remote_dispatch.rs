@@ -165,7 +165,7 @@ struct PendingRemoteAck {
     /// its delivery was admitted.
     silent_sweeps: AtomicU64,
     /// A parked share remains unresolved while it releases the upstream ownership handoff.
-    required_wait: Option<AckRequiredWaitGuard>,
+    required_wait: Option<AckParkGuard>,
     /// Delayed progress cannot reverse a newer park or resume.
     progress_sequence: Option<u64>,
 }
@@ -199,7 +199,7 @@ impl PendingRemoteAck {
         self.progress_sequence = Some(sequence);
         if parked {
             if self.required_wait.is_none() {
-                self.required_wait = Some(AckRequiredWaitGuard::new([&self.acks]));
+                self.required_wait = Some(AckParkGuard::new([&self.acks]));
             }
         } else {
             self.required_wait = None;

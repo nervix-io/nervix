@@ -524,6 +524,150 @@ pub(super) fn test_named_branching(
     )
 }
 
+/// One compiled single-route window processor state, driven the way its branch task drives it.
+pub(super) struct TestWindow {
+    pub(super) plan: WindowAccumulatorPlan,
+    pub(super) compiled: CompiledWindowAggregateProgram,
+    pub(super) input_schema: Arc<CompiledSchema>,
+    pub(super) output_schema: Arc<CompiledSchema>,
+    pub(super) state: WindowProcessorState,
+}
+
+impl TestWindow {
+    pub(super) fn new(
+        set: &str,
+        input: &[OptionalTestField],
+        output: &[OptionalTestField],
+    ) -> Self {
+        let input_schema = test_optional_schema(input);
+        let output_schema = test_optional_schema(output);
+        let input_relay = named::<RelayName>("events");
+        let output_relay = named::<RelayName>("summary");
+        let relay_schemas = HashMap::from_iter([
+            (input_relay.clone(), input_schema.clone()),
+            (output_relay.clone(), output_schema.clone()),
+        ]);
+        let compiled = CompiledWindowAggregateProgram::compile(
+            &window_aggregate(set),
+            &[input_relay],
+            &output_relay,
+            &relay_schemas,
+            None,
+        )
+        .expect("the test window route should compile");
+        let sketch_layout = compiled
+            .route
+            .demands
+            .iter()
+            .any(|demand| demand.sketch.is_some())
+            .then(|| {
+                WindowPaneLayout::for_width_and_step(Duration::from_secs(2), Duration::from_secs(1))
+                    .verified("the test window has valid duration panes")
+            });
+        let max_state_bytes = sketch_layout.and_then(|_| NonZeroU64::new(1_048_576));
+        let plan = WindowAccumulatorPlan::new([&compiled.route], sketch_layout, max_state_bytes);
+        let state = WindowProcessorState::new(&plan, 1);
+        Self {
+            plan,
+            compiled,
+            input_schema,
+            output_schema,
+            state,
+        }
+    }
+
+    /// Evaluate one batch of `columns`, in input schema order, whose rows carry `timestamps`
+    /// as watermarks, admit every admissible row, and answer why the others were refused.
+    pub(super) async fn admit(
+        &mut self,
+        columns: Vec<ArrayRef>,
+        timestamps: &[i64],
+    ) -> Vec<String> {
+        let acks = vec![AckSet::empty(); timestamps.len()];
+        self.admit_acknowledged(columns, timestamps, acks).await
+    }
+
+    /// Like [`Self::admit`], where each row's message carries the acknowledgement set at its index.
+    pub(super) async fn admit_acknowledged(
+        &mut self,
+        columns: Vec<ArrayRef>,
+        timestamps: &[i64],
+        acks: Vec<AckSet>,
+    ) -> Vec<String> {
+        let schema = self.input_schema.arrow_schema();
+        let batch = RecordBatch::try_new(StdArc::clone(&schema), columns)
+            .expect("the test columns should match the input schema");
+        let carrier = Arc::new(
+            RuntimeRecordBatch::from_record_batch(schema, batch)
+                .expect("the test batch should be a valid relay batch"),
+        );
+        let mut evaluated = evaluate_window_arguments(
+            &Executor::default(),
+            &self.plan,
+            std::slice::from_ref(&self.compiled),
+            &carrier,
+            Timestamp::from_unix_nanos(1),
+        )
+        .await
+        .expect("the test batch's arguments should evaluate");
+        let mut refused = Vec::new();
+        let mut run = Vec::new();
+        for ((row, timestamp), acks) in timestamps.iter().enumerate().zip(acks) {
+            if let Some(refusal) = evaluated.take_refusal(row) {
+                refused.push(refusal.current_context().to_string());
+                continue;
+            }
+            let metadata = RuntimeRecordMetadata::from_ingested_at_watermarks(
+                Timestamp::from_unix_nanos(*timestamp),
+                Timestamp::from_unix_nanos(*timestamp),
+            );
+            let record = RuntimeRow::new(carrier.clone(), row, metadata)
+                .expect("every test row is inside its batch");
+            let message = RelayMessage {
+                key: None,
+                record,
+                acks,
+            };
+            run.push(WindowAdmission { message, row });
+        }
+        if let Err(error) = self
+            .state
+            .check_admission(&self.plan, Some(&evaluated.columns), &run)
+        {
+            refused.push(error.current_context().to_string());
+        } else {
+            self.state.admit(&evaluated.columns, run);
+        }
+        refused
+    }
+
+    pub(super) fn step(&mut self, count: usize, removed_at: i64) {
+        let removed = self
+            .state
+            .retract_oldest(count, Timestamp::from_unix_nanos(removed_at));
+        assert_eq!(removed.len(), count, "a test steps only over retained rows");
+    }
+
+    pub(super) async fn emit(
+        &self,
+    ) -> error_stack::Result<RuntimeRecordBatch, WindowProcessorError> {
+        super::window_processor::evaluate_window_aggregate(
+            &Executor::default(),
+            &self.compiled,
+            &self.state,
+            &self.output_schema,
+            Timestamp::from_unix_nanos(42),
+        )
+        .await
+    }
+
+    pub(super) async fn emitted(&self) -> RuntimeRecordBatch {
+        self.emit()
+            .await
+            .expect("the window aggregate should evaluate")
+    }
+}
+
 /// One field of a test schema whose optionality varies per field.
 pub(super) struct OptionalTestField {
     pub(super) name: &'static str,

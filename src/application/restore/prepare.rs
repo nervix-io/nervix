@@ -77,6 +77,22 @@ pub(in crate::application) enum RestoreRefusal {
         domain: DomainName,
         entity: nervix_models::ModelName,
     },
+    #[error("archived branch state of '{entity}' in domain '{domain}' could not be prepared")]
+    BranchState {
+        domain: DomainName,
+        entity: nervix_models::ModelName,
+    },
+}
+
+/// Why one section of a verified archive could not be read whole.
+#[derive(Debug, Error)]
+pub(in crate::application) enum ArchiveSectionReadError {
+    #[error("the archive section is longer than its {limit}-byte bound")]
+    TooLong { limit: u64 },
+    #[error("reading the archive section could not be admitted")]
+    Admission,
+    #[error("the archive section could not be read")]
+    Read,
 }
 
 /// An archive a restore stream staged and verified, with each domain's models parsed.
@@ -164,6 +180,41 @@ impl VerifiedArchive {
             .await
             .change_context(RestoreRefusal::Unreadable)?
             .change_context(RestoreRefusal::Unreadable)
+    }
+
+    /// Reads `section` whole into memory charged to the bulk budget, refusing a section longer
+    /// than `limit` before reading a byte of it. Each read is one bounded window of the file.
+    pub(in crate::application) async fn read_bounded_section(
+        &self,
+        runtime: &Runtime,
+        section: &DescribedSection,
+        limit: u64,
+    ) -> Result<ChargedBytes, Report<ArchiveSectionReadError>> {
+        if section.length > limit {
+            return Err(Report::new(ArchiveSectionReadError::TooLong { limit }));
+        }
+        let charge = runtime
+            .executor()
+            .reserve(MemoryClass::Bulk, section.length.max(1))
+            .await
+            .change_context(ArchiveSectionReadError::Admission)?;
+        let capacity = usize::try_from(section.length)
+            .map_err(|_| Report::new(ArchiveSectionReadError::TooLong { limit }))?;
+        let mut bytes = Vec::with_capacity(capacity);
+        let mut offset = 0_u64;
+        while offset < section.length {
+            nervix_primitives::task::consume_budget().await;
+            let chunk = self
+                .read_guest_chunk(runtime, section, offset)
+                .await
+                .change_context(ArchiveSectionReadError::Read)?;
+            bytes.extend_from_slice(&chunk);
+            let read = u64::try_from(chunk.len()).verified("one bounded chunk fits 64 bits");
+            offset = offset
+                .checked_add(read)
+                .ok_or_else(|| Report::new(ArchiveSectionReadError::Read))?;
+        }
+        Ok(ChargedBytes::from_owned(bytes, charge))
     }
 
     /// When the backup that wrote the archive read its contents.
@@ -421,6 +472,8 @@ impl SessionServiceImpl {
                         }
                         _ => None,
                     });
+                self.validate_branch_states(domain, archive, schedule)
+                    .await?;
                 for captured in archive.states_for(&domain.source) {
                     let nervix_backup::DescribedRuntimeState::Materialized {
                         descriptor,
@@ -465,6 +518,102 @@ impl SessionServiceImpl {
             reports.push(Some(report));
         }
         Ok(reports)
+    }
+}
+
+impl SessionServiceImpl {
+    /// Validates the same bounded conversion installation runs for every archived deduplicator
+    /// keyspace and window the restored schedule installs. Their temporary files drop here; no
+    /// checkpoint namespace is published.
+    async fn validate_branch_states(
+        &self,
+        domain: &PlannedDomain,
+        archive: &VerifiedArchive,
+        schedule: Option<&nervix_models::DomainSchedule>,
+    ) -> Result<(), Report<RestoreRefusal>> {
+        let mut lifecycles = Vec::new();
+        for archived in archive.states_for(&domain.source) {
+            if let DescribedRuntimeState::BranchLifecycle { lifecycle, .. } = archived {
+                lifecycles.push(lifecycle);
+            }
+        }
+        for archived in archive.states_for(&domain.source) {
+            nervix_primitives::task::consume_budget().await;
+            let refusal = |entity: &nervix_models::ModelName| RestoreRefusal::BranchState {
+                domain: domain.source.clone(),
+                entity: entity.clone(),
+            };
+            match archived {
+                DescribedRuntimeState::Deduplicator {
+                    descriptor, groups, ..
+                } => {
+                    let reference = nervix_models::NodeRef::new(
+                        nervix_models::ModelKind::Deduplicator,
+                        descriptor.entity.clone(),
+                    );
+                    let Some(node) = schedule.and_then(|schedule| schedule.nodes.get(&reference))
+                    else {
+                        continue;
+                    };
+                    if node.schema_fingerprint != descriptor.schema {
+                        continue;
+                    }
+                    let Some(key_schema) =
+                        domain.branch_state_schemas.deduplicator(&descriptor.entity)
+                    else {
+                        continue;
+                    };
+                    super::branch_state::prepare_deduplicator_checkpoint(
+                        &self.inner.runtime,
+                        archive,
+                        descriptor,
+                        groups,
+                        key_schema,
+                    )
+                    .await
+                    .change_context_lazy(|| refusal(&descriptor.entity))?;
+                }
+                DescribedRuntimeState::Window {
+                    descriptor, groups, ..
+                } => {
+                    let reference = nervix_models::NodeRef::new(
+                        nervix_models::ModelKind::WindowProcessor,
+                        descriptor.entity.clone(),
+                    );
+                    let Some(node) = schedule.and_then(|schedule| schedule.nodes.get(&reference))
+                    else {
+                        continue;
+                    };
+                    if node.schema_fingerprint != descriptor.schema {
+                        continue;
+                    }
+                    let Some(window) = domain.branch_state_schemas.window(&descriptor.entity)
+                    else {
+                        continue;
+                    };
+                    if window
+                        .skip_of(descriptor, lifecycles.iter().copied())
+                        .is_some()
+                    {
+                        continue;
+                    }
+                    super::branch_state::prepare_window_checkpoint(
+                        &self.inner.runtime,
+                        archive,
+                        descriptor,
+                        groups,
+                        window,
+                    )
+                    .await
+                    .change_context_lazy(|| refusal(&descriptor.entity))?;
+                }
+                DescribedRuntimeState::Wasm { .. }
+                | DescribedRuntimeState::KafkaOffsets { .. }
+                | DescribedRuntimeState::BranchLifecycle { .. }
+                | DescribedRuntimeState::Materialized { .. } => {}
+            }
+        }
+        Ok(())
     }
 }
 

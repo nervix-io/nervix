@@ -87,6 +87,20 @@ pub(in crate::application) fn restored_upload_key(
     )
 }
 
+/// An archived branch key as the typed runtime fields a restored placement names.
+pub(super) fn remote_branch_key(
+    branch: Option<&Vec<nervix_backup::StateField>>,
+) -> Option<Vec<RemoteRuntimeField>> {
+    let fields = branch?;
+    Some(
+        fields
+            .iter()
+            .cloned()
+            .map(|field| field.into_remote())
+            .collect(),
+    )
+}
+
 /// The planned domain restored under `target`.
 fn planned_domain<'plan>(
     plan: &'plan RestorePlan,
@@ -171,7 +185,8 @@ impl SessionServiceImpl {
         enum RestorePayload<'a> {
             Encoded(Vec<u8>),
             Guest(&'a DescribedSection),
-            Materialized(Arc<crate::runtime::StagedArtifact>),
+            /// A converted native checkpoint in a quota-owned file.
+            Staged(Arc<crate::runtime::StagedArtifact>),
         }
         struct RestoredStateSection<'a> {
             reference: NodeRef,
@@ -200,6 +215,12 @@ impl SessionServiceImpl {
             .collect::<std::collections::BTreeMap<_, _>>();
         let schedule = self.inner.consensus.current_schedule().await;
         let scheduled = schedule.domain(&domain.target);
+        let mut lifecycles = Vec::new();
+        for archived in archive.states_for(&domain.source) {
+            if let DescribedRuntimeState::BranchLifecycle { lifecycle, .. } = archived {
+                lifecycles.push(lifecycle);
+            }
+        }
         // Stage lifecycle before guest saves; the published generation contains both at once.
         for first_lifecycle in [true, false] {
             nervix_primitives::task::consume_budget().await;
@@ -313,7 +334,96 @@ impl SessionServiceImpl {
                                     .materialized_at(domain.state.start_version),
                             },
                             revision: descriptor.revision,
-                            payload: RestorePayload::Materialized(Arc::new(artifact)),
+                            payload: RestorePayload::Staged(Arc::new(artifact)),
+                        }
+                    }
+                    DescribedRuntimeState::Deduplicator {
+                        descriptor, groups, ..
+                    } => {
+                        let reference =
+                            NodeRef::new(ModelKind::Deduplicator, descriptor.entity.clone());
+                        let Some(node) =
+                            scheduled.and_then(|scheduled| scheduled.nodes.get(&reference))
+                        else {
+                            continue;
+                        };
+                        if node.schema_fingerprint != descriptor.schema {
+                            continue;
+                        }
+                        let Some(key_schema) =
+                            domain.branch_state_schemas.deduplicator(&descriptor.entity)
+                        else {
+                            continue;
+                        };
+                        let artifact = super::branch_state::prepare_deduplicator_checkpoint(
+                            &self.inner.runtime,
+                            archive,
+                            descriptor,
+                            groups,
+                            key_schema,
+                        )
+                        .await
+                        .map_err(|error| StepFailure::Failed(format!("{error:#}")))?;
+                        RestoredStateSection {
+                            reference,
+                            schema: descriptor.schema,
+                            branch_fingerprint: descriptor.branch_fingerprint,
+                            branch_key: remote_branch_key(descriptor.branch.as_ref()),
+                            runtime_state: RuntimeState::Deduplicator {
+                                schema: descriptor.schema,
+                            },
+                            revision: descriptor.revision,
+                            payload: RestorePayload::Staged(Arc::new(artifact)),
+                        }
+                    }
+                    DescribedRuntimeState::Window {
+                        descriptor, groups, ..
+                    } => {
+                        let reference =
+                            NodeRef::new(ModelKind::WindowProcessor, descriptor.entity.clone());
+                        let Some(node) =
+                            scheduled.and_then(|scheduled| scheduled.nodes.get(&reference))
+                        else {
+                            continue;
+                        };
+                        if node.schema_fingerprint != descriptor.schema {
+                            continue;
+                        }
+                        let Some(window_schemas) =
+                            domain.branch_state_schemas.window(&descriptor.entity)
+                        else {
+                            continue;
+                        };
+                        if let Some(skip) =
+                            window_schemas.skip_of(descriptor, lifecycles.iter().copied())
+                        {
+                            tracing::warn!(
+                                domain = %domain.target,
+                                entity = %descriptor.entity,
+                                reason = skip.reason(),
+                                "skipped archived window state"
+                            );
+                            continue;
+                        }
+                        let artifact = super::branch_state::prepare_window_checkpoint(
+                            &self.inner.runtime,
+                            archive,
+                            descriptor,
+                            groups,
+                            window_schemas,
+                        )
+                        .await
+                        .map_err(|error| StepFailure::Failed(format!("{error:#}")))?;
+                        RestoredStateSection {
+                            reference,
+                            schema: descriptor.schema,
+                            branch_fingerprint: descriptor.branch_fingerprint,
+                            branch_key: remote_branch_key(descriptor.branch.as_ref()),
+                            runtime_state: RuntimeState::WindowProcessor {
+                                schema: descriptor.schema,
+                            },
+                            revision: descriptor.revision,
+                            payload: RestorePayload::Staged(Arc::new(artifact)),
                         }
                     }
                     DescribedRuntimeState::Wasm {
@@ -325,12 +435,7 @@ impl SessionServiceImpl {
                         ),
                         schema: descriptor.schema,
                         branch_fingerprint: descriptor.branch_fingerprint,
-                        branch_key: descriptor.branch.clone().map(|fields| {
-                            fields
-                                .into_iter()
-                                .map(|field| field.into_remote())
-                                .collect()
-                        }),
+                        branch_key: remote_branch_key(descriptor.branch.as_ref()),
                         runtime_state: RuntimeState::WasmProcessor {
                             schema: descriptor.schema,
                             generation: descriptor.generation,
@@ -373,9 +478,7 @@ impl SessionServiceImpl {
                         *blake3::hash(bytes).as_bytes(),
                     ),
                     RestorePayload::Guest(section) => (section.length, *section.digest.as_bytes()),
-                    RestorePayload::Materialized(artifact) => {
-                        (artifact.length(), artifact.digest())
-                    }
+                    RestorePayload::Staged(artifact) => (artifact.length(), artifact.digest()),
                 };
                 let checkpoint = RestoredRuntimeState {
                     placement: StatePlacementEnvelope {
@@ -415,8 +518,8 @@ impl SessionServiceImpl {
                             )
                             .await?
                         }
-                        RestorePayload::Materialized(artifact) => {
-                            self.install_restored_materialized_on(
+                        RestorePayload::Staged(artifact) => {
+                            self.install_restored_staged_on(
                                 owner_or_replica,
                                 &authority,
                                 checkpoint.clone(),
@@ -621,7 +724,7 @@ impl SessionServiceImpl {
         .await
     }
 
-    async fn install_restored_materialized_on(
+    async fn install_restored_staged_on(
         &self,
         node: &ClusterNodeName,
         authority: &RestoreStateAuthority,
@@ -654,7 +757,9 @@ impl SessionServiceImpl {
             authority,
             InstallRestoredStateAction::Begin {
                 placement: checkpoint.placement,
-                branch_fingerprint: None,
+                branch_fingerprint: checkpoint
+                    .branch_fingerprint
+                    .map(|fingerprint| *fingerprint.fingerprint()),
                 revision: checkpoint.revision,
                 length: checkpoint.length,
                 digest: checkpoint.digest,

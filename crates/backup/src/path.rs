@@ -11,6 +11,14 @@
 //! domains/<domain>/state/wasm_processor/<processor>/<branch>/guest.bin
 //! domains/<domain>/state/kafka_offset/<ingestor>/offsets.rkyv
 //! domains/<domain>/state/branch_lifecycle/<kind>/<processor>/branches.rkyv
+//! domains/<domain>/state/materialized_relay/<relay>/descriptor.rkyv
+//! domains/<domain>/state/materialized_relay/<relay>/groups/<group>/identities.rkyv
+//! domains/<domain>/state/materialized_relay/<relay>/groups/<group>/columns.arrow
+//! domains/<domain>/state/deduplicator/<deduplicator>/<branch>/descriptor.rkyv
+//! domains/<domain>/state/deduplicator/<deduplicator>/<branch>/groups/<group>/keys.arrow
+//! domains/<domain>/state/window_processor/<processor>/<branch>/descriptor.rkyv
+//! domains/<domain>/state/window_processor/<processor>/<branch>/groups/<group>/input.arrow
+//! domains/<domain>/state/window_processor/<processor>/<branch>/groups/<group>/arguments.arrow
 //! ```
 //!
 //! A path is for people and for tar tools; a reader identifies each section by the manifest entry
@@ -116,6 +124,69 @@ impl SectionPath {
         ))
     }
 
+    /// The descriptor of one deduplicator branch's keyspace.
+    pub fn deduplicator_descriptor(
+        domain: &DomainName,
+        entity: &ModelName,
+        branch: Option<&BranchKeyFingerprint>,
+    ) -> Self {
+        Self(format!(
+            "{}/descriptor.rkyv",
+            branch_state_directory(domain, "deduplicator", entity, branch)
+        ))
+    }
+
+    /// One bounded group of a deduplicator branch's typed keys.
+    pub fn deduplicator_keys(
+        domain: &DomainName,
+        entity: &ModelName,
+        branch: Option<&BranchKeyFingerprint>,
+        group: u32,
+    ) -> Self {
+        Self(format!(
+            "{}/groups/{group:010}/keys.arrow",
+            branch_state_directory(domain, "deduplicator", entity, branch)
+        ))
+    }
+
+    /// The descriptor of one window processor branch's state.
+    pub fn window_descriptor(
+        domain: &DomainName,
+        entity: &ModelName,
+        branch: Option<&BranchKeyFingerprint>,
+    ) -> Self {
+        Self(format!(
+            "{}/descriptor.rkyv",
+            branch_state_directory(domain, "window_processor", entity, branch)
+        ))
+    }
+
+    /// One bounded group of a window branch's retained input rows.
+    pub fn window_input_rows(
+        domain: &DomainName,
+        entity: &ModelName,
+        branch: Option<&BranchKeyFingerprint>,
+        group: u32,
+    ) -> Self {
+        Self(format!(
+            "{}/groups/{group:010}/input.arrow",
+            branch_state_directory(domain, "window_processor", entity, branch)
+        ))
+    }
+
+    /// The aggregate argument columns of the rows in the same window group.
+    pub fn window_argument_columns(
+        domain: &DomainName,
+        entity: &ModelName,
+        branch: Option<&BranchKeyFingerprint>,
+        group: u32,
+    ) -> Self {
+        Self(format!(
+            "{}/groups/{group:010}/arguments.arrow",
+            branch_state_directory(domain, "window_processor", entity, branch)
+        ))
+    }
+
     /// The raw guest save named by a WASM state descriptor.
     pub fn wasm_guest_blob(
         domain: &DomainName,
@@ -176,6 +247,21 @@ impl fmt::Display for SectionPath {
 
 fn domain_directory(domain: &DomainName) -> String {
     format!("domains/{}", segment(domain.as_str()))
+}
+
+/// Where one branch of a deduplicator or window processor keeps its sections.
+fn branch_state_directory(
+    domain: &DomainName,
+    kind: &str,
+    entity: &ModelName,
+    branch: Option<&BranchKeyFingerprint>,
+) -> String {
+    format!(
+        "{}/state/{kind}/{}/{}",
+        domain_directory(domain),
+        segment(entity.as_str()),
+        branch_segment(branch)
+    )
 }
 
 fn branch_segment(branch: Option<&BranchKeyFingerprint>) -> String {
