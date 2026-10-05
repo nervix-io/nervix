@@ -108,7 +108,12 @@ The retention view keeps the current generation of every applying restore and an
 ahead of the applied log; without an applied log it keeps all generations. Leadership and lease
 expiry alone do not end an applying execution's retry lifetime. Terminal, expired, missing or
 superseded executions no longer retain an applied unpublished generation. The runtime store
-protects its selected durable publication independently. This adds no consensus record or log
+protects its selected durable publication independently. Within the selected initial or restored namespace, the store
+retains only chunk sets referenced by the same view's segmented header and exact checkpoint
+revision; segmented or inline replacement, header purge and incomplete unpublished revisions
+permit bounded chunk deletion. Snapshot retention
+preserves preexisting readers, while the installation barrier serializes ordinary, replica and
+ownership writes with cleanup. This adds no consensus record or log
 mutation and never removes a replicated incomplete-installation gate. See
 [Backup And Restore](backup-and-restore.md#restore-checkpoint-storage-quota-and-metrics) for the
 quota, metrics and node-local cleanup boundary.
