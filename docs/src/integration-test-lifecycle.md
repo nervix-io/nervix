@@ -44,7 +44,7 @@ The suite is the `scenarios` test target, `tests/scenarios.rs`, running the feat
 | gRPC receivers | Tasks on the binary's runtime, one listener, one task per connection and one per call, owned by the scenario that started them | The gRPC receiver fixture, `tests/common/grpc_receiver.rs` |
 | Client probes | A child process per probe of another language, or one blocking task for the in-process probe of the shared Rust binding, owned by the scenario that started it | The client probe fixture, `tests/common/client_conformance.rs` |
 
-A scenario binary built for the `deloxide` mode, which only `just test-deloxide` builds, starts its
+A scenario binary built for the `deloxide` mode, which `just test-deloxide` or `just test-deloxide-order` builds, starts its
 deadlock diagnostics in `main`, right after it configures the lifecycle of its test dependencies and
 before it builds its runtime, so its one detector is installed before any tracked lock or runtime
 worker exists and every in-process node shares it; the helper process that holds a dependency
@@ -56,10 +56,16 @@ records its own evidence under its root, and is a diagnostic node only when the 
 scenario binary was built for the mode. The ordinary suite leaves the `@deadlock_diagnostics`
 scenarios out by default: their steps assert a detector an ordinary build does not have.
 
-The diagnostic command also selects the ordinary `@restore_installation` scenarios. They exercise
+The diagnostic commands also select the ordinary `@restore_installation` and
+`@client_ingestor_alter_drain` scenarios and the local `@deadlock_reports`
+inspection/export/triage workflow. They exercise
 the blocking applied-state guard through interrupted checkpoint staging, complete publication and
 runtime handle clearing, including a delayed coordinator after leadership transfer and a
-successor's START. The ordinary CLI built by the test dependencies drives these diagnostic nodes
+successor's START. The report tool is an ordinary local executable, even when the scenario process selects order
+analysis. Potential findings remain recorded without ending the process; any unreviewed workload
+finding prevents diagnostic qualification. Real server children and the scenario process record
+the same compile-time/runtime selection, and each invocation retains a fresh artifact directory.
+The ordinary CLI built by the test dependencies drives these diagnostic nodes
 through its public protocol; the command supplies its path explicitly because the diagnostic
 binary has a separate build directory. The feature input is a quoted file glob, and the shared
 scenario accounting requires every selected diagnostic workload to run and pass without retries. The recorded evidence
@@ -74,6 +80,17 @@ against diagnostic nodes on one and three nodes, without retries. Python uses th
 shared binding; its locks and condition variables are outside this detector. The command keeps
 this workload's console output beside its probe and cluster logs and applies the same nonempty,
 all-passed scenario accounting.
+
+The buffered-route replacement scenario accounts for every reading in the first run's outcomes
+and explicitly replays unresolved ledger entries. Ending a producer can refuse a pending or
+already planned submission even when its replacement opens in the same START generation. The
+scenario requires every planned reading to have exactly one effect after replay; each invocation's
+summary counts only that invocation, including an empty replay when no reading was refused.
+
+A separate diagnostic state-store test process starts its detector before any store or executor
+lock and exercises staging, snapshot views, queued writers, interrupted publication and bounded
+cleanup. Its build and execution share the command's budget with the probes and scenarios, and its
+nonempty libtest accounting and retained process evidence must pass in both diagnostic selections.
 
 Test dependencies start through one suite-owned environment. If Docker creates a named container
 but cannot bind its randomly selected host port, that owner removes the failed container and tries
@@ -200,7 +217,10 @@ The boundary between them is kept in four places.
 - **Ordinary commands.** The NSPL commands a scenario runs go through the production Rust client,
   with its execution identity, redirects, and reconnects. This includes the transaction qualification
   graph's setup commands, which retain each execution reference if leadership changes while setup
-  is applying. No harness deadline shortens them. Only
+  is applying. The paced simulation's published graph is loaded through one native client so its
+  BEGIN/COMMIT state and command references survive an interrupted finalization. Raw wire probes
+  expose the received dispositions directly for protocol assertions. No harness deadline shortens
+  native commands. Only
   the status path described below is harness-owned, and it is a separate test-only boundary: it
   opens its own session and never redirects, reconnects, or retries by itself, so it adds no second
   client policy.
@@ -1077,7 +1097,8 @@ tail it needs.
 | The suite budget expired | `124` |
 | A `deloxide` build could not start its deadlock diagnostics | `4` |
 | A `deloxide` build reported an active deadlock and recorded it | `3` |
-| A `deloxide` build reported a deadlock it could not record, or lost findings | `4` |
+| A `deloxide` build failed output/recording, exceeded a diagnostic budget, or lost findings/context | `4` |
+| A `deloxide-order` build retained a potential cycle | Workload continues; unreviewed evidence cannot qualify |
 
 `124` is the status `timeout(1)` reports. It differs from `0`, from `1`, and from the `101` a panic
 ends with, so a wedged suite is told apart from a passing or a failing one by its exit status alone.

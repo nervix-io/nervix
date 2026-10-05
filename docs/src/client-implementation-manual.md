@@ -287,6 +287,10 @@ use.
 - **E-8.** A client MUST treat `origin` as information only. A `Recovered` outcome is the outcome of
   the command, with the message and diagnostics recorded when it happened.
 
+An unknown outcome from an interrupted finalization is subject to E-3 and E-6. Its message can
+describe effects that already applied; the typed disposition still requires recovery under the
+retained reference, query and transaction expectations.
+
 ## Leader Redirect And Reconnect
 
 - **D-1.** On a `LeaderRedirect` that names the leader with an endpoint, a client MUST open a

@@ -18,14 +18,16 @@ use std::{
 use error_stack::Report;
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_primitives::deadlock::{
-    Access, ActiveCycle, BlockedAttempt, BlockedThread, BoundedText, Finding, LockKind, LockSite,
-    SourceSite, TrackedLockId, TrackedThreadId, WaitedLock,
+    Access, ActiveCycle, BlockedAttempt, BlockedThread, BoundedText, DiagnosticSelection, LockKind,
+    LockSite, SourceSite, TrackedLockId, TrackedThreadId, WaitedLock,
 };
 use rkyv::{Archive, Deserialize, Serialize, rancor, util::AlignedVec};
 
 use crate::{
+    EvidenceLossSource, RecordedFinding as Finding,
     error::EvidenceError,
-    evidence::{DeadlockEvidence, EvidenceOutOfBounds, ProcessRecord},
+    evidence::{DeadlockEvidence, EvidenceOutOfBounds, EvidenceScope, MAX_FINDINGS, ProcessRecord},
+    order_wire::{OrderCycleWire, TriageWire},
 };
 
 /// The bytes every evidence file begins with.
@@ -35,14 +37,14 @@ const MAGIC: [u8; 8] = *b"NVXDLEVD";
 const EVIDENCE_KIND: u16 = 1;
 
 /// The format version this crate writes and reads.
-const EVIDENCE_VERSION: u16 = 1;
+const EVIDENCE_VERSION: u16 = 2;
 
 /// The magic, the kind and the version.
 const HEADER_BYTES: usize = MAGIC.len() + 2 + 2;
 
-/// The largest evidence file this crate writes or reads. The bounds keep a file of the most
-/// findings, each with the most threads and the longest texts, under 2 MiB.
-pub(crate) const MAX_EVIDENCE_BYTES: u64 = 4 * 1024 * 1024;
+/// The largest evidence file this crate writes or reads. Encoding also checks this bound, since
+/// cumulative potential cycles may retain several acquisition contexts per edge.
+pub(crate) const MAX_EVIDENCE_BYTES: u64 = 128 * 1024 * 1024;
 
 /// The alignment an rkyv payload is validated at.
 const PAYLOAD_ALIGNMENT: usize = 16;
@@ -51,6 +53,34 @@ const PAYLOAD_ALIGNMENT: usize = 16;
 pub(crate) struct EvidenceWire {
     pub(crate) process: ProcessWire,
     pub(crate) findings: Vec<FindingWire>,
+    pub(crate) scope: ScopeWire,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Archive, Serialize, Deserialize)]
+pub(crate) enum ScopeWire {
+    WholeProcess,
+    SelectedActive,
+    SelectedPotential,
+}
+
+impl From<EvidenceScope> for ScopeWire {
+    fn from(scope: EvidenceScope) -> Self {
+        match scope {
+            EvidenceScope::WholeProcess => Self::WholeProcess,
+            EvidenceScope::ActiveSelection => Self::SelectedActive,
+            EvidenceScope::PotentialSelection => Self::SelectedPotential,
+        }
+    }
+}
+
+impl From<ScopeWire> for EvidenceScope {
+    fn from(scope: ScopeWire) -> Self {
+        match scope {
+            ScopeWire::WholeProcess => Self::WholeProcess,
+            ScopeWire::SelectedActive => Self::ActiveSelection,
+            ScopeWire::SelectedPotential => Self::PotentialSelection,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Archive, Serialize, Deserialize)]
@@ -58,6 +88,34 @@ pub(crate) struct ProcessWire {
     pub(crate) id: u32,
     pub(crate) program: Option<TextWire>,
     pub(crate) started_at_unix_nanos: u64,
+    pub(crate) selection: SelectionWire,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Archive, Serialize, Deserialize)]
+pub(crate) enum SelectionWire {
+    ActiveOnly,
+    OrderAnalysis,
+    OrderInstrumentedActiveOnly,
+}
+
+impl From<DiagnosticSelection> for SelectionWire {
+    fn from(selection: DiagnosticSelection) -> Self {
+        match selection {
+            DiagnosticSelection::ActiveOnly => Self::ActiveOnly,
+            DiagnosticSelection::OrderAnalysis => Self::OrderAnalysis,
+            DiagnosticSelection::OrderInstrumentedActiveOnly => Self::OrderInstrumentedActiveOnly,
+        }
+    }
+}
+
+impl From<SelectionWire> for DiagnosticSelection {
+    fn from(selection: SelectionWire) -> Self {
+        match selection {
+            SelectionWire::ActiveOnly => Self::ActiveOnly,
+            SelectionWire::OrderAnalysis => Self::OrderAnalysis,
+            SelectionWire::OrderInstrumentedActiveOnly => Self::OrderInstrumentedActiveOnly,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Archive, Serialize, Deserialize)]
@@ -69,7 +127,22 @@ pub(crate) struct TextWire {
 #[derive(Debug, Clone, PartialEq, Archive, Serialize, Deserialize)]
 pub(crate) enum FindingWire {
     ActiveCycle(CycleWire),
-    Overflow { lost: u64 },
+    Potential {
+        cycle: OrderCycleWire,
+        repetitions: u64,
+        triage: TriageWire,
+    },
+    Overflow {
+        lost: u64,
+        source: OverflowWire,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Archive, Serialize, Deserialize)]
+pub(crate) enum OverflowWire {
+    Handoff,
+    OrderHistory,
+    Retention,
 }
 
 #[derive(Debug, Clone, PartialEq, Archive, Serialize, Deserialize)]
@@ -217,10 +290,12 @@ impl TryFrom<&DeadlockEvidence> for EvidenceWire {
             findings.push(FindingWire::try_from(finding)?);
         }
         Ok(Self {
+            scope: ScopeWire::from(evidence.scope()),
             process: ProcessWire {
                 id: process.id,
                 program: process.program.as_ref().map(TextWire::from),
                 started_at_unix_nanos: unix_nanos(process.started_at)?,
+                selection: SelectionWire::from(process.selection),
             },
             findings,
         })
@@ -243,7 +318,26 @@ impl TryFrom<&Finding> for FindingWire {
                     omitted_threads: cycle.omitted_threads(),
                 }))
             }
-            Finding::Overflow { lost } => Ok(Self::Overflow { lost: lost.get() }),
+            Finding::Overflow { lost, source } => {
+                let source = match source {
+                    EvidenceLossSource::Handoff => OverflowWire::Handoff,
+                    EvidenceLossSource::OrderHistory => OverflowWire::OrderHistory,
+                    EvidenceLossSource::Retention => OverflowWire::Retention,
+                };
+                Ok(Self::Overflow {
+                    lost: lost.get(),
+                    source,
+                })
+            }
+            Finding::Potential {
+                cycle,
+                repetitions,
+                triage,
+            } => Ok(Self::Potential {
+                cycle: OrderCycleWire::try_from(cycle)?,
+                repetitions: repetitions.get(),
+                triage: TriageWire::from(triage),
+            }),
         }
     }
 }
@@ -328,6 +422,11 @@ impl TryFrom<EvidenceWire> for DeadlockEvidence {
     type Error = EvidenceOutOfBounds;
 
     fn try_from(wire: EvidenceWire) -> Result<Self, Self::Error> {
+        if wire.findings.len() > MAX_FINDINGS {
+            return Err(EvidenceOutOfBounds::TooManyFindings {
+                findings: wire.findings.len(),
+            });
+        }
         let mut findings = Vec::with_capacity(wire.findings.len());
         for finding in wire.findings {
             findings.push(Finding::try_from(finding)?);
@@ -340,8 +439,9 @@ impl TryFrom<EvidenceWire> for DeadlockEvidence {
             id: wire.process.id,
             program,
             started_at: system_time(wire.process.started_at_unix_nanos),
+            selection: DiagnosticSelection::from(wire.process.selection),
         };
-        Self::new(process, findings)
+        Ok(Self::new(process, findings)?.with_scope(EvidenceScope::from(wire.scope)))
     }
 }
 
@@ -363,9 +463,37 @@ impl TryFrom<FindingWire> for Finding {
                 .map_err(EvidenceOutOfBounds::Cycle)?;
                 Ok(Self::ActiveCycle(cycle))
             }
-            FindingWire::Overflow { lost } => {
+            FindingWire::Overflow { lost, source } => {
                 let lost = NonZeroU64::new(lost).ok_or(EvidenceOutOfBounds::NothingLost)?;
-                Ok(Self::Overflow { lost })
+                let source = match source {
+                    OverflowWire::Handoff => EvidenceLossSource::Handoff,
+                    OverflowWire::OrderHistory => EvidenceLossSource::OrderHistory,
+                    OverflowWire::Retention => EvidenceLossSource::Retention,
+                };
+                Ok(Self::Overflow { lost, source })
+            }
+            FindingWire::Potential {
+                cycle,
+                repetitions,
+                triage,
+            } => {
+                let cycle = nervix_primitives::deadlock::PotentialCycle::try_from(cycle)?;
+                let repetitions = nonzero(repetitions)?;
+                let triage = crate::PotentialTriage::try_from(triage)?;
+                let finding = Self::Potential {
+                    cycle,
+                    repetitions,
+                    triage,
+                };
+                if let Self::Potential {
+                    triage: crate::PotentialTriage::Reviewed(_),
+                    ..
+                } = &finding
+                    && !finding.qualifies()
+                {
+                    return Err(EvidenceOutOfBounds::InvalidReview);
+                }
+                Ok(finding)
             }
         }
     }
@@ -464,7 +592,7 @@ impl TryFrom<TextWire> for BoundedText {
     }
 }
 
-fn nonzero(number: u64) -> Result<NonZeroU64, EvidenceOutOfBounds> {
+pub(crate) fn nonzero(number: u64) -> Result<NonZeroU64, EvidenceOutOfBounds> {
     NonZeroU64::new(number).ok_or(EvidenceOutOfBounds::ZeroIdentity)
 }
 
@@ -477,7 +605,7 @@ pub(crate) fn unix_nanos(time: SystemTime) -> Result<u64, Report<EvidenceError>>
 }
 
 /// The time `nanos` nanoseconds after the Unix epoch.
-fn system_time(nanos: u64) -> SystemTime {
+pub(crate) fn system_time(nanos: u64) -> SystemTime {
     UNIX_EPOCH
         .checked_add(Duration::from_nanos(nanos))
         .assured("supported targets represent every time up to 2^64 nanoseconds after the epoch")

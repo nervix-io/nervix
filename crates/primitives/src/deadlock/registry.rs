@@ -4,15 +4,16 @@
 //! The detector names threads and locks by numbers. The adapters of `sync::blocking` record here,
 //! under those numbers, the construction site of every lock they create and the site of every
 //! acquisition that has to wait, so a cycle can be described in source terms while its threads are
-//! still blocked. An acquisition that succeeds at once records nothing: only an acquisition that
-//! waits can be part of a cycle.
+//! still blocked. Order analysis additionally retains bounded acquisition witnesses, including
+//! attempts that succeed immediately, and copies construction sites into historical evidence.
 //!
 //! The maps are concurrent maps, whose shard locks are held only inside one map operation and never
 //! across a tracked acquisition, so recording here can never join a cycle it describes, and reading
 //! here from the findings thread never waits for a blocked thread. Every record leaves with what it
 //! describes: a lock's when the lock is dropped, an acquisition's once it holds the lock, and a
 //! thread's name when the thread exits, so the registry holds no more than the live locks and
-//! threads.
+//! threads. The separately bounded order history survives lock destruction so it can report an
+//! ended instance without confusing a later instance constructed at the same source site.
 
 #![cfg_attr(
     nervix_lint,
@@ -28,8 +29,8 @@ use std::{cell::OnceCell, num::NonZeroU64, panic::Location, sync::LazyLock};
 use meticulous::{OptionExt as _, ResultExt as _};
 
 use super::{
-    Access, BlockedAttempt, BlockedThread, BoundedText, LockKind, LockSite, SourceSite,
-    TrackedLockId, TrackedThreadId, WaitedLock,
+    Access, BlockedAttempt, BlockedThread, BoundedText, LockKind, LockLifetime, LockSite,
+    OrderLock, SourceSite, TrackedLockId, TrackedThreadId, WaitedLock, order_history::OrderHistory,
 };
 use crate::collections::DashMap;
 
@@ -55,6 +56,7 @@ impl Drop for ThreadRecord {
 
 #[derive(Default)]
 pub(crate) struct Registry {
+    pub(crate) history: OrderHistory,
     locks: DashMap<TrackedLockId, LockRecord>,
     attempts: DashMap<TrackedThreadId, AttemptRecord>,
     names: DashMap<TrackedThreadId, Option<String>>,
@@ -86,6 +88,39 @@ impl Drop for WaitingAttempt {
 }
 
 impl Registry {
+    pub(crate) fn thread_name(&self, thread: TrackedThreadId) -> Option<BoundedText> {
+        match self.names.get(&thread) {
+            Some(name) => name.as_deref().map(BoundedText::new),
+            None => None,
+        }
+    }
+
+    pub(crate) fn order_lock(&self, lock: usize) -> OrderLock {
+        let id = lock_id(lock);
+        match self.locks.get(&id) {
+            Some(record) => OrderLock {
+                id,
+                site: Some(LockSite {
+                    kind: record.kind,
+                    constructed_at: SourceSite::from_location(record.constructed_at),
+                }),
+                lifetime: LockLifetime::Live,
+            },
+            None => OrderLock {
+                id,
+                site: None,
+                lifetime: LockLifetime::Unrecorded,
+            },
+        }
+    }
+
+    pub(crate) fn lifetime(&self, lock: TrackedLockId) -> LockLifetime {
+        if self.locks.contains_key(&lock) {
+            LockLifetime::Live
+        } else {
+            LockLifetime::Ended
+        }
+    }
     pub(crate) fn global() -> &'static Self {
         &REGISTRY
     }

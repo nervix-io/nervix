@@ -155,6 +155,8 @@ class InventoryTests(unittest.TestCase):
             "state-replication-routing",
             "paced-simulation-records",
             "deadlock-evidence",
+            "deadlock-order-normalization",
+            "deadlock-order-bounds",
             "deadlock-evidence-malformed",
             "deadlock-evidence-bounds",
             "wasm-protocol-malformed",

@@ -940,12 +940,20 @@ build and the existing tests, and nothing in it changes behavior.
   external Chaos suite against an immutable product image for real-process recovery.
 - A change that adds or alters thread-blocking synchronization, a `sync::blocking` lock or
   condition variable, the order in which tracked locks are acquired, or a lifecycle or ownership
-  path that uses tracked locks runs `just test-deloxide`, and extends its probes or its diagnostic
-  scenarios where they do not yet reach the changed path. The change records what the diagnostic
+  path that uses tracked locks runs `just test-deloxide` and `just test-deloxide-order`, and extends
+  their probes or diagnostic scenarios where they do not yet reach the changed path. The change records what the diagnostic
   run covered, what it cannot see, and the evidence it retained under
   `target/deloxide/test-deloxide`. An active cycle it reports is fixed in the owner, never
   suppressed, retried away or excluded from the run. A run that executed no check, lost a finding
   or could not record one is a failed diagnostic execution, never a clean result. Every
+  potential-order finding remains visible until its owner fixes it or records a specific
+  non-overlap, shared-reader or lifecycle proof together with retained regression evidence. A
+  historical cycle alone does not declare an active outage or end an operator's workload. Missing
+  source context, truncated cycles, overload and unreviewed findings prevent qualification. Order
+  evidence preserves run-local lock instances and lifetimes, thread identities, acquisition modes
+  and multiplicity; repeated source lines never stand in for lock identity. A build with graph
+  instrumentation and runtime checking disabled remains instrumented, and its cost is reported
+  separately from an active-only diagnostic build and ordinary execution. Every
   concurrency-related change states whether this applies: async-only or otherwise untracked work,
   such as Tokio's locks, channels and `Notify`, DashMap, atomic protocols or network waits, records
   that the detector does not see it and keeps its Shuttle, Loom, Turmoil, Chaos and Bolero
@@ -1108,7 +1116,9 @@ build and the existing tests, and nothing in it changes behavior.
 - A change to a primitive adapter or a synchronization protocol runs the checks of every mode it
   affects: `just test-shuttle [filter]` for interleavings, `just test-loom [filter]` for
   memory-ordering claims, `just test-turmoil` for the simulated network, and `just test-deloxide`
-  for active deadlocks among tracked locks, beside the ordinary suite. `just test-primitives` runs the boundary's own conformance checks once per mode. Every mode
+  for active deadlocks and `just test-deloxide-order` for potential acquisition-order cycles among
+  tracked locks, beside the ordinary suite. `just test-primitives` runs the boundary's own
+  conformance checks once per mode. Every mode
   command reports how many checks it discovered, selected, executed and saw complete; a selection
   that executes nothing across its whole scope fails, though a package with no match inside a
   nonempty selection is fine. `just test-shuttle` runs every registered check in its own process
@@ -1130,7 +1140,8 @@ build and the existing tests, and nothing in it changes behavior.
   in a check fails validation.
 - `just coverage-native-extras [producer ...]` runs eligible native extra checks under LLVM source
   instrumentation: `test-typed-ratchet`, `bench-smoke`, `nspl-completion-walk`, the canonical
-  `test-shuttle` and `test-loom` runners, and each `test-primitives-<mode>` conformance recipe.
+  `test-shuttle` and `test-loom` runners, each `test-primitives-<mode>` conformance recipe,
+  `test-deadlock-evidence-order` and `test-deadlock-report`.
   `test-primitives` selects every native conformance mode. CI runs these checks through collection;
   primitive compile/browser checks, replay qualification and Loom weakening qualification retain
   independent verdicts outside its instrumentation. Each run writes `lcov.info`, `completion.json`,

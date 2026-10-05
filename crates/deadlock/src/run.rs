@@ -1,15 +1,15 @@
 //! The diagnostic run of a process built for the `deloxide` mode.
 //!
 //! A run installs the deadlock detector with a recorder as its sink, then records the process's
-//! evidence without findings. The recorder handles the first finding the detector delivers and ends
-//! the process: it writes the finding's description to standard error, waits until the run has
-//! recorded its starting evidence or failed to, records the finding in the evidence directory, and
-//! exits. It writes through the standard error descriptor directly and exits without running exit
-//! handlers, so nothing on the way waits for a lock a blocked thread could hold, and a deadline
-//! thread ends the process if recording outlives its budget.
+//! evidence without findings. Potential cycles accumulate with bounded deduplication and leave the
+//! workload running; an active cycle or diagnostic loss ends the process. Each delivery writes a
+//! bounded description and atomically replaces the cumulative local evidence. Standard error uses
+//! its descriptor directly. Terminal outcomes bypass exit handlers, and a deadline thread exits
+//! without writing if a blocked output or filesystem outlives the recording budget.
 
 use std::{
     io,
+    num::NonZeroU64,
     path::{Path, PathBuf},
     time::{Duration, SystemTime},
 };
@@ -17,13 +17,14 @@ use std::{
 use error_stack::{Report, ResultExt as _};
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_primitives::{
-    deadlock::{self, BoundedText, Finding},
+    deadlock::{self, BoundedText, DiagnosticSelection, Finding},
     sync::blocking::{OnceLock, mpsc},
     thread,
 };
 
 use crate::{
-    ACTIVE_DEADLOCK_EXIT_STATUS, DIAGNOSTIC_FAILURE_EXIT_STATUS,
+    ACTIVE_DEADLOCK_EXIT_STATUS, DIAGNOSTIC_FAILURE_EXIT_STATUS, EvidenceLossSource, MAX_FINDINGS,
+    RecordedFinding,
     directory::EvidenceDirectory,
     error::DiagnosticError,
     evidence::{DeadlockEvidence, ProcessRecord},
@@ -34,13 +35,15 @@ use crate::{
 /// description and writing one bounded file normally take milliseconds; the budget matters only
 /// when standard error or the evidence directory has stopped accepting writes.
 const RECORDING_BUDGET: Duration = Duration::from_secs(10);
+/// Repeated source changes must also fit an explicit process output budget.
+const CONSOLE_BYTE_CAPACITY: usize = 128 * 1024 * 1024;
 
 const RECORDING_DEADLINE_THREAD: &str = "nervix-deadlock-recording-deadline";
 
 /// This process's run, once it started.
 static CURRENT: OnceLock<DiagnosticRun> = OnceLock::new();
 
-/// The diagnostic run of this process: its detector is installed, and its first finding ends it.
+/// The diagnostic run of this process, with a selected detector and cumulative local evidence.
 #[derive(Debug)]
 pub struct DiagnosticRun {
     process: ProcessRecord,
@@ -63,19 +66,28 @@ impl DiagnosticRun {
     pub fn start(
         directory: Option<EvidenceDirectory>,
     ) -> Result<&'static Self, Report<DiagnosticError>> {
+        Self::start_selected(directory, DiagnosticSelection::for_build(false))
+    }
+
+    pub fn start_selected(
+        directory: Option<EvidenceDirectory>,
+        selection: DiagnosticSelection,
+    ) -> Result<&'static Self, Report<DiagnosticError>> {
         let process = ProcessRecord {
             id: std::process::id(),
             program: program_name(),
             started_at: SystemTime::now(),
+            selection,
         };
         let evidence = DeadlockEvidence::started(process.clone());
         let (started_sender, started) = mpsc::channel();
         let mut recorder = Recorder {
             evidence: Some(evidence.clone()),
             directory: directory.clone(),
-            started,
+            started: Some(started),
+            printed_bytes: 0,
         };
-        deadlock::install(move |finding| recorder.record(finding))
+        deadlock::install_selected(selection, move |finding| recorder.record(finding))
             .change_context(DiagnosticError::Install)?;
         let evidence_file = match &directory {
             Some(directory) => match directory.record(&evidence) {
@@ -121,27 +133,73 @@ impl DiagnosticRun {
 
 /// The detector's sink.
 struct Recorder {
-    /// The evidence a finding is recorded into; taken by the first finding.
+    /// Cumulative bounded evidence, present after the run starts.
     evidence: Option<DeadlockEvidence>,
     directory: Option<EvidenceDirectory>,
-    started: mpsc::Receiver<Started>,
+    started: Option<mpsc::Receiver<Started>>,
+    printed_bytes: usize,
 }
 
 impl Recorder {
-    /// Record `finding` and end the process.
+    /// Record `finding`; only active cycles, loss or recording failure end the process.
     fn record(&mut self, finding: Finding) {
-        start_recording_deadline();
-        write_stderr(&render_finding(&finding));
+        let deadline = match RecordingDeadline::start() {
+            Ok(deadline) => deadline,
+            Err(error) => {
+                write_stderr(&format!(
+                    "nervix deadlock detector: the recording deadline could not start: {error}; \
+                     ending the diagnostic process\n"
+                ));
+                signal_hook::low_level::exit(DIAGNOSTIC_FAILURE_EXIT_STATUS);
+            }
+        };
+        let mut finding = RecordedFinding::from(finding);
+        // At most MAX_FINDINGS records are searched; repeated callbacks update cumulative
+        // evidence, and only the first description consumes console output.
+        let repeated = match &self.evidence {
+            Some(evidence) => evidence
+                .findings()
+                .iter()
+                .find(|recorded| recorded.same_potential(&finding))
+                .is_some_and(|recorded| {
+                    let mut combined = recorded.clone();
+                    match combined.merge(&finding) {
+                        Ok(changed) => !changed,
+                        Err(_) => false,
+                    }
+                }),
+            None => false,
+        };
+        let mut console_ok = true;
+        if !repeated {
+            let description = render_finding(&finding);
+            match self.printed_bytes.checked_add(description.len()) {
+                Some(total) if total <= CONSOLE_BYTE_CAPACITY => {
+                    self.printed_bytes = total;
+                    console_ok = write_stderr(&description);
+                }
+                _ => {
+                    finding = RecordedFinding::Overflow {
+                        lost: NonZeroU64::MIN,
+                        source: EvidenceLossSource::Retention,
+                    };
+                    console_ok = write_stderr(&render_finding(&finding));
+                }
+            }
+        }
         let status = match &finding {
-            Finding::ActiveCycle(_) => ACTIVE_DEADLOCK_EXIT_STATUS,
-            Finding::Overflow { .. } => DIAGNOSTIC_FAILURE_EXIT_STATUS,
+            RecordedFinding::ActiveCycle(_) => Some(ACTIVE_DEADLOCK_EXIT_STATUS),
+            RecordedFinding::Potential { .. } => None,
+            RecordedFinding::Overflow { .. } => Some(DIAGNOSTIC_FAILURE_EXIT_STATUS),
         };
         let status = match self.record_evidence(finding) {
             Recorded::InEvidence(file) => {
-                write_stderr(&format!(
-                    "nervix deadlock detector: evidence recorded at {}\n",
-                    file.display()
-                ));
+                if !repeated {
+                    console_ok &= write_stderr(&format!(
+                        "nervix deadlock detector: evidence recorded at {}\n",
+                        file.display()
+                    ));
+                }
                 status
             }
             Recorded::OnStandardError => status,
@@ -149,28 +207,71 @@ impl Recorder {
                 write_stderr(&format!(
                     "nervix deadlock detector: the evidence could not be recorded: {reason}\n"
                 ));
-                DIAGNOSTIC_FAILURE_EXIT_STATUS
+                Some(DIAGNOSTIC_FAILURE_EXIT_STATUS)
             }
         };
-        signal_hook::low_level::exit(status);
+        deadline.cancel();
+        let status = if console_ok {
+            status
+        } else {
+            Some(DIAGNOSTIC_FAILURE_EXIT_STATUS)
+        };
+        if let Some(status) = status {
+            signal_hook::low_level::exit(status);
+        }
     }
 
-    fn record_evidence(&mut self, finding: Finding) -> Recorded {
-        match self.started.recv() {
-            Ok(Started::Recorded) => {}
-            Ok(Started::Failed) | Err(_) => {
-                return Recorded::Failed("the run did not record its starting evidence".into());
+    fn record_evidence(&mut self, finding: RecordedFinding) -> Recorded {
+        if let Some(started) = self.started.take() {
+            match started.recv() {
+                Ok(Started::Recorded) => {}
+                Ok(Started::Failed) | Err(_) => {
+                    return Recorded::Failed("the run did not record its starting evidence".into());
+                }
             }
         }
+        let Some(evidence) = self.evidence.take() else {
+            return Recorded::Failed("the recorder has no current evidence".into());
+        };
+        let repeated = evidence
+            .findings()
+            .iter()
+            .any(|recorded| recorded.same_potential(&finding));
+        // Reserve one record for explicit retention overload. An overload artifact must never
+        // remain the preceding clean or reviewed evidence after the process exits with failure.
+        let retention_full = !repeated
+            && matches!(finding, RecordedFinding::Potential { .. })
+            && evidence.findings().len() >= MAX_FINDINGS - 1;
+        let recorded = if retention_full {
+            Err(crate::EvidenceOutOfBounds::TooManyFindings {
+                findings: evidence.findings().len(),
+            })
+        } else {
+            evidence.clone().with_finding(finding)
+        };
+        let evidence = match recorded {
+            Ok(evidence) => evidence,
+            Err(bounds) => {
+                let loss = RecordedFinding::Overflow {
+                    lost: NonZeroU64::MIN,
+                    source: EvidenceLossSource::Retention,
+                };
+                write_stderr(&render_finding(&loss));
+                let overloaded = evidence
+                    .with_finding(loss)
+                    .assured("retention always reserves one record for overload");
+                self.evidence = Some(overloaded.clone());
+                if let Some(directory) = &self.directory
+                    && let Err(error) = directory.record(&overloaded)
+                {
+                    return Recorded::Failed(format!("{bounds}; {error:#}"));
+                }
+                return Recorded::Failed(bounds.to_string());
+            }
+        };
+        self.evidence = Some(evidence.clone());
         let Some(directory) = &self.directory else {
             return Recorded::OnStandardError;
-        };
-        let Some(evidence) = self.evidence.take() else {
-            return Recorded::Failed("the recorder handles one finding".into());
-        };
-        let evidence = match evidence.with_finding(finding) {
-            Ok(evidence) => evidence,
-            Err(bounds) => return Recorded::Failed(bounds.to_string()),
         };
         match directory.record(&evidence) {
             Ok(file) => Recorded::InEvidence(file),
@@ -188,32 +289,49 @@ enum Recorded {
 }
 
 /// End the process if recording a finding outlives its budget.
-fn start_recording_deadline() {
-    let started = thread::spawn_detached(RECORDING_DEADLINE_THREAD, || {
-        thread::sleep(RECORDING_BUDGET);
-        write_stderr(
-            "nervix deadlock detector: recording the finding outlived its budget; ending the \
-             process\n",
-        );
-        signal_hook::low_level::exit(DIAGNOSTIC_FAILURE_EXIT_STATUS);
-    });
-    match started {
-        Ok(()) => {}
-        Err(error) => write_stderr(&format!(
-            "nervix deadlock detector: the recording deadline could not start ({error}); \
-             recording without it\n"
-        )),
+struct RecordingDeadline {
+    cancelled: mpsc::Sender<()>,
+    worker: thread::JoinHandle<()>,
+}
+
+impl RecordingDeadline {
+    fn start() -> Result<Self, io::Error> {
+        let (cancelled, cancellation) = mpsc::channel();
+        let worker = thread::Builder::new()
+            .name(RECORDING_DEADLINE_THREAD.into())
+            .spawn(move || {
+                match cancellation.recv_timeout(RECORDING_BUDGET) {
+                    Ok(()) | Err(mpsc::RecvTimeoutError::Disconnected) => {}
+                    Err(mpsc::RecvTimeoutError::Timeout) => {
+                        // The recorder may be blocked writing this very descriptor. The deadline
+                        // cannot depend on another write completing before it ends the process.
+                        signal_hook::low_level::exit(DIAGNOSTIC_FAILURE_EXIT_STATUS);
+                    }
+                }
+            })?;
+        Ok(Self { cancelled, worker })
+    }
+
+    fn cancel(self) {
+        self.cancelled
+            .send(())
+            .assured("the watchdog retains its receiver until cancellation or process exit");
+        self.worker
+            .join()
+            .assured("the watchdog only receives cancellation or exits the process");
     }
 }
 
 /// Write `text` to the standard error descriptor directly, without the lock the standard library
 /// takes around it: a blocked thread could hold that lock.
-fn write_stderr(text: &str) {
+fn write_stderr(text: &str) -> bool {
     let bytes = text.as_bytes();
     let mut written = 0;
     while written < bytes.len() {
         match nix::unistd::write(io::stderr(), &bytes[written..]) {
-            Ok(0) | Err(_) => return,
+            Ok(0) => return false,
+            Err(nix::errno::Errno::EINTR) => continue,
+            Err(_) => return false,
             Ok(count) => {
                 written = written
                     .checked_add(count)
@@ -221,6 +339,7 @@ fn write_stderr(text: &str) {
             }
         }
     }
+    true
 }
 
 /// The name of the program this process runs, as its first argument names it.
@@ -228,4 +347,64 @@ fn program_name() -> Option<BoundedText> {
     let first = std::env::args_os().next()?;
     let name = Path::new(&first).file_name()?;
     Some(BoundedText::new(&name.to_string_lossy()))
+}
+
+#[cfg(test)]
+mod tests {
+    use nervix_primitives::deadlock::Access;
+
+    use super::*;
+    use crate::{PotentialTriage, order_tests::cycle};
+
+    #[test]
+    fn retention_overload_replaces_the_artifact_with_explicit_loss() {
+        let root = tempfile::tempdir().assured("disposable evidence");
+        let directory = EvidenceDirectory::new(root.path());
+        let process = ProcessRecord {
+            selection: DiagnosticSelection::OrderAnalysis,
+            ..crate::tests::process()
+        };
+        let mut recorder = Recorder {
+            evidence: Some(DeadlockEvidence::started(process)),
+            directory: Some(directory.clone()),
+            started: None,
+            printed_bytes: 0,
+        };
+        for index in 0..MAX_FINDINGS - 1 {
+            let finding = RecordedFinding::Potential {
+                cycle: cycle(
+                    u64::try_from(index * 2).assured("the bound is small"),
+                    Access::Exclusive,
+                ),
+                repetitions: NonZeroU64::MIN,
+                triage: PotentialTriage::Unreviewed,
+            };
+            assert!(matches!(
+                recorder.record_evidence(finding),
+                Recorded::InEvidence(_)
+            ));
+        }
+        let refused = RecordedFinding::Potential {
+            cycle: cycle(100, Access::Exclusive),
+            repetitions: NonZeroU64::MIN,
+            triage: PotentialTriage::Unreviewed,
+        };
+        assert!(matches!(
+            recorder.record_evidence(refused),
+            Recorded::Failed(_)
+        ));
+        let recorded = directory
+            .read_all()
+            .assured("the current artifact is readable");
+        assert_eq!(recorded.len(), 1);
+        assert_eq!(recorded[0].findings().len(), MAX_FINDINGS);
+        assert!(matches!(
+            recorded[0].findings().last(),
+            Some(RecordedFinding::Overflow {
+                source: EvidenceLossSource::Retention,
+                ..
+            })
+        ));
+        assert!(!recorded[0].qualifies());
+    }
 }
