@@ -15,6 +15,9 @@
 //! into them. A snapshot larger than one section limit becomes more sections, never one larger
 //! section, so a receiver never decodes a whole snapshot as a single value.
 
+#[path = "materialized_checkpoint_reader.rs"]
+mod checkpoint_reader;
+
 use std::{
     io::{Read as _, Write as _},
     ops::Range,
@@ -22,6 +25,7 @@ use std::{
 
 use arch_into::ArchInto as _;
 use arrow_schema::Schema as ArrowSchema;
+pub(crate) use checkpoint_reader::CapturedMaterializedCheckpoint;
 use error_stack::{Report, ResultExt as _};
 use meticulous::OptionExt as _;
 use nervix_execution::{
@@ -271,11 +275,12 @@ pub(in crate::runtime) struct SealedSnapshotDescriptor {
 /// consistent and within their limits. Turning sections into rows is a separate step that needs
 /// the schema and the bulk budget.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(in crate::runtime) struct SealedSnapshotSummary {
-    pub(in crate::runtime) revision: u64,
-    pub(in crate::runtime) fence: u64,
-    pub(in crate::runtime) branch_generation: u64,
-    pub(in crate::runtime) records: u64,
+pub(crate) struct SealedSnapshotSummary {
+    pub(crate) revision: u64,
+    pub(crate) fence: u64,
+    pub(crate) branch_generation: u64,
+    pub(crate) records: u64,
+    pub(crate) groups: u32,
 }
 
 /// The container an empty generation seals into: one header and no sections.
@@ -362,6 +367,7 @@ pub(in crate::runtime) fn inspect_sealed_container(
         fence: header.fence,
         branch_generation: header.branch_generation,
         records: header.records,
+        groups: header.groups,
     })
 }
 
@@ -1842,30 +1848,69 @@ mod tests {
                         descriptor.groups,
                     )
                     .assured("native header encodes");
+                    let native_identities = identities
+                        .identities
+                        .into_iter()
+                        .map(|identity| {
+                            (
+                                identity.branch.map(|fields| {
+                                    fields.into_iter().map(StateField::into_remote).collect()
+                                }),
+                                identity.watermarks,
+                            )
+                        })
+                        .collect::<Vec<_>>();
                     bytes.extend(
-                        materialized_identity_section(
-                            identities
-                                .identities
-                                .into_iter()
-                                .map(|identity| {
-                                    (
-                                        identity.branch.map(|fields| {
-                                            fields
-                                                .into_iter()
-                                                .map(StateField::into_remote)
-                                                .collect()
-                                        }),
-                                        identity.watermarks,
-                                    )
-                                })
-                                .collect(),
-                        )
-                        .assured("native identities encode"),
+                        materialized_identity_section(native_identities.clone())
+                            .assured("native identities encode"),
                     );
                     bytes.extend(
                         materialized_columns_frame(columns.len()).assured("column frame encodes"),
                     );
                     bytes.extend_from_slice(columns.as_ref());
+                    let mut archived = CapturedMaterializedCheckpoint::new(
+                        executor.clone(),
+                        crate::runtime::state_store::checkpoint_reader::CheckpointReader::Inline(
+                            std::io::Cursor::new(bytes.clone()),
+                        ),
+                    )
+                    .open(&executor)
+                    .await
+                    .assured("stored generation opens for re-export");
+                    assert_eq!(
+                        archived.summary(),
+                        SealedSnapshotSummary {
+                            revision: descriptor.revision,
+                            fence: descriptor.fence,
+                            branch_generation: descriptor.branch_generation,
+                            records: descriptor.record_count,
+                            groups: descriptor.groups,
+                        }
+                    );
+                    let group = archived
+                        .next_group(
+                            &executor,
+                            nervix_backup::MATERIALIZED_IDENTITIES_BYTES,
+                            nervix_backup::MATERIALIZED_COLUMNS_BYTES,
+                        )
+                        .await
+                        .assured("stored group validates")
+                        .assured("the group exists");
+                    assert_eq!(group.identities, native_identities);
+                    assert_eq!(group.columns.as_ref(), columns.as_ref());
+                    drop(group);
+                    assert!(
+                        archived
+                            .next_group(
+                                &executor,
+                                nervix_backup::MATERIALIZED_IDENTITIES_BYTES,
+                                nervix_backup::MATERIALIZED_COLUMNS_BYTES,
+                            )
+                            .await
+                            .assured("stored framing and count are complete")
+                            .is_none()
+                    );
+                    drop(archived);
                     drop(columns);
                     let restored = RestoredMaterializedSnapshot::open_relay(
                         &executor,
@@ -2018,6 +2063,7 @@ mod tests {
                 fence: 3,
                 branch_generation: 5,
                 records: 1,
+                groups: 1,
             }
         );
         let restored = RestoredMaterializedSnapshot::open_relay(

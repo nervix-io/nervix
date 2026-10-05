@@ -21,6 +21,12 @@ use nervix_models::RestoreStateAuthority;
 
 use super::{generation::*, *};
 
+pub(in crate::runtime) struct BackupCheckpointView {
+    pub(in crate::runtime) checkpoints: Vec<(StoredPlacement, PersistedRuntimeStateEntry)>,
+    pub(in crate::runtime) materialized:
+        Vec<(StoredPlacement, checkpoint_reader::CheckpointReader)>,
+}
+
 #[derive(Debug, PartialEq, Archive, RkyvSerialize, RkyvDeserialize)]
 struct StagedRestoreCheckpoint {
     authority: RestoreStateAuthority,
@@ -381,34 +387,37 @@ impl RuntimeStateStore {
         Ok(())
     }
 
-    /// Pointer, headers, lifecycle, source offsets and guest chunks all belong to this one view.
+    /// The active pointer, checkpoint headers and materialized/guest chunks share this one view.
     pub(in crate::runtime) fn snapshot_backup_domain(
         &self,
         domain: &DomainName,
-    ) -> error_stack::Result<
-        Vec<(StoredPlacement, PersistedRuntimeStateEntry)>,
-        RuntimePersistenceError,
-    > {
+        kinds: &[RuntimeStateKind],
+    ) -> error_stack::Result<BackupCheckpointView, RuntimePersistenceError> {
         let view = self.db.snapshot();
         let namespace = active_namespace(&view, &self.restore_publications, domain)?;
         let mut entries = Vec::new();
+        let mut materialized = Vec::new();
         for item in view.prefix(&self.latest, namespace.prefix(domain)) {
             let (key, raw) = item
                 .into_inner()
                 .map_err(|_| RuntimePersistenceError::ReadValue)?;
             let (_, stored) = physical_placement(&key)?;
-            if !matches!(
-                stored.state.kind(),
-                RuntimeStateKind::WasmProcessor
-                    | RuntimeStateKind::KafkaOffset
-                    | RuntimeStateKind::BranchLru
-            ) {
+            // The runtime supplies the fixed three- or four-kind backup selection.
+            if !kinds.contains(&stored.state.kind()) {
+                continue;
+            }
+            if stored.state.kind() == RuntimeStateKind::MaterializedRelay {
+                let reader = self.checkpoint_reader_at(view.clone(), &key, &raw)?;
+                materialized.push((stored, reader));
                 continue;
             }
             let entry = read_checkpoint(&view, &self.checkpoint_chunks, &key, &raw)?;
             entries.push((stored, entry));
         }
-        Ok(entries)
+        Ok(BackupCheckpointView {
+            checkpoints: entries,
+            materialized,
+        })
     }
 }
 
@@ -848,12 +857,19 @@ mod tests {
             },
         );
         let unrelated_kind = placement("orders", RuntimeState::Deduplicator { schema });
+        let materialized = placement(
+            "orders",
+            RuntimeState::MaterializedRelay {
+                schema: schema.materialized_at(1),
+            },
+        );
         let other_domain = placement("billing", RuntimeState::KafkaOffset);
         for (placement, lsm) in [
             (&kafka, 5),
             (&lifecycle, 3),
             (&wasm, 7),
             (&unrelated_kind, 9),
+            (&materialized, 13),
             (&other_domain, 11),
         ] {
             store
@@ -863,9 +879,19 @@ mod tests {
         store
             .persist_latest_snapshot(&kafka, 2, b"late-periodic-write")
             .assured("an earlier periodic write completes");
-        let mut read = store
-            .snapshot_backup_domain(&domain)
+        let view = store
+            .snapshot_backup_domain(
+                &domain,
+                &[
+                    RuntimeStateKind::WasmProcessor,
+                    RuntimeStateKind::KafkaOffset,
+                    RuntimeStateKind::BranchLru,
+                    RuntimeStateKind::MaterializedRelay,
+                ],
+            )
             .assured("one database view opens");
+        assert_eq!(view.materialized.len(), 1);
+        let mut read = view.checkpoints;
         read.sort_by_key(|(placement, _)| u8::from(placement.state.kind()));
         assert_eq!(read.len(), 3);
         assert!(read.iter().any(|(placement, entry)| placement.state.kind()
@@ -885,10 +911,29 @@ mod tests {
             .assured("restored target purges");
         assert!(
             store
-                .snapshot_backup_domain(&domain)
+                .snapshot_backup_domain(
+                    &domain,
+                    &[
+                        RuntimeStateKind::WasmProcessor,
+                        RuntimeStateKind::KafkaOffset,
+                        RuntimeStateKind::BranchLru,
+                        RuntimeStateKind::MaterializedRelay
+                    ]
+                )
                 .assured("purged domain view opens")
+                .checkpoints
                 .is_empty()
         );
+        let (captured, mut reader) = view
+            .materialized
+            .into_iter()
+            .next()
+            .assured("the materialized checkpoint retains its database view");
+        assert_eq!(captured.identifier, materialized.identifier);
+        let mut bytes = Vec::new();
+        std::io::Read::read_to_end(&mut reader, &mut bytes)
+            .assured("publication cleanup cannot change the selected materialized checkpoint");
+        assert_eq!(bytes, b"current");
         assert_eq!(
             store
                 .latest_snapshot(&other_domain)
@@ -1163,8 +1208,17 @@ mod tests {
         );
         assert!(
             store
-                .snapshot_backup_domain(&domain)
+                .snapshot_backup_domain(
+                    &domain,
+                    &[
+                        RuntimeStateKind::WasmProcessor,
+                        RuntimeStateKind::KafkaOffset,
+                        RuntimeStateKind::BranchLru,
+                        RuntimeStateKind::MaterializedRelay
+                    ]
+                )
                 .assured("selected empty set reads")
+                .checkpoints
                 .is_empty()
         );
         assert_eq!(

@@ -30,7 +30,7 @@ deloxide-order = [
   "nervix-deadlock/deloxide-order",
   "nervix-primitives/deloxide-order",
 ]
-# Selects Loom's primitives for the whole graph, including the backup cut's atomic owner.
+# Selects Loom's primitives for the whole graph, and runs the Loom models of the server's owners.
 loom = [
   "nervix-consensus/loom",
   "nervix-execution/loom",
@@ -170,7 +170,7 @@ opentelemetry-otlp = { workspace = true, default-features = false, features = [
 opentelemetry_sdk = { workspace = true, features = ["trace"] }
 ordered-float = { workspace = true }
 ort = { workspace = true, features = [
-  "api-23",
+  "api-28",
   "cuda",
   "load-dynamic",
   "ndarray",
@@ -614,7 +614,7 @@ opentelemetry-otlp = { version = "0.31", default-features = false }
 opentelemetry-proto = { version = "0.31", default-features = false }
 opentelemetry_sdk = "0.31"
 ordered-float = "4"
-ort = { version = "2.0.0-rc.12", default-features = false }
+ort = { version = "2.0.0-rc.13", default-features = false }
 otel-prost = { package = "prost", version = "0.14" }
 otel-tonic = { package = "tonic", version = "0.14", features = [
   "gzip",

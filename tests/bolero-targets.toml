@@ -115,14 +115,14 @@ test_target = "lib"
 [[target]]
 case_timeout_seconds = 10
 corpus = "crates/nspl/src/backup/__fuzz__/backup__tests__bolero_models_exported_through_an_archive_reparse_to_themselves/corpus"
-domain_version = 6
+domain_version = 7
 features = []
 id = "nspl-archive-model"
-invariant = "An archived canonical document of generated Models of every family reparses to the complete ordered Model sequence."
+invariant = "Complete cluster/domain archives preserve every ordered canonical Model document through export, production restore reads, semantic reparse and byte-exact re-export."
 manifest = "Cargo.toml"
 max_input_bytes = 4096
 package = "nervix-nspl"
-random_iterations = 64
+random_iterations = 128
 source = "crates/nspl/src/backup/mod.rs"
 test = "backup::tests::bolero_models_exported_through_an_archive_reparse_to_themselves"
 test_target = "lib"
@@ -130,12 +130,12 @@ test_target = "lib"
 [[target]]
 case_timeout_seconds = 10
 corpus = "crates/backup/src/__fuzz__/tests__bolero_domain_records_and_manifests_round_trip/corpus"
-domain_version = 1
+domain_version = 3
 features = []
 id = "backup-record-manifest"
-invariant = "Current domain records and backup manifests decode from their own encoding to complete equal values."
+invariant = "All current archive records and manifests preserve complete users, lifecycle, catalog, cut metadata, ordered section identities and native-width values through their owning codecs."
 manifest = "Cargo.toml"
-max_input_bytes = 128
+max_input_bytes = 4096
 package = "nervix-backup"
 random_iterations = 256
 source = "crates/backup/src/tests.rs"
@@ -145,12 +145,12 @@ test_target = "lib"
 [[target]]
 case_timeout_seconds = 10
 corpus = "crates/backup/src/__fuzz__/tests__bolero_runtime_state_records_round_trip/corpus"
-domain_version = 1
+domain_version = 3
 features = []
 id = "backup-runtime-state-records"
-invariant = "Current WASM descriptors, Kafka offsets, and branch lifecycle records decode from their own encoding to complete equal values."
+invariant = "Current WASM and materialized descriptors, typed materialized identities, Kafka offsets, and branch lifecycle records decode from their own encoding to complete equal values."
 manifest = "Cargo.toml"
-max_input_bytes = 128
+max_input_bytes = 4096
 package = "nervix-backup"
 random_iterations = 256
 source = "crates/backup/src/tests.rs"
@@ -1358,14 +1358,61 @@ test_target = "lib"
 [[target]]
 case_timeout_seconds = 10
 corpus = "src/runtime/__fuzz__/runtime__materialized_snapshot__tests__bolero_materialized_archive_columns_preserve_the_exact_schema_and_rows/corpus"
-domain_version = 1
+domain_version = 2
 features = ["testing"]
 id = "backup-materialized-columns"
-invariant = "Archive materialized descriptors, typed identities and exact-schema Arrow IPC preserve nullable, sensitive, nested and byte fields, every row and watermark, and complete native generation identity."
+invariant = "Archive materialized descriptors, typed identities and exact-schema Arrow IPC preserve nullable, sensitive, nested and byte fields, every row and watermark, and complete native generation identity; stored checkpoint re-export preserves complete headers, ordered identities and original Arrow bytes."
 manifest = "Cargo.toml"
 max_input_bytes = 4096
 package = "nervix-server"
 random_iterations = 128
 source = "src/runtime/materialized_snapshot.rs"
 test = "runtime::materialized_snapshot::tests::bolero_materialized_archive_columns_preserve_the_exact_schema_and_rows"
+test_target = "lib"
+
+[[target]]
+case_timeout_seconds = 10
+corpus = "crates/backup/src/__fuzz__/archive_properties__bolero_complete_archives_preserve_every_record_section_and_payload/corpus"
+domain_version = 2
+features = []
+id = "backup-complete-archives"
+invariant = "Every promised current record, ordered section, length, digest and raw payload survives export, extraction, restore reads and deterministic re-export under cluster/domain and resource/state options."
+manifest = "Cargo.toml"
+max_input_bytes = 4096
+package = "nervix-backup"
+random_iterations = 256
+source = "crates/backup/src/archive_properties.rs"
+test = "archive_properties::bolero_complete_archives_preserve_every_record_section_and_payload"
+test_target = "lib"
+
+
+[[target]]
+case_timeout_seconds = 10
+corpus = "crates/backup/src/__fuzz__/malformed_properties__bolero_malformed_current_records_return_safe_typed_errors/corpus"
+domain_version = 2
+features = []
+id = "backup-malformed-records"
+invariant = "Bounded current malformed records and headers return safe typed owning errors; accepted records preserve their complete value through re-encoding."
+manifest = "Cargo.toml"
+max_input_bytes = 4096
+package = "nervix-backup"
+random_iterations = 256
+source = "crates/backup/src/malformed_properties.rs"
+test = "malformed_properties::bolero_malformed_current_records_return_safe_typed_errors"
+test_target = "lib"
+
+
+[[target]]
+case_timeout_seconds = 10
+corpus = "crates/backup/src/__fuzz__/malformed_properties__bolero_corrupt_archives_fail_before_restore_contents_are_returned/corpus"
+domain_version = 2
+features = []
+id = "backup-corrupt-archives"
+invariant = "Changed current section lengths, digests, kinds, order, membership and record bytes or truncated sections fail before verified archive contents reach restore installation."
+manifest = "Cargo.toml"
+max_input_bytes = 4096
+package = "nervix-backup"
+random_iterations = 256
+source = "crates/backup/src/malformed_properties.rs"
+test = "malformed_properties::bolero_corrupt_archives_fail_before_restore_contents_are_returned"
 test_target = "lib"

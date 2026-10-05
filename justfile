@@ -419,10 +419,14 @@ test-primitives-compile:
 # consistent-order controls must end cleanly with evidence that records no finding; and the
 # start-up, quiet-output and recording-failure cases end as their contract says. A child that never
 # ends is killed by its probe's watchdog and fails it. The diagnostic node smoke then runs the
-# `@deadlock_diagnostics`, `@restore_installation` and `@client_ingestor_alter_drain` scenarios,
-# without retries, in a scenario binary built for the mode: in-process nodes, real diagnostic
-# server processes on one and three nodes, buffered client alterations, interrupted restore
-# installation and stale publication after leadership transfer. Each
+# `@deadlock_diagnostics`, `@restore_installation`, `@client_ingestor_alter_drain`,
+# `@deadlock_reports`, `@memory_pressure_pause`, `@client_io_03_consumer_restore` and
+# `@client_io_03_generation` scenarios, without retries, in a scenario binary built for the mode:
+# in-process nodes, real
+# diagnostic server processes on one and three nodes, buffered client alterations, interrupted
+# restore installation and stale publication after leadership transfer, the memory-pressure pause
+# of starting and running ingestors, and Rust client consumers restored after a session restart and
+# closed by a domain restart. Each
 # contract-change scenario also runs the diagnostic Rust paced driver; the Python application's
 # locks remain outside the detector while its diagnostic nodes are tracked. Each
 # invocation's output stays under target/deloxide/test-deloxide, and the scenario binary's own
@@ -492,7 +496,7 @@ test-deloxide-selection selection budget_seconds: tests-deps
     within_budget scenarios \
         cargo test --features {{ quote("testing " + selection) }} --test scenarios -- \
             --input 'tests/features/**/*.feature' \
-            --tags '@deadlock_diagnostics or @restore_installation or @client_ingestor_alter_drain or @deadlock_reports' \
+            --tags '@deadlock_diagnostics or @restore_installation or @client_ingestor_alter_drain or @deadlock_reports or @memory_pressure_pause or @client_io_03_consumer_restore or @client_io_03_generation' \
             --retry 0
     summary="$(grep -E '^[0-9]+ scenarios? \(' "${logs}/scenarios.log" | tail -n 1 || true)"
     if [[ ! "${summary}" =~ ^([1-9][0-9]*)\ scenarios?\ \(([0-9]+)\ passed\)$ ]] \
@@ -577,7 +581,8 @@ test-shuttle-replay-check:
 # whole run fails when a registered invariant is missing, ignored or incomplete, or when a model is
 # unregistered. A non-empty `filter` runs the models whose test name or invariant contains it and
 # fails when it selects none. A failed model leaves its Loom checkpoint, output and metadata under
-# target/loom-failures for `test-loom-replay`.
+# target/loom-failures for `test-loom-replay`. The server's models need the web console its library
+# embeds.
 test-loom filter="": build-web-console (test-loom-models filter)
 
 [private]
@@ -601,14 +606,15 @@ coverage-loom-runner:
 
 # Replay a failure `test-loom` recorded: Loom resumes from the checkpoint of the failed execution,
 # with location tracking and tracing enabled, so that execution runs first.
-test-loom-replay failure:
+test-loom-replay failure: build-web-console
     python3 -m scripts.loom_models --target-dir {{ quote(cargo_target_dir) }} replay {{ quote(failure) }}
 
 # Show that each qualified Loom model detects its ordering or stack capacity fault. Every weakening is
 # applied to a copy of the working tree, the model must fail with its registered message, and the
-# checkpoint of that failure must replay it.
-test-loom-qualification: build-web-console
-    python3 -m scripts.loom_models --target-dir {{ quote(cargo_target_dir) }} qualify
+# checkpoint of that failure must replay it. `shard`, NUMBER/COUNT, qualifies one part of the
+# distinct weakenings, so CI can split their rebuilds across jobs; the default qualifies them all.
+test-loom-qualification shard="1/1": build-web-console
+    python3 -m scripts.loom_models --target-dir {{ quote(cargo_target_dir) }} qualify --shard {{ quote(shard) }}
 
 # Run the Turmoil suite: the primitive boundary's simulated-host checks, the execution and library
 # simulation checks, then every interconnect scenario over its committed regression seeds. Tokio's
@@ -1009,7 +1015,7 @@ coverage-patch-runner:
     set -euo pipefail
     mkdir -p "{{ cargo_target_dir }}/patch-coverage"
     coverage=(uvx --from coverage==7.11.0 coverage)
-    "${coverage[@]}" run --data-file "{{ cargo_target_dir }}/patch-coverage/python.coverage" --branch --source=scripts.patch_coverage -m unittest scripts.tests.test_patch_coverage
+    "${coverage[@]}" run --data-file "{{ cargo_target_dir }}/patch-coverage/python.coverage" --branch --source=scripts.patch_coverage,scripts.tests.test_patch_coverage -m unittest scripts.tests.test_patch_coverage
     "${coverage[@]}" lcov --data-file "{{ cargo_target_dir }}/patch-coverage/python.coverage" -o "{{ cargo_target_dir }}/patch-coverage/python.lcov"
 
 # Measure changed server and CLI lines against the server's unit tests and selected Cucumber
@@ -1156,6 +1162,42 @@ coverage-visual-create-report output="target/visual-create.lcov":
 # a change to those packages without the scenario suite that `test-coverage` runs.
 coverage-lib output *args:
     cargo llvm-cov --lib --lcov --output-path {{ output }} {{ args }}
+
+# Complete public archive representation and restore/re-export coverage, including test sources.
+coverage-backup-archives output="target/backup-archives.lcov": tests-deps
+    #!/usr/bin/env bash
+    set -euo pipefail
+    export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
+    cargo llvm-cov clean --workspace
+    just coverage-cli-binary
+    export NERVIX_TEST_CLI_PATH={{ quote(cargo_target_dir + "/llvm-cov-target/debug/nervix-cli") }}
+    cargo llvm-cov --no-report --lib --package nervix-backup
+    cargo llvm-cov --no-report --lib --package nervix-nspl -- backup
+    cargo llvm-cov --no-report --features testing --package nervix-server --test scenarios -- \
+        --input tests/features/cluster/backup.feature \
+        --name 'A quiesced backup restores two WASM branches and Kafka domain offsets' \
+        --concurrency 2 --retry 0
+    cargo llvm-cov --no-report --features testing --package nervix-server --lib -- materialized_snapshot
+    cargo llvm-cov --no-report --features testing --package nervix-server --lib -- backup
+    cargo llvm-cov --no-report --features testing --package nervix-server --lib -- runtime::state_store::checkpoint_reader
+    cargo llvm-cov --no-report --features testing --package nervix-server --test scenarios -- \
+        --input tests/features/cluster/backup_materialized.feature \
+        --name 'A resumed materialized cut preserves interleaved branches and generators through restart|Materialized generations larger than the bulk budget resume on every assigned owner and replica' \
+        --concurrency 2 --retry 0
+    cargo llvm-cov report --no-default-ignore-filename-regex --lcov --output-path {{ quote(output) }} \
+        --package nervix-backup --package nervix-nspl --package nervix-server
+
+# Append current checkpoint-reader and backup ownership tests to retained archive profiles.
+coverage-backup-archives-state-append output="target/backup-archives.lcov":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
+    cargo llvm-cov --no-report --lib --package nervix-backup
+    cargo llvm-cov --no-report --features testing --package nervix-server --lib -- materialized_snapshot
+    cargo llvm-cov --no-report --features testing --package nervix-server --lib -- backup
+    cargo llvm-cov --no-report --features testing --package nervix-server --lib -- runtime::state_store::checkpoint_reader
+    cargo llvm-cov report --no-default-ignore-filename-regex --lcov --output-path {{ quote(output) }} \
+        --package nervix-backup --package nervix-nspl --package nervix-server
 
 # Ordinary representation coverage includes the protocol's integration-test target and the
 # native host, SDK, archive descriptors and current checkpoint storage codecs.
@@ -2534,8 +2576,105 @@ generate-dev-tls:
 generate-test-onnx output="tests/fixtures/onnx/simple_score.onnx" alternate_output="tests/fixtures/onnx/alternate_score.onnx" batch_output="tests/fixtures/onnx/batch_score.onnx" f64_output="tests/fixtures/onnx/f64_score.onnx" matrix_output="tests/fixtures/onnx/matrix_identity.onnx" dynamic_batch_output="tests/fixtures/onnx/dynamic_batch_score.onnx" scalar_output="tests/fixtures/onnx/scalar_identity.onnx":
     python3 scripts/train_simple_onnx.py --output {{ output }} --alternate-output {{ alternate_output }} --batch-output {{ batch_output }} --f64-output {{ f64_output }} --matrix-output {{ matrix_output }} --dynamic-batch-output {{ dynamic_batch_output }} --scalar-output {{ scalar_output }}
 
-download-onnxruntime:
-    bash scripts/download_onnxruntime.sh
+# Download a CPU or CUDA 13 runtime; `host` selects the current machine's platform.
+download-onnxruntime flavor="cpu" platform="host":
+    bash scripts/download_onnxruntime.sh --flavor {{ quote(flavor) }} --platform {{ quote(platform) }}
+
+# Check runtime package selection and the CPU/CUDA image build targets.
+test-onnxruntime:
+    uv run --locked python -m unittest scripts.tests.test_onnxruntime
+
+# Build both final targets with fixture binaries and check layer sharing and runtime dependencies.
+test-onnxruntime-docker:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    just docker-prepare-qemu linux/amd64
+    mkdir -p target
+    fixture_context="$(mktemp -d "${PWD}/target/onnxruntime-docker.XXXXXX")"
+    trap 'rm -rf "${fixture_context}"' EXIT
+    mkdir -p "${fixture_context}/artifacts/nervix-server.bundle"
+    for binary in nervix-server nervix-cli nervix-nspl-format; do
+        cat > "${fixture_context}/artifacts/${binary}" <<'SH'
+    #!/bin/sh
+    basename "$0"
+    SH
+        chmod +x "${fixture_context}/artifacts/${binary}"
+    done
+    printf 'Sonic bundle fixture\n' > "${fixture_context}/artifacts/nervix-server.bundle/manifest"
+    for variant in cpu cuda; do
+        base=debian-base
+        if [[ "${variant}" == cuda ]]; then
+            base=cuda-base
+        fi
+        docker buildx build -f Dockerfile.debian --target "${base}" --platform linux/amd64 \
+            --load --tag "nervix:onnxruntime-${variant}-base-check" .
+        image="nervix:onnxruntime-${variant}-check"
+        docker buildx build -f Dockerfile.debian --target "${variant}" --platform linux/amd64 \
+            --build-context "builder=${fixture_context}" --load --tag "${image}" .
+        test "$(docker run --rm "${image}")" = nervix-server
+        docker run --rm --entrypoint /bin/sh "${image}" -c '
+            set -eu
+            if test -f /usr/local/lib/libonnxruntime_providers_cuda.so; then
+                ldconfig -p | grep -F libcudnn.so.9
+            fi
+            for library in /usr/local/lib/libonnxruntime*.so /usr/lib/x86_64-linux-gnu/libcudnn*.so.9; do
+                test -f "${library}" || continue
+                dependencies="$(ldd "${library}")"
+                printf "%s\n%s\n" "${library}" "${dependencies}"
+                # The NVIDIA container runtime injects the host driver when --gpus is used.
+                missing="$(printf "%s\n" "${dependencies}" | awk '\''/not found/ && $1 != "libcuda.so.1"'\'')"
+                test -z "${missing}"
+            done
+        '
+    done
+    uv run --locked python - <<'PY'
+    import json
+    import subprocess
+
+    def layers(image):
+        result = subprocess.check_output(["docker", "image", "inspect", image], text=True)
+        return json.loads(result)[0]["RootFS"]["Layers"]
+
+    def filesystem_history(image):
+        result = subprocess.check_output([
+            "docker", "image", "history", "--no-trunc", "--human=false", "--format", "json", image,
+        ], text=True)
+        rows = [json.loads(line) for line in result.splitlines()]
+        return [row["CreatedBy"] for row in reversed(rows) if int(row["Size"]) > 0]
+
+    debian = layers("nervix:onnxruntime-cpu-base-check")
+    cuda = layers("nervix:onnxruntime-cuda-base-check")
+    if cuda[:len(debian)] != debian or len(cuda) != len(debian) + 1:
+        raise SystemExit("CUDA must add exactly one filesystem layer directly above Debian")
+    for variant, base in (("cpu", debian), ("cuda", cuda)):
+        image = f"nervix:onnxruntime-{variant}-check"
+        runtime = layers(image)
+        if runtime[:len(base)] != base or len(runtime) <= len(base):
+            raise SystemExit(f"{variant}: Nervix runtime layers must follow the selected base")
+        first_runtime_layer = " ".join(filesystem_history(image)[len(base)].split())
+        command = first_runtime_layer.partition(" /bin/sh -c ")[2]
+        if not command.startswith("apt-get update && apt-get upgrade -y"):
+            raise SystemExit(f"{variant}: Debian updates must immediately follow the selected base")
+
+    if layers("nervix:onnxruntime-cpu-check")[-4:] != layers("nervix:onnxruntime-cuda-check")[-4:]:
+        raise SystemExit("CPU and CUDA targets must share the Nervix binary and bundle layers")
+
+    cuda_base = "nervix:onnxruntime-cuda-base-check"
+    held = subprocess.check_output([
+        "docker", "run", "--rm", "--entrypoint", "apt-mark", cuda_base, "showhold",
+    ], text=True).splitlines()
+    if not held:
+        raise SystemExit("CUDA packages must be held at their pinned versions")
+
+    def cuda_versions(image):
+        return subprocess.check_output([
+            "docker", "run", "--rm", "--entrypoint", "dpkg-query", image,
+            "-W", "-f=${Package}=${Version}\\n", *held,
+        ], text=True)
+    if cuda_versions(cuda_base) != cuda_versions("nervix:onnxruntime-cuda-check"):
+        raise SystemExit("Debian upgrades must preserve the pinned CUDA package versions")
+    print("Verified CPU/CUDA final targets, shared Nervix layers, Debian updates, and CUDA pins")
+    PY
 
 reset-local-dashboard-state:
     #!/usr/bin/env bash
@@ -2601,25 +2740,39 @@ docker-prepare-qemu platform="linux/amd64":
         docker run --privileged --rm tonistiigi/binfmt --install all
     fi
 
-docker-build-debian debian_version="trixie" llvm_version="23" tag="nervix:debian" platform="linux/amd64" push="false" cache_from="" cache_to="":
+# Build the CPU image for amd64 or arm64.
+docker-build-debian llvm_version="23" tag="nervix:debian" platform="linux/amd64" push="false" cache_from="" cache_to="":
+    just docker-build-linux cpu {{ quote(llvm_version) }} \
+        {{ quote(tag) }} {{ quote(platform) }} {{ quote(push) }} {{ quote(cache_from) }} {{ quote(cache_to) }}
+
+# Build Debian trixie -> CUDA 13/cuDNN 9 -> Nervix, reusing CUDA across application builds.
+docker-build-cuda llvm_version="23" tag="nervix:cuda" platform="linux/amd64" push="false" cache_from="" cache_to="":
+    just docker-build-linux cuda {{ quote(llvm_version) }} \
+        {{ quote(tag) }} {{ quote(platform) }} {{ quote(push) }} {{ quote(cache_from) }} {{ quote(cache_to) }}
+
+[private]
+docker-build-linux image_target llvm_version tag platform push cache_from cache_to:
     #!/usr/bin/env bash
     set -euo pipefail
-    normalized_platform="{{ platform }}"
+    normalized_platform={{ quote(platform) }}
     if [[ "${normalized_platform}" == "linux/aarch64" ]]; then
         normalized_platform="linux/arm64"
     fi
+    if [[ {{ quote(image_target) }} == "cuda" && "${normalized_platform}" != "linux/amd64" ]]; then
+        echo "CUDA images require linux/amd64; ONNX Runtime publishes no GPU archive for ${normalized_platform}" >&2
+        exit 1
+    fi
     just docker-prepare-qemu "${normalized_platform}"
     output_flag="--load"
-    if [[ "{{ push }}" == "true" ]]; then
+    if [[ {{ quote(push) }} == "true" ]]; then
         output_flag="--push"
     fi
-    cache_from_flag=""
-    if [[ -n "{{ cache_from }}" ]]; then
-        cache_from_flag="--cache-from={{ cache_from }}"
+    cache_flags=()
+    if [[ -n {{ quote(cache_from) }} ]]; then
+        cache_flags+=(--cache-from={{ quote(cache_from) }})
     fi
-    cache_to_flag=""
-    if [[ -n "{{ cache_to }}" ]]; then
-        cache_to_flag="--cache-to={{ cache_to }}"
+    if [[ -n {{ quote(cache_to) }} ]]; then
+        cache_flags+=(--cache-to={{ quote(cache_to) }})
     fi
     : "${KACHE_S3_BUCKET:?KACHE_S3_BUCKET is required}"
     : "${KACHE_S3_REGION:?KACHE_S3_REGION is required}"
@@ -2628,20 +2781,19 @@ docker-build-debian debian_version="trixie" llvm_version="23" tag="nervix:debian
     : "${KACHE_S3_SECRET_KEY:?KACHE_S3_SECRET_KEY is required}"
     docker buildx build \
         -f Dockerfile.debian \
+        --target {{ quote(image_target) }} \
         --progress=plain \
         --platform "${normalized_platform}" \
         --build-arg "KACHE_VERSION=${KACHE_VERSION:-0.28.1}" \
         --build-arg RUST_VERSION={{ rust_toolchain_version }} \
-        --build-arg DEBIAN_VERSION={{ debian_version }} \
-        --build-arg LLVM_VERSION={{ llvm_version }} \
+        --build-arg LLVM_VERSION={{ quote(llvm_version) }} \
         --build-arg "KACHE_S3_BUCKET=${KACHE_S3_BUCKET}" \
         --build-arg "KACHE_S3_REGION=${KACHE_S3_REGION}" \
         --build-arg "KACHE_S3_ENDPOINT=${KACHE_S3_ENDPOINT}" \
         --build-arg "KACHE_S3_ACCESS_KEY=${KACHE_S3_ACCESS_KEY}" \
         --build-arg "KACHE_S3_SECRET_KEY=${KACHE_S3_SECRET_KEY}" \
-        ${cache_from_flag} \
-        ${cache_to_flag} \
-        -t {{ tag }} \
+        "${cache_flags[@]}" \
+        -t {{ quote(tag) }} \
         "${output_flag}" \
         .
 

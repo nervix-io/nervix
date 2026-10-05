@@ -515,6 +515,8 @@ pub(crate) struct Exchange {
     pub(crate) reader: JoinHandle<()>,
     pub(crate) sinks: EventSinks,
     pub(crate) generation: Arc<()>,
+    /// The channel the exchange runs on, which resource uploads share.
+    pub(crate) channel: Channel,
 }
 
 /// What a request needs of the exchange it is sent on.
@@ -523,8 +525,6 @@ pub(crate) struct ExchangeRequests {
     /// The waiters of the exchange's requests. The exchange's reader shares the registry: it
     /// completes each waiter as its reply arrives and closes the registry when the exchange ends.
     pub(crate) pending: Arc<SyncMutex<PendingReplies>>,
-    /// The channel the exchange runs on, which resource uploads share.
-    pub(crate) channel: Channel,
 }
 
 impl ExchangeRequests {
@@ -591,14 +591,11 @@ impl Exchange {
         let reader = ExchangeReader::new(pending.clone(), sinks.clone(), generation.clone());
         let reader = nervix_primitives::task::spawn(reader.run(response.into_inner()));
         Ok(Self {
-            requests: Arc::new(ExchangeRequests {
-                frames,
-                pending,
-                channel,
-            }),
+            requests: Arc::new(ExchangeRequests { frames, pending }),
             reader,
             sinks,
             generation,
+            channel,
         })
     }
 

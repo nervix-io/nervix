@@ -71,8 +71,9 @@ class ModelCoverageTests(unittest.TestCase):
         self.assertIn("target/native-coverage/**/models.json", job)
         extra = job_section(workflow, "extra-tests")
         self.assertIn("just coverage-native-extras test-loom", extra)
-        self.assertIn("just test-loom-qualification", extra)
         self.assertIn("just test-primitives-compile", extra)
+        qualification = job_section(workflow, "loom-qualification")
+        self.assertIn("just test-loom-qualification", qualification)
         coverage = job_section(workflow, "coverage")
         self.assertIn(
             "needs: [tests, scenarios, extra-tests, shuttle]",

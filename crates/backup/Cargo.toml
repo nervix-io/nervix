@@ -20,6 +20,10 @@ tar = { workspace = true }
 thiserror = { workspace = true }
 
 [dev-dependencies]
+arrow-array = { workspace = true }
+arrow-ipc = { workspace = true }
+arrow-schema = { workspace = true }
 bolero = { workspace = true }
 nervix-arbitrary = { workspace = true }
+nervix-primitives = { workspace = true }
 rstest = { workspace = true }

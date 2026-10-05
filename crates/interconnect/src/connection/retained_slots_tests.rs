@@ -99,7 +99,7 @@ fn bolero_pool_slot_generations_have_one_worker_and_fixed_capacity() {
                         retained.push(slot);
                     }
                     1 => {
-                        for slots in current.slots.iter() {
+                        for slots in current.pool.slots.iter() {
                             for selected in slots.iter() {
                                 selected.cancel.cancel();
                             }

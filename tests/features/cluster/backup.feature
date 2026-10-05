@@ -739,6 +739,9 @@ Feature: Configuration backup into a public archive
     Then the current leader node is saved as placeholder "leader"
     When the CLI restores "domain {{domain}} --as {{domain}}_copy" from "stateful.nvxb" on node "{{leader}}" reporting JSON
     Then the CLI restore succeeded, restoring domain "{{domain}}_copy" with 1 resource versions and 10 models
+    When the CLI backs up "domain {{domain}}_copy" from node "{{leader}}" into "stopped-restored.nvxb" reporting JSON
+    Then the CLI backup succeeded with a JSON report naming domain "{{domain}}_copy"
+    And backup archives "stateful.nvxb" and "stopped-restored.nvxb" preserve complete domain "{{domain}}" restored as stopped domain "{{domain}}_copy"
     Given the active domain is "{{domain}}_copy"
     When these NSPL commands are executed on the leader node
       """

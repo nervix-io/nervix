@@ -8,6 +8,22 @@ For a reproducible or production deployment, replace the rolling tag with a revi
 tag or image digest. Use TLS, a secret manager, and a client-reachable advertise hostname instead
 of the local-development defaults shown here.
 
+## CUDA Images
+
+Build a local CUDA image from a repository checkout with `just docker-build-cuda`; the build
+requirements are in [Developing Nervix](developing-nervix.md#build-container-images). The image
+uses the `cuda` target in `Dockerfile.debian`; the CPU image uses the `cpu` target. Both copy
+the same Nervix binaries from one shared builder stage. The CUDA image
+contains ONNX Runtime 1.30.0's CUDA 13 provider, CUDA 13.2.2, and cuDNN 9.25.1. It supports Linux
+AMD64 and pins the Debian base to `debian:trixie-20260918-slim` and its image digest. CUDA and
+cuDNN occupy one layer directly above that base. The next layer updates and upgrades Debian
+packages while holding CUDA and cuDNN at their pinned versions. Nervix's layers follow and
+reuse that CUDA layer across application builds.
+
+To expose an NVIDIA GPU, install a host driver supporting CUDA 13.2 and the NVIDIA Container
+Toolkit, set `NERVIX_IMAGE=nervix:cuda`, and add `--gpus all` to the `docker run` commands below.
+The container toolkit supplies the host driver; CUDA and cuDNN are supplied by the image.
+
 ## Run Three Nodes With Docker
 
 Choose the image and initial password. The password environment variable is expanded by the shell

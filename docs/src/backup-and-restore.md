@@ -66,8 +66,8 @@ entries at the cut, including updates since the periodic snapshot; it never wait
 An empty relay contributes an explicit empty generation. A live capture obtains the same complete
 relay generation under that barrier, while its domain-wide cut retains live capture semantics.
 The drain uses the shutdown admitted-work view: active intake and generators, active source ACK
-roots, relay and node buffers, and emitter buffers or publishes. Parked `REQUIRED WAIT` messages
-are exempt. Once every node reports no admitted work, the leader requests a confirming force-flush
+roots, relay and node buffers, relays that admitted a batch while the node read that view, and
+emitter buffers or publishes. Parked `REQUIRED WAIT` messages are exempt. Once every node reports no admitted work, the leader requests a confirming force-flush
 generation on every node and waits for its obligations to finish before asking owners to capture.
 An unavailable sink keeps its publish and ACK counts outstanding until `TIMEOUT` expires; the
 failed backup reports those counts and resumes the domain.
@@ -630,6 +630,39 @@ versions.
 
 An archive holds password hashes, and its models and resources can hold credentials and other
 secrets. Store it as a secret.
+
+### Archive Fidelity Checks
+
+The registered [archive properties](./property-testing-and-fuzzing.md) compare complete current
+manifests, users, domain lifecycle and clocks, resource catalogs, WASM descriptors and guest saves,
+Kafka offsets, ordered branch lifecycle entries, materialized generation descriptors and every
+identity group's typed branch keys and watermarks. Valid synthetic Arrow groups include nullable,
+sensitive, nested, byte and floating-point columns. They exercise the production record validators,
+manifest-first tar writer, streaming reader and restore-content reader, checking every section's
+membership, order, length, digest and bytes. Re-exporting verified extracted values produces the
+same archive bytes. Canonical NSPL documents also reparse to their complete ordered Models across
+multiple domains. Synthetic payloads cover empty data, tar block boundaries and long section paths;
+entry permissions remain owner-only.
+
+Separate malformed-input targets check current record headers and fields, inconsistent metadata,
+missing or reordered sections and truncated streams before verified contents reach installation.
+Materialized cases also reject inconsistent row/group counts, missing identity or column sections,
+invalid keys/watermarks and damaged Arrow bytes. The owning runtime column property separately
+checks exact-schema encoding, restore conversion and complete native generation equality.
+Schema agreement with the restored schedule remains the restore planner's contract, exercised by
+public restore scenarios. The one-node and three-node WASM/Kafka restore scenario compares every
+archived field and raw resource/guest byte before the restored domain starts, then proves subsequent
+START behavior and two-branch isolation. It asserts domain renaming, the stopped lifecycle and the
+new guest lifetime explicitly; capture metadata belongs to each new backup. The materialized
+one-node and three-node restore scenario also re-exports the stopped domain before START, comparing
+every descriptor field, identity and Arrow byte, including generations larger than the bulk budget.
+RESTORE explicitly resets the source ownership fence to zero in the stored checkpoint; revisions
+and branch generations remain exact. A stopped backup reads this checkpoint's ordered groups from
+the same immutable database view as its other state, stages one bounded group at a time and retains
+the original Arrow bytes. A running or paused backup captures fresh runtime rows under their existing
+assignment barriers. These representation
+checks do not establish capture-fence or installation-ordering correctness, which retain their
+production-owner concurrency and recovery evidence.
 
 ## Limits
 

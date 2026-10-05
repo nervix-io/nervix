@@ -2,8 +2,9 @@
 //!
 //! Layer: data plane.
 //! - **Owns.** Forcing Kafka and branch-lifecycle publications, then reading one database
-//!   snapshot, reattaching typed branch keys from lifecycle checkpoints, and capturing fresh
-//!   shared Arrow rows under each materialized relay's assignment barrier.
+//!   snapshot, reattaching typed branch keys from lifecycle checkpoints, and selecting stored
+//!   materialized readers for stopped domains or fresh shared Arrow rows under the assignment
+//!   barrier for running and paused domains.
 //! - **Depends on.** Branch-local state, the runtime state store, and typed placement envelopes.
 //! - **Must not know.** Archive records, backup command execution, or restore planning.
 
@@ -22,7 +23,8 @@ use error_stack::{Report, ResultExt as _};
 use nervix_execution::Cancellation;
 use nervix_interconnect::StatePlacementEnvelope;
 use nervix_models::{
-    BranchKeyFingerprint, DomainName, ModelName, NodeRef, RemoteRuntimeField, Timestamp,
+    BranchKeyFingerprint, DomainName, DomainStatus, ModelName, NodeRef, RemoteRuntimeField,
+    Timestamp,
 };
 use thiserror::Error;
 
@@ -44,11 +46,20 @@ pub(crate) struct CapturedRuntimeState {
     pub(crate) payload: Vec<u8>,
 }
 
-/// One domain cut, including fresh shared column views captured under each relay's barrier.
-#[derive(Debug, Clone)]
+/// One domain cut, including the materialized source selected by the domain's lifecycle.
 pub(crate) struct CapturedDomainState {
     pub(crate) checkpoints: Vec<CapturedRuntimeState>,
-    pub(crate) materialized: Vec<CapturedMaterializedRelay>,
+    pub(crate) materialized: CapturedMaterializedState,
+}
+
+pub(crate) enum CapturedMaterializedState {
+    Current(Vec<CapturedMaterializedRelay>),
+    Stored(Vec<CapturedStoredMaterializedRelay>),
+}
+
+pub(crate) struct CapturedStoredMaterializedRelay {
+    pub(crate) placement: StatePlacementEnvelope,
+    pub(crate) checkpoint: super::materialized_snapshot::CapturedMaterializedCheckpoint,
 }
 
 #[derive(Debug, Clone)]
@@ -326,6 +337,7 @@ impl Runtime {
         &self,
         domain: &DomainName,
         quiesced: bool,
+        status: DomainStatus,
     ) -> error_stack::Result<CapturedDomainState, BackupStateCaptureError> {
         let Some(store) = self.inner.state_store.as_ref() else {
             return Err(Report::new(BackupStateCaptureError::Unavailable));
@@ -364,11 +376,24 @@ impl Runtime {
                 .publish_sealed_snapshot(placement, snapshot.lsm, &snapshot.payload)
                 .change_context(BackupStateCaptureError::Storage)?;
         }
+        let kinds: &[RuntimeStateKind] = match status {
+            DomainStatus::Stopped => &[
+                RuntimeStateKind::WasmProcessor,
+                RuntimeStateKind::KafkaOffset,
+                RuntimeStateKind::BranchLru,
+                RuntimeStateKind::MaterializedRelay,
+            ],
+            DomainStatus::Running | DomainStatus::Paused => &[
+                RuntimeStateKind::WasmProcessor,
+                RuntimeStateKind::KafkaOffset,
+                RuntimeStateKind::BranchLru,
+            ],
+        };
         let stored_snapshots = store
-            .snapshot_backup_domain(domain)
+            .snapshot_backup_domain(domain, kinds)
             .change_context(BackupStateCaptureError::Storage)?;
         let mut snapshots = Vec::new();
-        for (placement, snapshot) in stored_snapshots {
+        for (placement, snapshot) in stored_snapshots.checkpoints {
             let node = NodeRef::new(placement.kind, placement.identifier.clone()).in_domain(domain);
             let Some(slot) = self.inner.state_identities.get(&node) else {
                 continue;
@@ -417,23 +442,64 @@ impl Runtime {
                 payload: snapshot.payload,
             });
         }
-        let mut materialized = Vec::new();
-        for state in self.inner.replicated_materialized_stream_states.iter() {
-            let placement = state.key();
-            if &placement.domain != domain
-                || !self.runtime_state_placement_is_assigned_locally(placement)
-            {
-                continue;
+        let materialized = match status {
+            DomainStatus::Stopped => {
+                let mut stored_materialized = Vec::new();
+                for (placement, reader) in stored_snapshots.materialized {
+                    let node = NodeRef::new(placement.kind, placement.identifier.clone())
+                        .in_domain(domain);
+                    let Some(slot) = self.inner.state_identities.get(&node) else {
+                        continue;
+                    };
+                    let Some(assignment) = slot.load_full() else {
+                        continue;
+                    };
+                    if !assignment
+                        .identity
+                        .names(placement.state, placement.branch.as_ref())
+                    {
+                        continue;
+                    }
+                    let placement = RuntimeStatePlacement {
+                        domain: domain.clone(),
+                        state: placement.state,
+                        kind: placement.kind,
+                        identifier: placement.identifier,
+                        branch_key: None,
+                    };
+                    stored_materialized.push(CapturedStoredMaterializedRelay {
+                        placement: placement.to_remote(),
+                        checkpoint:
+                            super::materialized_snapshot::CapturedMaterializedCheckpoint::new(
+                                self.executor().clone(),
+                                reader,
+                            ),
+                    });
+                }
+                CapturedMaterializedState::Stored(stored_materialized)
             }
-            let (generation, charge) = ReplicatedMaterializedRelayState::read(state.value())
-                .capture_for_backup(self.executor())
-                .change_context(BackupStateCaptureError::Storage)?;
-            materialized.push(CapturedMaterializedRelay {
-                placement: placement.to_remote(),
-                generation,
-                charge: super::Arc::new(charge),
-            });
-        }
+            DomainStatus::Running | DomainStatus::Paused => {
+                let mut materialized = Vec::new();
+                for state in self.inner.replicated_materialized_stream_states.iter() {
+                    let placement = state.key();
+                    if &placement.domain != domain
+                        || !self.runtime_state_placement_is_assigned_locally(placement)
+                    {
+                        continue;
+                    }
+                    let (generation, charge) =
+                        ReplicatedMaterializedRelayState::read(state.value())
+                            .capture_for_backup(self.executor())
+                            .change_context(BackupStateCaptureError::Storage)?;
+                    materialized.push(CapturedMaterializedRelay {
+                        placement: placement.to_remote(),
+                        generation,
+                        charge: super::Arc::new(charge),
+                    });
+                }
+                CapturedMaterializedState::Current(materialized)
+            }
+        };
         Ok(CapturedDomainState {
             checkpoints: captured,
             materialized,
@@ -584,7 +650,7 @@ mod tests {
             )
             .assured("eviction persists");
         let captured = runtime
-            .capture_backup_state(&domain, true)
+            .capture_backup_state(&domain, true, DomainStatus::Stopped)
             .assured("a retained inactive guest does not fail the cut");
         assert_eq!(
             captured.checkpoints.len(),
@@ -600,7 +666,7 @@ mod tests {
         runtime.clear_state_identities(&domain);
         assert!(
             runtime
-                .capture_backup_state(&domain, true)
+                .capture_backup_state(&domain, true, DomainStatus::Stopped)
                 .assured("removed entities do not contribute retained checkpoints")
                 .checkpoints
                 .is_empty()
