@@ -341,14 +341,14 @@ impl RelayProcessorNode {
         .await
         {
             Ok(plan) => plan,
-            Err(error) => {
+            Err(failure) => {
                 branch.runtime.handle_internal_processor_error_for_acks(
                     &branch.domain,
                     self.kind,
                     &self.processor,
                     &self.error_policies,
-                    error.acks.iter(),
-                    error.reason,
+                    failure.acks.iter(),
+                    format!("{:#}", failure.error),
                 );
                 return None;
             }

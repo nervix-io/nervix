@@ -772,6 +772,13 @@ abandoned and its containers are left to the runner, because waiting without a b
 that already has its result loses it to the job's own timeout. Dropping the runtime then waits at
 most 60 seconds for blocking tasks a scenario left parked in a driver.
 
+A container that fails to stop or to be removed does not keep the others from being torn down. Its
+failure keeps a `ContainerTeardownError` report with the Docker or Testcontainers cause beneath it,
+and so does a Ryuk cleanup container the suite fails to remove. The teardown stays typed until the
+process prints it, on one line: `suite dependency teardown failed:` and the whole chain of every
+failure, the failures separated by semicolons. A teardown that failed is not clean, so it fails a
+run whose scenarios all passed; after a suite timeout it is printed beside the timeout instead.
+
 ## HTTP Receivers
 
 A scenario about a node sending HTTP requests to an external endpoint starts an in-process HTTP/1.1

@@ -6,6 +6,7 @@
 //! - **Must not know.** NSPL source, scheduling decisions or connector I/O.
 
 use arrow_buffer::BooleanBufferBuilder;
+use error_stack::ResultExt as _;
 
 use super::*;
 
@@ -17,23 +18,21 @@ pub(super) struct ProgramRun<'a> {
     pub(super) now: Timestamp,
 }
 
+/// The outcome of one filter-map program over a single record.
 #[cfg(test)]
 pub(super) async fn execute_filter_map_on_record(
-    processor: &ModelName,
     filter_map: &CompiledProgramWithMaterializedInterest,
     record: RuntimeRow,
     branch_key: Option<&BranchKey>,
     filter_map_metadata: Option<&IngestFilterMapMetadata>,
     side_inputs: &HashMap<String, RuntimeValue>,
     execution_now: Timestamp,
-) -> PlannedGeneralResult<Option<RuntimeRow>> {
+) -> PlannedGeneralResult<SingleRecordFilterMapOutcome> {
     let keys = vec![branch_key.cloned()];
     let metadata = RecordMetadataColumns::from_rows([record.metadata().clone()]);
     let carrier = record.one_row_batch();
     let outcome = evaluate_filter_map_on_batch(
         &Executor::default(),
-        "subscription",
-        processor,
         filter_map,
         FilterMapOutcomeInputs {
             carrier: &carrier,
@@ -48,16 +47,7 @@ pub(super) async fn execute_filter_map_on_record(
     .into_iter()
     .next()
     .verified("this call passes a single record, and filter-map answers one outcome per record");
-    match outcome {
-        SingleRecordFilterMapOutcome::Filtered => Ok(None),
-        SingleRecordFilterMapOutcome::Output(record) => Ok(Some(record)),
-        SingleRecordFilterMapOutcome::MessageError { error, .. } => {
-            Err(Report::new(PlannedGeneralError {
-                acks: Vec::new(),
-                reason: format!("FILTER-MAP message error: {}", error.message),
-            }))
-        }
-    }
+    Ok(outcome)
 }
 
 /// Runs one filter-map program over a whole group of records in a single VM execution
@@ -84,13 +74,10 @@ pub(super) struct FilterMapOutcomeInputs<'a> {
 )]
 pub(super) async fn evaluate_filter_map_on_batch(
     executor: &Executor,
-    processor_kind: &str,
-    processor: impl Into<ModelName>,
     filter_map: &CompiledProgramWithMaterializedInterest,
     inputs: FilterMapOutcomeInputs<'_>,
     execution_now: Timestamp,
 ) -> PlannedGeneralResult<Vec<SingleRecordFilterMapOutcome>> {
-    let processor = processor.into();
     let FilterMapOutcomeInputs {
         carrier,
         record_metadata,
@@ -98,46 +85,44 @@ pub(super) async fn evaluate_filter_map_on_batch(
         filter_map_metadata,
         side_inputs,
     } = inputs;
+    let operation = MessageErrorOperation::Set;
     let row_count = carrier.batch().num_rows();
     if row_count == 0 {
         return Ok(Vec::new());
     }
     if record_metadata.len() != row_count {
-        return Err(Report::new(PlannedGeneralError {
-            acks: Vec::new(),
-            reason: format!(
-                "FILTER-MAP received {} runtime metadata rows for {row_count} records",
-                record_metadata.len()
-            ),
+        return Err(Report::new(PlannedGeneralError::SidecarRowCount {
+            operation,
+            sidecar: PlannedSidecar::RuntimeMetadata,
+            expected: row_count,
+            found: record_metadata.len(),
         }));
     }
     if keys.len() != row_count {
-        return Err(Report::new(PlannedGeneralError {
-            acks: Vec::new(),
-            reason: format!(
-                "FILTER-MAP received {} branch keys for {row_count} records",
-                keys.len()
-            ),
+        return Err(Report::new(PlannedGeneralError::SidecarRowCount {
+            operation,
+            sidecar: PlannedSidecar::BranchKeys,
+            expected: row_count,
+            found: keys.len(),
         }));
     }
     if let Some(metadata) = filter_map_metadata
         && metadata.len() != row_count
     {
-        return Err(Report::new(PlannedGeneralError {
-            acks: Vec::new(),
-            reason: format!(
-                "FILTER-MAP received {} ingest metadata rows for {row_count} records",
-                metadata.len()
-            ),
+        return Err(Report::new(PlannedGeneralError::SidecarRowCount {
+            operation,
+            sidecar: PlannedSidecar::IngestMetadata,
+            expected: row_count,
+            found: metadata.len(),
         }));
     }
+    // Every acknowledgement the program run carries is empty, so a failure that ends the run
+    // resolves nothing and only its report is kept.
     let executed = execute_filter_map_program_on_batch(
         ProgramRun {
             executor,
             now: execution_now,
         },
-        processor_kind,
-        processor,
         filter_map,
         FilterMapBatchInputs {
             carrier,
@@ -150,15 +135,12 @@ pub(super) async fn evaluate_filter_map_on_batch(
         None,
     )
     .await
-    .map_err(Report::new)?;
+    .map_err(|failure| failure.error)?;
     if executed.selected_rows.len() != executed.batch.row_count() {
-        return Err(Report::new(PlannedGeneralError {
-            acks: Vec::new(),
-            reason: format!(
-                "FILTER-MAP produced {} rows for {} selected rows",
-                executed.batch.row_count(),
-                executed.selected_rows.len()
-            ),
+        return Err(Report::new(PlannedGeneralError::SelectedRowCount {
+            operation,
+            produced: executed.batch.row_count(),
+            selected: executed.selected_rows.len(),
         }));
     }
     // Rows the program filtered out never appear in `selected_rows`, so starting every
@@ -175,11 +157,10 @@ pub(super) async fn evaluate_filter_map_on_batch(
         // outcome slot is what this loop writes.
         let (Some(slot), Some(_)) = (outcomes.get_mut(input_row), record_metadata.row(input_row))
         else {
-            return Err(Report::new(PlannedGeneralError {
-                acks: Vec::new(),
-                reason: format!(
-                    "FILTER-MAP selected row {input_row} outside its {row_count}-record input"
-                ),
+            return Err(Report::new(PlannedGeneralError::SelectedRowOutOfBounds {
+                operation,
+                row: input_row,
+                rows: row_count,
             }));
         };
         if let Some(side_error) = executed.batch.errors().row(output_row).first() {
@@ -206,12 +187,7 @@ pub(super) async fn evaluate_filter_map_on_batch(
     if !successful_output_rows.is_empty() {
         let output_batch = Arc::new(
             vm_typed_batch_selected_rows_to_runtime_batch(&executed.batch, &successful_output_rows)
-                .map_err(|error| {
-                    Report::new(PlannedGeneralError {
-                        acks: Vec::new(),
-                        reason: error.to_string(),
-                    })
-                })?,
+                .change_context(PlannedGeneralError::MaterializeOutput { operation })?,
         );
         for (output_row, input_row) in successful_input_rows.into_iter().enumerate() {
             outcomes[input_row] = SingleRecordFilterMapOutcome::Output(
@@ -222,12 +198,7 @@ pub(super) async fn evaluate_filter_map_on_batch(
                         .row(input_row)
                         .verified("selected input rows were checked against metadata above"),
                 )
-                .map_err(|error| {
-                    Report::new(PlannedGeneralError {
-                        acks: Vec::new(),
-                        reason: error.to_string(),
-                    })
-                })?,
+                .change_context(PlannedGeneralError::MaterializeOutput { operation })?,
             );
         }
     }
@@ -358,15 +329,9 @@ pub(super) async fn plan_filter_map_messages(
     program: &CompiledProgramWithMaterializedInterest,
     mut batch: RelayRecordBatch,
     side_inputs: &HashMap<String, RuntimeValue>,
-) -> Result<FilterMapPlan, PlannedGeneralError> {
+) -> Result<FilterMapPlan, PlannedGeneralFailure> {
     let processor = processor.into();
-    let program_label = match operation {
-        MessageErrorOperation::SourceWhere => "FROM WHERE",
-        MessageErrorOperation::FilterWhere => "FILTER WHERE",
-        MessageErrorOperation::RouteWhere => "ROUTE WHERE",
-        MessageErrorOperation::Set => "FILTER-MAP",
-        _ => operation.as_ref(),
-    };
+    let program_name = ProgramName::of(&operation);
     let lookup_columns = match compute_lookup_hash_map_columns(
         run.executor,
         program,
@@ -384,15 +349,8 @@ pub(super) async fn plan_filter_map_messages(
     {
         Ok(columns) => columns,
         Err(error) => {
-            return Err(PlannedGeneralError {
-                acks: batch.acks,
-                reason: format!(
-                    "{} '{}' failed to prepare LOOKUP_HASH_MAP inputs: {}",
-                    processor_kind,
-                    processor.as_str(),
-                    error
-                ),
-            });
+            let error = error.change_context(PlannedGeneralError::PrepareLookups { operation });
+            return Err(PlannedGeneralFailure::new(error, batch.acks));
         }
     };
     let uninitialized = VmUninitializedInput {
@@ -421,16 +379,8 @@ pub(super) async fn plan_filter_map_messages(
     ) {
         Ok(vm_batch) => vm_batch,
         Err(error) => {
-            return Err(PlannedGeneralError {
-                acks: batch.acks,
-                reason: format!(
-                    "{} '{}' failed to prepare {} input batch: {}",
-                    processor_kind,
-                    processor.as_str(),
-                    program_label,
-                    error
-                ),
-            });
+            let error = error.change_context(PlannedGeneralError::PrepareInput { operation });
+            return Err(PlannedGeneralFailure::new(error, batch.acks));
         }
     };
     let key = batch.key.clone();
@@ -451,16 +401,8 @@ pub(super) async fn plan_filter_map_messages(
     {
         Ok(result) => result,
         Err(error) => {
-            return Err(PlannedGeneralError {
-                acks,
-                reason: format!(
-                    "{} '{}' {} execution failed: {}",
-                    processor_kind,
-                    processor.as_str(),
-                    program_label,
-                    error
-                ),
-            });
+            let error = error.change_context(PlannedGeneralError::Execute { operation });
+            return Err(PlannedGeneralFailure::new(error, acks));
         }
     };
 
@@ -487,7 +429,7 @@ pub(super) async fn plan_filter_map_messages(
                 "{} '{}' {} side error {}: {} at {}",
                 processor_kind,
                 processor.as_str(),
-                program_label,
+                program_name,
                 side_error.code().as_str(),
                 side_error.reason,
                 side_error.span
@@ -497,18 +439,16 @@ pub(super) async fn plan_filter_map_messages(
             } else {
                 reason
             };
-            let record = batch
-                .runtime_row(input_row)
-                .map_err(|error| PlannedGeneralError {
-                    acks: acks.clone(),
-                    reason: format!(
-                        "{} '{}' failed to materialize {} error input row: {}",
-                        processor_kind,
-                        processor.as_str(),
-                        program_label,
-                        error
-                    ),
-                })?;
+            let record = match batch.runtime_row(input_row) {
+                Ok(record) => record,
+                Err(error) => {
+                    let error = error.change_context(PlannedGeneralError::MaterializeErrorInput {
+                        operation,
+                        row: input_row,
+                    });
+                    return Err(PlannedGeneralFailure::new(error, acks));
+                }
+            };
             message_errors.push(planned_structured_message_error(
                 RelayMessage {
                     key: keys[input_row].clone(),
@@ -524,19 +464,16 @@ pub(super) async fn plan_filter_map_messages(
         }
         let invalid_fields = invalid_outputs.fields(output_row);
         if !invalid_fields.is_empty() {
-            let record =
-                batch
-                    .runtime_row(input_row)
-                    .map_err(|decode_error| PlannedGeneralError {
-                        acks: acks.clone(),
-                        reason: format!(
-                            "{} '{}' failed to materialize {} error input row: {}",
-                            processor_kind,
-                            processor.as_str(),
-                            program_label,
-                            decode_error
-                        ),
-                    })?;
+            let record = match batch.runtime_row(input_row) {
+                Ok(record) => record,
+                Err(error) => {
+                    let error = error.change_context(PlannedGeneralError::MaterializeErrorInput {
+                        operation,
+                        row: input_row,
+                    });
+                    return Err(PlannedGeneralFailure::new(error, acks));
+                }
+            };
             message_errors.push(planned_structured_message_error(
                 RelayMessage {
                     key: keys[input_row].clone(),
@@ -550,7 +487,7 @@ pub(super) async fn plan_filter_map_messages(
                         "{} '{}' failed to materialize {} output row: {}",
                         processor_kind,
                         processor.as_str(),
-                        program_label,
+                        program_name,
                         "required output fields are uninitialized or null"
                     ),
                     operation,
@@ -570,18 +507,17 @@ pub(super) async fn plan_filter_map_messages(
     let batch = if success_output_rows.is_empty() {
         None
     } else {
-        let output_batch =
-            vm_typed_batch_selected_rows_to_runtime_batch(&result.batch, &success_output_rows)
-                .map_err(|error| PlannedGeneralError {
-                    acks: acks.clone(),
-                    reason: format!(
-                        "{} '{}' failed to materialize successful {} rows: {}",
-                        processor_kind,
-                        processor.as_str(),
-                        program_label,
-                        error
-                    ),
-                })?;
+        let output_batch = match vm_typed_batch_selected_rows_to_runtime_batch(
+            &result.batch,
+            &success_output_rows,
+        ) {
+            Ok(output_batch) => output_batch,
+            Err(error) => {
+                let error =
+                    error.change_context(PlannedGeneralError::MaterializeOutput { operation });
+                return Err(PlannedGeneralFailure::new(error, acks));
+            }
+        };
         let output_metadata = metadata.take(&success_input_rows).verified(
             "the program selects rows of this batch, whose metadata has one entry for every row",
         );
@@ -590,19 +526,15 @@ pub(super) async fn plan_filter_map_messages(
             .map(|input_row| std::mem::take(&mut acks[*input_row]))
             .collect::<Vec<_>>();
         let error_acks = output_acks.clone();
-        Some(
-            RelayRecordBatch::from_filtered_parts(key, output_batch, output_metadata, output_acks)
-                .map_err(|error| PlannedGeneralError {
-                    acks: error_acks,
-                    reason: format!(
-                        "{} '{}' failed to build {} output batch: {}",
-                        processor_kind,
-                        processor.as_str(),
-                        program_label,
-                        error
-                    ),
-                })?,
-        )
+        match RelayRecordBatch::from_filtered_parts(key, output_batch, output_metadata, output_acks)
+        {
+            Ok(output) => Some(output),
+            Err(error) => {
+                let error =
+                    error.change_context(PlannedGeneralError::BuildOutputBatch { operation });
+                return Err(PlannedGeneralFailure::new(error, error_acks));
+            }
+        }
     };
 
     Ok(FilterMapPlan {
@@ -652,15 +584,14 @@ pub(super) async fn plan_emitter_filter_map_batch(
     mut input: RelayRecordBatch,
     execution_now: Timestamp,
     side_inputs: &HashMap<String, RuntimeValue>,
-) -> Result<EmitterFilterMapPlan, PlannedGeneralError> {
+) -> Result<EmitterFilterMapPlan, PlannedGeneralFailure> {
+    let operation = MessageErrorOperation::Set;
     let acks = std::mem::take(&mut input.acks);
     let body_result = execute_filter_map_program_on_batch(
         ProgramRun {
             executor,
             now: execution_now,
         },
-        "emitter",
-        emitter,
         &program.body,
         FilterMapBatchInputs {
             carrier: &input.batch,
@@ -684,19 +615,19 @@ pub(super) async fn plan_emitter_filter_map_batch(
     let mut headers = (!body_result.invocations.is_empty()).then(Vec::new);
     let mut message_errors = Vec::new();
     for (output_row, input_row) in body_result.selected_rows.iter().enumerate() {
-        let source_record = |context: &str| {
-            input
-                .runtime_row(input_row)
-                .map_err(|error| PlannedGeneralError {
-                    acks: acks.clone(),
-                    reason: format!(
-                        "emitter '{}' failed to materialize {context} input row: {error}",
-                        emitter.as_str()
-                    ),
-                })
+        let source_record = || {
+            input.runtime_row(input_row).map_err(|error| {
+                PlannedGeneralFailure::new(
+                    error.change_context(PlannedGeneralError::MaterializeErrorInput {
+                        operation,
+                        row: input_row,
+                    }),
+                    acks.clone(),
+                )
+            })
         };
         if let Some(side_error) = body_result.batch.errors().row(output_row).first() {
-            let source_record = source_record("FILTER-MAP error")?;
+            let source_record = source_record()?;
             let partial_output = program
                 .codec_route
                 .then(|| captured_partial_output(&body_result.batch, output_row))
@@ -734,7 +665,7 @@ pub(super) async fn plan_emitter_filter_map_batch(
             match emitter_headers_from_invocations(&body_result.invocations, output_row) {
                 Ok(headers) => headers,
                 Err(error) => {
-                    let source_record = source_record("FILTER-MAP header error")?;
+                    let source_record = source_record()?;
                     let partial_output = program
                         .codec_route
                         .then(|| captured_partial_output(&body_result.batch, output_row))
@@ -749,9 +680,8 @@ pub(super) async fn plan_emitter_filter_map_batch(
                             execution_now,
                             MessageErrorCode::Evaluation,
                             format!(
-                                "emitter '{}' failed to materialize FILTER-MAP headers: {}",
+                                "emitter '{}' failed to materialize FILTER-MAP headers: {error:#}",
                                 emitter.as_str(),
-                                error
                             ),
                             MessageErrorOperation::Invoke,
                             None,
@@ -766,7 +696,7 @@ pub(super) async fn plan_emitter_filter_map_batch(
             };
         let invalid_fields = invalid_outputs.fields(output_row);
         if !invalid_fields.is_empty() {
-            let source_record = source_record("FILTER-MAP validation error")?;
+            let source_record = source_record()?;
             let partial_output = program
                 .codec_route
                 .then(|| captured_partial_output(&body_result.batch, output_row))
@@ -808,17 +738,17 @@ pub(super) async fn plan_emitter_filter_map_batch(
     let batch = if successful_output_rows.is_empty() {
         None
     } else {
-        let output_batch = vm_typed_batch_selected_rows_to_runtime_batch(
+        let output_batch = match vm_typed_batch_selected_rows_to_runtime_batch(
             &body_result.batch,
             &successful_output_rows,
-        )
-        .map_err(|error| PlannedGeneralError {
-            acks: acks.clone(),
-            reason: format!(
-                "emitter '{}' failed to finalize FILTER-MAP output batch: {error}",
-                emitter.as_str()
-            ),
-        })?;
+        ) {
+            Ok(output_batch) => output_batch,
+            Err(error) => {
+                let error =
+                    error.change_context(PlannedGeneralError::MaterializeOutput { operation });
+                return Err(PlannedGeneralFailure::new(error, acks));
+            }
+        };
         let metadata = input.metadata.take(&successful_input_rows).verified(
             "the program selects rows of this batch, whose metadata has one entry for every row",
         );
@@ -827,21 +757,19 @@ pub(super) async fn plan_emitter_filter_map_batch(
             .map(|input_row| std::mem::take(&mut acks[*input_row]))
             .collect::<Vec<_>>();
         let error_acks = output_acks.clone();
-        Some(
-            RelayRecordBatch::from_filtered_parts(
-                input.key.clone(),
-                output_batch,
-                metadata,
-                output_acks,
-            )
-            .map_err(|error| PlannedGeneralError {
-                acks: error_acks,
-                reason: format!(
-                    "emitter '{}' failed to build FILTER-MAP output batch: {error}",
-                    emitter.as_str()
-                ),
-            })?,
-        )
+        match RelayRecordBatch::from_filtered_parts(
+            input.key.clone(),
+            output_batch,
+            metadata,
+            output_acks,
+        ) {
+            Ok(output) => Some(output),
+            Err(error) => {
+                let error =
+                    error.change_context(PlannedGeneralError::BuildOutputBatch { operation });
+                return Err(PlannedGeneralFailure::new(error, error_acks));
+            }
+        }
     };
 
     Ok(EmitterFilterMapPlan {
@@ -878,14 +806,11 @@ impl VmUninitializedInput {
 )]
 pub(super) async fn execute_prepared_filter_map(
     run: ProgramRun<'_>,
-    processor_kind: &str,
-    processor: impl Into<ModelName>,
     program: &CompiledProgramWithMaterializedInterest,
     vm_batch: VmTypedBatch,
     acks: Vec<AckSet>,
     injector: Option<Arc<Box<dyn VmFunctionInjector>>>,
-) -> Result<ExecutedFilterMap, PlannedGeneralError> {
-    let processor = processor.into();
+) -> Result<ExecutedFilterMap, PlannedGeneralFailure> {
     let result = match execute_program_with_selection_in_context(
         run.executor,
         &program.compiled,
@@ -899,15 +824,10 @@ pub(super) async fn execute_prepared_filter_map(
     {
         Ok(result) => result,
         Err(error) => {
-            return Err(PlannedGeneralError {
-                acks,
-                reason: format!(
-                    "{} '{}' FILTER-MAP execution failed: {}",
-                    processor_kind,
-                    processor.as_str(),
-                    error
-                ),
+            let error = error.change_context(PlannedGeneralError::Execute {
+                operation: MessageErrorOperation::Set,
             });
+            return Err(PlannedGeneralFailure::new(error, acks));
         }
     };
     Ok(ExecutedFilterMap {
@@ -935,14 +855,12 @@ pub(super) struct FilterMapBatchInputs<'a> {
 )]
 pub(super) async fn execute_filter_map_program_on_batch(
     run: ProgramRun<'_>,
-    processor_kind: &str,
-    processor: impl Into<ModelName>,
     program: &CompiledProgramWithMaterializedInterest,
     inputs: FilterMapBatchInputs<'_>,
     acks: Vec<AckSet>,
     mut shared: Option<&mut SharedBatchColumns>,
-) -> Result<ExecutedFilterMap, PlannedGeneralError> {
-    let processor = processor.into();
+) -> Result<ExecutedFilterMap, PlannedGeneralFailure> {
+    let operation = MessageErrorOperation::Set;
     let lookup_columns = match compute_lookup_hash_map_columns(
         run.executor,
         program,
@@ -954,15 +872,8 @@ pub(super) async fn execute_filter_map_program_on_batch(
     {
         Ok(columns) => columns,
         Err(error) => {
-            return Err(PlannedGeneralError {
-                acks,
-                reason: format!(
-                    "{} '{}' failed to prepare LOOKUP_HASH_MAP inputs: {}",
-                    processor_kind,
-                    processor.as_str(),
-                    error
-                ),
-            });
+            let error = error.change_context(PlannedGeneralError::PrepareLookups { operation });
+            return Err(PlannedGeneralFailure::new(error, acks));
         }
     };
     let uninitialized_fields = match program.output_namespace_input {
@@ -995,15 +906,8 @@ pub(super) async fn execute_filter_map_program_on_batch(
     ) {
         Ok(vm_batch) => vm_batch,
         Err(error) => {
-            return Err(PlannedGeneralError {
-                acks,
-                reason: format!(
-                    "{} '{}' failed to prepare FILTER-MAP input batch: {}",
-                    processor_kind,
-                    processor.as_str(),
-                    error
-                ),
-            });
+            let error = error.change_context(PlannedGeneralError::PrepareInput { operation });
+            return Err(PlannedGeneralFailure::new(error, acks));
         }
     };
     execute_prepared_filter_map(
@@ -1011,8 +915,6 @@ pub(super) async fn execute_filter_map_program_on_batch(
             executor: run.executor,
             now: run.now,
         },
-        processor_kind,
-        processor,
         program,
         vm_batch,
         acks,
@@ -1035,25 +937,29 @@ pub(super) async fn execute_filter_map_program_on_batch(
 )]
 pub(super) async fn evaluate_output_branch_program(
     run: ProgramRun<'_>,
-    node: impl Into<ModelName>,
     program: &CompiledBranchProgram,
     input: &RuntimeRecordBatch,
     output: &RuntimeRecordBatch,
     keys: &[Option<BranchKey>],
     side_inputs: &HashMap<String, RuntimeValue>,
-) -> PlannedGeneralResult<Vec<PlannedGeneralResult<Option<BranchKey>>>> {
-    let node = node.into();
+) -> PlannedGeneralResult<Vec<Result<BranchKey, BranchRowError>>> {
+    let operation = MessageErrorOperation::BranchSet;
     let row_count = output.batch().num_rows();
-    if input.batch().num_rows() != row_count || keys.len() != row_count {
-        return Err(Report::new(PlannedGeneralError {
-            acks: Vec::new(),
-            reason: format!(
-                "branch construction for '{}' received {} input rows, {} output rows, and {} keys",
-                node.as_str(),
-                input.batch().num_rows(),
-                row_count,
-                keys.len()
-            ),
+    let input_rows = input.batch().num_rows();
+    if input_rows != row_count {
+        return Err(Report::new(PlannedGeneralError::SidecarRowCount {
+            operation,
+            sidecar: PlannedSidecar::Input,
+            expected: row_count,
+            found: input_rows,
+        }));
+    }
+    if keys.len() != row_count {
+        return Err(Report::new(PlannedGeneralError::SidecarRowCount {
+            operation,
+            sidecar: PlannedSidecar::BranchKeys,
+            expected: row_count,
+            found: keys.len(),
         }));
     }
     let namespace_batches = [("input", input), ("output", output), ("message", output)];
@@ -1071,12 +977,7 @@ pub(super) async fn evaluate_output_branch_program(
         None,
     )
     .await
-    .map_err(|error| {
-        Report::new(PlannedGeneralError {
-            acks: Vec::new(),
-            reason: error.to_string(),
-        })
-    })?;
+    .change_context(PlannedGeneralError::PrepareLookups { operation })?;
     let uninitialized = VmUninitializedInput {
         fields: program
             .program
@@ -1102,12 +1003,7 @@ pub(super) async fn evaluate_output_branch_program(
         },
         None,
     )
-    .map_err(|error| {
-        Report::new(PlannedGeneralError {
-            acks: Vec::new(),
-            reason: error.to_string(),
-        })
-    })?;
+    .change_context(PlannedGeneralError::PrepareInput { operation })?;
     let result = execute_program_with_selection_in_context(
         run.executor,
         &program.program.compiled,
@@ -1118,127 +1014,140 @@ pub(super) async fn evaluate_output_branch_program(
         },
     )
     .await
-    .map_err(|error| {
-        Report::new(PlannedGeneralError {
-            acks: Vec::new(),
-            reason: format!(
-                "branch construction VM for '{}' failed: {}",
-                node.as_str(),
-                error
-            ),
-        })
-    })?;
-    let mut outcomes = (0..row_count)
-        .map(|_| {
-            Err(Report::new(PlannedGeneralError {
-                acks: Vec::new(),
-                reason: "branch construction VM did not preserve the input row".to_string(),
-            }))
-        })
-        .collect::<Vec<_>>();
+    .change_context(PlannedGeneralError::Execute { operation })?;
+    let columns = BranchKeyColumns::of(&result.batch)?;
+    // A row the program did not select keeps this outcome. A failed row holds a typed value rather
+    // than a report or a message, which only its reporting builds.
+    let mut outcomes = vec![Err(BranchRowError::NotSelected); row_count];
     for (output_row, input_row) in result.selected_rows.iter().enumerate() {
-        if input_row >= outcomes.len() {
-            return Err(Report::new(PlannedGeneralError {
-                acks: Vec::new(),
-                reason: format!(
-                    "branch construction VM for '{}' selected unknown row {}",
-                    node.as_str(),
-                    input_row
-                ),
+        let Some(outcome) = outcomes.get_mut(input_row) else {
+            return Err(Report::new(PlannedGeneralError::SelectedRowOutOfBounds {
+                operation,
+                row: input_row,
+                rows: row_count,
             }));
-        }
+        };
         if let Some(error) = result.batch.errors().row(output_row).first() {
-            outcomes[input_row] = Err(Report::new(PlannedGeneralError {
-                acks: Vec::new(),
-                reason: format!(
-                    "branch SET failed with {}: {} at {}",
-                    error.code().as_str(),
-                    error.reason,
-                    error.span
-                ),
-            }));
+            *outcome = Err(BranchRowError::Set(error.clone()));
             continue;
         }
-        let mut fields = Vec::with_capacity(result.batch.schema().fields().len());
-        for (column_index, field) in result.batch.schema().fields().iter().enumerate() {
-            let array = result.batch.column(column_index).to_array_ref();
-            let value = runtime_value_from_arrow_array(
-                array.as_ref(),
-                &parse_as_type_from_arrow(field.data_type()).map_err(|error| {
-                    Report::new(PlannedGeneralError {
-                        acks: Vec::new(),
-                        reason: error.to_string(),
-                    })
-                })?,
-                false,
-                output_row,
-                field.name(),
-            )
-            .map_err(|error| {
-                Report::new(PlannedGeneralError {
-                    acks: Vec::new(),
-                    reason: error.to_string(),
-                })
-            })?
-            .ok_or_else(|| {
-                Report::new(PlannedGeneralError {
-                    acks: Vec::new(),
-                    reason: format!("branch field '{}' is null", field.name()),
-                })
-            })?;
-            let name = FieldName::parse(field.name()).map_err(|error| {
-                Report::new(PlannedGeneralError {
-                    acks: Vec::new(),
-                    reason: format!(
-                        "compiled branch field '{}' is invalid: {}",
-                        field.name(),
-                        error
-                    ),
-                })
-            })?;
-            fields.push((name, value));
-        }
-        outcomes[input_row] = BranchKey::from_fields(fields).map(Some).map_err(|error| {
-            Report::new(PlannedGeneralError {
-                acks: Vec::new(),
-                reason: format!("{error:#}"),
-            })
-        });
+        *outcome = Ok(columns.key(output_row)?);
     }
     Ok(outcomes)
+}
+
+/// Why branch construction gave one row no concrete branch key.
+///
+/// Every failed row keeps this typed value, and its text is formatted only where the row's failure
+/// is reported, so a batch whose rows fail builds no report or message for any of them.
+#[derive(Debug, Clone, PartialEq, thiserror::Error)]
+pub(super) enum BranchRowError {
+    #[error("branch construction VM did not preserve the input row")]
+    NotSelected,
+    #[error("branch SET failed with {}: {} at {}", .0.code().as_str(), .0.reason, .0.span)]
+    Set(nervix_vm::SideError),
+}
+
+/// The fields a branch program wrote, read once for its whole batch: each field's name, the type
+/// its values are read as, and its column.
+struct BranchKeyColumns {
+    fields: Vec<BranchKeyColumn>,
+}
+
+struct BranchKeyColumn {
+    name: FieldName,
+    value_type: ParseAsType,
+    values: ArrayRef,
+}
+
+impl BranchKeyColumns {
+    fn of(batch: &VmTypedBatch) -> PlannedGeneralResult<Self> {
+        let schema_fields = batch.schema().fields();
+        let mut fields = Vec::with_capacity(schema_fields.len());
+        for (index, field) in schema_fields.iter().enumerate() {
+            let name = FieldName::parse(field.name()).change_context_lazy(|| {
+                PlannedGeneralError::BranchFieldName {
+                    field: field.name().clone(),
+                }
+            })?;
+            let value_type =
+                parse_as_type_from_arrow(field.data_type()).change_context_lazy(|| {
+                    PlannedGeneralError::BranchFieldType {
+                        field: name.clone(),
+                    }
+                })?;
+            fields.push(BranchKeyColumn {
+                name,
+                value_type,
+                values: batch.column(index).to_array_ref(),
+            });
+        }
+        Ok(Self { fields })
+    }
+
+    /// The concrete branch key output row `row` wrote.
+    fn key(&self, row: usize) -> PlannedGeneralResult<BranchKey> {
+        let mut values = Vec::with_capacity(self.fields.len());
+        for field in &self.fields {
+            let value = runtime_value_from_arrow_array(
+                field.values.as_ref(),
+                &field.value_type,
+                false,
+                row,
+                field.name.as_str(),
+            )
+            .change_context_lazy(|| PlannedGeneralError::BranchFieldValue {
+                field: field.name.clone(),
+            })?;
+            let Some(value) = value else {
+                return Err(Report::new(PlannedGeneralError::BranchFieldNull {
+                    field: field.name.clone(),
+                }));
+            };
+            values.push((field.name.clone(), value));
+        }
+        // A branch program writes every field of its branch's schema, and a schema declares at
+        // least one, so a key without fields is a defect of the whole program rather than of
+        // this row.
+        BranchKey::from_fields(values).change_context(PlannedGeneralError::BranchKey)
+    }
+}
+
+/// Why one row's `write_header` invocations give it no headers. Its emitter rejects that row with
+/// a message error naming the reason.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub(super) enum EmitterHeaderError {
+    #[error("unsupported invocation '{}'", .function.as_str())]
+    UnsupportedInvocation { function: FunctionName },
+    #[error("write_header arguments must both be STRING")]
+    ArgumentTypes,
+    #[error("write_header result does not contain output row {row}")]
+    MissingRow { row: usize },
+    #[error("write_header arguments cannot be NULL")]
+    NullArgument,
 }
 
 pub(super) fn emitter_headers_from_invocations(
     invocations: &[nervix_vm::FunctionInvocation],
     row: usize,
-) -> PlannedGeneralResult<EmitterHeaders> {
+) -> error_stack::Result<EmitterHeaders, EmitterHeaderError> {
     let mut headers = Vec::new();
     for invocation in invocations {
         if invocation.function != FunctionName::WriteHeader {
-            return Err(Report::new(PlannedGeneralError {
-                acks: Vec::new(),
-                reason: format!("unsupported invocation '{}'", invocation.function.as_str()),
+            return Err(Report::new(EmitterHeaderError::UnsupportedInvocation {
+                function: invocation.function.clone(),
             }));
         }
         let [VmTypedArray::Utf8(names), VmTypedArray::Utf8(values)] =
             invocation.arguments.as_slice()
         else {
-            return Err(Report::new(PlannedGeneralError {
-                acks: Vec::new(),
-                reason: "write_header arguments must both be STRING".to_string(),
-            }));
+            return Err(Report::new(EmitterHeaderError::ArgumentTypes));
         };
         if row >= names.len() || row >= values.len() {
-            return Err(Report::new(PlannedGeneralError {
-                acks: Vec::new(),
-                reason: format!("write_header result does not contain output row {row}"),
-            }));
+            return Err(Report::new(EmitterHeaderError::MissingRow { row }));
         }
         if names.is_null(row) || values.is_null(row) {
-            return Err(Report::new(PlannedGeneralError {
-                acks: Vec::new(),
-                reason: "write_header arguments cannot be NULL".to_string(),
-            }));
+            return Err(Report::new(EmitterHeaderError::NullArgument));
         }
         headers.push((names.value(row).to_string(), values.value(row).to_string()));
     }
@@ -1624,8 +1533,6 @@ mod tests {
         let side_inputs = HashMap::default();
         let outcomes = evaluate_filter_map_on_batch(
             &Executor::default(),
-            "junction",
-            named::<ModelName>("validate_filter_map"),
             &program,
             FilterMapOutcomeInputs {
                 carrier: &empty_carrier,
@@ -1642,8 +1549,6 @@ mod tests {
 
         let error = evaluate_filter_map_on_batch(
             &Executor::default(),
-            "junction",
-            named::<ModelName>("validate_filter_map"),
             &program,
             FilterMapOutcomeInputs {
                 carrier: &carrier,
@@ -1657,12 +1562,22 @@ mod tests {
         .await
         .err()
         .verified("the metadata sidecar is intentionally one row short");
-        assert!(error.current_context().reason.contains("runtime metadata"));
+        assert_eq!(
+            error.current_context(),
+            &PlannedGeneralError::SidecarRowCount {
+                operation: MessageErrorOperation::Set,
+                sidecar: PlannedSidecar::RuntimeMetadata,
+                expected: 1,
+                found: 0,
+            }
+        );
+        assert_eq!(
+            error.to_string(),
+            "FILTER-MAP received 0 runtime metadata rows for 1 records"
+        );
 
         let error = evaluate_filter_map_on_batch(
             &Executor::default(),
-            "junction",
-            named::<ModelName>("validate_filter_map"),
             &program,
             FilterMapOutcomeInputs {
                 carrier: &carrier,
@@ -1676,13 +1591,19 @@ mod tests {
         .await
         .err()
         .verified("the key sidecar is intentionally one row short");
-        assert!(error.current_context().reason.contains("branch keys"));
+        assert_eq!(
+            error.current_context(),
+            &PlannedGeneralError::SidecarRowCount {
+                operation: MessageErrorOperation::Set,
+                sidecar: PlannedSidecar::BranchKeys,
+                expected: 1,
+                found: 0,
+            }
+        );
 
         let empty_ingest_metadata = ingest_metadata_for_test(IngestMetadataKind::Headers, &[]);
         let error = evaluate_filter_map_on_batch(
             &Executor::default(),
-            "junction",
-            named::<ModelName>("validate_filter_map"),
             &program,
             FilterMapOutcomeInputs {
                 carrier: &carrier,
@@ -1696,7 +1617,15 @@ mod tests {
         .await
         .err()
         .verified("the ingest-metadata sidecar is intentionally one row short");
-        assert!(error.current_context().reason.contains("ingest metadata"));
+        assert_eq!(
+            error.current_context(),
+            &PlannedGeneralError::SidecarRowCount {
+                operation: MessageErrorOperation::Set,
+                sidecar: PlannedSidecar::IngestMetadata,
+                expected: 1,
+                found: 0,
+            }
+        );
     }
 
     #[test]
@@ -2309,6 +2238,7 @@ mod tests {
         );
     }
 
+    mod planned_failure_tests;
     mod typed_operation_tests;
 
     #[test]

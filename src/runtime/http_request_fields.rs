@@ -59,6 +59,8 @@ pub(in crate::runtime) enum HttpRequestFieldsError {
     HeaderWriteArguments,
     #[error("failed to select the source records of the published rows")]
     SelectSourceRecords,
+    #[error("failed to keep the rows whose HTTP requests are valid")]
+    AcceptedRows,
     #[error("published row {row} has no source record")]
     MissingSourceRecord { row: usize },
     #[error("failed to address the source record of published row {row}")]
@@ -512,21 +514,17 @@ impl CompiledHttpRequestFields {
         input: HttpRequestInput,
         side_inputs: &HashMap<String, RuntimeValue>,
         execution_now: Timestamp,
-    ) -> PlannedGeneralResult<PreparedHttpRequests> {
+    ) -> Result<PreparedHttpRequests, PlannedGeneralFailure> {
         let acks = std::mem::take(&mut published.acks);
         let source_input = match &input {
             HttpRequestInput::Published => None,
             HttpRequestInput::Source { records, rows } => match records.selected(rows) {
                 Ok(selected) => Some(selected),
                 Err(error) => {
-                    let error = error.change_context(HttpRequestFieldsError::SelectSourceRecords);
-                    return Err(Report::new(PlannedGeneralError {
-                        acks,
-                        reason: format!(
-                            "emitter '{}' failed to prepare its HTTP requests: {error:#}",
-                            emitter.as_str()
-                        ),
-                    }));
+                    let error = error
+                        .change_context(HttpRequestFieldsError::SelectSourceRecords)
+                        .change_context(PlannedGeneralError::HttpRequests);
+                    return Err(PlannedGeneralFailure::new(error, acks));
                 }
             },
         };
@@ -546,8 +544,6 @@ impl CompiledHttpRequestFields {
                 executor,
                 now: execution_now,
             },
-            "emitter",
-            emitter,
             &self.program,
             FilterMapBatchInputs {
                 carrier: &published.batch,
@@ -569,13 +565,8 @@ impl CompiledHttpRequestFields {
         let fields = match self.evaluated_fields(&evaluated, &invocations) {
             Ok(fields) => fields,
             Err(error) => {
-                return Err(Report::new(PlannedGeneralError {
-                    acks,
-                    reason: format!(
-                        "emitter '{}' failed to read its HTTP request fields: {error:#}",
-                        emitter.as_str()
-                    ),
-                }));
+                let error = error.change_context(PlannedGeneralError::HttpRequests);
+                return Err(PlannedGeneralFailure::new(error, acks));
             }
         };
         let state_snapshot = relay_state_snapshot_from_side_inputs(side_inputs);
@@ -594,16 +585,7 @@ impl CompiledHttpRequestFields {
             };
             let source_record = match input.source_record(&published, row) {
                 Ok(source_record) => source_record,
-                Err(error) => {
-                    return Err(batch_failure(
-                        acks,
-                        message_errors,
-                        format!(
-                            "emitter '{}' failed to report a rejected HTTP request: {error:#}",
-                            emitter.as_str()
-                        ),
-                    ));
-                }
+                Err(error) => return Err(batch_failure(acks, message_errors, error)),
             };
             let partial_output = match input.publishes_codec_records() {
                 true => finalized_partial_output(&published.batch, row),
@@ -637,31 +619,16 @@ impl CompiledHttpRequestFields {
         }
         let sources = match input.admitted(&accepted_rows) {
             Ok(sources) => sources,
-            Err(error) => {
-                return Err(batch_failure(
-                    acks,
-                    message_errors,
-                    format!(
-                        "emitter '{}' failed to keep the source records of its HTTP requests: \
-                         {error:#}",
-                        emitter.as_str()
-                    ),
-                ));
-            }
+            Err(error) => return Err(batch_failure(acks, message_errors, error)),
         };
         published.acks = acks;
         let batch = match published.take(&accepted_rows) {
             Ok(batch) => batch,
             Err(failure) => {
-                return Err(batch_failure(
-                    failure.preserved,
-                    message_errors,
-                    format!(
-                        "emitter '{}' failed to keep the rows whose HTTP requests are valid: {:#}",
-                        emitter.as_str(),
-                        failure.error
-                    ),
-                ));
+                let error = failure
+                    .error
+                    .change_context(HttpRequestFieldsError::AcceptedRows);
+                return Err(batch_failure(failure.preserved, message_errors, error));
             }
         };
         Ok(PreparedHttpRequests {
@@ -835,17 +802,20 @@ impl CompiledHttpRequestFields {
     }
 }
 
-/// The general error that fails a whole batch. It owns the acknowledgements of every row, including
-/// those of the rows already rejected into `message_errors`.
+/// The general failure that fails a whole batch. It owns the acknowledgements of every row,
+/// including those of the rows already rejected into `message_errors`.
 fn batch_failure(
     mut acks: Vec<AckSet>,
     message_errors: Vec<PlannedMessageError>,
-    reason: String,
-) -> Report<PlannedGeneralError> {
+    error: Report<HttpRequestFieldsError>,
+) -> PlannedGeneralFailure {
     for planned in message_errors {
         acks.push(planned.message.acks);
     }
-    Report::new(PlannedGeneralError { acks, reason })
+    PlannedGeneralFailure::new(
+        error.change_context(PlannedGeneralError::HttpRequests),
+        acks,
+    )
 }
 
 /// The value of one row of a string column a request field was evaluated into, or `absent` when

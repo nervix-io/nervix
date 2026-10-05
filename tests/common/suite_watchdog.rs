@@ -48,6 +48,7 @@ use nervix_primitives::sync::{
     blocking::{LazyLock, Mutex},
 };
 use nervix_recovery::Reported as _;
+use nervix_test_environment::TeardownFailures;
 
 use super::{
     cluster_teardown::CLUSTER_TEARDOWN_BUDGET,
@@ -650,10 +651,13 @@ impl SuiteWatchdog {
 ///
 /// The run's own result is already known by the time this happens, so the only thing at stake is
 /// whether the process ends in time to report that result itself.
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 pub(crate) enum SuiteTeardown {
-    /// The dependencies stopped, reporting these failures.
-    Stopped(Vec<String>),
+    /// The dependencies stopped, and every one of them was removed.
+    Stopped,
+    /// The dependencies stopped, and these failed to stop or to be removed. Each keeps its report
+    /// until the teardown is printed.
+    Failed(TeardownFailures),
     /// The budget passed with the stop still running, so the suite stopped waiting for it and
     /// left the containers to the runner that owns them.
     Abandoned(Duration),
@@ -666,11 +670,12 @@ impl SuiteTeardown {
     /// dependency is belongs to whoever started it, and what a bounded ending is belongs here.
     pub(crate) async fn bounded<Stop>(stop: Stop) -> Self
     where
-        Stop: Future<Output = Vec<String>>,
+        Stop: Future<Output = Result<(), TeardownFailures>>,
     {
         let deadline = PhaseDeadline::after(DEPENDENCY_SHUTDOWN_BUDGET);
         match deadline.bound(stop).await {
-            BeforeDeadline::Finished(failures) => Self::Stopped(failures),
+            BeforeDeadline::Finished(Ok(())) => Self::Stopped,
+            BeforeDeadline::Finished(Err(failures)) => Self::Failed(failures),
             BeforeDeadline::Passed => Self::Abandoned(DEPENDENCY_SHUTDOWN_BUDGET),
         }
     }
@@ -678,23 +683,22 @@ impl SuiteTeardown {
     /// Whether the teardown both finished and had nothing to report.
     pub(crate) fn is_clean(&self) -> bool {
         match self {
-            Self::Stopped(failures) => failures.is_empty(),
-            Self::Abandoned(_) => false,
+            Self::Stopped => true,
+            Self::Failed(_) | Self::Abandoned(_) => false,
         }
     }
 }
 
 impl fmt::Display for SuiteTeardown {
+    /// One line, whatever the teardown met, so the report the process ends with stays one report.
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Stopped(failures) if failures.is_empty() => {
+            Self::Stopped => {
                 formatter.write_str("suite dependency teardown stopped every dependency")
             }
-            Self::Stopped(failures) => write!(
-                formatter,
-                "suite dependency teardown failed: {}",
-                failures.join("; ")
-            ),
+            Self::Failed(failures) => {
+                write!(formatter, "suite dependency teardown failed: {failures}")
+            }
             Self::Abandoned(budget) => write!(
                 formatter,
                 "suite dependency teardown did not finish within {budget:?} and was left to the \

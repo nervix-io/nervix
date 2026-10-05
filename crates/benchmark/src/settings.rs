@@ -24,22 +24,36 @@ pub enum SettingsError {
     #[error("benchmark has no parameter named '{name}'")]
     UnknownParameter { name: String },
 
-    #[error("parameter '{name}' has invalid value '{value}': {reason}")]
-    InvalidParameter {
-        name: String,
-        value: String,
-        reason: String,
-    },
-
-    #[error("parameter '{name}' has invalid value '{value}': {error:#}")]
-    InvalidByteSize {
-        name: String,
-        value: String,
-        error: Report<ByteSizeError>,
-    },
+    /// A parameter whose value cannot be read in the form the parameter takes. Why stays beneath
+    /// it in the report: the parser's own error, a [`ByteSizeError`], or a
+    /// [`ParameterValueError`].
+    #[error("parameter '{name}' has invalid value '{value}'")]
+    InvalidParameter { name: String, value: String },
 
     #[error("duration override must be positive")]
     InvalidDuration,
+}
+
+impl SettingsError {
+    fn invalid_parameter(name: &str, value: &str) -> Self {
+        Self::InvalidParameter {
+            name: name.to_string(),
+            value: value.to_string(),
+        }
+    }
+}
+
+/// Why a parameter's value cannot serve what the benchmark reads it for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
+pub enum ParameterValueError {
+    #[error("only scalar string, integer, float, and boolean parameters may be overridden")]
+    NotScalar,
+    #[error("expected a string")]
+    NotString,
+    #[error("it exceeds the template integer range")]
+    TemplateIntegerRange,
+    #[error("flush interval demands a run longer than any benchmark can measure")]
+    FlushIntervalTooLong,
 }
 
 /// Why a parameter value is not a binary byte size such as `8MiB`.
@@ -62,9 +76,9 @@ impl RunSettings {
         definition: &BenchmarkDefinition,
         overrides: &[String],
         duration_override: Option<u64>,
-    ) -> Result<Self, SettingsError> {
+    ) -> error_stack::Result<Self, SettingsError> {
         if duration_override == Some(0) {
-            return Err(SettingsError::InvalidDuration);
+            return Err(Report::new(SettingsError::InvalidDuration));
         }
         let mut parameters = definition.parameters.clone();
         for override_value in overrides {
@@ -75,9 +89,9 @@ impl RunSettings {
                         override_value: override_value.clone(),
                     })?;
             if name.is_empty() || value.is_empty() {
-                return Err(SettingsError::InvalidOverride {
+                return Err(Report::new(SettingsError::InvalidOverride {
                     override_value: override_value.clone(),
-                });
+                }));
             }
             let current = parameters
                 .get(name)
@@ -108,36 +122,29 @@ fn parse_like(
     name: &str,
     value: &str,
     current: &toml::Value,
-) -> Result<toml::Value, SettingsError> {
-    let invalid = |reason: String| SettingsError::InvalidParameter {
-        name: name.to_string(),
-        value: value.to_string(),
-        reason,
-    };
+) -> error_stack::Result<toml::Value, SettingsError> {
+    let invalid = || SettingsError::invalid_parameter(name, value);
     match current {
         toml::Value::String(_) => Ok(toml::Value::String(value.to_string())),
         toml::Value::Integer(_) => value
             .parse::<i64>()
             .map(toml::Value::Integer)
-            .map_err(|error| invalid(error.to_string())),
+            .change_context_lazy(invalid),
         toml::Value::Float(_) => value
             .parse::<f64>()
             .map(toml::Value::Float)
-            .map_err(|error| invalid(error.to_string())),
+            .change_context_lazy(invalid),
         toml::Value::Boolean(_) => value
             .parse::<bool>()
             .map(toml::Value::Boolean)
-            .map_err(|error| invalid(error.to_string())),
-        _ => Err(invalid(
-            "only scalar string, integer, float, and boolean parameters may be overridden"
-                .to_string(),
-        )),
+            .change_context_lazy(invalid),
+        _ => Err(Report::new(ParameterValueError::NotScalar).change_context(invalid())),
     }
 }
 
 /// Restates duration and binary-size parameters in the units a competitive implementation's
 /// configuration takes, so one manifest value drives every implementation.
-fn add_derived_parameters(parameters: &mut toml::Table) -> Result<(), SettingsError> {
+fn add_derived_parameters(parameters: &mut toml::Table) -> error_stack::Result<(), SettingsError> {
     if let Some(value) = string_parameter(parameters, "emitter_flush_each")? {
         let duration = parse_duration_parameter("emitter_flush_each", value)?;
         parameters.insert(
@@ -147,12 +154,9 @@ fn add_derived_parameters(parameters: &mut toml::Table) -> Result<(), SettingsEr
     }
     if let Some(value) = string_parameter(parameters, "window_max_delay")? {
         let duration = parse_duration_parameter("window_max_delay", value)?;
-        let milliseconds =
-            i64::try_from(duration.as_millis()).map_err(|_| SettingsError::InvalidParameter {
-                name: "window_max_delay".to_string(),
-                value: value.to_string(),
-                reason: "duration exceeds the template integer range".to_string(),
-            })?;
+        let milliseconds = i64::try_from(duration.as_millis())
+            .change_context(ParameterValueError::TemplateIntegerRange)
+            .change_context_lazy(|| SettingsError::invalid_parameter("window_max_delay", value))?;
         parameters.insert(
             "window_max_delay_seconds".to_string(),
             toml::Value::Float(duration.as_secs_f64()),
@@ -163,16 +167,11 @@ fn add_derived_parameters(parameters: &mut toml::Table) -> Result<(), SettingsEr
         );
     }
     if let Some(value) = string_parameter(parameters, "emitter_max_batch_size")? {
-        let bytes = parse_binary_bytes(value).map_err(|error| SettingsError::InvalidByteSize {
-            name: "emitter_max_batch_size".to_string(),
-            value: value.to_string(),
-            error,
-        })?;
-        let bytes = i64::try_from(bytes).map_err(|_| SettingsError::InvalidParameter {
-            name: "emitter_max_batch_size".to_string(),
-            value: value.to_string(),
-            reason: "byte size exceeds the template integer range".to_string(),
-        })?;
+        let invalid = || SettingsError::invalid_parameter("emitter_max_batch_size", value);
+        let bytes = parse_binary_bytes(value).change_context_lazy(invalid)?;
+        let bytes = i64::try_from(bytes)
+            .change_context(ParameterValueError::TemplateIntegerRange)
+            .change_context_lazy(invalid)?;
         parameters.insert(
             "emitter_max_batch_bytes".to_string(),
             toml::Value::Integer(bytes),
@@ -181,59 +180,45 @@ fn add_derived_parameters(parameters: &mut toml::Table) -> Result<(), SettingsEr
     Ok(())
 }
 
-fn automatic_duration(parameters: &toml::Table) -> Result<u64, SettingsError> {
+fn automatic_duration(parameters: &toml::Table) -> error_stack::Result<u64, SettingsError> {
     let mut seconds = DEFAULT_MINIMUM_DURATION.as_secs();
     for (name, value) in parameters {
         if !name.ends_with("_flush_each") {
             continue;
         }
         let toml::Value::String(value) = value else {
-            return Err(SettingsError::InvalidParameter {
-                name: name.clone(),
-                value: value.to_string(),
-                reason: "flush intervals must be duration strings".to_string(),
-            });
+            return Err(Report::new(ParameterValueError::NotString)
+                .change_context(SettingsError::invalid_parameter(name, &value.to_string())));
         };
-        let flush =
-            parse_duration_text(value).map_err(|error| SettingsError::InvalidParameter {
-                name: name.clone(),
-                value: value.clone(),
-                reason: error.to_string(),
-            })?;
-        let required: u64 = (flush.as_secs_f64() * FLUSH_CYCLES)
+        let flush = parse_duration_parameter(name, value)?;
+        let required: Option<u64> = (flush.as_secs_f64() * FLUSH_CYCLES)
             .ceil()
-            .checked_approx_into()
-            .ok_or_else(|| SettingsError::InvalidParameter {
-                name: name.clone(),
-                value: value.clone(),
-                reason: "flush interval demands a run longer than any benchmark can measure"
-                    .to_string(),
-            })?;
+            .checked_approx_into();
+        let Some(required) = required else {
+            return Err(Report::new(ParameterValueError::FlushIntervalTooLong)
+                .change_context(SettingsError::invalid_parameter(name, value)));
+        };
         seconds = seconds.max(required);
     }
     Ok(seconds)
 }
 
-fn parse_duration_parameter(name: &str, value: &str) -> Result<Duration, SettingsError> {
-    parse_duration_text(value).map_err(|error| SettingsError::InvalidParameter {
-        name: name.to_string(),
-        value: value.to_string(),
-        reason: error.to_string(),
-    })
+fn parse_duration_parameter(
+    name: &str,
+    value: &str,
+) -> error_stack::Result<Duration, SettingsError> {
+    parse_duration_text(value).change_context_lazy(|| SettingsError::invalid_parameter(name, value))
 }
 
 fn string_parameter<'a>(
     parameters: &'a toml::Table,
     name: &str,
-) -> Result<Option<&'a str>, SettingsError> {
+) -> error_stack::Result<Option<&'a str>, SettingsError> {
     match parameters.get(name) {
         None => Ok(None),
         Some(toml::Value::String(value)) => Ok(Some(value)),
-        Some(value) => Err(SettingsError::InvalidParameter {
-            name: name.to_string(),
-            value: value.to_string(),
-            reason: "expected a string".to_string(),
-        }),
+        Some(value) => Err(Report::new(ParameterValueError::NotString)
+            .change_context(SettingsError::invalid_parameter(name, &value.to_string()))),
     }
 }
 
@@ -376,12 +361,157 @@ mod tests {
                     None,
                 )
                 .expect_err("the override names no duration");
+                assert!(error.contains::<nervix_models::DurationTextError>());
                 assert_eq!(
-                    error.to_string(),
+                    format!("{error:#}"),
                     format!("parameter '{parameter}' has invalid value '{value}': {why}")
                 );
             }
         }
+    }
+
+    #[test]
+    fn a_zero_duration_or_an_override_that_names_nothing_is_refused() {
+        let benchmark = definition(LoadDuration::Auto);
+
+        let error = RunSettings::resolve(&benchmark, &[], Some(0))
+            .expect_err("a run cannot last no time at all");
+        assert!(matches!(
+            error.current_context(),
+            SettingsError::InvalidDuration
+        ));
+
+        for override_value in ["emitter_flush_each", "=20s", "emitter_flush_each="] {
+            let error = RunSettings::resolve(&benchmark, &[override_value.to_string()], None)
+                .expect_err("an override names both a parameter and a value");
+            assert!(
+                matches!(
+                    error.current_context(),
+                    SettingsError::InvalidOverride { override_value: refused }
+                        if refused == override_value
+                ),
+                "{error:?}"
+            );
+        }
+
+        let error = RunSettings::resolve(&benchmark, &["missing=1".to_string()], None)
+            .expect_err("an override names a parameter the benchmark has");
+        assert!(matches!(
+            error.current_context(),
+            SettingsError::UnknownParameter { name } if name == "missing"
+        ));
+    }
+
+    #[test]
+    fn a_value_that_cannot_serve_its_parameter_names_why() {
+        let mut parameters = definition(LoadDuration::Auto).parameters;
+        parameters.insert(
+            "partition_weights".to_string(),
+            toml::Value::Array(vec![toml::Value::Integer(1)]),
+        );
+        let cases = [
+            (
+                parameters.clone(),
+                "partition_weights=2",
+                ParameterValueError::NotScalar,
+                "parameter 'partition_weights' has invalid value '2': only scalar string, \
+                 integer, float, and boolean parameters may be overridden",
+            ),
+            (
+                with_parameter(&parameters, "window_max_delay", toml::Value::Integer(5)),
+                "",
+                ParameterValueError::NotString,
+                "parameter 'window_max_delay' has invalid value '5': expected a string",
+            ),
+            (
+                with_parameter(&parameters, "ingestor_flush_each", toml::Value::Integer(5)),
+                "",
+                ParameterValueError::NotString,
+                "parameter 'ingestor_flush_each' has invalid value '5': expected a string",
+            ),
+            // The conversion's own error follows the range, in the standard library's words.
+            (
+                parameters.clone(),
+                "window_max_delay=10000000000000000s",
+                ParameterValueError::TemplateIntegerRange,
+                "parameter 'window_max_delay' has invalid value '10000000000000000s': it exceeds \
+                 the template integer range: ",
+            ),
+            (
+                parameters.clone(),
+                "emitter_max_batch_size=8589934592GiB",
+                ParameterValueError::TemplateIntegerRange,
+                "parameter 'emitter_max_batch_size' has invalid value '8589934592GiB': it exceeds \
+                 the template integer range: ",
+            ),
+            (
+                parameters.clone(),
+                "ingestor_flush_each=2000000000000000000s",
+                ParameterValueError::FlushIntervalTooLong,
+                "parameter 'ingestor_flush_each' has invalid value '2000000000000000000s': flush \
+                 interval demands a run longer than any benchmark can measure",
+            ),
+        ];
+        for (parameters, override_value, expected, message) in cases {
+            let mut benchmark = definition(LoadDuration::Auto);
+            benchmark.parameters = parameters;
+            let overrides = match override_value {
+                "" => Vec::new(),
+                override_value => vec![override_value.to_string()],
+            };
+            let error = RunSettings::resolve(&benchmark, &overrides, None)
+                .expect_err("the parameter value cannot serve its parameter");
+
+            assert!(matches!(
+                error.current_context(),
+                SettingsError::InvalidParameter { .. }
+            ));
+            assert_eq!(
+                error.downcast_ref::<ParameterValueError>(),
+                Some(&expected),
+                "{override_value}"
+            );
+            let rendered = format!("{error:#}");
+            assert!(rendered.starts_with(message), "{rendered}");
+        }
+    }
+
+    #[test]
+    fn a_scalar_override_that_does_not_parse_keeps_the_parser_error() {
+        let mut benchmark = definition(LoadDuration::Auto);
+        for (name, value) in [
+            ("partitions", toml::Value::Integer(1)),
+            ("ratio", toml::Value::Float(0.5)),
+            ("enabled", toml::Value::Boolean(true)),
+        ] {
+            benchmark.parameters.insert(name.to_string(), value);
+        }
+        for (override_value, message) in [
+            (
+                "partitions=many",
+                "parameter 'partitions' has invalid value 'many': invalid digit found in string",
+            ),
+            (
+                "ratio=half",
+                "parameter 'ratio' has invalid value 'half': invalid float literal",
+            ),
+            (
+                "enabled=maybe",
+                "parameter 'enabled' has invalid value 'maybe': provided string was not `true` or \
+                 `false`",
+            ),
+        ] {
+            let error = RunSettings::resolve(&benchmark, &[override_value.to_string()], None)
+                .expect_err("the override does not parse as its parameter's type");
+
+            assert_eq!(format!("{error:#}"), message);
+        }
+    }
+
+    fn with_parameter(parameters: &toml::Table, name: &str, value: toml::Value) -> toml::Table {
+        let mut parameters = parameters.clone();
+        parameters.insert(name.to_string(), value);
+        parameters
     }
 
     #[test]
@@ -409,9 +539,16 @@ mod tests {
         )
         .expect_err("the byte size suffix is invalid");
 
-        assert!(matches!(error, SettingsError::InvalidByteSize { .. }));
+        assert!(matches!(
+            error.current_context(),
+            SettingsError::InvalidParameter { .. }
+        ));
         assert_eq!(
-            error.to_string(),
+            error.downcast_ref::<ByteSizeError>(),
+            Some(&ByteSizeError::Suffix)
+        );
+        assert_eq!(
+            format!("{error:#}"),
             "parameter 'emitter_max_batch_size' has invalid value '8MB': expected a B, KiB, MiB, \
              or GiB suffix"
         );

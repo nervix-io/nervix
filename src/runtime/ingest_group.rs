@@ -1534,8 +1534,6 @@ impl Runtime {
             let keys = vec![None; rows.len()];
             let outcomes = evaluate_filter_map_on_batch(
                 self.executor(),
-                ModelKind::Ingestor.as_str(),
-                ingestor,
                 filter_where,
                 FilterMapOutcomeInputs {
                     carrier: &rows.batch,
@@ -1712,8 +1710,6 @@ impl Runtime {
             let keys = vec![None; rows.len()];
             let outcomes = evaluate_filter_map_on_batch(
                 self.executor(),
-                ModelKind::Ingestor.as_str(),
-                ingestor,
                 &output.program,
                 FilterMapOutcomeInputs {
                     carrier: &rows.batch,
@@ -1778,7 +1774,6 @@ impl Runtime {
                             executor: self.executor(),
                             now: execution_now,
                         },
-                        ingestor,
                         branch_program,
                         &input_batch,
                         &output_batch,
@@ -1791,7 +1786,7 @@ impl Runtime {
                         relay: output.relay.clone(),
                     })?;
                     for (row, key) in input_rows.into_iter().zip(evaluated) {
-                        route_keys[row] = Some(key);
+                        route_keys[row] = Some(key.map(Some));
                     }
                 }
             } else {
