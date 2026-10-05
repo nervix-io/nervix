@@ -218,7 +218,7 @@ Feature: Domain-paced emitter cadence
       | 3            |
 
   @domain_emitter_cadence
-  Scenario Outline: Iceberg flush and commit boundaries follow domain logical time
+  Scenario Outline: Iceberg commits one COMMIT EACH after the flush that staged the rows, on domain logical time
     Given Iceberg dependencies are running
     And runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
@@ -275,8 +275,8 @@ Feature: Domain-paced emitter cadence
           'uri' = '{{iceberg_rest_addr}}',
           'warehouse' = 's3://nervix-iceberg/warehouse'
         };
-      CREATE EMITTER iceberg_cadence FROM notifications TO ICEBERG ON S3 s3_main TABLE cadence_notifications_{{test_id}} VALUES { 'user_id' = input.user_id, 'action' = input.action } LOCATION 's3://nervix-iceberg/tables/cadence_notifications_{{test_id}}' CATALOG iceberg_catalog COMMIT EACH 2s MAX SIZE 1MiB MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s
-        FLUSH EACH 2s MAX BATCH SIZE 1MiB
+      CREATE EMITTER iceberg_cadence FROM notifications TO ICEBERG ON S3 s3_main TABLE cadence_notifications_{{test_id}} VALUES { 'user_id' = input.user_id, 'action' = input.action } LOCATION 's3://nervix-iceberg/tables/cadence_notifications_{{test_id}}' CATALOG iceberg_catalog COMMIT EACH 40s MAX SIZE 1MiB MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s
+        FLUSH EACH 40s MAX BATCH SIZE 1MiB
         ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
       START AT '2000-01-01T00:00:00Z' TIME RATE 20.0;
@@ -285,7 +285,11 @@ Feature: Domain-paced emitter cadence
       """
       {"user_id":11,"action":"paced"}
       """
-    Then within "2s" the Iceberg table "cadence_notifications_{{test_id}}" contains a row
+    # At TIME RATE 20 each 40s boundary lasts two physical seconds. The flush stages the row two
+    # seconds after it arrives and its commit cadence starts there, so the row reaches the table no
+    # sooner than four seconds after it was posted, and long before the 80 seconds the two
+    # boundaries would take on the physical clock.
+    Then within "30s" the Iceberg table "cadence_notifications_{{test_id}}" contains a row no sooner than "4s" after it was published
       """
       {"user_id":11,"action":"paced"}
       """

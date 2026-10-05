@@ -26413,21 +26413,68 @@ async fn then_within_duration_iceberg_table_contains_row(
 ) {
     let duration = parse_duration_text(&duration).expect("step duration must be a valid duration");
     let table = expand_placeholders(world, &table);
-    let domain = world.domain.clone();
     let expected = expand_placeholders(world, docstring(step));
     let expected = serde_json::from_str::<serde_json::Value>(&expected)
         .expect("Iceberg expected row must be valid JSON");
+    await_iceberg_table_row(world, &table, &expected, duration).await;
+}
+
+/// Measures when a published row reached the table rather than asserting that it had not yet: the
+/// publishing step records its instant before the row leaves the harness, and the row is observed
+/// no earlier than its commit, so load only lengthens the measured delay.
+#[then(
+    expr = "within {string} the Iceberg table {string} contains a row no sooner than {string} \
+            after it was published"
+)]
+async fn then_within_duration_iceberg_table_contains_row_no_sooner_than(
+    world: &mut ScenarioWorld,
+    duration: String,
+    table: String,
+    delay: String,
+    #[step] step: &Step,
+) {
+    let duration = parse_duration_text(&duration).expect("step duration must be a valid duration");
+    let expected_delay = parse_duration_text(&delay).expect("step delay must be a valid duration");
+    let published_at = world
+        .last_publish_at
+        .expect("a delivery-delay assertion must follow a publishing step");
+    let table = expand_placeholders(world, &table);
+    let expected = expand_placeholders(world, docstring(step));
+    let expected = serde_json::from_str::<serde_json::Value>(&expected)
+        .expect("Iceberg expected row must be valid JSON");
+
+    await_iceberg_table_row(world, &table, &expected, duration).await;
+
+    let arrived_after = published_at.elapsed();
+    append_cucumber_log_line(&format!(
+        "Iceberg row in table {table} arrived {arrived_after:?} after it was published"
+    ));
+    assert!(
+        arrived_after >= expected_delay,
+        "expected the Iceberg row {expected} in table {table} no sooner than {expected_delay:?} \
+         after publishing, but it arrived after {arrived_after:?}"
+    );
+}
+
+/// Waits until the Iceberg table contains `expected`, failing once `duration` has passed.
+async fn await_iceberg_table_row(
+    world: &ScenarioWorld,
+    table: &str,
+    expected: &serde_json::Value,
+    duration: Duration,
+) {
+    let domain = world.domain.clone();
     let dependencies = world.dependencies.endpoints().clone();
     let deadline = Instant::now() + duration;
     let mut observed = Vec::new();
 
     loop {
         nervix_primitives::task::consume_budget().await;
-        match iceberg_table_rows(&dependencies, &domain, &table).await {
+        match iceberg_table_rows(&dependencies, &domain, table).await {
             Ok(rows) => {
                 if rows
                     .iter()
-                    .any(|row| iceberg_row_matches_expected(row, &expected))
+                    .any(|row| iceberg_row_matches_expected(row, expected))
                 {
                     append_cucumber_log_line(&format!(
                         "observed searchable Iceberg row in table {table}: {expected}"

@@ -7,6 +7,52 @@
 
 use super::*;
 
+#[given("the cluster's reclaimed restore bytes are saved")]
+async fn given_reclaimed_restore_bytes(world: &mut ScenarioWorld) {
+    let bytes = reclaimed_restore_bytes(world).await;
+    world
+        .placeholders
+        .insert("reclaimed_restore_bytes".to_string(), bytes.to_string());
+}
+
+#[then(expr = "at least {int} MiB of replaced restore chunks are reclaimed")]
+async fn then_restore_chunks_reclaimed(world: &mut ScenarioWorld, mebibytes: u64) {
+    let baseline: f64 = world.placeholders["reclaimed_restore_bytes"]
+        .parse()
+        .assured("the preceding measurement saved a numeric byte count");
+    let expected: f64 = mebibytes
+        .checked_mul(1024 * 1024)
+        .assured("the scenario's MiB count fits u64")
+        .approx_into();
+    let deadline = nervix_primitives::time::Instant::now() + Duration::from_secs(60);
+    loop {
+        nervix_primitives::task::consume_budget().await;
+        let reclaimed = reclaimed_restore_bytes(world).await - baseline;
+        if reclaimed >= expected {
+            return;
+        }
+        assert!(
+            nervix_primitives::time::Instant::now() < deadline,
+            "maintenance reclaimed {reclaimed} bytes; expected at least {expected} after header \
+             replacement or purge"
+        );
+        nervix_primitives::time::sleep(Duration::from_millis(100)).await;
+    }
+}
+
+async fn reclaimed_restore_bytes(world: &ScenarioWorld) -> f64 {
+    let mut bytes = 0.0;
+    for node in world.cluster().node_ids() {
+        nervix_primitives::task::consume_budget().await;
+        bytes += world
+            .cluster()
+            .read_observability_metric(&node, "nervix_restore_staging_reclaimed_bytes_total", &[])
+            .await
+            .assured("each node reports completed checkpoint reclamation");
+    }
+    bytes
+}
+
 #[given(expr = "restore checkpoint staging is limited to {int} bytes")]
 fn given_restore_staging_limit(world: &mut ScenarioWorld, bytes: u64) {
     world.cluster_config.restore_staging_max_bytes = bytes;

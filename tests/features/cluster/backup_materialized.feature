@@ -194,8 +194,9 @@ Feature: Materialized backup and archived lifecycle resumption
     Then within "60s" the materialized generators report round 1, <row_kib> KiB, <relays> relays and <tenants> tenants
     When round 2 of <row_kib> KiB materialized rows is posted for <tenants> tenants
     Then within "60s" the materialized generators report round 2, <row_kib> KiB, <relays> relays and <tenants> tenants
+    When the materialized summary subscription "summary_subscription" is closed
     Then the current leader node is saved as placeholder "leader"
-    When the CLI backs up "domain {{domain}} --timeout 60s" from node "{{leader}}" into "large-materialized.nvxb" reporting JSON
+    When the CLI backs up "domain {{domain}} --timeout 120s" from node "{{leader}}" into "large-materialized.nvxb" reporting JSON
     Then the CLI backup succeeded with a JSON report naming domain "{{domain}}"
     And backup "large-materialized.nvxb" contains <relays> materialized relays with <tenants> records each and more than 32 MiB of columns
     Given the cluster is replaced by a fresh <cluster_size> node cluster whose nodes are named "restored"
@@ -261,8 +262,9 @@ Feature: Materialized backup and archived lifecycle resumption
     Then within "60s" the materialized generators report round 1, <row_kib> KiB, <relays> relays and <tenants> tenants
     When round 2 of <row_kib> KiB materialized rows is posted for <tenants> tenants
     Then within "60s" the materialized generators report round 2, <row_kib> KiB, <relays> relays and <tenants> tenants
+    When the materialized summary subscription "summary_subscription" is closed
     Then the current leader node is saved as placeholder "leader"
-    When the CLI backs up "domain {{domain}} --timeout 60s" from node "{{leader}}" into "large-stale.nvxb" reporting JSON
+    When the CLI backs up "domain {{domain}} --timeout 120s" from node "{{leader}}" into "large-stale.nvxb" reporting JSON
     Then the CLI backup succeeded with a JSON report naming domain "{{domain}}"
     And backup "large-stale.nvxb" contains <relays> materialized relays with <tenants> records each and more than 32 MiB of columns
     Given the cluster is replaced by a fresh 3 node cluster whose nodes are named "restored"
@@ -283,11 +285,12 @@ Feature: Materialized backup and archived lifecycle resumption
     Then within "60s" the materialized generators report round 2, <row_kib> KiB, <relays> relays and <tenants> tenants
     When round 3 of <row_kib> KiB materialized rows is posted for <tenants> tenants
     Then within "60s" the materialized generators report round 3, <row_kib> KiB, <relays> relays and <tenants> tenants
-    When the CLI backs up "domain {{domain}} --timeout 60s" from node "{{survivor}}" into "large-before-stale.nvxb" reporting JSON
+    When the materialized summary subscription "resumed_summaries" is closed
+    When the CLI backs up "domain {{domain}} --timeout 120s" from node "{{survivor}}" into "large-before-stale.nvxb" reporting JSON
     Then the CLI backup succeeded with a JSON report naming domain "{{domain}}"
     When state publication of domain "{{domain}}" by coordinator "{{leader}}" is released
     Then state publication of domain "{{domain}}" by coordinator "{{leader}}" is refused
-    When the CLI backs up "domain {{domain}} --timeout 60s" from node "{{survivor}}" into "large-after-stale.nvxb" reporting JSON
+    When the CLI backs up "domain {{domain}} --timeout 120s" from node "{{survivor}}" into "large-after-stale.nvxb" reporting JSON
     Then the CLI backup succeeded with a JSON report naming domain "{{domain}}"
     And backup archives "large-before-stale.nvxb" and "large-after-stale.nvxb" have identical materialized generations
 

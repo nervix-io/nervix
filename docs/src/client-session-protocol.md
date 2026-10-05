@@ -829,6 +829,9 @@ call fails as uncertain and names the execution reference. The Rust client, the 
 never send `CancelRequest`: a caller that stops waiting only drops its waiter, and the reply, when
 it comes, is discarded.
 
+`nervix-cli backup --timeout` extends its request and retry budgets by the named quiesce timeout,
+leaving the ordinary request budget for command admission, capture and the reply.
+
 For native Rust sessions, the client loads a Hickory resolver during setup or uses one its owner
 provided. It resolves the hostname of each selected server, seed, and redirect on a new connection
 attempt, preserving the advertised URI's authority and TLS name. Tonic's connection timeout spans

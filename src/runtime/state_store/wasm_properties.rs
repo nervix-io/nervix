@@ -8,7 +8,7 @@
 use nervix_arbitrary::{Arbitrary, Domain, WasmValues};
 
 use super::{
-    generation::{CheckpointMetadata, StateNamespace},
+    generation::{CheckpointMetadata, RESTORE_STATE_CHUNK_BYTES, StateNamespace},
     *,
 };
 
@@ -38,6 +38,9 @@ fn bolero_stored_wasm_checkpoints_preserve_bytes_and_typed_placement() {
                 }),
             ] {
                 let encoded = checkpoint.encode().assured("a current checkpoint encodes");
+                if matches!(checkpoint, StoredCheckpoint::Segmented(_)) {
+                    assert_eq!(encoded.len(), StoredCheckpoint::SEGMENTED_BYTES);
+                }
                 assert_eq!(
                     StoredCheckpoint::decode(&encoded).assured("the complete checkpoint decodes"),
                     checkpoint
@@ -85,6 +88,22 @@ fn bolero_stored_wasm_checkpoints_preserve_bytes_and_typed_placement() {
                         decoded.branch,
                         placement.branch_key.as_ref().map(BranchKey::fingerprint)
                     );
+                    for offset in [
+                        0,
+                        u64::try_from(RESTORE_STATE_CHUNK_BYTES)
+                            .assured("the chunk policy fits u64"),
+                        u64::MAX,
+                    ] {
+                        let mut chunk_key = generation::chunk_prefix(&key, revision);
+                        chunk_key.extend_from_slice(&offset.to_be_bytes());
+                        let chunks = generation::CheckpointChunkSet::try_from(chunk_key.as_slice())
+                            .assured(
+                                "a current chunk key has a complete placement and coordinates",
+                            );
+                        assert_eq!(chunks.placement_key, key);
+                        assert_eq!(chunks.lsm, revision);
+                        assert!(chunk_key < chunks.exclusive_end());
+                    }
                 }
             }
             let alpha = BranchKeyFingerprint::new([1; 32]);

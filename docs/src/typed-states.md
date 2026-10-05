@@ -432,11 +432,19 @@ gate until the same authority completes durability and cleanup.
 
 Runtime storage has distinct initial and restored namespaces; restore installation generation is
 separate from guest-state generation and checkpoint revision. A current checkpoint is either an
-inline normal write or a segmented restore save with required revision, length and digest. A read
+inline checkpoint or a segmented checkpoint with required revision, length and digest. A read
 uses one database view for namespace selection and payload data. A queued checkpoint job retains
 its selected namespace and validates that it remains current before writing. The storage format
 marker is required for nonempty checkpoint storage; corruption or absence fails explicitly and
 requires recreation rather than inventing a namespace for the stored keys.
+
+Active chunk maintenance validates the placement and fixed revision/offset coordinates before
+forming a chunk-set cursor. A set remains referenced only when the same view's selected header is
+segmented and names that exact revision. A missing or inline header is an ordinary unreferenced
+outcome; malformed coordinates or a malformed bounded header remain typed storage failures.
+Segmented headers have only their fixed archived root, so a size check bounds the caller's copy
+before decoding. The required current storage shape makes larger valid values inline; Fjall may
+still read/cache those values internally. No second persisted liveness field or default is added.
 
 Restore reclamation receives a borrowed `RestoreStateRetention` from one locked applied revision.
 Absence of an applied log means catch-up is unknown and retains all generations. A generation
