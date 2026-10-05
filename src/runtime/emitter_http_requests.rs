@@ -490,7 +490,7 @@ mod tests {
             stop_rx: &mut stop_rx,
             backoff: &mut backoff,
         };
-        let mut sink = EmitterSinkState::Open(Box::new(PreparedRequestSink::new(
+        let mut sink = EmitterSinkState::opened(Box::new(PreparedRequestSink::new(
             Box::new(ScriptedHttpSink {
                 writes: Arc::new(Mutex::new(Vec::new())),
                 answers: VecDeque::from([Answer::RejectFirst]),
