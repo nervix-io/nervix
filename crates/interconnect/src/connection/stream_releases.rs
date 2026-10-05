@@ -3,14 +3,14 @@
 //! Layer: engines and infrastructure.
 //!
 //! - **Owns.** One wakeup for each pool class and request subquota of a peer's streams, where a
-//!   released stream reports itself, and what one attempt to lease a stream found.
+//!   released stream reports itself.
 //! - **Depends on.** The pool classes and request subquotas, and the primitive boundary's `Notify`.
 //! - **Must not know.** Connections, slots, deadlines, or what an operation sends.
 
-use nervix_primitives::sync::{Arc, Notify};
+use nervix_primitives::sync::Notify;
 use strum::EnumCount as _;
 
-use super::{PoolClass, RequestSubquota, StreamLease};
+use super::{PoolClass, RequestSubquota};
 
 /// One wakeup for each class and subquota of a peer's streams.
 ///
@@ -29,21 +29,4 @@ impl StreamReleases {
     pub(super) fn of(&self, class: PoolClass, subquota: RequestSubquota) -> &Notify {
         &self.0[class.index()][subquota.index()]
     }
-}
-
-/// Where a stream lease reports its release: the wakeups of its peer, and its class and subquota.
-pub(super) struct StreamRelease {
-    pub(super) releases: Arc<StreamReleases>,
-    pub(super) class: PoolClass,
-    pub(super) subquota: RequestSubquota,
-}
-
-/// What one attempt to lease a stream found.
-pub(super) enum StreamLeaseAttempt {
-    Leased(StreamLease),
-    /// Every stream the peer has in the class and subquota is leased; a release wakes a waiter
-    /// through `releases`.
-    Busy(Arc<StreamReleases>),
-    /// The peer has no target to lease from.
-    NoTarget,
 }

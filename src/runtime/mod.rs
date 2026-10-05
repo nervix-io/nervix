@@ -51,9 +51,7 @@ use nervix_branch_instances::{
     BranchInstanceRegistry, BranchInstanceSnapshotEntry, BranchPresence, GetOrCreateBranchInstance,
     OwnedBranches,
 };
-use nervix_checkpoint_replication::{
-    Announcer, AnnouncerStep, CheckpointReplication, ReplicaProgress,
-};
+use nervix_checkpoint_replication::{Announcer, AnnouncerStep, CheckpointReplication};
 use nervix_dns::DnsResolver;
 use nervix_execution::{ChargedBytes, Executor, QueueAdmission};
 use nervix_interconnect::{
@@ -193,6 +191,8 @@ use crate::{
 #[cfg(feature = "benchmarks")]
 #[doc(hidden)]
 pub mod admitted_work_benchmark;
+mod backup_capture_fence;
+mod backup_state;
 mod branch_aggregated_state;
 mod branch_buffering;
 mod branch_checkpoint_catalog;
@@ -294,10 +294,16 @@ mod state_replication;
 mod state_snapshot_exchange;
 mod state_snapshot_transfer;
 mod state_store;
+mod subscription_interests;
 mod subscription_predicate;
 #[cfg(test)]
 mod test_fixtures;
 
+pub(crate) use backup_state::{
+    BackupBranchLifecycleEntry, CapturedRuntimeState, RESTORE_STATE_CHUNK_BYTES,
+    RESTORE_STATE_WORKING_BYTES, RestoredRuntimeState, decode_backup_branch_lifecycle,
+    decode_backup_kafka_offsets, encode_restored_branch_lifecycle, encode_restored_kafka_offsets,
+};
 use branch_aggregated_state::{
     BranchAggregatedRuntimeStateSnapshot, ReplicatedBranchAggregatedState,
     decode_branch_aggregated_snapshot, encode_branch_aggregated_snapshot,
@@ -882,11 +888,15 @@ pub(crate) use relay_batch::{RelayMessage, RelayRecordBatch};
 pub(crate) use relay_channel::{RelayBroadcast, RelayReceiver as RelaySubscriptionReceiver};
 pub(crate) use relay_subscription::RelaySubscriptionDefinition;
 use relay_subscription::{RelaySubscriptionRefusal, RelaySubscriptions};
-use state_assignment::{ScheduledStateAssignment, SharedStateAssignment, WasmCheckpointOwners};
+use state_assignment::{CheckpointOwners, ScheduledStateAssignment, SharedStateAssignment};
 pub(crate) use state_replication::StateSyncAck;
 pub(crate) use state_snapshot_transfer::{DescribeStateSnapshot, FetchStateSnapshot};
 pub(crate) use state_store::{
-    PersistedRuntimeStateEntry, RuntimePersistenceError, RuntimeStatePlacement,
+    DEFAULT_RESTORE_STAGING_MAX_BYTES, PersistedRuntimeStateEntry, RuntimePersistenceError,
+    RuntimeStatePlacement,
+};
+pub(crate) use subscription_interests::{
+    AdvertisedSubscriptionInterest, SubscriptionInterestIndex,
 };
 pub(crate) use subscription_predicate::{
     CompiledSubscriptionPredicate, SubscriptionPredicateCompileContext,

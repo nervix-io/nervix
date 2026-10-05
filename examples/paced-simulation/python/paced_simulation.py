@@ -75,6 +75,7 @@ CLOCK_UNPACED = 3
 CLOCK_PACED = 4
 
 ENDPOINT_CLOSED = 5
+ADMISSION_SUSPENDED = 2
 
 SUBMISSION_NOT_ADMITTED = 1
 SUBMISSION_COMPLETED = 2
@@ -190,6 +191,8 @@ class Binding:
         )
         declare("nx_producer_schema", HANDLE, HANDLE, OUT_HANDLE)
         declare("nx_producer_generation", U64, HANDLE)
+        declare("nx_producer_admission", I32, HANDLE)
+        declare("nx_producer_reopen_reason", BOOL, HANDLE, ctypes.POINTER(I32), ctypes.POINTER(I32))
         declare(
             "nx_producer_grant", None, HANDLE, ctypes.POINTER(U32), ctypes.POINTER(U64),
             ctypes.POINTER(U32), ctypes.POINTER(U64),
@@ -770,12 +773,15 @@ class EffectStore:
             self.condition.notify_all()
             return True
 
-    def await_rejections(self, reading_ids, until):
+    def await_rejections(self, reading_ids, until, stopping):
         """Waits until the store holds the rejection notice of every reading in `reading_ids`, or
-        `until` passes. A notice still missing then reaches a later run."""
+        `until` passes or `stopping` reports an application failure. A notice still missing then
+        reaches a later run."""
         reported = False
         with self.condition:
             while True:
+                if stopping():
+                    return
                 outstanding = sum(1 for reading_id in reading_ids
                                   if reading_id not in self.rejections)
                 if outstanding == 0:
@@ -996,33 +1002,33 @@ class Clock:
 
     def reach(self, generation, center, stopping):
         """Waits until the clock of `generation` reaches `center`. Returns ("center", window),
-        ("moved", pace) or ("stopping", None)."""
+        ("moved", pace), ("stopping", None) or ("recheck", None) after a bounded wait."""
         while True:
             if stopping.is_set():
                 return ("stopping", None)
             pace, changes = self.current()
             if pace == (PAUSED, generation):
-                self.wait_change(changes, stopping)
-                continue
+                self.wait_change(changes, stopping, timeout=OPEN_RETRY_DELAY)
+                return ("recheck", None)
             if pace != (PACED, generation):
                 return ("moved", pace)
             clock = self.snapshot()
             if clock is None:
                 return ("moved", (ENDED, None))
             if clock.generation() != generation:
-                self.wait_change(changes, stopping, timeout=0.2)
-                continue
+                self.wait_change(changes, stopping, timeout=OPEN_RETRY_DELAY)
+                return ("recheck", None)
             now = time.time_ns()
             try:
                 wait = clock.wall_duration_until(now, center)
             except BindingError as failure:
                 if failure.kind != ERROR_TYPE:
                     raise
-                self.wait_change(changes, stopping, timeout=0.2)
-                continue
+                self.wait_change(changes, stopping, timeout=OPEN_RETRY_DELAY)
+                return ("recheck", None)
             if wait > 0:
-                self.wait_change(changes, stopping, timeout=wait / 1e9)
-                continue
+                self.wait_change(changes, stopping, timeout=min(wait / 1e9, OPEN_RETRY_DELAY))
+                return ("recheck", None)
             window = clock.window(now)
             if window is None:
                 return ("moved", (UNPACED, generation))
@@ -1172,6 +1178,49 @@ def producer_line(settings, producer):
             f"batches={batches} bytes={size} max_batch_rows={rows} max_batch_bytes={batch_size}")
 
 
+class Reopen:
+    """The binding's reopen reason, including whether another START is required."""
+
+    def __init__(self, reason, refusal):
+        self.reason = reason
+        self.refusal = refusal
+
+    @classmethod
+    def read(cls, accessor, handle):
+        reason, refusal = I32(), I32()
+        if not accessor(handle, ctypes.byref(reason), ctypes.byref(refusal)):
+            return None
+        return cls(reason.value, refusal.value if reason.value == 7 else None)
+
+    def waits_for_generation(self):
+        # nx_reopen_reason: DOMAIN_STOPPED and GENERATION_CHANGED are the lifecycle endings.
+        return self.reason in (1, 5)
+
+    def text(self):
+        if self.reason == 7:
+            return f"refused ({REFUSALS[self.refusal]})"
+        return REOPEN_REASONS[self.reason]
+
+
+class Producer:
+    """One binding handle, its schema and the credit only its own submissions hold.
+
+    Each outcome thread retains this owner, so replacing the run's producer cannot free the
+    binding handle or release credit against the replacement while that thread still uses it.
+    """
+
+    def __init__(self, handle):
+        self.handle = handle
+        self.schema = HANDLE()
+        self.outstanding = {"batches": 0, "bytes": 0}
+        check(NX.nx_producer_schema(handle, ctypes.byref(self.schema)))
+
+    def __del__(self):
+        if NX is not None:
+            NX.nx_schema_free(self.schema)
+            NX.nx_producer_free(self.handle)
+
+
 class ConsumerLoop:
     """One consumer: reads deliveries, records their effects, and only then acknowledges them."""
 
@@ -1209,10 +1258,15 @@ class ConsumerLoop:
                         line(f"INTERRUPTED consumer={self.name} emitter={self.emitter}")
                         continue
                     if failure.kind == ERROR_REOPEN_REQUIRED:
-                        reason = self.reopen_reason(consumer)
+                        reason = Reopen.read(NX.nx_consumer_reopen_reason, consumer)
+                        if reason is None:
+                            self.run.fail(ConfigurationError(
+                                f"cannot reopen consumer '{self.name}': the binding gave no reason"
+                            ))
+                            break
                         line(f"CONSUMER reopen_required consumer={self.name} "
-                             f"emitter={self.emitter} reason={reason}")
-                        reopened = self.reopen(generation)
+                             f"emitter={self.emitter} reason={reason.text()}")
+                        reopened = self.reopen(generation, reason)
                         if reopened is None:
                             break
                         NX.nx_consumer_free(consumer)
@@ -1242,24 +1296,16 @@ class ConsumerLoop:
         finally:
             NX.nx_consumer_free(consumer)
 
-    def reopen_reason(self, consumer):
-        reason, refusal = I32(), I32()
-        if not NX.nx_consumer_reopen_reason(consumer, ctypes.byref(reason), ctypes.byref(refusal)):
-            return "unknown"
-        if reason.value == 7:
-            return f"refused ({REFUSALS[refusal.value]})"
-        return REOPEN_REASONS[reason.value]
-
-    def reopen(self, generation):
-        """Opens a new consumer once the simulation moved on to a later generation."""
-        while self.run.generation_now() <= generation:
+    def reopen(self, generation, reason):
+        """Accepts a changed contract now; a lifecycle ending waits for the next START."""
+        while reason.waits_for_generation() and self.run.generation_now() <= generation:
             if not self.run.wait_generation(generation):
                 return None
         try:
             consumer = open_consumer(self.run.session, self.run.settings.domain, self.emitter,
                                      OBSERVED_FIELDS if self.kind == "reading" else REJECTED_FIELDS)
         except ConfigurationError as failure:
-            error_line(str(failure))
+            self.run.fail(failure)
             return None
         line(f"CONSUMER reopened consumer={self.name} emitter={self.emitter} "
              f"generation={NX.nx_consumer_generation(consumer)}")
@@ -1383,16 +1429,15 @@ class Run:
         self.stopped = threading.Event()
         self.planning_stopped = threading.Event()
         self.planning = Cancel()
+        self.refusal_cancel = Cancel()
         self.generation_lock = threading.Condition()
         self.generation = None
         self.session = None
         self.clock = None
         self.producer = None
-        self.producer_schema = None
         # The producer credit the run's submissions hold. The run waits for credit before it
         # checks the admission window and submits, so it never checks a batch's event times and
         # then holds the batch back while the window moves on.
-        self.outstanding = {"batches": 0, "bytes": 0}
         self.credit = threading.Condition()
         self.outcomes = []
         self.consumer_loops = []
@@ -1424,6 +1469,18 @@ class Run:
     def stop_planning(self):
         self.planning_stopped.set()
         self.planning.trigger()
+
+    def fail(self, failure):
+        self.refused = failure
+        self.refusal_cancel.trigger()
+        self.stop_planning()
+
+    def check_refusal(self):
+        if self.refused is not None:
+            self.stopped.set()
+            for consumer_loop in self.consumer_loops:
+                consumer_loop.stop()
+            raise self.refused
 
     def connect(self):
         server, server_len = text(self.settings.server)
@@ -1474,17 +1531,37 @@ class Run:
             self.clock.wait_change(changes, self.stopped, timeout=remaining)
 
     def open_producer(self):
-        producer = open_producer(self.session, self.settings)
-        schema = HANDLE()
-        check(NX.nx_producer_schema(producer, ctypes.byref(schema)))
-        if self.producer_schema is not None:
-            NX.nx_schema_free(self.producer_schema)
+        return self.install_producer(Producer(open_producer(self.session, self.settings)))
+
+    def install_producer(self, producer):
         self.producer = producer
-        self.producer_schema = schema
-        with self.credit:
-            self.outstanding = {"batches": 0, "bytes": 0}
-        line(producer_line(self.settings, producer))
-        return NX.nx_producer_generation(producer)
+        line(producer_line(self.settings, producer.handle))
+        return NX.nx_producer_generation(producer.handle)
+
+    def close_producer(self):
+        try:
+            check(NX.nx_producer_close(self.producer.handle, self.refusal_cancel.handle))
+        except BindingError as failure:
+            self.check_refusal()
+            line(f"PRODUCER close_failed reason={failure.message}")
+
+    def reopen(self, grid):
+        """Accepts a changed contract with fresh credit, leaving pending outcomes with their owner."""
+        reason = Reopen.read(NX.nx_producer_reopen_reason, self.producer.handle)
+        if reason is None or reason.waits_for_generation():
+            return grid
+        self.close_producer()
+        producer = Producer(open_producer(self.session, self.settings))
+        opened = NX.nx_producer_generation(producer.handle)
+        if opened != grid.generation:
+            # START raced the open. The clock and --follow-generations still decide whether
+            # this run may plan in that generation.
+            del producer
+            return self.follow((PACED, opened), grid)
+        self.install_producer(producer)
+        line(f"REOPENED generation={opened} ingestor={self.settings.ingestor} "
+             f"reason={reason.text()}")
+        return grid
 
     def start_consumers(self):
         rejections = ConsumerLoop(self, "rejections", self.settings.rejections, "rejection", 0,
@@ -1515,8 +1592,7 @@ class Run:
                 try:
                     self.open_output(consumer_loop)
                 except ConfigurationError as failure:
-                    self.refused = failure
-                    self.stop_planning()
+                    self.fail(failure)
                     return
 
         threading.Thread(target=open_later, name="late-consumers", daemon=True).start()
@@ -1540,6 +1616,12 @@ class Run:
         tick = self.first_tick(grid)
         planned = 0
         while planned < self.settings.ticks:
+            generation = grid.generation
+            grid = self.reopen(grid)
+            if grid is None:
+                return
+            if grid.generation != generation:
+                tick = self.first_tick(grid)
             center = grid.center(tick)
             if center is None:
                 raise RuntimeError(f"the clock of domain '{self.settings.domain}' leaves the "
@@ -1547,6 +1629,8 @@ class Run:
             reached, value = self.clock.reach(grid.generation, center, self.planning_stopped)
             if reached == "stopping":
                 return
+            if reached == "recheck":
+                continue
             if reached == "moved":
                 grid = self.follow(value, grid)
                 if grid is None:
@@ -1554,6 +1638,16 @@ class Run:
                 tick = self.first_tick(grid)
                 continue
             window = value
+            generation = grid.generation
+            grid = self.reopen(grid)
+            if grid is None:
+                return
+            if grid.generation != generation:
+                tick = self.first_tick(grid)
+                continue
+            if NX.nx_producer_admission(self.producer.handle) == ADMISSION_SUSPENDED:
+                self.planning_stopped.wait(OPEN_RETRY_DELAY)
+                continue
             number = planned + 1
             prepared = self.prepare(tick, self.plan(grid.generation, tick, center, window, number))
             try:
@@ -1593,9 +1687,9 @@ class Run:
 
     def prepare(self, tick, readings):
         """Encodes the readings of one tick as the producer's batch."""
-        batch = build_batch(self.producer_schema, readings)
+        batch = build_batch(self.producer.schema, readings)
         size = batch_bytes(batch)
-        _, _, _, max_batch_bytes = grant(NX.nx_producer_grant, self.producer)
+        _, _, _, max_batch_bytes = grant(NX.nx_producer_grant, self.producer.handle)
         if size > max_batch_bytes:
             NX.nx_batch_release(batch)
             raise RuntimeError(f"cannot submit the readings of tick {tick}: its {size} bytes "
@@ -1605,11 +1699,14 @@ class Run:
     def wait_for_credit(self, size):
         """Waits until a batch of `size` bytes fits in the producer's credit beside the batches it
         holds. Returns False when the planning stops first."""
-        batches, granted, _, _ = grant(NX.nx_producer_grant, self.producer)
+        batches, granted, _, _ = grant(NX.nx_producer_grant, self.producer.handle)
         reported = False
         with self.credit:
             while True:
-                held = self.outstanding
+                if Reopen.read(NX.nx_producer_reopen_reason, self.producer.handle) is not None:
+                    # This already-planned batch reaches send's definitely-unsent ledger path.
+                    return True
+                held = self.producer.outstanding
                 if held["batches"] < batches and held["bytes"] + size <= granted:
                     return True
                 if not reported:
@@ -1634,7 +1731,7 @@ class Run:
         submission = U64()
         while True:
             try:
-                check(NX.nx_producer_submit(self.producer, batch, self.planning.handle,
+                check(NX.nx_producer_submit(self.producer.handle, batch, self.planning.handle,
                                             ctypes.byref(submission)))
                 break
             except BindingError as failure:
@@ -1647,18 +1744,21 @@ class Run:
                     self.planning_stopped.wait(1.0)
                     continue
                 if failure.kind in (ERROR_CLOSED, ERROR_REOPEN_REQUIRED):
-                    self.not_sent(tick, reading_ids, "producer_ended")
+                    reason = Reopen.read(NX.nx_producer_reopen_reason, self.producer.handle)
+                    cause = ("not_sent" if reason is not None and not reason.waits_for_generation()
+                             else "producer_ended")
+                    self.not_sent(tick, reading_ids, cause)
                     return
                 raise
         with self.credit:
-            self.outstanding["batches"] += 1
-            self.outstanding["bytes"] += size
-            held = self.outstanding["bytes"]
+            self.producer.outstanding["batches"] += 1
+            self.producer.outstanding["bytes"] += size
+            held = self.producer.outstanding["bytes"]
         self.counters.outstanding(held)
         line(f"SUBMITTED tick={tick} readings={len(readings)} bytes={size}")
         thread = threading.Thread(
             target=self.await_outcome,
-            args=(self.producer, self.outstanding, tick, reading_ids, rejected_ids, size,
+            args=(self.producer, tick, reading_ids, rejected_ids, size,
                   submission.value),
             name=f"outcome-{tick}", daemon=True)
         thread.start()
@@ -1669,17 +1769,17 @@ class Run:
         self.counters.outcome("not_admitted", len(reading_ids))
         line(outcome_line(tick, len(reading_ids), "not_admitted", cause))
 
-    def await_outcome(self, producer, outstanding, tick, reading_ids, rejected_ids, size,
+    def await_outcome(self, producer, tick, reading_ids, rejected_ids, size,
                       submission):
         outcome = HANDLE()
-        check(NX.nx_producer_rejoin(producer, submission, None, ctypes.byref(outcome)))
+        check(NX.nx_producer_rejoin(producer.handle, submission, None, ctypes.byref(outcome)))
         try:
             kind, cause = outcome_of(outcome)
         finally:
             NX.nx_submission_outcome_free(outcome)
         with self.credit:
-            outstanding["batches"] -= 1
-            outstanding["bytes"] -= size
+            producer.outstanding["batches"] -= 1
+            producer.outstanding["bytes"] -= size
             if kind == "completed":
                 self.awaited_notices.extend(rejected_ids)
             self.credit.notify_all()
@@ -1706,10 +1806,7 @@ class Run:
                 return None
             pace, _ = self.clock.current()
         target = pace[1]
-        try:
-            check(NX.nx_producer_close(self.producer, None))
-        except BindingError as failure:
-            line(f"PRODUCER close_failed reason={failure.message}")
+        self.close_producer()
         opened = self.open_producer()
         deadline = time.monotonic() + INSTALL_BUDGET
         while True:
@@ -1733,6 +1830,7 @@ class Run:
     def replay(self, unresolved, grid):
         """Resubmits the ledger's readings without a completed outcome, when they belong to the
         generation the run is in and the window still admits them."""
+        generation = grid.generation
         by_tick = {}
         for reading in unresolved:
             if reading.generation != grid.generation:
@@ -1741,6 +1839,9 @@ class Run:
                 continue
             by_tick.setdefault(reading.tick, []).append(reading)
         for tick in sorted(by_tick):
+            grid = self.reopen(grid)
+            if grid is None or grid.generation != generation:
+                return
             admissible = self.admissible(by_tick[tick], grid)
             if not admissible:
                 continue
@@ -1786,13 +1887,18 @@ class Run:
         until = time.monotonic() + self.settings.deadline / 1e9
         missing = 0
         for thread in self.outcomes:
-            thread.join(max(0.0, until - time.monotonic()))
-            if thread.is_alive():
-                missing += 1
+            while thread.is_alive():
+                self.check_refusal()
+                remaining = until - time.monotonic()
+                if remaining <= 0:
+                    missing += 1
+                    break
+                thread.join(min(remaining, OPEN_RETRY_DELAY))
         with self.credit:
             awaited = list(self.awaited_notices)
             self.awaited_notices.clear()
-        self.effects.await_rejections(awaited, until)
+        self.effects.await_rejections(awaited, until, lambda: self.refused is not None)
+        self.check_refusal()
         return missing
 
     def inspect(self):
@@ -1887,11 +1993,9 @@ class Run:
         if continuing:
             self.replay(unresolved, grid)
             self.simulate(grid)
+        self.check_refusal()
         missing = self.settle_outcomes()
-        try:
-            check(NX.nx_producer_close(self.producer, None))
-        except BindingError as failure:
-            line(f"PRODUCER close_failed reason={failure.message}")
+        self.close_producer()
         self.stopped.set()
         for consumer_loop in self.consumer_loops:
             consumer_loop.stop()

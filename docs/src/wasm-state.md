@@ -39,9 +39,53 @@ Nodes](./processors.md#wasm-processor) owns the NSPL statements.
 | Control plane | The recovery coordinator on the leader | Deciding whether a refused lifetime still has its one recovery attempt, recording the decision, and driving the reset it admits. |
 | Edges | The session service and clients | Admitting an NSPL reset as a transaction step, and returning the typed state inspection beside the text of `DESCRIBE WASM PROCESSOR`. |
 
-Guest bytes never leave the data plane and the state store. The control plane decides lifetimes and
-never reads a checkpoint; the data plane executes the lifetime the committed schedule names and
-never decides one.
+During normal execution, guest bytes stay in the data plane and state store. A backup is an
+explicit control-plane export of durable checkpoints to an archive; restore installs those bytes
+under the generations of the newly published schedule. The data plane executes the lifetime the
+committed schedule names and never decides one.
+
+Registered representation properties compare complete guest snapshots, SDK restore values,
+archive state descriptors and stored checkpoint headers. The oracle includes every raw guest byte,
+typed name, schema, branch field, generation and revision; segmented headers retain their full
+length and digest. These serial conversions establish value preservation. Callback completion,
+replica durability and publication ordering retain the scenario and concurrency evidence of their
+production owners. The [WASM representation register](https://github.com/nervix-io/nervix/blob/main/tests/wasm-representation-coverage.md)
+records each conversion, its exact oracle and the limits of its claim.
+
+## Backup And Restore
+
+A normal backup holds a quiesced cut for each running domain. Once intake and acknowledged work
+drain, each owner applies the selected cut revision and its runtime plan, then requests a fresh
+branch lifecycle checkpoint from its active supervisors before
+reading durable WASM saves together with its other state from one database snapshot.
+The archive stores a typed descriptor for each saved branch: processor, schema fingerprint, typed
+branch key and its fingerprint, generation, and checkpoint revision. Raw guest bytes occupy a
+separate section with a measured length and digest. `WITHOUT PAUSE` exports the latest published
+checkpoints with crash-consistent semantics; `WITHOUT STATE` omits them. Capture filters the
+current scheduled identity and active lifecycle before reconstructing branch keys. Retained
+checkpoints for TTL or LRU evicted branches are omitted; they remain available for local branch
+reappearance without preventing a backup of the current lifecycle.
+
+A restore creates the target domain stopped and publishes its models and schedule before installing
+state. It stages a complete replacement state set on each target node. It accepts a guest save
+only when its entity and schema fingerprint match the restored schedule, maps the saved branch to
+the generation that schedule names, and stages the checkpoint on the assigned owner and replicas.
+Branch lifecycle is staged first. Each node streams saves into bounded chunks in an invisible
+installation namespace, verifies the complete inventory, synchronizes the namespace and durably
+selects it with one atomic pointer. Lifecycle, offsets and saves become visible together. Passive
+handles are cleared only after pointer durability and bounded obsolete-namespace cleanup, under
+the same installation authority. The installation and publication jobs reserve 2 MiB independently
+of total guest bytes and checkpoint count; loading a saved guest at START still materializes its
+bytes under the WASM host's own limits. Snapshot readers retain one complete selected generation,
+and queued checkpoint writers cannot cross an installation namespace.
+The replicated start gate remains closed until every node completes publication, even if the
+restore fails or its mutation lease is released. Authority binds leader tenure, execution, lease
+and installation generation; stale local and remote requests cannot republish or clear handles. A
+checkpoint from a different schema or an entity absent from the schedule is skipped with a
+diagnostic. The source domain name and owner node are not carried into the restored placement.
+The guest still validates its saved bytes when the restored domain later starts. The Rust SDK
+allows the domain name to change when the branch key, domain type, and input and output schemas
+match; a guest with its own snapshot format may apply stricter identity rules and reject the save.
 
 ## Branch Ownership
 
@@ -134,6 +178,9 @@ A zero-length save means the guest has no state: the next instance is initialize
 `nervix_load_state` call. The Rust SDK wraps every save in a `GuestSnapshot` envelope that also
 carries the branch configuration, so empty application state is still restored as state, and a
 snapshot taken under another branch configuration is rejected.
+For a restore into a differently named domain, the SDK accepts that name change while still
+checking the domain type, concrete branch key, and input and output schemas. The saved application
+bytes are passed through unchanged.
 
 A restore either succeeds, or the guest rejects the saved state with one of the two reserved verdict
 codes, or it fails without a verdict: a trap, an exhausted limit, or another negative code. Only a
@@ -154,7 +201,11 @@ schemas the processor's records are laid out by, and the branch's guest-state ge
 places guest state only under the identity derived from the committed schedule in its applied typed
 execution revision, and acts on a placement only while that placement is current. The same revision
 carries the processor's reset and pinned module plans through a rebuild or owner change. A replica
-acknowledgement counts only toward the placement it names. See [Checkpoint
+acknowledgement counts only toward the placement it names. Installed replication routes retain the
+same entity assignment publication as guest checkpoint execution. Reset lifecycle confirmation
+retains its route, follows replica reassignment, and refuses replacement or loss of primary
+ownership before declaring confirmation; neither that wait nor its announcer reads execution maps.
+See [Checkpoint
 Identity](./shutdown.md#checkpoint-identity) and [Membership, Consensus, And Bulk
 Transfer](./interconnect.md#membership-consensus-and-bulk-transfer).
 

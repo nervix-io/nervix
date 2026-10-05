@@ -1,10 +1,10 @@
-//! Completing the work a terminating node has already admitted, in place.
+//! Observing and completing the work a node has already admitted, in place.
 //!
 //! Layer: data plane.
 //!
-//! - **Owns.** The intake boundary a terminating node closes over its ingestors and generators, the
-//!   force-flush generations that release its buffered work while downstream relays and sinks stay
-//!   alive, and the proof that its graphs hold no admitted work before terminal teardown.
+//! - **Owns.** The admitted-work view shared by shutdown and backup, the intake boundary a
+//!   terminating node closes, the force-flush generations that release its buffered work while
+//!   downstream relays and sinks stay alive, and the proof of a completed local drain.
 //! - **Depends on.** Ingestor quiesce controls, generator activity, relay boundary fan-outs, node
 //!   quiesce counters, emitter publishing state, in-flight acknowledgement roots and the domain
 //!   force-flush coordinator.
@@ -65,25 +65,25 @@ pub(crate) enum LocalGraphDrainOutcome {
 
 /// What one domain still holds on this node while it drains in place.
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct LocalDomainDrainStatus {
-    domain: DomainName,
+pub(crate) struct LocalDomainDrainStatus {
+    pub(crate) domain: DomainName,
     /// Ingestors that have not stopped admitting new work.
-    admitting_ingestors: usize,
-    active_generators: usize,
+    pub(crate) admitting_ingestors: usize,
+    pub(crate) active_generators: usize,
     /// Unresolved acknowledgement roots, apart from roots whose every pending share waits on
     /// `REQUIRED WAIT`.
-    outstanding_acks: usize,
+    pub(crate) outstanding_acks: usize,
     /// Relays that admitted a batch while the observation read, which work may have reached
     /// after the read that would have counted it.
-    admitting_relays: usize,
-    buffered_relay_batches: usize,
+    pub(crate) admitting_relays: usize,
+    pub(crate) buffered_relay_batches: usize,
     /// Mailbox, in-flight, collected and route-buffered work of the domain's graph nodes.
-    node_work_items: usize,
-    buffered_emitter_messages: usize,
+    pub(crate) node_work_items: usize,
+    pub(crate) buffered_emitter_messages: usize,
     /// Emitter publishes awaiting sink confirmation or retrying, counted once per state.
-    publishing_emitters: usize,
-    required_waits: usize,
-    force_flush_obligations: usize,
+    pub(crate) publishing_emitters: usize,
+    pub(crate) required_waits: usize,
+    pub(crate) force_flush_obligations: usize,
 }
 
 impl LocalDomainDrainStatus {
@@ -114,7 +114,7 @@ impl LocalDomainDrainStatus {
     /// Whether admitted work is still visible in the domain. Force-flush obligations are the
     /// drain's own requests, and parked `REQUIRED WAIT` messages cannot finish while their
     /// dependency is absent, so neither is work the drain waits for.
-    fn holds_admitted_work(&self) -> bool {
+    pub(crate) fn holds_admitted_work(&self) -> bool {
         self.admitting_ingestors != 0
             || self.active_generators != 0
             || self.outstanding_acks != 0
@@ -357,7 +357,7 @@ impl Runtime {
         *self.inner.local_intake.borrow() == LocalIntake::Closed
     }
 
-    fn local_domain_drain_status(&self, domain: &DomainName) -> LocalDomainDrainStatus {
+    pub(crate) fn local_domain_drain_status(&self, domain: &DomainName) -> LocalDomainDrainStatus {
         let sources = RuntimeDomainDrainSources {
             runtime: self,
             domain,
@@ -404,7 +404,7 @@ impl LocalDomainDrainSources for RuntimeDomainDrainSources<'_> {
             }
             let stopped_admitting = match self.runtime.inner.ingestor_quiescence.get(ingestor.key())
             {
-                Some(control) => control.cause() == Some(IngestorQuiesceCause::Shutdown),
+                Some(control) => control.is_quiesced(),
                 None => false,
             };
             if !stopped_admitting {

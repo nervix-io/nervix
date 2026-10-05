@@ -32,3 +32,5 @@ wasmtime = { workspace = true }
 arrow-array = { workspace = true }
 arrow-ipc = { workspace = true }
 arrow-schema = { workspace = true }
+bolero = { workspace = true }
+nervix-arbitrary = { workspace = true }

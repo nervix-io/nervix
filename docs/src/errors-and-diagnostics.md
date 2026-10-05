@@ -73,7 +73,9 @@ conversion. A codec or runtime caller retains that report under its operation co
 errors remain typed values in the batch outcome and are formatted only when a message error is
 reported; this conversion does not turn them into report allocations per row.
 
-The WASM FlatBuffers decoder reports protocol failures with their verified payload cause. The Rust
+The WASM FlatBuffers decoder reports protocol failures with their verified payload cause. It checks
+the complete header length before reading the identifier; a truncated header returns the typed
+length or identifier error even when its size prefix matches the received bytes. The Rust
 guest SDK retains that report beneath its envelope or snapshot meaning, and its `Processor`
 callbacks return guest-error reports. It renders a failure only when returning an ABI code or
 global-error reason; rejected snapshot bytes and rejected application state keep their distinct
@@ -286,7 +288,14 @@ bytes. The control plane's backup execution reports a `BackupError`: no configur
 selected or no existing domain, models that are not a valid graph or do not render or parse back to
 themselves, a clock mapping that cannot be projected, a resource version that is missing on the
 leader or differs from its catalog entry, a record that does not encode, and an archive the
-staging area cannot hold. The failed command's message is `backup failed:` followed by that
+staging area cannot hold. A quiesced capture also names its domain when the mutation lease, pause,
+drain, owner capture, or resume fails or times out, or when its coordinator loses the leader tenure
+under which it acquired the cut. Owner capture failures are classified at the
+interconnect boundary without guest bytes in the failure. An owner still applying the selected
+revision waits within a five-second bound; a closed applied-state authority or an expired catch-up
+wait is a domain capture failure. A leadership change during that wait refuses the capture before
+state is read. The failed command's message is
+`backup failed:` followed by that
 error's text. A download the server does not serve is answered with a typed refusal,
 `InvalidRequest`, `NotRetained`, `Expired`, `NotOwner` or `ReadFailed`, or with a redirect to the
 leader, and a call without valid credentials ends with `UNAUTHENTICATED`. The client reports a
@@ -318,9 +327,32 @@ version other than a restored one by number. Each of these is reported as `resto
 its reason, and changes nothing. Once admitted, a step that fails ends the restore as
 `restore failed at step '<step>':` and its reason, with the restore's report: the consensus command
 that records a step refuses it with a `RestoreStepConflict` naming the step and the domain, user,
-resource, or version, and a resource import or the domain's model batch keeps its own failure
-beneath the step. The steps before it stay applied, and the message says so. No restore
-diagnostic includes password hashes or resource bytes. The client reports an archive it cannot read
+resource, or version, and a resource import, domain model batch, or state installation keeps its own failure
+beneath the step. `RestoreStateInstallationError` distinguishes an incomplete installation that
+blocks starting a domain from authority that no longer permits mutation. The runtime store reports
+a stale or competing published generation as `RuntimePersistenceError::RestoreGeneration`.
+`InvalidCheckpointChunks` covers a missing, misordered, truncated or digest-mismatched current
+chunk set or a conflicting publication inventory. `RestoreRead`, `Cancelled`, `Synchronize` and
+storage admission preserve their owning failure boundary. `CheckpointPlacementTooLarge` rejects
+an encoding beyond the bounded storage key allowance. `InvalidStorageFormat` requires recreation
+of the node state directory when the required current format marker is missing or invalid.
+`RestoreStagingQuota` carries the node's unpublished checkpoint limit, current usage and incoming
+checkpoint footprint; `RestoreStagingSize` rejects an unrepresentable accounting sum. A quota
+failure remains a storage failure beneath the admitted restore step and leaves its activation
+gate closed. Node-local maintenance logs admission, cancellation or storage failure and retries
+on its next sweep without changing the command outcome or gate. Metrics are updated only for a
+completed sweep, so a partial cancelled deletion cannot claim a completed reclamation count.
+Staging or publication failure leaves the durable start gate in place, including a failure after
+the complete generation's pointer became durable but before runtime handles were cleared. Exact
+publication retry completes durability and bounded cleanup under the same authority and inventory. The steps before it stay
+applied, and the message says so. Transaction planning reports a blocked `START` as
+`TransactionPlanningError::RestoreInstallation`, naming the domain and restore execution before
+lifecycle admission. The client receives a definitive failure. No restore
+diagnostic includes password hashes or resource bytes. When a state section's entity is absent
+from the restored schedule or its schema fingerprint differs, installation skips that section and
+the successful command carries an unlocated warning diagnostic. The same applies to a verified
+state record whose kind tag or version is unsupported. The CLI includes those warnings
+in text and JSON reports. The client reports an archive it cannot read
 as `ClientError::ReadRestoreArchive` with the path and the I/O error kind, an empty file as
 `ClientError::EmptyRestoreArchive`, a failed call as `ClientError::Restore` with its status, and a
 reply that does not decode as `ClientError::InvalidRestoreReply`; an error that may hide an
@@ -516,8 +548,11 @@ and UDFs once for that installed revision. Missing inputs, codecs or relays fail
 missing runtime relay services, invalid flush settings or a failed VM compilation fail binding
 with the owning node and DLQ relay. A failed record uses the installed plan and never reads the
 scheduled Model or compiles its handler. If unavailable, it reports the delivery failure and does
-not acknowledge the source record. Replacing a buffered route starts a task for the new bound plan and
-drains the earlier task, preserving the earlier task's pending acknowledgements.
+not acknowledge the source record. Binding a buffered route prepares its bounded queue; successful
+running publication starts the worker once and the plan retains its exact delivery handle. A failed
+record sends directly through that handle. Replacement cancels the preceding handle before
+installing the new worker and drains the earlier task, preserving its pending acknowledgements.
+Changing to immediate delivery or withdrawing the route also retires its buffered worker.
 
 A batch payload's rejection becomes one message error per member, each a copy of the sink's
 structured error: the members share its reference, so an operator can see that they failed
@@ -656,7 +691,11 @@ report carries its planning diagnostics and cannot supply a commit preview. A st
 recoverable command disposition that applies no effects and tells the client to refresh its
 inspection before retrying `COMMIT`. [Transaction Quiescence And Impact
 Inspection](./transaction-quiescence.md) defines the planned and actual report outcomes these
-diagnostics describe. Parse diagnostics retain precise expected and found tokens and byte spans
+diagnostics describe. A buffered ingestor's intake-only drain uses the same typed entity-quiesce
+timeout, naming the domain, pending node, work counts, and outstanding ACK roots. Its failure
+releases the attempted hold and retains the committed endpoint contract. A failure while
+releasing that intake hold keeps the typed release cause beneath the model alteration's gate
+error; it cannot publish the replacement. Parse diagnostics retain precise expected and found tokens and byte spans
 into the submitted source for a client to underline, whichever statement of a batch was
 rejected. Validation diagnostics attach a source span when the
 relevant identifier is present in the submitted text; failures without a source location have an
@@ -759,6 +798,14 @@ output. A submission cancelled that way sent nothing, and an outcome wait leaves
 with the producer. A read stays with the consumer, which hands its reply to the next read, and a
 settlement may still have reached the server.
 
+The [paced simulation drivers](./paced-simulation-drivers.md) classify a refused replacement
+producer or consumer as a configuration error and exit with status `2`, retaining the typed
+refusal or schema diagnostic. A consumer's refusal ends input planning and interrupts outstanding
+outcome, rejection-notice and producer-close waits, including after planning finished: batches
+whose output contract cannot be consumed cannot finish that close.
+The application retains their ledger entries for an explicit `--replay`; reopening never resends
+an unknown submission automatically.
+
 If a paced clock cannot convert one period through its rate, the authority can still emit its
 already-due first tick. Scheduling a later tick then reports a rate-conversion or cadence error and
 stops production. A next-boundary overflow reports its own clock arithmetic error. None of these
@@ -793,6 +840,10 @@ requester, session, or observer left (`means_peer_left`). If the receiver was gu
 its absence is a broken invariant. A watch value needed by later subscribers uses `send_replace`
 so loss of current subscribers cannot leave stale state. [Shutdown And Recovery](./shutdown.md)
 owns where these outcomes occur during stop and drain.
+
+Closing the runtime's checkpoint announcement task owner after drain cancels pending dispatches
+and retry waits, then joins them before withdrawing their routes. This cancellation is an ordinary
+terminal task ending; replica synchronization supplies any missed checkpoint availability hint.
 
 Broken internal guarantees take the explicit panic classes `assured` for a construction or platform
 guarantee, `verified` for a condition checked on the current path, and `todo` for a deliberately
@@ -855,3 +906,12 @@ Reporting a different error without selecting a new retry preserves the active r
 renders error, backoff and remaining wait from one immutable observation. A failed record obtains
 its prepared message-error route from its task's retained routing publication and preserves that
 plan while its VM program and delivery execute.
+
+## Replication Routing
+
+Replication frame routing treats an absent state, an ended route or a replaced assignment as an
+ordinary non-admission: it creates no state and records no replica progress. Synchronization
+request admission retains the existing rejected-assignment outcome. A WASM reset lifecycle wait
+reports the existing typed superseded-state failure when its retained assignment loses identity
+or primary ownership, the existing replica-plan-shrunk failure when its promised boundary loses
+replicas, and the existing replica-confirmation failure when its deadline expires.

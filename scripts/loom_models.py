@@ -7,14 +7,14 @@
 `crates/model-harness/loom-inventory.toml` registers every model by the invariant it checks.
 
 `run` lists the library tests named `loom_*` of every inventory package, built with its `loom`
-feature, and checks them against the inventory: a run over the whole inventory fails when a
-registered test is missing or ignored, or when a discovered model is not registered. It then runs
-each selected model in its own process and accepts it only when the model's harness printed the
+feature and build profile, and checks them against the inventory: a run over the whole inventory
+fails when a registered test is missing or ignored, or when a discovered model is not registered.
+It then runs each selected model in its own process and accepts it only when the model's harness printed the
 record of an exhaustive exploration for the model's own invariant; a passing test without that
 record is an incomplete run. It reports how many models it discovered, selected, executed and saw
 complete, and a filter that selects nothing fails.
 
-A failed model leaves `<target>/loom-failures/<package>/<test>/` behind: Loom's checkpoint of the
+A failed model leaves `<target>/loom-failures/<package>/<invariant>/` behind: Loom's checkpoint of the
 failed execution, the run's output, and `metadata.json` with the invariant, revision, toolchain,
 Loom version and exploration bounds. `replay` resumes Loom from that checkpoint with location
 tracking and tracing enabled, so the failed execution runs first. The artifacts hold model output
@@ -27,6 +27,7 @@ working tree's, and every file it copies or restores takes a fresh modification 
 rebuilds exactly what a weakening changed and never mistakes a weakened build for a restored one.
 Qualifications that apply the same weakening share one weakened build. The copy links the generated
 inputs the ignore rules leave out but a package embeds, such as the built web console.
+Discovery, execution, replay and qualification use the same build profile.
 """
 
 from __future__ import annotations
@@ -43,6 +44,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Mapping, Sequence
 
+from scripts.model_evidence import Evidence
+
 INVENTORY = Path("crates/model-harness/loom-inventory.toml")
 FAILURES = "loom-failures"
 QUALIFICATIONS = "loom-qualification"
@@ -52,6 +55,7 @@ QUALIFICATION_BUILD = "loom-qualification-build"
 GENERATED_INPUTS = (Path("crates/web-console/dist"),)
 MODEL_PREFIX = "loom_"
 LOOM_FEATURE = "loom"
+LOOM_PROFILE = "loom"
 
 _INVARIANT_ID = re.compile(r"^[a-z0-9-]+(?:\.[a-z0-9-]+)+$")
 # The test harness prints `test <name> ... ` before a test's own output, so a record can share its
@@ -271,6 +275,8 @@ def completion(output: str, invariant_id: str) -> Completion | None:
 
     for match in _COMPLETED.finditer(output):
         if match.group("id") == invariant_id:
+            if int(match.group("executions")) == 0:
+                return None
             return Completion(
                 executions=int(match.group("executions")), bounds=match.group("bounds")
             )
@@ -339,7 +345,7 @@ class Commands:
 
 
 def cargo_test(package: str, *arguments: str, manifest: Path | None = None) -> list[str]:
-    command = ["cargo", "test"]
+    command = ["cargo", "test", "--profile", LOOM_PROFILE]
     if manifest is not None:
         command += ["--manifest-path", str(manifest)]
     return [*command, "--package", package, "--features", LOOM_FEATURE, "--lib", *arguments]
@@ -414,16 +420,35 @@ def checkpoint_environment(checkpoint: Path) -> dict[str, str]:
     }
 
 
-def run_models(commands: Commands, inventory: Inventory, target: Path, filter_text: str) -> int:
+def run_models(
+    commands: Commands, inventory: Inventory, target: Path, filter_text: str, report: Path | None = None
+) -> int:
+    evidence = Evidence(report, "loom", filter_text, INVENTORY)
     discoveries = [discover(commands, package) for package in inventory.packages()]
+    evidence.discover([
+        {
+            "package": discovery.package,
+            "test": test,
+            "invariant": registered.id if (registered := inventory.registered(discovery.package, test)) else None,
+            "ignored": test in discovery.ignored,
+        }
+        for discovery in discoveries for test in discovery.models
+    ])
     discovered = sum(len(discovery.models) for discovery in discoveries)
     selected = select(inventory, discoveries, filter_text)
+    evidence.select([
+        {"package": model.package, "test": model.test, "invariant": model.invariant.id}
+        for model in selected
+    ])
 
     executed = 0
     completed = 0
     failures: list[str] = []
     for model in selected:
-        directory = target / FAILURES / model.package / model.test
+        check_evidence = evidence.begin({
+            "package": model.package, "test": model.test, "invariant": model.invariant.id
+        })
+        directory = target / FAILURES / model.package / model.invariant.id
         shutil.rmtree(directory, ignore_errors=True)
         directory.mkdir(parents=True)
         checkpoint = directory / "checkpoint.json"
@@ -432,8 +457,18 @@ def run_models(commands: Commands, inventory: Inventory, target: Path, filter_te
         outcome = commands.run(command, environment=checkpoint_environment(checkpoint))
         executed += 1
         record = completion(outcome.output, model.invariant.id)
+        check_evidence["runs"] = [{
+            "name": "exploration",
+            "exit_status": outcome.status,
+            "completed": outcome.status == 0 and record is not None,
+            "executions": record.executions if record is not None else None,
+            "bounds": record.bounds if record is not None else exploration_bounds(outcome.output, model.invariant.id),
+        }]
+        evidence.write()
         if outcome.status == 0 and record is not None:
             completed += 1
+            check_evidence["completed"] = True
+            evidence.write()
             shutil.rmtree(directory)
             continue
         if outcome.status == 0:
@@ -455,7 +490,9 @@ def run_models(commands: Commands, inventory: Inventory, target: Path, filter_te
     for failure in failures:
         print(f"loom: {failure}", file=sys.stderr)
     if failures:
+        evidence.finish(1)
         return 1
+    evidence.finish(0)
     return 0
 
 
@@ -652,6 +689,7 @@ def main(
     subcommands = parser.add_subparsers(dest="command", required=True)
     run_parser = subcommands.add_parser("run")
     run_parser.add_argument("filter", nargs="?", default="")
+    run_parser.add_argument("--report", type=Path)
     replay_parser = subcommands.add_parser("replay")
     replay_parser.add_argument("failure", type=Path)
     subcommands.add_parser("qualify")
@@ -663,7 +701,7 @@ def main(
     try:
         inventory = parse_inventory((root / INVENTORY).read_text(encoding="utf-8"))
         if arguments.command == "run":
-            return run_models(commands, inventory, target, arguments.filter)
+            return run_models(commands, inventory, target, arguments.filter, arguments.report)
         if arguments.command == "replay":
             return replay(commands, inventory, arguments.failure.resolve())
         return qualify(commands, inventory, target)

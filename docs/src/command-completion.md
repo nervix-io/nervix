@@ -120,7 +120,9 @@ reference with another archive is a different request. The leader admits a resto
 archive verified and the whole restore planned, and records every step the restore applies in the
 restore's execution as the step's effect commits. Its success means every step applied: the users,
 each domain created stopped, its resource versions completed under their archived numbers on every
-live node, and its models applied. A failure names the step, and the steps before it stay applied.
+live node, its models applied, and its complete compatible state set durably published on every
+target node. A failure names the step, and the steps before it stay applied. An unfinished domain
+retains a replicated start gate even after failure releases the execution's mutation lease.
 Retrying the reference while the restore applies on the leader returns `OutcomeUnknown` with the
 `StillApplying` cause at once, and after it finished returns the recorded outcome with the typed
 restore report. Only the leader the archive was streamed to holds it, so a new leader resumes an

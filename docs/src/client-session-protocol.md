@@ -201,6 +201,15 @@ extreme values, nested lists, and every refusal of a domain clock attachment, to
 `just test-client-wire` checks that the checked-in bytes are exactly what the encoder writes, and
 `just update-client-wire-corpus` regenerates them for review.
 
+The registered client representation properties also compare complete generated current values
+through the production codecs. Separate targets verify malformed bytes under fixed limits; Arrow
+properties compare selected logical values and validity with decoded Row cells, using float bits
+and explicit redaction, while binding properties check column copies and retained frame lifetime.
+The [client representation coverage map](https://github.com/nervix-io/nervix/blob/main/tests/client-representation-coverage.md)
+records their schema coverage and ownership boundaries. Both ordinary corpus replay and
+sanitizer-backed fuzzing run the same assertions through the
+[property target inventory](./property-testing-and-fuzzing.md#target-and-representation-register).
+
 ## Transports, Endpoints, And Authentication
 
 Every live node runs both client listeners. Neither depends on leadership or placement, and both
@@ -1287,6 +1296,13 @@ outcome before it: `EndpointChanged`, `EndpointRemoved`, `DomainStopped`, `Reloc
 which change causes each. A producer closed by its client ends with the close reply and no
 `ProducerEnded`.
 
+During an ingestor alteration, admitted buffered batches keep their original outcome and credit
+while admission is suspended. The server drains them before publishing the replacement contract,
+including partial branch batches that must first pass through a shared relay. An intake hold and
+the full entity hold overlap, so no intermediate `Open` admits work between those phases. A failed
+drain keeps the committed contract and producer attachments; it does not replay an unresolved
+submission. A successful contract change delivers the admitted outcomes before `EndpointChanged`.
+
 ### Ordering And Backpressure
 
 Each producer has one task on the serving node that is the only writer of its replies and frames, so
@@ -1459,11 +1475,12 @@ under its execution reference like every other persistent command, while its arc
 call of its own, `DownloadBackup`, keyed by that reference. [Backup And
 Restore](./backup-and-restore.md) owns what an archive holds and how it is laid out.
 
-The leader runs the backup. It reads every section from one applied revision, assembles the archive
-in its staging area, and only then completes the command. The `CommandCompleted` outcome carries the
+The leader runs the backup. Each domain is captured at its own applied revision and records whether
+its cut was quiesced, live, stopped, or configuration-only. The leader assembles the archive in its
+staging area, and only then completes the command. The `CommandCompleted` outcome carries the
 archive's summary: its size and BLAKE3 digest, the capture time, the instant the node stops
 retaining the archive, whether resource bytes are included, the number of users, and each domain's
-revision, section count, and bytes. The summary is part of the recorded outcome, so repeating the
+revision, cut kind and quiesce counters, section count, and bytes. The summary is part of the recorded outcome, so repeating the
 command under its reference returns the same summary and never assembles a second archive.
 
 A download call carries exactly one `BackupDownloadRequest`, which names the backup's execution
@@ -1551,6 +1568,12 @@ other answer is a `CommandOutcome` under the start's execution reference:
 A restore that failed at a step is `RequestFailed`, and its report names the step as `Failed`, the
 steps before it as `Applied`, and those after it as `NotAttempted`. A dry run reports every step as
 `Planned`, and is never admitted or recorded.
+
+A domain whose restore has not published its complete runtime-state generation refuses `START`
+with a definitive command failure naming the incomplete installation. Planning rejects it before
+admitting a lifecycle step, and consensus checks the same gate at activation. Failure of the
+restore, release of its mutation lease, and node restart do not release this gate. Only completion
+of the whole installation does.
 
 The call is not bounded by the request deadline, because an archive can take far longer to send
 than a command takes to run; the Rust client bounds each frame by it, and then the wait for the

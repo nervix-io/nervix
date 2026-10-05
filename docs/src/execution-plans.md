@@ -197,7 +197,12 @@ assignments. Installation binds its program against local capabilities once. A f
 uses that bound plan with a structured, non-sensitive error reference, code, operation, fields,
 and timestamp. A handler failure cannot invoke the same handler recursively; an unavailable
 route is reported and does not acknowledge the source record. A route change replaces its bound
-plan with the installed revision. [Errors And Diagnostics](./errors-and-diagnostics.md) owns the
+plan with the installed revision. Buffered plans retain their prepared delivery queue and exact
+worker handle. Binding starts no worker and retires no active route. Successful running publication
+activates each prepared worker once, retires unselected/replaced workers and publishes the complete
+routing snapshot. Failed and passive builds cannot replace running delivery. Subsequent failed
+records send through the bound handle, selecting retirement against bounded queue admission;
+accepted deliveries drain through the worker that already owns them. [Errors And Diagnostics](./errors-and-diagnostics.md) owns the
 error taxonomy and public reporting contract.
 
 ## Placement, Resources, And Recovery
@@ -218,6 +223,21 @@ published identity and generation match the desired placement. A stopped domain 
 passive surfaces; a running or paused domain reconstructs the applicable execution and intake
 state. [Shutdown And Recovery](./shutdown.md) and [WASM State And Recovery](./wasm-state.md) own
 the detailed handoff, checkpoint, duplicate-window, and restart guarantees.
+
+An archive restore first publishes the restored models as a stopped domain and recomputes its
+schedule. Archived node assignments are never installation authority. The coordinator requires
+each archived entity's schema fingerprint to match the new schedule and stages its checkpoints on
+the scheduled owner and replicas. Branch lifecycle is staged before WASM guest saves, and each
+save uses the state generation from the published schedule. Each node atomically publishes its
+complete replacement set through a small durable pointer to its verified generation namespace,
+including an empty set on unassigned nodes, then clears passive handles. Restart and passive-state
+loading select pointer, headers and checkpoint chunks from one database view. Checkpoint jobs
+queued for a different namespace cannot cross into the new installation.
+The replicated installation gate prevents `START` until all nodes finish. A retry of an unfinished
+model step admits a new installation generation bound to its leader tenure, execution and lease;
+a delayed preceding attempt cannot mutate the state or its handles after completion.
+[Backup And Restore](./backup-and-restore.md) owns archive cut modes, state selection, skipped
+sections, and the operator-visible restore guarantees.
 
 Resource plans carry concrete pinned version numbers from the committed Models. Node binding
 loads exactly those versions from its local resource store; it never resolves `LATEST` or reads
@@ -256,8 +276,16 @@ reconstructible artifact, so it is not an independently persisted or user-editab
 
 Installation publishes bound message-error plans inside the domain routing snapshot. A failed
 record retains that snapshot while executing its prepared route. Entity state identity and
-checkpoint executors/replicas publish through one stable assignment slot before reset callbacks;
+checkpoint primary/executors/replicas publish through one stable assignment slot before reset callbacks;
 WASM states retain that slot across schedule replacements. Task startup also binds connector
 status, accounting, metric, freeze and domain-clock dependencies. Their runtime registries serve
 registration, teardown and observers; recurring operations use the retained capabilities. See
 [Data-Plane Concurrency](./data-plane-concurrency.md#retained-task-dependencies).
+
+## Replication Routing
+
+State construction publishes resolved replication routes to the installed state and that existing
+assignment slot. Schedule replacement, branch eviction and entity or domain teardown retire those
+routes before removing registry entries. Frame handlers read the immutable route publication;
+announcers and entity catch-up tasks retain their route or lifecycle and never revisit execution
+or identity registries. See [Data-Plane Concurrency](./data-plane-concurrency.md#checkpoint-replication).

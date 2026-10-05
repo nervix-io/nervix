@@ -36,6 +36,7 @@ fastrand = { workspace = true }
 futures-util = { workspace = true }
 h2 = { workspace = true }
 http = { workspace = true }
+imbl = { workspace = true }
 meticulous = { workspace = true }
 nervix-dns = { workspace = true }
 nervix-execution = { workspace = true }
@@ -62,6 +63,7 @@ alloc_count = { workspace = true }
 arrow-array = { workspace = true }
 arrow-ipc = { workspace = true }
 arrow-schema = { workspace = true }
+bolero = { workspace = true }
 nervix-model-harness = { workspace = true }
 rcgen = { workspace = true }
 serde = { workspace = true }

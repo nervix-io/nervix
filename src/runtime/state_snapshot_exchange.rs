@@ -150,11 +150,15 @@ impl Runtime {
         after_revision: Option<u64>,
     ) -> Result<DescribedStateSnapshot, RemoteOperationFailure> {
         let subject = RemoteOperationSubject::state(&placement.to_remote());
-        let state = self
-            .inner
-            .replicated_materialized_stream_states
-            .get(placement)
-            .map(|state| super::ReplicatedMaterializedRelayState::read(state.value()));
+        let state = match self.inner.state_replication_routing.resolve(placement) {
+            Some(route) => match route.state().as_deref() {
+                Some(super::state_replication::routing::ReplicatedState::MaterializedRelay(
+                    state,
+                )) => Some(super::ReplicatedMaterializedRelayState::read(state)),
+                _ => None,
+            },
+            None => None,
+        };
         let Some(state) = state else {
             return Err(RemoteOperationFailure::unavailable(subject));
         };
@@ -181,11 +185,15 @@ impl Runtime {
     ) -> Result<StreamingResponse, Report<StreamHandlerError>> {
         let placement = RuntimeStatePlacement::from_remote(request.placement)
             .map_err(StreamHandlerError::with_cause)?;
-        let state = self
-            .inner
-            .replicated_materialized_stream_states
-            .get(&placement)
-            .map(|state| super::ReplicatedMaterializedRelayState::read(state.value()));
+        let state = match self.inner.state_replication_routing.resolve(&placement) {
+            Some(route) => match route.state().as_deref() {
+                Some(super::state_replication::routing::ReplicatedState::MaterializedRelay(
+                    state,
+                )) => Some(super::ReplicatedMaterializedRelayState::read(state)),
+                _ => None,
+            },
+            None => None,
+        };
         let Some(state) = state else {
             return Err(Report::new(StreamHandlerError::new(format!(
                 "this node is not currently assigned materialized state for {} '{}'",

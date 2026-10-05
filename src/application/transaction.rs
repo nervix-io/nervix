@@ -1338,6 +1338,16 @@ impl SessionServiceImpl {
             .consensus
             .transaction_control_snapshot(domain)
             .await;
+        if let Some(execution) = &control.restore_installation
+            && statements
+                .iter()
+                .any(|statement| matches!(statement, Statement::StartDomain(_)))
+        {
+            return Err(Report::new(TransactionPlanningError::RestoreInstallation {
+                domain: domain.clone(),
+                execution: execution.clone(),
+            }));
+        }
         let schedule_inputs = self
             .capture_domain_schedule_planning_snapshot(&control.planning_inputs)
             .await;

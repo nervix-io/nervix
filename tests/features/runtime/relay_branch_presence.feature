@@ -180,6 +180,23 @@ Feature: Relay branch presence
       {"source":"acme-second","tenant":"acme","user_id":30}
       """
     And the last relay subscription payload contains key fragment '{"tenant":"acme"}'
+    When http payload is posted to node "node-1" with host "http-{{test_id}}.example.com" path "/ingest"
+      """
+      {"tenant":"gamma","user_id":31,"source":"input"}
+      """
+    Then within "30s" the relay subscription receives a payload
+      """
+      {"source":"gamma-first","tenant":"gamma","user_id":31}
+      """
+    When http payload is posted to node "node-1" with host "http-{{test_id}}.example.com" path "/ingest"
+      """
+      {"tenant":"acme","user_id":32,"source":"input"}
+      """
+    Then within "30s" the relay subscription receives a payload
+      """
+      {"source":"acme-second","tenant":"acme","user_id":32}
+      """
+    And the last relay subscription payload contains key fragment '{"tenant":"acme"}'
 
     Examples:
       | cluster_size | replica_count |

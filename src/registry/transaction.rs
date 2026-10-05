@@ -179,6 +179,13 @@ pub(crate) enum TransactionPlanningError {
     DomainAlreadyRunning { domain: DomainName },
     #[error("domain '{domain}' is already stopped")]
     DomainAlreadyStopped { domain: DomainName },
+    #[error(
+        "domain '{domain}' restore state installation is incomplete for execution '{execution}'"
+    )]
+    RestoreInstallation {
+        domain: DomainName,
+        execution: CommandExecutionReference,
+    },
     #[error("domain '{domain}' start generation overflowed")]
     DomainStartGenerationOverflow { domain: DomainName },
     #[error("resource '{resource}' already exists")]
@@ -276,6 +283,7 @@ impl TransactionPlanningError {
             | Self::ConcurrentDomainAlter { .. }
             | Self::DomainAlreadyRunning { .. }
             | Self::DomainAlreadyStopped { .. }
+            | Self::RestoreInstallation { .. }
             | Self::DomainStartGenerationOverflow { .. }
             | Self::ResourceAlreadyExists { .. }
             | Self::ResourceNotFound { .. }

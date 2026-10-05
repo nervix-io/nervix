@@ -5,6 +5,9 @@ gRPC API used by `nervix-cli`. It is the reference implementation of the [Client
 Manual](./client-implementation-manual.md), and [Client Session
 Protocol](./client-session-protocol.md) explains the protocol behavior it relies on.
 
+For a complete graph, data-handle lifetimes, credit and failure decisions, read
+[Client Ingestors And Emitters](./client-io-architecture.md).
+
 Capabilities:
 
 - `Client::connect(...)` and `Client::connect_with_options(...)`
@@ -457,7 +460,9 @@ The [Paced Simulation Drivers](paced-simulation-drivers.md) are complete program
 followed domain clock, a producer and competing consumers on one session, in Rust and through the
 shared C binding: they start their consumers before they await an attached outcome, pace their
 `TIMESTAMP AT` values by the attached clock's projections, and make their effects idempotent across
-redeliveries and deliberate replays.
+redeliveries and deliberate replays. They explicitly reopen changed endpoint contracts within a
+START generation, validate the same expected fields and credit requests again, and keep unknown
+submissions with their original handle rather than resending them.
 
 ### Through The Shared C Binding
 

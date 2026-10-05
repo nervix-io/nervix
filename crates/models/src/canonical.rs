@@ -17,9 +17,9 @@ use crate::{
     AlterPlacement, AlterPlacementOperation, AlterProcessorOperation, AlterReingestor, AlterRelay,
     AlterRelayOperation, AlterReorderer, AlterReordererOperation, AlterSchema,
     AlterSchemaOperation, AlterWireSchema, AlterWireSchemaOperation, AssignmentTarget,
-    AssignmentTargetScope, AvroType, Backup, BackupResources, BackupScope, BinaryOperator,
-    BranchEviction, BranchSelection, ClickHouseValueMapping, ClientConfigEntry, ClientIngestMode,
-    ClientIngestSource, ClientResourceMount, CodecEncoding, CodecEncodingRule,
+    AssignmentTargetScope, AvroType, Backup, BackupCapture, BackupResources, BackupScope,
+    BinaryOperator, BranchEviction, BranchSelection, ClickHouseValueMapping, ClientConfigEntry,
+    ClientIngestMode, ClientIngestSource, ClientResourceMount, CodecEncoding, CodecEncodingRule,
     CodecJaqTransformations, CodecName, CodecWireFormat, CorrelationTimeoutAction, CreateBranch,
     CreateClientAzureBlob, CreateClientClickHouse, CreateClientGcs, CreateClientHttp,
     CreateClientIcebergRest, CreateClientKafka, CreateClientMongoDb, CreateClientMqtt,
@@ -41,9 +41,9 @@ use crate::{
     MySqlConflictAction, NamePosition, NatsIngestMode, OtelMetricKind, OtelSignal, OutputBranch,
     ParseAsType, PlacementPolicy, PostgresConflictAction, ProcessorInputWhere, ProcessorInputs,
     ProcessorOutputs, PulsarIngestMode, RabbitMqIngestMode, RangeOperator, RedisPubSubIngestMode,
-    RelayBranching, RelayName, Restore, RestoreMode, RestoreScope, RetryPolicy, RouteConstruction,
-    SchemaField, SignalingProtocolName, SignalingStep, SignalingWaitStep, SignalingWireFormat,
-    SqsFifoGroup, SqsIngestMode, Statement, SubscriptionLiteral, TopicName,
+    RelayBranching, RelayName, Restore, RestoreMode, RestoreScope, RestoreState, RetryPolicy,
+    RouteConstruction, SchemaField, SignalingProtocolName, SignalingStep, SignalingWaitStep,
+    SignalingWireFormat, SqsFifoGroup, SqsIngestMode, Statement, SubscriptionLiteral, TopicName,
     TransactionInspectionTarget, UnaryOperator, WebsocketsIngestMode, WindowBound,
     WindowStateLimit, WireSchemaField, ZeroMqIngestMode,
 };
@@ -698,8 +698,8 @@ impl Statement {
                     DomainPace::Paced { period, skew } => format!(
                         "PACED DOMAIN {} WITH PERIOD {} SKEW {}",
                         create.body.id.as_str(),
-                        clock_duration_literal(period.as_nanos()),
-                        clock_duration_literal(skew.as_nanos())
+                        duration_literal(period.as_nanos()),
+                        duration_literal(skew.as_nanos())
                     ),
                     DomainPace::Unpaced => {
                         format!("UNPACED DOMAIN {}", create.body.id.as_str())
@@ -949,8 +949,16 @@ impl Backup {
             BackupResources::Included => "",
             BackupResources::Omitted => " WITHOUT RESOURCES",
         };
+        let capture = match self.capture {
+            BackupCapture::Quiesced { timeout: None } => String::new(),
+            BackupCapture::Quiesced {
+                timeout: Some(timeout),
+            } => format!(" TIMEOUT {}", duration_literal(timeout.as_nanos())),
+            BackupCapture::Live => " WITHOUT PAUSE".to_string(),
+            BackupCapture::ConfigurationOnly => " WITHOUT STATE".to_string(),
+        };
         format!(
-            "BACKUP {scope} TO {}{resources};",
+            "BACKUP {scope} TO {}{resources}{capture};",
             string_literal(&self.destination)
         )
     }
@@ -981,6 +989,11 @@ impl Restore {
         match self.mode {
             RestoreMode::Apply => {}
             RestoreMode::DryRun => statement.push_str(" DRY RUN"),
+        }
+        match self.state {
+            RestoreState::All => {}
+            RestoreState::WithoutSourceOffsets => statement.push_str(" WITHOUT SOURCE OFFSETS"),
+            RestoreState::ConfigurationOnly => statement.push_str(" WITHOUT STATE"),
         }
         statement.push(';');
         statement
@@ -1789,10 +1802,7 @@ impl CreateGenerator {
                 "USING MATERIALIZED STATE {}",
                 self.materialized_relay.as_str()
             )),
-            Clause::line(format!(
-                "EACH {}",
-                clock_duration_literal(self.each.as_nanos())
-            )),
+            Clause::line(format!("EACH {}", duration_literal(self.each.as_nanos()))),
             Clause::line(branch_selection_to_nspl(&self.branched_by)),
         ];
         clauses.extend(processor_outputs_clauses(&self.output_routes)?);
@@ -2515,10 +2525,9 @@ fn alter_generator_operation_to_nspl(
         AlterGeneratorOperation::SetMaterializedState { relay } => {
             Ok(format!("SET MATERIALIZED STATE {}", relay.as_str()))
         }
-        AlterGeneratorOperation::SetEach { each } => Ok(format!(
-            "SET EACH {}",
-            clock_duration_literal(each.as_nanos())
-        )),
+        AlterGeneratorOperation::SetEach { each } => {
+            Ok(format!("SET EACH {}", duration_literal(each.as_nanos())))
+        }
         AlterGeneratorOperation::SetBranching { branching } => {
             Ok(format!("SET {}", branch_selection_to_nspl(branching)))
         }
@@ -2917,7 +2926,7 @@ fn ingest_source_to_nspl(source: &IngestSource) -> String {
         } => format!(
             "HTTP {} EVERY {} ON QUIESCE {}",
             client.as_str(),
-            clock_duration_literal(every.as_nanos()),
+            duration_literal(every.as_nanos()),
             ingest_quiesce_to_nspl(quiesce)
         ),
         IngestSource::Kafka {
@@ -3036,7 +3045,7 @@ fn ingest_source_to_nspl(source: &IngestSource) -> String {
             "PROMETHEUS {} QUERY {} EVERY {} ON QUIESCE {}",
             client.as_str(),
             string_literal(query),
-            clock_duration_literal(every.as_nanos()),
+            duration_literal(every.as_nanos()),
             ingest_quiesce_to_nspl(quiesce)
         ),
         IngestSource::ZeroMq {
@@ -3781,14 +3790,14 @@ fn float_literal(literal: Float64Literal) -> error_stack::Result<String, Canonic
     }
 }
 
-/// Renders a domain-clock duration as one whole number of the largest unit that divides it
+/// Renders a duration as one whole number of the largest unit that divides it
 /// exactly, the only form an NSPL duration literal reads.
 ///
-/// A period's `Display` spells every component, as in `1s 500ms`, which a duration literal cannot
-/// hold, so `1500ms` would otherwise render as text that no longer parses. Zero, which only a skew
-/// can be, is written in seconds.
-fn clock_duration_literal(nanos: u64) -> String {
-    const UNITS: [(u64, &str); 6] = [
+/// A duration's `Display` spells every component, as in `1s 500ms`, which a duration literal cannot
+/// hold, so `1500ms` would otherwise render as text that no longer parses. Zero is written in seconds.
+fn duration_literal(nanos: impl Into<u128>) -> String {
+    let nanos = nanos.into();
+    const UNITS: [(u128, &str); 6] = [
         (86_400_000_000_000, "d"),
         (3_600_000_000_000, "h"),
         (60_000_000_000, "m"),

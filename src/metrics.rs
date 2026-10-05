@@ -60,9 +60,12 @@ use strum::{AsRefStr, EnumIter, IntoEnumIterator};
 use tikv_jemalloc_ctl::{epoch, epoch_mib, stats};
 
 mod interconnection;
+mod restore_staging;
 
 pub use interconnection::NodeObservations;
 use interconnection::{InterconnectionCollector, InterconnectionCollectorHandle};
+use restore_staging::RestoreStagingMetrics;
+pub(crate) use restore_staging::RestoreStagingObservation;
 
 /// Why withdrawing a label set discards its outcome. See [`PrometheusMetrics::remove`].
 const WITHDRAWN_SERIES_MAY_NOT_EXIST: &str =
@@ -1593,6 +1596,7 @@ struct BranchInstanceReferences {
 #[derive(Debug, Clone)]
 struct PrometheusMetrics {
     registry: Registry,
+    restore_staging: RestoreStagingMetrics,
     /// Registered empty and filled in once the node's transport, executor and consensus observer
     /// exist. See [`RuntimeMetrics::install_node_observations`].
     interconnection: Arc<InterconnectionCollector>,
@@ -2135,8 +2139,10 @@ impl PrometheusMetrics {
                  name",
             );
 
+        let restore_staging = RestoreStagingMetrics::register(&registry);
         Self {
             registry,
+            restore_staging,
             interconnection,
             messages_total,
             batches_total,
@@ -3533,6 +3539,10 @@ impl RuntimeMetrics {
 
     pub fn prometheus_text(&self) -> String {
         self.series.prometheus.text()
+    }
+
+    pub(crate) fn record_restore_staging(&self, observation: RestoreStagingObservation) {
+        self.series.prometheus.restore_staging.record(observation);
     }
 
     /// Give this node's exposition the transport, execution and consensus state its

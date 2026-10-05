@@ -28,9 +28,9 @@ including the subscription fan-out that feeds a client's Row frames.
 
 Source-local compiler contracts distinguish peer/slot installation from recurring stream,
 frame, admission and acknowledgement operations. Retained admission records and placement progress
-name their bounded protocol key and transition bound; shared relay/connection discovery and remote
-ACK tracking retain exact-operation expectations naming their repair tasks. A conditional first
-installation from a recurring transport path documents that phase at the call. The compiler's
+name their bounded protocol key and transition bound. Transport selection reads immutable target
+and connection publications; remote ACK tracking retains exact-operation repair expectations.
+A retained slot admits one worker through an atomic claim; established operations read that claim. The compiler's
 contracts do not establish wire delivery or concurrency guarantees; those remain the protocols
 and checks described here. [Data-Plane Concurrency](./data-plane-concurrency.md#source-contracts)
 owns the compiler authoring contract.
@@ -237,7 +237,8 @@ Coordination operations use a typed identity composed of the authenticated coord
 current process epoch, and a process-local sequence. The sequence begins independently in every
 process; the node and process epoch make equal sequence values distinct across concurrent leaders
 and restarts. For every coordination request, the receiver verifies the node and process epoch
-against the bound connection before the application handler can observe the request. A process
+against the bound connection before the application handler can observe the request or open a
+coordinated response stream. A process
 therefore cannot issue or replay an identity that belongs to another node or to an earlier run of
 the same node.
 
@@ -249,6 +250,14 @@ ownership-handoff capture, preparation, confirmation, activation, and discard al
 identity. Prepared handoff state persists it in the sole current stored shape and checks it again
 before activation or cleanup after a restart. The handoff's committed schedule-transition ID still
 names the schedule change; it does not authorize coordination traffic.
+
+A model alteration that includes an ingestor and shared downstream relay uses two entity-gate
+operations. An intake-only scope, with no relay gates, first suspends the affected ingestors on
+every node and drains their admitted work. The full subgraph operation then engages before that
+intake operation is released. Each operation has its own authenticated coordination identity and
+exact scope, and both use the same alteration deadline. Status, retries, receiver-owned release,
+and lease expiry retain the normal identity checks throughout this overlap. The coordinator does
+not change an existing operation's scope to advance the drain.
 
 A coordinated WASM guest-state reset uses the same authenticated coordination identity and adds its
 typed reset scope to the entity-gate purpose. Engagement publishes a branch-selective relay fence:
@@ -404,13 +413,22 @@ applied separately to incoming and outgoing work across all peers and connection
 These reservations mean that ordinary management traffic cannot consume the capacity required to
 resolve already-started relay work or determine whether a peer is healthy.
 
-Leasing a stream slot takes no exclusive lock and allocates nothing once a pool is established.
-When an endpoint is registered for a peer, the transport builds the identity of every connection
-slot that endpoint can hold, and each lease reads the registration, its slots, and their connections
-through shared lookups. Only a slot that is not running yet, such as the first on-demand bulk
-connection, takes the exclusive path that starts it. A replaced endpoint gets a new registration
-with its own slot identities, so a lease can never select a connection that belongs to the endpoint
-it replaced.
+Leasing an established stream allocates nothing and acquires no shared discovery map. An immutable
+persistent target table selects the peer's fixed pool arrays. Each slot retains its cancellation
+lifetime, one atomic worker claim and an `ArcSwapOption` containing the current authenticated
+connection. A lease retains that exact connection and takes its existing pool/subquota reservation.
+Only a first use can win the worker claim, including on-demand bulk. The worker clears its connection
+publication on loss and publishes a fresh connection after authenticated reconnect. The cold
+connection registry remains available for registration, statistics and exact teardown; predecessor
+teardown removes only its own allocation.
+
+Endpoint or TLS replacement cancels the preceding slots before publishing new fixed arrays. Peer
+retirement therefore cannot expose a replacement connection through a stale slot. A dial-address
+update for an unchanged endpoint preserves slot identity and affects only the next connection
+attempt. Such an update retains the fixed arrays' shared owner under its new target wrapper, so a
+concurrent peer withdrawal still withdraws that exact pool lifetime. A recreated pool has a distinct
+owner, even at the same endpoint, and survives a predecessor's withdrawal. The fixed array scan
+retains round-robin selection and each class's existing capacities.
 
 An operation that finds every stream of its class and subquota to a peer leased waits for one to be
 released, within its request deadline. Each peer keeps one wakeup for each class and subquota, and
@@ -587,6 +605,11 @@ the sender waits for an attached record acknowledgement only while the receiver 
 and fails one the receiver reports nothing about for fifteen seconds, as
 [Acknowledgement Registrations](#acknowledgement-registrations) describes. Progress keeps a live
 attempt from being mistaken for a disconnected one; it does not change the delivery outcome.
+For an attached acknowledgement, progress also carries a monotonic sequence and whether all of its
+remaining handoff shares are parked on `REQUIRED WAIT`. Each upstream node parks or reactivates its
+own attached share in sequence order, so a domain drain excludes a parked chain across relay hops.
+The eventual terminal acknowledgement still resolves every share; parking does not acknowledge the
+source or persist an acknowledgement. Admission progress carries no parked state.
 
 ### Acknowledgement Registrations
 
@@ -845,12 +868,58 @@ the active decoded section are resident at once.
 [Resource Versions And Bindings](./resource-versions.md#publication-and-transfer) defines when a
 node fetches a resource archive and how it verifies and records the fetched version.
 
+Backup state capture uses typed drain, capture, inventory, and fetch operations. The leader reads
+each node's admitted work through a management-class drain request and requests a separate
+confirming force-flush round after all nodes appear quiet. The leader sends a management-class capture
+request with its coordination identity and applied cut revision to each live node, then reads each
+node's management-class inventory of staged sections. A receiver waits up to five seconds for its
+state machine to apply that revision, installs its current runtime plan, and rechecks the sending
+leader before it captures. A closed applied-state authority or a catch-up deadline refuses the
+capture; a follower that is still applying the cut does not produce an archive from earlier state.
+A captured section is fetched over a
+snapshot-subquota bulk response: the inventory declares its path, length, content kind and digest,
+and the leader stages and verifies the stream before adding it to the archive. The owner keeps a
+staged section only for the coordinator process that requested it and releases expired stages.
+The fetch stream authenticates that process identity before its handler can consume the stage; a
+partitioned or cancelled fetch leaves any unconsumed stage available until expiry.
+
+Restore state installation uses the snapshot bulk subquota after the stopped-domain schedule is
+published. The leader admits a replicated installation authority carrying its identity and term,
+the restore execution, mutation lease revision and installation generation. Every request carries
+that authority. A receiver waits for its generation to apply and authenticates the sending leader.
+A begin request declares placement, length and digest; chunks are ordered and at most 64 KiB;
+finish verifies the staged file, then reads it directly inside a filesystem storage job that
+reserves 2 MiB and stages bounded checkpoint chunks into an invisible installation namespace.
+It retains the upload's disk-quota owner through that job. There is no full guest buffer or nested
+staged-reader reservation. Incomplete transfers expire under the node's staging quota.
+
+After all checkpoints are staged, the leader sends each target node a publish request with the
+complete checkpoint and byte counts. The receiver reserves a fixed 2 MiB, validates receipts,
+headers and chunk digests one checkpoint at a time, synchronizes the generation data, and commits
+and synchronizes one active-generation pointer. It then deletes obsolete keys in bounded batches.
+The inventory size and total payload bytes do not determine the publication reservation.
+An empty inventory clears unassigned nodes and implements configuration-only restoration. Local
+and remote mutations revalidate the exact authority under the applied-state read guard, held
+through the storage mutation and clearing of runtime handles. Publication of a new authority or
+release of the replicated start gate requires the corresponding write guard, so a delayed
+coordinator cannot mutate after its successor completes installation. The store also retains the
+published authority and inventory to reject lower or competing generations. An exact retry must
+carry the same counts and repeats durability and cleanup before acknowledging completion.
+A failure after pointer commit can leave that complete generation selected with the start gate
+closed; it cannot authorize START or clear handles before durable completion.
+The domain's replicated start gate is released only after all nodes acknowledge publication.
+Staging and publication run on the admitted filesystem worker class. Authority is checked inside
+the storage job after admission, so waiting for a worker cannot preserve an expired installation
+right. Durable synchronization does not run on the async reactor.
+
 A runtime-state placement names exactly the state it addresses: the domain, entity, state kind, and
 concrete branch; for every kind of state except branch-aggregated metrics and Kafka domain offsets,
 the fingerprint of the schemas the state is laid out by; and for WASM processor guest state the
 generation the committed schedule names for that branch. Branch-aggregated metrics and Kafka domain
 offsets depend on no schema, so their placements carry no fingerprint and stay current across every
-schema change of their entity. A checkpoint carries no identity of its own: a synchronization reply,
+schema change of their entity. A backup archive separately records the Kafka ingestor's schema
+fingerprint and checks it against the restore target before installing offsets. A checkpoint carries
+no identity of its own: a synchronization reply,
 a handoff checkpoint, and a forced-recovery preparation each carry it beside the placement that
 names it. A node answers a synchronization request, and acts on a checkpoint announcement or a
 handoff checkpoint, only while the placement is current on that node, so an owner never serves, and
@@ -904,8 +973,9 @@ acknowledgements complete.
 
 A replica catches the branch-keyed entities it replicates up in rounds, one replica task for each
 entity, through two replication-class requests. A state synchronization request names one placement
-and the revision the replica holds of it. The owner answers from the registry that keeps the
-placement's kind of state: with the checkpoint when it is newer, and with nothing otherwise. Only for
+and the revision the replica holds of it. The owner answers through the actual state handle
+published when that placement was installed: with the checkpoint when it is newer, and with
+nothing otherwise. Only for
 a placement it holds no state for does the owner read its storage. A branch checkpoint listing
 request names the entity's branch lifecycle placement and the cursor the replica's previous listing
 returned. The owner answers with the next changes of its catalog of the entity's branch
@@ -915,7 +985,11 @@ state went away, followed by the cursor after them and whether more changes foll
 restarts from the catalog's beginning when the replica has no cursor, when its cursor belongs to
 another catalog, such as one a replaced or restarted owner kept, and when it is older than the
 oldest removal the catalog kept. An owner that holds no branch state of the entity answers that it
-holds none. Both requests are answered only while the answering node is assigned the placement. A
+holds none. Both requests are answered only while the answering node is assigned the placement. Admission
+reads the retained entity assignment from the immutable routing publication; state and catalog
+selection never reads the execution, identity or replicated-state registries. Route withdrawal
+ends the exact state handle before replacement, while an already admitted request may finish on
+the state it borrowed. A
 round synchronizes the lifecycle, reads the catalog's changes, and requests only the checkpoints of
 the branches that changed or were announced, so a round in which no branch changed sends two
 requests however many branches the entity has.
@@ -924,7 +998,13 @@ The owner of a placement offers its newest checkpoint to the replicas the commit
 assigns, and repeats the offer every 100 milliseconds to each replica that has not acknowledged
 that revision, until every one of them has, the node stops being the placement's primary, the
 placement's state goes away, or the node stops. A newer checkpoint taken meanwhile raises the
-revision on offer instead of starting a second offer. The owner records the highest revision each
+revision on offer instead of starting a second offer. Each announcer retains the installed route
+and reads its primary and replica set from the same assignment slot used by checkpoint execution.
+Removal, a replaced identity or loss of primary ownership ends its next step. Terminal runtime
+teardown cancels a pending announcement dispatch or retry wait after domain drain, then joins the
+announcers before withdrawing their routes. These messages are availability hints; the replica's
+periodic synchronization supplies a hint cancelled during shutdown. The owner records
+the highest revision each
 replica acknowledged, so an acknowledgement delivered after a newer one never lowers it, and a
 Kafka offset commit waiting for its replica quorum, like a WASM checkpoint waiting for its replicas,
 completes on the acknowledgement that satisfies it rather than at its deadline. Only a node that

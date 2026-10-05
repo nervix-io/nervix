@@ -363,7 +363,9 @@ All table and vector fields are required, including empty vectors. Unknown
 fields are ignored for FlatBuffers schema evolution; unknown union or enum
 variants, missing required fields, a wrong identifier or size prefix, trailing
 bytes, invalid column counts, bad source tokens, malformed or trailing Arrow
-IPC, and exact-schema mismatches are global processor errors. Empty output
+IPC, and exact-schema mismatches are global processor errors. Short headers are
+rejected before identifier access, including a complete size prefix whose declared
+length matches a buffer too short to hold the root and identifier. Empty output
 groups, out-of-range or unreferenced generated columns, and generated
 row-layout mismatches are also rejected. Nonzero uninitialized column indexes
 are rejected. CBOR and per-output generated-column
@@ -402,7 +404,9 @@ whose restored state needs a timer requests it again from its next input or time
 
 Keep `nervix_load_state` strict about what it restores. Save what a restore needs to validate the
 state, such as the branch configuration it was taken under, and reject state that does not match
-the instance it is handed to.
+the instance it is handed to. The Rust SDK's snapshot envelope permits a restored domain name to
+change if the domain type, branch key, and input and output schemas match. Guests with their own
+snapshot format decide whether a domain name change is valid for their application state.
 
 A concrete branch evicted for its `TTL` or instance limit stops without a quiesce flush, but its
 checkpoint stays: when the same branch key appears again, its new instance restores the last

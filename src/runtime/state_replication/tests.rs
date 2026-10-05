@@ -826,8 +826,12 @@ fn forced_recovery_replay_preserves_source_offsets_and_branch_processor_state() 
         let db = Database::builder(dir.path())
             .open()
             .expect("database should open");
-        let store = RuntimeStateStore::from_database(db, Executor::default())
-            .expect("state store should open");
+        let store = RuntimeStateStore::from_database(
+            db,
+            Executor::default(),
+            crate::runtime::DEFAULT_RESTORE_STAGING_MAX_BYTES,
+        )
+        .expect("state store should open");
         store
             .persist_forced_recovery_preparation(
                 &kafka_recovery,
@@ -887,8 +891,12 @@ fn forced_recovery_replay_preserves_source_offsets_and_branch_processor_state() 
         let db = Database::builder(dir.path())
             .open()
             .expect("database should reopen");
-        let store = RuntimeStateStore::from_database(db, Executor::default())
-            .expect("state store should reopen");
+        let store = RuntimeStateStore::from_database(
+            db,
+            Executor::default(),
+            crate::runtime::DEFAULT_RESTORE_STAGING_MAX_BYTES,
+        )
+        .expect("state store should reopen");
         let replayed_kafka_recovery = ForcedRuntimeStateRecoveryTransition {
             destination_incarnation: ClusterNodeIncarnation::new(43),
             target_schedule_fingerprint: [10; 32],
@@ -985,8 +993,12 @@ fn forced_recovery_refuses_missing_or_stale_preparation_without_changing_state()
     let db = Database::builder(dir.path())
         .open()
         .expect("database should open");
-    let store =
-        RuntimeStateStore::from_database(db, Executor::default()).expect("state store should open");
+    let store = RuntimeStateStore::from_database(
+        db,
+        Executor::default(),
+        crate::runtime::DEFAULT_RESTORE_STAGING_MAX_BYTES,
+    )
+    .expect("state store should open");
     let domain = domain("default");
     let source = named::<ClusterNodeName>("node-1");
     let destination = named::<ClusterNodeName>("node-2");
@@ -1118,8 +1130,12 @@ fn runtime_state_store_persists_latest_snapshot_with_monotonic_lsm() {
     let db = Database::builder(dir.path())
         .open()
         .expect("db should open");
-    let store =
-        RuntimeStateStore::from_database(db, Executor::default()).expect("state store should open");
+    let store = RuntimeStateStore::from_database(
+        db,
+        Executor::default(),
+        crate::runtime::DEFAULT_RESTORE_STAGING_MAX_BYTES,
+    )
+    .expect("state store should open");
     let placement = RuntimeStatePlacement {
         domain: domain("default"),
         state: RuntimeState::Deduplicator {
@@ -1577,8 +1593,12 @@ fn runtime_state_store_purges_only_stale_schema_fingerprints() {
     let db = Database::builder(dir.path())
         .open()
         .expect("db should open");
-    let store =
-        RuntimeStateStore::from_database(db, Executor::default()).expect("state store should open");
+    let store = RuntimeStateStore::from_database(
+        db,
+        Executor::default(),
+        crate::runtime::DEFAULT_RESTORE_STAGING_MAX_BYTES,
+    )
+    .expect("state store should open");
     let base = RuntimeStatePlacement {
         domain: domain("default"),
         state: RuntimeState::Deduplicator {
@@ -1635,61 +1655,17 @@ fn runtime_state_store_purges_only_stale_schema_fingerprints() {
 }
 
 #[test]
-fn runtime_state_store_purges_only_the_requested_domain() {
-    let dir = tempdir().expect("temp dir should open");
-    let db = Database::builder(dir.path())
-        .open()
-        .expect("db should open");
-    let store =
-        RuntimeStateStore::from_database(db, Executor::default()).expect("state store should open");
-    let stopped = RuntimeStatePlacement {
-        domain: domain("stopped"),
-        state: RuntimeState::Deduplicator {
-            schema: SchemaFingerprint::from_digest([1; 32]),
-        },
-        kind: ModelKind::Deduplicator,
-        identifier: named("dedup_orders"),
-        branch_key: None,
-    };
-    let running = RuntimeStatePlacement {
-        domain: domain("running"),
-        ..stopped.clone()
-    };
-    store
-        .persist_latest_snapshot(&stopped, 1, b"stopped")
-        .expect("stopped-domain snapshot should persist");
-    store
-        .persist_latest_snapshot(&running, 2, b"running")
-        .expect("running-domain snapshot should persist");
-
-    store
-        .purge_domain(&stopped.domain)
-        .expect("stopped-domain snapshots should purge");
-
-    assert!(
-        store
-            .latest_snapshot(&stopped)
-            .expect("stopped-domain snapshot lookup should succeed")
-            .is_none()
-    );
-    assert_eq!(
-        store
-            .latest_snapshot(&running)
-            .expect("running-domain snapshot lookup should succeed")
-            .expect("running-domain snapshot should remain")
-            .payload,
-        b"running".to_vec()
-    );
-}
-
-#[test]
 fn runtime_state_store_purges_only_the_requested_entity() {
     let dir = tempdir().expect("temp dir should open");
     let db = Database::builder(dir.path())
         .open()
         .expect("db should open");
-    let store =
-        RuntimeStateStore::from_database(db, Executor::default()).expect("state store should open");
+    let store = RuntimeStateStore::from_database(
+        db,
+        Executor::default(),
+        crate::runtime::DEFAULT_RESTORE_STAGING_MAX_BYTES,
+    )
+    .expect("state store should open");
     let removed = RuntimeStatePlacement {
         domain: domain("default"),
         state: RuntimeState::MaterializedRelay {
@@ -1741,8 +1717,12 @@ fn kafka_offset_state_roundtrips_partition_schedule_through_fjall() {
     let db = Database::builder(dir.path())
         .open()
         .expect("db should open");
-    let store =
-        RuntimeStateStore::from_database(db, Executor::default()).expect("state store should open");
+    let store = RuntimeStateStore::from_database(
+        db,
+        Executor::default(),
+        crate::runtime::DEFAULT_RESTORE_STAGING_MAX_BYTES,
+    )
+    .expect("state store should open");
     let placement = RuntimeStatePlacement {
         domain: domain("default"),
         state: RuntimeState::KafkaOffset,
@@ -1936,13 +1916,13 @@ async fn state_sync_request_returns_latest_snapshot_only_when_lsm_advances() {
         .replicated_deduplicator_state(placement.clone())
         .expect("deduplicator state should initialize");
     let initial = runtime
-        .handle_state_sync_request(&placement, None)
+        .capture_state_checkpoint(&placement, None)
         .await
         .expect("initial state sync request should succeed")
         .expect("an explicit empty checkpoint should be returned");
     assert_eq!(initial.lsm, 0);
     let unchanged_initial = runtime
-        .handle_state_sync_request(&placement, Some(0))
+        .capture_state_checkpoint(&placement, Some(0))
         .await
         .expect("state sync request at the initial LSM should succeed");
     assert!(unchanged_initial.is_none());
@@ -1953,7 +1933,7 @@ async fn state_sync_request_returns_latest_snapshot_only_when_lsm_advances() {
         Duration::from_secs(600),
     ));
     let unpublished = runtime
-        .handle_state_sync_request(&placement, Some(0))
+        .capture_state_checkpoint(&placement, Some(0))
         .await
         .expect("state sync request before the branch publishes should succeed");
     assert!(
@@ -1964,14 +1944,14 @@ async fn state_sync_request_returns_latest_snapshot_only_when_lsm_advances() {
     let lsm = state.generations.load().revision;
 
     let first = runtime
-        .handle_state_sync_request(&placement, Some(0))
+        .capture_state_checkpoint(&placement, Some(0))
         .await
         .expect("state sync request should succeed")
         .expect("snapshot should be returned");
     assert_eq!(first.lsm, lsm);
 
     let none = runtime
-        .handle_state_sync_request(&placement, Some(lsm))
+        .capture_state_checkpoint(&placement, Some(lsm))
         .await
         .expect("state sync request should succeed");
     assert!(none.is_none());
@@ -2036,7 +2016,7 @@ async fn an_owner_reads_storage_only_for_a_placement_it_holds_no_state_for() {
         .expect("a checkpoint of a branch without state persists");
 
     let answered = runtime
-        .handle_state_sync_request(&held, Some(0))
+        .capture_state_checkpoint(&held, Some(0))
         .await
         .expect("a held window answers");
     assert_eq!(
@@ -2044,13 +2024,13 @@ async fn an_owner_reads_storage_only_for_a_placement_it_holds_no_state_for() {
         "a placement with state is answered from that state, not from storage"
     );
     let stored = runtime
-        .handle_state_sync_request(&unheld, Some(1))
+        .capture_state_checkpoint(&unheld, Some(1))
         .await
         .expect("a stored checkpoint answers")
         .expect("storage holds a newer checkpoint of a placement without state");
     assert_eq!(stored.lsm, 3);
     let nothing_newer = runtime
-        .handle_state_sync_request(&unheld, Some(3))
+        .capture_state_checkpoint(&unheld, Some(3))
         .await
         .expect("a stored checkpoint answers");
     assert_eq!(nothing_newer, None);
@@ -2073,7 +2053,7 @@ async fn an_owner_reads_storage_only_for_a_placement_it_holds_no_state_for() {
         .persist_latest_snapshot(&lifecycle, 7, &[7])
         .expect("a newer lifecycle persists");
     let held_lifecycle = runtime
-        .handle_state_sync_request(&lifecycle, Some(2))
+        .capture_state_checkpoint(&lifecycle, Some(2))
         .await
         .expect("a held lifecycle answers");
     assert_eq!(

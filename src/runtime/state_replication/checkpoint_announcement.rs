@@ -16,7 +16,46 @@
     )
 )]
 
+use std::future::Future;
+
 use super::*;
+
+/// Announcement tasks retain their exact state until they finish or terminal teardown cancels
+/// them. Closing the owner also interrupts a pending dispatch or retry wait.
+#[derive(Default)]
+pub(in crate::runtime) struct CheckpointAnnouncementTasks {
+    tracker: TaskTracker,
+    shutdown: CancellationToken,
+}
+
+impl CheckpointAnnouncementTasks {
+    pub(in crate::runtime) fn spawn(
+        &self,
+        task: impl Future<Output = ()> + Send + 'static,
+    ) -> JoinHandle<()> {
+        let shutdown = self.shutdown.clone();
+        self.tracker.spawn(async move {
+            nervix_primitives::select! {
+                biased;
+                _ = shutdown.cancelled() => {}
+                _ = task => {}
+            }
+        })
+    }
+
+    pub(in crate::runtime) fn is_closed(&self) -> bool {
+        self.tracker.is_closed()
+    }
+
+    pub(in crate::runtime) fn close(&self) {
+        self.shutdown.cancel();
+        self.tracker.close();
+    }
+
+    pub(in crate::runtime) async fn wait(&self) {
+        self.tracker.wait().await;
+    }
+}
 
 impl Runtime {
     /// Offer revision `lsm` of `placement` to its replicas through `replication`, the replication of
@@ -27,15 +66,15 @@ impl Runtime {
         replication: &CheckpointReplication,
         lsm: u64,
     ) {
-        let Some(announcer) = replication.offer(lsm) else {
+        let Some(route) = self.inner.state_replication_routing.resolve(placement) else {
+            return;
+        };
+        let Some(announcer) = route.offer(replication, lsm) else {
             return;
         };
         let runtime = self.clone();
-        let placement = placement.clone();
         self.inner.state_replication_tasks.spawn(async move {
-            runtime
-                .offer_to_lagging_replicas(placement, announcer)
-                .await;
+            runtime.offer_to_lagging_replicas(route, announcer).await;
         });
     }
 
@@ -53,7 +92,7 @@ impl Runtime {
     /// the placement's primary, the replicated state goes away, or the runtime stops.
     async fn offer_to_lagging_replicas(
         &self,
-        placement: RuntimeStatePlacement,
+        route: Arc<routing::StateReplicationRoute>,
         mut announcer: Announcer,
     ) {
         loop {
@@ -67,12 +106,14 @@ impl Runtime {
             let Some(dispatcher) = self.inner.remote_dispatcher.load_full() else {
                 return;
             };
-            let replicas = self.owned_placement_replicas(&placement, dispatcher.local_node_id());
+            let Some(replicas) = route.owned_replicas(dispatcher.local_node_id()) else {
+                return;
+            };
             let AnnouncerStep::Offer { revision, lagging } = announcer.next(&replicas) else {
                 return;
             };
             let checkpoint = nervix_interconnect::StateCheckpointAvailable {
-                placement: placement.to_remote(),
+                placement: route.placement().to_remote(),
                 lsm: revision,
             };
             for replica in lagging {
@@ -99,36 +140,7 @@ impl Runtime {
         }
     }
 
-    /// The replicas the committed schedule assigns to `placement`'s entity while `local_node_id` is
-    /// its primary, and none otherwise.
-    fn owned_placement_replicas(
-        &self,
-        placement: &RuntimeStatePlacement,
-        local_node_id: &ClusterNodeName,
-    ) -> BTreeSet<ClusterNodeName> {
-        let Some(execution) = nervix_primitives::expect_lint!(
-            nervix::sync_acquisition,
-            "Typed Ratchet 15 https://app.clickup.com/t/86bca1web: retain the current state \
-             assignment and its replication handle",
-            self.inner.executions.get(&placement.domain)
-        ) else {
-            return BTreeSet::new();
-        };
-        let Some(node) = execution
-            .revision
-            .nodes
-            .get(&NodeRef::new(placement.kind, placement.identifier.clone()))
-        else {
-            return BTreeSet::new();
-        };
-        if !node.is_primary_on(local_node_id) {
-            return BTreeSet::new();
-        }
-        node.replica_nodes().into_iter().cloned().collect()
-    }
-
-    /// Hand `use_replication` the replication of the state this node holds for `placement`, when it
-    /// holds one. Each kind of state is found in the registry that keeps it; nothing is created.
+    /// Use the installed state's retained replication handle without opening a state registry.
     #[cfg_attr(
         nervix_lint,
         nervix::dispatch(
@@ -140,79 +152,9 @@ impl Runtime {
         placement: &RuntimeStatePlacement,
         use_replication: impl FnOnce(&CheckpointReplication),
     ) {
-        match placement.state.kind() {
-            RuntimeStateKind::BranchAggregated => {
-                if let Some(state) = nervix_primitives::expect_lint!(
-                    nervix::sync_acquisition,
-                    "Typed Ratchet 15 https://app.clickup.com/t/86bca1web: retain the current \
-                     state assignment and its replication handle",
-                    self.inner
-                        .replicated_branch_aggregated_states
-                        .get(placement)
-                ) {
-                    use_replication(state.replication());
-                }
-            }
-            RuntimeStateKind::BranchLru => {
-                if let Some(lifecycle) = self.branch_lifecycle(placement) {
-                    use_replication(lifecycle.replication());
-                }
-            }
-            // Correlator buffers are not replicated runtime state.
-            RuntimeStateKind::Correlator => {}
-            RuntimeStateKind::Deduplicator => {
-                if let Some(state) = nervix_primitives::expect_lint!(
-                    nervix::sync_acquisition,
-                    "Typed Ratchet 15 https://app.clickup.com/t/86bca1web: retain the current \
-                     state assignment and its replication handle",
-                    self.inner.replicated_deduplicator_states.get(placement)
-                ) {
-                    use_replication(state.replication());
-                }
-            }
-            RuntimeStateKind::KafkaOffset => {
-                if let Some(state) = nervix_primitives::expect_lint!(
-                    nervix::sync_acquisition,
-                    "Typed Ratchet 15 https://app.clickup.com/t/86bca1web: retain the current \
-                     state assignment and its replication handle",
-                    self.inner.replicated_kafka_offset_states.get(placement)
-                ) {
-                    use_replication(state.replication());
-                }
-            }
-            RuntimeStateKind::MaterializedRelay => {
-                if let Some(state) = nervix_primitives::expect_lint!(
-                    nervix::sync_acquisition,
-                    "Typed Ratchet 15 https://app.clickup.com/t/86bca1web: retain the current \
-                     state assignment and its replication handle",
-                    self.inner
-                        .replicated_materialized_stream_states
-                        .get(placement)
-                ) {
-                    use_replication(state.replication());
-                }
-            }
-            RuntimeStateKind::WasmProcessor => {
-                if let Some(state) = nervix_primitives::expect_lint!(
-                    nervix::sync_acquisition,
-                    "Typed Ratchet 15 https://app.clickup.com/t/86bca1web: retain the current \
-                     state assignment and its replication handle",
-                    self.inner.replicated_wasm_processor_states.get(placement)
-                ) {
-                    use_replication(state.replication());
-                }
-            }
-            RuntimeStateKind::WindowProcessor => {
-                if let Some(state) = nervix_primitives::expect_lint!(
-                    nervix::sync_acquisition,
-                    "Typed Ratchet 15 https://app.clickup.com/t/86bca1web: retain the current \
-                     state assignment and its replication handle",
-                    self.inner.replicated_window_processor_states.get(placement)
-                ) {
-                    use_replication(state.replication());
-                }
-            }
-        }
+        self.inner
+            .state_replication_routing
+            .with_replication(placement, use_replication);
     }
 
     /// Record that `node_id` holds revision `ack.lsm` of `ack.placement` on its stable storage.
@@ -221,9 +163,9 @@ impl Runtime {
         node_id: &ClusterNodeName,
         ack: StateSyncAck,
     ) {
-        self.with_placement_replication(&ack.placement, |replication| {
-            replication.record(node_id, ack.lsm);
-        });
+        self.inner
+            .state_replication_routing
+            .acknowledge(&ack.placement, node_id, ack.lsm);
     }
 
     /// Act on `source`'s announcement that it holds a newer checkpoint of a placement this node

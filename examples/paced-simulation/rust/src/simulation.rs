@@ -3,8 +3,8 @@
 //!
 //! - **Owns.** The order a run starts and stops its loops in, the planner that steps through the
 //!   tick centers the clock reaches and submits each tick's readings, the outcomes it awaits,
-//!   following a new START generation, deliberate replay, inspection, and the exit status a run's
-//!   outcomes imply.
+//!   reopening changed endpoint contracts, following a new START generation, deliberate replay,
+//!   inspection, and the exit status a run's outcomes imply.
 //! - **Depends on.** Every other module of the driver, and the Rust client library.
 //! - **Must not know.** How the server admits, routes or delivers anything.
 //!
@@ -17,9 +17,9 @@ use std::{collections::BTreeMap, process::ExitCode, time::Duration};
 use error_stack::Report;
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_client_core::{
-    Client, ClientError, ClientProducerGrant, ClientProducerLimits, ConnectOptions, DomainName,
-    EmitterName, IngestorName, Producer, ProducerBatch, ProducerError, ProducerOutcome,
-    SubmissionId, SubmissionUncertainty,
+    Client, ClientError, ClientProducerAdmission, ClientProducerGrant, ClientProducerLimits,
+    ConnectOptions, DomainName, EmitterName, IngestorName, Producer, ProducerBatch, ProducerEnd,
+    ProducerError, ProducerOutcome, SubmissionId, SubmissionUncertainty,
 };
 use nervix_models::{DomainAdmissionWindow, Timestamp};
 use nervix_primitives::{
@@ -40,6 +40,7 @@ use crate::{
     options::{OptionsError, Settings, TimestampSource},
     readings::{self, Reading, ReadingSlot, Stamp, reading_fields},
     refusal::Refusal,
+    reopen::Reopen,
     report::{self, Report as Counters},
 };
 
@@ -442,21 +443,70 @@ impl Planner {
         }
     }
 
+    /// Accepts a changed endpoint with a fresh producer and its own fresh credit. Outcome tasks
+    /// retain the producer and credit that accepted their submissions; none is resubmitted here.
+    async fn reopen(&mut self) -> Result<bool, RunError> {
+        let Some(ProducerEnd::ReopenRequired(reason)) = self.producer.end() else {
+            return Ok(true);
+        };
+        let reason = Reopen::from(&reason);
+        if reason.waits_for_generation() {
+            return Ok(true);
+        }
+        if let Err(failure) = self.producer.close().await {
+            report::line(format!(
+                "PRODUCER close_failed reason={}",
+                failure.current_context()
+            ));
+        }
+        let producer = open_producer(&self.client, &self.settings)
+            .await
+            .map_err(RunError::Producer)?;
+        let opened = producer.description().generation;
+        if opened != self.generation {
+            // START raced the open. The clock and --follow-generations still decide whether
+            // this run may plan in that generation.
+            drop(producer);
+            return self.follow(Pace::Paced { generation: opened }).await;
+        }
+        report::line(producer_line(&self.settings, &producer));
+        self.producer = Arc::new(producer);
+        self.credit = Arc::new(Credit::new());
+        report::line(format!(
+            "REOPENED generation={opened} ingestor={} reason={}",
+            self.settings.ingestor,
+            reason.text()
+        ));
+        Ok(true)
+    }
+
     async fn simulate(&mut self) -> Result<(), RunError> {
         let mut tick = self.first_tick();
         let mut planned: u64 = 0;
         while planned < self.settings.ticks {
             nervix_primitives::task::consume_budget().await;
+            let generation = self.generation;
+            if !self.reopen().await? {
+                return Ok(());
+            }
+            if self.generation != generation {
+                tick = self.first_tick();
+            }
             let Some(center) = self.grid.center(tick) else {
                 return Err(RunError::Clock(Report::new(ClockError::Arithmetic {
                     domain: self.settings.domain.clone(),
                 })));
             };
-            let reached = self
-                .clock
-                .reach(self.generation, center, &self.planning)
-                .await
-                .map_err(RunError::Clock)?;
+            // Even a very slow domain clock must let the application accept an endpoint change.
+            let reached = nervix_primitives::time::timeout(
+                OPEN_RETRY_DELAY,
+                self.clock.reach(self.generation, center, &self.planning),
+            )
+            .await;
+            let reached = match reached {
+                Ok(reached) => reached.map_err(RunError::Clock)?,
+                Err(_) => continue,
+            };
             let window = match reached {
                 Reached::Center(window) => window,
                 Reached::Stopping => return Ok(()),
@@ -468,6 +518,21 @@ impl Planner {
                     continue;
                 }
             };
+            let generation = self.generation;
+            if !self.reopen().await? {
+                return Ok(());
+            }
+            if self.generation != generation {
+                tick = self.first_tick();
+                continue;
+            }
+            if self.producer.admission() == ClientProducerAdmission::Suspended {
+                nervix_primitives::select! {
+                    () = nervix_primitives::time::sleep(OPEN_RETRY_DELAY) => {}
+                    () = self.planning.cancelled() => return Ok(()),
+                }
+                continue;
+            }
             let number = planned
                 .checked_add(1)
                 .assured("a run plans at most --ticks ticks");
@@ -587,6 +652,10 @@ impl Planner {
         loop {
             nervix_primitives::task::consume_budget().await;
             released.borrow_and_update();
+            if self.producer.end().is_some() {
+                // This already-planned batch reaches send's definitely-unsent ledger path.
+                return true;
+            }
             let held = self.credit.held();
             if held.admits(&grant, bytes) {
                 return true;
@@ -606,6 +675,7 @@ impl Planner {
                     }
                 }
                 () = self.planning.cancelled() => return false,
+                () = nervix_primitives::time::sleep(OPEN_RETRY_DELAY) => {}
             }
         }
     }
@@ -658,6 +728,13 @@ impl Planner {
                         () = nervix_primitives::time::sleep(UNAVAILABLE_RETRY) => {}
                         () = self.planning.cancelled() => {}
                     }
+                }
+                ProducerError::Ended(ProducerEnd::ReopenRequired(reason))
+                    if !Reopen::from(reason).waits_for_generation() =>
+                {
+                    // The contract ended after this tick was planned. Keep the definitely
+                    // unsent readings for an explicit --replay; the next tick opens afresh.
+                    return self.not_sent(tick, reading_ids, count, "not_sent").await;
                 }
                 ProducerError::Ended(_) => {
                     return self
@@ -791,6 +868,7 @@ impl Planner {
     /// the generation the run is in and the window still admits them. A reading of another
     /// generation is never submitted against this one.
     async fn replay(&mut self, unresolved: Vec<Reading>) -> Result<(), RunError> {
+        let generation = self.generation;
         let mut by_tick: BTreeMap<u64, Vec<Reading>> = BTreeMap::new();
         for reading in unresolved {
             if reading.generation != self.generation {
@@ -804,6 +882,9 @@ impl Planner {
         }
         for (tick, readings) in by_tick {
             nervix_primitives::task::consume_budget().await;
+            if !self.reopen().await? || self.generation != generation {
+                return Ok(());
+            }
             let admissible = self.admissible(readings);
             if admissible.is_empty() {
                 continue;
@@ -1078,13 +1159,7 @@ impl OutputConsumers {
 
     /// Opens every output consumer after `delay`, while the run already submits. A refusal ends
     /// the planning and is kept for the run to report.
-    fn open_later(
-        settings: &Settings,
-        shared: &Shared,
-        delay: Duration,
-        planning: CancellationToken,
-        refused: Arc<SyncMutex<Option<RunError>>>,
-    ) -> Self {
+    fn open_later(settings: &Settings, shared: &Shared, delay: Duration) -> Self {
         let loops = Self::loops(settings, shared);
         let shared = shared.clone();
         let starter = nervix_primitives::task::spawn(async move {
@@ -1104,8 +1179,7 @@ impl OutputConsumers {
                 let consumer = match opened {
                     Ok(consumer) => consumer,
                     Err(failure) => {
-                        *refused.lock() = Some(RunError::Consumer(failure));
-                        planning.cancel();
+                        shared.fail(failure);
                         break;
                     }
                 };
@@ -1171,12 +1245,15 @@ async fn simulate(settings: Settings) -> Result<Finish, RunError> {
     };
     let ledger = Arc::new(Ledger::open(&settings.ledger).await?);
     let (generations, following) = watch::channel(generation);
+    let (refused, _) = watch::channel(None);
     let shared = Shared {
         client: client.clone(),
         domain: settings.domain.clone(),
         effects,
         counters: counters.clone(),
         generations: following,
+        refused,
+        planning: planning.clone(),
         stop: stop.clone(),
     };
 
@@ -1206,7 +1283,6 @@ async fn simulate(settings: Settings) -> Result<Finish, RunError> {
     consumer_tasks.push(nervix_primitives::task::spawn(
         rejection_loop.run(rejections),
     ));
-    let refused = Arc::new(SyncMutex::new(None));
     let outputs = if settings.consumer_delay.is_zero() {
         OutputConsumers::open_now(&settings, &shared).await?
     } else {
@@ -1215,13 +1291,7 @@ async fn simulate(settings: Settings) -> Result<Finish, RunError> {
             settings.emitter,
             clock::duration_text(settings.consumer_delay)
         ));
-        OutputConsumers::open_later(
-            &settings,
-            &shared,
-            settings.consumer_delay,
-            planning.clone(),
-            refused.clone(),
-        )
+        OutputConsumers::open_later(&settings, &shared, settings.consumer_delay)
     };
     consumer_tasks.extend(outputs.tasks);
 
@@ -1287,13 +1357,25 @@ async fn simulate(settings: Settings) -> Result<Finish, RunError> {
         planner.replay(unresolved).await?;
         planner.simulate().await?;
     }
-    let missing = planner.settle(planner.settings.deadline).await;
-    if let Err(failure) = planner.producer.close().await {
-        report::line(format!(
-            "PRODUCER close_failed reason={}",
-            failure.current_context()
-        ));
-    }
+    let missing = nervix_primitives::select! {
+        biased;
+        error = shared.failure() => {
+            // A refused output cannot finish the held batches, even if planning already ended.
+            stop.cancel();
+            interrupt.abort();
+            return Err(RunError::Consumer(error));
+        }
+        missing = async {
+            let missing = planner.settle(planner.settings.deadline).await;
+            if let Err(failure) = planner.producer.close().await {
+                report::line(format!(
+                    "PRODUCER close_failed reason={}",
+                    failure.current_context()
+                ));
+            }
+            missing
+        } => missing,
+    };
     interrupt.abort();
     stop.cancel();
     for task in consumer_tasks {
@@ -1321,9 +1403,9 @@ async fn simulate(settings: Settings) -> Result<Finish, RunError> {
         ));
     }
     report::line(counters.summary());
-    let refusal = refused.lock().take();
+    let refusal = shared.refused.send_replace(None);
     if let Some(error) = refusal {
-        return Err(error);
+        return Err(RunError::Consumer(error));
     }
     if missing > 0 {
         return Err(RunError::Deadline {

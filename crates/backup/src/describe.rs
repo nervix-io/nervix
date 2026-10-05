@@ -1,13 +1,13 @@
 //! What an archive holds, read and verified from a stream.
 //!
-//! A description decodes every record, verifies every section, and keeps the place, size and digest
+//! A description decodes supported records, verifies every section, and keeps the place, size and digest
 //! of the NSPL and resource archive sections without their bytes, so describing an archive of any
 //! size holds only its records in memory. The contents a restore reads add each domain's NSPL,
 //! which configuration size keeps small, and leave resource archives where they are, to be read
 //! again by their place.
 
 use std::{
-    collections::{BTreeMap, btree_map::Entry},
+    collections::{BTreeMap, BTreeSet, btree_map::Entry},
     io::Read,
 };
 
@@ -23,6 +23,7 @@ use crate::{
     reader::{SectionReader, SectionVisitor, read_archive},
     records::{DomainRecord, ResourceVersionRecord, UsersRecord},
     section::{ArchiveRecord, MAX_RECORD_BYTES, RecordKind},
+    state::{BranchLifecycleRecord, KafkaOffsetsRecord, WasmStateDescriptor},
 };
 
 /// Everything an archive holds, verified.
@@ -44,6 +45,43 @@ pub struct DescribedDomain {
     pub models: DescribedSection,
     /// Every resource version, in archive order.
     pub resource_versions: Vec<DescribedResourceVersion>,
+    /// State sections in archive order, verified and decoded without retaining guest blobs.
+    pub state: Vec<DescribedRuntimeState>,
+    /// Verified state sections whose record tag or version this reader cannot install.
+    pub skipped_state: Vec<SkippedStateSection>,
+}
+
+/// A state section whose payload stays opaque because its record contract is unsupported.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SkippedStateSection {
+    pub path: SectionPath,
+    pub reason: SkippedStateReason,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub enum SkippedStateReason {
+    #[error("unknown record kind tag {found}")]
+    UnknownKind { found: u16 },
+    #[error("unsupported record version {found}; this reader supports {supported}")]
+    UnsupportedVersion { found: u16, supported: u16 },
+}
+
+/// One verified runtime-state section or WASM descriptor and its guest blob.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DescribedRuntimeState {
+    Wasm {
+        descriptor: WasmStateDescriptor,
+        record: DescribedSection,
+        guest: DescribedSection,
+    },
+    KafkaOffsets {
+        offsets: KafkaOffsetsRecord,
+        record: DescribedSection,
+    },
+    BranchLifecycle {
+        lifecycle: BranchLifecycleRecord,
+        record: DescribedSection,
+    },
 }
 
 /// One resource version of an archive.
@@ -157,6 +195,8 @@ struct Describer {
     models_paths: BTreeMap<SectionPath, DomainName>,
     /// Where the archive of each resource version already read belongs.
     archive_paths: BTreeMap<SectionPath, VersionSlot>,
+    wasm_blob_paths: BTreeMap<SectionPath, (DomainName, usize)>,
+    skipped_wasm_blobs: BTreeSet<SectionPath>,
 }
 
 /// A domain whose sections are still arriving.
@@ -165,6 +205,24 @@ struct AssembledDomain {
     record: Option<DomainRecord>,
     models: Option<DescribedSection>,
     resource_versions: Vec<DescribedResourceVersion>,
+    state: Vec<AssembledRuntimeState>,
+    skipped_state: Vec<SkippedStateSection>,
+}
+
+enum AssembledRuntimeState {
+    Wasm {
+        descriptor: WasmStateDescriptor,
+        record: DescribedSection,
+        guest: Option<DescribedSection>,
+    },
+    KafkaOffsets {
+        offsets: KafkaOffsetsRecord,
+        record: DescribedSection,
+    },
+    BranchLifecycle {
+        lifecycle: BranchLifecycleRecord,
+        record: DescribedSection,
+    },
 }
 
 /// The resource version a resource archive section belongs to.
@@ -182,6 +240,8 @@ impl SectionVisitor for Describer {
                 record: None,
                 models: None,
                 resource_versions: Vec::new(),
+                state: Vec::new(),
+                skipped_state: Vec::new(),
             };
             match self.domains.entry(capture.domain.clone()) {
                 Entry::Vacant(vacant) => {
@@ -213,14 +273,191 @@ impl SectionVisitor for Describer {
             SectionContent::Record(RecordKind::ResourceVersion) => {
                 self.resource_version(entry, content)
             }
+            SectionContent::Record(RecordKind::WasmStateDescriptor) => {
+                let decoded = self.wasm_descriptor(entry, content);
+                self.state_record_or_skip(entry, decoded)
+            }
+            SectionContent::Record(RecordKind::KafkaOffsets) => {
+                let decoded = self.kafka_offsets(entry, content);
+                self.state_record_or_skip(entry, decoded)
+            }
+            SectionContent::Record(RecordKind::BranchLifecycle) => {
+                let decoded = self.branch_lifecycle(entry, content);
+                self.state_record_or_skip(entry, decoded)
+            }
             SectionContent::Record(RecordKind::Manifest) => Err(misplaced(entry)),
             SectionContent::Nspl => self.models(entry, content),
             SectionContent::ResourceArchive => self.resource_archive(entry, content),
+            SectionContent::WasmGuestBlob => self.wasm_guest_blob(entry, content),
         }
     }
 }
 
 impl Describer {
+    fn state_record_or_skip(
+        &mut self,
+        entry: &SectionEntry,
+        decoded: Result<(), Report<ArchiveReadError>>,
+    ) -> Result<(), Report<ArchiveReadError>> {
+        let Err(error) = decoded else {
+            return Ok(());
+        };
+        let reason = match error.current_context() {
+            ArchiveReadError::ForeignRecordKind { found, .. } => {
+                SkippedStateReason::UnknownKind { found: *found }
+            }
+            ArchiveReadError::UnsupportedRecordVersion {
+                found, supported, ..
+            } => SkippedStateReason::UnsupportedVersion {
+                found: *found,
+                supported: *supported,
+            },
+            _ => return Err(error),
+        };
+        let domain = self
+            .domains
+            .keys()
+            .find(|domain| {
+                entry
+                    .path
+                    .as_str()
+                    .starts_with(&format!("domains/{}/state/", domain.as_str()))
+            })
+            .cloned()
+            .ok_or_else(|| misplaced(entry))?;
+        if entry.content == SectionContent::Record(RecordKind::WasmStateDescriptor) {
+            let prefix = entry
+                .path
+                .as_str()
+                .strip_suffix("/descriptor.rkyv")
+                .ok_or_else(|| misplaced(entry))?;
+            let blob = SectionPath::parse(&format!("{prefix}/guest.bin"))?;
+            self.skipped_wasm_blobs.insert(blob);
+        }
+        self.domains
+            .get_mut(&domain)
+            .ok_or_else(|| misplaced(entry))?
+            .skipped_state
+            .push(SkippedStateSection {
+                path: entry.path.clone(),
+                reason,
+            });
+        Ok(())
+    }
+
+    fn wasm_descriptor(
+        &mut self,
+        entry: &SectionEntry,
+        content: &mut SectionReader<'_>,
+    ) -> Result<(), Report<ArchiveReadError>> {
+        let bytes = content.read_all(entry, MAX_RECORD_BYTES)?;
+        let descriptor = WasmStateDescriptor::decode(entry.path.as_str(), &bytes)?;
+        let expected = SectionPath::wasm_state_descriptor(
+            &descriptor.domain,
+            &descriptor.entity,
+            descriptor.branch_fingerprint.as_ref(),
+        );
+        if entry.path != expected {
+            return Err(misplaced(entry));
+        }
+        let Some(domain) = self.domains.get_mut(&descriptor.domain) else {
+            return Err(misplaced(entry));
+        };
+        let index = domain.state.len();
+        let blob_path = SectionPath::wasm_guest_blob(
+            &descriptor.domain,
+            &descriptor.entity,
+            descriptor.branch_fingerprint.as_ref(),
+        );
+        if self
+            .wasm_blob_paths
+            .insert(blob_path, (descriptor.domain.clone(), index))
+            .is_some()
+        {
+            return Err(misplaced(entry));
+        }
+        domain.state.push(AssembledRuntimeState::Wasm {
+            descriptor,
+            record: DescribedSection::read_at(entry, content),
+            guest: None,
+        });
+        Ok(())
+    }
+
+    fn kafka_offsets(
+        &mut self,
+        entry: &SectionEntry,
+        content: &mut SectionReader<'_>,
+    ) -> Result<(), Report<ArchiveReadError>> {
+        let bytes = content.read_all(entry, MAX_RECORD_BYTES)?;
+        let offsets = KafkaOffsetsRecord::decode(entry.path.as_str(), &bytes)?;
+        if entry.path != SectionPath::kafka_offsets(&offsets.domain, &offsets.entity) {
+            return Err(misplaced(entry));
+        }
+        let Some(domain) = self.domains.get_mut(&offsets.domain) else {
+            return Err(misplaced(entry));
+        };
+        domain.state.push(AssembledRuntimeState::KafkaOffsets {
+            offsets,
+            record: DescribedSection::read_at(entry, content),
+        });
+        Ok(())
+    }
+
+    fn branch_lifecycle(
+        &mut self,
+        entry: &SectionEntry,
+        content: &mut SectionReader<'_>,
+    ) -> Result<(), Report<ArchiveReadError>> {
+        let bytes = content.read_all(entry, MAX_RECORD_BYTES)?;
+        let lifecycle = BranchLifecycleRecord::decode(entry.path.as_str(), &bytes)?;
+        if entry.path
+            != SectionPath::branch_lifecycle(
+                &lifecycle.domain,
+                lifecycle.owner_kind,
+                &lifecycle.entity,
+            )
+        {
+            return Err(misplaced(entry));
+        }
+        let Some(domain) = self.domains.get_mut(&lifecycle.domain) else {
+            return Err(misplaced(entry));
+        };
+        domain.state.push(AssembledRuntimeState::BranchLifecycle {
+            lifecycle,
+            record: DescribedSection::read_at(entry, content),
+        });
+        Ok(())
+    }
+
+    fn wasm_guest_blob(
+        &mut self,
+        entry: &SectionEntry,
+        content: &SectionReader<'_>,
+    ) -> Result<(), Report<ArchiveReadError>> {
+        if self.skipped_wasm_blobs.remove(&entry.path) {
+            return Ok(());
+        }
+        let Some((domain, index)) = self.wasm_blob_paths.get(&entry.path) else {
+            return Err(misplaced(entry));
+        };
+        let Some(state) = self
+            .domains
+            .get_mut(domain)
+            .and_then(|domain| domain.state.get_mut(*index))
+        else {
+            return Err(misplaced(entry));
+        };
+        let AssembledRuntimeState::Wasm { guest, .. } = state else {
+            return Err(misplaced(entry));
+        };
+        if guest.is_some() {
+            return Err(misplaced(entry));
+        }
+        *guest = Some(DescribedSection::read_at(entry, content));
+        Ok(())
+    }
+
     fn users(
         &mut self,
         entry: &SectionEntry,
@@ -355,6 +592,31 @@ impl Describer {
                 record,
                 models,
                 resource_versions: assembled.resource_versions,
+                state: assembled
+                    .state
+                    .into_iter()
+                    .map(|state| match state {
+                        AssembledRuntimeState::Wasm {
+                            descriptor,
+                            record,
+                            guest: Some(guest),
+                        } => Ok(DescribedRuntimeState::Wasm {
+                            descriptor,
+                            record,
+                            guest,
+                        }),
+                        AssembledRuntimeState::Wasm { guest: None, .. } => {
+                            Err(incomplete(&capture.domain, "WASM guest blob"))
+                        }
+                        AssembledRuntimeState::KafkaOffsets { offsets, record } => {
+                            Ok(DescribedRuntimeState::KafkaOffsets { offsets, record })
+                        }
+                        AssembledRuntimeState::BranchLifecycle { lifecycle, record } => {
+                            Ok(DescribedRuntimeState::BranchLifecycle { lifecycle, record })
+                        }
+                    })
+                    .collect::<Result<Vec<_>, _>>()?,
+                skipped_state: assembled.skipped_state,
             });
         }
         Ok(ArchiveDescription {

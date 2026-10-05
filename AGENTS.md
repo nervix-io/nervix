@@ -190,6 +190,13 @@ behavior, and a compatibility requirement the user states explicitly for the cur
   of window state, measured performance evidence, and the checklist for adding a function.
   [Expression Functions](docs/src/filter-map-functions.md) remains the owner of every public
   function contract.
+- [SIMD Kernels](docs/src/simd-kernels.md) is the authoritative architecture reference for portable
+  buffer kernels and their callers. Any change to kernel ownership, dispatch or build targets,
+  arithmetic or bitmap contracts, byte scanning, typed run execution, scalar/level qualification,
+  or SIMD performance claims must keep that chapter current in the same change. Its scope includes
+  the admission rule for new kernels, the caller catalog, bounded tails and reductions, measured
+  scalar versus vector selection, evidence limits, and the checklist for adding a kernel. VM,
+  codec, connector, clock and concurrency chapters retain their respective semantic contracts.
 - [Resource Versions And Bindings](docs/src/resource-versions.md) is the authoritative architecture
   reference for resource versions and the models that bind them. Any change to the resource
   catalog, upload installation or replication, version resolution, how a binding is validated,
@@ -373,6 +380,17 @@ choose a backend.
   tool that is not a node or an external driver that waits on the network. A permission declares
   its file for exactly the items it lists, so an item no permission lists for its file and a listed
   item the file no longer names both fail.
+- Thread creation through `nervix_primitives::thread::{spawn, Builder, scope, spawn_detached}`
+  and `nervix_primitives::unmodeled::thread::Builder` needs the same exact-file, exact-item
+  declaration in `crates/primitives/blocking-permissions.toml`, with its owner, why it stays
+  outside the bounded executor, and what bounds its work, thread count and lifetime. There is
+  no built-in caller outside the primitive crate. Unit tests, Loom and Shuttle models, and
+  harnesses declare their files and items too: no directory, `cfg(test)` module, model-only
+  module, inactive branch or authored macro is exempt. An unlisted use and an unused declared
+  item fail. The real builder also needs its unmodeled permission and verification limit;
+  that permission alone does not authorize thread creation.
+  Reimported module aliases retain confinement; import boundary modules and items by name,
+  because a root glob hides confined and unmodeled paths and is rejected.
 - An execution mode is a feature, never a global cfg: a bare `loom`, `shuttle`, `turmoil` or
   `deloxide` in a `cfg` predicate, and `--cfg` with any of those names in any recipe, Cargo
   configuration, workflow or build script, are rejected, because every crate of a build, Tokio's
@@ -1114,19 +1132,27 @@ build and the existing tests, and nothing in it changes behavior.
   mode. `just cargo-clippy-shuttle`, also part of `just lint`, lints every Shuttle build with
   warnings denied, including each package `just test-shuttle` explores in test mode, so a warning
   in a check fails validation.
-- `just coverage-native-extras [producer ...]` runs the extra checks that execute Nervix code
-  natively in ordinary mode, `test-typed-ratchet`, `bench-smoke`, `test-primitives` and
-  `nspl-completion-walk`, exactly as their recipes do but under LLVM source instrumentation, and
-  CI's extra-tests job runs them only
-  that way. Each run writes `lcov.info`, `completion.json`, `executions.jsonl` and `export.log` to a
+- `just coverage-native-extras [producer ...]` runs eligible native extra checks under LLVM source
+  instrumentation: `test-typed-ratchet`, `bench-smoke`, `nspl-completion-walk`, the canonical
+  `test-shuttle` and `test-loom` runners, and each `test-primitives-<mode>` conformance recipe.
+  `test-primitives` selects every native conformance mode. CI runs these checks through collection;
+  primitive compile/browser checks, replay qualification and Loom weakening qualification retain
+  independent verdicts outside its instrumentation. Each run writes `lcov.info`, `completion.json`,
+  `executions.jsonl` and `export.log` to a
   fresh `target/native-coverage/<producer>/<mode>/<toolchain>/<attempt>/`. A report counts only
   beside a `complete` completion record; a failed, interrupted or incomplete collection never is
   one, and it keeps its evidence. Prerequisites build outside the instrumentation, and the parts
-  of a check that compile, target the browser or run a model checker stay uninstrumented, as do
+  of a check that compile or target the browser stay uninstrumented, as do
   Miri, mutation testing and the Loom weakening qualification. An extra check that starts
   executing Nervix code natively joins the producer inventory in `scripts/native_coverage.py`, with
   its justfile recipe composed as prepare, instrumented and finish parts. `just test-native-coverage`
   tests the collector.
+  Model producers also retain `models.json` with canonical discovery, selection, execution and
+  completion, including Shuttle's paired nondeterminism run and Loom's invariant, executions and
+  bounds. Missing or incomplete evidence fails collection before export. Each mode uses its own
+  instrumented build directory; model and diagnostic reports never enter the ordinary coverage or
+  CRAP gate. Coverage bookkeeping stays outside model processes and supplies no synchronization
+  to the invariant.
 - Every public interface or NSPL surface change must update the relevant `docs/src` pages and the
   user-facing NSPL skill in the same change. Keep `.agents/skills/nspl/SKILL.md` and its references
   accurate for users configuring Nervix, then regenerate `docs/book` with `just book`.

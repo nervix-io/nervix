@@ -56,6 +56,7 @@ them substitutes for another.
 | `crates/interconnect/tests/simulation.rs` | Harness | The `simulation` test target: runner checks, the DNS and CPU scenarios, and the fresh-process record and replay checks |
 | `crates/interconnect/tests/simulation/transport.rs` | Harness | The certificate authority fixture, typed Arrow requests, host synchronization, and the exchange and link-fault scenarios |
 | `crates/interconnect/tests/simulation/relay.rs` | Harness | Relay reply loss, cancellation, and receiver-restart scenarios |
+| `crates/interconnect/tests/simulation/backup.rs` | Harness | Authenticated backup capture and section fetch across a partition, repair, and owner restart during transfer |
 | `crates/interconnect/tests/simulation/isolation.rs` | Harness | The three-host stalled-peer scenario and the capacity bounds it checks |
 | `crates/interconnect/src/authentication/simulation_tests.rs` | Harness | Certificate validity, expiry drain, handshake deadlines, and trace replay under the simulated clock |
 | `crates/interconnect/src/wire.rs`, module `simulation_checks` | Harness | Seeded rkyv round trips through the execution owner |
@@ -548,6 +549,8 @@ seeds twice each, in fresh processes; the sweep replaces the seeds without weake
 | receiver restart after relay body receipt | `transport::relay::relay_restart_fences_unresolved_delivery_and_accepts_fresh_work` | 81 | 90 s / 50,000 / 90 s | A new process epoch leaves the unresolved delivery indeterminate and admits fresh work |
 | receiver restart after runtime admission | The same | 83 | 90 s / 50,000 / 90 s | The same after runtime admission |
 | receiver restart with delayed relay response | The same | 85, 1036 | 90 s / 50,000 / 90 s | A released pre-crash reply confirms only historical receipt; admission stays indeterminate against the new epoch |
+| backup section partition and repair | `transport::backup::backup_section_fetch_is_fenced_and_recovers_after_partition` | 101 | 85 s / 100,000 / 90 s | A forged process identity cannot capture or consume a section; a stalled fetch reaches its deadline; a partitioned fetch fails and succeeds after repair |
+| backup owner restart during transfer | `transport::backup::restart_during_backup_transfer_discards_the_process_stage` | 102 | 85 s / 100,000 / 90 s | An incomplete section cannot finish after owner restart, and the replacement process has no prior capture stage |
 | stalled peer isolation | `transport::isolation::stalled_peer_cannot_consume_unrelated_capacity_or_leak_reservations` | 91–93 | 120 s / 120,000 / 120 s | A stalled peer holds only its own connection's slots, unrelated work progresses, and every reservation is released |
 
 The simulation target also holds 26 runner and driver checks, such as the supervision, bound, clock,
@@ -614,6 +617,17 @@ released pre-crash reply can confirm only that the old process received the body
 identity then crosses the rebound listener and is admitted. The fixture checks the Arrow batch and
 both process identities at the protocol boundary, and that the receiver crashed and restarted
 exactly once.
+
+### Backup Section Transfer
+
+The backup cases send the production typed capture, inventory, and bulk fetch messages. A request
+that claims another process epoch is rejected before the capture or stream handler runs. The
+partition case bounds a stalled fetch by its request deadline, leaves the staged section available
+when the link is partitioned, repairs the link, and reads the verified section. The restart case
+ends an owner process after its first stream chunk;
+the incomplete stream fails, and the rebound owner has no stage from that process. These are
+transport and in-memory staging boundary checks; the Cucumber cluster scenarios verify the
+server's archive and restore behavior.
 
 ### Stalled-Peer Isolation
 

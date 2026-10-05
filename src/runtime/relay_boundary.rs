@@ -19,6 +19,10 @@
 
 use super::*;
 
+#[path = "relay_channels.rs"]
+mod channels;
+use channels::{RelayBranchChannels, RelayChannels};
+
 #[cfg(all(test, feature = "shuttle"))]
 #[path = "relay_boundary_shuttle_tests.rs"]
 mod shuttle_tests;
@@ -46,6 +50,12 @@ pub(super) struct ConcreteRelayRuntime {
     pub(super) domain: DomainName,
     pub(super) relay: RelayName,
     pub(super) services: Arc<RelayBoundaryServices>,
+    channels: RelayProducerChannels,
+}
+
+enum RelayProducerChannels {
+    Bound(StdArc<RelayBranchChannels>),
+    Ended,
 }
 
 pub(super) struct ConcreteRelayRuntimeBuild {
@@ -75,8 +85,7 @@ pub(super) struct RelayBoundaryServices {
     /// The concrete branches this node's owner of the relay holds, shared with the relay's state
     /// placement so materialized reads observe the same membership across execution rebuilds.
     pub(super) branch_presence: RelayBranchPresence,
-    pub(super) ingress_slots: DashMap<Option<BranchKey>, Arc<RelayOutboundSlot>, RandomState>,
-    pub(super) outbound_slots: DashMap<RelayOutboundChannel, Arc<RelayOutboundSlot>, RandomState>,
+    channels: RelayChannels,
 }
 
 #[derive(Debug, Clone, Hash, PartialEq, Eq)]
@@ -84,7 +93,6 @@ pub(super) struct RelayOutboundChannel {
     node_id: ClusterNodeName,
     relay: RelayName,
     kind: RelayPayloadKind,
-    branch: Option<BranchKey>,
 }
 
 #[derive(Debug)]
@@ -126,7 +134,12 @@ impl RelayOutboundSequence {
 }
 
 impl RelayOutboundSlot {
+    #[cfg(test)]
     fn new() -> Self {
+        Self::with_cancellation(CancellationToken::new())
+    }
+
+    fn with_cancellation(cancellation: CancellationToken) -> Self {
         Self {
             gate: Mutex::new(()),
             sequence: nervix_primitives::sync::blocking::Mutex::new(RelayOutboundSequence {
@@ -134,16 +147,34 @@ impl RelayOutboundSlot {
                 next_sequence: 0,
                 last_delivery_at: None,
             }),
-            cancellation: CancellationToken::new(),
+            cancellation,
+        }
+    }
+
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            bounded,
+            reason = "one retained channel serializes an admitted delivery until completion or \
+                      retirement",
+            key = "delivery channel lifetime",
+            bound = "one gate holder; queued delivery is cancelled when that exact lifetime ends"
+        )
+    )]
+    pub(super) async fn lock_for_delivery(
+        &self,
+    ) -> Option<nervix_primitives::sync::MutexGuard<'_, ()>> {
+        nervix_primitives::select! {
+            biased;
+            _ = self.cancellation.cancelled() => None,
+            guard = self.gate.lock() => {
+                if self.cancellation.is_cancelled() { None } else { Some(guard) }
+            }
         }
     }
 
     pub(super) fn cancellation(&self) -> &CancellationToken {
         &self.cancellation
-    }
-
-    fn cancel(&self) {
-        self.cancellation.cancel();
     }
 
     #[cfg_attr(
@@ -360,7 +391,7 @@ pub(super) fn routed_payload(delivery: RoutedDelivery<'_>) -> RelayPayload {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct RemoteRuntimeConsumer {
     pub(super) node_id: ClusterNodeName,
     pub(super) relay: RelayName,
@@ -1105,8 +1136,7 @@ impl RelayBoundaryServices {
             remote_dispatcher,
             owner_node: ArcSwapOption::empty(),
             branch_presence,
-            ingress_slots: DashMap::default(),
-            outbound_slots: DashMap::default(),
+            channels: RelayChannels::default(),
         }
     }
 
@@ -1116,6 +1146,10 @@ impl RelayBoundaryServices {
     }
 
     pub(super) fn replace_owner_node(&self, owner_node: Option<ClusterNodeName>) {
+        if self.owner_node.load().as_deref() == owner_node.as_ref() {
+            return;
+        }
+        self.channels.replace_owner();
         self.owner_node.store(owner_node.map(StdArc::new));
     }
 
@@ -1138,110 +1172,42 @@ impl RelayBoundaryServices {
         self.fanout.deactivate_owner_buffer();
     }
 
-    #[cfg_attr(
-        nervix_lint,
-        nervix::context(
-            recurring,
-            reason = "this owner is reached by recurring record, frame, acknowledgement or \
-                      state-poll work"
-        )
-    )]
-    pub(super) fn ingress_slot(&self, branch: &Option<BranchKey>) -> Arc<RelayOutboundSlot> {
-        // A branch's slot is created once and then read on every batch it carries, so the steady
-        // state resolves it with a borrowed key and clones nothing. Creation still goes through
-        // `entry`, because two first batches for one branch must agree on a single slot: the slot
-        // is what orders deliveries, and a racing pair of them would interleave the channel.
-        if let Some(existing) = nervix_primitives::expect_lint!(
-            nervix::sync_acquisition,
-            "Typed Ratchet 03 https://app.clickup.com/t/86bc9eqjv: retain the branch relay slot \
-             and avoid recurring shared registry operations",
-            self.ingress_slots.get(branch)
-        ) {
-            return existing.clone();
-        }
-        nervix_primitives::expect_lint!(
-            nervix::sync_acquisition,
-            "Typed Ratchet 03 https://app.clickup.com/t/86bc9eqjv: retain the branch relay slot \
-             and avoid recurring shared registry operations",
-            self.ingress_slots.entry(branch.clone())
-        )
-        .or_insert_with(|| Arc::new(RelayOutboundSlot::new()))
-        .clone()
+    pub(super) fn ingress_slot(&self, branch: &Option<BranchKey>) -> StdArc<RelayOutboundSlot> {
+        self.channels.bind(branch).ingress()
     }
 
-    #[cfg_attr(
-        nervix_lint,
-        nervix::context(
-            recurring,
-            reason = "this owner is reached by recurring record, frame, acknowledgement or \
-                      state-poll work"
-        )
-    )]
     pub(super) fn outbound_slot(
         &self,
         node_id: &ClusterNodeName,
         relay: &RelayName,
         kind: RelayPayloadKind,
         branch: &Option<BranchKey>,
-    ) -> Arc<RelayOutboundSlot> {
-        // Remote destinations are stable for the lifetime of a published routing snapshot. Avoid
-        // taking the shard's exclusive `entry` path for every batch after the channel has been
-        // installed. Name and branch clones here only increment their shared allocations; the
-        // miss path owns the one key that enters the map.
-        let channel = RelayOutboundChannel {
+    ) -> StdArc<RelayOutboundSlot> {
+        self.channels.bind(branch).outbound(RelayOutboundChannel {
             node_id: node_id.clone(),
             relay: relay.clone(),
             kind,
-            branch: branch.clone(),
-        };
-        if let Some(existing) = nervix_primitives::expect_lint!(
-            nervix::sync_acquisition,
-            "Typed Ratchet 03 https://app.clickup.com/t/86bc9eqjv: retain the branch relay slot \
-             and avoid recurring shared registry operations",
-            self.outbound_slots.get(&channel)
-        ) {
-            return existing.clone();
-        }
-        nervix_primitives::expect_lint!(
-            nervix::sync_acquisition,
-            "Typed Ratchet 03 https://app.clickup.com/t/86bc9eqjv: retain the branch relay slot \
-             and avoid recurring shared registry operations",
-            self.outbound_slots.entry(channel)
-        )
-        .or_insert_with(|| Arc::new(RelayOutboundSlot::new()))
-        .clone()
+        })
     }
 
-    #[cfg_attr(
-        nervix_lint,
-        nervix::context(
-            recurring,
-            reason = "this owner is reached by recurring record, frame, acknowledgement or \
-                      state-poll work"
-        )
-    )]
+    pub(super) fn subscription_channels(
+        &self,
+        branch: &Option<BranchKey>,
+        snapshot: StdArc<crate::runtime::SubscriptionInterestIndex>,
+        domain: &DomainName,
+        relay: &RelayName,
+    ) -> StdArc<channels::SubscriptionChannels> {
+        self.channels
+            .bind(branch)
+            .subscriptions(snapshot, domain, relay)
+    }
+
+    pub(super) fn retire_channels(&self) {
+        self.channels.retire_all();
+    }
+
     pub(super) fn remove_branch_slots(&self, branch: &Option<BranchKey>) {
-        if let Some((_, slot)) = nervix_primitives::expect_lint!(
-            nervix::sync_acquisition,
-            "Typed Ratchet 03 https://app.clickup.com/t/86bc9eqjv: retain the branch relay slot \
-             and avoid recurring shared registry operations",
-            self.ingress_slots.remove(branch)
-        ) {
-            slot.cancel();
-        }
-        nervix_primitives::expect_lint!(
-            nervix::sync_acquisition,
-            "Typed Ratchet 03 https://app.clickup.com/t/86bc9eqjv: retain the branch relay slot \
-             and avoid recurring shared registry operations",
-            self.outbound_slots.retain(|channel, slot| {
-                if &channel.branch == branch {
-                    slot.cancel();
-                    false
-                } else {
-                    true
-                }
-            })
-        );
+        self.channels.retire(branch);
     }
 
     pub(super) async fn enqueue_owner_batch(
@@ -1289,6 +1255,17 @@ impl RelayBoundaryServices {
         relay: &RelayName,
         batch: &RelayRecordBatch,
     ) -> RelayDispatchResult {
+        self.dispatch_to_owner_on(domain, relay, batch, self.ingress_slot(&batch.key))
+            .await
+    }
+
+    async fn dispatch_to_owner_on(
+        &self,
+        domain: &DomainName,
+        relay: &RelayName,
+        batch: &RelayRecordBatch,
+        ingress_slot: StdArc<RelayOutboundSlot>,
+    ) -> RelayDispatchResult {
         let dispatch_gate = self.fanout.dispatch_gate();
         let _dispatch_permit = dispatch_gate.acquire_dispatch().await;
         let _branch_dispatch_permits = self.fanout.acquire_branch_dispatch_gates(&batch.key).await;
@@ -1304,8 +1281,12 @@ impl RelayBoundaryServices {
             }
             return Err(Box::new(batch.clone()));
         };
-        let ingress_slot = self.ingress_slot(&batch.key);
-        let _slot = ingress_slot.gate.lock().await;
+        let Some(_slot) = ingress_slot.lock_for_delivery().await else {
+            for ack in &batch.acks {
+                ack.no_ack("relay channel was retired");
+            }
+            return Err(Box::new(batch.clone()));
+        };
         let batch_ipc = match batch.batch.encode_arrow_ipc(dispatcher.executor()).await {
             Ok(bytes) => bytes,
             Err(error) => {
@@ -1450,7 +1431,12 @@ impl RelayBoundaryServices {
                 RelayPayloadKind::Routed,
                 &batch.key,
             );
-            let _slot = outbound_slot.gate.lock().await;
+            let Some(_slot) = outbound_slot.lock_for_delivery().await else {
+                for ack in batch.acks.iter() {
+                    ack.no_ack("relay channel lifetime ended");
+                }
+                return Err(Box::new(batch.clone()));
+            };
             let batch_ipc = match encoded_body.clone() {
                 Some(bytes) => bytes,
                 None => match batch.batch.encode_arrow_ipc(dispatcher.executor()).await {
@@ -1559,6 +1545,10 @@ impl RelayBoundaryServices {
     }
 
     pub(super) fn replace_remote_runtime_consumers(&self, consumers: Vec<RemoteRuntimeConsumer>) {
+        if *self.remote_runtime_consumers.load().as_ref() == consumers {
+            return;
+        }
+        self.channels.replace_destinations();
         self.remote_runtime_consumers.store(StdArc::new(consumers));
     }
 
@@ -1620,13 +1610,19 @@ impl ConcreteRelayRuntime {
             relay,
             services,
         } = build;
+        let channels = RelayProducerChannels::Bound(services.channels.bind(&key));
         Self {
             runtime,
             domain,
             relay,
             services,
             key,
+            channels,
         }
+    }
+
+    pub(super) fn retire(&mut self) {
+        self.channels = RelayProducerChannels::Ended;
     }
 
     pub(super) async fn dispatch_boundary(
@@ -1634,8 +1630,28 @@ impl ConcreteRelayRuntime {
         batch: &RelayRecordBatch,
     ) -> RelayDispatchResult {
         debug_assert_eq!(&self.key, &batch.key);
-        self.runtime
-            .ingest_stream_boundary_message(&self.domain, &self.relay, &self.services, batch)
+        let RelayProducerChannels::Bound(channels) = &mut self.channels else {
+            for ack in batch.acks.iter() {
+                ack.no_ack("relay producer lifetime ended");
+            }
+            return Err(Box::new(batch.clone()));
+        };
+        // The receiver's relay branch may expire independently of this producer. Its explicit
+        // invalidation is a cold rebind; ending this producer never permits such a rebind.
+        if channels.is_retired() {
+            *channels = self.services.channels.bind(&self.key);
+            if channels.is_retired() {
+                for ack in batch.acks.iter() {
+                    ack.no_ack("relay service lifetime ended");
+                }
+                return Err(Box::new(batch.clone()));
+            }
+        }
+        if self.runtime.owns_relay(&self.services) {
+            return self.services.enqueue_owner_batch(batch).await;
+        }
+        self.services
+            .dispatch_to_owner_on(&self.domain, &self.relay, batch, channels.ingress())
             .await
     }
 }

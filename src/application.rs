@@ -384,6 +384,14 @@ pub struct Args {
     pub state_snapshot_interval: Duration,
     #[arg(
         long,
+        env = "NERVIX_RESTORE_STAGING_MAX_BYTES",
+        default_value = "128GiB",
+        value_parser = parse_human_bytes,
+        help = "Maximum unpublished restore checkpoint key and value bytes per node"
+    )]
+    pub restore_staging_max_bytes: ubyte::ByteUnit,
+    #[arg(
+        long,
         env = "NERVIX_MEMORY_HIGH_WATERMARK",
         value_parser = parse_human_bytes,
         help = "Allocated jemalloc bytes that pause all ingestors"
@@ -619,6 +627,8 @@ pub struct Application {
     pub replica_count: usize,
     #[builder(default = Duration::from_secs(30))]
     pub state_snapshot_interval: Duration,
+    #[builder(default = crate::runtime::DEFAULT_RESTORE_STAGING_MAX_BYTES)]
+    pub restore_staging_max_bytes: u64,
     #[builder(default)]
     pub memory_pressure: Option<MemoryPressureConfig>,
     pub cluster_bootstrap_host: Option<String>,
@@ -778,6 +788,7 @@ impl Application {
         let transaction_max_open = self.transaction_max_open;
         let replica_count = self.replica_count;
         let state_snapshot_interval = self.state_snapshot_interval;
+        let restore_staging_max_bytes = self.restore_staging_max_bytes;
         let memory_pressure_controller = self
             .memory_pressure
             .map(MemoryPressureController::new)
@@ -923,6 +934,7 @@ impl Application {
             state_snapshot_interval,
             fault_injection.clone(),
             temp_dir.clone(),
+            restore_staging_max_bytes,
         )
         .map_err(|error| {
             error!(error = %error, "failed to initialize runtime persistence");
@@ -1889,6 +1901,8 @@ impl Application {
                 resource_upload_executions: DashMap::with_hasher(RandomState::new()),
                 resource_replication_executions: DashMap::with_hasher(RandomState::new()),
                 retained_backups: Default::default(),
+                captured_backup_sections: DashMap::with_hasher(RandomState::new()),
+                restored_state_uploads: DashMap::with_hasher(RandomState::new()),
                 restore_archives: Default::default(),
             }),
         };
@@ -1928,6 +1942,9 @@ impl Application {
             })
             .change_context(AppError::RegisterInterconnectRequestHandler)?;
         let resource_replica_service = service.clone();
+        service
+            .register_backup_state_handlers(&interconnect)
+            .change_context(AppError::RegisterInterconnectRequestHandler)?;
         interconnect
             .register_handler::<PublishResourceReplica, _, _>(move |context, request| {
                 let service = resource_replica_service.clone();
@@ -2447,6 +2464,22 @@ impl Application {
                 nervix_primitives::select! {
                     _ = transaction_shutdown.cancelled() => break,
                     _ = sleep(Duration::from_millis(250)) => {}
+                }
+            }
+        }));
+
+        let restore_maintenance_service = service.clone();
+        let restore_maintenance_shutdown = shutdown.clone();
+        background_tasks.push(nervix_primitives::task::spawn(async move {
+            loop {
+                nervix_primitives::task::consume_budget().await;
+                nervix_primitives::select! {
+                    _ = restore_maintenance_shutdown.cancelled() => break,
+                    _ = restore_maintenance_service.sweep_restore_checkpoint_staging() => {}
+                }
+                nervix_primitives::select! {
+                    _ = restore_maintenance_shutdown.cancelled() => break,
+                    _ = sleep(Duration::from_secs(1)) => {}
                 }
             }
         }));

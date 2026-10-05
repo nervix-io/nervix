@@ -99,6 +99,20 @@ without inferring them from a client timeout. These records contain control-plan
 attribution, and non-sensitive diagnostics only. Runtime payloads, acknowledgement maps, connector
 buffers, and handoff bytes remain volatile data-plane state.
 
+### Restore Checkpoint Reclamation
+
+Restore checkpoint reclamation borrows the applied state through `with_restore_state_reclamation`
+and retains its read guard across node-local bounded storage deletion. Its caller takes the
+checkpoint installation barrier after this guard, in the same order as staging and publication.
+The retention view keeps the current generation of every applying restore and any generation
+ahead of the applied log; without an applied log it keeps all generations. Leadership and lease
+expiry alone do not end an applying execution's retry lifetime. Terminal, expired, missing or
+superseded executions no longer retain an applied unpublished generation. The runtime store
+protects its selected durable publication independently. This adds no consensus record or log
+mutation and never removes a replicated incomplete-installation gate. See
+[Backup And Restore](backup-and-restore.md#restore-checkpoint-storage-quota-and-metrics) for the
+quota, metrics and node-local cleanup boundary.
+
 ### Coordinated WASM Reset Publications
 
 An NSPL reset first records a typed ordered transaction step with its captured planning inputs,
@@ -317,8 +331,8 @@ the bounded storage executor, but consensus has its own single ordered worker.
 
 The dedicated database owns exactly four current keyspaces: `raft_count_logs`, `raft_count_meta`,
 `raft_count_state`, and `raft_count_snapshots`. Opening it validates the complete keyspace namespace
-before reading any records. Its state metadata requires the current `WideCounts` encoding. Native
-counts in commands, queued transactions, progress, outcomes, and plan, report and topology headers
+before reading any records. Its state metadata requires the current `RestoreCounts` encoding,
+including the durable restore installation gate. Native counts in commands, queued transactions, progress, outcomes, and plan, report and topology headers
 are archived as fixed-width 64-bit values with checked native decoding. Log replay, state recovery
 and snapshot installation therefore retain their complete magnitudes. See
 [Archived Counts](./typed-states.md#archived-counts).
@@ -406,3 +420,16 @@ transfer snapshots more often; smaller covered suffixes make a lagging follower 
 sooner. Larger thresholds and suffixes retain more log and require a retained-log cap large enough
 for the working set. The cap should leave room for entries newer than the latest completed snapshot,
 because those entries cannot be purged regardless of the covered-log settings.
+
+## Restored Domain Installation Gate
+
+The consensus state machine persists each restored domain's pending or installing state alongside
+its restore execution and mutation lease. Creating the domain establishes a pending start gate;
+admitting state installation records leader tenure, execution, lease revision and the committed
+log index as its generation. Recording the model step removes the gate only for that exact
+authority. The record is included in snapshots and restored after restart, independently of lease
+release or terminal execution failure. Runtime state bytes remain in the node-owned state store.
+A local storage mutation holds the applied-state read guard through its authority validation,
+checkpoint mutation and handle clearing; a newer applied authority or start-gate release cannot
+cross that boundary. The current state encoding requires these records and rejects a database
+whose encoding does not match, requiring recreation under the alpha persistence contract.

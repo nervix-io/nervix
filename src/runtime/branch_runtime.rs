@@ -239,12 +239,7 @@ impl BranchDispatchLanes {
 impl BranchRuntime {
     pub(super) fn refresh_domain_routing(&mut self) -> Result<(), Report<DomainRoutingError>> {
         if self.routing.is_none() {
-            self.routing = nervix_primitives::expect_lint!(
-                nervix::lifecycle_call,
-                "Typed Ratchet 03 (86bc9eqjv): retain the domain routing publication across \
-                 revision refresh instead of repeating its installation lookup",
-                self.runtime.domain_routing_cache(&self.domain)
-            );
+            self.routing = self.runtime.domain_routing_cache(&self.domain);
         }
         let Some(routing) = self.routing.as_mut() else {
             return Err(Report::new(DomainRoutingError::DomainNotInstantiated {
@@ -280,6 +275,9 @@ impl BranchRuntime {
     }
 
     pub(super) async fn evict(&mut self) {
+        for relay in self.relays.values_mut() {
+            relay.retire();
+        }
         for processor in self.processors.values_mut() {
             processor.drop_collected_inputs("processor branch was evicted");
             processor.reset_window_state();
@@ -2143,6 +2141,7 @@ fn checkpoint_branch_instance_lru_snapshot<V>(
             identifier: ModelName::from(&template.source),
         }
     })?;
+    let _publication = runtime.backup_publication(domain);
     let payload = encode_branch_lru_snapshot(&instances.snapshot_entries())
         .map_err(|error| OwnershipHandoffError::checkpoint(error.to_string()))?;
     let snapshot = PersistedRuntimeStateEntry {
@@ -2176,6 +2175,7 @@ pub(super) fn persist_branch_instance_lru_snapshot<V>(
     }
     let placement = branch_lru_placement(runtime, domain, template)
         .change_context(BranchLruSnapshotError::Unplaced)?;
+    let _publication = runtime.backup_publication(domain);
     let payload = encode_branch_lru_snapshot(&instances.snapshot_entries())?;
     runtime
         .persist_branch_lru_snapshot(
@@ -2205,6 +2205,7 @@ pub(super) fn publish_branch_instance_lru_snapshot<V>(
 ) -> error_stack::Result<(), BranchLruSnapshotError> {
     let placement = branch_lru_placement(runtime, domain, template)
         .change_context(BranchLruSnapshotError::Unplaced)?;
+    let _publication = runtime.backup_publication(domain);
     let payload = encode_branch_lru_snapshot(&instances.snapshot_entries())?;
     let snapshot = PersistedRuntimeStateEntry {
         lsm: instances.version(),

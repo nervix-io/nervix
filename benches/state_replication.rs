@@ -55,6 +55,14 @@ fn catch_up_requests(benchmark: &mut ReplicaCatchUpBenchmark) -> usize {
 }
 
 fn state_replication_benches(criterion: &mut Criterion) {
+    let frames = StateReplicationBenchmark::new(0);
+    criterion.bench_function("state_replication/acknowledgement_frame", |bencher| {
+        bencher.iter(|| frames.acknowledgement_frame());
+    });
+    criterion.bench_function("state_replication/announcement_frame", |bencher| {
+        bencher.iter(|| frames.announcement_frame());
+    });
+
     let mut commits = criterion.benchmark_group("state_replication/acknowledged_commit");
     commits.throughput(Throughput::Elements(1));
     commits.bench_function("one_replica", |bencher| {

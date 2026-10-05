@@ -30,6 +30,9 @@ mod generated {
 
 use generated::nervix_wasm as wire;
 
+#[cfg(test)]
+mod properties;
+
 pub const FILE_IDENTIFIER: &str = wire::MESSAGE_IDENTIFIER;
 pub const SERIALIZATION_NAME: &str = "FlatBuffers";
 
@@ -240,7 +243,8 @@ pub enum OutputColumnRef {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct GuestSnapshot {
     /// A `BranchInit` message of the branch configuration the instance was initialized with,
-    /// which a restore checks against the configuration of the instance it restores into.
+    /// which a restore checks against the state-bearing configuration of its new instance.
+    /// The Rust SDK permits a domain rename when type, key, and schemas still match.
     pub init_metadata: Vec<u8>,
     /// The guest's durable computation state. Empty bytes are the state of a guest with nothing to
     /// carry over.
@@ -427,7 +431,8 @@ fn verified_message(bytes: &[u8]) -> Result<wire::Message<'_>, ProtocolError> {
             actual,
         }));
     }
-    if !wire::message_size_prefixed_buffer_has_identifier(bytes) {
+    const HEADER_BYTES: usize = 2 * size_of::<u32>() + FILE_IDENTIFIER.len();
+    if bytes.len() < HEADER_BYTES || !wire::message_size_prefixed_buffer_has_identifier(bytes) {
         return Err(Report::new(ProtocolError::InvalidIdentifier));
     }
     wire::size_prefixed_root_as_message(bytes)

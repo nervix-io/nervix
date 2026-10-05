@@ -55,6 +55,10 @@ use nervix_recovery::Discarded as _;
 use rkyv::{Archive, Deserialize, Serialize};
 use tracing::{debug, info, warn};
 
+#[cfg(test)]
+use crate::runtime::AdvertisedSubscriptionInterest;
+use crate::runtime::SubscriptionInterestIndex;
+
 const KEY_CLUSTER_ID: &str = "cluster_id";
 const KEY_NODE_ID: &str = "node_id";
 const KEY_GRPC_LISTEN_ADDR: &str = "grpc_listen_addr";
@@ -92,86 +96,26 @@ pub struct ClusterHandle {
     membership_task: Mutex<Option<JoinHandle<()>>>,
 }
 
-/// The interested node incarnations for every domain and relay advertised by live gossip state.
-///
-/// Strings are retained only in this cold-path snapshot. A relay owner looks them up through
-/// borrowed `str` keys, then iterates the node map without formatting a gossip key or allocating.
-#[derive(Debug, Default)]
-pub(crate) struct SubscriptionInterestIndex {
-    domains: BTreeMap<
-        String,
-        BTreeMap<String, BTreeMap<ClusterNodeName, AdvertisedSubscriptionInterest>>,
-    >,
-}
-
-/// One live advertisement, fenced by both the node incarnation and its interest key's version.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-pub(crate) struct AdvertisedSubscriptionInterest {
-    incarnation: ClusterNodeIncarnation,
-    version: u64,
-}
-
-impl SubscriptionInterestIndex {
-    fn from_live_node_states(nodes: &BTreeMap<ChitchatId, NodeState>) -> Self {
-        let mut index = Self::default();
-        for (chitchat_id, state) in nodes {
-            let Some(identity) = cluster_node_identity(chitchat_id) else {
+fn subscription_interests_from_live_nodes(
+    nodes: &BTreeMap<ChitchatId, NodeState>,
+) -> SubscriptionInterestIndex {
+    let mut index = SubscriptionInterestIndex::default();
+    for (chitchat_id, state) in nodes {
+        let Some(identity) = cluster_node_identity(chitchat_id) else {
+            continue;
+        };
+        for (key, _) in state.key_values() {
+            let Some((domain, relay)) = subscription_interest_from_key(key) else {
                 continue;
             };
-            for (key, _) in state.key_values() {
-                let Some((domain, relay)) = subscription_interest_from_key(key) else {
-                    continue;
-                };
-                let version = state
-                    .get_versioned(key)
-                    .assured("key_values yields a live entry from this same immutable node state")
-                    .version;
-                let advertisement = AdvertisedSubscriptionInterest {
-                    incarnation: identity.incarnation(),
-                    version,
-                };
-                let relays = index.domains.entry(domain.to_string()).or_default();
-                let interested_nodes = relays.entry(relay.to_string()).or_default();
-                match interested_nodes.entry(identity.node_id().clone()) {
-                    std::collections::btree_map::Entry::Occupied(mut current) => {
-                        if advertisement > *current.get() {
-                            current.insert(advertisement);
-                        }
-                    }
-                    std::collections::btree_map::Entry::Vacant(entry) => {
-                        entry.insert(advertisement);
-                    }
-                }
-            }
+            let version = state
+                .get_versioned(key)
+                .assured("key_values yields a live entry from this same immutable node state")
+                .version;
+            index.record(domain, relay, &identity, version);
         }
-        index
     }
-
-    pub(crate) fn nodes(
-        &self,
-        domain: &str,
-        relay: &str,
-    ) -> Option<&BTreeMap<ClusterNodeName, AdvertisedSubscriptionInterest>> {
-        let relays = self.domains.get(domain)?;
-        relays.get(relay)
-    }
-
-    fn contains(
-        &self,
-        subscriber: &ClusterNodeIdentity,
-        domain: &str,
-        relay: &str,
-        minimum_version: u64,
-    ) -> bool {
-        let Some(nodes) = self.nodes(domain, relay) else {
-            return false;
-        };
-        let Some(advertisement) = nodes.get(subscriber.node_id()) else {
-            return false;
-        };
-        advertisement.incarnation == subscriber.incarnation()
-            && advertisement.version >= minimum_version
-    }
+    index
 }
 
 /// Atomic publication plus a cold-path change notification for creation handshakes.
@@ -189,7 +133,7 @@ impl SubscriptionInterestPublication {
     }
 
     fn publish(&self, nodes: &BTreeMap<ChitchatId, NodeState>) {
-        let index = SubscriptionInterestIndex::from_live_node_states(nodes);
+        let index = subscription_interests_from_live_nodes(nodes);
         self.index.store(StdArc::new(index));
         self.changed.send_replace(());
     }
@@ -2467,7 +2411,7 @@ mod tests {
             (node_two_id.clone(), node_two_state),
         ]);
 
-        let index = SubscriptionInterestIndex::from_live_node_states(&live_nodes);
+        let index = subscription_interests_from_live_nodes(&live_nodes);
         let expected = BTreeMap::from([
             (
                 ClusterNodeName::parse("node-1").assured("the test node name is valid"),
@@ -2497,7 +2441,7 @@ mod tests {
             .get_mut(&node_two_id)
             .assured("the second test node is live")
             .delete(&subscription_interest_key("sales", "events"));
-        let withdrawn = SubscriptionInterestIndex::from_live_node_states(&live_nodes);
+        let withdrawn = subscription_interests_from_live_nodes(&live_nodes);
         let remaining = withdrawn
             .nodes("sales", "events")
             .assured("the first test node remains interested");

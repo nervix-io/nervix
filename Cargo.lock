@@ -6517,6 +6517,7 @@ version = "0.1.0-dev"
 dependencies = [
  "meticulous",
  "nervix-models",
+ "nervix-wasm-protocol",
  "strum 0.26.3",
 ]
 
@@ -6529,6 +6530,7 @@ dependencies = [
  "bolero",
  "error-stack",
  "meticulous",
+ "nervix-arbitrary",
  "nervix-models",
  "rkyv",
  "rstest",
@@ -6611,6 +6613,7 @@ dependencies = [
  "clap",
  "clap_complete",
  "error-stack",
+ "humantime",
  "meticulous",
  "nervix-backup",
  "nervix-client-core",
@@ -6680,6 +6683,7 @@ dependencies = [
  "bytes",
  "error-stack",
  "meticulous",
+ "nervix-arbitrary",
  "nervix-client-core",
  "nervix-models",
  "nervix-primitives",
@@ -6702,6 +6706,7 @@ dependencies = [
  "flatc-rust",
  "futures-util",
  "meticulous",
+ "nervix-arbitrary",
  "nervix-models",
  "nervix-primitives",
  "serde_json",
@@ -7212,6 +7217,7 @@ dependencies = [
  "nervix-arbitrary",
  "nervix-execution",
  "nervix-interconnect",
+ "nervix-model-harness",
  "nervix-models",
  "nervix-primitives",
  "nervix-recovery",
@@ -7320,12 +7326,14 @@ dependencies = [
  "arrow-array",
  "arrow-ipc",
  "arrow-schema",
+ "bolero",
  "bytes",
  "error-stack",
  "fastrand",
  "futures-util",
  "h2",
  "http",
+ "imbl",
  "meticulous",
  "nervix-dns",
  "nervix-execution",
@@ -7476,6 +7484,7 @@ dependencies = [
  "error-stack",
  "meticulous",
  "nervix-client-core",
+ "nervix-deadlock",
  "nervix-models",
  "nervix-primitives",
  "nervix-recovery",
@@ -7819,10 +7828,12 @@ dependencies = [
  "arrow-array",
  "arrow-ipc",
  "arrow-schema",
+ "bolero",
  "bytes",
  "error-stack",
  "flatbuffers",
  "meticulous",
+ "nervix-arbitrary",
  "nervix-execution",
  "nervix-models",
  "nervix-primitives",
@@ -7838,10 +7849,12 @@ dependencies = [
 name = "nervix-wasm-protocol"
 version = "0.1.0-dev"
 dependencies = [
+ "bolero",
  "error-stack",
  "flatbuffers",
  "flatc-rust",
  "meticulous",
+ "nervix-arbitrary",
  "thiserror 2.0.21",
 ]
 
@@ -7850,10 +7863,13 @@ name = "nervix-wasm-sdk"
 version = "0.1.0-dev"
 dependencies = [
  "arrow-array",
+ "arrow-buffer",
  "arrow-ipc",
  "arrow-schema",
+ "bolero",
  "error-stack",
  "meticulous",
+ "nervix-arbitrary",
  "nervix-wasm-protocol",
  "thiserror 2.0.21",
 ]

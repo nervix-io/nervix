@@ -55,8 +55,8 @@ mod wasm_state_inspection;
 
 pub use archived_count::{ArchivedCountError, CountAsU64};
 pub use backup::{
-    ArchiveDigest, Backup, BackupArchiveSummary, BackupDomainSummary, BackupResources, BackupScope,
-    DescribeBackup,
+    ArchiveDigest, Backup, BackupArchiveSummary, BackupCapture, BackupCut, BackupCutKind,
+    BackupDomainSummary, BackupQuiesceCounters, BackupResources, BackupScope, DescribeBackup,
 };
 pub use canonical::{
     CanonicalNsplError, NSPL_LANGUAGE_VERSION, alter_avro_wire_schema_to_canonical_nspl,
@@ -165,7 +165,8 @@ pub use resource::{
 pub use resource_binding::ResourceRebinding;
 pub use restore::{
     ExistingUserPolicy, Restore, RestoreArchive, RestoreMode, RestoreReport, RestoreScope,
-    RestoreStep, RestoreStepOutcome, RestoreStepReport, RestoredDomain, RestoredUsers,
+    RestoreState, RestoreStateAuthority, RestoreStep, RestoreStepOutcome, RestoreStepReport,
+    RestoredDomain, RestoredUsers,
 };
 pub use schema::{
     AlterSchema, AlterSchemaError, AlterSchemaOperation, AlterWireSchema, AlterWireSchemaError,

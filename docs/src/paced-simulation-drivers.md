@@ -16,6 +16,9 @@ either one can continue a run the other began. They are complete programs meant 
 public scenarios in `tests/features/runtime/paced_simulation.feature` run them as published against
 the published graph, on one node and on three.
 
+The [Client Ingestors And Emitters](./client-io-architecture.md) architecture chapter explains
+the endpoint ownership, ACK, credit, ALTER and recovery contracts these programs exercise.
+
 ## The Graph
 
 `examples/paced-simulation/paced_simulation.nspl` creates the paced domain `paced_simulation`
@@ -69,13 +72,19 @@ ingestor admitted it at, `admitted_at`. Clock observations and deliveries are se
 with no order between them, so an application that needs an output's event time reads it from the
 output.
 
-The graph needs nothing outside Nervix. Load it, then start the clock at the pace the simulation
-should run at:
+The graph needs nothing outside Nervix. Its file includes separate domain bootstrap and `USE`
+phases. Create the domain, load the transaction beginning at `BEGIN` with the CLI's domain
+selection, then start the clock at the pace the simulation should run at:
 
 ```bash
-nervix-cli --domain paced_simulation --command "$(cat examples/paced-simulation/paced_simulation.nspl)"
+nervix-cli --command "CREATE PACED DOMAIN paced_simulation WITH PERIOD 100ms SKEW 100ms;"
+nervix-cli --domain paced_simulation --command \
+  "$(sed -n '/^BEGIN;/,$p' examples/paced-simulation/paced_simulation.nspl)"
 nervix-cli --domain paced_simulation --command "START AT NOW TIME RATE 4.0;"
 ```
+
+Check the printed command dispositions: ordinary `--command` currently prints a refusal without
+a nonzero exit status. `USE` must run on its own when entered as an NSPL command.
 
 ## Running The Drivers
 
@@ -196,7 +205,8 @@ lines for the same run. Errors go to standard error, prefixed with `error:`.
 | `REJECTED reading_id=… occurred_at=… error_code=… error_message=…` | A rejection notice arrived |
 | `INTERRUPTED consumer=…`, `CONSUMER reopen_required\|reopened\|left\|unavailable …` | A consumer's attachment changed |
 | `CONSUMER delayed`, `PRODUCER unavailable`, `… close_failed`, `CLOCK detach_failed` | A consumer waits to join, the session could not be restored for a submission yet, or closing failed |
-| `REOPENED generation=…` | The run moved on to a new START generation |
+| `REOPENED generation=… ingestor=… reason=…` | The producer accepted a changed contract within the current START generation |
+| `REOPENED generation=… ingestor=… after=…` | The run moved on to a new START generation |
 | `REPLAY tick=… readings=…`, `REPLAY expired\|skipped …` | A replay resubmitted, or could not resubmit, ledger readings |
 | `INSPECT …` | An inspection of the ingestor and the output emitter |
 | `WAITING notices outstanding=…`, `NOTICES missing=…` | The run waits for rejection notices of completed batches |
@@ -278,10 +288,31 @@ The clock and the data endpoints recover independently, and neither waits for th
   idempotent, not because delivery is exactly once.
 - A delivery whose acknowledgement was lost comes again with the same identity and a fresh
   reference, and is recorded as a duplicate.
+- When an endpoint requires a new open because its contract or schema changed, it was removed,
+  it violated the protocol, or restoration was refused, the driver opens a fresh producer or
+  consumer immediately in the current START generation. Consumers print `CONSUMER reopen_required`
+  and `CONSUMER reopened`; the producer prints `REOPENED` with the unchanged generation and the
+  reason. An `endpoint unavailable` refusal is retried within the existing 30-second physical
+  open budget. A flush-only change preserves the contract and requires no application reopen.
+  Clock and credit waits recheck the endpoint every 200ms, so a slow domain rate does not defer
+  reopening until the next tick. Suspended admission pauses planning before it creates readings.
+  An alteration drains admitted work before it publishes the changed contract. The example keeps
+  its buffered `FLUSH EACH 100ms` branched input route: an intake hold force-flushes partial batches
+  through the open shared relay and waits for their ACK roots before the full alteration hold
+  closes the relay gates. Admission stays suspended across both holds. An unsuccessful alteration
+  keeps the committed contract and requires no reopen.
+- Each replacement validates the example's exact fields again and requests the same credit
+  limits. A schema mismatch, removed endpoint, or unusable credit limit ends the run with status
+  2 and the endpoint's refusal text. A fresh producer has fresh credit; outstanding submissions
+  retain their original producer and credit until their outcomes resolve. Nothing with an unknown
+  outcome is resent. A tick already planned when its producer ended is recorded as `not_admitted
+  not_sent` if it never left the client, or with the node's refusal if it reached the node. These
+  readings can be resubmitted only by an explicit `--replay`.
 - `STOP` ends the producer and the consumers with the generation; their batches that had not
   completed end not admitted or of unknown outcome. With `--follow-generations` the driver waits for
   the next `START`, opens a new producer and new consumers under the new generation, and continues
   from that generation's reached tick center. Without it the run finishes.
+  The `domain_stopped` and `generation_changed` reopen reasons wait for this next generation.
 - With `--consumer-delay` the output emitter has no consumer at first: it retains the batches it
   could not deliver, which `DESCRIBE EMITTER` shows, and the producer stops being granted credit once
   its outstanding batches fill it. The backlog is bounded by that credit. Consumers that join drain

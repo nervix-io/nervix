@@ -25,11 +25,13 @@ mod path;
 mod reader;
 mod records;
 mod section;
+mod state;
 mod wire;
 
 pub use describe::{
     ArchiveContents, ArchiveDescription, DescribedDomain, DescribedResourceVersion,
-    DescribedSection, describe_archive, read_archive_contents,
+    DescribedRuntimeState, DescribedSection, SkippedStateReason, SkippedStateSection,
+    describe_archive, read_archive_contents,
 };
 pub use error::{ArchiveReadError, ArchiveWriteError};
 pub use layout::{ArchiveLayout, ArchivePiece, SectionSink};
@@ -44,6 +46,14 @@ pub use records::{
     ResourceVersionState, UserRecord, UsersRecord,
 };
 pub use section::{ArchiveRecord, RecordKind, SectionDigester};
+pub use state::{
+    BranchLifecycleEntry, BranchLifecycleRecord, KafkaOffsetsRecord, KafkaPartitionOffset,
+    WasmStateDescriptor,
+};
+pub use wire::{StateField, StateValue};
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod wasm_properties;

@@ -23,6 +23,7 @@ name = "nervix-execution"
 
 [[package]]
 checks = [
+  "connection::retained_slots_tests::shuttle_a_retained_pool_slot_claims_one_worker_and_retirement_is_final",
   "connection::stream_slots::shuttle_checks::bulk_drain_stops_leasing_and_waits_for_every_leased_slot",
   "connection::stream_slots::shuttle_checks::management_drain_stops_leasing_and_waits_for_every_leased_slot",
   "connection::stream_slots::shuttle_checks::relay_drain_stops_leasing_and_waits_for_every_leased_slot",
@@ -60,6 +61,7 @@ checks = [
   "application::shutdown::shuttle_tests::shuttle_racing_stop_requests_accept_exactly_one_and_keep_its_deadline",
   "application::termination_signals::shuttle_tests::shuttle_a_repeated_signal_before_the_deadline_ends_the_process_with_the_status_of_that_signal",
   "application::termination_signals::shuttle_tests::shuttle_an_expired_deadline_and_a_repeated_signal_let_exactly_one_forced_exit_end_the_process",
+  "runtime::backup_capture_fence::shuttle_tests::shuttle_backup_cut_includes_pre_cut_branch_publication",
   "runtime::branch_lifecycle_state::shuttle_tests::shuttle_an_announced_branch_racing_the_replica_round_is_never_missed",
   "runtime::branch_lifecycle_state::shuttle_tests::shuttle_announcements_of_one_branch_keep_the_newest_pending",
   "runtime::client_emitter::shuttle_tests::shuttle_a_reservation_waiting_for_a_full_budget_takes_the_bytes_a_release_returns",
@@ -81,6 +83,10 @@ checks = [
   "runtime::domain_clock::shuttle_lifecycle_tests::readers_never_observe_an_installation_older_than_one_they_observed",
   "runtime::domain_clock::shuttle_lifecycle_tests::shuttle_an_attach_waiting_for_the_first_installation_observes_its_domains",
   "runtime::domain_clock::shuttle_lifecycle_tests::shuttle_delivery_sends_state_before_ticks_without_regressing_progress",
+  "runtime::ingestor_quiesce::readiness::shuttle_tests::shuttle_retirement_racing_source_polling_is_final_and_instance_local",
+  "runtime::relay_boundary::channels::shuttle_tests::shuttle_first_binding_has_one_winner_and_routing_retirement_cancels_every_slot",
+  "runtime::relay_boundary::channels::shuttle_tests::shuttle_first_delivery_binding_racing_terminal_retirement_cannot_publish_a_live_channel",
+  "runtime::relay_boundary::channels::shuttle_tests::shuttle_branch_retirement_racing_a_route_refresh_never_revives_a_retained_producer",
   "runtime::domain_execution::shuttle_tests::shuttle_a_reader_observes_one_complete_typed_routing_revision",
   "runtime::emitter_record_writes::shuttle_tests::shuttle_a_cancelled_attempt_leaves_each_member_to_resolve_once",
   "runtime::emitter_record_writes::shuttle_tests::shuttle_a_drain_never_finds_the_emitter_empty_while_a_member_is_retained",
@@ -138,6 +144,8 @@ checks = [
   "runtime::state_replication::checkpoint_announcement::shuttle_tests::shuttle_a_retired_replication_ends_its_announcer",
   "runtime::state_replication::checkpoint_announcement::shuttle_tests::shuttle_an_announcement_racing_the_replica_wait_is_never_missed",
   "runtime::state_replication::checkpoint_announcement::shuttle_tests::shuttle_an_offer_racing_the_end_of_an_announcement_is_always_announced",
+  "runtime::state_replication::checkpoint_announcement::shuttle_tests::shuttle_checkpoint_announcement_close_cancels_pending_dispatch",
+  "runtime::state_replication::routing::shuttle_tests::shuttle_state_replacement_and_retirement_fence_frames_in_flight",
   "runtime::state_store::durability::shuttle_tests::shuttle_a_failed_synchronization_refuses_every_uncovered_writer",
   "runtime::state_store::durability::shuttle_tests::shuttle_an_abandoned_synchronization_frees_the_barrier",
   "runtime::state_store::durability::shuttle_tests::shuttle_an_abandoned_writers_failed_synchronization_still_refuses_what_it_covered",
@@ -161,7 +169,15 @@ checks = [
   "runtime_ack::shuttle_tests::concurrent_wait_release_and_completion_leave_no_tracking",
   "runtime_ack::shuttle_tests::fan_out_across_ingestors_with_a_failing_root_resolves_each_root_once_with_exact_counts",
   "runtime_ack::shuttle_tests::parked_and_fanned_out_roots_hold_exact_counts_at_every_quiescent_point",
+  "runtime_ack::shuttle_tests::parked_remote_progress_survives_a_racing_heartbeat_and_resumes_once",
   "runtime_ack::shuttle_tests::wait_release_racing_the_last_active_ack_holds_domain_and_ingestor_handoff_once",
   "shuttle_selection_tests::shuttle_a_vocabulary_atomic_is_a_scheduling_point_in_the_server_build",
 ]
 name = "nervix-server"
+
+[[package]]
+checks = [
+  "restore::tests::shuttle_restore_publication_and_handle_clear_cannot_cross_a_successors_start",
+  "restore::tests::shuttle_restore_reclamation_holds_the_revision_through_queued_installation",
+]
+name = "nervix-consensus"

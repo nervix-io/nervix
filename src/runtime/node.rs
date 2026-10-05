@@ -51,7 +51,7 @@ pub(in crate::runtime) struct RuntimeInner {
     pub(in crate::runtime) executions: DashMap<DomainName, DomainExecution, RandomState>,
     /// Stable per-domain publication handles retained across execution rebuilds. Data-plane tasks
     /// resolve one handle when they start and keep its cache instead of revisiting `executions`.
-    pub(in crate::runtime) domain_routings: DashMap<DomainName, SharedDomainRouting, RandomState>,
+    pub(in crate::runtime) domain_routings: domain_execution::DomainRoutings,
     pub(in crate::runtime) message_error_routes:
         DashMap<MessageErrorRouteKey, Arc<MessageErrorRouteRuntime>, RandomState>,
     pub(in crate::runtime) compiled_domain_udfs:
@@ -102,6 +102,10 @@ pub(in crate::runtime) struct RuntimeInner {
         Arc<DashMap<DomainName, ActiveDomainAlter, RandomState>>,
     pub(in crate::runtime) state_identities:
         DashMap<DomainNodeRef, SharedStateAssignment, RandomState>,
+    /// Immutable routes retain the state installed for each replication relationship. Frames and
+    /// announcers share those handles with the executing tasks until cold teardown retires them.
+    pub(in crate::runtime) state_replication_routing:
+        state_replication::routing::StateReplicationRouting,
     /// The endpoint task of every client ingestor this node executes, kept while the ingestor
     /// restarts so its producers stay attached.
     pub(in crate::runtime) client_ingestors:
@@ -134,12 +138,15 @@ pub(in crate::runtime) struct RuntimeInner {
     /// Owns acknowledgement progress tasks so none can retain an interconnect after shutdown.
     pub(in crate::runtime) remote_ack_watcher_tasks: TaskTracker,
     /// Owns checkpoint announcement work that outlives the event that scheduled it. Closing it
-    /// when the runtime stops ends every announcer.
-    pub(in crate::runtime) state_replication_tasks: TaskTracker,
+    /// after domain drain cancels each announcer, including a pending dispatch or retry wait.
+    pub(in crate::runtime) state_replication_tasks: state_replication::CheckpointAnnouncementTasks,
     /// The copy of each branch checkpoint this node installed as a replica, taken when it is
     /// promoted and dropped when its branch lifecycle stops naming the branch.
     pub(in crate::runtime) passive_runtime_state_snapshots:
         DashMap<RuntimeStatePlacement, PersistedRuntimeStateEntry, RandomState>,
+    /// Immutable registry of per-domain publication handles shared by branch tasks and backup.
+    pub(in crate::runtime) backup_capture_fences:
+        ArcSwap<HashMap<DomainName, Arc<backup_capture_fence::BackupCaptureFence>>>,
     /// The branch lifecycle this node holds for each branch-keyed entity, as its owner or as a
     /// replica, with the catalog of the branch checkpoints it owns for the entity and the owner's
     /// announcements a replica has not acted on yet. The replica task that keeps an entity current

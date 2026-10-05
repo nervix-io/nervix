@@ -39,6 +39,12 @@ that result is part of the function contract. Arrow values under a null or failu
 also do not encode absence in the numeric lane: the mask does. An `Option` or enum is needed when
 the *state* is absent or different, not merely because a literal looks special.
 
+The guest protocol keeps an absent branch key and an absent source token distinct from present
+values. Empty application-state bytes remain present inside the Rust SDK's snapshot envelope.
+Reset acceptance, reset refusal, an unusable snapshot envelope and rejected application state have
+distinct typed ABI verdicts. Protocol decoding checks the complete size-prefixed header before
+identifier access and verifies offsets and counts before constructing owned values.
+
 ## Absence And Distinct States
 
 **Node trace export.** A tracing guard either has no trace export or owns its provider and resolver
@@ -125,6 +131,10 @@ fingerprint is accepted for its identity even if its bytes happen to be zero. Sc
 publish the required fingerprint before schema-bound state can be loaded or replicated. Missing
 required identity is an error, not a default digest.
 
+The runtime Kafka offset key remains schema-independent. A backup archive also records the
+ingestor's scheduled fingerprint with those offsets, so restore applies them only to the same
+ingestor contract after publishing its target schedule.
+
 The runtime checks a stored state's schema identity against the current scheduled identity before
 accepting it. WASM guest state additionally uses its generation for the concrete branch. A state
 from another schema or generation cannot become current merely because it has a later revision.
@@ -166,6 +176,13 @@ encoding. Completion cannot be reactivated. This preserves the contentionless AC
 root tracker's accounting without adding a lock. The delivery and handoff boundaries themselves
 are described in [Data-Plane Concurrency](./data-plane-concurrency.md) and
 [Shutdown And Recovery](./shutdown.md).
+
+A source instance owns starting, ready and retired states in a private atomic byte. Its handle alone
+interprets starting=0, ready=1 and retired=2. Compare-and-swap permits readiness changes only before
+retirement; a retired source cannot become ready or change a replacement instance. This relaxed
+scalar publishes no payload or other location. Buffered message-error workers separately own
+`Prepared`, `Running` and `Ended` lifecycle states; a fallible binding prepares the bounded queue,
+and successful running publication starts its worker once. An ended worker is never restarted.
 
 The domain clock's atomic maximum has a different meaning. Its initial `i64::MIN` is the
 documented identity for a maximum computation, and zero elapsed time is the value of an elapsed
@@ -350,6 +367,39 @@ Error-route branch validation carries the node, source route, error relay, and b
 declarations as typed data. Direct emitter `VALUES` validation identifies a sensitive external
 target by name and requires explicit leakage; neither error needs the source payload value.
 
+## Restore Installation Authority
+
+A restored domain has a replicated `Pending` installation from creation and an `Installing`
+authority once its state generation is admitted. Neither state permits `START`. Completion of the
+exact current generation removes the installation; terminal command failure does not. Authority
+carries leader identity and term, execution reference, mutation lease revision and generation.
+Checkpoint revision remains guest history and cannot grant installation authority. Validation at
+the applied-state boundary holds its read guard across the storage mutation and handle clearing.
+The state store validates authority-bound receipts, checkpoint headers and ordered chunks before
+synchronizing the complete namespace. One small active-generation record then selects that set
+atomically and is synchronized before completion. It retains both authority and inventory for
+exact retry and stale-attempt rejection. Cancellation after selection preserves the closed start
+gate until the same authority completes durability and cleanup.
+
+Runtime storage has distinct initial and restored namespaces; restore installation generation is
+separate from guest-state generation and checkpoint revision. A current checkpoint is either an
+inline normal write or a segmented restore save with required revision, length and digest. A read
+uses one database view for namespace selection and payload data. A queued checkpoint job retains
+its selected namespace and validates that it remains current before writing. The storage format
+marker is required for nonempty checkpoint storage; corruption or absence fails explicitly and
+requires recreation rather than inventing a namespace for the stored keys.
+
+Restore reclamation receives a borrowed `RestoreStateRetention` from one locked applied revision.
+Absence of an applied log means catch-up is unknown and retains all generations. A generation
+ahead of that log is also retained. Once applied, only the exact generation of an applying restore
+requires unpublished storage; terminal, expired or absent execution records do not. Publication
+identity remains a separate node-store protection, and reclamation never converts an incomplete
+installation into a completed one. Key/value usage is reconstructed from current namespace keys,
+including partial chunks without a receipt, rather than a defaulted persisted counter.
+Namespace cursors use the vocabulary's canonical `decode` entry point for the required domain
+name. It requires lowercase stored text and retains the typed `NameError` beneath the storage
+format failure.
+
 ## Qualification Evidence
 
 The [typed states qualification ledger](https://github.com/nervix-io/nervix/blob/main/tests/typed-states-qualification-ledger.md)
@@ -375,7 +425,12 @@ which values remain legitimate zeros, empty content, Arrow masked lanes, and pri
 Healthy connector status is absence of a failure; a failure contains its safe error and an optional
 retry in one publication. Domain-clock publication carries lifecycle pause, generation and start
 point beside the installation. Entity assignment absence invalidates a retained checkpoint reader;
-a present assignment contains its state identity and checkpoint owners together. Force-flush
+a present assignment contains its state identity, optional primary, executors and replicas
+together. An absent primary represents an assignment without one primary owner. Replication routes
+retain that same slot and an optional state intake; ending an intake permanently fences its exact
+route before the routing publication withdraws it. Assignment absence and ended intake are distinct
+states: identity removal invalidates every reader, while state retirement may leave the entity's
+assignment available for storage-backed synchronization. Force-flush
 readiness is privately encoded as idle=0, available=1 and closed=2. Only its owning type writes or
 decodes that byte; the coordinator remains the authority for generation and claim state. The hint
 has no cross-location data-publication contract.

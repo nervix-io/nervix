@@ -17,6 +17,9 @@ Following a domain clock is not a subscription; see
 [Domain Clock Attachment](#domain-clock-attachment). Publishing to a client ingestor uses
 [producers](#producers), which are not statements either.
 
+The [Client Ingestors And Emitters](./client-io-architecture.md) architecture chapter connects
+these transient handles to their persisted graph endpoints, ACK boundaries and restoration.
+
 This page describes sessions as a user of NSPL sees them. [Client Session
 Protocol](./client-session-protocol.md) explains the protocol that carries them, and the [Client
 Implementation Manual](./client-implementation-manual.md) states what a client implementation must
@@ -229,8 +232,6 @@ producers it opens. A producer is not a statement: clients open, feed, and close
   nobody left to answer them, so a client reports them as of unknown outcome. The Rust client keeps
   the producer handle and restores a fresh attachment if the domain generation and endpoint
   contract still match; it does not resend those uncertain batches.
-
-## Suggestions
 
 ## Emitter consumers
 

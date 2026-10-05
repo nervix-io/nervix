@@ -25,6 +25,7 @@ impl Runtime {
             DEFAULT_STATE_SNAPSHOT_INTERVAL,
             ConfiguredFaultInjection::default(),
             PathBuf::from(DEFAULT_TEMP_DIR),
+            DEFAULT_RESTORE_STAGING_MAX_BYTES,
         )
         .verified("the None persistence path has no fallible step")
     }
@@ -40,6 +41,7 @@ impl Runtime {
             state_snapshot_interval,
             ConfiguredFaultInjection::default(),
             PathBuf::from(DEFAULT_TEMP_DIR),
+            DEFAULT_RESTORE_STAGING_MAX_BYTES,
         )
     }
 
@@ -50,11 +52,14 @@ impl Runtime {
         state_snapshot_interval: Duration,
         fault_injection: ConfiguredFaultInjection,
         temp_dir: PathBuf,
+        restore_staging_max_bytes: u64,
     ) -> Result<Self, RuntimePersistenceError> {
         let events = RuntimeEvents::new();
         let (domain_status_changed, _) = watch::channel(0);
         let state_store = db
-            .map(|db| RuntimeStateStore::from_database(db, executor.clone()))
+            .map(|db| {
+                RuntimeStateStore::from_database(db, executor.clone(), restore_staging_max_bytes)
+            })
             .transpose()?
             .map(Arc::new);
         let prepared_runtime_state_handoffs = DashMap::default();
@@ -113,7 +118,7 @@ impl Runtime {
                 pool_waits: DashMap::default(),
                 emitter_confirmation_waits: DashMap::default(),
                 executions: DashMap::default(),
-                domain_routings: DashMap::default(),
+                domain_routings: domain_execution::DomainRoutings::default(),
                 message_error_routes: DashMap::default(),
                 compiled_domain_udfs: DashMap::default(),
                 compiled_wasm_modules: DashMap::default(),
@@ -135,6 +140,7 @@ impl Runtime {
                 frozen_ownership_handoff_entities: Arc::new(DashMap::default()),
                 active_domain_alters: Arc::new(DashMap::default()),
                 state_identities: DashMap::default(),
+                state_replication_routing: Default::default(),
                 client_ingestors: DashMap::default(),
                 client_producer_budget: client_ingestor::ClientProducerBudget::default(),
                 client_emitters: DashMap::default(),
@@ -148,8 +154,9 @@ impl Runtime {
                 remote_dispatch: Arc::new(RemoteDispatchRegistry::new()),
                 remote_ack_watcher_shutdown: CancellationToken::new(),
                 remote_ack_watcher_tasks: TaskTracker::new(),
-                state_replication_tasks: TaskTracker::new(),
+                state_replication_tasks: Default::default(),
                 passive_runtime_state_snapshots: DashMap::default(),
+                backup_capture_fences: ArcSwap::from_pointee(HashMap::default()),
                 replicated_branch_lifecycles: DashMap::default(),
                 prepared_runtime_state_handoffs,
                 activated_runtime_state_handoffs: DashMap::default(),
@@ -333,6 +340,37 @@ impl Runtime {
             .fault_injection
             .pause_restore_step_if_armed(node_id, step)
             .await;
+    }
+
+    #[cfg(feature = "testing")]
+    pub(crate) async fn pause_backup_cut_if_armed(&self, domain: &DomainName) {
+        self.inner
+            .fault_injection
+            .pause_backup_cut_if_armed(domain)
+            .await;
+    }
+
+    #[cfg(feature = "testing")]
+    pub(crate) async fn pause_restore_state_publication_if_armed(
+        &self,
+        domain: &DomainName,
+        coordinator: &ClusterNodeName,
+    ) {
+        self.inner
+            .fault_injection
+            .pause_restore_state_publication_if_armed(domain, coordinator)
+            .await;
+    }
+
+    #[cfg(feature = "testing")]
+    pub(crate) fn mark_restore_state_publication_refused(
+        &self,
+        domain: &DomainName,
+        coordinator: &ClusterNodeName,
+    ) {
+        self.inner
+            .fault_injection
+            .mark_restore_state_publication_refused(domain, coordinator);
     }
 
     #[cfg(feature = "testing")]
@@ -541,6 +579,9 @@ impl Runtime {
             }
         }
         self.stop_message_error_routes_for_domain(domain).await;
+        for services in execution.routing.relay_services.values() {
+            services.retire_channels();
+        }
         if !self.inner.domains.contains_key(domain) {
             self.clear_runtime_state_for_domain(domain);
         }
@@ -597,9 +638,13 @@ impl Runtime {
             }
             self.clear_domain_ingestor_quiescence(domain);
         }
+        self.inner.domain_routings.clear();
         self.inner.endpoint_intake_routes.clear();
         self.inner.compiled_domain_udfs.clear();
         self.inner.compiled_wasm_modules.clear();
+        for readiness in self.inner.ingestor_readiness.iter() {
+            readiness.retire();
+        }
         self.inner.ingestor_readiness.clear();
         self.inner.remote_ack_watcher_shutdown.cancel();
         self.inner.remote_ack_watcher_tasks.close();
@@ -607,6 +652,7 @@ impl Runtime {
         self.inner.state_replication_tasks.close();
         self.inner.state_replication_tasks.wait().await;
         self.inner.relay_branch_presences.clear();
+        self.inner.state_replication_routing.clear();
         self.inner.replicated_deduplicator_states.clear();
         self.inner.replicated_kafka_offset_states.clear();
         self.inner.replicated_materialized_stream_states.clear();

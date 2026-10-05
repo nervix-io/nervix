@@ -81,7 +81,7 @@ jobs:
             amd64|arm64) ;;
             *) echo "unsupported TinyGo CI architecture: ${arch}" >&2; exit 1 ;;
           esac
-          curl -fsSLo /tmp/tinygo.deb "https://github.com/tinygo-org/tinygo/releases/download/v${TINYGO_VERSION}/tinygo_${TINYGO_VERSION}_${arch}.deb"
+          curl --retry 3 --retry-delay 2 --retry-max-time 120 --connect-timeout 20 --max-time 120 -fsSLo /tmp/tinygo.deb "https://github.com/tinygo-org/tinygo/releases/download/v${TINYGO_VERSION}/tinygo_${TINYGO_VERSION}_${arch}.deb"
           sudo dpkg -i /tmp/tinygo.deb
           tinygo version
 
@@ -214,7 +214,7 @@ jobs:
             amd64|arm64) ;;
             *) echo "unsupported TinyGo CI architecture: ${arch}" >&2; exit 1 ;;
           esac
-          curl -fsSLo /tmp/tinygo.deb "https://github.com/tinygo-org/tinygo/releases/download/v${TINYGO_VERSION}/tinygo_${TINYGO_VERSION}_${arch}.deb"
+          curl --retry 3 --retry-delay 2 --retry-max-time 120 --connect-timeout 20 --max-time 120 -fsSLo /tmp/tinygo.deb "https://github.com/tinygo-org/tinygo/releases/download/v${TINYGO_VERSION}/tinygo_${TINYGO_VERSION}_${arch}.deb"
           sudo dpkg -i /tmp/tinygo.deb
           tinygo version
 
@@ -387,7 +387,7 @@ jobs:
             amd64|arm64) ;;
             *) echo "unsupported TinyGo CI architecture: ${arch}" >&2; exit 1 ;;
           esac
-          curl -fsSLo /tmp/tinygo.deb "https://github.com/tinygo-org/tinygo/releases/download/v${TINYGO_VERSION}/tinygo_${TINYGO_VERSION}_${arch}.deb"
+          curl --retry 3 --retry-delay 2 --retry-max-time 120 --connect-timeout 20 --max-time 120 -fsSLo /tmp/tinygo.deb "https://github.com/tinygo-org/tinygo/releases/download/v${TINYGO_VERSION}/tinygo_${TINYGO_VERSION}_${arch}.deb"
           sudo dpkg -i /tmp/tinygo.deb
           tinygo version
 
@@ -523,7 +523,7 @@ jobs:
 
   coverage:
     name: coverage
-    needs: [tests, scenarios, extra-tests]
+    needs: [tests, scenarios, extra-tests, shuttle]
     runs-on: ubuntu-latest
     timeout-minutes: 20
     permissions:
@@ -564,6 +564,12 @@ jobs:
           name: coverage-native-extras
           path: coverage-inputs/native-extras
 
+      - name: Download Shuttle coverage evidence
+        uses: actions/download-artifact@v4
+        with:
+          name: coverage-shuttle
+          path: coverage-inputs/shuttle
+
       - name: Merge coverage and check CRAP
         run: |
           lcov --add-tracefile coverage-inputs/tests/lcov-workspace.info \
@@ -575,7 +581,7 @@ jobs:
           while IFS= read -r report; do
             lcov --add-tracefile lcov-workspace.info --add-tracefile "$report" --output-file lcov-workspace.info
             lcov --add-tracefile lcov.info --add-tracefile "$report" --output-file lcov.info
-          done < <(find coverage-inputs/native-extras -name lcov.info -o -name python.lcov)
+          done < <(find coverage-inputs/native-extras -path '*/ordinary/*/lcov.info' -o -name python.lcov)
           just check-coverage
 
       - name: Upload coverage to Codecov
@@ -656,7 +662,7 @@ jobs:
             amd64|arm64) ;;
             *) echo "unsupported TinyGo CI architecture: ${arch}" >&2; exit 1 ;;
           esac
-          curl -fsSLo /tmp/tinygo.deb "https://github.com/tinygo-org/tinygo/releases/download/v${TINYGO_VERSION}/tinygo_${TINYGO_VERSION}_${arch}.deb"
+          curl --retry 3 --retry-delay 2 --retry-max-time 120 --connect-timeout 20 --max-time 120 -fsSLo /tmp/tinygo.deb "https://github.com/tinygo-org/tinygo/releases/download/v${TINYGO_VERSION}/tinygo_${TINYGO_VERSION}_${arch}.deb"
           sudo dpkg -i /tmp/tinygo.deb
           tinygo version
 
@@ -812,7 +818,7 @@ jobs:
             amd64|arm64) ;;
             *) echo "unsupported TinyGo CI architecture: ${arch}" >&2; exit 1 ;;
           esac
-          curl -fsSLo /tmp/tinygo.deb "https://github.com/tinygo-org/tinygo/releases/download/v${TINYGO_VERSION}/tinygo_${TINYGO_VERSION}_${arch}.deb"
+          curl --retry 3 --retry-delay 2 --retry-max-time 120 --connect-timeout 20 --max-time 120 -fsSLo /tmp/tinygo.deb "https://github.com/tinygo-org/tinygo/releases/download/v${TINYGO_VERSION}/tinygo_${TINYGO_VERSION}_${arch}.deb"
           sudo dpkg -i /tmp/tinygo.deb
           tinygo version
 
@@ -875,21 +881,24 @@ jobs:
       - name: Expiry map mutation tests
         run: just test-expiry-map-mutants
 
+      - name: Setup uv for runner coverage
+        uses: astral-sh/setup-uv@v6
+
       # The collector that the steps below run their checks through, including its refusal of
       # every incomplete collection.
       - name: Native coverage collector
-        run: just test-native-coverage
+        run: just coverage-model-runner
 
       - name: Source contracts, compiler diagnostics and paired API doctests
         run: just coverage-native-extras test-typed-ratchet
-
-      - name: Setup uv for compiler runner coverage
-        uses: astral-sh/setup-uv@v6
 
       - name: Compiler cache changes, interruption and runner qualification
         run: |
           just qualify-typed-ratchet-cache
           just coverage-typed-ratchet-python
+
+      - name: Primitive source and thread owner validation coverage
+        run: just coverage-primitive-boundary
 
       # Criterion's test mode executes every benchmark body once, catching panics and deadlocks
       # without treating noisy shared-runner timings as a performance regression signal. The run is
@@ -897,10 +906,18 @@ jobs:
       - name: Benchmark smoke tests
         run: just coverage-native-extras bench-smoke
 
-      # The primitive boundary's conformance in every execution mode, the ordinary one collected
-      # for coverage.
+      # The primitive boundary's native conformance collected separately in every execution mode,
+      # then every registered Loom model of a production owner explored to exhaustion. The proof
+      # that each model fails under the ordering weakening it exists to detect runs in the
+      # loom-qualification job.
       - name: Primitive boundary conformance
         run: just coverage-native-extras test-primitives
+
+      - name: Primitive boundary compile and browser checks
+        run: just test-primitives-compile
+
+      - name: Loom memory-ordering models
+        run: just coverage-native-extras test-loom
 
       # The walk saturates every core, and its failures are about completion reachability rather
       # than about any one test.
@@ -920,7 +937,10 @@ jobs:
             target/native-coverage/**/lcov.info
             target/native-coverage/**/executions.jsonl
             target/native-coverage/**/export.log
+            target/native-coverage/**/models.json
             target/typed-ratchet/python.lcov
+            target/model-coverage/python.lcov
+            target/primitive-boundary/python.lcov
             target/typed-ratchet/cache-qualification/**/qualification.json
           if-no-files-found: warn
 
@@ -936,12 +956,21 @@ jobs:
           path: ${{ runner.temp }}/kache-report
           if-no-files-found: warn
 
-  # Loom's memory-ordering models of production owners, each explored to exhaustion, then the
-  # proof that each model fails under the ordering weakening it exists to detect. A job of its own
-  # because the server's models build the server library in Loom's test mode, and every
-  # qualification that weakens the server rebuilds that library with its one weakening applied.
-  loom:
-    name: loom
+      # A failed Loom model is only reproducible from the checkpoint of the execution that failed;
+      # this job is the only witness of it.
+      - name: Upload Loom failure evidence
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: loom-failures
+          path: target/native-coverage-build-loom/loom-failures
+          if-no-files-found: ignore
+
+  # The proof that each Loom model fails under the ordering weakening it exists to detect. A job
+  # of its own because every qualification that weakens the server rebuilds the server library in
+  # Loom's test mode with its one weakening applied, which outlasts the other extra tests.
+  loom-qualification:
+    name: loom-qualification
     runs-on: blacksmith-8vcpu-ubuntu-2404
     timeout-minutes: 120
     permissions:
@@ -1038,13 +1067,10 @@ jobs:
           s3-access-key-id: ${{ secrets.KACHE_BUCKET_ACCESS_KEY_ID }}
           s3-secret-access-key: ${{ secrets.KACHE_BUCKET_SECRET_ACCESS_KEY }}
 
-      - name: Loom memory-ordering models
+      - name: Loom ordering qualification
         run: |
           just toolchains-install
-          just test-loom
-
-      - name: Loom ordering qualification
-        run: just test-loom-qualification
+          just test-loom-qualification
 
       - name: Publish kache report
         if: always()
@@ -1058,21 +1084,20 @@ jobs:
           path: ${{ runner.temp }}/kache-report
           if-no-files-found: warn
 
-      # A failed Loom model is only reproducible from the checkpoint of the execution that failed,
-      # and a failed qualification from its weakened run; this job is the only witness of either.
-      - name: Upload Loom failure evidence
+      # A failed qualification is only reproducible from its weakened run; this job is the only
+      # witness of it.
+      - name: Upload Loom qualification evidence
         if: failure()
         uses: actions/upload-artifact@v4
         with:
-          name: loom-failures
+          name: loom-qualification-failures
           path: |
-            target/loom-failures
             target/loom-qualification/*/*.log
             target/loom-qualification/*/*.json
           if-no-files-found: ignore
 
   # Shuttle's in-process scheduling checks and uncontrolled-nondeterminism rechecks run
-  # independently of the native coverage collectors and other extra tests.
+  # in their own coverage collection job beside the other extra tests.
   shuttle:
     name: shuttle
     runs-on: blacksmith-8vcpu-ubuntu-2404
@@ -1092,7 +1117,7 @@ jobs:
       - name: Install cargo tools
         uses: taiki-e/install-action@v2
         with:
-          tool: just@latest,toml-cli,trunk,wild-linker
+          tool: just@latest,toml-cli,trunk,wild-linker,cargo-llvm-cov
 
       - name: Install Latest LLVM
         run: |
@@ -1176,10 +1201,23 @@ jobs:
       - name: Shuttle concurrency checks
         run: |
           just toolchains-install
-          just test-shuttle
+          just coverage-native-extras test-shuttle
 
       - name: Shuttle schedule replay
         run: just test-shuttle-replay-check
+
+      - name: Upload Shuttle coverage
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-shuttle
+          path: |
+            target/native-coverage/**/completion.json
+            target/native-coverage/**/lcov.info
+            target/native-coverage/**/executions.jsonl
+            target/native-coverage/**/export.log
+            target/native-coverage/**/models.json
+          if-no-files-found: warn
 
       - name: Publish kache report
         if: always()
@@ -1200,7 +1238,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: shuttle-failures
-          path: target/shuttle-failures
+          path: target/native-coverage-build-shuttle/shuttle-failures
           if-no-files-found: ignore
 
   # Turmoil's seeded network simulations of the interconnect: every scenario over its committed

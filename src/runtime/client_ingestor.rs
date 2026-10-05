@@ -763,7 +763,11 @@ impl Runtime {
             &ModelName::from(&ingestor.name),
             branched_templates,
         );
-        self.prepare_ingestor_readiness(domain, &ingestor.name, NonZeroU64::MIN);
+        let readiness = self
+            .prepare_ingestor_readiness(domain, &ingestor.name, NonZeroU64::MIN)
+            .into_iter()
+            .next()
+            .assured("the client source has one declared instance");
         let (shutdown_tx, _) = watch::channel(false);
         let (jobs, job_receiver) = mpsc::channel(1);
         let execution = Arc::new(ClientExecution {
@@ -813,7 +817,7 @@ impl Runtime {
             commands.clone(),
             shutdown_tx.subscribe(),
         ));
-        self.mark_ingestor_instance_ready(domain, &ingestor.name, 0);
+        readiness.mark_ready();
         info!(
             domain = domain.as_str(),
             ingestor = ingestor.name.as_str(),

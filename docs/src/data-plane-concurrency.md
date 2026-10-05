@@ -8,6 +8,12 @@ state, metric, and connector handles have been resolved.
 [Execution Plans](./execution-plans.md) describes the revision that installs and publishes those
 handles before record and batch work begins.
 
+[SIMD Kernels](./simd-kernels.md) defines the pure buffer boundary that folds batch latency and
+computes admission, arithmetic, and byte masks. Its cached CPU level is process-wide detection
+under an unmodeled permission; it carries no protocol state. Batch-local reductions preserve this
+chapter's ownership and bounded synchronization rules, including one accumulator lock and one
+wall-clock read per delivery-latency series per batch.
+
 The hot paths are:
 
 - accepting one record from an ingestor
@@ -29,6 +35,50 @@ value up in a shared map at all, whether by borrowed lookup or by `entry()`. It 
 it resolved when its task, branch, channel, or attempt was created. A shared registry serves the
 cold paths around that handle: registration and first installation, where `entry()` gives racing
 installers a single winner, replacement, teardown, and observers.
+
+## Relay, Transport And Source Lifetimes
+
+A concrete producer retains its branch channel handle. The relay publishes branch membership in a
+persistent immutable table; concurrent first binding selects one allocation with CAS. Each branch
+publishes an owner/consumer routing generation, whose cancellation parent fences ingress and
+outbound slots, including candidates created during replacement. Eviction cancels the exact branch
+before withdrawing its allocation. An independently expiring receiver branch permits a still-live
+producer to bind a fresh channel after invalidation. The producer's own ending moves it to `Ended`
+and prevents rebinding. Domain terminal teardown cancels the relay publication itself.
+
+Channel gates serialize encode, sequence assignment and dispatch for that channel only. Gate waits
+select cancellation, and transport admission retains its existing physical deadline. They do not
+serialize unrelated branches or peers. A subscription snapshot selects only live advertised peers,
+fenced by incarnation and interest version. Equal advertisements retain channels; changed selection
+cancels the preceding subscription generation. Branch and destination registration copy only a
+persistent changed-key path. Tables are never rebuilt for an established batch.
+
+Transport targets publish immutable fixed pool arrays. A slot atomically claims one reconnect
+worker for its lifetime and publishes its authenticated connection through `ArcSwapOption`. Leasing
+reads these publications, scans the fixed class slots and retains the selected connection. The
+connection registry serves registration, exact retirement and observers. Endpoint, peer or TLS
+replacement cancels slots before publishing replacement handles; a changed DNS answer affects only
+the next dial. [Cluster Interconnect](./interconnect.md) owns quotas, deadlines and delivery rules.
+
+A fresh intake selects its domain publisher from an immutable persistent table. Executing tasks
+retain the selected publisher and observe complete snapshots. Domain removal withdraws its table
+entry; terminal shutdown clears the table after ending executions. Buffered error routes similarly
+send through the worker retained by the bound plan, with no failure-path discovery acquisition.
+
+Source polling writes a retained instance readiness scalar. Starting and ready may alternate;
+retired is final, so a late poll or drop cannot change a replacement instance's readiness. These
+scalar transitions and worker claims use relaxed atomic operations and publish no other data.
+Shuttle checks production binding, refresh, retirement and polling races. ArcSwap internals remain
+opaque; this delivery adds no cross-location memory-ordering claim requiring a new Loom weakening.
+Existing memory-ordering claims remain with their owning models. Deloxide tracks the existing
+sequence and route-task blocking locks; it does not track ArcSwap, scalar atomics or async channel
+ordering gates.
+
+`just bench-retained-channels` measures published versus retained branch selection, established
+stream leasing and bounded branch churn. Its ordinary native bodies also run in `bench-smoke`,
+whose shared native coverage producer prepares browser, guest and runtime dependencies before
+instrumentation. The measured bodies retain the usual allocation assertions; their timing output
+is workload evidence, not a portable latency threshold.
 
 The resulting design uses four forms of ownership:
 
@@ -87,6 +137,22 @@ writer.
 | Committed domain installation | Each node's runtime counts its installations of the committed domain states through a watch. An installation advances the count only after it has inserted, updated, or removed every domain. | A session attach waits for the first count before it looks up a domain, so a node that is still starting never refuses a domain the cluster has. Because the count advances after the domains are in place, the wait never releases before they are observable. |
 | Runtime-state assignment | Each state placement publishes one packed atomic binding containing its generation and capability. Replication roles are a separate immutable published snapshot. | A per-message operation admits itself, compares the exact binding it was granted, and proceeds only while that generation still grants the required capability. It never takes the assignment barrier. |
 | Ingestor quiesce decision | Each ingestor publishes the declared and pending modes, active causes, source support, and derived intake decision as one value. Concurrent lifecycle changes derive their replacement from the current publication. | Polling and per-message intake make one load to decide whether to dispatch, suspend, skip, buffer, drop, or reject. A source host retains its last observed publication across dispatch awaits; its change wait registers before comparing that publication with the current one, so an engagement or release in the gap wakes it. The retained-payload lock is reached only after the published decision selects buffering. |
+| Backup state snapshot | Branch lifecycle publications, Kafka offset commits and WASM checkpoints register on a per-domain atomic generation before changing their published state. After the domain is paused and drained, the owner closes that generation with a Release RMW and waits with Acquire loads for registered publishers to leave. It then serializes Kafka positions and branch lifecycle into the runtime state store and opens one database snapshot for those records and durable WASM saves. The closing RMW is in the release sequence that a publisher entering the next generation acquires. | A publisher that entered before the cut completes into the captured view; a publisher that enters after it waits for the next generation. An older periodic storage write cannot replace a newer forced publication. The backup reads the database snapshot off the record path and stages owned section bytes. A live backup does not close the generation and reports its weaker cut explicitly. The server's Shuttle and Loom checks drive this production fence. |
+
+| Restore state publication | The control plane stages checkpoints under a replicated authority, then admits one fixed-size storage job, validates a complete generation namespace and durably publishes its active pointer. It holds the consensus applied-state read guard through authority validation, synchronous storage mutation and runtime-handle clearing. The state store reuses its existing latest-snapshot installation mutex for staging, pointer publication and bounded cleanup. Checkpoint jobs retain their selected namespace and validate it under that barrier; entity replacement and purge also select the active namespace while holding the barrier. | A newer applied generation and the release of the start gate require the state-machine write guard. Every node therefore replaces a whole state set before `START` is available, and stale coordinators cannot mutate a running restored domain. The store retains authority and inventory for exact retry and monotonic rejection. Database readers select pointer, header and chunk values from one snapshot, which retains its complete set across bounded deletion of obsolete namespaces. These are stopped-domain cold paths; record paths add no lock. |
+
+Restore storage qualification includes the store's cancellation, corruption, snapshot, queued
+writer and many-key cleanup regressions in `just test-deloxide`, plus the public one-node and
+three-node `@restore_installation` workloads for large saves, many checkpoints, durable publication
+failure, restart and delayed coordinators. Deloxide tracks the installation barrier and other
+boundary blocking locks; Fjall's internal locks, async authority ordering and memory ordering keep
+their separate ordinary, Shuttle, Loom and Turmoil checks. Measurements and diagnostic artifacts
+are delivered to the owning task.
+
+The backup coordinator waits for each node's admitted-work counters to reach zero, then orders one
+confirming force-flush generation across the cluster. The generation's obligations use the same
+atomic counters as shutdown; a parked `REQUIRED WAIT` batch stays visible separately and cannot
+hold the cut open.
 | Metric series handles | Each relay, node, ingestor, emitter, or concrete branch resolves its label set, internal series, and Prometheus child when its owning task or branch is created. | Recording uses the retained series directly. Counters update atomically; a histogram records through its already-resolved per-series accumulator without a registry lookup, key construction, or map guard. A node input folds a whole batch's delivery latencies in one kernel pass over the batch's high-watermark column before recording, so each latency series locks its accumulator and reads the wall clock once per batch rather than once per row, and its Prometheus child takes the batch in one flush. Whether a series was ever observed is an atomic flag set under that lock and read without it. Registration and removal stay on lifecycle paths. |
 | MQTT broker packet limit | Each MQTT sink's event-loop task stores the Maximum Packet Size of every `CONNACK` its client receives, or the broker's silence about one, as one atomic scalar. A reconnect replaces it. | A publish loads the scalar once per record to reject a packet the broker would refuse before handing it to the client. The value stands alone, so relaxed ordering is its whole contract, and a record published before the first `CONNACK` is measured only against the protocol's largest packet. |
 
@@ -317,17 +383,27 @@ stable storage, and offers the placement's newest checkpoint to the replicas tha
 yet. On a replica, it carries the owner's announcements to the task that keeps the replica's copy
 current. It lives and ends with the state it replicates, so a WASM checkpoint or a Kafka offset
 commit offers its revision through the state it already holds, and no checkpoint, commit,
-offer enters a node-wide announcement or progress map. Incoming frames still resolve their
-placement in the existing state registry, and announcer steps still resolve the execution's
-replicas; those recurring lookups are debt owned by Typed Ratchet 15.
+offer enters a node-wide announcement or progress map. State installation publishes a resolved
+route containing the actual state handle and the entity's existing assignment slot. Frames select
+that route from one immutable publication, never from the state, execution or identity registries.
+An announcer retains its selected route for its whole lifetime and reads the current primary and
+replica set from the assignment slot.
+
+Branch-aggregate byte capture keeps the existing narrow `lifecycle_call` expectation for
+scanning the metrics inventory at an explicit snapshot boundary. State-route selection uses the
+installed state handle and retained assignment slot.
 
 A replica's progress only rises. Acknowledgements travel independently, and a replica acknowledges
 what it holds again whenever it is offered a checkpoint, so an acknowledgement of an older revision
 can arrive after a newer one; it leaves the newer one in place. Each wait for replicas registers for
 the next report before it reads the progress: a WASM checkpoint waiting for the replicas its
 boundary names, a Kafka offset commit waiting for its replica quorum, and a WASM state reset waiting
-for the branch lifecycle that authorizes its first checkpoint. A report that lands between the read
-and the wait therefore wakes the wait instead of leaving it to its deadline.
+for the branch lifecycle that authorizes its first checkpoint. The reset wait retains its route,
+follows the current replica assignment and rejects loss of identity or primary ownership. A
+checkpoint promised to replicas never confirms with fewer replicas, using the same typed boundary
+as a guest checkpoint. A 100-millisecond recheck observes assignment changes even without a replica
+report. A report that lands between the read and the wait therefore wakes the wait instead of
+leaving it to its deadline.
 
 One announcer at a time offers a placement's revision. An offer raises the revision the running
 announcer offers or, with none running, starts one. The announcer sends the revision to the
@@ -337,21 +413,32 @@ either sent by that step or starts the next announcer. It also ends when this no
 placement's primary, when the replicated state goes away, and when the runtime stops. An announcer
 whose task ends before it finished hands its announcement back to the next offer.
 
+The runtime's checkpoint announcement task owner cancels both dispatch and retry waits when it
+closes after domain drain. It joins every cancelled task before withdrawing replication routes,
+so shutdown releases the task's exact retained state without waiting for a remote dispatch timeout.
+
 The announcement, the progress and the announcer's handover change together under a short lock
 that belongs to the one placement and is never held across an await. The placement's originator,
 its one announcer and its replicas' acknowledgements are the only participants; unrelated
 placements never share it. An acknowledgement or an announcement names its placement, and the node
-that receives it finds the placement's state in the registry that already keeps that kind of state,
-through a borrowed read that creates nothing. On a replica, an announcement of a branch lifecycle or
-of the state of one of its branches finds the entity's lifecycle, which the entity's replica task
-retains. An announcement of a placement a node holds no state for wakes nothing.
+that receives it uses the handle resolved when that state was installed. The assignment and the
+placement must still name the same schema and guest-state generation. Cold replacement or teardown
+ends the route before withdrawing it, so a retained route never attaches to its successor, including
+when the successor has the same placement key. A frame already admitted through a borrowed state
+may finish on that exact state. On a replica, announcements of a lifecycle or one of its branches
+use the published entity lifecycle, which the entity's replica task retains. An announcement of an
+entity a node holds no state for wakes nothing and creates no state.
 
 A replica installs a branch checkpoint only while the branch lifecycle it holds names the branch.
 Each lifecycle checkpoint a node holds is decoded once into the set of branches it names, so
 installing a branch checkpoint looks its branch up in that set, through the lifecycle handle the
 replica task retains, instead of copying and decoding the lifecycle each time. Holding a replica's
-copy of a branch checkpoint compares revisions and moves the newer checkpoint in; its payload is
-never copied under the registry's guard.
+copy of a branch checkpoint compares revisions and moves the newer payload into an immutable
+publication owned by the entity lifecycle. Lifecycle pruning visits only that entity's passive
+copies without acquiring a registry shard. Catch-up steps and installation read the assignment
+slot the lifecycle retains. Cold assignment cleanup also discards superseded passive generations,
+while an already borrowed checkpoint can finish. Cold promotion consumes the passive copy;
+non-branch handoff snapshots remain in a cold recovery registry.
 
 ### Replica catch-up
 
@@ -435,6 +522,10 @@ encodes either a typed tracking state with its active-share count or the complet
 reserved raw representation stays inside the encoding's owner. That state records whether shares
 still count against ownership handoff; a message parked on materialized `REQUIRED WAIT` does not
 keep a handoff blocked.
+Remote ACK progress publishes a monotonic sequence with the root's parked handoff state. An
+upstream remote share follows that state, and its root publishes the resulting transition farther
+upstream. A delayed progress event cannot reactivate a newer parked state. Terminal ACK resolution
+still owns the pending share and releases the parked guard with it.
 
 A handle owns an active share only when its attachment reserved a pending share. An attachment that
 finds the root complete may observe that root, but cannot park or remove a share owned by another
@@ -591,6 +682,16 @@ everything it did for the flush, including resuming a message parked on `REQUIRE
 observation that sees the obligation complete sees that work as well. The totals cost a relay's
 owner path the same two read-modify-writes per batch as the pending count they replace, a routed
 delivery two more, and a drain reads them only on its own poll.
+
+An ingestor route's force-flush participant releases its partial batches into branch execution;
+the admitted client submission's tracked ACK root stays outstanding until its downstream work
+settles. For a model alteration with a shared relay gate, the control plane suspends the affected
+ingestors on every node and drains those roots before closing the relay gate. Otherwise a flushed
+batch could wait behind the gate whose drain waits for that same root. Intake and full entity
+holds overlap on the same quiesce control: releasing one `EntityHold` removes only its share, so
+the remaining hold keeps admission suspended. The client admission Shuttle check exercises that
+overlap with racing batch admission; the public buffered alteration scenarios exercise delivery
+through local and remote relay owners.
 
 A task that must not publish while an ownership handoff has frozen its entity observes that freeze
 through one watch, which registers for the next freeze change before it reads the freeze. A release
@@ -830,9 +931,9 @@ errors. The lints use ordinary Rust warn/deny/expect levels; the required gate a
 Retained repair debt names its owning task at the exact operation:
 
 ```rust,ignore
-let channel = nervix_primitives::expect_lint!(nervix::sync_acquisition,
-    "Typed Ratchet 03 (86bc9eqjv): retain the channel selected at branch installation",
-    channels.get(&branch));
+let state = nervix_primitives::expect_lint!(nervix::sync_acquisition,
+    "Typed Ratchet 15 (86bca1web): retain the replica entity before frame handling",
+    states.get(&entity));
 ```
 
 `expect_lint!` puts a normal reason-bearing Rust expectation on one binding, evaluates the
@@ -844,17 +945,18 @@ lint caps and unfulfilled expectations fail. The checker counts distinct HIR ope
 Rust's effective expectation identity, including macro expansion; widening a binding to cover a
 second operation fails even when Rust would regard the expectation as fulfilled.
 
-Task handles remove recurring status, freeze, metric and checkpoint lookups. Source readiness
-registry reads during polling remain operation-specific debt for Typed Ratchet 03, alongside
-relay/channel selection. Typed Ratchet 04 owns materialized branch discovery and Typed Ratchet 05
+Task handles remove recurring status, freeze, metric and checkpoint lookups. Source readiness,
+relay channels, buffered error delivery, domain selection and transport leasing use retained handles
+or immutable publications. Typed Ratchet 04 owns materialized branch discovery and Typed Ratchet 05
 owns remaining remote acknowledgement/admission discovery. Replica catch-up retains the entity's
-lifecycle handle and its own record of each branch, and Typed Ratchet 15 owns state-replication
-frame, synchronization, listing and announcer registry reads.
+lifecycle handle, assignment slot and its own record of each branch. Replication frames,
+synchronization and listing requests select published state handles; announcers retain their route
+and assignment slot. Their runtime registries handle installation, replacement and teardown.
 Bounded retained placement progress remains explicitly documented. Testing fault selectors name
 their exact emitter, ingestor, domain/branch, checkpoint window or acknowledgement link and finite
 read/removal steps; they release map guards before a scenario-controlled pause. These contracts
 describe test selection, not a product wait deadline. The executor-saturation lookup belongs to
-testing fault control. The [concurrent map inventory](../../tests/concurrent-map-inventory-ledger.md)
+testing fault control. The [concurrent map inventory](https://github.com/nervix-io/nervix/blob/main/tests/concurrent-map-inventory-ledger.md)
 records the runtime ownership review; source contracts and expectations are the executable policy.
 
 ### Complete analysis and qualification
@@ -1140,11 +1242,23 @@ one invocation:
 
 | Mode | Lint | Tests | Coverage |
 | --- | --- | --- | --- |
-| Ordinary | `just lint`: every package in ordinary mode, the server, the client, the formatter, the browser console and the wire crate for the browser | `just test`, `just test-primitives-ordinary` | `just test-coverage`, `just coverage-native-extras` |
-| Shuttle | `just cargo-clippy-shuttle`: every Shuttle library, and each package `just test-shuttle` explores in test mode, where its checks are compiled | `just test-shuttle [filter]`, `just test-shuttle-replay-check`, the Shuttle part of `just test-primitives-modeled` | `just coverage-shuttle` |
-| Loom | `just cargo-clippy-loom` | `just test-loom [filter]`, `just test-loom-qualification`, the Loom part of `just test-primitives-modeled` | Not collected: a model is evidence of an ordering, not of product coverage |
-| Turmoil | The Turmoil targets of `just cargo-clippy` | `just test-turmoil`, `just test-turmoil-replay-check`, the Turmoil part of `just test-primitives-modeled` | `just coverage-turmoil` |
-| Deloxide | `just cargo-clippy-deloxide`: the boundary, the deadlock diagnostics with their probes, and the server as a diagnostic node, alone and with its tests and scenario binary | `just test-deloxide`, the Deloxide parts of `just test-primitives-modeled` and `just test-primitives-compile` | Not collected: a diagnostic run is evidence of what its workload exercised, not of product coverage |
+| Ordinary | `just lint`: every package in ordinary mode, the server, the client, the formatter, the browser console and the wire crate for the browser | `just test`, `just test-primitives-ordinary` | `just test-coverage`; ordinary extras and `test-primitives-ordinary` through `just coverage-native-extras` |
+| Shuttle | `just cargo-clippy-shuttle`: every Shuttle library, and each package `just test-shuttle` explores in test mode, where its checks are compiled | `just test-shuttle [filter]`, `just test-shuttle-replay-check`, `just test-primitives-shuttle` | `just coverage-native-extras test-shuttle test-primitives-shuttle`; `just coverage-shuttle <output> [filter]` |
+| Loom | `just cargo-clippy-loom` | `just test-loom [filter]`, `just test-loom-qualification`, `just test-primitives-loom` | `just coverage-native-extras test-loom test-primitives-loom`; `just coverage-loom <output> [filter]` |
+| Turmoil | The Turmoil targets of `just cargo-clippy` | `just test-turmoil`, `just test-turmoil-replay-check`, `just test-primitives-turmoil` | `just coverage-turmoil`; native conformance through `just coverage-native-extras test-primitives-turmoil` |
+| Deloxide | `just cargo-clippy-deloxide`: the boundary, the deadlock diagnostics with their probes, and the server as a diagnostic node, alone and with its tests and scenario binary | `just test-deloxide`, `just test-primitives-deloxide`, diagnostic compile checks in `just test-primitives-compile` | Native conformance through `just coverage-native-extras test-primitives-deloxide`; full diagnostic workloads retain separate evidence |
+
+Model coverage uses the canonical inventories and runners, including per-test process isolation,
+Shuttle random/PCT exploration and nondeterminism checking, and Loom InvariantIds and exhaustive
+completion. `models.json` retains discovered/selected/executed/completed counts and exact check
+identities; the coverage collector requires matching complete evidence before exporting LCOV.
+Loom weakening qualification runs independently outside instrumentation. Coverage bookkeeping
+runs in the command processes and supplies no ordering, wakeups or branches inside a model.
+The per-mode build directories and fresh attempt directories prevent one mode from replacing
+another's executable or counters. Native source-line execution complements each model's claim;
+it does not broaden the ordering or interleaving guarantee. Mode reports remain separate from
+the ordinary coverage and CRAP gate. See [native extra coverage](developing-nervix.md) for
+collection, artifacts, filtering and replay commands.
 
 `just validate-execution-mode-dependencies` resolves the normal dependency graph of the workspace
 and of every package on its own, the way a consumer builds it, with default features and without
@@ -1203,7 +1317,8 @@ builds.
 diagnostic process starts its run after it has registered the signals it must not lose and before it
 constructs a tracked lock or starts a runtime worker: the server's `main` right after it registers
 its termination signals, and the scenario binary's right after it configures the lifecycle of its
-test dependencies. A tracked lock constructed in a process that has not installed the detector
+test dependencies. The Rust paced driver's diagnostic `main` installs it before entering the
+runtime that runs the application. A tracked lock constructed in a process that has not installed the detector
 panics, naming the configuration failure, because Deloxide drops a cycle it detects while no
 callback is installed, so such a lock would deadlock unreported. A second installation is refused,
 so nothing resets the detector or configures it twice, and the in-process nodes of a scenario binary
@@ -1266,12 +1381,40 @@ end their process with status `3`. Threads taking two mutexes in one order, a co
 between threads and readers sharing a lock must end cleanly, with evidence that records the process
 and no finding. A tracked lock before the run fails its process, a second run is refused, standard
 output never carries the banner, and a deadlock whose evidence cannot be recorded ends its process
-with status `4`. A child that never ends is killed by its watchdog and fails its probe. The command
-then runs the `@deadlock_diagnostics` scenarios, without retries, in a scenario binary built for the
-mode: in-process diagnostic nodes running a workload, and real diagnostic server processes that stop
-gracefully with evidence that records a running detector and no findings, each on one and three
-nodes. An invocation that executed no check fails the run, and so does a smoke whose scenarios did
-not all run and pass.
+with status `4`. A child that never ends is killed by its watchdog and fails its probe. A fresh
+state-store test process starts its detector before constructing store or executor locks and runs
+the current generation regressions: cancellation before and after pointer publication, snapshot
+readers, queued checkpoint writers, corrupt and incomplete chunks, exact retry after reopen,
+stale authority, bounded cleanup across 600 checkpoints and a 40 MiB guest save admitted with a
+2 MiB reservation. Its evidence is retained beside the probe and scenario evidence. The command
+also exercises quota refusal and exact staging retry, partial chunks without receipts across
+reopen, reclamation with applying and future generations retained, published and initial state
+preservation, snapshot readers across deletion, and interrupted bounded reclamation resumed after
+restart. The node-local sweeper takes the applied consensus read guard before the checkpoint
+installation barrier, matching staging and publication; both remain held through bounded deletion.
+The public quota scenarios retain active staging through completed sweeps and prove failed
+targets remain gated after reclamation and restart on one and three nodes. The command
+then runs the `@deadlock_diagnostics`, `@restore_installation`, and
+`@client_ingestor_alter_drain` scenarios, without retries, in a
+scenario binary built for the mode: in-process diagnostic nodes running a workload, real diagnostic
+server processes that stop gracefully with evidence that records a running detector and no
+findings, each on one and three nodes, the buffered client alterations with overlapping holds and
+failed drains or full-hold engagement, and the restore installation workloads. The latter exercise
+the blocking applied-state authority guard through staging failure, complete publication, runtime
+handle clearing and a delayed coordinator across leadership transfer and a successor's START.
+The large-generation scenarios cover two 20 MiB saves and forty 1 MiB saves on one and three nodes,
+failure after durable publication, cluster restart, branch isolation and saved source offsets.
+The three-node copy restore cordons its coordinator before planning, so every guest save uses the
+remote chunk transfer and the receiver's quota-owned completed file.
+Those restore scenarios also run in the ordinary public suite. An invocation that executed no
+check fails the run, and so does a diagnostic workload whose scenarios did not all run and pass.
+The command also runs `@paced_simulation_reopen` on one and three nodes, with the diagnostic
+Rust driver replacing producer credit owners, retaining pending submission owners, reopening
+consumers and publishing replacement refusals. Python runs against diagnostic nodes with its
+ordinary shared binding; Python's own locks and condition variables are outside this detector.
+The retained diagnostic evidence covers the tracked locks acquired by those workloads; async
+coordination, atomic capture fencing, database dependency locks and network waits keep their
+Shuttle, Loom, Turmoil and Chaos evidence.
 
 ### Blocking work outside the executor
 
@@ -1301,6 +1444,43 @@ a file whose owners block in different ways, such as the CLI's, has a permission
 
 The boundary check rejects either item in a file no permission lists it for, and a listed item its
 file no longer names.
+
+### Thread creation outside the executor
+
+Starting a thread can bypass the executor's admission, memory charges and cancellation just as
+blocking work can. Every caller of `thread::spawn`, `thread::Builder`, `thread::scope`,
+`thread::spawn_detached` or `unmodeled::thread::Builder` therefore declares its exact file and
+items in the same `crates/primitives/blocking-permissions.toml`. The declaration states its owner,
+why the work stays outside the executor, and what bounds the work, thread count and lifetime.
+No caller outside the primitive crate has a built-in permission. Naming the builder includes its
+ordinary and scoped spawn methods; a glob names every confined item it brings into scope.
+Reimported module aliases retain the same confinement regardless of import order. A glob over
+the boundary root is rejected; name its modules and items explicitly so confined and unmodeled
+paths remain visible.
+
+| Owner | Thread items | Work, count and lifetime bound |
+| --- | --- | --- |
+| Process termination supervision | `thread::spawn_detached` | Two supervisors per process, parked between signals or deadline changes, plus at most one forced-exit watchdog after the single exit claim; supervisors end with the process, and the watchdog waits only the forced-exit report budget |
+| WASM epoch driver | `unmodeled::thread::Builder` | One thread per WASM runtime; one sleep and one engine epoch increment per configured tick; it ends on its next wake after the stop flag is set or the weak stop reference can no longer upgrade |
+| Diagnostic finding recorder | `thread::spawn_detached` | At most one watchdog for the process's one finding; it exits the process after the ten-second recording budget |
+| Shared Loom participant launcher | `thread::Builder` | Loom's five slots, including coordinator and body, the branch limit and runner watchdog; participants end within one model execution |
+| Benchmark load driver | `thread::Builder`, `thread::scope` | One joined summary poller per drain owner, and one scoped watermark query per configured partition, each with the request timeout within the driver deadline |
+| Turmoil scenario runner | `thread::Builder` | One scheduler per disposable attempt; physical run and cleanup deadlines, a normal join, and a failed process when either deadline is missed |
+| NSPL completion walk | `thread::Builder`, `thread::scope` | At most the configured jobs per finite frontier; every worker is joined before the next level |
+| Public C binding probes and external Kafka member | `thread::spawn`, `thread::scope`, `thread::Builder` as listed for each file | Fixed probe participants joined within their bounded call and cancellation waits; one Kafka poller per member, stopped and joined when the member drops |
+
+Unit tests and Loom and Shuttle checks declare every file and its exact thread items too. Their
+permissions describe finite participants for each case, joins or model termination, and the
+registered exploration bounds where applicable. Diagnostic cycle probes instead use disposable
+processes and a parent watchdog, since their tested cycle intentionally cannot join. These
+declarations do not exempt a directory or evaluate away `cfg(test)`, a model-only module, an
+inactive branch or a macro body. A new item needs its declaration, and a listed item its file no
+longer names fails as stale. A file whose product owner and tests use different items names both.
+
+The real epoch builder also keeps its independent unmodeled permission, with its reason and
+verification limit. That permission does not supply the work and lifetime bound and cannot alone
+authorize thread creation. The ordinary re-exports and every modeled thread operation retain their
+existing execution semantics; this confinement changes source validation only.
 
 ## Deterministic Concurrency Verification
 
@@ -1437,7 +1617,7 @@ A family of names means each member runs independently through the recipe.
 | Materialized dependency waits (`src/runtime/materialized_read.rs`) | `shuttle_a_parked_message_is_woken_by_the_materialized_state_it_waits_for` races the arrival of the state a `REQUIRED WAIT` message is parked on against the processor branch reading it and parking: the wait registers before the read, and again before every retry, so the arrival always wakes it. |
 | Client emitter budget (`src/runtime/client_emitter_shuttle_tests.rs`) | `shuttle_competing_consumer_grants_never_exceed_the_node_budget`, `shuttle_consumer_loss_and_ack_race_release_one_retained_delivery` and `shuttle_publish_cancellation_and_ack_race_release_one_reservation` keep grants within the node budget and release each retained delivery and reservation once. `shuttle_a_reservation_waiting_for_a_full_budget_takes_the_bytes_a_release_returns` races a release against a reservation that finds the budget full: the reservation registers for the change before it reads the budget, so the release wakes it and it takes the bytes. |
 | Assignment authority and state updates (`src/runtime/state_store_shuttle_tests.rs`, `materialized_state.rs`, `kafka_offset_state.rs`) | `shuttle_a_rebind_yields_until_the_operation_admitted_under_its_replaced_binding_finishes` and `shuttle_no_operation_admitted_under_a_superseded_binding_outlives_its_superseding_rebind` fence admitted work even when generations reuse an even or odd counter. `shuttle_snapshot_installation_never_overlaps_origination_or_a_capture` keeps exclusive installation apart from originators and captures. `shuttle_an_originator_update_proceeds_while_the_assignment_barrier_is_held` and `shuttle_a_committed_offset_proceeds_while_the_assignment_barrier_is_held` keep ordinary admitted updates independent of a capture's barrier. |
-| ACK tree (`src/runtime_ack.rs`) | The `shuttle_tests` checks `concurrent_attachment_and_final_ack_leave_exact_tracking`, `concurrent_wait_and_active_ack_exempt_the_remaining_root`, `concurrent_wait_release_and_completion_leave_no_tracking`, `attachment_losing_its_reservation_to_completion_resolves_no_share`, `attachment_losing_its_reservation_to_completion_parks_no_share`, `wait_release_racing_the_last_active_ack_holds_domain_and_ingestor_handoff_once`, and `attachment_racing_the_last_active_share_into_wait_publishes_one_active_share` keep pending, active, and handoff counts exact across attachment and `REQUIRED WAIT`. `concurrent_success_and_failure_choose_one_terminal_transition`, `fan_out_across_ingestors_with_a_failing_root_resolves_each_root_once_with_exact_counts`, and `parked_and_fanned_out_roots_hold_exact_counts_at_every_quiescent_point` require one terminal result per root, one observed completion, and zero outstanding counts after resolution. |
+| ACK tree (`src/runtime_ack.rs`) | The `shuttle_tests` checks `concurrent_attachment_and_final_ack_leave_exact_tracking`, `concurrent_wait_and_active_ack_exempt_the_remaining_root`, `concurrent_wait_release_and_completion_leave_no_tracking`, `attachment_losing_its_reservation_to_completion_resolves_no_share`, `attachment_losing_its_reservation_to_completion_parks_no_share`, `wait_release_racing_the_last_active_ack_holds_domain_and_ingestor_handoff_once`, `attachment_racing_the_last_active_share_into_wait_publishes_one_active_share`, and `parked_remote_progress_survives_a_racing_heartbeat_and_resumes_once` keep pending, active, and handoff counts exact across attachment, `REQUIRED WAIT`, and remote progress. `concurrent_success_and_failure_choose_one_terminal_transition`, `fan_out_across_ingestors_with_a_failing_root_resolves_each_root_once_with_exact_counts`, and `parked_and_fanned_out_roots_hold_exact_counts_at_every_quiescent_point` require one terminal result per root, one observed completion, and zero outstanding counts after resolution. |
 | Forwarded acknowledgement silence (`src/runtime/remote_dispatch_shuttle_tests.rs`) | `shuttle_a_terminal_outcome_racing_the_final_sweep_resolves_the_share_once` races the receiver's terminal outcome against the sweep that would fail a forwarded share: exactly one of them removes it, and the root delivers that one's outcome. `shuttle_a_report_racing_the_final_sweep_keeps_the_share_it_reached` races a report against the same sweep: a report that reached the share keeps it pending with its root unresolved, and only a report that found it removed lets the sweep fail it. |
 | Entity gate and node quiesce (`src/runtime/entity_gate_shuttle_tests.rs`) | `shuttle_an_entity_gate_hold_fences_every_relay_and_admits_no_work_until_it_is_released` requires admitted work to drain before quiescence and prevents new admission while closed. `shuttle_a_work_item_parked_for_materialized_state_is_never_missing_from_a_drain` and `shuttle_every_node_quiesce_gauge_withdraws_exactly_what_it_contributed` keep parked, buffered, and branch work counted without underflow and back to zero. `shuttle_every_engagement_waiter_wakes_and_exactly_one_release_takes_the_hold`, `shuttle_a_hold_dropped_before_its_fence_completes_reopens_every_relay_it_engaged`, and `shuttle_a_failed_engagement_wakes_every_waiter_with_its_failure` cover release, drop, and failure. `shuttle_releasing_an_ownership_handoff_wakes_every_waiter_frozen_by_it` holds release-before-wake; `shuttle_an_ownership_handoff_freeze_observation_registers_before_its_read` holds register-before-read against that release. |
 | Interconnect slots and membership (`crates/interconnect/src/connection/stream_slots/shuttle_checks.rs`, `request/shuttle_checks.rs`) | `management_drain_stops_leasing_and_waits_for_every_leased_slot`, `replication_drain_stops_leasing_and_waits_for_every_leased_slot`, `bulk_drain_stops_leasing_and_waits_for_every_leased_slot`, and `relay_drain_stops_leasing_and_waits_for_every_leased_slot` keep partition and subquota reservations isolated, forbid leases after drain starts, and wait for every lease to return. `racing_registrations_lose_no_handler_and_publish_each_name_once` prevents a lost handler registration and duplicate name. `a_membership_change_between_a_callers_check_and_its_wait_is_never_lost` prevents a missed discovery wakeup. |
@@ -1447,8 +1627,10 @@ A family of names means each member runs independently through the recipe.
 | Rust client submission slots (`crates/client-core/src/producer/slots_shuttle_tests.rs`) | `shuttle_a_wait_racing_its_resolution_takes_the_outcome_once_and_returns_the_credit`, `shuttle_a_cancelled_wait_loses_neither_the_outcome_nor_the_credit`, and `shuttle_a_release_racing_its_resolution_returns_the_credit_exactly_once` race a submission's resolution against the application's wait, an aborted wait followed by a new one, and a release: the outcome is taken at most once, a cancelled wait leaves it retrievable, and the credit comes back exactly once. |
 | Rust client attachment recovery (`crates/client-core/src/producer.rs`, `consumer.rs`) | `shuttle_close_fences_a_producer_restore_started_on_the_same_exchange` and `shuttle_close_fences_a_consumer_restore_started_on_the_same_exchange` race close against beginning restoration. `shuttle_close_fences_a_producer_restore_interrupted_by_another_loss` and `shuttle_close_fences_a_consumer_restore_interrupted_by_another_loss` race close against another loss while restoring. Each check uses the production lifecycle owner and requires the final phase to remain closed, with subsequent restoration refused. `shuttle_a_reply_racing_the_end_of_its_exchange_reports_the_gap_once` races a consumer's reply against the end of its exchange: the interruption is reported once, whichever observes the end first. `shuttle_a_read_parked_while_its_consumer_closes_does_not_outlive_the_close` races a read that parks for delivery against the close: the read ends with the close. `shuttle_a_submission_racing_its_producers_end_observes_the_end` races a submission's wait against its producer's end, and `shuttle_a_reader_racing_a_reported_gap_takes_it_without_another_change` (`subscriptions.rs`) races the application's next read against a subscription event the follower reports: each waiter subscribes before it reads, so neither waits for a later change. |
 | Relay branch presence (`src/runtime/relay_branch_presence_shuttle_tests.rs`) | `shuttle_an_observer_sees_every_owner_step_whole_and_never_an_older_one` races an owner at capacity one through admission, eviction, recreation and release against an observer that registers and reads throughout: every read is a membership the owner published whole and never older than the step the owner had finished. `shuttle_capacity_and_expiry_publish_whole_memberships` keeps every read within the owner's capacity and drops an expired branch from every read after the expiry. `shuttle_a_replaced_owner_never_publishes_over_its_successor` races a predecessor's admissions, expiry and release against its successor's claim: once the claim is visible no read holds a branch only the predecessor admitted, and the successor's branch survives the predecessor's release. |
-| Checkpoint replication (`src/runtime/kafka_offset_state.rs`, `src/runtime/state_replication/checkpoint_announcement_shuttle_tests.rs`) | `shuttle_a_replica_acknowledgement_racing_the_quorum_wait_is_never_missed` races a Kafka offset commit's replica quorum wait against its replica's acknowledgement: the wait registers before it reads, so it completes without its deadline, which a Shuttle timeout only reaches when a check triggers it. `shuttle_an_offer_racing_the_end_of_an_announcement_is_always_announced` races a second offer against the announcer of the first finding its replica caught up: the second revision is always announced and acknowledged. `shuttle_a_retired_replication_ends_its_announcer` ends an announcer whose replicated state goes away while its replica never acknowledges. `shuttle_an_announcement_racing_the_replica_wait_is_never_missed` races an owner's announcement against the replica task's synchronization and wait: an announcement that lands before the wait is kept as its permit. |
+| Checkpoint replication (`src/runtime/kafka_offset_state.rs`, `src/runtime/state_replication/checkpoint_announcement_shuttle_tests.rs`) | `shuttle_a_replica_acknowledgement_racing_the_quorum_wait_is_never_missed` races a Kafka offset commit's replica quorum wait against its replica's acknowledgement: the wait registers before it reads, so it completes without its deadline, which a Shuttle timeout only reaches when a check triggers it. `shuttle_an_offer_racing_the_end_of_an_announcement_is_always_announced` races a second offer against the announcer of the first finding its replica caught up: the second revision is always announced and acknowledged. `shuttle_a_retired_replication_ends_its_announcer` ends an announcer whose replicated state goes away while its replica never acknowledges. `shuttle_an_announcement_racing_the_replica_wait_is_never_missed` races an owner's announcement against the replica task's synchronization and wait: an announcement that lands before the wait is kept as its permit. `shuttle_checkpoint_announcement_close_cancels_pending_dispatch` exercises the production task owner with close racing the first poll and close after dispatch starts: both cancel a dispatch that never becomes ready and release its retained announcer. |
+| Resolved state replication (`src/runtime/state_replication/routing_shuttle_tests.rs`) | `shuttle_state_replacement_and_retirement_fence_frames_in_flight` exercises the production routing owner: a frame can complete only on its selected lifetime, never change a successor, and cannot enter a route after retirement. ArcSwap internals remain opaque; this check covers owner use and scheduling, with no new Nervix-owned memory-ordering claim. |
 | Replica catch-up announcements (`src/runtime/branch_lifecycle_state_shuttle_tests.rs`) | `shuttle_an_announced_branch_racing_the_replica_round_is_never_missed` races an owner's announcement of a branch checkpoint against the replica task taking the pending announcements and waiting for the next: the task takes it whether it lands before the take, between the take and the wait, or during the wait. `shuttle_announcements_of_one_branch_keep_the_newest_pending` delivers two announcements of one branch in either order while the task takes them: an older one never replaces a newer one still pending. |
+| Backup capture, restore publication and reclamation (`src/runtime/backup_capture_fence.rs`, `crates/consensus/src/restore.rs`) | `shuttle_backup_cut_includes_pre_cut_branch_publication` requires every registered publication observed before a cut to be present in its view. `shuttle_restore_publication_and_handle_clear_cannot_cross_a_successors_start` drives the production applied-state authority guard against a new restore generation and START, so stale publication changes neither checkpoints nor runtime handles. `shuttle_restore_reclamation_holds_the_revision_through_queued_installation` races the production reclamation guard with a successor's applied generation and queued installer, requiring the borrowed revision to stay fixed through deletion and preserving the current installation. They register in the shared Shuttle inventory and run through its exploration, nondeterminism and replay contract. |
 | Domain clock (`src/runtime/domain_clock.rs`) | `shuttle_lifecycle_tests::concurrent_reads_of_one_installed_generation_never_decrease` checks the nondecreasing watermark; `a_clock_bound_to_a_replaced_generation_is_refused_by_revalidation` rejects a superseded generation; `readers_never_observe_an_installation_older_than_one_they_observed` prevents publication regression. `shuttle_delivery_sends_state_before_ticks_without_regressing_progress` explores the production observer and attachment delivery order across accepted ticks, same-generation unassignment and reassignment, and a generation change. `shuttle_an_attach_waiting_for_the_first_installation_observes_its_domains` races an attach's wait and lookup against the node's first installation of the committed domains and requires the lookup to find the domain and its clock. `a_logical_waiter_wakes_when_its_generation_stops`, `a_logical_waiter_wakes_when_its_generation_is_replaced`, `a_logical_waiter_wakes_when_its_domain_is_removed`, and `a_logical_waiter_wakes_when_a_replacement_mapping_reaches_its_deadline` cover each lifecycle wakeup. |
 
 The checks of WASM checkpoint holds and the durability barrier use the same runner and replay
@@ -1490,17 +1672,35 @@ model rather than ending the search, and Loom's full thread count. A Loom settin
 that would change that search is refused. A completed search prints a record naming its invariant,
 its execution count and its bounds, and `just test-loom` accepts nothing else as a completed model.
 
+Discovery, model execution, qualification and checkpoint replay use the workspace's `loom` build
+profile. It inherits `dev`, retains debug assertions, overflow checks, debug information and the
+server's allocation instrumentation, and compiles with optimization level one to reduce the
+allocation frames on Loom's fixed coordinator stack. Qualification cleans only this profile's
+package artifacts before and after each weakening, so a weakened artifact cannot become an
+ordinary build input or satisfy another qualification.
+
+The coordinator starts and joins the model body without touching protocol state. The body and
+participants started through `nervix_model_harness::loom::spawn` each request a 1 MiB coroutine
+stack for instrumented allocators and debug frames. The coordinator retains Loom's fixed default
+stack; its initial allocation and spawn path must fit before the larger body stack can run.
+Loom forwards that request to its coroutine implementation, whose allocation units need not be
+bytes. Its five thread slots include the coordinator, body and at most three other participants.
+The harness stack model executes a 64 KiB frame on both the body and a participant; reducing the
+stack request must reproduce the overflow and replay it from its checkpoint. Scheduling and
+memory-ordering checks still explore to exhaustion.
+
 `crates/model-harness/loom-inventory.toml` registers every model by invariant. `just test-loom`
 lists the `loom_*` library tests of every registered package built with its `loom` feature, and a
 run over the whole inventory fails when a registered invariant's test is missing, ignored or did not
 complete, or when a discovered model is unregistered. Each model runs in its own process, and the
 command reports how many models it discovered, selected, executed and saw complete; a filter that
-selects none fails. A failed model leaves `target/loom-failures/<package>/<test>/`: the Loom
+selects none fails. A failed model leaves `target/loom-failures/<package>/<invariant>/`: the Loom
 checkpoint of the failed execution, the run's output, and metadata naming the invariant, revision,
 toolchain, Loom version and exploration bounds. `just test-loom-replay` resumes Loom from that
 checkpoint with location tracking and tracing, so the failed execution runs first. The artifacts
 hold model output only, never payloads or secrets. CI runs the models on every change and uploads
-the failure directory.
+the failure directory. Invariant IDs use ASCII letters, digits, dots and hyphens, so these paths
+are valid artifact names; metadata retains the exact Rust test name used for replay.
 
 Every model also registers a weakening that must make it fail. `just test-loom-qualification`
 applies each to a copy of the working tree, requires the model to fail with the registered message,

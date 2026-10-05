@@ -5,6 +5,20 @@
 
 use super::*;
 
+/// Called only after the diagnostic process installed its detector, covering the other writers
+/// and purges that select the same physical generation under the installation barrier.
+#[cfg(feature = "deloxide")]
+pub(super) fn diagnostic_installation_writers_and_purges() {
+    ownership_handoff_preparation_retains_exact_coordination_identity_across_reopen();
+    forced_recovery_preparation_survives_reopen_and_activation_is_idempotent();
+    forced_recovery_preserves_checkpoint_after_incarnation_change();
+    forced_recovery_preserves_checkpoint_after_fingerprint_change();
+    purging_removes_only_guest_state_of_superseded_generations();
+    a_schema_change_replaces_only_schema_bound_state();
+    guest_checkpoints_and_replica_installs_return_once_synchronized();
+    forced_recovery_publishes_staged_guest_state_in_the_committed_generation();
+}
+
 #[test]
 fn ownership_handoff_preparation_retains_exact_coordination_identity_across_reopen() {
     let dir = tempfile::tempdir().expect("temporary runtime state directory should open");
@@ -33,8 +47,12 @@ fn ownership_handoff_preparation_retains_exact_coordination_identity_across_reop
         let db = Database::builder(dir.path())
             .open()
             .expect("database should open");
-        let store = RuntimeStateStore::from_database(db, Executor::default())
-            .expect("state store should open");
+        let store = RuntimeStateStore::from_database(
+            db,
+            Executor::default(),
+            crate::runtime::DEFAULT_RESTORE_STAGING_MAX_BYTES,
+        )
+        .expect("state store should open");
         store
             .persist_handoff_preparation(&transition, &[])
             .expect("ownership handoff preparation should persist");
@@ -43,8 +61,12 @@ fn ownership_handoff_preparation_retains_exact_coordination_identity_across_reop
     let db = Database::builder(dir.path())
         .open()
         .expect("database should reopen");
-    let store = RuntimeStateStore::from_database(db, Executor::default())
-        .expect("state store should reopen");
+    let store = RuntimeStateStore::from_database(
+        db,
+        Executor::default(),
+        crate::runtime::DEFAULT_RESTORE_STAGING_MAX_BYTES,
+    )
+    .expect("state store should reopen");
     let preparations = store
         .handoff_preparations()
         .expect("persisted handoff preparation should load");
@@ -149,8 +171,12 @@ fn forced_recovery_preparation_survives_reopen_and_activation_is_idempotent() {
         let db = Database::builder(dir.path())
             .open()
             .expect("database should open");
-        let store = RuntimeStateStore::from_database(db, Executor::default())
-            .expect("state store should open");
+        let store = RuntimeStateStore::from_database(
+            db,
+            Executor::default(),
+            crate::runtime::DEFAULT_RESTORE_STAGING_MAX_BYTES,
+        )
+        .expect("state store should open");
         store
             .persist_latest_snapshot(&placement, 4, &payload)
             .expect("earlier state should persist");
@@ -166,8 +192,12 @@ fn forced_recovery_preparation_survives_reopen_and_activation_is_idempotent() {
         let db = Database::builder(dir.path())
             .open()
             .expect("database should reopen");
-        let store = RuntimeStateStore::from_database(db, Executor::default())
-            .expect("state store should reopen");
+        let store = RuntimeStateStore::from_database(
+            db,
+            Executor::default(),
+            crate::runtime::DEFAULT_RESTORE_STAGING_MAX_BYTES,
+        )
+        .expect("state store should reopen");
         let activated = store
             .activate_forced_recovery(
                 &transition,
@@ -186,8 +216,12 @@ fn forced_recovery_preparation_survives_reopen_and_activation_is_idempotent() {
         let db = Database::builder(dir.path())
             .open()
             .expect("database should reopen again");
-        let store = RuntimeStateStore::from_database(db, Executor::default())
-            .expect("state store should reopen");
+        let store = RuntimeStateStore::from_database(
+            db,
+            Executor::default(),
+            crate::runtime::DEFAULT_RESTORE_STAGING_MAX_BYTES,
+        )
+        .expect("state store should reopen");
         let activated = store
             .activate_forced_recovery(
                 &transition,
@@ -243,8 +277,12 @@ fn forced_recovery_preserves_checkpoint_after_incarnation_change() {
         let db = Database::builder(dir.path())
             .open()
             .expect("database should open");
-        let store = RuntimeStateStore::from_database(db, Executor::default())
-            .expect("state store should open");
+        let store = RuntimeStateStore::from_database(
+            db,
+            Executor::default(),
+            crate::runtime::DEFAULT_RESTORE_STAGING_MAX_BYTES,
+        )
+        .expect("state store should open");
         store
             .persist_latest_snapshot(&placement, 4, &payload)
             .expect("earlier state should persist");
@@ -260,8 +298,12 @@ fn forced_recovery_preserves_checkpoint_after_incarnation_change() {
         let db = Database::builder(dir.path())
             .open()
             .expect("database should reopen");
-        let store = RuntimeStateStore::from_database(db, Executor::default())
-            .expect("state store should reopen");
+        let store = RuntimeStateStore::from_database(
+            db,
+            Executor::default(),
+            crate::runtime::DEFAULT_RESTORE_STAGING_MAX_BYTES,
+        )
+        .expect("state store should reopen");
         let activated = store
             .activate_forced_recovery(
                 &transition,
@@ -280,8 +322,12 @@ fn forced_recovery_preserves_checkpoint_after_incarnation_change() {
         let db = Database::builder(dir.path())
             .open()
             .expect("database should reopen again");
-        let store = RuntimeStateStore::from_database(db, Executor::default())
-            .expect("state store should reopen");
+        let store = RuntimeStateStore::from_database(
+            db,
+            Executor::default(),
+            crate::runtime::DEFAULT_RESTORE_STAGING_MAX_BYTES,
+        )
+        .expect("state store should reopen");
         let transition = ForcedRuntimeStateRecoveryTransition {
             destination_incarnation: ClusterNodeIncarnation::new(43),
             ..transition
@@ -340,8 +386,12 @@ fn forced_recovery_preserves_checkpoint_after_fingerprint_change() {
         let db = Database::builder(dir.path())
             .open()
             .expect("database should open");
-        let store = RuntimeStateStore::from_database(db, Executor::default())
-            .expect("state store should open");
+        let store = RuntimeStateStore::from_database(
+            db,
+            Executor::default(),
+            crate::runtime::DEFAULT_RESTORE_STAGING_MAX_BYTES,
+        )
+        .expect("state store should open");
         store
             .persist_latest_snapshot(&placement, 4, &payload)
             .expect("earlier state should persist");
@@ -357,8 +407,12 @@ fn forced_recovery_preserves_checkpoint_after_fingerprint_change() {
         let db = Database::builder(dir.path())
             .open()
             .expect("database should reopen");
-        let store = RuntimeStateStore::from_database(db, Executor::default())
-            .expect("state store should reopen");
+        let store = RuntimeStateStore::from_database(
+            db,
+            Executor::default(),
+            crate::runtime::DEFAULT_RESTORE_STAGING_MAX_BYTES,
+        )
+        .expect("state store should reopen");
         let activated = store
             .activate_forced_recovery(
                 &transition,
@@ -377,8 +431,12 @@ fn forced_recovery_preserves_checkpoint_after_fingerprint_change() {
         let db = Database::builder(dir.path())
             .open()
             .expect("database should reopen again");
-        let store = RuntimeStateStore::from_database(db, Executor::default())
-            .expect("state store should reopen");
+        let store = RuntimeStateStore::from_database(
+            db,
+            Executor::default(),
+            crate::runtime::DEFAULT_RESTORE_STAGING_MAX_BYTES,
+        )
+        .expect("state store should reopen");
         let transition = ForcedRuntimeStateRecoveryTransition {
             target_schedule_fingerprint: [10; 32],
             ..transition
@@ -431,7 +489,12 @@ pub(super) fn open_store(dir: &tempfile::TempDir) -> RuntimeStateStore {
     let db = Database::builder(dir.path())
         .open()
         .expect("database should open");
-    RuntimeStateStore::from_database(db, Executor::default()).expect("state store should open")
+    RuntimeStateStore::from_database(
+        db,
+        Executor::default(),
+        crate::runtime::DEFAULT_RESTORE_STAGING_MAX_BYTES,
+    )
+    .expect("state store should open")
 }
 
 fn current_identity(generations: WasmStateGenerations) -> HashMap<NodeRef, ScheduledStateIdentity> {
@@ -528,18 +591,17 @@ fn purging_removes_only_guest_state_of_superseded_generations() {
 }
 
 #[test]
-fn persisted_runtime_state_decodes_from_unaligned_storage() {
-    let expected = PersistedRuntimeStateEntry {
+fn checkpoint_header_decodes_from_unaligned_storage() {
+    let expected = StoredCheckpoint::Inline(PersistedRuntimeStateEntry {
         lsm: 7,
         payload: vec![1, 2, 3],
-    };
-    let encoded =
-        rkyv::to_bytes::<rkyv::rancor::Error>(&expected).expect("runtime state should encode");
+    });
+    let encoded = expected.encode().assured("the checkpoint header encodes");
     let mut unaligned = vec![0];
     unaligned.extend_from_slice(&encoded);
 
-    let decoded = PersistedRuntimeStateEntry::decode(&unaligned[1..])
-        .expect("runtime state should decode from an unaligned database buffer");
+    let decoded = StoredCheckpoint::decode(&unaligned[1..])
+        .assured("the checkpoint header decodes from an unaligned database buffer");
 
     assert_eq!(decoded, expected);
 }
@@ -556,7 +618,7 @@ async fn guest_checkpoints_and_replica_installs_return_once_synchronized() {
     let guest = super::super::ReplicatedWasmProcessorState::new(
         placement.clone(),
         None,
-        Arc::new(nervix_primitives::publication::ArcSwapOption::empty()),
+        Default::default(),
     );
     let captured = guest.capture(
         vec![1, 2, 3],

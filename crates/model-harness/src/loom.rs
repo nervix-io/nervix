@@ -7,17 +7,18 @@
 //! about the owner. Loom's own limits still apply: it does not model every relaxed behavior, and an
 //! operation inside a third-party dependency stays invisible to it.
 //!
+//! The default coordinator only starts and joins the model body. The body and every participant
+//! started by [`spawn`] request larger coroutine stacks, so allocator instrumentation and debug
+//! frames execute on those stacks. The coordinator retains Loom's fixed default stack, so the
+//! runner uses the workspace's `loom` build profile to reduce its initial allocation frames while
+//! preserving debug assertions, overflow checks and allocation instrumentation. It carries no
+//! protocol state and occupies one of Loom's five thread slots, alongside the body and actors.
+//!
 //! Every run prints one record for its runner. A completed search prints
 //! `nervix-model-harness: loom invariant <name> explored to exhaustion in <n> executions` followed by
 //! the bounds it ran under; `just test-loom` accepts nothing else as a completed model. When
 //! `LOOM_CHECKPOINT_FILE` names a checkpoint that already exists, Loom resumes the search from that
 //! execution, which is how a failure is replayed, and the record says the search was resumed.
-//!
-//! Loom runs a model's threads as coroutines of one operating-system thread, each on a stack of a
-//! few kilobytes unless it asks for more, and a production owner called from a debug build needs
-//! more. [`explore`] runs each model on a thread with [`MODEL_THREAD_STACK`], and a model spawns its
-//! own threads through [`spawn`], which gives them the same. A stack size decides nothing a model
-//! explores.
 
 use std::env;
 
@@ -32,19 +33,24 @@ use tracing_subscriber::{EnvFilter, fmt};
 
 use crate::exploration::{InvariantId, LOOM_BRANCH_LIMIT, refused_loom_settings};
 
-/// The stack of the thread each model runs on, and of every thread it spawns through [`spawn`].
-pub const MODEL_THREAD_STACK: usize = 8 * 1024 * 1024;
+/// The stack request for the model body and each participant. Loom forwards this to its coroutine
+/// implementation, whose allocation units need not be bytes. Debug frames and allocator
+/// instrumentation can exhaust the default stack before a model reaches its first atomic.
+const MODEL_STACK_REQUEST: usize = 1_048_576;
 
-/// Spawns a thread of a model, with a stack a production owner's calls fit in.
-pub fn spawn<F, T>(task: F) -> JoinHandle<T>
+/// Start a participant with the same coroutine stack request as the model body.
+///
+/// Call this from inside [`explore`]. It selects a modeled thread through the primitive boundary;
+/// its operations and joins retain Loom's scheduling and memory-ordering semantics.
+pub fn spawn<F, T>(body: F) -> JoinHandle<T>
 where
     F: FnOnce() -> T + Send + 'static,
     T: Send + 'static,
 {
     thread::Builder::new()
-        .stack_size(MODEL_THREAD_STACK)
-        .spawn(task)
-        .assured("a Loom model spawns its threads inside the model, below Loom's thread limit")
+        .stack_size(MODEL_STACK_REQUEST)
+        .spawn(body)
+        .assured("a modeled thread with a declared stack request can be started")
 }
 
 /// Explore `model`, which checks `invariant` against a production owner, to exhaustion.
@@ -54,6 +60,7 @@ where
 /// that would change that search is refused rather than honored. `LOOM_CHECKPOINT_FILE`,
 /// `LOOM_CHECKPOINT_INTERVAL`, `LOOM_LOG` and `LOOM_LOCATION` only record and describe the search,
 /// and are honored.
+/// The five thread slots include the coordinator, model body and at most three other participants.
 pub fn explore<F>(invariant: InvariantId, model: F)
 where
     F: Fn() + Sync + Send + 'static,
@@ -90,13 +97,13 @@ where
     let model = Arc::new(model);
     let counted_model = move || {
         counted_executions.fetch_add(1, Ordering::Relaxed);
-        let execution = Arc::clone(&model);
+        let model = Arc::clone(&model);
         spawn(move || {
-            let model: &F = &execution;
             model();
+            drop(model);
         })
         .join()
-        .assured("a model that panics fails its execution before this join returns");
+        .assured("the model body completes before its coordinator returns");
     };
     let subscriber = fmt::Subscriber::builder()
         .with_env_filter(EnvFilter::from_env("LOOM_LOG"))
@@ -117,5 +124,36 @@ where
             "nervix-model-harness: loom invariant {invariant} explored to exhaustion in \
              {explored} executions ({bounds})"
         ),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use meticulous::ResultExt as _;
+
+    use super::{InvariantId, explore, spawn};
+
+    const STACK: InvariantId = InvariantId::new("harness.loom.coroutine-stack");
+
+    #[inline(never)]
+    fn debug_frame(seed: u8) -> usize {
+        let mut bytes = [0_u8; 65_536];
+        bytes.fill(seed);
+        std::hint::black_box(&mut bytes);
+        bytes.iter().map(|byte| usize::from(*byte)).sum()
+    }
+
+    #[test]
+    fn loom_model_coroutines_support_instrumented_debug_frames() {
+        explore(STACK, || {
+            assert_eq!(debug_frame(3), 3 * 65_536);
+            let participant = spawn(|| debug_frame(7));
+            assert_eq!(
+                participant
+                    .join()
+                    .assured("the modeled participant completes its debug frame"),
+                7 * 65_536
+            );
+        });
     }
 }

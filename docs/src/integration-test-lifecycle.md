@@ -56,6 +56,25 @@ records its own evidence under its root, and is a diagnostic node only when the 
 scenario binary was built for the mode. The ordinary suite leaves the `@deadlock_diagnostics`
 scenarios out by default: their steps assert a detector an ordinary build does not have.
 
+The diagnostic command also selects the ordinary `@restore_installation` scenarios. They exercise
+the blocking applied-state guard through interrupted checkpoint staging, complete publication and
+runtime handle clearing, including a delayed coordinator after leadership transfer and a
+successor's START. The ordinary CLI built by the test dependencies drives these diagnostic nodes
+through its public protocol; the command supplies its path explicitly because the diagnostic
+binary has a separate build directory. The feature input is a quoted file glob, and the shared
+scenario accounting requires every selected diagnostic workload to run and pass without retries. The recorded evidence
+covers tracked blocking locks reached by those workloads; async waits, capture atomics, dependency
+locks and cross-node waits retain their other concurrency checks.
+
+The command also selects `@paced_simulation_reopen` from the public paced-driver feature. It
+builds the Rust driver in diagnostic mode and supplies its path to the same scenario fixture,
+so the driver installs its own detector before entering its runtime. Both drivers exercise
+endpoint replacement, pending submission ownership, explicit replay and replacement refusal
+against diagnostic nodes on one and three nodes, without retries. Python uses the ordinary
+shared binding; its locks and condition variables are outside this detector. The command keeps
+this workload's console output beside its probe and cluster logs and applies the same nonempty,
+all-passed scenario accounting.
+
 Test dependencies start through one suite-owned environment. If Docker creates a named container
 but cannot bind its randomly selected host port, that owner removes the failed container and tries
 up to three more times with a new port selection. It also removes the failed container when those
@@ -123,8 +142,8 @@ The CI jobs divide the work at the scenario boundary:
 | `tests` | Instrumented workspace build and all tests except the scenario target |
 | `scenarios` | Instrumented server, CLI and paced simulation drivers, the unsharded scenario suite at factor 2, and scenario logs |
 | `coverage` | After tests, scenarios and extra tests, merge their ordinary-mode workspace reports for CRAP and one Codecov upload |
-| `extra-tests` | Native coverage collectors plus capability doctests, Miri, mutation, and compiler checks |
-| `loom` | Memory-ordering models explored to exhaustion, their weakening qualifications, and failure checkpoints |
+| `extra-tests` | Native coverage collectors plus capability doctests, Miri, mutation, compiler, and Loom checks |
+| `loom-qualification` | Loom weakening qualifications, one weakened server build for each, and the runs of a failed qualification |
 | `shuttle` | Modeled in-process concurrency checks, uncontrolled-nondeterminism rechecks, and failure schedules |
 
 The `tests` and `scenarios` jobs also sample runner CPU utilization and steal time every five

@@ -120,8 +120,7 @@ async fn admit_one_batch(
     root.ack_success();
 }
 
-/// Engages a quiesce and drains the ingestor the way an entity hold does: it waits until no root
-/// it tracks is outstanding.
+/// Drains the intake hold, then transfers its suspension to an overlapping full entity hold.
 async fn quiesce_and_drain(
     control: Arc<IngestorQuiesceControl>,
     trackers: Arc<IngestorAckRootTrackers>,
@@ -135,6 +134,15 @@ async fn quiesce_and_drain(
         }
         nervix_primitives::task::yield_now().await;
     }
+    control.engage(IngestorQuiesceCause::EntityHold);
+    control.release(IngestorQuiesceCause::EntityHold);
+    assert!(
+        matches!(
+            control.track_client_batch(&trackers),
+            Err(ClientSubmissionRefusal::Suspended)
+        ),
+        "releasing the intake hold reopened admission while the full hold remained engaged"
+    );
     drained.store(true, RecordOrdering::SeqCst);
 }
 
@@ -173,7 +181,8 @@ fn a_batch_racing_a_quiesce_is_counted_or_refused() {
 }
 
 /// A batch validated while a quiesce engages is either counted by the drain that follows, which
-/// then waits for it, or refused with its root resolved and nothing dispatched.
+/// then waits for it, or refused with its root resolved and nothing dispatched. Replacing the
+/// intake hold with an overlapping full hold keeps the same admission fence closed.
 #[test]
 fn shuttle_a_batch_racing_a_quiesce_is_either_counted_by_its_drain_or_refused_undispatched() {
     check_interleavings(a_batch_racing_a_quiesce_is_counted_or_refused);

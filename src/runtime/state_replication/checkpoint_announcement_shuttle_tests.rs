@@ -17,7 +17,10 @@ use nervix_models::ClusterNodeName;
 use nervix_primitives::sync::{
     StdArc,
     atomic::{AtomicU64, Ordering},
+    oneshot,
 };
+
+use super::CheckpointAnnouncementTasks;
 
 const MODEL_TASK_JOINS: &str =
     "Shuttle fails the whole execution when a model task panics, so no join observes one";
@@ -139,4 +142,42 @@ fn an_announcement_racing_the_replica_wait() {
 #[test]
 fn shuttle_an_announcement_racing_the_replica_wait_is_never_missed() {
     check_interleavings(an_announcement_racing_the_replica_wait);
+}
+
+/// Closing the production task owner cancels dispatch even when it never becomes ready. Explore
+/// both close racing the task's first poll and close after the pending dispatch has started.
+fn close_racing_checkpoint_dispatch() {
+    shuttle::future::block_on(async {
+        for await_started in [false, true] {
+            let tasks = CheckpointAnnouncementTasks::default();
+            let replication = CheckpointReplication::new();
+            let announcer = replication
+                .offer(1)
+                .assured("the checkpoint starts an announcer");
+            let (started, entered) = oneshot::channel();
+            let announcing = tasks.spawn(async move {
+                let _announcer = announcer;
+                let _ = started.send(());
+                std::future::pending::<()>().await;
+            });
+            if await_started {
+                entered
+                    .await
+                    .assured("the dispatch starts before its owner closes");
+            }
+            tasks.close();
+            assert!(tasks.is_closed());
+            tasks.wait().await;
+            announcing.await.assured(MODEL_TASK_JOINS);
+            assert!(
+                replication.offer(2).is_some(),
+                "cancelling a pending dispatch releases the exact announcer it retained"
+            );
+        }
+    });
+}
+
+#[test]
+fn shuttle_checkpoint_announcement_close_cancels_pending_dispatch() {
+    check_interleavings(close_racing_checkpoint_dispatch);
 }

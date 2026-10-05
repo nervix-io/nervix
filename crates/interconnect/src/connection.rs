@@ -30,6 +30,7 @@ use error_stack::Report;
 use futures_util::stream::FuturesUnordered;
 use h2::{Ping, PingPong, Reason, RecvStream, client, server};
 use http::{Method, Request, StatusCode, Version};
+use imbl::{GenericHashMap, shared_ptr::DefaultSharedPtr};
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_dns::ConnectionBudget;
 use nervix_execution::{
@@ -41,9 +42,10 @@ use nervix_models::{
 use nervix_primitives::{
     collections::{DashMap, dash_map::Entry},
     net::{TcpListener, TcpStream},
+    publication::{ArcSwap, ArcSwapOption},
     sync::{
         Arc, CancellationToken, Notify, OwnedSemaphorePermit, Semaphore, StdArc,
-        atomic::{AtomicU64, AtomicUsize, Ordering},
+        atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
         mpsc,
     },
     task::TaskTracker,
@@ -54,7 +56,7 @@ use tracing::{debug, warn};
 
 use self::{
     published_tls::{ActiveTls, PublishedTls},
-    stream_releases::{StreamLeaseAttempt, StreamRelease, StreamReleases},
+    stream_releases::StreamReleases,
 };
 use super::{
     ControlEnvelope, CoordinationIdentityAllocationError, Envelope, PeerTarget, PoolClass,
@@ -84,6 +86,7 @@ mod relay;
 mod stream;
 mod stream_releases;
 pub(crate) mod stream_slots;
+mod targets;
 
 use body::{read_body, read_body_into, send_body, send_response, send_static_error};
 use dial::{DialedStream, OutboundDial};
@@ -140,8 +143,34 @@ struct InboundPeer {
     class: PoolClass,
 }
 
+#[cfg_attr(
+    nervix_lint,
+    nervix::context(
+        bounded,
+        reason = "one concrete pool slot claims its own worker and publishes authenticated \
+                  connections",
+        key = "endpoint, pool class, slot and cancellation lifetime",
+        bound = "one worker claim per lifetime and one current connection publication"
+    )
+)]
 struct SlotControl {
+    key: ConnectionSlotKey,
     cancel: CancellationToken,
+    started: AtomicBool,
+    /// The slot worker publishes each authenticated connection here. A stream lease retains that
+    /// exact connection, including its cancellation and peer incarnation, after the load ends.
+    connection: ArcSwapOption<ClientConnection>,
+}
+
+impl SlotControl {
+    fn claim_worker(&self) -> bool {
+        if self.cancel.is_cancelled() || self.started.load(Ordering::Relaxed) {
+            return false;
+        }
+        self.started
+            .compare_exchange(false, true, Ordering::Relaxed, Ordering::Relaxed)
+            .is_ok()
+    }
 }
 
 #[cfg_attr(
@@ -174,10 +203,10 @@ impl Drop for CancelOnDrop {
     }
 }
 
-/// One registered outbound endpoint of a peer, with the key of every connection slot it can hold.
+/// One published outbound endpoint of a peer, retaining every connection slot it can hold.
 ///
-/// The keys are built once when the endpoint is registered, so leasing a stream finds its slots
-/// and connections by reference instead of assembling a key for every operation. The keys name the
+/// The slot handles are built once when the endpoint is registered. Leasing a stream reads their
+/// connection publications without acquiring a discovery map. Slot identities name the
 /// endpoint, not an address, so a new DNS answer for the same endpoint changes only where the next
 /// connection is dialled and never retires a connection that is already established.
 #[cfg_attr(
@@ -190,21 +219,22 @@ impl Drop for CancelOnDrop {
 struct OutboundTarget {
     endpoint: NodeEndpoint,
     dial: OutboundDial,
-    slot_keys: [Box<[ConnectionSlotKey]>; PoolClass::COUNT],
-    /// The wakeups of the operations waiting for a stream of this peer. The same peer dialled
-    /// another way keeps them, so a waiter of the earlier target still hears a later release.
-    stream_releases: Arc<StreamReleases>,
+    pool: Arc<OutboundPool>,
 }
+
+type OutboundTargets =
+    GenericHashMap<ClusterNodeName, Arc<OutboundTarget>, RandomState, DefaultSharedPtr>;
 
 impl OutboundTarget {
     fn new(node_id: &ClusterNodeName, endpoint: NodeEndpoint, dial: OutboundDial) -> Self {
-        let slot_keys =
-            PoolClass::ALL.map(|class| Self::class_slot_keys(node_id, &endpoint, class));
+        let slots = PoolClass::ALL.map(|class| Self::class_slots(node_id, &endpoint, class));
         Self {
             endpoint,
             dial,
-            slot_keys,
-            stream_releases: Arc::new(StreamReleases::new()),
+            pool: Arc::new(OutboundPool {
+                slots,
+                releases: StreamReleases::new(),
+            }),
         }
     }
 
@@ -213,32 +243,44 @@ impl OutboundTarget {
         Self {
             endpoint: self.endpoint.clone(),
             dial,
-            slot_keys: self.slot_keys.clone(),
-            stream_releases: Arc::clone(&self.stream_releases),
+            pool: Arc::clone(&self.pool),
         }
     }
 
-    fn class_slot_keys(
+    fn class_slots(
         node_id: &ClusterNodeName,
         endpoint: &NodeEndpoint,
         class: PoolClass,
-    ) -> Box<[ConnectionSlotKey]> {
+    ) -> Box<[Arc<SlotControl>]> {
         let mut keys = Vec::with_capacity(class.connections_per_peer());
         for slot in 0..class.connections_per_peer() {
-            keys.push(ConnectionSlotKey {
-                node_id: node_id.clone(),
-                endpoint: endpoint.clone(),
-                class,
-                slot,
-            });
+            keys.push(Arc::new(SlotControl {
+                key: ConnectionSlotKey {
+                    node_id: node_id.clone(),
+                    endpoint: endpoint.clone(),
+                    class,
+                    slot,
+                },
+                cancel: CancellationToken::new(),
+                started: AtomicBool::new(false),
+                connection: ArcSwapOption::empty(),
+            }));
         }
         keys.into_boxed_slice()
     }
 
-    /// The keys of this endpoint's connection slots in `class`, in slot order.
-    fn slot_keys(&self, class: PoolClass) -> &[ConnectionSlotKey] {
-        &self.slot_keys[class.index()]
+    /// The retained connection slots in `class`, in slot order.
+    fn slots(&self, class: PoolClass) -> &[Arc<SlotControl>] {
+        &self.pool.slots[class.index()]
     }
+}
+
+/// What every dial of one registered endpoint shares: its connection slots, and the wakeups of the
+/// operations waiting for one of their streams. The same endpoint dialled another way keeps both,
+/// so a waiter of the earlier target still hears a later release.
+struct OutboundPool {
+    slots: [Box<[Arc<SlotControl>]>; PoolClass::COUNT],
+    releases: StreamReleases,
 }
 
 struct ClientConnection {
@@ -271,7 +313,7 @@ fn increment(total: usize, addition: usize) -> usize {
     )
 )]
 pub(crate) struct StreamLease {
-    connection: Arc<ClientConnection>,
+    connection: StdArc<ClientConnection>,
     slot: Option<OwnedSemaphorePermit>,
     state: TransportState,
     released: StreamRelease,
@@ -281,12 +323,29 @@ impl Drop for StreamLease {
     fn drop(&mut self) {
         drop(self.slot.take());
         let StreamRelease {
-            releases,
+            pool,
             class,
             subquota,
         } = &self.released;
-        releases.of(*class, *subquota).notify_one();
+        pool.releases.of(*class, *subquota).notify_one();
     }
+}
+
+/// Where a stream lease reports its release: the pool it leased from, and its class and subquota.
+struct StreamRelease {
+    pool: Arc<OutboundPool>,
+    class: PoolClass,
+    subquota: RequestSubquota,
+}
+
+/// What one attempt to lease a stream found.
+enum StreamLeaseAttempt {
+    Leased(StreamLease),
+    /// Every stream the peer has in the class and subquota is leased; a release wakes a waiter
+    /// through the pool's releases.
+    Busy(Arc<OutboundPool>),
+    /// The peer has no target to lease from.
+    NoTarget,
 }
 
 struct RawRequest<'a> {
@@ -754,9 +813,8 @@ pub(crate) struct TransportStateInner {
     resolver: PeerResolver,
     tls: PublishedTls,
     tls_changed: Notify,
-    targets: DashMap<ClusterNodeName, Arc<OutboundTarget>, RandomState>,
-    slots: DashMap<ConnectionSlotKey, SlotControl, RandomState>,
-    connections: DashMap<ConnectionSlotKey, Arc<ClientConnection>, RandomState>,
+    targets: ArcSwap<OutboundTargets>,
+    connections: DashMap<ConnectionSlotKey, StdArc<ClientConnection>, RandomState>,
     peer_connections: DashMap<ClusterNodeName, PeerConnections, RandomState>,
     inbound_pool_connections: DashMap<InboundPoolKey, usize, RandomState>,
     peer_permits: StdArc<Semaphore>,
@@ -840,8 +898,7 @@ impl TransportState {
                 resolver,
                 tls: PublishedTls::new(tls),
                 tls_changed: Notify::new(),
-                targets: DashMap::default(),
-                slots: DashMap::default(),
+                targets: ArcSwap::from_pointee(OutboundTargets::default()),
                 connections: DashMap::default(),
                 peer_connections: DashMap::default(),
                 inbound_pool_connections: DashMap::default(),
@@ -1003,119 +1060,17 @@ impl TransportState {
     }
 
     pub(crate) fn is_connected_to(&self, node_id: &ClusterNodeName) -> bool {
-        let Some(target) = self
-            .targets
-            .get(node_id)
-            .map(|target| Arc::clone(target.value()))
-        else {
+        let Some(target) = self.targets.load().get(node_id).cloned() else {
             return false;
         };
         for class in PoolClass::PRECONNECTED {
-            for key in target.slot_keys(class) {
-                if !self.connections.contains_key(key) {
+            for slot in target.slots(class) {
+                if slot.cancel.is_cancelled() || slot.connection.load().is_none() {
                     return false;
                 }
             }
         }
         true
-    }
-
-    pub(crate) fn replace_outbound_targets(
-        &self,
-        endpoints: &BTreeMap<ClusterNodeName, NodeEndpoint>,
-    ) {
-        let accepted = endpoints
-            .iter()
-            .take(self.options.max_peers)
-            .map(|(node, endpoint)| (node.clone(), endpoint.clone()))
-            .collect::<BTreeMap<_, _>>();
-
-        // Retire in node order, not map order, so the cancellations a replacement causes happen in
-        // the same sequence in every process.
-        let removed = self
-            .targets
-            .iter()
-            .filter(|entry| accepted.get(entry.key()) != Some(&entry.value().endpoint))
-            .map(|entry| entry.key().clone())
-            .collect::<BTreeSet<_>>();
-        for node in removed {
-            self.targets.remove(&node);
-            self.cancel_slots_for_node(&node);
-        }
-
-        for (node, endpoint) in accepted {
-            let outbound = self.install_outbound_target(node, endpoint, OutboundDial::Advertised);
-            self.ensure_preconnected_slots(&outbound);
-        }
-    }
-
-    pub(crate) fn register_outbound_target(
-        &self,
-        node_id: ClusterNodeName,
-        endpoint: NodeEndpoint,
-    ) -> Result<(), Report<TransportError>> {
-        if !self.has_room_for(&node_id) {
-            return Err(Report::new(TransportError::PoolExhausted));
-        }
-        let outbound = self.install_outbound_target(node_id, endpoint, OutboundDial::Advertised);
-        self.ensure_preconnected_slots(&outbound);
-        Ok(())
-    }
-
-    /// Install the address a bootstrap exchange authenticated as `node_id`. An endpoint the node
-    /// already has keeps how it is dialled, so a later bootstrap never narrows an advertised
-    /// endpoint down to one of its addresses.
-    fn install_authenticated_target(
-        &self,
-        node_id: ClusterNodeName,
-        target: PeerTarget,
-    ) -> Arc<OutboundTarget> {
-        let endpoint = target.endpoint();
-        let current = self
-            .targets
-            .get(&node_id)
-            .map(|current| Arc::clone(current.value()));
-        if let Some(current) = current
-            && current.endpoint == endpoint
-        {
-            return current;
-        }
-        self.install_outbound_target(node_id, endpoint, OutboundDial::Authenticated(target.addr))
-    }
-
-    /// Whether `node_id` fits the topology limit: a node that already has a target always does.
-    fn has_room_for(&self, node_id: &ClusterNodeName) -> bool {
-        self.targets.contains_key(node_id) || self.targets.len() < self.options.max_peers
-    }
-
-    /// Make `endpoint` the endpoint `node_id` is reached at, dialled through `dial`, and return its
-    /// registration. A different endpoint replaces the registered one and cancels the slots that
-    /// belonged to it. The same endpoint keeps its slots and connections, and only a different
-    /// `dial` changes where the next connection goes.
-    fn install_outbound_target(
-        &self,
-        node_id: ClusterNodeName,
-        endpoint: NodeEndpoint,
-        dial: OutboundDial,
-    ) -> Arc<OutboundTarget> {
-        let current = self
-            .targets
-            .get(&node_id)
-            .map(|current| Arc::clone(current.value()));
-        if let Some(current) = current
-            && current.endpoint == endpoint
-        {
-            if current.dial == dial {
-                return current;
-            }
-            let redialled = Arc::new(current.with_dial(dial));
-            self.targets.insert(node_id, Arc::clone(&redialled));
-            return redialled;
-        }
-        self.cancel_slots_for_node(&node_id);
-        let outbound = Arc::new(OutboundTarget::new(&node_id, endpoint, dial));
-        self.targets.insert(node_id, Arc::clone(&outbound));
-        outbound
     }
 
     pub(crate) async fn bootstrap_target(
@@ -1156,10 +1111,7 @@ impl TransportState {
                 ))));
             }
             let node_id = identity.node_id;
-            if !self.has_room_for(&node_id) {
-                return Err(Report::new(TransportError::PoolExhausted));
-            }
-            let outbound = self.install_authenticated_target(node_id.clone(), target);
+            let outbound = self.install_authenticated_target(node_id.clone(), target)?;
             self.ensure_preconnected_slots(&outbound);
             Ok::<_, Report<TransportError>>(node_id)
         };
@@ -1175,13 +1127,13 @@ impl TransportState {
     pub(crate) fn retire_departed_connections(&self, live_nodes: &BTreeSet<ClusterNodeName>) {
         let departed = self
             .targets
+            .load()
             .iter()
-            .filter(|target| !live_nodes.contains(target.key()))
-            .map(|target| target.key().clone())
+            .filter(|target| !live_nodes.contains(target.0))
+            .map(|target| target.0.clone())
             .collect::<BTreeSet<_>>();
         for node in departed {
-            self.targets.remove(&node);
-            self.cancel_slots_for_node(&node);
+            self.remove_target(&node);
         }
     }
 
@@ -1194,8 +1146,8 @@ impl TransportState {
         )
     )]
     fn ensure_class_slots(&self, target: &OutboundTarget, class: PoolClass) {
-        for key in target.slot_keys(class) {
-            self.ensure_slot(key);
+        for slot in target.slots(class) {
+            self.ensure_slot(slot);
         }
     }
 
@@ -1205,82 +1157,54 @@ impl TransportState {
         }
     }
 
+    /// Claims the one worker belonging to this slot's lifetime. Established requests only read
+    /// the claimed bit; replacement constructs different slots and never resets this bit.
     #[cfg_attr(
         nervix_lint,
         nervix::context(
-            recurring,
-            reason = "this owner is reached by recurring record, frame, acknowledgement or \
-                      state-poll work"
+            bounded,
+            reason = "one retained pool slot admits its worker once per endpoint and TLS \
+                      generation",
+            key = "peer endpoint, pool class, slot and cancellation lifetime",
+            bound = "one atomic claim and at most one supervised worker per retained slot"
         )
     )]
-    fn ensure_slot(&self, key: &ConnectionSlotKey) {
-        if self.admission_closed.is_cancelled() {
+    fn ensure_slot(&self, slot: &Arc<SlotControl>) {
+        if self.admission_closed.is_cancelled() || !slot.claim_worker() {
             return;
         }
-        // Every lease passes through here, and in the steady state its slot is already running. A
-        // shared lookup confirms that, so only a missing slot takes the exclusive entry and builds
-        // an owned key.
-        if nervix_primitives::expect_lint!(
-            nervix::sync_acquisition,
-            "Typed Ratchet 03 https://app.clickup.com/t/86bc9eqjv: retain the selected connection \
-             slot instead of reaching the shared registry per request",
-            self.slots.contains_key(key)
-        ) {
-            return;
-        }
-        match nervix_primitives::expect_lint!(
-            nervix::sync_acquisition,
-            "Typed Ratchet 03 https://app.clickup.com/t/86bc9eqjv: retain the selected connection \
-             slot instead of reaching the shared registry per request",
-            self.slots.entry(key.clone())
-        ) {
-            Entry::Occupied(_) => {}
-            Entry::Vacant(entry) => {
-                let cancel = CancellationToken::new();
-                entry.insert(SlotControl {
-                    cancel: cancel.clone(),
-                });
-                let state = self.clone();
-                let key = key.clone();
-                self.tasks.spawn(async move {
-                    nervix_primitives::expect_lint!(
-                        nervix::lifecycle_call,
-                        "Typed Ratchet 03 (86bc9eqjv): a missing retained transport slot installs \
-                         its one supervised connection task",
-                        state.run_slot(key, cancel)
-                    )
-                    .await;
-                });
-            }
-        }
+        let state = self.clone();
+        let slot = slot.clone();
+        #[cfg_attr(
+            nervix_lint,
+            nervix::context(
+                lifecycle,
+                reason = "only the successful first-use claim constructs this retained slot's \
+                          reconnect worker"
+            )
+        )]
+        #[cfg_attr(
+            nervix_lint,
+            expect(
+                nervix::lifecycle_call,
+                reason = "constructing this reconnect task is a first-use installation: the \
+                          retained slot's atomic claim has one winner and is never reset"
+            )
+        )]
+        let worker = async move {
+            state.run_slot(slot).await;
+        };
+        self.tasks.spawn(worker);
     }
 
-    fn cancel_slots_for_node(&self, node_id: &ClusterNodeName) {
-        let slots = self
-            .slots
-            .iter()
-            .filter(|slot| &slot.key().node_id == node_id)
-            .map(|slot| (slot.key().clone(), slot.cancel.clone()))
-            .collect::<BTreeMap<_, _>>();
-        for (key, cancel) in slots {
-            self.retire_slot(&key, &cancel);
-        }
-    }
-
-    fn retire_slot(&self, key: &ConnectionSlotKey, cancel: &CancellationToken) {
-        cancel.cancel();
-        let connection = self
-            .connections
-            .remove_if(key, |_, connection| connection.retiring == *cancel);
+    fn retire_slot(&self, slot: &SlotControl) {
+        slot.cancel.cancel();
+        slot.connection.store(None);
+        let connection = self.connections.remove_if(&slot.key, |_, connection| {
+            connection.retiring == slot.cancel
+        });
         if connection.is_some() {
-            self.decrement_peer(&key.node_id);
-        }
-        if self
-            .slots
-            .get(key)
-            .is_some_and(|slot| slot.cancel == *cancel)
-        {
-            self.slots.remove(key);
+            self.decrement_peer(&slot.key.node_id);
         }
         self.connection_changed.notify_waiters();
     }
@@ -1293,7 +1217,9 @@ impl TransportState {
                       an explicit lifetime boundary"
         )
     )]
-    async fn run_slot(self, key: ConnectionSlotKey, slot_cancel: CancellationToken) {
+    async fn run_slot(self, slot: Arc<SlotControl>) {
+        let key = slot.key.clone();
+        let slot_cancel = slot.cancel.clone();
         let mut backoff = self.options.reconnect_backoff;
         loop {
             nervix_primitives::task::consume_budget().await;
@@ -1315,7 +1241,7 @@ impl TransportState {
             match connected {
                 Ok(connection) => {
                     backoff = self.options.reconnect_backoff;
-                    match self.register_connection(connection.clone()) {
+                    match self.register_connection(&slot, connection.clone()) {
                         Ok(()) => {
                             self.observations.connection_established(key.class);
                             nervix_primitives::select! {
@@ -1325,6 +1251,7 @@ impl TransportState {
                             }
                             self.observations
                                 .connection_failed(key.class, ConnectionFailureReason::Closed);
+                            slot.connection.store(None);
                             self.unregister_connection(&key, &connection);
                             self.drain_outbound_connection(&connection).await;
                             connection.cancel.cancel();
@@ -1368,7 +1295,7 @@ impl TransportState {
                 .unwrap_or(self.options.max_reconnect_backoff)
                 .min(self.options.max_reconnect_backoff);
         }
-        self.unregister_slot(&key, &slot_cancel);
+        slot.connection.store(None);
     }
 
     /// End a blackholed HTTP/2 connection without waiting for the kernel's TCP retransmission
@@ -1438,39 +1365,34 @@ impl TransportState {
         })
     }
 
-    fn unregister_slot(&self, key: &ConnectionSlotKey, cancel: &CancellationToken) {
-        let remove = self
-            .slots
-            .get(key)
-            .is_some_and(|slot| slot.cancel == *cancel);
-        if remove {
-            self.slots.remove(key);
-        }
-    }
-
     fn register_connection(
         &self,
-        connection: Arc<ClientConnection>,
+        slot: &SlotControl,
+        connection: StdArc<ClientConnection>,
     ) -> Result<(), Report<TransportError>> {
         let key = connection.key.clone();
         let Entry::Vacant(entry) = self.connections.entry(key.clone()) else {
             return Err(Report::new(TransportError::PoolExhausted));
         };
         self.increment_peer(&key.node_id)?;
-        entry.insert(connection);
+        entry.insert(connection.clone());
+        slot.connection.store(Some(connection));
         self.connection_changed.notify_waiters();
         Ok(())
     }
 
-    fn unregister_connection(&self, key: &ConnectionSlotKey, connection: &Arc<ClientConnection>) {
-        let remove = self
+    fn unregister_connection(
+        &self,
+        key: &ConnectionSlotKey,
+        connection: &StdArc<ClientConnection>,
+    ) {
+        if self
             .connections
-            .get(key)
-            .is_some_and(|current| Arc::ptr_eq(current.value(), connection));
-        if !remove {
+            .remove_if(key, |_, current| StdArc::ptr_eq(current, connection))
+            .is_none()
+        {
             return;
         }
-        self.connections.remove(key);
         self.decrement_peer(&key.node_id);
         self.connection_changed.notify_waiters();
     }
@@ -1491,7 +1413,7 @@ impl TransportState {
         &self,
         key: &ConnectionSlotKey,
         slot_cancel: &CancellationToken,
-    ) -> Result<Arc<ClientConnection>, Report<TransportError>> {
+    ) -> Result<StdArc<ClientConnection>, Report<TransportError>> {
         let budget = ConnectionBudget::start(self.options.connection_setup_timeout);
         let setup = async {
             let DialedStream {
@@ -1543,7 +1465,7 @@ impl TransportState {
                 driver_closed.cancel();
             });
             let driver_setup_guard = CancelOnDrop::new(cancel.clone());
-            let connection = Arc::new(ClientConnection {
+            let connection = StdArc::new(ClientConnection {
                 key: key.clone(),
                 peer_addr,
                 request_host: key.endpoint.url_host(),
@@ -1596,7 +1518,7 @@ impl TransportState {
                     "wire fingerprint or addressed node identity differs".to_string(),
                 )));
             }
-            let connection = Arc::new(ClientConnection {
+            let connection = StdArc::new(ClientConnection {
                 key: connection.key.clone(),
                 peer_addr: connection.peer_addr,
                 request_host: connection.request_host.clone(),
@@ -1644,9 +1566,9 @@ impl TransportState {
             if self.admission_closed.is_cancelled() {
                 return Err(Report::new(TransportError::ShuttingDown));
             }
-            let releases = match self.try_lease(node_id, class, subquota) {
+            let busy_pool = match self.try_lease(node_id, class, subquota) {
                 StreamLeaseAttempt::Leased(lease) => return Ok(lease),
-                StreamLeaseAttempt::Busy(releases) => Some(releases),
+                StreamLeaseAttempt::Busy(pool) => Some(pool),
                 StreamLeaseAttempt::NoTarget => None,
             };
             // Only an operation that found no free stream registers to wait: for a stream of its
@@ -1657,8 +1579,8 @@ impl TransportState {
             tokio::pin!(changed);
             changed.as_mut().enable();
             let released = async {
-                match &releases {
-                    Some(releases) => releases.of(class, subquota).notified().await,
+                match &busy_pool {
+                    Some(pool) => pool.releases.of(class, subquota).notified().await,
                     None => std::future::pending::<()>().await,
                 }
             };
@@ -1687,58 +1609,31 @@ impl TransportState {
         }
     }
 
-    /// Lease a free stream on an established connection of `class` to `node_id`, starting any of
-    /// the peer's slots in that class that are not running. On an established pool every step reads
-    /// shared state, so the lease takes no exclusive lock.
+    /// Select from the peer's atomically published slot handles. The publication changes only
+    /// with topology or credentials; connection workers replace their own connection publication.
     #[cfg_attr(
         nervix_lint,
         nervix::context(
             recurring,
-            reason = "this owner is reached by recurring record, frame, acknowledgement or \
-                      state-poll work"
+            reason = "stream requests select a retained peer pool and lease one bounded stream"
         )
     )]
-    #[allow(deprecated)] // until try_update is stabilized
     fn try_lease(
         &self,
         node_id: &ClusterNodeName,
         class: PoolClass,
         subquota: RequestSubquota,
     ) -> StreamLeaseAttempt {
-        let Some(target) = nervix_primitives::expect_lint!(
-            nervix::sync_acquisition,
-            "Typed Ratchet 03 https://app.clickup.com/t/86bc9eqjv: retain the selected connection \
-             slot instead of reaching the shared registry per request",
-            self.targets.get(node_id)
-        )
-        .map(|target| Arc::clone(target.value())) else {
+        let targets = self.targets.load();
+        let Some(target) = targets.get(node_id) else {
             return StreamLeaseAttempt::NoTarget;
         };
-        nervix_primitives::expect_lint!(
-            nervix::lifecycle_call,
-            "Typed Ratchet 03 (86bc9eqjv): retain the selected transport class slots before \
-             recurring lease attempts",
-            self.ensure_class_slots(&target, class)
-        );
-
-        let slot_keys = target.slot_keys(class);
-        #[allow(deprecated)] // until try_update is stabilized
-        let start = self
-            .next_connection
-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
-                Some(current.checked_add(1).unwrap_or_default())
-            })
-            .assured("the round-robin cursor update always returns a value")
-            % slot_keys.len();
-        let (before_start, from_start) = slot_keys.split_at(start);
-        for key in from_start.iter().chain(before_start) {
-            let Some(connection) = nervix_primitives::expect_lint!(
-                nervix::sync_acquisition,
-                "Typed Ratchet 03 https://app.clickup.com/t/86bc9eqjv: retain the selected \
-                 connection slot instead of reaching the shared registry per request",
-                self.connections.get(key)
-            )
-            .map(|item| item.clone()) else {
+        let slots = target.slots(class);
+        let start = self.next_connection.fetch_add(1, Ordering::Relaxed) % slots.len();
+        let (before_start, from_start) = slots.split_at(start);
+        for slot in from_start.iter().chain(before_start) {
+            self.ensure_slot(slot);
+            let Some(connection) = slot.connection.load_full() else {
                 continue;
             };
             let Some(permit) = connection.stream_slots.try_lease(subquota) else {
@@ -1752,13 +1647,13 @@ impl TransportState {
                 slot: Some(permit),
                 state: self.clone(),
                 released: StreamRelease {
-                    releases: Arc::clone(&target.stream_releases),
+                    pool: Arc::clone(&target.pool),
                     class,
                     subquota,
                 },
             });
         }
-        StreamLeaseAttempt::Busy(Arc::clone(&target.stream_releases))
+        StreamLeaseAttempt::Busy(Arc::clone(&target.pool))
     }
 
     #[cfg_attr(
@@ -1780,7 +1675,7 @@ impl TransportState {
         // A terminal acknowledgement resolves the reserved admission it names. The resolved record
         // is retired once the acknowledgement is delivered, without looking the admission up again.
         let completed_admission = if let Envelope::Ack(ack) = &envelope {
-            if let RemoteAckOutcome::Alive = &ack.outcome {
+            if ack.outcome.is_progress() {
                 None
             } else {
                 let key = RelayAdmissionKey {
@@ -1810,7 +1705,7 @@ impl TransportState {
             let class = envelope.pool_class();
             let subquota = match &envelope {
                 Envelope::Ack(ack) => {
-                    if ack.outcome == RemoteAckOutcome::Alive {
+                    if ack.outcome.is_progress() {
                         RequestSubquota::Progress
                     } else {
                         RequestSubquota::Terminal
@@ -2405,7 +2300,7 @@ impl TransportState {
             )
             .await?;
             let (ack, reservation) = decoded.into_parts();
-            let terminal_admission = if ack.outcome == RemoteAckOutcome::Alive {
+            let terminal_admission = if ack.outcome.is_progress() {
                 None
             } else {
                 Some(RelayAdmissionKey {
@@ -2413,7 +2308,7 @@ impl TransportState {
                     registration: ack.registration.clone(),
                 })
             };
-            if ack.outcome == RemoteAckOutcome::Alive {
+            if ack.outcome.is_progress() {
                 self.deliver_incoming(
                     peer.addr,
                     peer.node_id,
@@ -2702,25 +2597,30 @@ impl TransportState {
         self.tls.replace(tls);
         self.cancel_all_slots();
         self.tls_changed.notify_waiters();
-        let targets = self
-            .targets
-            .iter()
-            .map(|entry| (entry.key().clone(), Arc::clone(entry.value())))
-            .collect::<BTreeMap<_, _>>();
-        for target in targets.into_values() {
-            self.ensure_preconnected_slots(&target);
+        self.targets.rcu(|current| {
+            let mut next = (**current).clone();
+            for (node, target) in current.iter() {
+                self.retire_target(target);
+                next.insert(
+                    node.clone(),
+                    Arc::new(OutboundTarget::new(
+                        node,
+                        target.endpoint.clone(),
+                        target.dial,
+                    )),
+                );
+            }
+            next
+        });
+        for target in self.targets.load().values() {
+            self.ensure_preconnected_slots(target);
         }
         Ok(())
     }
 
     fn cancel_all_slots(&self) {
-        let slots = self
-            .slots
-            .iter()
-            .map(|entry| (entry.key().clone(), entry.cancel.clone()))
-            .collect::<BTreeMap<_, _>>();
-        for (key, cancel) in slots {
-            self.retire_slot(&key, &cancel);
+        for target in self.targets.load().values() {
+            self.retire_target(target);
         }
     }
 
@@ -2981,3 +2881,7 @@ impl StreamLease {
         self.connection.request_raw(state, request).await
     }
 }
+
+#[cfg(test)]
+#[path = "connection/retained_slots_tests.rs"]
+mod retained_slots_tests;

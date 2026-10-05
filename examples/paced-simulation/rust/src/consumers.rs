@@ -2,8 +2,8 @@
 //! constructed readings, and the consumer of rejection notices.
 //!
 //! - **Owns.** Opening a consumer, reading its deliveries, applying each to the effect store before
-//!   acknowledging it, joining late and leaving early, opening a new consumer when the domain's
-//!   START generation changes, and closing.
+//!   acknowledging it, joining late and leaving early, accepting changed endpoint contracts,
+//!   following new START generations, and closing.
 //! - **Depends on.** The Rust client's emitter consumers, decoding the delivered batches, and the
 //!   effect store.
 //! - **Must not know.** Producers or the clock.
@@ -18,10 +18,10 @@ use std::{
     time::Duration,
 };
 
-use meticulous::OptionExt as _;
+use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_client_core::{
-    Client, ClientConsumerLimits, ClientError, ConsumerConnection, ConsumerReopenReason,
-    DomainName, EmitterConsumer, EmitterDelivery, EmitterName, EmitterSettlement,
+    Client, ClientConsumerLimits, ClientError, ConsumerConnection, DomainName, EmitterConsumer,
+    EmitterDelivery, EmitterName, EmitterSettlement,
 };
 use nervix_primitives::{
     sync::{Arc, CancellationToken, Mutex, watch},
@@ -33,6 +33,7 @@ use crate::{
     effects::{Applied, EffectStore},
     readings::{self, observed_fields, rejected_fields},
     refusal::Refusal,
+    reopen::Reopen,
     report::{self, Report as Counters},
 };
 
@@ -51,21 +52,6 @@ fn consumer_limits() -> ClientConsumerLimits {
     ClientConsumerLimits {
         batches: NonZeroU32::new(4).assured("four batches is not zero"),
         bytes: NonZeroU64::new(1024 * 1024).assured("a mebibyte is not zero"),
-    }
-}
-
-/// The text of a consumer's reason to need a new open.
-pub(crate) fn reopen_reason(reason: &ConsumerReopenReason) -> String {
-    match reason {
-        ConsumerReopenReason::DomainStopped => "domain_stopped".to_string(),
-        ConsumerReopenReason::EndpointRemoved => "endpoint_removed".to_string(),
-        ConsumerReopenReason::SchemaChanged => "schema_changed".to_string(),
-        ConsumerReopenReason::ContractChanged => "contract_changed".to_string(),
-        ConsumerReopenReason::GenerationChanged => "generation_changed".to_string(),
-        ConsumerReopenReason::ProtocolViolated => "protocol_violated".to_string(),
-        ConsumerReopenReason::Refused(refusal) => {
-            format!("refused ({})", Refusal::from(*refusal).as_str())
-        }
     }
 }
 
@@ -170,8 +156,37 @@ pub(crate) struct Shared {
     /// The START generation the simulation runs in; a consumer whose generation ended opens a new
     /// consumer once the simulation moved on to a later one.
     pub(crate) generations: watch::Receiver<u64>,
+    /// A refused replacement ends planning and is reported as a configuration error.
+    pub(crate) refused: watch::Sender<Option<error_stack::Report<ConsumerError>>>,
+    pub(crate) planning: CancellationToken,
     /// Ends every consumer once the simulation finished.
     pub(crate) stop: CancellationToken,
+}
+
+impl Shared {
+    pub(crate) fn fail(&self, failure: error_stack::Report<ConsumerError>) {
+        self.refused.send_replace(Some(failure));
+        self.planning.cancel();
+    }
+
+    /// A refusal also interrupts outcome and close waits after planning has finished.
+    pub(crate) async fn failure(&self) -> error_stack::Report<ConsumerError> {
+        let mut refused = self.refused.subscribe();
+        loop {
+            nervix_primitives::task::consume_budget().await;
+            let present = refused.borrow_and_update().is_some();
+            if present {
+                return self
+                    .refused
+                    .send_replace(None)
+                    .assured("only the run takes the consumer failure it observed");
+            }
+            refused
+                .changed()
+                .await
+                .assured("the shared consumer state holds the failure sender");
+        }
+    }
 }
 
 /// One consumer loop: its emitter, how long the application works on a delivery, and when it
@@ -220,13 +235,14 @@ impl ConsumerLoop {
                     ));
                 }
                 ClientError::ConsumerReopenRequired(reason) => {
+                    let reason = Reopen::from(reason);
                     report::line(format!(
                         "CONSUMER reopen_required consumer={} emitter={} reason={}",
                         self.name,
                         self.emitter,
-                        reopen_reason(reason)
+                        reason.text()
                     ));
-                    let Some(reopened) = self.reopen(generation).await else {
+                    let Some(reopened) = self.reopen(generation, reason).await else {
                         break;
                     };
                     consumer = reopened;
@@ -258,9 +274,9 @@ impl ConsumerLoop {
         self.close(&consumer).await;
     }
 
-    /// Opens a new consumer under the generation the simulation moved on to, once it has.
-    async fn reopen(&mut self, generation: u64) -> Option<EmitterConsumer> {
-        loop {
+    /// Accepts a changed contract now; a lifecycle ending waits for the simulation's next START.
+    async fn reopen(&mut self, generation: u64, reason: Reopen) -> Option<EmitterConsumer> {
+        while reason.waits_for_generation() {
             nervix_primitives::task::consume_budget().await;
             let current = *self.shared.generations.borrow_and_update();
             if current > generation {
@@ -275,14 +291,16 @@ impl ConsumerLoop {
                 () = self.shared.stop.cancelled() => return None,
             }
         }
-        match open(
+        let opened = nervix_primitives::select! {
+            opened = open(
             &self.shared.client,
             &self.shared.domain,
             &self.emitter,
             self.output,
-        )
-        .await
-        {
+            ) => opened,
+            () = self.shared.stop.cancelled() => return None,
+        };
+        match opened {
             Ok(consumer) => {
                 let description = consumer.description();
                 report::line(format!(
@@ -292,7 +310,7 @@ impl ConsumerLoop {
                 Some(consumer)
             }
             Err(failure) => {
-                report::error(failure.current_context().to_string());
+                self.shared.fail(failure);
                 None
             }
         }

@@ -150,9 +150,10 @@ pub(super) struct RemoteDispatchRegistry {
 /// delivery went to.
 ///
 /// Its atomics change only while it is in the registry, through a borrowed lookup under the
-/// shard's shared lock. The sweep fails it only through an exclusive removal that rechecks the
-/// count, so the shard lock, not the atomics' ordering, orders that recheck after every report
-/// that reached the acknowledgement first.
+/// shard's shared lock. Parked progress changes under the shard's exclusive lock. The sweep fails
+/// it only through an exclusive removal that rechecks the count, so the shard lock, not the
+/// atomics' ordering, orders that recheck after every report that reached the acknowledgement
+/// first.
 struct PendingRemoteAck {
     /// The node the delivery went to, which reports and resolves the acknowledgement.
     receiver: ClusterNodeName,
@@ -163,6 +164,10 @@ struct PendingRemoteAck {
     /// Sweeps that found no report since the receiver last reported the acknowledgement, or since
     /// its delivery was admitted.
     silent_sweeps: AtomicU64,
+    /// A parked share remains unresolved while it releases the upstream ownership handoff.
+    required_wait: Option<AckRequiredWaitGuard>,
+    /// Delayed progress cannot reverse a newer park or resume.
+    progress_sequence: Option<u64>,
 }
 
 impl PendingRemoteAck {
@@ -172,6 +177,8 @@ impl PendingRemoteAck {
             acks,
             admitted: AtomicBool::new(false),
             silent_sweeps: AtomicU64::new(0),
+            required_wait: None,
+            progress_sequence: None,
         }
     }
 
@@ -183,6 +190,20 @@ impl PendingRemoteAck {
     fn report(&self) {
         self.silent_sweeps.store(0, Ordering::Relaxed);
         self.acks.ack_alive();
+    }
+
+    fn progress(&mut self, sequence: u64, parked: bool) {
+        if self.progress_sequence.is_some_and(|seen| sequence <= seen) {
+            return;
+        }
+        self.progress_sequence = Some(sequence);
+        if parked {
+            if self.required_wait.is_none() {
+                self.required_wait = Some(AckRequiredWaitGuard::new([&self.acks]));
+            }
+        } else {
+            self.required_wait = None;
+        }
     }
 
     /// Counts one sweep that found no report, and answers whether the receiver has now been silent
@@ -270,6 +291,23 @@ impl RemoteDispatchRegistry {
         ) else {
             return false;
         };
+        pending.report();
+        true
+    }
+
+    /// Applies a receiver's parked or resumed status in sequence order, while still counting even
+    /// a stale status as a liveness report for the silence timeout.
+    pub(super) fn progress_ack(&self, ack_id: u64, sequence: u64, parked: bool) -> bool {
+        let Some(mut pending) = nervix_primitives::expect_lint!(
+            nervix::sync_acquisition,
+            "Typed Ratchet 05 https://app.clickup.com/t/86bc9erep: retain payload attempts and \
+             acknowledgement owners through terminal delivery, including ordered parked and \
+             resumed progress",
+            self.pending_acks.get_mut(&ack_id)
+        ) else {
+            return false;
+        };
+        pending.progress(sequence, parked);
         pending.report();
         true
     }
@@ -375,6 +413,11 @@ impl RemoteDispatchRegistry {
             }
         }
     }
+}
+
+fn remote_ack_progress(completion: &AckCompletion) -> RemoteAckOutcome {
+    let (sequence, parked) = completion.remote_progress();
+    RemoteAckOutcome::Progress { sequence, parked }
 }
 
 /// How this node reaches the rest of its cluster. The node attaches it once, after joining the
@@ -770,6 +813,12 @@ impl RemoteDispatcher {
     ) {
         let local_node_id = self.local_node_id();
         let interest_index = self.cluster.subscription_interest_index();
+        let channels = services.subscription_channels(
+            &batch.key,
+            StdArc::clone(&interest_index),
+            domain,
+            relay,
+        );
         let Some(interested_nodes) = interest_index.nodes(domain.as_str(), relay.as_str()) else {
             return;
         };
@@ -783,13 +832,12 @@ impl RemoteDispatcher {
             if node_id == local_node_id || excluded_nodes.contains(node_id) {
                 continue;
             }
-            let outbound_slot = services.outbound_slot(
-                node_id,
-                relay,
-                RelayPayloadKind::SubscriptionFanout,
-                &batch.key,
-            );
-            let _slot = outbound_slot.gate.lock().await;
+            let Some(outbound_slot) = channels.slot(node_id, relay) else {
+                continue;
+            };
+            let Some(_slot) = outbound_slot.lock_for_delivery().await else {
+                continue;
+            };
             let batch_ipc = match encoded_body.clone() {
                 Some(bytes) => bytes,
                 None => match batch.batch.encode_arrow_ipc(self.executor()).await {
@@ -1408,7 +1456,7 @@ impl Runtime {
             return;
         }
         let ack_id = registration.ack_id;
-        if let RemoteAckOutcome::Alive = &outcome {
+        if outcome.is_progress() {
             if let Some(admission) = nervix_primitives::expect_lint!(
                 nervix::sync_acquisition,
                 "Typed Ratchet 05 https://app.clickup.com/t/86bc9erep: retain payload attempts \
@@ -1444,11 +1492,19 @@ impl Runtime {
             }
             // A report can follow the acknowledgement's failure: the receiver keeps reporting a
             // record whose reports this node stopped hearing for the whole silence bound.
-            if !self.inner.remote_dispatch.report_ack(ack_id) {
-                debug!(ack_id, "received remote ack alive for unknown ack id");
+            let reported = match outcome {
+                RemoteAckOutcome::Alive => self.inner.remote_dispatch.report_ack(ack_id),
+                RemoteAckOutcome::Progress { sequence, parked } => self
+                    .inner
+                    .remote_dispatch
+                    .progress_ack(ack_id, sequence, parked),
+                RemoteAckOutcome::Ack | RemoteAckOutcome::NoAck(_) => unreachable!(),
+            };
+            if !reported {
+                debug!(ack_id, "received remote ack progress for unknown ack id");
                 return;
             }
-            trace!(ack_id, "received remote ack alive");
+            trace!(ack_id, "received remote ack progress");
             return;
         }
 
@@ -1464,7 +1520,7 @@ impl Runtime {
             let terminal_update = match outcome {
                 RemoteAckOutcome::Ack => RelayAdmissionUpdate::Admitted,
                 RemoteAckOutcome::NoAck(error) => RelayAdmissionUpdate::Rejected(error),
-                RemoteAckOutcome::Alive => return,
+                RemoteAckOutcome::Alive | RemoteAckOutcome::Progress { .. } => return,
             };
             admission.send_if_modified(|update| {
                 if let RelayAdmissionUpdate::Admitted | RelayAdmissionUpdate::Rejected(_) = update {
@@ -1479,7 +1535,7 @@ impl Runtime {
         let outcome = match outcome {
             RemoteAckOutcome::Ack => AckOutcome::Ack,
             RemoteAckOutcome::NoAck(error) => AckOutcome::NoAck(error),
-            RemoteAckOutcome::Alive => return,
+            RemoteAckOutcome::Alive | RemoteAckOutcome::Progress { .. } => return,
         };
         trace!(ack_id, outcome = ?outcome, "resolving remote ack");
         // An outcome can follow the acknowledgement's failure, when the sweep failed it after the
@@ -1516,7 +1572,7 @@ impl Runtime {
                         if let Err(error) = dispatcher
                             .dispatch(
                                 ack.registrar.node_id(),
-                                Envelope::Ack(ack.resolution(RemoteAckOutcome::Alive)),
+                                Envelope::Ack(ack.resolution(remote_ack_progress(&completion))),
                             )
                             .await
                         {
@@ -1541,7 +1597,7 @@ impl Runtime {
                                 if let Err(error) = dispatcher
                                     .dispatch(
                                         ack.registrar.node_id(),
-                                        Envelope::Ack(ack.resolution(RemoteAckOutcome::Alive)),
+                                        Envelope::Ack(ack.resolution(remote_ack_progress(&completion))),
                                     )
                                     .await
                                 {
@@ -1814,7 +1870,7 @@ mod tests {
         assert!(runtime.inner.remote_ack_watcher_tasks.is_empty());
     }
 
-    #[nervix_primitives::test]
+    #[nervix_primitives::test(start_paused = true)]
     async fn ack_alive_resets_ingestor_ack_timeout() {
         let (shutdown_tx, mut shutdown_rx) = watch::channel(false);
         let (acks, completion) = AckSet::root();
@@ -1878,6 +1934,7 @@ mod tests {
     #[nervix_primitives::test]
     async fn remote_ack_alive_packet_resets_ingestor_ack_timeout() {
         let (runtime, dispatcher) = joined_runtime().await;
+        nervix_primitives::time::pause();
         let (shutdown_tx, mut shutdown_rx) = watch::channel(false);
         let (acks, completion) = AckSet::root();
         let registration = dispatcher.register_pending_ack(&receiving_node(), acks);
@@ -1908,8 +1965,44 @@ mod tests {
     }
 
     #[nervix_primitives::test]
+    async fn remote_parked_progress_releases_and_restores_upstream_handoff_ownership() {
+        let (runtime, dispatcher) = joined_runtime().await;
+        let tracker = Arc::new(AckRootTracker::default());
+        let (acks, completion) = AckSet::tracked_root(tracker.clone());
+        let registration = dispatcher.register_pending_ack(&receiving_node(), acks);
+        dispatcher.registry.admit_ack(registration.ack_id);
+        assert_eq!(tracker.outstanding_for_ownership_handoff(), 1);
+
+        runtime.handle_remote_ack_resolution(registration.resolution(RemoteAckOutcome::Progress {
+            sequence: 1,
+            parked: true,
+        }));
+        assert_eq!(tracker.outstanding_for_ownership_handoff(), 0);
+        assert!(completion.remote_progress().1);
+
+        // A delayed status cannot undo the newer park. An actual resume can.
+        runtime.handle_remote_ack_resolution(registration.resolution(RemoteAckOutcome::Progress {
+            sequence: 0,
+            parked: false,
+        }));
+        assert_eq!(tracker.outstanding_for_ownership_handoff(), 0);
+        runtime.handle_remote_ack_resolution(registration.resolution(RemoteAckOutcome::Progress {
+            sequence: 2,
+            parked: false,
+        }));
+        assert_eq!(tracker.outstanding_for_ownership_handoff(), 1);
+        assert!(!completion.remote_progress().1);
+
+        runtime.handle_remote_ack_resolution(registration.resolution(RemoteAckOutcome::Ack));
+        assert_eq!(completion.wait().await, AckOutcome::Ack);
+        assert_eq!(tracker.outstanding_for_ownership_handoff(), 0);
+        assert!(!runtime.inner.remote_dispatch.holds_ack(registration.ack_id));
+    }
+
+    #[nervix_primitives::test]
     async fn remote_relay_admission_alive_resets_dispatch_timeout() {
         let (runtime, dispatcher) = joined_runtime().await;
+        nervix_primitives::time::pause();
         let (registration, admission_rx) = dispatcher.register_pending_relay_admission();
         let runtime_task = runtime.clone();
         let resolved = registration.clone();

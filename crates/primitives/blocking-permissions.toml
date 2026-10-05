@@ -1,6 +1,8 @@
 # Every file whose own work blocks a thread rather than going through the bounded executor: on the
 # runtime's blocking pool, `nervix_primitives::task::spawn_blocking`, or in place, on the runtime
-# worker thread that calls `nervix_primitives::task::block_in_place`.
+# worker thread that calls `nervix_primitives::task::block_in_place`, or on a thread it creates through
+# `thread::spawn`, `thread::Builder`, `thread::scope`, `thread::spawn_detached` or the real
+# `unmodeled::thread::Builder`.
 #
 # A node runs its variable-size encoding, decoding, validation, hashing, compilation and synchronous
 # filesystem or database work through `nervix-execution`, which admits it into a CPU or storage
@@ -11,6 +13,38 @@
 # cannot be admitted, and what bounds the work instead. A file whose owners block in different ways
 # has a permission for each. `just validate-primitive-boundary` rejects a blocking item no
 # permission lists for the file that names it, and a listed item the file no longer names.
+# Thread declarations also state their count and lifetime bounds. Tests, models and harnesses
+# declare each exact file and item; conditional compilation exempts nothing. The real builder
+# needs its unmodeled permission as well, whose reason and verification limit do not replace its
+# thread count, work and lifetime bound here.
+
+[[permission]]
+bound = "Three model threads per execution: two claim one fixed pool slot and one retires it; all are joined before the bounded Shuttle execution ends."
+items = ["thread::spawn"]
+owner = "The retained transport pool-slot lifetime model."
+path = "crates/interconnect/src/connection/retained_slots_tests.rs"
+reason = "These threads drive the production slot owner inside Shuttle's scheduler. They are model contenders, not node work admitted to the bounded executor."
+
+[[permission]]
+bound = "Two contender threads register one peer each, synchronize with the test through a three-party barrier, and are joined before both fixture transports shut down."
+items = ["thread::spawn"]
+owner = "The ordinary transport registration-limit regression."
+path = "crates/interconnect/src/tests/lease.rs"
+reason = "The test races synchronous public target registration from external threads with an entered ordinary runtime; it is a harness, not a node's accepted work."
+
+[[permission]]
+bound = "At most two model threads coexist: each binds or selects one channel, replaces routing, or retires one lifetime. Each pair is joined before the bounded Shuttle execution advances or ends."
+items = ["thread::spawn"]
+owner = "The relay channel binding and retirement models."
+path = "src/runtime/relay_channels_shuttle_tests.rs"
+reason = "The model contenders drive the production channel owners under Shuttle's scheduler rather than executing a node job through the bounded executor."
+
+[[permission]]
+bound = "Two model threads per execution: one publishes three readiness transitions and one retires the exact instance. Both are joined before the bounded Shuttle execution ends."
+items = ["thread::spawn"]
+owner = "The exact source-instance readiness lifetime model."
+path = "src/runtime/source_readiness.rs"
+reason = "Thread creation is confined to this file's Shuttle test module, where model contenders exercise the production scalar owner; product readiness publication creates no thread."
 
 [[permission]]
 bound = "Two small files, read once for each resolver built; a node builds one when it starts."
@@ -88,3 +122,241 @@ items = ["task::spawn_blocking"]
 owner = "The scenario harness's external Kafka group member."
 path = "tests/common/kafka_group_member.rs"
 reason = "The harness is not a node; joining the member's polling thread blocks until its consumer has closed."
+
+[[permission]]
+bound = "One summary consumer thread per drain owner, stopped and joined on drop after at most one poll interval; each scoped query creates one participant per configured topic partition, joins it before returning, and carries the Kafka request timeout within the driver deadline."
+items = ["thread::Builder", "thread::scope"]
+owner = "The benchmark load driver summary drain and Kafka watermark queries."
+path = "crates/benchmark/src/bin/nervix-benchmark-load.rs"
+reason = "The external load harness has no node executor; broker polling and metadata queries must not block its async traffic driver."
+
+[[permission]]
+bound = "Each test or model creates its fixed finite participants for one case and joins them before it returns; modeled exploration and its watchdog use the registered runner bounds."
+items = ["thread::spawn"]
+owner = "C binding shared-session release tests."
+path = "crates/client-ffi/src/tests.rs"
+reason = "Test participants exercise this owner concurrently outside a node executor; model participants use the selected scheduler."
+
+[[permission]]
+bound = "Each test or model creates its fixed finite participants for one case and joins them before it returns; modeled exploration and its watchdog use the registered runner bounds."
+items = ["thread::spawn"]
+owner = "C binding batch-lifetime tests."
+path = "crates/client-ffi/src/tests/batches.rs"
+reason = "Test participants exercise this owner concurrently outside a node executor; model participants use the selected scheduler."
+
+[[permission]]
+bound = "Each test or model creates its fixed finite participants for one case and joins them before it returns; modeled exploration and its watchdog use the registered runner bounds."
+items = ["thread::spawn"]
+owner = "C binding clock-event cancellation and restoration tests."
+path = "crates/client-ffi/src/tests/clock_events.rs"
+reason = "Test participants exercise this owner concurrently outside a node executor; model participants use the selected scheduler."
+
+[[permission]]
+bound = "Each test or model creates its fixed finite participants for one case and joins them before it returns; modeled exploration and its watchdog use the registered runner bounds."
+items = ["thread::spawn"]
+owner = "C binding domain-clock execution, cancellation and release tests."
+path = "crates/client-ffi/src/tests/domain_clock.rs"
+reason = "Test participants exercise this owner concurrently outside a node executor; model participants use the selected scheduler."
+
+[[permission]]
+bound = "Each test or model creates its fixed finite participants for one case and joins them before it returns; modeled exploration and its watchdog use the registered runner bounds."
+items = ["thread::spawn"]
+owner = "C binding endpoint admission, close and settlement tests."
+path = "crates/client-ffi/src/tests/endpoints.rs"
+reason = "Test participants exercise this owner concurrently outside a node executor; model participants use the selected scheduler."
+
+[[permission]]
+bound = "Each test or model creates its fixed finite participants for one case and joins them before it returns; modeled exploration and its watchdog use the registered runner bounds."
+items = ["thread::spawn"]
+owner = "Consensus restore-publication unit tests."
+path = "crates/consensus/src/restore.rs"
+reason = "Test participants exercise this owner concurrently outside a node executor; model participants use the selected scheduler."
+
+[[permission]]
+bound = "The recorder handles one finding per process and starts at most one watchdog; it sleeps for the ten-second recording budget, then exits the process."
+items = ["thread::spawn_detached"]
+owner = "The diagnostic run recording-deadline watchdog."
+path = "crates/deadlock/src/run.rs"
+reason = "A deadlock finding must end its process even when recording cannot progress; a tracked executor or runtime worker cannot enforce that deadline."
+
+[[permission]]
+bound = "Each probe creates its fixed participants; successful probes join them, and the parent watchdog kills a probe that does not end within its deadline."
+items = ["thread::Builder", "thread::spawn"]
+owner = "The isolated diagnostic active-cycle probes."
+path = "crates/deadlock/tests/active_cycles.rs"
+reason = "Probes need real thread participants to reach tracked lock cycles and blocking wakeups in disposable processes."
+
+[[permission]]
+bound = "Each test or model creates its fixed finite participants for one case and joins them before it returns; modeled exploration and its watchdog use the registered runner bounds."
+items = ["thread::spawn"]
+owner = "Interconnect request Shuttle checks."
+path = "crates/interconnect/src/request/shuttle_checks.rs"
+reason = "Test participants exercise this owner concurrently outside a node executor; model participants use the selected scheduler."
+
+[[permission]]
+bound = "One scheduler thread per scenario attempt; run and cleanup each use the runner's physical deadline, normal cleanup joins the thread, and a missed deadline fails the disposable attempt process."
+items = ["thread::Builder"]
+owner = "The Turmoil scenario scheduler runner."
+path = "crates/interconnect/tests/simulation/runner.rs"
+reason = "The scenario scheduler needs a dedicated thread so the real harness watchdog can observe and end a stalled simulated host."
+
+[[permission]]
+bound = "Each execution has Loom's five thread slots including coordinator and body, a 1,000-switch branch limit, and the runner watchdog; actors end or join within that execution."
+items = ["thread::Builder"]
+owner = "The shared Loom participant launcher."
+path = "crates/model-harness/src/loom.rs"
+reason = "Model actors must run as scheduler-visible threads, outside any node executor, with the same declared coroutine stack request."
+
+[[permission]]
+bound = "Each test or model creates its fixed finite participants for one case and joins them before it returns; modeled exploration and its watchdog use the registered runner bounds."
+items = ["thread::scope"]
+owner = "Roto compile-cache concurrency tests."
+path = "crates/nervix-roto/src/lib.rs"
+reason = "Test participants exercise this owner concurrently outside a node executor; model participants use the selected scheduler."
+
+[[permission]]
+bound = "One epoch thread per WASM runtime, one sleep and one engine epoch increment per configured tick; it ends on the next wake after the stop flag is set or its weak stop reference can no longer upgrade."
+items = ["unmodeled::thread::Builder"]
+owner = "The WASM runtime epoch driver."
+path = "crates/nervix-wasm/src/lib.rs"
+reason = "Epoch interruption must progress while a guest occupies an executor worker. Its operating-system thread runs outside every model and also has an unmodeled permission."
+
+[[permission]]
+bound = "At most the configured jobs per frontier level; each worker claims a finite level entry, and the scope joins all workers before the next level or the walk budget is checked."
+items = ["thread::Builder", "thread::scope"]
+owner = "The NSPL completion graph walker."
+path = "crates/nspl/tests/completion_walk/walker.rs"
+reason = "The test harness evaluates a finite grammar frontier in parallel and has no node executor."
+
+[[permission]]
+bound = "Each test or model creates its fixed finite participants for one case and joins them before it returns; modeled exploration and its watchdog use the registered runner bounds."
+items = ["thread::spawn"]
+owner = "Retained-backup claim and sweep concurrency tests."
+path = "src/application/backup/retained.rs"
+reason = "Test participants exercise this owner concurrently outside a node executor; model participants use the selected scheduler."
+
+[[permission]]
+bound = "Each test or model creates its fixed finite participants for one case and joins them before it returns; modeled exploration and its watchdog use the registered runner bounds."
+items = ["thread::spawn"]
+owner = "Restore-installation Shuttle checks."
+path = "src/application/restore/shuttle_tests.rs"
+reason = "Test participants exercise this owner concurrently outside a node executor; model participants use the selected scheduler."
+
+[[permission]]
+bound = "Each test or model creates its fixed finite participants for one case and joins them before it returns; modeled exploration and its watchdog use the registered runner bounds."
+items = ["thread::spawn"]
+owner = "Shutdown coordination Shuttle checks."
+path = "src/application/shutdown.rs"
+reason = "Test participants exercise this owner concurrently outside a node executor; model participants use the selected scheduler."
+
+[[permission]]
+bound = "Two supervisors per server process, parked between signals or deadline changes, plus at most one forced-exit watchdog after the single exit claim. Their lifetime ends with the process; the watchdog waits only the forced-exit report budget. Tests create fixed participants, join ordinary participants, and end detached supervisors with their model execution."
+items = ["thread::spawn", "thread::spawn_detached"]
+owner = "The process termination-signal and shutdown-deadline supervisors, forced-exit watchdog, and their unit and Shuttle tests."
+path = "src/application/termination_signals.rs"
+reason = "Signal delivery and forced exit must remain available when runtime workers or the bounded executor cannot progress; tests use the same supervision owner."
+
+[[permission]]
+bound = "Each test or model creates its fixed finite participants for one case and joins them before it returns; modeled exploration and its watchdog use the registered runner bounds."
+items = ["thread::spawn"]
+owner = "Backup capture-fence concurrency tests."
+path = "src/runtime/backup_capture_fence.rs"
+reason = "Test participants exercise this owner concurrently outside a node executor; model participants use the selected scheduler."
+
+[[permission]]
+bound = "Each test or model creates its fixed finite participants for one case and joins them before it returns; modeled exploration and its watchdog use the registered runner bounds."
+items = ["thread::spawn"]
+owner = "Domain-clock publication Shuttle checks."
+path = "src/runtime/domain_clock.rs"
+reason = "Test participants exercise this owner concurrently outside a node executor; model participants use the selected scheduler."
+
+[[permission]]
+bound = "Each test or model creates its fixed finite participants for one case and joins them before it returns; modeled exploration and its watchdog use the registered runner bounds."
+items = ["thread::spawn"]
+owner = "Domain routing publication Shuttle checks."
+path = "src/runtime/domain_routing_shuttle_tests.rs"
+reason = "Test participants exercise this owner concurrently outside a node executor; model participants use the selected scheduler."
+
+[[permission]]
+bound = "Each test or model creates its fixed finite participants for one case and joins them before it returns; modeled exploration and its watchdog use the registered runner bounds."
+items = ["thread::spawn"]
+owner = "Endpoint route publication Shuttle checks."
+path = "src/runtime/endpoint_route_table_shuttle_tests.rs"
+reason = "Test participants exercise this owner concurrently outside a node executor; model participants use the selected scheduler."
+
+[[permission]]
+bound = "Each test or model creates its fixed finite participants for one case and joins them before it returns; modeled exploration and its watchdog use the registered runner bounds."
+items = ["thread::spawn"]
+owner = "Ingestor quiesce and retained-payload Shuttle checks."
+path = "src/runtime/ingestor_quiesce.rs"
+reason = "Test participants exercise this owner concurrently outside a node executor; model participants use the selected scheduler."
+
+[[permission]]
+bound = "Each test or model creates its fixed finite participants for one case and joins them before it returns; modeled exploration and its watchdog use the registered runner bounds."
+items = ["thread::spawn"]
+owner = "Kafka offset commit-barrier Shuttle checks."
+path = "src/runtime/kafka_offset_state.rs"
+reason = "Test participants exercise this owner concurrently outside a node executor; model participants use the selected scheduler."
+
+[[permission]]
+bound = "Each test or model creates its fixed finite participants for one case and joins them before it returns; modeled exploration and its watchdog use the registered runner bounds."
+items = ["thread::spawn"]
+owner = "Materialized-state publication Shuttle checks."
+path = "src/runtime/materialized_state.rs"
+reason = "Test participants exercise this owner concurrently outside a node executor; model participants use the selected scheduler."
+
+[[permission]]
+bound = "Each test or model creates its fixed finite participants for one case and joins them before it returns; modeled exploration and its watchdog use the registered runner bounds."
+items = ["thread::spawn"]
+owner = "Relay branch-presence publication Shuttle checks."
+path = "src/runtime/relay_branch_presence_shuttle_tests.rs"
+reason = "Test participants exercise this owner concurrently outside a node executor; model participants use the selected scheduler."
+
+[[permission]]
+bound = "Each test or model creates its fixed finite participants for one case and joins them before it returns; modeled exploration and its watchdog use the registered runner bounds."
+items = ["thread::spawn"]
+owner = "Remote-dispatch assignment and delivery Shuttle checks."
+path = "src/runtime/remote_dispatch_shuttle_tests.rs"
+reason = "Test participants exercise this owner concurrently outside a node executor; model participants use the selected scheduler."
+
+[[permission]]
+bound = "Each test or model creates its fixed finite participants for one case and joins them before it returns; modeled exploration and its watchdog use the registered runner bounds."
+items = ["thread::scope"]
+owner = "State-replication prepare-cache concurrency tests."
+path = "src/runtime/state_replication/tests.rs"
+reason = "Test participants exercise this owner concurrently outside a node executor; model participants use the selected scheduler."
+
+[[permission]]
+bound = "Each test or model creates its fixed finite participants for one case and joins them before it returns; modeled exploration and its watchdog use the registered runner bounds."
+items = ["thread::spawn"]
+owner = "State-store authority and snapshot Shuttle checks."
+path = "src/runtime/state_store_shuttle_tests.rs"
+reason = "Test participants exercise this owner concurrently outside a node executor; model participants use the selected scheduler."
+
+[[permission]]
+bound = "Each test or model creates its fixed finite participants for one case and joins them before it returns; modeled exploration and its watchdog use the registered runner bounds."
+items = ["thread::spawn"]
+owner = "Acknowledgement ownership Shuttle checks."
+path = "src/runtime_ack.rs"
+reason = "Test participants exercise this owner concurrently outside a node executor; model participants use the selected scheduler."
+
+[[permission]]
+bound = "Each probe operation creates its fixed participant for one endpoint call or release, uses the probe's bounded request and cancellation waits, and joins before the probe returns."
+items = ["thread::scope", "thread::spawn"]
+owner = "The public endpoint C binding conformance probe."
+path = "tests/common/client_conformance/c_abi_endpoints.rs"
+reason = "The external harness drives blocking C binding operations and races cancellation and resource release from another participant."
+
+[[permission]]
+bound = "Each probe operation creates its fixed participant for one call, uses the probe's bounded request and cancellation waits, and joins before the probe returns."
+items = ["thread::scope", "thread::spawn"]
+owner = "The public C binding session conformance probe."
+path = "tests/common/client_conformance/c_abi_probe.rs"
+reason = "The external harness needs simultaneous blocking C binding calls to exercise session release and cancellation."
+
+[[permission]]
+bound = "One poller per member, one bounded consumer poll per loop; dropping the member sends the leave request and joins after at most the current poll interval."
+items = ["thread::Builder"]
+owner = "The scenario harness external Kafka group member."
+path = "tests/common/kafka_group_member.rs"
+reason = "The external harness must keep polling librdkafka while async scenario steps observe its assignment; it has no node executor."

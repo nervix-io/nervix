@@ -2056,10 +2056,10 @@ Feature: WASM processor runtime behavior
       | 1            | 0             |
       | 3            | 0             |
 
-  Scenario: Malformed WASM processor output reports a runtime error
+  Scenario Outline: Malformed WASM processor output reports a runtime error
     Given runtime replication is configured with replica count 0 and snapshot interval "100ms"
-    And a 1 node nervix cluster is started
-    And node "node-1" has malformed-output WASM processor fixture resource directory "wasm_processor"
+    And a <cluster_size> node nervix cluster is started
+    And node "node-1" has a WASM fixture emitting a <length> byte malformed envelope in resource directory "wasm_processor"
     And the leader node is configured with these NSPL commands
       """
       CREATE UNPACED DOMAIN {{domain}};
@@ -2110,3 +2110,14 @@ Feature: WASM processor runtime behavior
       """
       wasm processor 'filter_even_rows' output emission failed (unbranched, resource 'wasm_malformed_filter' version 1 file 'processors/filter_even.wasm', export 'nervix_read_emit'): wasm guest batch processing failed: wasm guest emitted an output envelope the host cannot decode
       """
+
+    Examples:
+      | cluster_size | length |
+      | 1            | 1      |
+      | 1            | 4      |
+      | 1            | 8      |
+      | 1            | 11     |
+      | 3            | 1      |
+      | 3            | 4      |
+      | 3            | 8      |
+      | 3            | 11     |

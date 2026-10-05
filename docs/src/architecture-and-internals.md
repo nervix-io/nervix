@@ -10,6 +10,8 @@ Use it for:
 - [typed absence, semantic states, validation boundaries, state identity, and boundary encodings](./typed-states.md)
 - [connector crate ownership, the shared source and sink contract, and host execution](./connector-contract.md)
 - [HTTP emitter request preparation, delivery, lifecycle, and qualification](./http-emitter-architecture.md)
+- [client ingestors and emitters: native batches, application ACKs, credits, forwarding,
+  restoration, buffered ALTER and paced workflows](./client-io-architecture.md)
 - domain-clock mapping, authority, lifecycle, progress, and execution-time semantics
 - cluster interconnect security, traffic isolation, and delivery semantics
 - [host name resolution: the node's asynchronous DNS resolver, its configuration, cache and bounds,
@@ -30,6 +32,8 @@ Use it for:
   regressions, sanitizer libFuzzer runs and exact failure replay](./property-testing-and-fuzzing.md)
 - [the expression VM: compilation, columnar execution, kernels and SIMD, function families, window
   aggregates and sketches, and adding a function](./vm-functions.md)
+- [SIMD kernels: typed buffer ownership, dispatch and build targets, exact results, caller
+  catalog, qualification, and measured evidence](./simd-kernels.md)
 - runtime semantics that are easier to understand from the implementation side
 - relay/state internals
 

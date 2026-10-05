@@ -213,6 +213,11 @@ If a broker-style source is still resuming, the host cancels that pending resume
 arrives, drops its DNS, socket and handshake work, and closes the source before exiting. A quiesce
 change also cancels an in-progress resume so the next loop turn observes the new intake state.
 
+Source-instance readiness retirement is final and names the ending host's exact handle. Shutdown
+retires installed readiness before withdrawing the registry. Terminal domain execution teardown
+cancels its relay channel publication after owned tasks stop; retained producer or channel handles
+then reject further dispatch and cannot attach to a restarted execution.
+
 This intake stop ignores `ON QUIESCE`. That clause governs what an external source experiences
 during a resumable hold — a model alteration, a domain pause, or memory-pressure shedding — where
 the ingestor will run again. Shutdown and ownership handoff are not resumable, so polling and
@@ -291,6 +296,12 @@ Draining ends with a confirmation pass. After a flush generation observes nothin
 more generation must also observe nothing, so work that an upstream node publishes after a
 downstream node finished its own flush is not left behind. A domain is quiescent only when that
 confirming generation completes with nothing visible.
+Quiesced backup applies the same admitted-work view to its selected domain across all live nodes.
+It requests a separate cluster-wide confirming generation before capturing checkpoints. Parked
+`REQUIRED WAIT` messages do not hold that cut open, and a failed drain resumes the domain.
+When a parked message has crossed nodes, remote ACK progress carries its parked state back through
+the source's acknowledgement chain. The drain excludes that chain while the message is parked;
+resuming it reactivates the chain, and only a terminal ACK completes the source attempt.
 
 Work keeps moving while the drain looks for it, so "nothing visible" is an exact observation rather
 than a series of separate reads. Each observation reads the domain's outstanding force-flush
@@ -605,6 +616,13 @@ sessions and commands started until the shutdown deadline and cancels whatever s
 stops the runtime, consensus, cluster membership, and the interconnect in that order, and finally
 releases the node's storage.
 
+Runtime teardown ends each resolved replication route before clearing its state registry. A
+retained route cannot attach to replacement state; a request already admitted through a borrowed
+checkpoint handle may finish on that exact state. After domain drain, closing the replication task
+owner cancels its announcers, including pending dispatches and retry waits, and waits for their
+retained handles to be released before these routes are cleared. Teardown does not wait for an
+announcement's remote dispatch timeout; synchronization supplies any missed availability hint.
+
 Consensus stops Raft and then waits for its storage to reach an idle barrier, which proves every
 earlier durable write has returned and released the store, before its dedicated database handle is
 dropped. The registry and runtime database is released separately after the services that hold its
@@ -659,6 +677,7 @@ strongly consistent, selected runtime state is checkpointed, and the hot path is
 | Durable handoff and forced-recovery preparations | Preserved, then reconciled or activated | Preserved, then reconciled or activated |
 | Runtime-state checkpoints: Kafka domain offsets, deduplicator and window state, materialized relay records | Flushed again as runtime tasks stop | Reopen at the last completed periodic checkpoint |
 | WASM guest-state checkpoints | Every checkpoint that released an acknowledgement is already synchronized | Reopen at the newest checkpoint on the node's storage, which covers every acknowledged input |
+| Restored backup state: WASM guest saves, Kafka domain offsets and branch lifecycle | A restore synchronizes a complete chunked namespace and its atomic active-generation pointer before releasing the stopped domain's START gate | Reopens pointer and checkpoints from one complete database view on each assigned owner and replica; a durable pointer alone does not release an incomplete replicated installation gate. Once installation completes, the next START continues saved guest state, source positions and branch incarnations |
 | External source offsets and sink commits | Complete when the drain succeeds | Only the external connector's own delivery and transaction guarantee applies |
 | Relay batches, queued payload attempts, suspended work, ACK guards, ACK tokens, ACK maps, handoff payloads, gate leases, clock progress | The drain tries to resolve them before its deadline | Volatile; lost |
 | Client producers, their credit and queued batches, producer links | Ended as `shutting down` after the drain, or detached with their sessions | Volatile; lost with the process. Every producer another node forwarded here ends there as `owner lost`: its batches that node never cleared for admission are refused as `producer ended`, and only the cleared ones are of unknown outcome. The node's own sessions end, so their clients report every batch they sent without an outcome as of unknown outcome, and the nodes executing the ingestors detach those producers and finish what they admitted |
@@ -787,6 +806,17 @@ A backup archive a node retains for download is a temporary file in its staging 
 durable. Stopping the node, gracefully or not, loses it: a later download is refused, while the
 backup's recorded outcome stays retained under its execution reference. See
 [Backup And Restore](./backup-and-restore.md#downloading-the-archive).
+
+Unpublished restore checkpoint namespaces remain in the runtime database after an interrupted
+installation. Every restarted node's admitted maintenance borrows its applied consensus revision
+before taking the checkpoint installation barrier. It retains selected publications, applying
+installations and generations ahead of catch-up; without an applied log it retains all generations.
+Terminal or superseded applied attempts are reclaimed in bounded deletion batches, including
+chunks without receipts. Terminal teardown cancels the maintenance caller, and its storage job
+checks cancellation between bounded units. A later startup resumes from the remaining keys.
+Reclamation preserves snapshot readers and never completes an installation or opens its `START`
+gate. See [restore checkpoint storage](backup-and-restore.md#restore-checkpoint-storage-quota-and-metrics)
+for quotas, metrics and physical storage limits.
 
 ### Domain Time
 

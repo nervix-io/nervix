@@ -70,7 +70,7 @@ impl StateOwner for InProcessOwner {
         };
         self.record(request);
         self.runtime
-            .handle_state_sync_request(placement, after_lsm)
+            .capture_state_checkpoint(placement, after_lsm)
             .await
     }
 
@@ -129,6 +129,7 @@ impl CaughtUpReplica {
                 None,
             )
             .expect("the published identity places the branch lifecycle");
+        let lifecycle = replica.replicated_branch_lifecycle(&branch_lru);
         let mut branches = Vec::new();
         let mut states = Vec::new();
         for index in 0..branch_count {
@@ -148,7 +149,7 @@ impl CaughtUpReplica {
             let checkpoint = state
                 .latest_snapshot()
                 .expect("an empty deduplicator state encodes");
-            replica.hold_passive_state_replica_snapshot(&placement, checkpoint);
+            lifecycle.hold_passive_checkpoint(&placement, checkpoint);
             branches.push(branch);
             states.push(state);
         }
@@ -156,7 +157,6 @@ impl CaughtUpReplica {
         owner
             .replicated_branch_lifecycle(&branch_lru)
             .publish(named_branches.clone());
-        let lifecycle = replica.replicated_branch_lifecycle(&branch_lru);
         replica
             .install_replica_branch_lru_snapshot(&branch_lru, &lifecycle, named_branches)
             .expect("the branch lifecycle installs");

@@ -203,6 +203,23 @@ async fn relay_owner_buffer_remains_visible_in_entity_drain_status() {
     assert!(!status.is_drained());
 }
 
+#[test]
+fn replacing_relay_owner_retires_the_retained_ingress_channel() {
+    let services = test_relay_boundary_services();
+    services.replace_owner_node(Some(named("node-2")));
+    let branch = string_branch_key("tenant", "acme");
+    let retained = services.ingress_slot(&branch);
+    let sibling = services.ingress_slot(&string_branch_key("tenant", "beta"));
+
+    services.replace_owner_node(Some(named("node-3")));
+
+    assert!(retained.cancellation().is_cancelled());
+    assert!(sibling.cancellation().is_cancelled());
+    let replacement = services.ingress_slot(&branch);
+    assert!(!replacement.cancellation().is_cancelled());
+    assert!(!StdArc::ptr_eq(&retained, &replacement));
+}
+
 #[nervix_primitives::test]
 async fn relay_owner_buffer_retains_the_upstream_ack_until_fanout() {
     let runtime = Runtime::default();
@@ -1112,6 +1129,7 @@ async fn relay_owner_expires_branch_presence_by_ttl() {
         Duration::from_secs(60),
         fault_injection,
         PathBuf::from(DEFAULT_TEMP_DIR),
+        DEFAULT_RESTORE_STAGING_MAX_BYTES,
     )
     .expect("runtime should build");
     let domain = domain("default");
@@ -1220,6 +1238,25 @@ fn presence_test_batch(key: Option<BranchKey>) -> (RelayRecordBatch, AckCompleti
     let batch = RelayRecordBatch::single(test_schema(&[]), key, test_runtime_row([]), acks)
         .expect("relay batch should build");
     (batch, completion)
+}
+
+#[nervix_primitives::test]
+async fn an_ended_producer_cannot_attach_to_a_recreated_relay_branch() {
+    let runtime = Runtime::default();
+    let services = test_relay_boundary_services();
+    let mut producer = ConcreteRelayRuntime::new(ConcreteRelayRuntimeBuild {
+        runtime,
+        domain: domain("default"),
+        relay: named("orders"),
+        services: services.clone(),
+        key: None,
+    });
+    producer.retire();
+    services.channels.retire(&None);
+    assert!(!services.channels.bind(&None).is_retired());
+    let (batch, completion) = presence_test_batch(None);
+    assert!(producer.dispatch_boundary(&batch).await.is_err());
+    assert!(matches!(completion.wait().await, AckOutcome::NoAck(_)));
 }
 
 /// Hand `key`'s next batch to the owner of `services` and wait until the owner has fanned it out.

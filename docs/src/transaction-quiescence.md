@@ -45,6 +45,11 @@ that same run can make it valid. An intervening lifecycle, domain, resource-cata
 ends the run, so a later run cannot repair the earlier one. An incomplete candidate is never a
 complete empty scope, and `COMMIT` requires every step to plan completely.
 
+Planning captures the restored domain's installation gate with its authoritative control inputs.
+An incomplete restore refuses a queued or standalone `START` before lifecycle admission, naming
+the restore execution responsible for the gate. Consensus revalidates the gate at activation;
+releasing a failed restore's mutation lease does not make that domain startable.
+
 ```mermaid
 stateDiagram-v2
     [*] --> OPEN: BEGIN for one domain
@@ -105,6 +110,18 @@ contract, not by the quiesce level: an alteration that keeps the contract reopen
 every producer attached once the step is applied, one that changes it ends them as
 `endpoint changed`, and a failed drain releases the hold and reopens admission with the previous
 execution and every producer still attached.
+
+When a model alteration pauses an ingestor and gates a shared downstream relay, the coordinator
+first engages an ingestor-only admission hold on every node. It force-flushes the current graph
+and waits for those ingestors' route work and admitted ACK roots while the relay gates remain
+open. A partial branch batch can therefore reach its relay and acknowledging sink. The full
+subgraph hold is engaged before the intake hold is released, so admission never reopens between
+the two phases. Both phases share the alteration's physical deadline and retain separate exact
+coordination identities. Failure releases the attempted holds and keeps the committed contract;
+dropping the coordinator leaves their existing owned release and lease cleanup responsible.
+For a planned subgraph pause, transaction inspection records the intake-only scope separately
+from the full subgraph scope, with each scope's actual engagement, drain failure, and release
+outcomes. An already engaged domain pause covers its ingestors throughout these phases.
 
 A native client emitter keeps its prepared IPC bytes, source members and application ACK wait as
 emitter work. Force flush releases rows into that same wait; a read or network delivery does not

@@ -338,6 +338,13 @@ Each timestamp rejection retains the source row's ACK for its route-local messag
 accepted neighbors continue into the graph. A source position is acknowledged only after every
 message it unfolded into has completed its own route or error delivery.
 
+Each source host retains its exact instance readiness handle. Poll success and suspend/resume
+publish through that scalar, without looking up the ingestor registry. Replacing an ingestor retires
+its preceding handles before installing the new instances; host drop also retires its own handle.
+Retirement is final, so late polling or teardown cannot mark a replacement ready or unready.
+Readiness observers aggregate the installed instance handles. Quiescence and ACK/commit ownership
+remain with the host's existing loop and controls.
+
 The host runs three source loop families, with a listener using the broker loop:
 
 | Family | Host behavior | Source behavior |
@@ -508,6 +515,12 @@ delivered before it and routes every other still-owned source row through the em
 error policy. Stop requests retain their separate
 deadline-bounded final flush and transport finish, and a stopped interaction performs its final
 drain before the loop exits.
+
+A quiesced backup keeps these source and sink tasks installed. The host stops domain source
+admission according to each source's declared quiesce policy, reports admitted ACK roots and
+publishing sinks to the domain drain, and runs a confirming force flush after admitted work clears.
+Listeners for other domains continue serving. A sink that does not confirm before the backup's
+quiesce timeout leaves the backup incomplete; it is not treated as a successful publish.
 
 When that policy sends a failed emitter record to a DLQ, the host executes the message-error SET
 program bound during domain installation or replacement. The prepared route retains the input and
@@ -737,6 +750,11 @@ sequenceDiagram
   committed partition schedule. The leader observes partition topology and commits assignments;
   executing sources follow that schedule. Offset snapshots can lag a crash, so this mode remains
   at least once. [Kafka ingestion](./ingestors.md#kafka) defines the recovery details.
+  Replica ACKs reach that installed offset state through a resolved, retired-on-ending route and
+  the existing assignment publication. The host's announcer retains its route and follows replica
+  assignment changes without reading node-wide state or execution registries. The Kafka commit and
+  acknowledgement boundary remains the state's highest durable replica progress.
+
 - **Pulsar client.** The Pulsar source and sink build on Nervix's fork of `pulsar-rs`,
   `nervix-io/pulsar-rs`, because the released crate discards `CommandConnected`. The fork keeps each
   connection's announced `maxMessageSize`, refuses a message whose serialized metadata and payload
@@ -794,6 +812,11 @@ sequenceDiagram
   progress. An alteration that keeps the endpoint contract finds the same producers attached once
   the new execution is installed; a changed contract, a new domain generation, removal,
   relocation, and shutdown end them with the reason that applies.
+  Before a model alteration closes a shared downstream relay gate, an intake-only hold suspends
+  the affected ingestors across the cluster and force-flushes their buffered routes. Their
+  admitted ACK roots drain through the open relay and sink. The full entity hold takes over
+  suspension before the intake hold is released; a failed drain retains the committed execution
+  and the admitted batches' original outcome ownership.
   [Ingestors](./ingestors.md#client-ingestors) defines the public behavior.
 - **Pooled sinks.** The connector owns the driver's pool and borrowed connection. The host owns
   the lease on the node's named client and the runtime wait while no connection is available.

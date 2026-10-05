@@ -113,6 +113,10 @@ Feature: Session protocol
     Then request "bad-reference" is rejected as an invalid request naming "CommandRequest.execution_reference"
     When the active session sends request "split-character" completing "SHOW é" at byte 6 inside a character
     Then request "split-character" is rejected as an invalid request naming "SuggestRequest.cursor"
+    When the active session sends request "zero-page" completing with invalid page size 0
+    Then request "zero-page" is rejected as an invalid request naming "SuggestRequest.page_size"
+    When the active session sends request "oversized-page" completing with invalid page size 101
+    Then request "oversized-page" is rejected as an invalid request naming "SuggestRequest.page_size"
     When the active session sends request "after-refusals" completing "SHOW é" at byte 5
     Then request "after-refusals" suggests "CLUSTER"
     When these NSPL commands are executed on the active session
