@@ -590,6 +590,12 @@ complete report, and uploads it to Codecov. The separate `lcov.info` report sele
 CLI and console for focused inspection; it does not replace the workspace export.
 Run the same complexity check locally with `just check-coverage <merged-workspace-report>`.
 
+Both ordinary and diagnostic coverage uploads use the verified Codecov CLI and explicitly select
+`https://codecov.io` as the API origin and OIDC audience. The diagnostic upload retains its
+`diagnostic-evidence` flag. Uploads require TLS verification and `fail_ci_if_error: true`; transport,
+authentication and upload failures fail their jobs. Each job retains its coverage artifacts with an
+`always()` upload so the report remains available for diagnosis.
+
 ### The scenario suite's execution budget
 
 The Cucumber suite bounds its own run. A step, a teardown diagnostic or a node stop that never

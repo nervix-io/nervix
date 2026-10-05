@@ -2553,7 +2553,7 @@ impl Runtime {
     )]
     pub(in crate::runtime) async fn apply_materialized_stream_records(
         &self,
-        state: &MaterializedRelayStateOriginator,
+        state: &mut MaterializedRelayStateOriginator,
         key: &Option<BranchKey>,
         records: impl IntoIterator<Item = RuntimeRow>,
     ) -> Result<(), error_stack::Report<StateAuthorityError>> {
@@ -2578,7 +2578,7 @@ impl Runtime {
 
     pub(in crate::runtime) fn delete_materialized_stream_key(
         &self,
-        state: &MaterializedRelayStateOriginator,
+        state: &mut MaterializedRelayStateOriginator,
         key: &Option<BranchKey>,
     ) -> Result<(), error_stack::Report<StateAuthorityError>> {
         if state.remove_key(key)?.is_some() {

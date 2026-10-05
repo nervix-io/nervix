@@ -1,9 +1,9 @@
-//! Assignment-owned materialized relay rows and immutable snapshot generations.
+//! Branch-owned materialized relay rows and immutable snapshot generations.
 //!
 //! Layer: data plane.
-//! - **Owns.** One latest row per concrete branch, assignment-fenced updates and installation,
-//!   exact branch-generation capture, and retention of the current sealed artifact.
-//! - **Depends on.** Typed placements, Arrow row views, snapshot codecs, staging and the executor.
+//! - **Owns.** Exclusive branch records and immutable row and membership publications,
+//!   assignment-fenced installation, exact branch-generation capture and sealed artifact retention.
+//! - **Depends on.** Typed placements, assignment fences, Arrow row views, codecs and admission.
 //! - **Must not know.** Models, NSPL text, archive layouts or consensus restore policies.
 
 #![cfg_attr(
@@ -17,11 +17,12 @@
 
 use ahash::RandomState;
 use error_stack::Report;
+use imbl::{GenericHashMap, shared_ptr::DefaultSharedPtr};
 use nervix_checkpoint_replication::CheckpointReplication;
 use nervix_execution::{Executor, MemoryClass, Reservation};
 use nervix_models::ClusterNodeName;
 use nervix_primitives::{
-    collections::DashMap,
+    publication::{ArcSwap, ArcSwapOption},
     sync::{
         Arc, StdArc,
         atomic::{AtomicU64, Ordering},
@@ -39,14 +40,57 @@ use super::{
 };
 use crate::runtime_schema::RuntimeRow;
 
+#[cfg(test)]
+#[path = "materialized_state_publication_tests.rs"]
+mod publication_tests;
+
+#[cfg(test)]
+#[path = "materialized_state_cost_tests.rs"]
+mod cost_tests;
+
+type MaterializedBranches = GenericHashMap<
+    Option<BranchKey>,
+    Arc<ArcSwapOption<RuntimeRow>>,
+    RandomState,
+    DefaultSharedPtr,
+>;
+
+/// One task's mutable record. Readers and captured generations hold the published Arrow view;
+/// the owner retains its selection so a replacement never discovers state through the index.
+#[derive(Debug)]
+struct MaterializedBranchRecord {
+    record: StdArc<RuntimeRow>,
+    /// Also retained by readers and the membership publication after this owner's borrow ends.
+    published: Arc<ArcSwapOption<RuntimeRow>>,
+}
+
+impl MaterializedBranchRecord {
+    fn new(record: RuntimeRow) -> Self {
+        let record = StdArc::new(record);
+        Self {
+            published: Arc::new(ArcSwapOption::from(Some(record.clone()))),
+            record,
+        }
+    }
+
+    fn replace(&mut self, record: RuntimeRow) -> bool {
+        if !record.metadata().is_newer_than(self.record.metadata()) {
+            return false;
+        }
+        self.record = StdArc::new(record);
+        self.published.store(Some(self.record.clone()));
+        true
+    }
+}
+
 #[derive(Debug)]
 pub(super) struct ReplicatedMaterializedRelayState {
     placement: RuntimeStatePlacement,
     schema: StdArc<arrow_schema::Schema>,
     assignment: StateAssignmentAuthority,
-    /// Each branch's latest record. Branches are added and removed only under the assignment
-    /// barrier; replacing the record of a branch already held is admitted without it.
-    entries: DashMap<Option<BranchKey>, RuntimeRow, RandomState>,
+    /// Lifecycle changes publish a persistent index under the assignment barrier. Established
+    /// branch updates retain their row publication and never reach this index.
+    entries: ArcSwap<MaterializedBranches>,
     /// Advances whenever a branch appears in or leaves this state. A capture records it, so a
     /// snapshot sealed before an eviction cannot resurrect the branch that eviction dropped.
     branch_generation: AtomicU64,
@@ -76,10 +120,11 @@ pub struct MaterializedRelayStateRead {
 }
 
 /// Authoritative materialization access for one concrete assignment generation.
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct MaterializedRelayStateOriginator {
     read: MaterializedRelayStateRead,
     assignment: StateAssignmentToken,
+    branches: super::HashMap<Option<BranchKey>, MaterializedBranchRecord>,
 }
 
 /// Replica snapshot installation access for one concrete assignment generation.
@@ -112,16 +157,6 @@ pub(crate) struct MaterializedRecordReport {
     pub(crate) ingested_at_high_watermark: nervix_models::Timestamp,
 }
 
-/// What admitting one record did to the branch it belongs to.
-enum RecordReplacement {
-    /// The branch held an older record, which this one replaced at the returned revision.
-    Replaced(u64),
-    /// The branch already holds a record at least as new.
-    NotNewer,
-    /// The branch holds no record, so keeping this one changes which branches exist.
-    BranchAbsent(RuntimeRow),
-}
-
 impl ReplicatedMaterializedRelayState {
     /// Build this state from a snapshot that has already been opened, or empty when there is none.
     ///
@@ -136,9 +171,12 @@ impl ReplicatedMaterializedRelayState {
         let Some(restored) = restored else {
             return state;
         };
+        let mut entries = MaterializedBranches::default();
         for record in restored.records {
-            state.entries.insert(record.branch, record.row);
+            let branch = MaterializedBranchRecord::new(record.row);
+            entries.insert(record.branch, branch.published);
         }
+        state.entries.store(StdArc::new(entries));
         state
             .branch_generation
             .store(restored.branch_generation, Ordering::SeqCst);
@@ -160,7 +198,7 @@ impl ReplicatedMaterializedRelayState {
             placement,
             schema,
             assignment: StateAssignmentAuthority::default(),
-            entries: DashMap::default(),
+            entries: ArcSwap::from_pointee(MaterializedBranches::default()),
             branch_generation: AtomicU64::new(0),
             installed_fence: AtomicU64::new(0),
             current_lsm: LsmSequence::restored(0),
@@ -191,12 +229,27 @@ impl ReplicatedMaterializedRelayState {
         let read = MaterializedRelayStateRead {
             state: state.clone(),
         };
+        let mut branches = super::HashMap::default();
+        if binding.token_for(StateCapability::Originate).is_some() {
+            for (key, published) in state.entries.load().iter() {
+                if let Some(record) = published.load_full() {
+                    branches.insert(
+                        key.clone(),
+                        MaterializedBranchRecord {
+                            record,
+                            published: published.clone(),
+                        },
+                    );
+                }
+            }
+        }
         MaterializedRelayStateAssignment {
             originator: binding
                 .token_for(StateCapability::Originate)
                 .map(|assignment| MaterializedRelayStateOriginator {
                     read: read.clone(),
                     assignment,
+                    branches,
                 }),
             installer: binding
                 .token_for(StateCapability::InstallSnapshot)
@@ -306,6 +359,7 @@ impl MaterializedRelayStateRead {
             let bytes = self
                 .state
                 .entries
+                .load()
                 .len()
                 .checked_mul(
                     std::mem::size_of::<MaterializedGenerationRecord>()
@@ -334,17 +388,16 @@ impl MaterializedRelayStateRead {
     fn capture_generation(&self, fence: u64) -> MaterializedGeneration {
         let revision = self.state.current_lsm.current();
         let branch_generation = self.state.branch_generation.load(Ordering::SeqCst);
-        let mut records = nervix_primitives::expect_lint!(
-            nervix::sync_acquisition,
-            "Typed Ratchet 04 https://app.clickup.com/t/86bc9eqp3: move materialized branch \
-             records and reads onto their branch owners",
-            self.state.entries.iter()
-        )
-        .map(|entry| MaterializedGenerationRecord {
-            branch: entry.key().clone(),
-            row: entry.value().clone(),
-        })
-        .collect::<Vec<_>>();
+        let entries = self.state.entries.load();
+        let mut records = Vec::with_capacity(entries.len());
+        for (branch, published) in entries.iter() {
+            if let Some(row) = published.load_full() {
+                records.push(MaterializedGenerationRecord {
+                    branch: branch.clone(),
+                    row: (*row).clone(),
+                });
+            }
+        }
         records.sort_unstable_by(|left, right| {
             super::branch_key_display(&left.branch).cmp(super::branch_key_display(&right.branch))
         });
@@ -444,7 +497,9 @@ impl MaterializedRelayStateRead {
     )]
     fn usable_sealed(&self, after_revision: Option<u64>) -> Option<UsableSealedSnapshot> {
         let sealed = self.state.sealed.lock().clone()?;
-        if sealed.descriptor.revision != self.state.current_lsm.current() {
+        if sealed.descriptor.revision != self.state.current_lsm.current()
+            || sealed.descriptor.fence != self.state.assignment.current_binding().fence()
+        {
             return None;
         }
         if after_revision.is_some_and(|after| sealed.descriptor.revision <= after) {
@@ -478,31 +533,25 @@ impl MaterializedRelayStateRead {
         )
     )]
     pub(super) fn record(&self, key: &Option<BranchKey>) -> Option<MaterializedGenerationRecord> {
-        nervix_primitives::expect_lint!(
-            nervix::sync_acquisition,
-            "Typed Ratchet 04 https://app.clickup.com/t/86bc9eqp3: move materialized branch \
-             records and reads onto their branch owners",
-            self.state.entries.get(key)
-        )
-        .map(|row| MaterializedGenerationRecord {
+        let entries = self.state.entries.load();
+        let published = entries.get(key)?;
+        let row = published.load_full()?;
+        Some(MaterializedGenerationRecord {
             branch: key.clone(),
-            row: row.clone(),
+            row: (*row).clone(),
         })
     }
 
     pub(super) fn restored_branch_watermarks(
         &self,
     ) -> Vec<(Option<BranchKey>, nervix_models::Timestamp)> {
-        self.state
-            .entries
-            .iter()
-            .map(|entry| {
-                (
-                    entry.key().clone(),
-                    entry.value().metadata().ingested_at_high_watermark(),
-                )
-            })
-            .collect()
+        let mut watermarks = Vec::new();
+        for (branch, published) in self.state.entries.load().iter() {
+            if let Some(row) = published.load_full() {
+                watermarks.push((branch.clone(), row.metadata().ingested_at_high_watermark()));
+            }
+        }
+        watermarks
     }
 }
 
@@ -530,27 +579,41 @@ impl MaterializedRelayStateOriginator {
     /// Replacing an existing branch's record is admitted without the barrier. A branch's first
     /// record changes which branches exist, so it is kept under the barrier, where no capture can
     /// observe the branch apart from the branch lifecycle it belongs to.
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            recurring,
+            reason = "the originating task updates its own branch record and row publication"
+        )
+    )]
     pub(super) fn update_last_by_timestamp(
-        &self,
+        &mut self,
         key: &Option<BranchKey>,
         record: RuntimeRow,
     ) -> Result<Option<u64>, Report<super::StateAuthorityError>> {
         let state = &self.read.state;
-        let replacement =
-            state
+        if let Some(branch) = self.branches.get_mut(key) {
+            return state
                 .assignment
                 .authorize(self.assignment, StateCapability::Originate, || {
-                    state.replace_existing_record(key, record)
-                })?;
-        match replacement {
-            RecordReplacement::Replaced(revision) => Ok(Some(revision)),
-            RecordReplacement::NotNewer => Ok(None),
-            RecordReplacement::BranchAbsent(record) => state.assignment.authorize_exclusive(
-                self.assignment,
-                StateCapability::Originate,
-                || state.add_branch_record(key, record),
-            ),
+                    if branch.replace(record) {
+                        Some(state.advance_revision())
+                    } else {
+                        None
+                    }
+                });
         }
+        state
+            .assignment
+            .authorize_exclusive(self.assignment, StateCapability::Originate, || {
+                let branch = MaterializedBranchRecord::new(record);
+                let mut entries = (**state.entries.load()).clone();
+                entries.insert(key.clone(), branch.published.clone());
+                self.branches.insert(key.clone(), branch);
+                state.advance_branch_generation();
+                state.entries.store(StdArc::new(entries));
+                Some(state.advance_revision())
+            })
     }
 
     #[cfg_attr(
@@ -562,19 +625,18 @@ impl MaterializedRelayStateOriginator {
         )
     )]
     pub(super) fn remove_key(
-        &self,
+        &mut self,
         key: &Option<BranchKey>,
     ) -> Result<Option<u64>, Report<super::StateAuthorityError>> {
         let state = &self.read.state;
         state
             .assignment
             .authorize_exclusive(self.assignment, StateCapability::Originate, || {
-                nervix_primitives::expect_lint!(
-                    nervix::sync_acquisition,
-                    "Typed Ratchet 04 https://app.clickup.com/t/86bc9eqp3: move materialized \
-                     branch records and reads onto their branch owners",
-                    state.entries.remove(key)
-                )?;
+                let branch = self.branches.remove(key)?;
+                branch.published.store(None);
+                let mut entries = (**state.entries.load()).clone();
+                entries.remove(key);
+                state.entries.store(StdArc::new(entries));
                 state.advance_branch_generation();
                 Some(state.advance_revision())
             })
@@ -603,66 +665,6 @@ impl ReplicatedMaterializedRelayState {
     fn advance_branch_generation(&self) {
         self.branch_generation
             .checked_advance("one process cannot apply 2^64 branch lifecycle changes to one relay");
-    }
-
-    /// Replace the record of a branch this state already holds when `record` is newer, or hand
-    /// `record` back when the branch holds none.
-    #[cfg_attr(
-        nervix_lint,
-        nervix::context(
-            recurring,
-            reason = "this owner is reached by recurring record, frame, acknowledgement or \
-                      state-poll work"
-        )
-    )]
-    fn replace_existing_record(
-        &self,
-        key: &Option<BranchKey>,
-        record: RuntimeRow,
-    ) -> RecordReplacement {
-        let Some(mut existing) = nervix_primitives::expect_lint!(
-            nervix::sync_acquisition,
-            "Typed Ratchet 04 https://app.clickup.com/t/86bc9eqp3: move materialized branch \
-             records and reads onto their branch owners",
-            self.entries.get_mut(key)
-        ) else {
-            return RecordReplacement::BranchAbsent(record);
-        };
-        if !record.metadata().is_newer_than(existing.metadata()) {
-            return RecordReplacement::NotNewer;
-        }
-        *existing = record;
-        drop(existing);
-        RecordReplacement::Replaced(self.advance_revision())
-    }
-
-    /// Keep a branch's first record, or replace the record of a branch that appeared meanwhile.
-    ///
-    /// Branches are only added and removed under the barrier, which this runs under, so a branch
-    /// found absent here stays absent until this record adds it.
-    #[cfg_attr(
-        nervix_lint,
-        nervix::context(
-            recurring,
-            reason = "this owner is reached by recurring record, frame, acknowledgement or \
-                      state-poll work"
-        )
-    )]
-    fn add_branch_record(&self, key: &Option<BranchKey>, record: RuntimeRow) -> Option<u64> {
-        match self.replace_existing_record(key, record) {
-            RecordReplacement::Replaced(revision) => Some(revision),
-            RecordReplacement::NotNewer => None,
-            RecordReplacement::BranchAbsent(record) => {
-                self.advance_branch_generation();
-                nervix_primitives::expect_lint!(
-                    nervix::sync_acquisition,
-                    "Typed Ratchet 04 https://app.clickup.com/t/86bc9eqp3: move materialized \
-                     branch records and reads onto their branch owners",
-                    self.entries.insert(key.clone(), record)
-                );
-                Some(self.advance_revision())
-            }
-        }
     }
 }
 
@@ -701,9 +703,9 @@ impl MaterializedRelaySnapshotInstaller {
 
     /// Replace this state with a restored snapshot, or refuse it.
     ///
-    /// The decoding already happened; this is the publication step and it is atomic. A snapshot
-    /// from an older branch lifecycle is refused rather than installed, so an evicted branch is
-    /// never resurrected by a generation captured before it left.
+    /// Decoding already happened. Captures serialize with this publication; point readers may
+    /// finish a borrowed row or observe absence while the preceding members end. A snapshot from
+    /// an earlier branch lifecycle is refused, so eviction cannot be undone by a preceding capture.
     #[cfg_attr(
         nervix_lint,
         nervix::context(
@@ -724,11 +726,10 @@ impl MaterializedRelaySnapshotInstaller {
             || {
                 let installed_revision = self.read.state.current_lsm.current();
                 if restored.revision < installed_revision {
-                    return Err(RuntimeStateOperationError::Checkpoint(format!(
-                        "refused materialized revision {} while revision {installed_revision} is \
-                         installed",
-                        restored.revision,
-                    )));
+                    return Err(RuntimeStateOperationError::MaterializedSnapshotRevision {
+                        received: restored.revision,
+                        current: installed_revision,
+                    });
                 }
                 let installed_branch_generation =
                     self.read.state.branch_generation.load(Ordering::SeqCst);
@@ -747,10 +748,15 @@ impl MaterializedRelaySnapshotInstaller {
                         restored.fence,
                     )));
                 }
-                self.read.state.entries.clear();
+                let mut entries = MaterializedBranches::default();
                 for record in restored.records {
-                    self.read.state.entries.insert(record.branch, record.row);
+                    let branch = MaterializedBranchRecord::new(record.row);
+                    entries.insert(record.branch, branch.published);
                 }
+                for published in self.read.state.entries.load().values() {
+                    published.store(None);
+                }
+                self.read.state.entries.store(StdArc::new(entries));
                 self.read
                     .state
                     .branch_generation
@@ -857,7 +863,7 @@ mod tests {
             test_placement("state"),
             schema.clone(),
         ));
-        let originator = ReplicatedMaterializedRelayState::bind(
+        let mut originator = ReplicatedMaterializedRelayState::bind(
             &owner,
             StateReplicationRoles::owned_by(None),
             None,
@@ -945,6 +951,79 @@ mod tests {
         replica_race_preserves_the_restored_revision();
     }
 
+    #[test]
+    fn snapshot_installation_keeps_the_newest_revision_of_one_branch_generation() {
+        let executor = Executor::new(nervix_execution::ExecutionConfig::default())
+            .assured("valid executor budgets");
+        let first = test_runtime_row([("value".to_string(), RuntimeValue::I64(1))]);
+        let schema = first.arrow_schema();
+        let state = Arc::new(ReplicatedMaterializedRelayState::new(
+            test_placement("tenant_state"),
+            schema.clone(),
+        ));
+        let local = ClusterNodeName::try_from("node-2".to_string())
+            .assured("the test node satisfies the node grammar");
+        let mut assignment = ReplicatedMaterializedRelayState::bind(
+            &state,
+            StateReplicationRoles::new(
+                Some(
+                    ClusterNodeName::try_from("node-1".to_string())
+                        .assured("the test node satisfies the node grammar"),
+                ),
+                vec![local.clone()],
+                0,
+            ),
+            Some(&local),
+        );
+        let installer = assignment
+            .installer
+            .take()
+            .assured("the local node is a replica");
+        let earlier = RestoredMaterializedSnapshot::from_captured_generation(
+            &executor,
+            MaterializedGeneration::new(
+                1,
+                1,
+                1,
+                schema.clone(),
+                vec![MaterializedGenerationRecord {
+                    branch: None,
+                    row: first,
+                }],
+            ),
+        );
+        let newer = RestoredMaterializedSnapshot::from_captured_generation(
+            &executor,
+            MaterializedGeneration::new(
+                2,
+                1,
+                1,
+                schema,
+                vec![MaterializedGenerationRecord {
+                    branch: None,
+                    row: test_runtime_row([("value".to_string(), RuntimeValue::I64(2))]),
+                }],
+            ),
+        );
+        installer
+            .install(newer)
+            .assured("a newer snapshot is admissible");
+        assert!(
+            installer.install(earlier).is_err(),
+            "an earlier revision must not replace newer rows"
+        );
+        assert_eq!(
+            installer
+                .read()
+                .record(&None)
+                .assured("the current row exists")
+                .row
+                .value_at(0)
+                .assured("the current column is valid"),
+            Some(RuntimeValue::I64(2))
+        );
+    }
+
     #[nervix_primitives::test]
     async fn unbranched_materialized_state_snapshot_restores_entries() {
         let executor = Executor::new(nervix_execution::ExecutionConfig::default())
@@ -964,7 +1043,7 @@ mod tests {
             StateReplicationRoles::owned_by(None),
             None,
         );
-        let originator = assignment
+        let mut originator = assignment
             .originator
             .take()
             .assured("branch-local state is authoritative in this process");
@@ -1024,7 +1103,7 @@ mod tests {
             StateReplicationRoles::owned_by(None),
             None,
         );
-        let originator = assignment
+        let mut originator = assignment
             .originator
             .take()
             .assured("branch-local state is authoritative in this process");
@@ -1071,7 +1150,7 @@ mod tests {
             StateReplicationRoles::owned_by(None),
             None,
         );
-        let originator = assignment
+        let mut originator = assignment
             .originator
             .take()
             .assured("branch-local state is authoritative in this process");
@@ -1120,7 +1199,7 @@ mod tests {
             StateReplicationRoles::owned_by(None),
             None,
         );
-        let originator = assignment
+        let mut originator = assignment
             .originator
             .take()
             .assured("branch-local state is authoritative in this process");
@@ -1162,7 +1241,7 @@ mod tests {
             StateReplicationRoles::owned_by(None),
             None,
         );
-        let originator = owner
+        let mut originator = owner
             .originator
             .take()
             .assured("branch-local state is authoritative in this process");
@@ -1247,7 +1326,7 @@ mod tests {
                 StateReplicationRoles::owned_by(None),
                 None,
             );
-            let originator = assignment
+            let mut originator = assignment
                 .originator
                 .take()
                 .assured("branch-local state is authoritative in this process");
@@ -1277,7 +1356,10 @@ mod tests {
 
             // The barrier stays held until the update returns, so an update that waited for it
             // would leave every thread blocked, which Shuttle reports as a deadlock.
-            let updated = originator.update_last_by_timestamp(&None, record);
+            let updated = originator.update_last_by_timestamp(
+                &None,
+                record.with_ingested_at_watermarks(nervix_models::Timestamp::from_unix_nanos(1)),
+            );
             release_tx
                 .send(())
                 .assured("the barrier thread waits for its release");
@@ -1287,7 +1369,7 @@ mod tests {
             );
 
             assert!(
-                updated.is_ok(),
+                matches!(updated, Ok(Some(2))),
                 "the originator update was refused while the assignment barrier was held"
             );
         }
@@ -1312,7 +1394,7 @@ mod tests {
                     test_placement("state"),
                     row.arrow_schema(),
                 ));
-                let originator = ReplicatedMaterializedRelayState::bind(
+                let mut originator = ReplicatedMaterializedRelayState::bind(
                     &state,
                     StateReplicationRoles::owned_by(None),
                     None,
@@ -1328,7 +1410,6 @@ mod tests {
                     .update_last_by_timestamp(&beta, timestamped_row(2))
                     .assured("beta starts");
                 let writer = thread::spawn({
-                    let originator = originator.clone();
                     let alpha = alpha.clone();
                     let beta = beta.clone();
                     move || {

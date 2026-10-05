@@ -110,6 +110,16 @@ refresh their typed plan identity between batches. The endpoint routing index an
 resources are installed at their own cutover points under the application sequence. This is a
 node-local publication guarantee, not a distributed atomic transaction across cluster nodes.
 
+The routing snapshot also retains each materialized relay's installed-state publication and the
+domain's relay-state epoch. Assignments are registered before these handles are staged; a missing
+required publication is an installation invariant failure. A materialized origination capability
+moves once into its concrete branch runtime or scheduled relay-state task. That task owns the
+mutable selections, while dependency readers, generators and captures retain immutable row views.
+Lazy branch installation binds every materialized relay independently within an unchanged routing
+epoch; having installed one relay does not suppress another. Eviction withdraws the branch's
+materialized record before releasing its writer. Read and replica-installation capabilities remain
+independently retainable.
+
 A stopped domain uses a passive build from the same activation and resource decisions. It keeps
 schemas, codecs, relay descriptions, materialized-state identities, lookups, bound error routes,
 and endpoint definitions available for inspection and recovery, while routing is marked passive

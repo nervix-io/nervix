@@ -1064,6 +1064,14 @@ node's opaque diagnostic text. A materialized snapshot is streamed only after a 
 description identifies its exact length, digest, revision, fence, and branch generation; the
 placement that the request names supplies its schema fingerprint.
 
+Domain routing retains each materialized relay's installed-state publication from the shared
+state-replication routing owner. Branch reads and generator scans use that relay's immutable index,
+while the selected route validates its retained assignment identity. Retirement ends the exact
+state intake before removing its member; an ending predecessor cannot withdraw its replacement.
+Materialized installation refuses a lower revision, fence or branch generation before changing
+live rows. Transport decoding and the snapshot container remain owned by their existing engines;
+this publication introduces no wire or stored-container variant.
+
 A materialized dependency reader may observe the committed destination just before that node
 activates its prepared state, or the previous destination just after it leaves the assignment. A
 rejected, absent, or not-ready snapshot description in this handoff window means the dependency has

@@ -602,6 +602,10 @@ pub(in crate::runtime) enum RuntimeStateOperationError {
     Authority(#[from] StateAuthorityError),
     #[error(transparent)]
     Persistence(#[from] RuntimePersistenceError),
+    #[error(
+        "refused materialized snapshot revision {received} while revision {current} is installed"
+    )]
+    MaterializedSnapshotRevision { received: u64, current: u64 },
     #[error("runtime state checkpoint failed: {0}")]
     Checkpoint(String),
     #[error("runtime state replication failed: {0}")]
@@ -2312,3 +2316,7 @@ mod tests;
 #[cfg(all(test, feature = "shuttle"))]
 #[path = "state_store_shuttle_tests.rs"]
 mod shuttle_tests;
+
+#[cfg(all(test, feature = "loom"))]
+#[path = "state_store_loom_models.rs"]
+mod loom_models;

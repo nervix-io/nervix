@@ -451,6 +451,13 @@ The same key accompanies branch-local processor and relay failures, so another b
 mistaken for the failed one. Unbranched work has no branch key. [Data Plane](./data-plane.md) owns
 branch execution and [Cluster Interconnect](./interconnect.md) owns snapshot exchange.
 
+The materialized installation owner refuses a lower snapshot revision with
+`RuntimeStateOperationError::MaterializedSnapshotRevision { received, current }`, preserving both
+values in its diagnostic. It checks this before publishing any restored row, alongside assignment,
+branch-generation and ownership-fence validation. A cached snapshot from another assignment is
+rebuilt under the current fence rather than reported as current; a fence change during encoding
+remains the snapshot owner's typed `OwnershipChanged` failure.
+
 ```mermaid
 sequenceDiagram
     participant Processor

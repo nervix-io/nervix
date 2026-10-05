@@ -942,7 +942,7 @@ impl Runtime {
                 }
 
                 if desired_materialized {
-                    let placement = self.build_scheduled_node_placement(
+                    let mut placement = self.build_scheduled_node_placement(
                         domain,
                         &shutdown,
                         desired_node,
@@ -961,7 +961,7 @@ impl Runtime {
                                 domain,
                                 RelayStateTaskSpec {
                                     relay: RelayName::from(&entity.identifier.clone()),
-                                    state: placement.materialized_state.clone().ok_or_else(
+                                    state: placement.materialized_state.take().ok_or_else(
                                         || RuntimeError::BuildDomainExecution {
                                             domain: domain.as_str().to_string(),
                                             reason: format!(
