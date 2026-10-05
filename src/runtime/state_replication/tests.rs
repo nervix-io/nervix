@@ -1849,6 +1849,57 @@ fn branch_aggregated_state_snapshot_roundtrips_metrics() {
     );
 }
 
+/// Metrics a batch records after a flush took its snapshot, and before that flush recorded the
+/// snapshot persisted, are persisted by the next flush rather than forgotten.
+#[test]
+fn a_metrics_update_after_a_flush_took_its_snapshot_is_persisted_by_the_next_flush() {
+    let metrics = RuntimeMetrics::default();
+    let node = ClusterNodeName::parse("node-1").assured("a literal node name");
+    let placement = RuntimeStatePlacement {
+        domain: domain("default"),
+        state: RuntimeState::BranchAggregated,
+        kind: ModelKind::Ingestor,
+        identifier: named("redis_notifications"),
+        branch_key: None,
+    };
+    let relay = named("notifications");
+    let state = ReplicatedBranchAggregatedState::new(
+        placement.clone(),
+        Some(node.clone()),
+        node.clone(),
+        &metrics,
+        None,
+    )
+    .assured("a state without a persisted snapshot initializes");
+    let batch_metrics = metrics.resolve_node_batch_metrics(NodeBatchMetricsSpec {
+        domain: &placement.domain,
+        kind: placement.kind,
+        node: &placement.identifier,
+        relay: &relay,
+        physical_node_id: Some(&node),
+        direction: "sent",
+        branch_key: None,
+    });
+    batch_metrics.observe(2, 64, None);
+    state.mark_metrics_updated();
+    let first = state
+        .snapshot_to_persist(&metrics)
+        .assured("the metrics snapshot encodes")
+        .verified("the batch above marked the metrics updated");
+
+    batch_metrics.observe(3, 96, None);
+    state.mark_metrics_updated();
+    state.persisted(first.lsm);
+
+    let next = state
+        .snapshot_to_persist(&metrics)
+        .assured("the metrics snapshot encodes");
+    assert!(
+        next.is_some(),
+        "metrics recorded after a flush took its snapshot were never persisted"
+    );
+}
+
 #[nervix_primitives::test]
 async fn state_sync_request_returns_latest_snapshot_only_when_lsm_advances() {
     let runtime = Runtime::default();

@@ -103,6 +103,20 @@ class PatchCoverageTests(unittest.TestCase):
         self.assertEqual(measured.files[0].path, "src/sample.py")
         self.assertEqual((measured.covered, measured.executable), (1, 2))
 
+    def test_non_utf8_corpus_content_preserves_paths_and_source_line_coverage(self) -> None:
+        corpus = self.root / "corpus" / "雪"
+        corpus.parent.mkdir()
+        corpus.write_bytes(b"\xff\xfe\n")
+        self.source.write_text("def answer():\n    return 2\n")
+        self.commit()
+        report = self.report("coverage.lcov", "src/sample.py", {1: 1, 2: 1})
+        measured = self.measure(report)
+        self.assertEqual(measured.patch.lines["corpus/雪"], {1})
+        self.assertEqual((measured.covered, measured.executable), (1, 1))
+        by_path = {item.path: item for item in measured.files}
+        self.assertIsNone(by_path["corpus/雪"].executable)
+        self.assertEqual(by_path["src/sample.py"].covered, 1)
+
     def test_deleted_lines_and_changes_on_the_base_branch_do_not_enter_the_patch(self) -> None:
         self.git("checkout", "--quiet", "-b", "patch")
         self.source.write_text("def answer():\n    return 2\n")

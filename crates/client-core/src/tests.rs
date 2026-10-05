@@ -264,14 +264,11 @@ fn detached_exchange(
     let sinks = SessionEvents::new().sinks;
     let generation = sinks.begin_generation();
     Exchange {
-        requests: Arc::new(ExchangeRequests {
-            frames,
-            pending,
-            channel: Channel::from_static("http://127.0.0.1:9").connect_lazy(),
-        }),
+        requests: Arc::new(ExchangeRequests { frames, pending }),
         reader: nervix_primitives::task::spawn(std::future::ready(())),
         sinks,
         generation,
+        channel: Channel::from_static("http://127.0.0.1:9").connect_lazy(),
     }
 }
 
@@ -1059,7 +1056,6 @@ async fn closing_a_failed_exchange_preserves_its_grpc_status_for_waiters() {
     let exchange = ExchangeRequests {
         frames,
         pending: fixture.pending.clone(),
-        channel: Channel::from_static("http://127.0.0.1:9").connect_lazy(),
     };
     let mut request = exchange.register().assured("the exchange is open");
     fixture

@@ -315,11 +315,21 @@ async fn each_materialized_relay_installs_its_branch_owner_in_the_same_routing_e
             ),
         );
     }
-    branch.routing_snapshot = Some(StdArc::new(DomainRoutingSnapshot {
+    // Reconciliation reads the routing the runtime publishes, as a schedule leaves it, so the test
+    // publishes the routing it gives the branch.
+    let published = StdArc::new(DomainRoutingSnapshot {
         materialized_stream_reads: runtime.materialized_relay_publications(&placed.domain, &specs),
         materialized_stream_specs: specs,
         ..DomainRoutingSnapshot::default()
-    }));
+    });
+    let routing = runtime
+        .inner
+        .domain_routings
+        .get(&placed.domain)
+        .verified("the test domain publishes its routing")
+        .clone();
+    routing.store(StdArc::clone(&published));
+    branch.routing_snapshot = Some(published);
     for name in ["profiles", "rules"] {
         let relay = RelayName::parse(name).assured("valid relay");
         branch.reconcile_materialized_state_membership(&relay).await;

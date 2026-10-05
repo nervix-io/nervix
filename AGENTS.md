@@ -932,7 +932,11 @@ build and the existing tests, and nothing in it changes behavior.
   `crates/model-harness/loom-inventory.toml`, and register a `[[qualification]]` weakening that
   must make the model fail. A standalone relaxed counter carries no cross-location claim, and an
   operation inside an opaque dependency is excluded from a claim rather than given a fictional
-  model.
+  model. A store-load claim, in which each side writes one location and then reads the other's,
+  holds only under sequential consistency, which acquire and release do not give and Loom cannot
+  check, because it models `SeqCst` accesses as acquire and release. The side off the hot path
+  therefore reads the other side's location by read-modify-write, so acquire and release decide the
+  claim and Loom can check it.
 - The evidence forms are complementary and none replaces another: Shuttle for interleavings of
   production owners, Loom for memory-ordering claims of synchronous production owners, Turmoil for
   network claims within the supported simulation, Deloxide for active deadlocks among the tracked
@@ -1148,8 +1152,8 @@ build and the existing tests, and nothing in it changes behavior.
   `just test-turmoil` fails when one of its invocations executes no test, when a test
   `tests/turmoil-inventory.toml` registers did not run or ran ignored, and when a simulation test
   ran unregistered. CI runs Shuttle and its replay check, Loom and its qualification, and Turmoil
-  and its replay check each in a job of its own, only for a pull request labeled `shuttle`, `loom`
-  or `turmoil` respectively; a pull request that affects one of these modes carries that mode's
+  and its replay check in jobs of their own, only for a pull request labeled `shuttle`, `loom` or
+  `turmoil` respectively; a pull request that affects one of these modes carries that mode's
   label. `just cargo-clippy-loom`, part of `just lint`, keeps every Loom build compiling,
   including the server and consensus libraries as they ship and in test mode.
   `just cargo-clippy-shuttle`, also part of `just lint`, lints every Shuttle build with warnings

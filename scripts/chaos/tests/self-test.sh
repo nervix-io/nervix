@@ -562,7 +562,9 @@ CHAOS_NODE_3_ADDRESS="10.213.7.13" \
 
 jq -e --arg image "${placeholder_image}" \
     --arg election_min "${CHAOS_RAFT_ELECTION_TIMEOUT_MIN:-1500ms}" \
-    --arg node_timeout "${CHAOS_NODE_UNAVAILABILITY_TIMEOUT:-10s}" '
+    --arg node_timeout "${CHAOS_NODE_UNAVAILABILITY_TIMEOUT:-10s}" \
+    --arg snapshot_entries "${CHAOS_RAFT_SNAPSHOT_ENTRY_THRESHOLD:-10000}" \
+    --arg covered_entries "${CHAOS_RAFT_COVERED_LOG_ENTRIES_RETAINED:-1000}" '
     ([.services.admin, .services["nervix-1"], .services["nervix-2"], .services["nervix-3"]]
       | all(.image == $image))
     and ([.services[]] | all(has("build") | not))
@@ -574,6 +576,8 @@ jq -e --arg image "${placeholder_image}" \
     and .services.observer.labels["io.nervix.chaos.role"] == "observer"
     and .services["nervix-1"].environment.NERVIX_RAFT_ELECTION_TIMEOUT_MIN == $election_min
     and .services["nervix-1"].environment.NERVIX_NODE_UNAVAILABILITY_TIMEOUT == $node_timeout
+    and .services["nervix-1"].environment.NERVIX_RAFT_SNAPSHOT_ENTRY_THRESHOLD == $snapshot_entries
+    and .services["nervix-1"].environment.NERVIX_RAFT_COVERED_LOG_ENTRIES_RETAINED == $covered_entries
 ' "${compose_json}" >/dev/null || fail "Compose does not pin every Nervix service or contains a build"
 
 jq -e --arg nervix "${placeholder_image}" \
@@ -709,3 +713,4 @@ fi
 printf 'chaos harness self-test passed\n'
 "${script_dir}/degraded-self-test.sh"
 "${script_dir}/docker-events-self-test.sh"
+"${script_dir}/recovery-self-test.sh"

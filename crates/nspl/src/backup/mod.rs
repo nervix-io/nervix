@@ -239,9 +239,11 @@ pub(crate) fn describe_backup_tail(describe: &DescribeBackup, tokens: &[Token]) 
 }
 
 #[cfg(test)]
+mod archive_properties;
+
+#[cfg(test)]
 mod tests {
     use meticulous::ResultExt as _;
-    use nervix_arbitrary::{Arbitrary, Domain};
     use nervix_models::{DomainName, Statement};
     use rstest::rstest;
 
@@ -819,105 +821,13 @@ mod tests {
         );
     }
 
-    /// Every generated Model exported the way a backup exports a domain — one canonical document,
-    /// held as a section of an archive and read back from the archive stream — reparses to itself,
-    /// statement for statement and in order.
+    /// Ordered canonical Model documents survive complete multi-domain archive extraction,
+    /// production restore reads, semantic reparse and deterministic re-export.
     #[test]
     fn bolero_models_exported_through_an_archive_reparse_to_themselves() {
         bolero::check!()
-            .with_iterations(64)
+            .with_iterations(128)
             .with_max_len(4096)
-            .for_each(|bytes: &[u8]| {
-                let mut arbitrary = Arbitrary::new(bytes, Domain::Nspl);
-                let count = arbitrary.entropy().count(4);
-                let mut models = Vec::with_capacity(count);
-                for _ in 0..count {
-                    models.push(arbitrary.model());
-                }
-                let document = nervix_models::canonical_nspl_document(&models)
-                    .expect("generator output must be renderable");
-                let exported = archived_models_document(&document);
-                assert_eq!(
-                    exported, document,
-                    "the archive returns the document it holds"
-                );
-                let statements = crate::client_statement::parse_client_statements(&exported)
-                    .unwrap_or_else(|error| panic!("{exported} must reparse: {error:?}"));
-                let expected = models
-                    .into_iter()
-                    .map(|model| {
-                        crate::client_statement::ClientStatement::Server(Statement::Create(
-                            nervix_models::CreateStatement::new(Box::new(model), false),
-                        ))
-                    })
-                    .collect::<Vec<_>>();
-                assert_eq!(statements, expected, "{exported} changed meaning");
-            });
-    }
-
-    /// Writes `document` as the `models.nspl` section of an archive and reads it back from the
-    /// archive's bytes.
-    fn archived_models_document(document: &str) -> String {
-        use std::io::Read as _;
-
-        use nervix_backup::{
-            ArchiveLayout, ArchiveReadError, ArchiveScope, BackupManifest, SectionContent,
-            SectionDigester, SectionEntry, SectionPath, SectionReader, SectionVisitor,
-            read_archive,
-        };
-
-        struct Collector {
-            text: String,
-        }
-
-        impl SectionVisitor for Collector {
-            fn manifest(
-                &mut self,
-                _manifest: &BackupManifest,
-            ) -> Result<(), error_stack::Report<ArchiveReadError>> {
-                Ok(())
-            }
-
-            fn section(
-                &mut self,
-                _entry: &SectionEntry,
-                content: &mut SectionReader<'_>,
-            ) -> Result<(), error_stack::Report<ArchiveReadError>> {
-                content
-                    .read_to_string(&mut self.text)
-                    .expect("the exported document is UTF-8");
-                Ok(())
-            }
-        }
-
-        let domain = nervix_models::DomainName::parse("exported").expect("a valid domain");
-        let entry = SectionEntry {
-            path: SectionPath::domain_models(&domain),
-            content: SectionContent::Nspl,
-            length: u64::try_from(document.len()).expect("the document fits 64 bits"),
-            digest: SectionDigester::digest_of(document.as_bytes()),
-        };
-        let manifest = BackupManifest {
-            producer_version: nervix_models::NSPL_LANGUAGE_VERSION.to_string(),
-            language_version: nervix_models::NSPL_LANGUAGE_VERSION.to_string(),
-            cluster_id: "property".to_string(),
-            captured_at: nervix_models::Timestamp::from_unix_nanos(0),
-            scope: ArchiveScope::Domain(domain),
-            resources: nervix_models::BackupResources::Included,
-            domains: Vec::new(),
-            sections: vec![entry],
-        };
-        let layout = ArchiveLayout::new(manifest).expect("the archive lays out");
-        let mut archive = Vec::new();
-        layout
-            .write_to(&mut archive, |_, sink| {
-                std::io::Write::write_all(sink, document.as_bytes())
-            })
-            .expect("the archive writes");
-        let mut collector = Collector {
-            text: String::new(),
-        };
-        read_archive(archive.as_slice(), &mut collector).expect("the archive reads back");
-        collector.text
+            .for_each(super::archive_properties::assert_archive_models);
     }
 }

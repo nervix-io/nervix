@@ -45,7 +45,7 @@ own Cucumber, Shuttle, Loom, Turmoil and external Chaos evidence.
 | `client-processor-choice-request` | `nervix-client-wire` processor choice request round-trip equality | current targets with relay context, search, page and identity, v1 | 128 | 32 bytes |
 | `nspl-expression` | `nervix-nspl` expression render and reparse equality through a statement and the standalone expression, expression-list and route-construction readers | NSPL expressions of every form, v5 | 256 | 512 bytes |
 | `nspl-model` | `nervix-nspl` canonical `CREATE` render and client and server reparse equality | NSPL Models of every family, client emitters included, v6 | 256 | 2048 bytes |
-| `nspl-archive-model` | `nervix-nspl` archive document and reparse equality | ordered NSPL Models, client emitters included, v6 | 64 | 4096 bytes |
+| `nspl-archive-model` | `nervix-nspl` complete ordered canonical Model equality through export, restore reads, reparse and re-export | cluster/domain archives with multiple ordered documents and every Model family, v7 | 128 | 4096 bytes |
 | `nspl-statement` | `nervix-nspl` canonical statement render and client and server reparse equality | NSPL statements of every form, session-only forms included, v4 | 256 | 2048 bytes |
 | `nspl-statement-text` | `nervix-nspl` edited statement text is rejected with located diagnostics or reads as canonical statements | edited canonical text, v4 | 256 | 2048 bytes |
 | `nspl-expression-text` | `nervix-nspl` edited expression text reads as the same expression, or as none, through a statement and the standalone expression, expression-list and route-construction readers | edited canonical expressions, v3 | 256 | 512 bytes |
@@ -70,8 +70,13 @@ own Cucumber, Shuttle, Loom, Turmoil and external Chaos evidence.
 | `consensus-archived-counts` | `nervix-consensus` complete record equality through the production bounded storage codec | transaction commands, limits, positions, progress, failures, outcomes, plan and report headers with boundary and generated counts, v1 | 256 | 16 bytes |
 | `registry-archived-models` | `nervix-server` complete Model equality through the registry's sealed storage codec | every vocabulary Model family with pinned resource versions and full-width counts, v2 | 256 | 4096 bytes |
 | `runtime-window-archived-counts` | `nervix-server` histogram delayed-removal archive equality | current removals with arbitrary expiry and boundary and generated bucket indices, v1 | 256 | 32 bytes |
-| `backup-record-manifest` | `nervix-backup` record and manifest encode/decode equality | current domain record and manifest, v1 | 256 | 128 bytes |
-| `backup-runtime-state-records` | `nervix-backup` complete runtime state record equality | guest descriptors, source offsets and branch lifecycle, v1 | 256 | 128 bytes |
+| `backup-record-manifest` | `nervix-backup` complete record and manifest encode/decode equality | all nine current record kinds, lifecycle/catalog variants, every cut, full-width counters and ordered metadata, v3 | 256 | 4096 bytes |
+| `backup-runtime-state-records` | `nervix-backup` complete runtime state record equality | guest/materialized descriptors and identities, empty/multi-partition offsets and ordered branch lifecycle with bit-exact nested fields, v3 | 256 | 4096 bytes |
+| `backup-materialized-identities` | `nervix-backup` complete materialized descriptors and scalar identity group equality | empty/unbranched/branched generations, nested typed fields, float bits and watermarks, v1 | 256 | 2048 bytes |
+| `backup-materialized-columns` | `nervix-server` exact-schema Arrow/native generation fidelity and stored checkpoint re-export | nullable, sensitive, nested and byte columns; complete headers, ordered identities and original stored Arrow bytes, v2 | 128 | 4096 bytes |
+| `backup-complete-archives` | `nervix-backup` complete export/extraction, restore-read and deterministic re-export fidelity | cluster/domain scopes, resources included/omitted, every cut and supported state kind, empty/unbranched/multi-group materialized generations with valid Arrow columns, synthetic raw payloads at tar block boundaries and long paths, v2 | 256 | 4096 bytes |
+| `backup-malformed-records` | `nervix-backup` safe typed validation of current record headers and values | all nine kinds, truncated/altered headers, invalid current fields and bounded arbitrary bytes, v2 | 256 | 4096 bytes |
+| `backup-corrupt-archives` | `nervix-backup` rejection before verified restore contents are returned | changed lengths/digests/kinds, reordered/missing/extra sections, invalid records and materialized group metadata/membership, damaged Arrow sections, truncation and bounded arbitrary tar inputs, v2 | 256 | 4096 bytes |
 | `restore-installation-wire` | `nervix-interconnect` complete installation request wire equality | all actions, authority, placement, payload and inventory, v1 | 256 | 128 bytes |
 | `restore-installation-storage` | `nervix-server` complete staged checkpoint and publication record equality | authority, placement, revision, payload and inventory, v1 | 256 | 128 bytes |
 | `simd-checked-lanes` | `nervix-simd-kernels` checked integer arithmetic equals scalar overflowing arithmetic at every SIMD level | all integer widths, runs and shared operands, v1 | 256 | 128 bytes |
@@ -332,6 +337,13 @@ accepts a skipped sanitizer job otherwise. Scheduled and manual workflow runs ex
 properties. Job limits reserve additional time for compilation, artifacts and cleanup. A
 cache may seed a campaign but cannot skip a target or replace checked-in regressions. An empty
 selection, timeout, engine failure, sanitizer finding or property failure fails the job.
+
+The workspace, sanitizer-runner Python, and diagnostic coverage upload jobs use
+`.github/actions/setup-codecov` to verify the pinned CLI
+wheel's SHA-256 and Codecov publisher attestation before installing it in an isolated environment.
+The verified executable is passed to the Codecov action; OIDC authentication and fatal upload
+errors apply to all three uploads. Diagnostic coverage retains its separate flag and is excluded
+from ordinary coverage and CRAP accounting.
 
 Each fuzz run retains its corpus, crashes, log and metadata with revision, target, domain version,
 toolchain, features, flags, result and an exact-input reproduction command. Retain failure

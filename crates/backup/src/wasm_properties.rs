@@ -16,7 +16,7 @@ use crate::{
     wire::{StateField, StateValue, WasmStateDescriptorWire},
 };
 
-struct Descriptors<'a>(Arbitrary<'a>);
+pub(super) struct Descriptors<'a>(pub(super) Arbitrary<'a>);
 
 impl Descriptors<'_> {
     fn scalar(&mut self, kind: u8) -> StateValue {
@@ -58,7 +58,7 @@ impl Descriptors<'_> {
         }
     }
 
-    fn descriptor(&mut self, branched: bool) -> WasmStateDescriptor {
+    pub(super) fn descriptor(&mut self, branched: bool) -> WasmStateDescriptor {
         let mut fields = Vec::new();
         for kind in 0..13 {
             let scalar = self.scalar(kind);

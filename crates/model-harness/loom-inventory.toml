@@ -23,9 +23,9 @@ test = "runtime::state_store::loom_models::loom_assignment_drain_observes_every_
 failure = "assignment drain omitted an admitted publication's preceding writes"
 id = "server.state-assignment.relaxed-completion"
 invariant = "server.state-assignment.drained-publication"
-original = ".fetch_sub(1, Ordering::SeqCst)\n            .checked_sub(1)"
+original = ".fetch_sub(1, Ordering::Release)"
 path = "src/runtime/state_store.rs"
-weakened = ".fetch_sub(1, Ordering::Relaxed)\n            .checked_sub(1)"
+weakened = ".fetch_sub(1, Ordering::Relaxed)"
 
 [[invariant]]
 claim = "The model body and its participants execute instrumented debug frames on their modeled coroutine stacks, while the coordinator only joins the body."
@@ -74,6 +74,202 @@ invariant = "execution.cancellation.publication"
 original = "self.cancelled.load(Ordering::Acquire)"
 path = "crates/execution/src/cancellation.rs"
 weakened = "self.cancelled.load(Ordering::Relaxed)"
+
+[[invariant]]
+claim = "A relay dispatch fence counts every dispatch that finds the gate open: a dispatch raises the in-flight count before it reads the closed flag, an engagement closes the gate before it reads the count, and both reach the count by read-modify-write, so one observes the other."
+id = "runtime.relay-dispatch-gate.entry-fence"
+package = "nervix-server"
+test = "runtime::relay_channel::loom_models::loom_a_fence_counts_every_dispatch_that_finds_the_gate_open"
+
+[[invariant]]
+claim = "A fence that takes its lease observes everything each dispatch it counted did under its permit: leaving releases and the fence's read of the count acquires."
+id = "runtime.relay-dispatch-gate.lease-publication"
+package = "nervix-server"
+test = "runtime::relay_channel::loom_models::loom_a_lease_follows_what_every_counted_dispatch_did_under_its_permit"
+
+[[invariant]]
+claim = "The last dispatch to leave a closed gate wakes the fence waiting for it: either the fence's read of the count sees the dispatch gone, or the dispatch's leaving acquires that read and observes the gate closed."
+id = "runtime.relay-dispatch-gate.drain-wakeup"
+package = "nervix-server"
+test = "runtime::relay_channel::loom_models::loom_the_last_dispatch_to_leave_a_closed_gate_wakes_its_fence"
+
+[[invariant]]
+claim = "A dispatch that finds the gate reopened observes what the protected mutation changed while it was closed: reopening releases and the dispatch's read of the flag acquires."
+id = "runtime.relay-dispatch-gate.reopen-publication"
+package = "nervix-server"
+test = "runtime::relay_channel::loom_models::loom_a_dispatch_that_finds_the_gate_reopened_observes_the_protected_change"
+
+[[qualification]]
+failure = "the fence took its lease while a dispatch it did not count was still running"
+id = "runtime.relay-dispatch-gate.fence-loads-the-count"
+invariant = "runtime.relay-dispatch-gate.entry-fence"
+original = "let in_flight_dispatches = self.in_flight_dispatches.fetch_add(0, Ordering::AcqRel);"
+path = "src/runtime/relay_channel.rs"
+weakened = "let in_flight_dispatches = self.in_flight_dispatches.load(Ordering::Acquire);"
+
+[[qualification]]
+failure = "the fence took its lease without what the dispatch did under its permit"
+id = "runtime.relay-dispatch-gate.relaxed-leave"
+invariant = "runtime.relay-dispatch-gate.lease-publication"
+original = """
+            .in_flight_dispatches
+            .fetch_sub(1, Ordering::AcqRel)"""
+path = "src/runtime/relay_channel.rs"
+weakened = """
+            .in_flight_dispatches
+            .fetch_sub(1, Ordering::Relaxed)"""
+
+[[qualification]]
+failure = "the fence waits for a dispatch that left without waking it"
+id = "runtime.relay-dispatch-gate.drain-fence-loads-the-count"
+invariant = "runtime.relay-dispatch-gate.drain-wakeup"
+original = "let in_flight_dispatches = self.in_flight_dispatches.fetch_add(0, Ordering::AcqRel);"
+path = "src/runtime/relay_channel.rs"
+weakened = "let in_flight_dispatches = self.in_flight_dispatches.load(Ordering::Acquire);"
+
+[[qualification]]
+failure = "a dispatch entered the reopened gate without the change made while it was closed"
+id = "runtime.relay-dispatch-gate.relaxed-reopen"
+invariant = "runtime.relay-dispatch-gate.reopen-publication"
+original = ".store(!state.engagements.is_empty(), Ordering::Release);"
+path = "src/runtime/relay_channel.rs"
+weakened = ".store(!state.engagements.is_empty(), Ordering::Relaxed);"
+
+[[invariant]]
+claim = "A consumer that frees room a waiting publisher needs either admits it or wakes it: the publisher raises the waiting count before it reads the admission count, the consumer lowers the admission count before it reads the waiting count, and both reach the admission count by read-modify-write, so one observes the other."
+id = "runtime.relay-fanout.admission-wakeup"
+package = "nervix-server"
+test = "runtime::relay_channel::loom_models::loom_a_consumer_freeing_room_admits_or_wakes_the_publisher_waiting_for_it"
+
+[[qualification]]
+failure = "a consumer freed room without admitting or waking the publisher waiting for it"
+id = "runtime.relay-fanout.waiting-publisher-loads-the-admissions"
+invariant = "runtime.relay-fanout.admission-wakeup"
+original = "let admitted = self.admitted.fetch_add(0, Ordering::AcqRel);"
+path = "src/runtime/relay_channel.rs"
+weakened = "let admitted = self.admitted.load(Ordering::Acquire);"
+
+[[invariant]]
+claim = "An operation admitted under a runtime-state binding that a rebind supersedes either observes the new binding and is refused, or finishes before the rebind returns with everything it did visible to the rebinding side: the operation counts itself in before it reads the binding, the rebind publishes the binding before it reads the count, both reach the count by read-modify-write, and finishing releases what the read acquires."
+id = "runtime.state-assignment.admission-fence"
+package = "nervix-server"
+test = "runtime::state_store::loom_models::loom_an_operation_admitted_under_a_superseded_binding_never_outlives_its_rebind"
+
+[[qualification]]
+failure = "an operation admitted under the superseded binding was still running after its superseding rebind returned"
+id = "runtime.state-assignment.rebind-loads-the-admissions"
+invariant = "runtime.state-assignment.admission-fence"
+original = "while admitted.fetch_add(0, Ordering::AcqRel) != 0 {"
+path = "src/runtime/state_store.rs"
+weakened = "while admitted.load(Ordering::Acquire) != 0 {"
+
+[[qualification]]
+failure = "an operation admitted under the superseded binding was still running after its superseding rebind returned"
+id = "runtime.state-assignment.relaxed-finish"
+invariant = "runtime.state-assignment.admission-fence"
+original = ".fetch_sub(1, Ordering::Release)"
+path = "src/runtime/state_store.rs"
+weakened = ".fetch_sub(1, Ordering::Relaxed)"
+
+[[invariant]]
+claim = "A client batch whose admission races a quiesce is either counted by the drain that follows the quiesce or refused before anything is dispatched under it: the admission tracks its root by read-modify-write before it reads the quiesce publication, the quiesce publishes before the drain reads the root counts, and the drain reads each count by read-modify-write, so one side observes the other."
+id = "runtime.client-ingestor.admission-fence"
+package = "nervix-server"
+test = "runtime::client_ingestor::loom_models::loom_a_client_batch_racing_a_quiesce_is_counted_by_its_drain_or_refused"
+
+[[qualification]]
+failure = "a client batch was admitted after a quiesce whose drain did not count it"
+id = "runtime.client-ingestor.drain-loads-the-roots"
+invariant = "runtime.client-ingestor.admission-fence"
+original = "self.outstanding.fetch_add(0, Ordering::AcqRel)"
+path = "src/runtime_ack.rs"
+weakened = "self.outstanding.load(Ordering::Acquire)"
+
+[[qualification]]
+failure = "a client batch was admitted after a quiesce whose drain did not count it"
+id = "runtime.client-ingestor.handoff-drain-loads-the-roots"
+invariant = "runtime.client-ingestor.admission-fence"
+original = """
+        self.ownership_handoff_outstanding
+            .fetch_add(0, Ordering::AcqRel)"""
+path = "src/runtime_ack.rs"
+weakened = """
+        self.ownership_handoff_outstanding
+            .load(Ordering::Acquire)"""
+
+[[invariant]]
+claim = "A batch a node publishes into a relay while a drain observes the domain is never missing from the observation: the relay admits the batch before the node lets it go, the observation reads every relay's admission sequence before and after the node's count, and acquiring the node's release makes the admission visible to the closing read."
+id = "runtime.local-drain.moving-batch"
+package = "nervix-server"
+test = "runtime::local_drain::loom_models::loom_a_batch_published_while_a_drain_observes_is_never_missing_from_it"
+
+[[qualification]]
+failure = "a drain observation reported no work while a batch moved from a node into a relay"
+id = "runtime.local-drain.relaxed-node-work"
+invariant = "runtime.local-drain.moving-batch"
+original = "self.admitted.load(Ordering::Acquire)"
+path = "src/runtime/entity_gate.rs"
+weakened = "self.admitted.load(Ordering::Relaxed)"
+
+[[invariant]]
+claim = "A batch a consumer takes from a relay while a drain observes the domain is never missing from the observation: the consumer's node counts the batch before the consumer returns the relay's admission, the observation reads the relay before the node, and returning the admission releases the node's count to the observation that acquires it."
+id = "runtime.local-drain.taken-batch"
+package = "nervix-server"
+test = "runtime::local_drain::loom_models::loom_a_batch_a_consumer_takes_while_a_drain_observes_is_never_missing_from_it"
+
+[[qualification]]
+failure = "a drain observation reported no work while a consumer took a batch from a relay"
+id = "runtime.local-drain.relaxed-take"
+invariant = "runtime.local-drain.taken-batch"
+original = """
+        self.admitted
+            .fetch_sub(1, Ordering::AcqRel)"""
+path = "src/runtime/relay_channel.rs"
+weakened = """
+        self.admitted
+            .fetch_sub(1, Ordering::Relaxed)"""
+
+[[invariant]]
+claim = "A batch a relay's owner hands on to its consumer while a drain observes the domain is never missing from the observation: the consumer admits the batch before the owner hands it on, the observation reads the relay's transit before its consumers' queues, and handing on releases the consumer's admission to the observation that acquires it."
+id = "runtime.local-drain.handed-on-batch"
+package = "nervix-server"
+test = "runtime::local_drain::loom_models::loom_a_batch_its_owner_hands_on_while_a_drain_observes_is_never_missing_from_it"
+
+[[qualification]]
+failure = "a drain observation reported no work while a relay handed a batch on to its consumer"
+id = "runtime.local-drain.relaxed-hand-on"
+invariant = "runtime.local-drain.handed-on-batch"
+original = "self.handed_on.fetch_add(1, Ordering::Release);"
+path = "src/runtime/relay_transit.rs"
+weakened = "self.handed_on.fetch_add(1, Ordering::Relaxed);"
+
+[[invariant]]
+claim = "A message a force flush resumed is admitted work to a drain observation that sees the flush complete: the participant resumes the message before it completes its obligation, the observation reads the obligations before the node's work, and acquiring the completion makes the resumed message visible."
+id = "runtime.local-drain.flush-completion"
+package = "nervix-server"
+test = "runtime::local_drain::loom_models::loom_a_message_a_flush_resumed_is_seen_by_a_drain_that_sees_the_flush_complete"
+
+[[qualification]]
+failure = "a drain observation saw the flush complete without the message the flush resumed"
+id = "runtime.local-drain.relaxed-obligations"
+invariant = "runtime.local-drain.flush-completion"
+original = "self.force_flushes.load(Ordering::Acquire)"
+path = "src/runtime/entity_gate.rs"
+weakened = "self.force_flushes.load(Ordering::Relaxed)"
+
+[[invariant]]
+claim = "A Kafka offset snapshot stamped with a commit's revision encodes that commit's offset: the commit stores the partition's offset before it advances the revision, the snapshot reads the revision before the offsets, and advancing releases what reading the revision acquires."
+id = "runtime.kafka-offset-state.snapshot-revision"
+package = "nervix-server"
+test = "runtime::kafka_offset_state::tests::loom_models::loom_a_snapshot_carrying_a_commits_revision_carries_its_offset"
+
+[[qualification]]
+failure = "a snapshot carried the revision of a commit without its offset"
+id = "runtime.kafka-offset-state.relaxed-revision-advance"
+invariant = "runtime.kafka-offset-state.snapshot-revision"
+original = ".fetch_add(1, Ordering::SeqCst)"
+path = "src/runtime/lsm_sequence.rs"
+weakened = ".fetch_add(1, Ordering::Relaxed)"
 
 [[invariant]]
 claim = "A quiesced backup cut waits for every branch state publication that registered before the cut closed, then reads all writes those publications completed."

@@ -43,6 +43,14 @@ impl EmitterBufferedMessages {
         self.report_total();
     }
 
+    /// Reports that the emitter holds nothing: its buffer and the rows its sink staged are gone
+    /// with its task.
+    fn clear(&self) {
+        self.buffered.store(0, Ordering::Release);
+        self.staged.store(0, Ordering::Release);
+        self.report_total();
+    }
+
     fn report_total(&self) {
         self.reported.store(
             self.buffered
@@ -851,9 +859,11 @@ impl EmitterBatchBuffer {
 }
 
 impl Drop for EmitterBatchBuffer {
+    /// The buffer lives as long as its emitter task, so dropping it ends what the task held: the
+    /// buffered batches, and the rows its sink staged, which the sink's own end abandons.
     fn drop(&mut self) {
         self.pending_acks().no_ack("emitter dropped buffered batch");
-        self.buffered_messages.set_buffered(0);
+        self.buffered_messages.clear();
     }
 }
 
@@ -1694,6 +1704,29 @@ mod tests {
         assert_eq!(reported.load(Ordering::Acquire), 3);
         buffered.set_staged(0);
         assert_eq!(reported.load(Ordering::Acquire), 0);
+    }
+
+    /// A sink that commits on its own cadence still holds staged messages when its emitter task is
+    /// torn down. Nothing holds them once the task is gone, so the count drains read for the
+    /// emitter drops to zero instead of keeping them until a restarted task first changes its
+    /// buffer.
+    #[test]
+    fn a_torn_down_emitter_keeps_none_of_its_staged_messages_counted() {
+        let context = sink_context();
+        let reported_messages = Arc::new(AtomicUsize::new(0));
+        let buffered_messages = Arc::new(EmitterBufferedMessages::new(reported_messages.clone()));
+        let buffer =
+            EmitterBatchBuffer::new(&context, &FlushPolicy::Immediate, buffered_messages.clone());
+        buffer.report_staged_messages(3);
+        assert_eq!(reported_messages.load(Ordering::Acquire), 3);
+
+        drop(buffer);
+
+        assert_eq!(
+            reported_messages.load(Ordering::Acquire),
+            0,
+            "a torn-down emitter still reports the messages its sink had staged"
+        );
     }
 
     #[test]
