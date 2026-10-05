@@ -6,6 +6,10 @@
 //! waits for a lock another one holds, and none of them can proceed: an active deadlock. `install`
 //! starts the detector that reports such a cycle while its threads are still blocked, and hands each
 //! report, as a [`Finding`], to the installer's sink on a thread of its own.
+//! A `deloxide-order` build also records bounded acquisition history and correlates the vendor's
+//! historical order cycles with held and requested modes, source sites and lock lifetimes. Such a
+//! potential cycle does not assert that any thread is blocked. Runtime selection is retained in the
+//! evidence; disabling order checking does not remove compile-time instrumentation.
 //!
 //! A finding names threads and locks by their run-local identities, the numbers the detector
 //! assigned in this process, and correlates them with where in the source each lock was constructed
@@ -31,13 +35,57 @@ use std::{fmt, num::NonZeroU64, panic::Location, time::SystemTime};
 
 use meticulous::ResultExt as _;
 
+#[cfg(feature = "native")]
+mod handoff;
+mod order;
+#[cfg(feature = "native")]
+pub use handoff::ReportHandoff;
+pub use order::{
+    LockLifetime, MAX_ORDER_EDGES, MAX_ORDER_WITNESSES, OrderEdge, OrderLock, OrderOutOfBounds,
+    OrderWitness, PotentialCycle,
+};
+
+/// Compile-time instrumentation and runtime checking selected for one diagnostic process.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum DiagnosticSelection {
+    /// No order graph was compiled.
+    ActiveOnly,
+    /// The graph is compiled and runtime order checking is enabled.
+    OrderAnalysis,
+    /// The graph is compiled, but runtime order checking is disabled. This still pays the
+    /// instrumented acquisition cost and is never an ordinary or active-only fast path.
+    OrderInstrumentedActiveOnly,
+}
+
+impl DiagnosticSelection {
+    pub const fn for_build(active_only: bool) -> Self {
+        if cfg!(feature = "deloxide-order") {
+            if active_only {
+                Self::OrderInstrumentedActiveOnly
+            } else {
+                Self::OrderAnalysis
+            }
+        } else {
+            Self::ActiveOnly
+        }
+    }
+
+    pub const fn checks_order(self) -> bool {
+        matches!(self, Self::OrderAnalysis)
+    }
+}
+
 #[cfg(all(feature = "native", feature = "deloxide", not(feature = "shuttle")))]
 pub(crate) mod detector;
+#[cfg(all(feature = "native", feature = "deloxide", not(feature = "shuttle")))]
+pub(crate) mod order_history;
 #[cfg(all(feature = "native", feature = "deloxide", not(feature = "shuttle")))]
 pub(crate) mod registry;
 
 #[cfg(all(feature = "native", feature = "deloxide", not(feature = "shuttle")))]
-pub use detector::{Detector, InstallError, install, is_installed};
+pub use detector::{
+    Detector, InstallError, install, install_selected, is_installed, order_enabled,
+};
 
 /// The most threads one cycle describes. A longer cycle keeps its first threads in cycle order and
 /// counts the rest.
@@ -90,7 +138,7 @@ impl fmt::Display for TrackedLockId {
 
 /// Text a finding carries, kept to at most [`MAX_TEXT_BYTES`]: a longer text keeps its leading
 /// bytes up to a character boundary, and remembers how long it was.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct BoundedText {
     text: String,
     original_bytes: u64,
@@ -203,7 +251,7 @@ impl std::error::Error for TextOutOfBounds {}
 
 /// Where in the source an operation was written: a file, a line and a column, as the compiler
 /// records them for a caller.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct SourceSite {
     pub file: BoundedText,
     pub line: u32,
@@ -227,7 +275,7 @@ impl fmt::Display for SourceSite {
 }
 
 /// Which kind of tracked lock a lock is.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum LockKind {
     Mutex,
     RwLock,
@@ -247,7 +295,7 @@ impl fmt::Display for LockKind {
 }
 
 /// How a thread asked for a lock.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum Access {
     /// Alone: a mutex, or a read-write lock for writing.
     Exclusive,
@@ -265,7 +313,7 @@ impl fmt::Display for Access {
 }
 
 /// What kind of lock a tracked lock is and where it was constructed.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct LockSite {
     pub kind: LockKind,
     pub constructed_at: SourceSite,
@@ -281,7 +329,7 @@ pub struct WaitedLock {
 }
 
 /// The acquisition a blocked thread is waiting in: how it asked for the lock and where.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct BlockedAttempt {
     pub access: Access,
     pub at: SourceSite,
@@ -387,7 +435,18 @@ impl std::error::Error for CycleOutOfBounds {}
 pub enum Finding {
     /// An active deadlock among tracked locks.
     ActiveCycle(ActiveCycle),
+    /// Historical acquisition order, without a claim that threads currently cannot progress.
+    PotentialCycle(PotentialCycle),
     /// Findings the detector made while the hand-off to the sink was full, which it could not
     /// describe. Each is at least one more cycle.
-    Overflow { lost: NonZeroU64 },
+    Overflow {
+        lost: NonZeroU64,
+        source: OverflowSource,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum OverflowSource {
+    Handoff,
+    OrderHistory,
 }

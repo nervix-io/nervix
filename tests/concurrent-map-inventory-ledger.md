@@ -28,6 +28,24 @@ handler remains recurring debt. Source hosts retain an exact instance readiness 
 the readiness registry. Relay channels, transport selection and domain publications use the
 immutable tables and retained lifetimes described below.
 
+## Diagnostic acquisition history
+
+`nervix-primitives::deadlock::OrderHistory::edges` is a diagnostic-only
+`DashMap<EdgeKey, EdgeRecord>`. An order-enabled attempted nested acquisition reaches it once per
+held source context; the findings owner reads it when correlating a historical cycle. It retains
+at most 8,192 directed run-local instance edges and 64 contexts per edge until process exit,
+including ended locks. Refusal is explicit overload. No borrowed shard crosses a tracked lock
+acquisition. Runtime-disabled order checking skips edge access; the compiled instrumentation and
+actual-guard tracking still remain. Ordinary execution contains neither the map nor its access.
+
+The existing diagnostic live registry retains construction, waiting-attempt and thread-name maps
+for their corresponding lifetimes. The order selection also reads construction/name entries while
+recording nested attempts and copies bounded source context into history before they disappear.
+This is retained diagnostic bookkeeping, outside ordinary recurring data-plane execution, not a
+repair or suppression of a product map. The canonical
+[diagnostic contract](../docs/src/data-plane-concurrency.md#diagnostic-deadlock-detection) states its
+upstream graph, callback and modeled-scheduling limits.
+
 ## How accesses are classified
 
 A `DashMap` synchronizes on every access. `get`, `contains_key`, `len` and iteration take a shard's

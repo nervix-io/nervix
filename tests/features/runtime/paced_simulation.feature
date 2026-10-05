@@ -189,16 +189,29 @@ Feature: Paced simulation drivers
         ON QUIESCE SUSPEND;
       """
     Then within "10s" the paced simulation driver prints a line starting with "REOPENED generation=1 ingestor=simulated_readings"
-    And within "180s" the paced simulation driver exits with status 0
+    And within "180s" the paced simulation driver finishes with the status its outcomes imply
+    # Producer replacement may refuse a pending or already planned reading.
+    # The application retains it for explicit replay, even though later ticks use the new producer.
     And the paced simulation driver reports
-      | completed         | 60 |
-      | effects           | 60 |
-      | not_admitted      | 0  |
-      | processing_failed | 0  |
-      | outcome_unknown   | 0  |
-      | duplicates        | 0  |
-      | generations       | 1  |
+      | readings          | 60   |
+      | completed         | >= 1 |
+      | effects           | >= 1 |
+      | processing_failed | 0    |
+      | outcome_unknown   | 0    |
+      | duplicates        | 0    |
+      | generations       | 1    |
+    And every completed paced simulation reading has exactly one effect from its own generation
+    When the <driver> paced simulation driver runs through node "node-1" with arguments "--ticks 0 --replay"
+    Then within "120s" the paced simulation driver exits with status 0
+    # Summary counts describe this invocation; replay may have no work if replacement refused nothing.
+    And the paced simulation driver reports
+      | not_admitted      | 0 |
+      | processing_failed | 0 |
+      | outcome_unknown   | 0 |
+      | duplicates        | 0 |
+      | generations       | 1 |
     And the paced simulation effects hold every reading of its ledger exactly once
+    And every completed paced simulation reading has exactly one effect from its own generation
 
     Examples:
       | driver | cluster_size |
