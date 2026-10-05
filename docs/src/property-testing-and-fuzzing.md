@@ -70,11 +70,13 @@ own Cucumber, Shuttle, Loom, Turmoil and external Chaos evidence.
 | `consensus-archived-counts` | `nervix-consensus` complete record equality through the production bounded storage codec | transaction commands, limits, positions, progress, failures, outcomes, plan and report headers with boundary and generated counts, v1 | 256 | 16 bytes |
 | `registry-archived-models` | `nervix-server` complete Model equality through the registry's sealed storage codec | every vocabulary Model family with pinned resource versions and full-width counts, v2 | 256 | 4096 bytes |
 | `runtime-window-archived-counts` | `nervix-server` histogram delayed-removal archive equality | current removals with arbitrary expiry and boundary and generated bucket indices, v1 | 256 | 32 bytes |
-| `backup-record-manifest` | `nervix-backup` complete record and manifest encode/decode equality | all seven current record kinds, lifecycle/catalog variants, every cut, full-width counters and ordered metadata, v2 | 256 | 4096 bytes |
-| `backup-runtime-state-records` | `nervix-backup` complete runtime state record equality | guest descriptors, empty/multi-partition offsets and ordered branch lifecycle with bit-exact nested fields, v2 | 256 | 4096 bytes |
-| `backup-complete-archives` | `nervix-backup` complete export/extraction, restore-read and deterministic re-export fidelity | cluster/domain scopes, resources included/omitted, every cut and supported state kind, synthetic raw payloads at tar block boundaries and long paths, v1 | 256 | 4096 bytes |
-| `backup-malformed-records` | `nervix-backup` safe typed validation of current record headers and values | all seven kinds, truncated/altered headers, invalid current fields and bounded arbitrary bytes, v1 | 256 | 4096 bytes |
-| `backup-corrupt-archives` | `nervix-backup` rejection before verified restore contents are returned | changed lengths/digests/kinds, reordered/missing/extra sections, invalid records, truncation and bounded arbitrary tar inputs, v1 | 256 | 4096 bytes |
+| `backup-record-manifest` | `nervix-backup` complete record and manifest encode/decode equality | all nine current record kinds, lifecycle/catalog variants, every cut, full-width counters and ordered metadata, v3 | 256 | 4096 bytes |
+| `backup-runtime-state-records` | `nervix-backup` complete runtime state record equality | guest/materialized descriptors and identities, empty/multi-partition offsets and ordered branch lifecycle with bit-exact nested fields, v3 | 256 | 4096 bytes |
+| `backup-materialized-identities` | `nervix-backup` complete materialized descriptors and scalar identity group equality | empty/unbranched/branched generations, nested typed fields, float bits and watermarks, v1 | 256 | 2048 bytes |
+| `backup-materialized-columns` | `nervix-server` exact-schema Arrow/native generation fidelity and stored checkpoint re-export | nullable, sensitive, nested and byte columns; complete headers, ordered identities and original stored Arrow bytes, v2 | 128 | 4096 bytes |
+| `backup-complete-archives` | `nervix-backup` complete export/extraction, restore-read and deterministic re-export fidelity | cluster/domain scopes, resources included/omitted, every cut and supported state kind, empty/unbranched/multi-group materialized generations with valid Arrow columns, synthetic raw payloads at tar block boundaries and long paths, v2 | 256 | 4096 bytes |
+| `backup-malformed-records` | `nervix-backup` safe typed validation of current record headers and values | all nine kinds, truncated/altered headers, invalid current fields and bounded arbitrary bytes, v2 | 256 | 4096 bytes |
+| `backup-corrupt-archives` | `nervix-backup` rejection before verified restore contents are returned | changed lengths/digests/kinds, reordered/missing/extra sections, invalid records and materialized group metadata/membership, damaged Arrow sections, truncation and bounded arbitrary tar inputs, v2 | 256 | 4096 bytes |
 | `restore-installation-wire` | `nervix-interconnect` complete installation request wire equality | all actions, authority, placement, payload and inventory, v1 | 256 | 128 bytes |
 | `restore-installation-storage` | `nervix-server` complete staged checkpoint and publication record equality | authority, placement, revision, payload and inventory, v1 | 256 | 128 bytes |
 | `simd-checked-lanes` | `nervix-simd-kernels` checked integer arithmetic equals scalar overflowing arithmetic at every SIMD level | all integer widths, runs and shared operands, v1 | 256 | 128 bytes |
@@ -231,13 +233,16 @@ metadata with a 7,200-second compilation deadline; it does not count as a comple
 The sanitizer CI job runs only on PRs labeled `fuzz`, prepares that server binary with one Cargo
 build job to bound compiler memory, and allows 180 minutes for preparation, all target campaigns,
 failure qualification and artifact upload. An expected sanitizer skip contributes no execution or
-coverage evidence. The Check workflow's validation job and the dedicated Bolero discovery job
-retain their separate scopes and limits.
+coverage evidence. The Check workflow's validation job and the Bolero randomized job
+retain their separate scopes and limits. Check calls the reusable Bolero workflow with its exact
+tested SHA, event and label snapshot. Scheduled and manual Bolero runs execute randomized checks
+and record a deliberate sanitizer skip.
 
 The fuzz profile uses one codegen unit, optimization level two and debug level one. The full
 server package uses optimization level one and no debug output to keep its instrumented build
 within the compilation budget. Both profiles retain debug assertions, overflow checks,
-AddressSanitizer and libFuzzer coverage feedback; ordinary and release builds are unchanged.
+AddressSanitizer and libFuzzer coverage feedback. Live campaigns also use Rust source
+instrumentation; ordinary and release builds retain their own settings.
 
 An instrumented build has a 1,800-second deadline. On a loaded development host,
 `BOLERO_BUILD_TIMEOUT_SECONDS=7200 just fuzz <id> 30` grants compilation more time. The override
@@ -268,6 +273,7 @@ just test-bolero
 just test-bolero nspl-model
 just fuzz nspl-model 30
 just fuzz-all 30
+just coverage-bolero 30
 just fuzz-replay nspl-model <saved-input>
 just fuzz-reduce nspl-model <saved-input>
 ```
@@ -313,7 +319,8 @@ CI prepares the server library with both the empty and `testing` feature sets.
 The target must subsequently pass `just fuzz <id>` with the ordinary build and case
 limits; CI campaigns continue to use that bounded runner.
 
-PR CI runs a required ordinary randomized/corpus job. The sanitizer libFuzzer job runs only when
+PR CI runs a required ordinary randomized/corpus job through Check's reusable Bolero call. The
+sanitizer libFuzzer job runs only when
 the PR has the `fuzz` label, with 30 seconds of engine time per target. Both jobs use the native
 [CI linker](./developing-nervix.md#validation-and-tests), including sanitizer builds that supply
 their own compiler flags. Adding or removing the
@@ -336,6 +343,54 @@ inputs before cleanup. `fuzz-replay` stages saved bytes in the target's actual c
 directory and runs the ordinary assertion with zero randomized cases. `fuzz-reduce`
 uses libFuzzer crash minimization and verifies that minimized bytes still fail that assertion.
 A random seed reproduces one generated case, not an entire entropy-driven campaign.
+
+## Live Rust Source Coverage
+
+`just fuzz <id> <seconds>` and `just fuzz-all <seconds>` collect Rust source coverage from the
+inputs the live libFuzzer process executes, including candidates it discards from its retained
+corpus. `just coverage-bolero <seconds>` runs the command/artifact tests, all live campaigns and
+failure qualification while collecting the separate Python runner report. It does not rerun the
+randomized producer that CI already requires independently.
+
+The shared build path adds `-C instrument-coverage` to cargo-bolero's sanitizer flags, retaining
+the pinned nightly, assertions, optimization settings, case/input limits and kache wrapper.
+Encoded Cargo flags are rejected because they would override cargo-bolero's sanitizer flags.
+Preparation and the zero-run build probe discard their counters. Ordinary discovery, exact replay
+and deliberate failure qualification also discard counters; they cannot enter a product campaign
+report or mix stable profiles with nightly profiles.
+
+Each invocation allocates a fresh
+`target/native-coverage/bolero-fuzz/fuzz/<nightly>/<attempt>/` directory. Each selected target
+has its own `targets/<id>/` directory there, with `profiles/%p-%m.profraw`, `executions.jsonl`,
+`lcov.info`, `export.log` and `completion.json`. The runner records the exact executable returned
+by the hashed fuzz build and its Cargo fingerprint, effective compiler flags and profile settings.
+It holds the fuzz build directory through execution and export, so another collector cannot
+replace those objects. The shared native exporter matches profile binary IDs to retained
+executables and any required child objects, using the producing nightly's own `llvm-profdata`
+and `llvm-cov`. Missing objects, absent counters and unreadable or mixed-format profiles fail
+collection. LCOV paths are repository-relative; dependency, generated and harness files follow
+the native collector's exclusion policy. Tests inline in an included source file retain that
+file's attribution.
+
+A successful target has a `complete` record only after a successful engine exit with nonzero
+completed inputs and a successful source export. The aggregate report beside the invocation's
+completion record is complete only after all selected registered targets complete. The record
+retains the inventory digest and exact entries, selection and discovered/executed/completed
+counts, revision and whether it was modified, compiler/LLVM identity, workflow run and attempt,
+event and labels, campaign limits, input throughput and source attribution. A focused invocation
+states its selection and never claims the rest of the inventory ran.
+
+A crash, abort, deadline or interrupt stays failed or interrupted even if it left some counters.
+The runner retains its original corpus, crash input, logs and incomplete evidence; it does not
+export those counters as a successful campaign. Failure minimization and exact replay remain
+independent qualification, with their original failure retained. No corpus replay substitutes for
+the live measurement.
+
+CI publishes `coverage-bolero-fuzz` for live campaign reports and completion evidence,
+`bolero-runs` for corpus/crash and qualification artifacts, and `bolero-selection` for the exact
+eligible producer verdicts, including deliberate skips. The native report uses the `bolero-fuzz`
+Codecov flag; the Python report keeps `bolero`. Fuzz reports remain separate from ordinary
+workspace coverage and its CRAP gate. A sanitizer skip publishes no fuzz coverage artifact.
 
 ## Adding A Target
 

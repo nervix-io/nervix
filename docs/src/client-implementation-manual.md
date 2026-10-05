@@ -654,7 +654,12 @@ payload, infinity, and nullable and sensitive branch key fields.
     a command's: `LeaderRedirect` means the client streams the restore again, under the same
     reference, to the leader; `OutcomeUnknown` means it streams it again after a backoff; and
     `CommandCompleted` and `RequestFailed` are terminal. A `RequestFailed` whose restore report
-    names a failed step leaves the steps before it applied.
+    names a failed step leaves the steps before it applied. Clients MUST decode each restored
+    domain's required `status` and `start_version`, including in a dry run. With `RESUME`, a
+    completed outcome reports `Running` at the archived generation after all state is published;
+    the default reports `Stopped`. Clients MUST also decode the required `start_version` in each
+    `DomainInfo` from domain lists and domain-change events, and MUST reject missing required
+    generation or status fields rather than supply a default.
 - **P-5.** When a call fails in transport, or a frame or the reply does not arrive in time, the
   restore's outcome is uncertain. A client MUST stream the whole archive again, from its first
   byte, under the same reference to learn it, and MUST NOT create a new reference for it. It MUST

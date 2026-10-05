@@ -17,11 +17,13 @@
 
 mod assembly;
 pub(in crate::application) mod interconnect;
+mod materialized_sections;
 pub(in crate::application) mod restore_storage;
 pub(in crate::application) mod retained;
 mod state_sections;
+mod stored_materialized_sections;
 
-use std::{collections::BTreeMap, num::NonZeroU64};
+use std::{collections::BTreeMap, num::NonZeroU64, time::Duration};
 
 use arch_into::ArchInto as _;
 use error_stack::{Report, ResultExt as _};
@@ -32,6 +34,7 @@ use nervix_backup::{
 };
 use nervix_consensus::{CommandExecution, ConfigurationCapture};
 use nervix_execution::{ChargedBytes, Executor, MemoryClass};
+use nervix_interconnect::InterconnectStreamRequest as _;
 use nervix_models::{
     ArchiveDigest, Backup, BackupArchiveSummary, BackupCapture, BackupCut, BackupDomainSummary,
     BackupQuiesceCounters, BackupResources, BackupScope, CoordinationIdentity, DomainName,
@@ -748,18 +751,35 @@ impl SessionServiceImpl {
                 source: SectionSource::Captured(artifact),
             });
         }
-        let mut body = self
-            .inner
-            .interconnect
-            .request_stream(
-                &inventory.node,
-                FetchCapturedSection {
-                    coordination: inventory.coordination.clone(),
-                    domain: inventory.domain.clone(),
-                    path: section.path.clone(),
-                },
-            )
+        // The immutable owner stage has not been consumed when admission refuses the opening.
+        // Live materialized readers share this quota, so wait within the opening's one deadline
+        // rather than losing a completed cut to temporary capacity pressure.
+        let opening = async {
+            loop {
+                match self
+                    .inner
+                    .interconnect
+                    .request_stream(
+                        &inventory.node,
+                        FetchCapturedSection {
+                            coordination: inventory.coordination.clone(),
+                            domain: inventory.domain.clone(),
+                            path: section.path.clone(),
+                        },
+                    )
+                    .await
+                {
+                    Ok(body) => break Ok(body),
+                    Err(refused) if refused.current_context().is_capacity_exhaustion() => {
+                        nervix_primitives::time::sleep(Duration::from_millis(50)).await;
+                    }
+                    Err(failure) => break Err(failure),
+                }
+            }
+        };
+        let mut body = nervix_primitives::time::timeout(FetchCapturedSection::TIMEOUT, opening)
             .await
+            .map_err(|_| error("captured section opening exceeded its deadline".to_string()))?
             .map_err(|reason| error(reason.to_string()))?;
         if body.content_length() != section.length {
             return Err(error(
@@ -783,6 +803,7 @@ impl SessionServiceImpl {
                 .await
                 .map_err(|reason| error(reason.to_string()))?;
         }
+        drop(body);
         let artifact = writer
             .finish_artifact()
             .await

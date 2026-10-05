@@ -20,7 +20,7 @@ use nervix_client_core::{
     Client, CommandOutcome, ConnectOptions, ExistingUserPolicy, Restore, RestoreMode,
     RestoreReport, RestoreScope, RestoreStepOutcome,
 };
-use nervix_models::{DomainName, RestoreState, Statement};
+use nervix_models::{DomainName, RestoreLifecycle, RestoreState, Statement};
 use nervix_nspl::client_statement::{ClientStatement, parse_client_statements};
 use nervix_primitives::sync::{
     Arc,
@@ -74,6 +74,7 @@ pub(super) struct RestoreRequest {
     pub(super) input: String,
     pub(super) existing_users: Option<CliExistingUsers>,
     pub(super) dry_run: bool,
+    pub(super) resume: bool,
     pub(super) without_state: bool,
     pub(super) without_source_offsets: bool,
     pub(super) format: CliReportFormat,
@@ -123,6 +124,11 @@ impl RestoreRequest {
             source: self.input.clone(),
             mode,
             state,
+            lifecycle: if self.resume {
+                RestoreLifecycle::Resume
+            } else {
+                RestoreLifecycle::Stopped
+            },
         })
     }
 }
@@ -288,6 +294,14 @@ fn report_text(outcome: &CommandOutcome) -> String {
     let Some(report) = outcome.restore.as_deref() else {
         return text;
     };
+    for domain in &report.domains {
+        text.push_str(&format!(
+            "\n- domain={} status={} start_version={}",
+            domain.domain,
+            domain.status.as_ref(),
+            domain.start_version
+        ));
+    }
     for step in &report.steps {
         text.push_str(&format!(
             "\n- {}: {}",
@@ -365,6 +379,8 @@ fn report_json(restore: &Restore, outcome: &CommandOutcome, report: &RestoreRepo
             "domain": domain.domain.as_str(),
             "resource_versions": domain.resource_versions,
             "models": domain.models,
+            "status": domain.status.as_ref(),
+            "start_version": domain.start_version,
             "planned_models": planned_models,
         }));
     }
@@ -414,6 +430,7 @@ mod tests {
             input: "cluster.nvxb".to_string(),
             existing_users: None,
             dry_run: false,
+            resume: false,
             without_state: false,
             without_source_offsets: false,
             format: CliReportFormat::Json,
@@ -468,6 +485,35 @@ mod tests {
             restore.to_canonical_nspl(),
             "RESTORE DOMAIN payments AS payments_copy FROM 'cluster.nvxb';"
         );
+    }
+
+    #[test]
+    fn resume_reports_its_requested_lifecycle_in_both_restore_scopes() {
+        for scope in [CliRestoreScope::Cluster, CliRestoreScope::Domain] {
+            let mut requested = request(scope);
+            if matches!(scope, CliRestoreScope::Domain) {
+                requested.domain = Some(domain("payments"));
+            }
+            assert_eq!(
+                requested
+                    .restore()
+                    .assured("default restore is valid")
+                    .lifecycle,
+                RestoreLifecycle::Stopped
+            );
+            requested.resume = true;
+            requested.dry_run = true;
+            requested.without_source_offsets = true;
+            let restore = requested.restore().assured("resume dry run is valid");
+            assert_eq!(restore.lifecycle, RestoreLifecycle::Resume);
+            assert_eq!(restore.mode, RestoreMode::DryRun);
+            assert_eq!(restore.state, RestoreState::WithoutSourceOffsets);
+            assert!(
+                restore
+                    .to_canonical_nspl()
+                    .contains(" RESUME DRY RUN WITHOUT SOURCE OFFSETS;")
+            );
+        }
     }
 
     #[test]

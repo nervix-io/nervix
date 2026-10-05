@@ -13,8 +13,9 @@ use strum::IntoEnumIterator as _;
 
 use crate::{
     ArchiveReadError, ArchiveRecord, BackupManifest, BranchLifecycleRecord, DomainRecord,
-    KafkaOffsetsRecord, RecordKind, ResourceVersionRecord, SectionContent, SectionDigester,
-    SectionPath, UsersRecord, WasmStateDescriptor,
+    KafkaOffsetsRecord, MaterializedIdentitiesRecord, MaterializedRelayDescriptor, RecordKind,
+    ResourceVersionRecord, SectionContent, SectionDigester, SectionPath, UsersRecord,
+    WasmStateDescriptor,
     archive_properties::assert_record,
     archive_values::{Case, Section, Values},
     read_archive_contents,
@@ -42,6 +43,8 @@ fn validate_kind(kind: RecordKind, bytes: &[u8]) -> Result<(), Report<ArchiveRea
         RecordKind::WasmStateDescriptor => validate::<WasmStateDescriptor>(bytes),
         RecordKind::KafkaOffsets => validate::<KafkaOffsetsRecord>(bytes),
         RecordKind::BranchLifecycle => validate::<BranchLifecycleRecord>(bytes),
+        RecordKind::MaterializedRelayDescriptor => validate::<MaterializedRelayDescriptor>(bytes),
+        RecordKind::MaterializedIdentities => validate::<MaterializedIdentitiesRecord>(bytes),
     }
 }
 
@@ -54,6 +57,8 @@ fn current_version(kind: RecordKind) -> u16 {
         RecordKind::WasmStateDescriptor => WasmStateDescriptor::VERSION,
         RecordKind::KafkaOffsets => KafkaOffsetsRecord::VERSION,
         RecordKind::BranchLifecycle => BranchLifecycleRecord::VERSION,
+        RecordKind::MaterializedRelayDescriptor => MaterializedRelayDescriptor::VERSION,
+        RecordKind::MaterializedIdentities => MaterializedIdentitiesRecord::VERSION,
     }
 }
 
@@ -71,7 +76,7 @@ fn safe_record_failure(error: &Report<ArchiveReadError>) {
     ));
 }
 
-fn rejects_field<R: ArchiveRecord>(bytes: Vec<u8>, field: &'static str) {
+pub(super) fn rejects_field<R: ArchiveRecord>(bytes: Vec<u8>, field: &'static str) {
     let error = match R::decode("synthetic.rkyv", &bytes) {
         Ok(_) => panic!("an invalid current {field} was accepted"),
         Err(error) => error,
@@ -197,6 +202,7 @@ impl Case {
                     );
                 }
                 crate::archive_values::State::Wasm { .. } => {}
+                crate::archive_values::State::Materialized(value) => value.assert_invalid_fields(),
             }
         }
         let mut manifest = ManifestWire::from(&self.manifest);
@@ -284,7 +290,7 @@ fn bolero_malformed_current_records_return_safe_typed_errors() {
 }
 
 /// Writes deliberately inconsistent current metadata and section membership for reader tests.
-fn damaged_archive(manifest: &BackupManifest, sections: &[Section]) -> Vec<u8> {
+pub(super) fn damaged_archive(manifest: &BackupManifest, sections: &[Section]) -> Vec<u8> {
     let mut builder = tar::Builder::new(Vec::new());
     let manifest = manifest
         .encode()
@@ -321,6 +327,7 @@ fn bolero_corrupt_archives_fail_before_restore_contents_are_returned() {
             let case = Values::new(bytes).case(true, true, 1);
             let original = case.export();
             read_archive_contents(original.as_slice()).assured("the unmodified archive validates");
+            case.assert_materialized_faults();
             for fault in 0..7 {
                 let mut manifest = case.manifest.clone();
                 let mut sections = case.sections.clone();

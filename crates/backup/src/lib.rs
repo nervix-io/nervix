@@ -21,6 +21,7 @@ mod describe;
 mod error;
 mod layout;
 mod manifest;
+mod materialized;
 mod path;
 mod reader;
 mod records;
@@ -29,15 +30,19 @@ mod state;
 mod wire;
 
 pub use describe::{
-    ArchiveContents, ArchiveDescription, DescribedDomain, DescribedResourceVersion,
-    DescribedRuntimeState, DescribedSection, SkippedStateReason, SkippedStateSection,
-    describe_archive, read_archive_contents,
+    ArchiveContents, ArchiveDescription, DescribedDomain, DescribedMaterializedGroup,
+    DescribedResourceVersion, DescribedRuntimeState, DescribedSection, SkippedStateReason,
+    SkippedStateSection, describe_archive, read_archive_contents,
 };
 pub use error::{ArchiveReadError, ArchiveWriteError};
 pub use layout::{ArchiveLayout, ArchivePiece, SectionSink};
 pub use manifest::{
     ARCHIVE_FORMAT_MAJOR, ArchiveScope, BackupManifest, DomainCapture, RaftLogPosition,
     SectionContent, SectionDigest, SectionEntry,
+};
+pub use materialized::{
+    MATERIALIZED_COLUMNS_BYTES, MATERIALIZED_IDENTITIES_BYTES, MaterializedIdentitiesRecord,
+    MaterializedRecordIdentity, MaterializedRelayDescriptor,
 };
 pub use path::SectionPath;
 pub use reader::{SectionReader, SectionVisitor, read_archive};
@@ -60,6 +65,12 @@ mod wasm_properties;
 
 #[cfg(test)]
 mod archive_values;
+
+#[cfg(test)]
+mod materialized_values;
+
+#[cfg(test)]
+mod materialized_faults;
 
 #[cfg(test)]
 mod archive_properties;

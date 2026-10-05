@@ -19,7 +19,7 @@ use nervix_interconnect::{
     HandlerRegistrationError, RemoteOperationFailure, RemoteOperationSubject,
     StatePlacementEnvelope, StreamHandlerError, StreamingResponse, Transport,
 };
-use nervix_models::{DomainName, RestoreStateAuthority};
+use nervix_models::{DomainName, DomainStatus, RestoreStateAuthority};
 use nervix_primitives::{
     sync::{Arc, Mutex as AsyncMutex, watch},
     time::Instant,
@@ -31,7 +31,10 @@ use super::{
 };
 use crate::{
     application::session_service::SessionServiceImpl,
-    runtime::{CapturedRuntimeState, RestoredRuntimeState, StagedArtifact, StagedSnapshotWriter},
+    runtime::{
+        CapturedDomainState, CapturedMaterializedState, RestoredRuntimeState, StagedArtifact,
+        StagedSnapshotWriter,
+    },
 };
 
 /// A receiving node keeps one bounded install in its staging area until all chunks verify.
@@ -71,6 +74,13 @@ fn section_kind(content: SectionContent) -> Option<CapturedStateSectionKind> {
             Some(CapturedStateSectionKind::BranchLifecycle)
         }
         SectionContent::WasmGuestBlob => Some(CapturedStateSectionKind::WasmGuestBlob),
+        SectionContent::Record(RecordKind::MaterializedRelayDescriptor) => {
+            Some(CapturedStateSectionKind::MaterializedDescriptor)
+        }
+        SectionContent::Record(RecordKind::MaterializedIdentities) => {
+            Some(CapturedStateSectionKind::MaterializedIdentities)
+        }
+        SectionContent::MaterializedColumns => Some(CapturedStateSectionKind::MaterializedColumns),
         _ => None,
     }
 }
@@ -85,6 +95,13 @@ pub(super) fn section_content(kind: CapturedStateSectionKind) -> SectionContent 
             SectionContent::Record(RecordKind::BranchLifecycle)
         }
         CapturedStateSectionKind::WasmGuestBlob => SectionContent::WasmGuestBlob,
+        CapturedStateSectionKind::MaterializedDescriptor => {
+            SectionContent::Record(RecordKind::MaterializedRelayDescriptor)
+        }
+        CapturedStateSectionKind::MaterializedIdentities => {
+            SectionContent::Record(RecordKind::MaterializedIdentities)
+        }
+        CapturedStateSectionKind::MaterializedColumns => SectionContent::MaterializedColumns,
     }
 }
 
@@ -218,7 +235,8 @@ impl SessionServiceImpl {
         &self,
         domain: &DomainName,
         quiesced: bool,
-    ) -> Result<Vec<CapturedRuntimeState>, RemoteOperationFailure> {
+        status: DomainStatus,
+    ) -> Result<CapturedDomainState, RemoteOperationFailure> {
         let runtime = self.inner.runtime.clone();
         if quiesced {
             runtime
@@ -236,7 +254,9 @@ impl SessionServiceImpl {
             .run_storage(
                 nervix_execution::StorageClass::Filesystem,
                 reservation,
-                move |_charge, _cancellation| runtime.capture_backup_state(&domain_owned, quiesced),
+                move |_charge, _cancellation| {
+                    runtime.capture_backup_state(&domain_owned, quiesced, status)
+                },
             )
             .await
             .map_err(|_| failed(domain, "state capture execution failed"))?;
@@ -272,11 +292,17 @@ impl SessionServiceImpl {
         let Some(capture) = self.inner.consensus.configuration_capture().await else {
             return Err(failed(&request.domain, "configuration is unavailable"));
         };
+        let status = capture
+            .domains
+            .get(&request.domain)
+            .ok_or_else(|| failed(&request.domain, "domain is unavailable"))?
+            .status
+            .clone();
         let state = self
-            .capture_local_state(&request.domain, request.quiesced)
+            .capture_local_state(&request.domain, request.quiesced, status)
             .await?;
         let sections = plan_state_sections(
-            state,
+            state.checkpoints,
             capture.schedule.domain(&request.domain),
             self.inner.consensus.local_node_id(),
         )
@@ -297,6 +323,28 @@ impl SessionServiceImpl {
                 artifact,
             ));
         }
+        match state.materialized {
+            CapturedMaterializedState::Current(captured) => {
+                staged.extend(
+                    self.stage_materialized_sections(
+                        captured,
+                        capture.schedule.domain(&request.domain),
+                        &request,
+                    )
+                    .await?,
+                );
+            }
+            CapturedMaterializedState::Stored(captured) => {
+                staged.extend(
+                    self.stage_stored_materialized_sections(
+                        captured,
+                        capture.schedule.domain(&request.domain),
+                        &request,
+                    )
+                    .await?,
+                );
+            }
+        }
         self.inner.captured_backup_sections.retain(|key, _| {
             key.coordination != request.coordination || key.domain != request.domain
         });
@@ -314,7 +362,7 @@ impl SessionServiceImpl {
         Ok(())
     }
 
-    async fn stage_captured_section(
+    pub(super) async fn stage_captured_section(
         &self,
         bytes: Vec<u8>,
         domain: &DomainName,
@@ -600,7 +648,7 @@ impl SessionServiceImpl {
     }
 }
 
-fn failed(domain: &DomainName, reason: &str) -> RemoteOperationFailure {
+pub(super) fn failed(domain: &DomainName, reason: &str) -> RemoteOperationFailure {
     RemoteOperationFailure::failed(RemoteOperationSubject::domain(domain), reason.to_string())
 }
 

@@ -345,6 +345,14 @@ same plan shape feeds running and passive builds. Passive builds retain the plan
 relay identities and endpoint routes, while admission remains stopped. A server-side listener stays
 bound on every live node independently of graph placement or domain leadership.
 
+Materialized origination is an exclusive task capability: moving it transfers the mutable branch
+selections, while reads and snapshot installation remain independently retainable. Read publications
+carry an immutable row with its Arrow schema and watermarks. Branch membership and an ended row
+publication are distinct states; absence in live state owns the answer even when storage retains an
+earlier checkpoint. Recreating a branch allocates a fresh publication. Installation validates
+assignment capability, branch generation, captured fence and revision before replacing any row;
+the current branch lifecycle and revision cannot move backwards.
+
 Server endpoint configuration and source availability are distinct states. The immutable route
 table contains configured definitions; a bound source lifetime contains an optional prepared intake.
 Source ending publishes absence through that lifetime before removing its route binding. A retained
@@ -383,6 +391,24 @@ declarations as typed data. Direct emitter `VALUES` validation identifies a sens
 target by name and requires explicit leakage; neither error needs the source payload value.
 
 ## Restore Installation Authority
+
+`RestoreLifecycle` is a closed `Stopped`/`Resume` policy in the semantic restore Model. Text omitting
+`RESUME` selects `Stopped` at the language boundary. The restore plan carries distinct initial
+stopped state and activation state. Both require the archived start generation and latest start
+point; paced activation also requires the archived mapping. Required report and `DomainInfo`
+generation fields are validated at their wire boundary, including the valid generation zero.
+Materialized archive descriptors and row identities are archive-owned types. Their raw schema
+fingerprint binds once to the archived start generation for native storage, independently of the
+installation authority; payload values stay exact-schema Arrow columns. Typed branch identities,
+watermark ordering, counts and framing are validated before those values reach the runtime.
+
+A materialized capture carries either current rows or stored checkpoints as distinct variants.
+A captured materialized checkpoint is a selected immutable source. Opening it produces a reader
+whose complete header is required; there is no optional or defaulted generation metadata. Each
+bounded group retains its scalar identities and original Arrow bytes, and completion checks the
+whole declared group and row count. Running and paused domains capture current rows; stopped
+domains capture stored checkpoints. An empty generation still has its descriptor and
+zero group/row counts. RESTORE resets the stored ownership fence to zero explicitly.
 
 A restored domain has a replicated `Pending` installation from creation and an `Installing`
 authority once its state generation is admitted. Neither state permits `START`. Completion of the

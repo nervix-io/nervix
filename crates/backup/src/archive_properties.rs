@@ -12,8 +12,9 @@ use meticulous::{OptionExt as _, ResultExt as _};
 
 use crate::{
     ArchiveContents, ArchiveDescription, ArchiveLayout, ArchiveReadError, ArchiveRecord,
-    BackupManifest, DescribedDomain, DescribedResourceVersion, DescribedRuntimeState,
-    DescribedSection, SectionEntry, SectionPath, SectionReader, SectionVisitor,
+    BackupManifest, DescribedDomain, DescribedMaterializedGroup, DescribedResourceVersion,
+    DescribedRuntimeState, DescribedSection, SectionEntry, SectionPath, SectionReader,
+    SectionVisitor,
     archive_values::{Case, Section, State, Values},
     describe_archive, read_archive, read_archive_contents,
 };
@@ -89,6 +90,12 @@ impl Case {
                     State::Wasm { descriptor, .. } => assert_record(descriptor),
                     State::Kafka(record) => assert_record(record),
                     State::Lifecycle(record) => assert_record(record),
+                    State::Materialized(value) => {
+                        assert_record(&value.descriptor);
+                        for group in &value.groups {
+                            assert_record(&group.identities);
+                        }
+                    }
                 }
             }
         }
@@ -202,6 +209,34 @@ impl Case {
                             lifecycle.owner_kind,
                             &lifecycle.entity,
                         )),
+                    },
+                    State::Materialized(value) => DescribedRuntimeState::Materialized {
+                        descriptor: value.descriptor.clone(),
+                        record: location(SectionPath::materialized_descriptor(
+                            &value.descriptor.domain,
+                            &value.descriptor.entity,
+                        )),
+                        groups: value
+                            .groups
+                            .iter()
+                            .map(|group| {
+                                let identities = &group.identities;
+                                DescribedMaterializedGroup {
+                                    identities: location(SectionPath::materialized_identities(
+                                        &identities.domain,
+                                        &identities.entity,
+                                        identities.group,
+                                    )),
+                                    columns: location(SectionPath::materialized_columns(
+                                        &identities.domain,
+                                        &identities.entity,
+                                        identities.group,
+                                    )),
+                                    record_count: u64::try_from(identities.identities.len())
+                                        .assured("bounded identity counts fit"),
+                                }
+                            })
+                            .collect(),
                     },
                 });
             }

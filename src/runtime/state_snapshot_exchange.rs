@@ -27,8 +27,6 @@ use std::time::Duration;
 
 use error_stack::{Report, ResultExt as _};
 use futures_util::stream;
-use meticulous::ResultExt as _;
-use nervix_execution::ChargedBytes;
 use nervix_interconnect::{
     RemoteOperationFailure, RemoteOperationSubject, StreamHandlerError, StreamingResponse,
 };
@@ -162,7 +160,14 @@ impl Runtime {
         let Some(state) = state else {
             return Err(RemoteOperationFailure::unavailable(subject));
         };
-        match state.seal_after(&self.inner.executor, after_revision).await {
+        match state
+            .seal_after(
+                &self.inner.executor,
+                &self.inner.snapshot_staging,
+                after_revision,
+            )
+            .await
+        {
             Ok(Some(sealed)) => Ok(DescribedStateSnapshot::Sealed(SealedSnapshotEnvelope {
                 length: sealed.descriptor.length,
                 digest: sealed.descriptor.digest,
@@ -210,13 +215,20 @@ impl Runtime {
         };
         let chunk_bytes = self.inner.executor.limits().bulk_chunk_bytes.as_u64();
         let length = sealed.descriptor.length;
-        let chunks = stream::unfold(
-            SealedChunks {
-                bytes: sealed.bytes,
-                offset: 0,
-                chunk_bytes,
+        let reader = sealed
+            .artifact
+            .open_reader()
+            .await
+            .map_err(StreamHandlerError::with_cause)?;
+        let chunks = stream::try_unfold(
+            (sealed.artifact, reader),
+            move |(artifact, mut reader)| async move {
+                let chunk = reader
+                    .next_chunk(chunk_bytes)
+                    .await
+                    .map_err(StreamHandlerError::with_cause)?;
+                Ok::<_, Report<StreamHandlerError>>(chunk.map(|chunk| (chunk, (artifact, reader))))
             },
-            |mut chunks| async move { chunks.next().map(|chunk| (chunk, chunks)) },
         );
         Ok(StreamingResponse::new(length, chunks))
     }
@@ -328,13 +340,16 @@ impl Runtime {
                 },
             )?;
         }
+        // EOF ends transport ownership. File verification and Arrow materialization are local
+        // work and must not retain a shared Snapshot request or connection-stream permit.
+        drop(body);
         let staged = staged.finish(envelope.digest).await.change_context(
             MaterializedSnapshotExchangeError::Verify {
                 target: target_node_id.clone(),
                 placement: placement.clone(),
             },
         )?;
-        RestoredMaterializedSnapshot::open(
+        RestoredMaterializedSnapshot::open_relay(
             &self.inner.executor,
             schema,
             SealedSource::staged(staged),
@@ -379,40 +394,9 @@ impl Runtime {
     }
 }
 
-/// One sealed generation being handed to the transport a bounded chunk at a time. Each chunk is a
-/// window onto the same charged allocation, so the stream copies nothing.
-struct SealedChunks {
-    bytes: ChargedBytes,
-    offset: usize,
-    chunk_bytes: u64,
-}
-
-impl SealedChunks {
-    fn next(&mut self) -> Option<Result<ChargedBytes, Report<StreamHandlerError>>> {
-        if self.offset >= self.bytes.len() {
-            return None;
-        }
-        let wanted = usize::try_from(self.chunk_bytes).verified(
-            "the configured bulk chunk is validated against a memory budget counted in permits",
-        );
-        let end = self
-            .offset
-            .checked_add(wanted)
-            .unwrap_or(self.bytes.len())
-            .min(self.bytes.len());
-        let Some(chunk) = self.bytes.slice(self.offset, end) else {
-            return Some(Err(Report::new(StreamHandlerError::new(
-                "the sealed snapshot ended before the chunk it declared",
-            ))));
-        };
-        self.offset = end;
-        Some(Ok(chunk))
-    }
-}
-
 #[cfg(test)]
 mod tests {
-    use meticulous::OptionExt as _;
+    use meticulous::{OptionExt as _, ResultExt as _};
     use nervix_models::{DomainName, ModelKind, ModelName, SchemaFingerprint};
 
     use super::*;

@@ -729,6 +729,8 @@ fn restore_report() -> RestoreReport {
                 domain: name("tenant_copy"),
                 resource_versions: 3,
                 models: u64::MAX,
+                status: nervix_models::DomainStatus::Stopped,
+                start_version: 4,
                 planned_models: None,
             },
             RestoredDomain {
@@ -736,6 +738,8 @@ fn restore_report() -> RestoreReport {
                 domain: name("analytics"),
                 resource_versions: 0,
                 models: 0,
+                status: nervix_models::DomainStatus::Stopped,
+                start_version: 4,
                 planned_models: None,
             },
         ],

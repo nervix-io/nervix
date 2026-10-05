@@ -27,6 +27,7 @@ pub struct DomainInfo {
     pub domain: DomainName,
     pub status: DomainStatus,
     pub pace: DomainPace,
+    pub start_version: u64,
 }
 
 impl DomainInfo {
@@ -58,6 +59,7 @@ impl DomainInfo {
                 status: Some(self.status.clone().into()),
                 pace_type: pace.discriminant,
                 pace: Some(pace.value),
+                start_version: Some(self.start_version),
             },
         ))
     }
@@ -83,6 +85,7 @@ impl DomainInfo {
             domain,
             status,
             pace,
+            start_version: decoder.required("DomainInfo.start_version", info.start_version())?,
         })
     }
 

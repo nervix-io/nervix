@@ -21,7 +21,7 @@ use crate::{
     DeclaredResource, DomainCapture, DomainRecord, KafkaOffsetsRecord, KafkaPartitionOffset,
     PublishedResourceVersion, RaftLogPosition, ResourceVersionRecord, ResourceVersionState,
     SectionContent, SectionDigester, SectionEntry, SectionPath, UserRecord, UsersRecord,
-    WasmStateDescriptor, wasm_properties::Descriptors,
+    WasmStateDescriptor, materialized_values::Materialized, wasm_properties::Descriptors,
 };
 
 pub(super) struct Values<'a>(pub(super) Arbitrary<'a>);
@@ -66,11 +66,13 @@ pub(super) enum State {
     },
     Kafka(KafkaOffsetsRecord),
     Lifecycle(BranchLifecycleRecord),
+    Materialized(Materialized),
 }
 
 impl State {
     pub fn sections(&self, output: &mut Vec<Section>) {
         match self {
+            Self::Materialized(value) => value.sections(output),
             Self::Wasm { descriptor, bytes } => {
                 output.push(Section::record(
                     SectionPath::wasm_state_descriptor(
@@ -456,6 +458,9 @@ impl<'a> Values<'a> {
                     });
                 }
                 state.push(State::Kafka(self.offsets(domain.clone())));
+                for shape in 0..3 {
+                    state.push(State::Materialized(self.materialized(&domain, shape)));
+                }
                 state.push(State::Lifecycle(self.lifecycle(domain.clone())));
             }
             for section in &state {

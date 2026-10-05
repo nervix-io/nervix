@@ -8,8 +8,9 @@
 use std::os::unix::fs::PermissionsExt as _;
 
 use nervix_backup::{
-    ArchiveRecord, BranchLifecycleRecord, DomainRecord, KafkaOffsetsRecord, RecordKind,
-    ResourceVersionRecord, SectionPath, WasmStateDescriptor, read_archive_contents,
+    ArchiveRecord, BranchLifecycleRecord, DomainRecord, KafkaOffsetsRecord,
+    MaterializedIdentitiesRecord, MaterializedRelayDescriptor, RecordKind, ResourceVersionRecord,
+    SectionPath, WasmStateDescriptor, read_archive_contents,
 };
 use nervix_models::{DomainStatus, WasmStateGeneration};
 
@@ -177,6 +178,44 @@ impl ArchiveValues {
                             .assured("the restored-lifecycle expectation encodes"),
                     )
                 }
+                RecordKind::MaterializedRelayDescriptor => {
+                    let mut record =
+                        MaterializedRelayDescriptor::decode(path.as_str(), &section.bytes)
+                            .assured("the original materialized descriptor validates");
+                    for group in 0..record.groups {
+                        payload_paths.insert(
+                            SectionPath::materialized_columns(
+                                &record.domain,
+                                &record.entity,
+                                group,
+                            ),
+                            SectionPath::materialized_columns(target, &record.entity, group),
+                        );
+                    }
+                    let target_path = SectionPath::materialized_descriptor(target, &record.entity);
+                    // RESTORE clears source-process authority. A stopped domain re-exports
+                    // the stored checkpoint, whose fence is explicitly reset to zero.
+                    record.fence = 0;
+                    record.domain = target.clone();
+                    (
+                        target_path,
+                        record
+                            .encode()
+                            .assured("the restored generation expectation encodes"),
+                    )
+                }
+                RecordKind::MaterializedIdentities => {
+                    let mut record =
+                        MaterializedIdentitiesRecord::decode(path.as_str(), &section.bytes)
+                            .assured("the original materialized identities validate");
+                    record.domain = target.clone();
+                    (
+                        SectionPath::materialized_identities(target, &record.entity, record.group),
+                        record
+                            .encode()
+                            .assured("the restored identity expectation encodes"),
+                    )
+                }
                 RecordKind::Manifest | RecordKind::Users => {
                     panic!("a domain archive has domain-owned sections")
                 }
@@ -198,7 +237,9 @@ impl ArchiveValues {
             let target_path = match section.content {
                 SectionContent::Record(_) => continue,
                 SectionContent::Nspl => SectionPath::domain_models(target),
-                SectionContent::ResourceArchive | SectionContent::WasmGuestBlob => payload_paths
+                SectionContent::ResourceArchive
+                | SectionContent::WasmGuestBlob
+                | SectionContent::MaterializedColumns => payload_paths
                     .remove(&path)
                     .assured("the raw payload has its original owning descriptor"),
             };
@@ -253,8 +294,8 @@ fn then_complete_restored_archive_matches(
         nervix_models::BackupCut::Stopped
     );
     assert!(restored.description.domains[0].skipped_state.is_empty());
-    let expected = ArchiveValues::read(&source_path).restored(&target);
     let actual = ArchiveValues::read(&restored_path);
+    let expected = ArchiveValues::read(&source_path).restored(&target);
     assert_eq!(
         actual.sections, expected.sections,
         "restore preserves every promised field, ordered branch entry, catalog value and raw \

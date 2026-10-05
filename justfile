@@ -37,53 +37,53 @@ bolero-deps: build-web-console
 
 # Prepare one declared sanitizer target through the shared build path, without a campaign.
 prepare-bolero target: bolero-deps
-    BOLERO_BUILD_TIMEOUT_SECONDS=7200 python3 scripts/bolero.py prepare {{ quote(target) }}
+    BOLERO_BUILD_TIMEOUT_SECONDS=7200 python3 -m scripts.bolero prepare {{ quote(target) }}
 
 # The registry and window properties share this declared server library and feature set.
 prepare-archive-counts-fuzz: (prepare-bolero "registry-archived-models")
 
 # Run all registered properties with bounded randomized cases and source-adjacent corpus replay.
 test-bolero filter="": bolero-deps
-    python3 scripts/bolero.py test {{ quote(filter) }}
+    python3 -m scripts.bolero test {{ quote(filter) }}
 
 # List every compiled, registered Bolero target after checking the inventory.
 fuzz-list: bolero-deps
-    python3 scripts/bolero.py list
+    python3 -m scripts.bolero list
 
 # Run one target through sanitizer-backed libFuzzer. Duration is in seconds.
 fuzz target duration="30": bolero-deps
-    python3 scripts/bolero.py fuzz {{ quote(target) }} {{ quote(duration) }}
+    python3 -m scripts.bolero fuzz {{ quote(target) }} {{ quote(duration) }}
 
 # Run every target through sanitizer-backed libFuzzer. Duration is per target in seconds.
 fuzz-all duration="30": bolero-deps
-    python3 scripts/bolero.py fuzz-all {{ quote(duration) }}
+    python3 -m scripts.bolero fuzz-all {{ quote(duration) }}
 
 # Replay the exact saved input through its ordinary property assertion.
 fuzz-replay target failure: bolero-deps
-    python3 scripts/bolero.py replay {{ quote(target) }} {{ quote(failure) }}
+    python3 -m scripts.bolero replay {{ quote(target) }} {{ quote(failure) }}
 
 # Minimize a saved failure with libFuzzer and verify the minimized input still fails.
 fuzz-reduce target failure: bolero-deps
-    python3 scripts/bolero.py reduce {{ quote(target) }} {{ quote(failure) }}
+    python3 -m scripts.bolero reduce {{ quote(target) }} {{ quote(failure) }}
 
 # Compare the inventory, package declarations, test harness and compiled Bolero targets.
 validate-bolero: bolero-deps
-    python3 scripts/bolero.py validate
+    python3 -m scripts.bolero validate
 
 # Check the dedicated Bolero workflow with the pinned Actions linter.
 validate-bolero-workflow: (validate-workflows ".github/workflows/bolero.yaml")
 
 # Check selected Actions workflows, or all workflows when no paths are supplied.
 validate-workflows *workflows:
-    go run github.com/rhysd/actionlint/cmd/actionlint@v1.7.7 {{ workflows }}
+    go run github.com/rhysd/actionlint/cmd/actionlint@v1.7.12 {{ workflows }}
 
 # Qualify nonzero failures, saved crashes, minimization, exact replay and case timeouts.
 qualify-bolero: bolero-deps
-    python3 scripts/bolero.py qualify
+    python3 -m scripts.bolero qualify
 
 # Exercise the inventory and runner's validation and failure paths.
 test-bolero-runner: build-web-console
-    python3 -m unittest scripts.tests.test_bolero
+    python3 -m unittest scripts.tests.test_bolero scripts.tests.test_bolero_coverage
 
 # Measure runner edits without launching unrelated product fuzz campaigns.
 coverage-bolero-runner:
@@ -91,20 +91,19 @@ coverage-bolero-runner:
     set -euo pipefail
     mkdir -p target/bolero
     coverage=(uvx --from coverage==7.11.0 coverage)
-    "${coverage[@]}" run --data-file target/bolero/runner.coverage --branch --source=scripts.bolero,scripts.build_web_console,scripts.tests.test_bolero -m unittest scripts.tests.test_bolero
+    "${coverage[@]}" run --data-file target/bolero/runner.coverage --branch --source=scripts.bolero,scripts.bolero_coverage,scripts.build_web_console,scripts.tests.test_bolero,scripts.tests.test_bolero_coverage -m unittest scripts.tests.test_bolero scripts.tests.test_bolero_coverage
     "${coverage[@]}" lcov --data-file target/bolero/runner.coverage -o target/bolero/python-runner.lcov
 
-# Collect runner line coverage while exercising real libFuzzer and its failure qualification.
+# Collect distinct Python runner and live Rust source reports, then qualify failure retention.
 # The duration is per product target; CI passes 30 on PRs labeled `fuzz`.
 coverage-bolero duration="2": bolero-deps
     #!/usr/bin/env bash
     set -euo pipefail
     coverage=(uvx --from coverage==7.11.0 coverage)
     "${coverage[@]}" erase
-    "${coverage[@]}" run --branch --source=scripts.bolero,scripts.build_web_console,scripts.tests.test_bolero -m unittest scripts.tests.test_bolero
-    "${coverage[@]}" run --branch -a --source=scripts.bolero,scripts.build_web_console,scripts.tests.test_bolero scripts/bolero.py test
-    "${coverage[@]}" run --branch -a --source=scripts.bolero,scripts.build_web_console,scripts.tests.test_bolero scripts/bolero.py fuzz-all {{ quote(duration) }}
-    "${coverage[@]}" run --branch -a --source=scripts.bolero,scripts.build_web_console,scripts.tests.test_bolero scripts/bolero.py qualify
+    "${coverage[@]}" run --branch --source=scripts.bolero,scripts.bolero_coverage,scripts.build_web_console,scripts.tests.test_bolero,scripts.tests.test_bolero_coverage -m unittest scripts.tests.test_bolero scripts.tests.test_bolero_coverage
+    "${coverage[@]}" run --branch -a --source=scripts.bolero,scripts.bolero_coverage,scripts.build_web_console,scripts.tests.test_bolero,scripts.tests.test_bolero_coverage -m scripts.bolero fuzz-all {{ quote(duration) }}
+    "${coverage[@]}" run --branch -a --source=scripts.bolero,scripts.bolero_coverage,scripts.build_web_console,scripts.tests.test_bolero,scripts.tests.test_bolero_coverage -m scripts.bolero qualify
     mkdir -p target/bolero
     "${coverage[@]}" lcov -o target/bolero/python.lcov
     "${coverage[@]}" report --fail-under=80
@@ -115,12 +114,12 @@ coverage-bolero-restore duration="30": build-web-console
     set -euo pipefail
     coverage=(uvx --from coverage==7.11.0 coverage)
     "${coverage[@]}" erase
-    "${coverage[@]}" run --branch --source=scripts.bolero -m unittest scripts.tests.test_bolero
-    "${coverage[@]}" run --branch -a scripts/bolero.py test restore-installation
+    "${coverage[@]}" run --branch --source=scripts.bolero -m unittest scripts.tests.test_bolero scripts.tests.test_bolero_coverage
+    "${coverage[@]}" run --branch -a -m scripts.bolero test restore-installation
     for target in restore-installation-wire restore-installation-storage; do
-        "${coverage[@]}" run --branch -a scripts/bolero.py fuzz "${target}" {{ quote(duration) }}
+        "${coverage[@]}" run --branch -a -m scripts.bolero fuzz "${target}" {{ quote(duration) }}
     done
-    "${coverage[@]}" run --branch -a scripts/bolero.py qualify
+    "${coverage[@]}" run --branch -a -m scripts.bolero qualify
     mkdir -p target/bolero
     "${coverage[@]}" lcov -o target/bolero/python.lcov
     "${coverage[@]}" report --fail-under=80
@@ -265,6 +264,12 @@ test-admission-runtime *args: download-onnxruntime
 # Focused ordinary-mode regressions for runtime owners.
 test-runtime *args: build-web-console wasm-processor-guests download-onnxruntime
     ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)" cargo test --package nervix-server --features testing --lib -- {{ args }}
+
+# Measure established row publication and immutable captures with bounded allocation evidence.
+bench-materialized-state: build-web-console wasm-processor-guests download-onnxruntime bench-materialized-state-bodies
+
+bench-materialized-state-bodies:
+    ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)" cargo test --package nervix-server --features testing --lib materialized_owner_cost -- --ignored --nocapture
 
 # Measure the endpoint's actual request routing and per-thread allocations on the same host.
 bench-endpoint-routing: build-web-console download-onnxruntime
@@ -478,6 +483,10 @@ test-deloxide-selection selection budget_seconds: tests-deps
         cargo test --features {{ quote("testing " + selection) }} --lib -- \
             runtime::state_store::backup::tests::deloxide_restore_storage --exact
     python3 -m scripts.libtest_accounting deloxide "${logs}/restore-storage.log"
+    within_budget materialized-publication \
+        cargo test --features {{ quote("testing " + selection) }} --lib -- \
+            runtime::materialized_state::publication_tests::deloxide_materialized_publications --exact
+    python3 -m scripts.libtest_accounting deloxide "${logs}/materialized-publication.log"
     within_budget scenarios-build \
         cargo test --no-run --features {{ quote("testing " + selection) }} --test scenarios
     within_budget scenarios \
@@ -1145,6 +1154,25 @@ coverage-backup-archives output="target/backup-archives.lcov": tests-deps
         --input tests/features/cluster/backup.feature \
         --name 'A quiesced backup restores two WASM branches and Kafka domain offsets' \
         --concurrency 2 --retry 0
+    cargo llvm-cov --no-report --features testing --package nervix-server --lib -- materialized_snapshot
+    cargo llvm-cov --no-report --features testing --package nervix-server --lib -- backup
+    cargo llvm-cov --no-report --features testing --package nervix-server --lib -- runtime::state_store::checkpoint_reader
+    cargo llvm-cov --no-report --features testing --package nervix-server --test scenarios -- \
+        --input tests/features/cluster/backup_materialized.feature \
+        --name 'A resumed materialized cut preserves interleaved branches and generators through restart|Materialized generations larger than the bulk budget resume on every assigned owner and replica' \
+        --concurrency 2 --retry 0
+    cargo llvm-cov report --no-default-ignore-filename-regex --lcov --output-path {{ quote(output) }} \
+        --package nervix-backup --package nervix-nspl --package nervix-server
+
+# Append current checkpoint-reader and backup ownership tests to retained archive profiles.
+coverage-backup-archives-state-append output="target/backup-archives.lcov":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
+    cargo llvm-cov --no-report --lib --package nervix-backup
+    cargo llvm-cov --no-report --features testing --package nervix-server --lib -- materialized_snapshot
+    cargo llvm-cov --no-report --features testing --package nervix-server --lib -- backup
+    cargo llvm-cov --no-report --features testing --package nervix-server --lib -- runtime::state_store::checkpoint_reader
     cargo llvm-cov report --no-default-ignore-filename-regex --lcov --output-path {{ quote(output) }} \
         --package nervix-backup --package nervix-nspl --package nervix-server
 
@@ -1519,6 +1547,7 @@ bench-smoke-bodies:
     cargo bench --profile dev --package nervix-connector-syslog --bench stream_framing --features benchmarks -- --test
     cargo bench --profile dev --package nervix-vm --bench vm -- --test
     just bench-retained-channels-bodies
+    just bench-materialized-state-bodies
 
 # Measure the data-plane work a node admits through its bounded executor, as the runtime submits it:
 # one branched input prepared into its branch batches, and an emitter batch encoded through a JAQ
@@ -1999,7 +2028,7 @@ coverage-typed-ratchet-python: test-typed-ratchet-compiler test-typed-ratchet-mo
     set -euo pipefail
     coverage=(uvx --from coverage==7.11.0 coverage)
     export COVERAGE_FILE="{{ cargo_target_dir }}/typed-ratchet/python.coverage"
-    "${coverage[@]}" run --branch --source=scripts.typed_ratchet,scripts.typed_lint_wrapper,scripts.ratchet,scripts.native_coverage,scripts.bolero,scripts.build_web_console,scripts.tests.test_bolero -m unittest scripts.tests.test_typed_ratchet scripts.tests.compiler_fixture_checks scripts.tests.test_ratchet scripts.tests.test_native_coverage scripts.tests.test_bolero
+    "${coverage[@]}" run --branch --source=scripts.typed_ratchet,scripts.typed_lint_wrapper,scripts.ratchet,scripts.native_coverage,scripts.bolero,scripts.bolero_coverage,scripts.build_web_console,scripts.tests.test_bolero,scripts.tests.test_bolero_coverage -m unittest scripts.tests.test_typed_ratchet scripts.tests.compiler_fixture_checks scripts.tests.test_ratchet scripts.tests.test_native_coverage scripts.tests.test_bolero scripts.tests.test_bolero_coverage
     "${coverage[@]}" lcov -o "{{ cargo_target_dir }}/typed-ratchet/python.lcov"
     "${coverage[@]}" report
 

@@ -1061,6 +1061,17 @@ build and the existing tests, and nothing in it changes behavior.
   validation job. A random seed identifies one generated case, not an entire
   entropy-driven campaign. Keep failures, their minimization and revision/toolchain/flag metadata
   before cleanup.
+- Live `just fuzz` / `just fuzz-all` campaigns collect Rust source coverage with the pinned
+  sanitizer toolchain. `scripts/bolero_coverage.py` reuses the native exporter for their exact
+  hashed executables and required objects. Each selected target and the aggregate retain
+  `completion.json`, `executions.jsonl`, `lcov.info` and `export.log` beneath
+  `target/native-coverage/bolero-fuzz/fuzz/<nightly>/<attempt>/`. Only a `complete` record
+  beside a report is successful evidence. Discovery, build probes, replay and deliberate failure
+  qualification supply no campaign counters; stable and nightly raw profiles never mix.
+  A failed or interrupted campaign retains its failure and cannot produce a complete aggregate.
+  Check calls the reusable Bolero workflow with its tested SHA, event and label snapshot;
+  randomized checks are required and a deliberate sanitizer skip publishes no fuzz coverage.
+  Keep native fuzz reports and the Python runner report distinct from ordinary coverage and CRAP.
 - Use `just validate` for formatting and validation.
 - Architecture debt is counted and only decreases. `just ratchet` counts oversized files, `as`
   casts outside imports and qualified paths, bare `unwrap` and `expect`, outcomes dropped with

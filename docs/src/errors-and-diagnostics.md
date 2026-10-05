@@ -291,8 +291,12 @@ leader or differs from its catalog entry, a record that does not encode, and an 
 staging area cannot hold. A quiesced capture also names its domain when the mutation lease, pause,
 drain, owner capture, or resume fails or times out, or when its coordinator loses the leader tenure
 under which it acquired the cut. Owner capture failures are classified at the
-interconnect boundary without guest bytes in the failure. An owner still applying the selected
-revision waits within a five-second bound; a closed applied-state authority or an expired catch-up
+interconnect boundary without guest bytes in the failure. Stored materialized capture refuses
+malformed headers, inconsistent group or row counts, oversized identity or column frames,
+truncated checkpoints and failed stored chunk digests. These
+typed codec/storage failures follow the same domain capture failure path without column bytes.
+An owner still applying the selected revision waits within a five-second bound; a closed
+applied-state authority or an expired catch-up
 wait is a domain capture failure. A leadership change during that wait refuses the capture before
 state is read. The failed command's message is
 `backup failed:` followed by that
@@ -308,6 +312,23 @@ stream are retried, from the archive's first byte. The C binding classifies a re
 archive as `NX_ERROR_PROTOCOL`, and a write failure as `NX_ERROR_INVALID_ARGUMENT`, and names the
 execution reference so a host can run the backup again. No diagnostic of a backup includes archive
 contents, password hashes, or resource bytes.
+
+A captured-section opening refused only for Snapshot request capacity retains its inventory and
+retries within one 30-second opening deadline. The typed capacity classification determines this
+retry; other request failures end the fetch. Deadline expiry remains a capture failure, and an
+admitted or partially consumed response is never reopened by this admission retry.
+
+Materialized archive descriptors and identities reject invalid counts, names, typed branch fields,
+watermark order and supported record headers before runtime installation. `RestorePlanError::MissingClock`
+refuses a paced `RESUME` without its committed mapping. `RestoreRefusal::MaterializedState` names
+the domain and relay when preflight conversion fails; `MaterializedRestoreError` distinguishes
+invalid section lengths, identities, Arrow schema or row counts, metadata limits, admission,
+cancellation, framing and staging. A preflight admission refusal records no restore progress and
+can be presented again; it is reported as preparation refusal without judging the archive invalid.
+Native `MaterializedSnapshotError` checks framing, metadata bounds, unique keys,
+counts, exact schemas and complete container consumption. Diagnostics carry typed causes and
+entity identities, without payload columns or branch field values. Replica installation refuses
+a revision older than its currently installed materialized revision.
 
 A restore's failures are owned where they are decided, in the order the restore meets them. The
 restore stream refuses what its frames get wrong with a typed `RestoreUploadFailure`:
@@ -433,6 +454,13 @@ reports them with relay and placement context; a branch-local read includes the 
 The same key accompanies branch-local processor and relay failures, so another branch cannot be
 mistaken for the failed one. Unbranched work has no branch key. [Data Plane](./data-plane.md) owns
 branch execution and [Cluster Interconnect](./interconnect.md) owns snapshot exchange.
+
+The materialized installation owner refuses a lower snapshot revision with
+`RuntimeStateOperationError::MaterializedSnapshotRevision { received, current }`, preserving both
+values in its diagnostic. It checks this before publishing any restored row, alongside assignment,
+branch-generation and ownership-fence validation. A cached snapshot from another assignment is
+rebuilt under the current fence rather than reported as current; a fence change during encoding
+remains the snapshot owner's typed `OwnershipChanged` failure.
 
 ```mermaid
 sequenceDiagram

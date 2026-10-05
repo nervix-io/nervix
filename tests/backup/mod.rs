@@ -23,6 +23,7 @@ use crate::common::{
 };
 
 mod fidelity;
+mod materialized;
 pub(crate) mod restore;
 mod staging;
 

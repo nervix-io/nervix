@@ -631,6 +631,7 @@ impl Runtime {
                             &mut branch_states,
                         )
                         .await;
+                    quiesce_activity.take();
                     activity.set_active(false);
                     nervix_primitives::select! {
                         changed = shutdown_rx.changed() => {
@@ -651,6 +652,9 @@ impl Runtime {
                         _ = source_gate.wait_closed() => {}
                     }
                     continue;
+                }
+                if quiesce_activity.is_none() {
+                    quiesce_activity = Some(NodeQuiesceWorkGuard::begin(quiesce_counters.clone()));
                 }
                 activity.set_active(true);
                 let mut did_scheduled_work = false;

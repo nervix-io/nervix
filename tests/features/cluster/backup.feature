@@ -382,7 +382,7 @@ Feature: Configuration backup into a public archive
     Then the CLI output contains "cut: quiesced"
 
   @restore_installation
-  Scenario: A stale restore coordinator cannot republish after a new leader starts the domain
+  Scenario: A stale restore coordinator cannot republish after a new leader resumes the archived lifecycle
     Given Kafka is running
     And runtime replication is configured with replica count 0 and snapshot interval "10m"
     And a 3 node nervix cluster is started
@@ -402,7 +402,7 @@ Feature: Configuration backup into a public archive
       CREATE CODEC metric_codec FROM WIRE JSON SCHEMA metric_wire TO SCHEMA metric;
       CREATE SCHEMA tenant_branch ( tenant STRING );
       CREATE BRANCH by_tenant SCHEMA tenant_branch TTL 5m;
-      CREATE RELAY raw_metrics SCHEMA metric BRANCHED BY by_tenant;
+      CREATE RELAY raw_metrics SCHEMA metric BRANCHED BY by_tenant WITH MATERIALIZED STATE LAST BY TIMESTAMP;
       CREATE RELAY filtered_metrics SCHEMA metric BRANCHED BY by_tenant;
       CREATE CLIENT kafka_ingress TYPE KAFKA CONFIG {
         'bootstrap.servers' = '{{kafka_addr}}',
@@ -459,17 +459,25 @@ Feature: Configuration backup into a public archive
     Then the CLI backup succeeded with a JSON report naming domain "{{domain}}"
     And a node other than placeholder "leader" is saved as placeholder "survivor"
     Given restoring domain "{{domain}}_copy" by coordinator "{{leader}}" pauses before state publication
-    When restore "domain {{domain}} AS {{domain}}_copy" of backup archive "stateful.nvxb" is streamed to node "{{leader}}" under execution reference "restore_reference" in the background
+    When restore "domain {{domain}} AS {{domain}}_copy RESUME" of backup archive "stateful.nvxb" is streamed to node "{{leader}}" under execution reference "restore_reference" in the background
     Then restoring domain "{{domain}}_copy" by coordinator "{{leader}}" has reached state publication
     When leadership is transferred from node "{{leader}}" to node "{{survivor}}"
     Then node "{{survivor}}" eventually reports a leader other than "{{leader}}"
     And node "{{leader}}" eventually reports a leader other than "{{leader}}"
-    And restore "domain {{domain}} AS {{domain}}_copy" of backup archive "stateful.nvxb" completes on node "{{survivor}}" under execution reference "restore_reference"
+    And restore "domain {{domain}} AS {{domain}}_copy RESUME" of backup archive "stateful.nvxb" completes on node "{{survivor}}" under execution reference "restore_reference"
     Given the active domain is "{{domain}}_copy"
     When these NSPL commands are executed on the leader node
       """
       CREATE SUBSCRIPTION filtered_metrics_subscription TO filtered_metrics;
-      START;
+      SHOW RELAY raw_metrics MATERIALIZED STATE;
+      """
+    Then the last command output contains
+      """
+      "value":2
+      """
+    And the last command output contains
+      """
+      "value":12
       """
     When Kafka message is published to topic "backup_wasm_in_{{test_id}}"
       """
@@ -499,6 +507,7 @@ Feature: Configuration backup into a public archive
     When the CLI backs up "domain {{domain}}" from node "{{survivor}}" into "after-stale.nvxb" reporting JSON
     Then the CLI backup succeeded with a JSON report naming domain "{{domain}}"
     And backup archives "before-stale.nvxb" and "after-stale.nvxb" have identical guest checkpoints and source offsets
+    And backup archives "before-stale.nvxb" and "after-stale.nvxb" have identical materialized generations
 
   Scenario Outline: A quiesced backup omits guest checkpoints after WASM branch TTL eviction
     Given branched relay expiration scan interval is configured as "100ms"

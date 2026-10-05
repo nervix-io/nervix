@@ -2,7 +2,7 @@ name: Check
 
 on:
   pull_request:
-    types: [opened, synchronize, reopened]
+    types: [opened, synchronize, reopened, labeled, unlabeled]
 
 env:
   KACHE_VERSION: "0.28.1"
@@ -17,6 +17,17 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  bolero:
+    uses: ./.github/workflows/bolero.yaml
+    permissions:
+      contents: read
+      id-token: write
+    secrets: inherit
+    with:
+      tested-sha: ${{ github.sha }}
+      event-name: ${{ github.event_name }}
+      labels-json: ${{ toJSON(github.event.pull_request.labels.*.name) }}
+
   conventional-pr-title:
     if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
@@ -255,6 +266,7 @@ jobs:
           fail_ci_if_error: true
           files: target/deadlock.lcov
           flags: diagnostic-evidence
+          url: https://codecov.io
           use_oidc: true
 
       - name: Upload diagnostic evidence
@@ -628,7 +640,7 @@ jobs:
 
   coverage:
     name: coverage
-    needs: [tests, scenarios, extra-tests, shuttle]
+    needs: [tests, scenarios, extra-tests, shuttle, diagnostic-evidence, bolero]
     runs-on: ubuntu-latest
     timeout-minutes: 20
     permissions:
@@ -700,6 +712,16 @@ jobs:
           disable_search: true
           fail_ci_if_error: true
           files: ./lcov-workspace.info
+          url: https://codecov.io
+          use_oidc: true
+
+      - name: Finalize complete Codecov coverage checks
+        uses: codecov/codecov-action@v5
+        with:
+          binary: ${{ steps.codecov-cli.outputs.binary }}
+          run_command: send-notifications
+          fail_ci_if_error: true
+          url: https://codecov.io
           use_oidc: true
 
       - name: Upload merged coverage

@@ -51,6 +51,9 @@ mod backup;
 mod isolation;
 mod relay;
 
+#[path = "materialized.rs"]
+mod materialized;
+
 const CLUSTER: &str = "simulated";
 const PORT: u16 = 7443;
 const HOST_DEADLINE: Duration = Duration::from_secs(20);

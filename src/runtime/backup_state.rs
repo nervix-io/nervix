@@ -1,8 +1,10 @@
-//! Snapshotting the three runtime state kinds a backup carries at a domain cut.
+//! Capturing the runtime checkpoint kinds and fresh materialized generations at a domain cut.
 //!
 //! Layer: data plane.
 //! - **Owns.** Forcing Kafka and branch-lifecycle publications, then reading one database
-//!   snapshot and reattaching typed branch keys from lifecycle checkpoints.
+//!   snapshot, reattaching typed branch keys from lifecycle checkpoints, and selecting stored
+//!   materialized readers for stopped domains or fresh shared Arrow rows under the assignment
+//!   barrier for running and paused domains.
 //! - **Depends on.** Branch-local state, the runtime state store, and typed placement envelopes.
 //! - **Must not know.** Archive records, backup command execution, or restore planning.
 
@@ -21,14 +23,15 @@ use error_stack::{Report, ResultExt as _};
 use nervix_execution::Cancellation;
 use nervix_interconnect::StatePlacementEnvelope;
 use nervix_models::{
-    BranchKeyFingerprint, DomainName, ModelName, NodeRef, RemoteRuntimeField, Timestamp,
+    BranchKeyFingerprint, DomainName, DomainStatus, ModelName, NodeRef, RemoteRuntimeField,
+    Timestamp,
 };
 use thiserror::Error;
 
 use super::{
-    BranchInstanceSnapshotEntry, BranchKey, OwnershipHandoffError, OwnershipHandoffResult,
-    ReplicatedKafkaOffsetState, Runtime, RuntimeStateKind, RuntimeStatePlacement,
-    ScheduledNodeTask,
+    BranchInstanceSnapshotEntry, BranchKey, MaterializedGeneration, OwnershipHandoffError,
+    OwnershipHandoffResult, ReplicatedKafkaOffsetState, ReplicatedMaterializedRelayState, Runtime,
+    RuntimeStateKind, RuntimeStatePlacement, ScheduledNodeTask,
     backup_capture_fence::{BackupCaptureFence, BackupPublication},
     decode_branch_lru_snapshot, encode_branch_lru_snapshot,
     kafka_offset_state::{backup_offset_positions, restore_offset_payload},
@@ -41,6 +44,29 @@ pub(crate) struct CapturedRuntimeState {
     pub(crate) branch_fingerprint: Option<BranchKeyFingerprint>,
     pub(crate) revision: u64,
     pub(crate) payload: Vec<u8>,
+}
+
+/// One domain cut, including the materialized source selected by the domain's lifecycle.
+pub(crate) struct CapturedDomainState {
+    pub(crate) checkpoints: Vec<CapturedRuntimeState>,
+    pub(crate) materialized: CapturedMaterializedState,
+}
+
+pub(crate) enum CapturedMaterializedState {
+    Current(Vec<CapturedMaterializedRelay>),
+    Stored(Vec<CapturedStoredMaterializedRelay>),
+}
+
+pub(crate) struct CapturedStoredMaterializedRelay {
+    pub(crate) placement: StatePlacementEnvelope,
+    pub(crate) checkpoint: super::materialized_snapshot::CapturedMaterializedCheckpoint,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct CapturedMaterializedRelay {
+    pub(crate) placement: StatePlacementEnvelope,
+    pub(crate) generation: MaterializedGeneration,
+    pub(crate) charge: super::Arc<nervix_execution::Reservation>,
 }
 
 /// A checkpoint's identity and byte contract, independent of how its bytes are delivered.
@@ -212,11 +238,16 @@ impl Runtime {
         cancellation: &Cancellation,
     ) -> error_stack::Result<(), BackupStateCaptureError> {
         #[cfg(feature = "testing")]
-        if checkpoint.placement.state.kind() == RuntimeStateKind::WasmProcessor
+        if (checkpoint.placement.state.kind() == RuntimeStateKind::WasmProcessor
             && self
                 .inner
                 .fault_injection
-                .restored_wasm_checkpoint_fails(&checkpoint.placement.domain)
+                .restored_wasm_checkpoint_fails(&checkpoint.placement.domain))
+            || (checkpoint.placement.state.kind() == RuntimeStateKind::MaterializedRelay
+                && self
+                    .inner
+                    .fault_injection
+                    .restored_materialized_checkpoint_fails(&checkpoint.placement.domain))
         {
             return Err(Report::new(BackupStateCaptureError::Storage));
         }
@@ -306,7 +337,8 @@ impl Runtime {
         &self,
         domain: &DomainName,
         quiesced: bool,
-    ) -> error_stack::Result<Vec<CapturedRuntimeState>, BackupStateCaptureError> {
+        status: DomainStatus,
+    ) -> error_stack::Result<CapturedDomainState, BackupStateCaptureError> {
         let Some(store) = self.inner.state_store.as_ref() else {
             return Err(Report::new(BackupStateCaptureError::Unavailable));
         };
@@ -344,11 +376,24 @@ impl Runtime {
                 .publish_sealed_snapshot(placement, snapshot.lsm, &snapshot.payload)
                 .change_context(BackupStateCaptureError::Storage)?;
         }
+        let kinds: &[RuntimeStateKind] = match status {
+            DomainStatus::Stopped => &[
+                RuntimeStateKind::WasmProcessor,
+                RuntimeStateKind::KafkaOffset,
+                RuntimeStateKind::BranchLru,
+                RuntimeStateKind::MaterializedRelay,
+            ],
+            DomainStatus::Running | DomainStatus::Paused => &[
+                RuntimeStateKind::WasmProcessor,
+                RuntimeStateKind::KafkaOffset,
+                RuntimeStateKind::BranchLru,
+            ],
+        };
         let stored_snapshots = store
-            .snapshot_backup_domain(domain)
+            .snapshot_backup_domain(domain, kinds)
             .change_context(BackupStateCaptureError::Storage)?;
         let mut snapshots = Vec::new();
-        for (placement, snapshot) in stored_snapshots {
+        for (placement, snapshot) in stored_snapshots.checkpoints {
             let node = NodeRef::new(placement.kind, placement.identifier.clone()).in_domain(domain);
             let Some(slot) = self.inner.state_identities.get(&node) else {
                 continue;
@@ -397,7 +442,68 @@ impl Runtime {
                 payload: snapshot.payload,
             });
         }
-        Ok(captured)
+        let materialized = match status {
+            DomainStatus::Stopped => {
+                let mut stored_materialized = Vec::new();
+                for (placement, reader) in stored_snapshots.materialized {
+                    let node = NodeRef::new(placement.kind, placement.identifier.clone())
+                        .in_domain(domain);
+                    let Some(slot) = self.inner.state_identities.get(&node) else {
+                        continue;
+                    };
+                    let Some(assignment) = slot.load_full() else {
+                        continue;
+                    };
+                    if !assignment
+                        .identity
+                        .names(placement.state, placement.branch.as_ref())
+                    {
+                        continue;
+                    }
+                    let placement = RuntimeStatePlacement {
+                        domain: domain.clone(),
+                        state: placement.state,
+                        kind: placement.kind,
+                        identifier: placement.identifier,
+                        branch_key: None,
+                    };
+                    stored_materialized.push(CapturedStoredMaterializedRelay {
+                        placement: placement.to_remote(),
+                        checkpoint:
+                            super::materialized_snapshot::CapturedMaterializedCheckpoint::new(
+                                self.executor().clone(),
+                                reader,
+                            ),
+                    });
+                }
+                CapturedMaterializedState::Stored(stored_materialized)
+            }
+            DomainStatus::Running | DomainStatus::Paused => {
+                let mut materialized = Vec::new();
+                for state in self.inner.replicated_materialized_stream_states.iter() {
+                    let placement = state.key();
+                    if &placement.domain != domain
+                        || !self.runtime_state_placement_is_assigned_locally(placement)
+                    {
+                        continue;
+                    }
+                    let (generation, charge) =
+                        ReplicatedMaterializedRelayState::read(state.value())
+                            .capture_for_backup(self.executor())
+                            .change_context(BackupStateCaptureError::Storage)?;
+                    materialized.push(CapturedMaterializedRelay {
+                        placement: placement.to_remote(),
+                        generation,
+                        charge: super::Arc::new(charge),
+                    });
+                }
+                CapturedMaterializedState::Current(materialized)
+            }
+        };
+        Ok(CapturedDomainState {
+            checkpoints: captured,
+            materialized,
+        })
     }
 }
 
@@ -544,23 +650,25 @@ mod tests {
             )
             .assured("eviction persists");
         let captured = runtime
-            .capture_backup_state(&domain, true)
+            .capture_backup_state(&domain, true, DomainStatus::Stopped)
             .assured("a retained inactive guest does not fail the cut");
         assert_eq!(
-            captured.len(),
+            captured.checkpoints.len(),
             1,
             "the scheduled current lifecycle is retained"
         );
         assert!(
             captured
+                .checkpoints
                 .iter()
                 .all(|entry| entry.placement.state.kind() != RuntimeStateKind::WasmProcessor)
         );
         runtime.clear_state_identities(&domain);
         assert!(
             runtime
-                .capture_backup_state(&domain, true)
+                .capture_backup_state(&domain, true, DomainStatus::Stopped)
                 .assured("removed entities do not contribute retained checkpoints")
+                .checkpoints
                 .is_empty()
         );
     }
