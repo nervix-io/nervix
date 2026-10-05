@@ -73,7 +73,9 @@ conversion. A codec or runtime caller retains that report under its operation co
 errors remain typed values in the batch outcome and are formatted only when a message error is
 reported; this conversion does not turn them into report allocations per row.
 
-The WASM FlatBuffers decoder reports protocol failures with their verified payload cause. The Rust
+The WASM FlatBuffers decoder reports protocol failures with their verified payload cause. It checks
+the complete header length before reading the identifier; a truncated header returns the typed
+length or identifier error even when its size prefix matches the received bytes. The Rust
 guest SDK retains that report beneath its envelope or snapshot meaning, and its `Processor`
 callbacks return guest-error reports. It renders a failure only when returning an ABI code or
 global-error reason; rejected snapshot bytes and rejected application state keep their distinct
@@ -334,6 +336,12 @@ chunk set or a conflicting publication inventory. `RestoreRead`, `Cancelled`, `S
 storage admission preserve their owning failure boundary. `CheckpointPlacementTooLarge` rejects
 an encoding beyond the bounded storage key allowance. `InvalidStorageFormat` requires recreation
 of the node state directory when the required current format marker is missing or invalid.
+`RestoreStagingQuota` carries the node's unpublished checkpoint limit, current usage and incoming
+checkpoint footprint; `RestoreStagingSize` rejects an unrepresentable accounting sum. A quota
+failure remains a storage failure beneath the admitted restore step and leaves its activation
+gate closed. Node-local maintenance logs admission, cancellation or storage failure and retries
+on its next sweep without changing the command outcome or gate. Metrics are updated only for a
+completed sweep, so a partial cancelled deletion cannot claim a completed reclamation count.
 Staging or publication failure leaves the durable start gate in place, including a failure after
 the complete generation's pointer became durable but before runtime handles were cleared. Exact
 publication retry completes durability and bounded cleanup under the same authority and inventory. The steps before it stay

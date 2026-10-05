@@ -1129,6 +1129,7 @@ async fn relay_owner_expires_branch_presence_by_ttl() {
         Duration::from_secs(60),
         fault_injection,
         PathBuf::from(DEFAULT_TEMP_DIR),
+        DEFAULT_RESTORE_STAGING_MAX_BYTES,
     )
     .expect("runtime should build");
     let domain = domain("default");

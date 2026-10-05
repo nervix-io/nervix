@@ -610,6 +610,13 @@ impl StoreInner {
         self.state_machine.read().clone()
     }
 
+    pub(super) fn with_restore_state_reclamation<T>(
+        &self,
+        reclaim: impl FnOnce(&crate::RestoreStateRetention<'_>) -> T,
+    ) -> T {
+        crate::restore::with_restore_state_reclamation(&self.state_machine, reclaim)
+    }
+
     pub(super) fn with_restore_state_installation<T>(
         &self,
         domain: &nervix_models::DomainName,

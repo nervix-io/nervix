@@ -481,6 +481,7 @@ mod tests {
             DEFAULT_STATE_SNAPSHOT_INTERVAL,
             ConfiguredFaultInjection::default(),
             PathBuf::from(DEFAULT_TEMP_DIR),
+            DEFAULT_RESTORE_STAGING_MAX_BYTES,
         )
         .expect("a runtime without persistence builds")
     }

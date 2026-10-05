@@ -49,6 +49,9 @@ const DEFAULT_EPOCH_DEADLINE_TICKS: u64 = 1;
 const DEFAULT_MAX_GUEST_BUFFER_BYTES: usize = 64 * 1024 * 1024;
 pub const ABI_SERIALIZATION_NAME: &str = protocol::SERIALIZATION_NAME;
 
+#[cfg(test)]
+mod properties;
+
 nervix_primitives::unmodeled::task_local! {
     static INVOCATION_NOW: Timestamp;
 }

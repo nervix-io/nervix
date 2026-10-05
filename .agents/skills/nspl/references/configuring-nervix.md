@@ -375,6 +375,15 @@ Choose checks relevant to the configured graph:
   refused, so copy a domain with `AS`. A fresh cluster already has its bootstrap user, so a cluster
   restore there needs `ON EXISTING USER SKIP` or `REPLACE`. Run `DRY RUN` first to see the plan and
   each domain's impact report without changing anything.
+  Failed unpublished checkpoint data is reclaimed on every node while the failed target's
+  `START` gate stays closed. Size the server's `--restore-staging-max-bytes` or
+  `NERVIX_RESTORE_STAGING_MAX_BYTES` allowance for all concurrent unpublished checkpoints on that
+  node; it defaults to `128GiB` and counts keys and values, including incomplete chunks. It is
+  separate from archive-file staging and does not bound snapshot retention or filesystem
+  overhead. Observe `nervix_restore_staging_bytes`, `nervix_restore_staging_limit_bytes` and
+  `nervix_restore_staging_reclaimed_bytes_total` at `/metrics`; the backup chapter distinguishes
+  logical usage from SST allocation. Recover an uncertain applying restore with its exact
+  execution reference; after a terminal failed restore, restore into a fresh target name.
 - `SHOW UDFS`, `DESCRIBE UDF <name>`, and `SHOW CREATE UDF <name>` inspect trusted Roto functions.
   Creation itself is the test gate: a rejecting Roto `test` block prevents persistence.
 - `SHOW PLACEMENTS`, `DESCRIBE PLACEMENT <name>`, `SHOW CREATE PLACEMENT <name>`, and

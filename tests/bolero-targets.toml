@@ -1054,3 +1054,258 @@ random_iterations = 256
 source = "src/runtime/materialized_state_publication_tests.rs"
 test = "runtime::materialized_state::publication_tests::bolero_materialized_sequences_preserve_selection_lifetimes_and_complete_snapshots"
 test_target = "lib"
+
+[[target]]
+case_timeout_seconds = 10
+corpus = "crates/nervix-wasm-protocol/src/__fuzz__/properties__bolero_malformed_messages_fail_typed_within_bounds/corpus"
+domain_version = 1
+features = []
+id = "wasm-protocol-malformed"
+invariant = "Short and arbitrary current guest messages return the owning typed error or a completely decoded value without panic."
+manifest = "Cargo.toml"
+max_input_bytes = 4096
+package = "nervix-wasm-protocol"
+random_iterations = 256
+source = "crates/nervix-wasm-protocol/src/properties.rs"
+test = "properties::bolero_malformed_messages_fail_typed_within_bounds"
+test_target = "lib"
+
+[[target]]
+case_timeout_seconds = 10
+corpus = "crates/nervix-wasm-protocol/tests/__fuzz__/bolero_branch_metadata_preserves_every_type_and_field/corpus"
+domain_version = 1
+features = []
+id = "wasm-branch-metadata"
+invariant = "Every current schema type, optional field, branch identity and schema order survives both production encoders and verified decoding."
+manifest = "Cargo.toml"
+max_input_bytes = 2048
+package = "nervix-wasm-protocol"
+random_iterations = 256
+source = "crates/nervix-wasm-protocol/tests/representations.rs"
+test = "bolero_branch_metadata_preserves_every_type_and_field"
+test_target = "test:representations"
+
+[[target]]
+case_timeout_seconds = 10
+corpus = "crates/nervix-wasm-protocol/tests/__fuzz__/bolero_envelopes_preserve_borrowed_bytes_sidecars_and_order/corpus"
+domain_version = 1
+features = []
+id = "wasm-envelopes"
+invariant = "Input and output envelopes preserve complete opaque bytes, token sidecars, typed absence, routes and column order across verified borrowed and owned views."
+manifest = "Cargo.toml"
+max_input_bytes = 2048
+package = "nervix-wasm-protocol"
+random_iterations = 256
+source = "crates/nervix-wasm-protocol/tests/representations.rs"
+test = "bolero_envelopes_preserve_borrowed_bytes_sidecars_and_order"
+test_target = "test:representations"
+
+[[target]]
+case_timeout_seconds = 10
+corpus = "crates/nervix-wasm-protocol/tests/__fuzz__/bolero_snapshots_preserve_opaque_state_and_init_bytes/corpus"
+domain_version = 1
+features = []
+id = "wasm-snapshots"
+invariant = "Current snapshot envelopes preserve every init and opaque application-state byte, including empty state."
+manifest = "Cargo.toml"
+max_input_bytes = 2048
+package = "nervix-wasm-protocol"
+random_iterations = 256
+source = "crates/nervix-wasm-protocol/tests/representations.rs"
+test = "bolero_snapshots_preserve_opaque_state_and_init_bytes"
+test_target = "test:representations"
+
+[[target]]
+case_timeout_seconds = 10
+corpus = "crates/nervix-wasm-protocol/tests/__fuzz__/bolero_reset_and_rejection_codes_preserve_typed_distinctions/corpus"
+domain_version = 1
+features = []
+id = "wasm-abi-codes"
+invariant = "Reset answers and saved-envelope/application rejection verdicts round trip their own ABI codes and classify every other code as absent."
+manifest = "Cargo.toml"
+max_input_bytes = 16
+package = "nervix-wasm-protocol"
+random_iterations = 256
+source = "crates/nervix-wasm-protocol/tests/representations.rs"
+test = "bolero_reset_and_rejection_codes_preserve_typed_distinctions"
+test_target = "test:representations"
+
+[[target]]
+case_timeout_seconds = 10
+corpus = "crates/nervix-wasm/src/__fuzz__/properties__bolero_host_schema_preserves_the_complete_abi_projection/corpus"
+domain_version = 1
+features = []
+id = "wasm-host-schema"
+invariant = "The host ABI schema projection preserves names, exact nested types, nullability and order; sensitivity stays an explicit host execution rule."
+manifest = "Cargo.toml"
+max_input_bytes = 2048
+package = "nervix-wasm"
+random_iterations = 256
+source = "crates/nervix-wasm/src/properties.rs"
+test = "properties::bolero_host_schema_preserves_the_complete_abi_projection"
+test_target = "lib"
+
+[[target]]
+case_timeout_seconds = 10
+corpus = "crates/nervix-wasm/src/__fuzz__/properties__bolero_host_envelopes_preserve_views_owned_bytes_and_sidecars/corpus"
+domain_version = 1
+features = []
+id = "wasm-host-envelopes"
+invariant = "Native host envelope conversions preserve complete protocol values, sidecars and retained output bytes after dropping the decoded owner."
+manifest = "Cargo.toml"
+max_input_bytes = 2048
+package = "nervix-wasm"
+random_iterations = 256
+source = "crates/nervix-wasm/src/properties.rs"
+test = "properties::bolero_host_envelopes_preserve_views_owned_bytes_and_sidecars"
+test_target = "lib"
+
+[[target]]
+case_timeout_seconds = 10
+corpus = "crates/nervix-wasm-sdk/src/__fuzz__/snapshot_properties__bolero_sdk_snapshots_restore_every_byte_and_preserve_branch_isolation/corpus"
+domain_version = 1
+features = []
+id = "wasm-sdk-snapshots"
+invariant = "SDK saves restore every opaque byte under the same branch contract or domain rename; a different branch configuration never calls application restore."
+manifest = "Cargo.toml"
+max_input_bytes = 2048
+package = "nervix-wasm-sdk"
+random_iterations = 256
+source = "crates/nervix-wasm-sdk/src/snapshot_properties.rs"
+test = "snapshot_properties::bolero_sdk_snapshots_restore_every_byte_and_preserve_branch_isolation"
+test_target = "lib"
+
+[[target]]
+case_timeout_seconds = 10
+corpus = "crates/nervix-wasm-sdk/src/__fuzz__/snapshot_properties__bolero_sdk_snapshot_rejections_keep_envelope_and_application_verdicts/corpus"
+domain_version = 1
+features = []
+id = "wasm-sdk-rejections"
+invariant = "Snapshot, init metadata and application-state rejection retain their owning typed contexts and distinct restore verdicts."
+manifest = "Cargo.toml"
+max_input_bytes = 2048
+package = "nervix-wasm-sdk"
+random_iterations = 256
+source = "crates/nervix-wasm-sdk/src/snapshot_properties.rs"
+test = "snapshot_properties::bolero_sdk_snapshot_rejections_keep_envelope_and_application_verdicts"
+test_target = "lib"
+
+[[target]]
+case_timeout_seconds = 10
+corpus = "crates/nervix-wasm-sdk/src/__fuzz__/column_properties__bolero_sdk_input_preserves_complete_arrow_batches_and_sidecars/corpus"
+domain_version = 1
+features = []
+id = "wasm-sdk-input"
+invariant = "SDK input preserves every Arrow schema, logical value bit, null, nested collection and sidecar through IPC and cloned buffer ownership."
+manifest = "Cargo.toml"
+max_input_bytes = 2048
+package = "nervix-wasm-sdk"
+random_iterations = 128
+source = "crates/nervix-wasm-sdk/src/column_properties.rs"
+test = "column_properties::bolero_sdk_input_preserves_complete_arrow_batches_and_sidecars"
+test_target = "lib"
+
+[[target]]
+case_timeout_seconds = 10
+corpus = "crates/nervix-wasm-sdk/src/__fuzz__/column_properties__bolero_sdk_output_preserves_shared_columns_routes_and_emit_order/corpus"
+domain_version = 1
+features = []
+id = "wasm-sdk-output"
+invariant = "SDK output preserves the complete shared generated column pool, routed references, sidecars and ordered callback emissions."
+manifest = "Cargo.toml"
+max_input_bytes = 2048
+package = "nervix-wasm-sdk"
+random_iterations = 128
+source = "crates/nervix-wasm-sdk/src/column_properties.rs"
+test = "column_properties::bolero_sdk_output_preserves_shared_columns_routes_and_emit_order"
+test_target = "lib"
+
+[[target]]
+case_timeout_seconds = 10
+corpus = "crates/backup/src/__fuzz__/wasm_properties__bolero_wasm_descriptors_preserve_every_identity_generation_and_branch_value/corpus"
+domain_version = 1
+features = []
+id = "wasm-state-descriptors"
+invariant = "Every current durable WASM descriptor preserves complete names, schema, branch identities and values, generation and revision; scalar floats preserve every bit."
+manifest = "Cargo.toml"
+max_input_bytes = 2048
+package = "nervix-backup"
+random_iterations = 256
+source = "crates/backup/src/wasm_properties.rs"
+test = "wasm_properties::bolero_wasm_descriptors_preserve_every_identity_generation_and_branch_value"
+test_target = "lib"
+
+[[target]]
+case_timeout_seconds = 10
+corpus = "crates/backup/src/__fuzz__/wasm_properties__bolero_malformed_wasm_descriptors_fail_at_the_owning_boundary/corpus"
+domain_version = 1
+features = []
+id = "wasm-state-descriptors-malformed"
+invariant = "Malformed descriptor bytes and out-of-domain current fields return the owning typed archive failure before runtime installation."
+manifest = "Cargo.toml"
+max_input_bytes = 4096
+package = "nervix-backup"
+random_iterations = 256
+source = "crates/backup/src/wasm_properties.rs"
+test = "wasm_properties::bolero_malformed_wasm_descriptors_fail_at_the_owning_boundary"
+test_target = "lib"
+
+[[target]]
+case_timeout_seconds = 10
+corpus = "crates/nervix-wasm-protocol/src/__fuzz__/properties__bolero_corrupt_messages_validate_sizes_offsets_and_counts/corpus"
+domain_version = 1
+features = []
+id = "wasm-protocol-corruption"
+invariant = "Truncated frames, declared-size mismatches, invalid identifiers, offsets and vector counts fail before decoding or effects for every current message family."
+manifest = "Cargo.toml"
+max_input_bytes = 2048
+package = "nervix-wasm-protocol"
+random_iterations = 256
+source = "crates/nervix-wasm-protocol/src/properties.rs"
+test = "properties::bolero_corrupt_messages_validate_sizes_offsets_and_counts"
+test_target = "lib"
+
+[[target]]
+case_timeout_seconds = 10
+corpus = "crates/nervix-wasm-protocol/src/__fuzz__/properties__bolero_message_tags_and_column_descriptors_fail_typed/corpus"
+domain_version = 1
+features = []
+id = "wasm-protocol-tags"
+invariant = "Unknown current union, processor-type and column-source tags, missing nested types and nonzero uninitialized indices yield the owning typed protocol error."
+manifest = "Cargo.toml"
+max_input_bytes = 64
+package = "nervix-wasm-protocol"
+random_iterations = 256
+source = "crates/nervix-wasm-protocol/src/properties.rs"
+test = "properties::bolero_message_tags_and_column_descriptors_fail_typed"
+test_target = "lib"
+
+[[target]]
+case_timeout_seconds = 10
+corpus = "src/runtime/state_store/__fuzz__/runtime__state_store__wasm_properties__bolero_stored_wasm_checkpoints_preserve_bytes_and_typed_placement/corpus"
+domain_version = 1
+features = []
+id = "wasm-stored-checkpoints"
+invariant = "Stored checkpoint variants preserve complete bytes, revision, length and digest; keys preserve complete typed placement and exact branch text while reset identity stays scoped to its selected branch."
+manifest = "Cargo.toml"
+max_input_bytes = 2048
+package = "nervix-server"
+random_iterations = 256
+source = "src/runtime/state_store/wasm_properties.rs"
+test = "runtime::state_store::wasm_properties::bolero_stored_wasm_checkpoints_preserve_bytes_and_typed_placement"
+test_target = "lib"
+
+[[target]]
+case_timeout_seconds = 10
+corpus = "src/runtime/state_store/__fuzz__/runtime__state_store__wasm_properties__bolero_malformed_stored_wasm_checkpoints_fail_within_bounds/corpus"
+domain_version = 1
+features = []
+id = "wasm-stored-checkpoints-malformed"
+invariant = "Arbitrary stored checkpoints fail with their owning typed error or decode completely and deterministically within the input budget."
+manifest = "Cargo.toml"
+max_input_bytes = 4096
+package = "nervix-server"
+random_iterations = 256
+source = "src/runtime/state_store/wasm_properties.rs"
+test = "runtime::state_store::wasm_properties::bolero_malformed_stored_wasm_checkpoints_fail_within_bounds"
+test_target = "lib"

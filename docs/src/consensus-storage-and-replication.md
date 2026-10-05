@@ -99,6 +99,20 @@ without inferring them from a client timeout. These records contain control-plan
 attribution, and non-sensitive diagnostics only. Runtime payloads, acknowledgement maps, connector
 buffers, and handoff bytes remain volatile data-plane state.
 
+### Restore Checkpoint Reclamation
+
+Restore checkpoint reclamation borrows the applied state through `with_restore_state_reclamation`
+and retains its read guard across node-local bounded storage deletion. Its caller takes the
+checkpoint installation barrier after this guard, in the same order as staging and publication.
+The retention view keeps the current generation of every applying restore and any generation
+ahead of the applied log; without an applied log it keeps all generations. Leadership and lease
+expiry alone do not end an applying execution's retry lifetime. Terminal, expired, missing or
+superseded executions no longer retain an applied unpublished generation. The runtime store
+protects its selected durable publication independently. This adds no consensus record or log
+mutation and never removes a replicated incomplete-installation gate. See
+[Backup And Restore](backup-and-restore.md#restore-checkpoint-storage-quota-and-metrics) for the
+quota, metrics and node-local cleanup boundary.
+
 ### Coordinated WASM Reset Publications
 
 An NSPL reset first records a typed ordered transaction step with its captured planning inputs,

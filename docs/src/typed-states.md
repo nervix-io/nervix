@@ -39,6 +39,12 @@ that result is part of the function contract. Arrow values under a null or failu
 also do not encode absence in the numeric lane: the mask does. An `Option` or enum is needed when
 the *state* is absent or different, not merely because a literal looks special.
 
+The guest protocol keeps an absent branch key and an absent source token distinct from present
+values. Empty application-state bytes remain present inside the Rust SDK's snapshot envelope.
+Reset acceptance, reset refusal, an unusable snapshot envelope and rejected application state have
+distinct typed ABI verdicts. Protocol decoding checks the complete size-prefixed header before
+identifier access and verifies offsets and counts before constructing owned values.
+
 ## Absence And Distinct States
 
 **Node trace export.** A tracing guard either has no trace export or owns its provider and resolver
@@ -390,6 +396,17 @@ uses one database view for namespace selection and payload data. A queued checkp
 its selected namespace and validates that it remains current before writing. The storage format
 marker is required for nonempty checkpoint storage; corruption or absence fails explicitly and
 requires recreation rather than inventing a namespace for the stored keys.
+
+Restore reclamation receives a borrowed `RestoreStateRetention` from one locked applied revision.
+Absence of an applied log means catch-up is unknown and retains all generations. A generation
+ahead of that log is also retained. Once applied, only the exact generation of an applying restore
+requires unpublished storage; terminal, expired or absent execution records do not. Publication
+identity remains a separate node-store protection, and reclamation never converts an incomplete
+installation into a completed one. Key/value usage is reconstructed from current namespace keys,
+including partial chunks without a receipt, rather than a defaulted persisted counter.
+Namespace cursors use the vocabulary's canonical `decode` entry point for the required domain
+name. It requires lowercase stored text and retains the typed `NameError` beneath the storage
+format failure.
 
 ## Qualification Evidence
 

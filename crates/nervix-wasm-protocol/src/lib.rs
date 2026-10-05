@@ -30,6 +30,9 @@ mod generated {
 
 use generated::nervix_wasm as wire;
 
+#[cfg(test)]
+mod properties;
+
 pub const FILE_IDENTIFIER: &str = wire::MESSAGE_IDENTIFIER;
 pub const SERIALIZATION_NAME: &str = "FlatBuffers";
 
@@ -428,7 +431,8 @@ fn verified_message(bytes: &[u8]) -> Result<wire::Message<'_>, ProtocolError> {
             actual,
         }));
     }
-    if !wire::message_size_prefixed_buffer_has_identifier(bytes) {
+    const HEADER_BYTES: usize = 2 * size_of::<u32>() + FILE_IDENTIFIER.len();
+    if bytes.len() < HEADER_BYTES || !wire::message_size_prefixed_buffer_has_identifier(bytes) {
         return Err(Report::new(ProtocolError::InvalidIdentifier));
     }
     wire::size_prefixed_root_as_message(bytes)

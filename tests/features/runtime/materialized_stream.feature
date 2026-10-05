@@ -258,6 +258,17 @@ Feature: Materialized relay state
           FLUSH IMMEDIATE
           ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
+      CREATE INGESTOR dependency_acknowledged_source
+        FROM CLIENT SCHEMA dependency_event
+          MODE ACK PARALLEL MAX 4 ACK TIMEOUT 30s RETRY POLICY BACKOFF 100ms MAX 1s
+          ON QUIESCE SUSPEND
+        TO dependency_input
+          INHERIT ALL
+          BRANCHED BY by_dependency_tenant
+          SET tenant = message.tenant
+          FLUSH IMMEDIATE
+          ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
       CREATE JUNCTION resolve_dependencies
         FROM dependency_input
         BRANCHED BY by_dependency_tenant
@@ -272,6 +283,8 @@ Feature: Materialized relay state
       CREATE SUBSCRIPTION dependency_output_subscription TO dependency_output;
       START;
       """
+    Given client "dependencies" is connected to the leader node
+    When client "dependencies" opens producer "dependency-input" on ingestor "dependency_acknowledged_source" expecting fields "tenant STRING, value STRING, first_value STRING OPTIONAL, second_value STRING OPTIONAL"
     When http payload is posted to node "node-1" with host "http-materialized-order-{{test_id}}.example.com" path "/dependency-input"
       """
       {"tenant":"acme","value":"input-acme"}
@@ -290,21 +303,38 @@ Feature: Materialized relay state
       """
       {"first_value":"first-acme","second_value":"second-acme","tenant":"acme","value":"input-acme"}
       """
-    When http payload is posted to node "node-1" with host "http-materialized-order-{{test_id}}.example.com" path "/dependency-input"
-      """
-      {"tenant":"beta","value":"input-beta"}
-      """
+    When producer "dependency-input" submits batch "beta-wait" with rows
+      | tenant | value      | first_value | second_value |
+      | beta   | input-beta |             |              |
     Then the relay subscription does not receive a payload within "300ms"
     When http payload is posted to node "node-1" with host "http-materialized-order-{{test_id}}.example.com" path "/first-state"
       """
       {"tenant":"beta","value":"first-beta"}
       """
+    # Completion acknowledges REQUIRED SKIP before the later dependency is published.
+    Then batch "beta-wait" completes
     Then the relay subscription does not receive a payload within "300ms"
     When http payload is posted to node "node-1" with host "http-materialized-order-{{test_id}}.example.com" path "/second-state"
       """
       {"tenant":"beta","value":"second-beta"}
       """
     Then the relay subscription does not receive a payload within "1s"
+    When http payload is posted to node "node-1" with host "http-materialized-order-{{test_id}}.example.com" path "/dependency-input"
+      """
+      {"tenant":"acme","value":"input-acme-again"}
+      """
+    Then within "5s" the relay subscription receives a payload
+      """
+      {"first_value":"first-acme","second_value":"second-acme","tenant":"acme","value":"input-acme-again"}
+      """
+    When producer "dependency-input" submits batch "beta-ready" with rows
+      | tenant | value            | first_value | second_value |
+      | beta   | input-beta-again |             |              |
+    Then batch "beta-ready" completes
+    And within "5s" the relay subscription receives a payload
+      """
+      {"first_value":"first-beta","second_value":"second-beta","tenant":"beta","value":"input-beta-again"}
+      """
 
     Examples:
       | cluster_size |

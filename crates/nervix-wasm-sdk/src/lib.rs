@@ -46,6 +46,12 @@ mod envelope;
 mod error;
 mod processor;
 
+#[cfg(test)]
+mod snapshot_properties;
+
+#[cfg(test)]
+mod column_properties;
+
 pub use nervix_wasm_protocol::{
     AckSidecar, AckToken, AckTokenSet, MessageErrorSet, NackSet, OutputColumnRef, OutputRow,
     ProcessorField, ProcessorSchema, ProcessorType, StateResetRequestAnswer,

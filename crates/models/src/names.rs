@@ -173,10 +173,10 @@ macro_rules! declare_names {
                     self.0.as_str()
                 }
 
-                /// Read a name back from its serde or archived form, which holds exactly the text
+                /// Read a canonical name from stored text, which holds exactly the text
                 /// `parse` produced. Text that is not already a valid lower-case name is refused
                 /// rather than normalized: no encoder ever wrote it.
-                fn decode(raw: &str) -> Result<Self, Report<NameError>> {
+                pub fn decode(raw: &str) -> Result<Self, Report<NameError>> {
                     let name = Self::parse(raw)?;
                     if let Some(ch) = raw.chars().find(char::is_ascii_uppercase) {
                         return Err(Report::new(NameError::UpperCase { ch }));
