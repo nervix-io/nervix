@@ -602,6 +602,8 @@ jobs:
           fail_ci_if_error: true
           files: ./lcov-workspace.info
           use_oidc: true
+          use_pypi: true
+          version: "11.3.1"
 
       - name: Upload merged coverage
         if: always()

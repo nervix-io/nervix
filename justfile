@@ -75,7 +75,7 @@ validate-bolero-workflow: (validate-workflows ".github/workflows/bolero.yaml")
 
 # Check selected Actions workflows, or all workflows when no paths are supplied.
 validate-workflows *workflows:
-    go run github.com/rhysd/actionlint/cmd/actionlint@v1.7.7 {{ workflows }}
+    go run github.com/rhysd/actionlint/cmd/actionlint@v1.7.12 {{ workflows }}
 
 # Qualify nonzero failures, saved crashes, minimization, exact replay and case timeouts.
 qualify-bolero: bolero-deps
