@@ -243,9 +243,14 @@ jobs:
         env:
           NERVIX_DEADLOCK_PROBE_ARTIFACTS: target/diagnostic-evidence/probes
 
+      - name: Install verified Codecov CLI
+        id: codecov-cli
+        uses: ./.github/actions/setup-codecov
+
       - name: Upload diagnostic coverage to Codecov
         uses: codecov/codecov-action@v5
         with:
+          binary: ${{ steps.codecov-cli.outputs.binary }}
           disable_search: true
           fail_ci_if_error: true
           files: target/deadlock.lcov
@@ -684,9 +689,14 @@ jobs:
           done < <(find coverage-inputs/native-extras -path '*/ordinary/*/lcov.info' -o -name python.lcov)
           just check-coverage
 
+      - name: Install verified Codecov CLI
+        id: codecov-cli
+        uses: ./.github/actions/setup-codecov
+
       - name: Upload coverage to Codecov
         uses: codecov/codecov-action@v5
         with:
+          binary: ${{ steps.codecov-cli.outputs.binary }}
           disable_search: true
           fail_ci_if_error: true
           files: ./lcov-workspace.info
