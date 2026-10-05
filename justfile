@@ -2422,8 +2422,105 @@ generate-dev-tls:
 generate-test-onnx output="tests/fixtures/onnx/simple_score.onnx" alternate_output="tests/fixtures/onnx/alternate_score.onnx" batch_output="tests/fixtures/onnx/batch_score.onnx" f64_output="tests/fixtures/onnx/f64_score.onnx" matrix_output="tests/fixtures/onnx/matrix_identity.onnx" dynamic_batch_output="tests/fixtures/onnx/dynamic_batch_score.onnx" scalar_output="tests/fixtures/onnx/scalar_identity.onnx":
     python3 scripts/train_simple_onnx.py --output {{ output }} --alternate-output {{ alternate_output }} --batch-output {{ batch_output }} --f64-output {{ f64_output }} --matrix-output {{ matrix_output }} --dynamic-batch-output {{ dynamic_batch_output }} --scalar-output {{ scalar_output }}
 
-download-onnxruntime:
-    bash scripts/download_onnxruntime.sh
+# Download a CPU or CUDA 13 runtime; `host` selects the current machine's platform.
+download-onnxruntime flavor="cpu" platform="host":
+    bash scripts/download_onnxruntime.sh --flavor {{ quote(flavor) }} --platform {{ quote(platform) }}
+
+# Check runtime package selection and the CPU/CUDA image build targets.
+test-onnxruntime:
+    uv run --locked python -m unittest scripts.tests.test_onnxruntime
+
+# Build both final targets with fixture binaries and check layer sharing and runtime dependencies.
+test-onnxruntime-docker:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    just docker-prepare-qemu linux/amd64
+    mkdir -p target
+    fixture_context="$(mktemp -d "${PWD}/target/onnxruntime-docker.XXXXXX")"
+    trap 'rm -rf "${fixture_context}"' EXIT
+    mkdir -p "${fixture_context}/artifacts/nervix-server.bundle"
+    for binary in nervix-server nervix-cli nervix-nspl-format; do
+        cat > "${fixture_context}/artifacts/${binary}" <<'SH'
+    #!/bin/sh
+    basename "$0"
+    SH
+        chmod +x "${fixture_context}/artifacts/${binary}"
+    done
+    printf 'Sonic bundle fixture\n' > "${fixture_context}/artifacts/nervix-server.bundle/manifest"
+    for variant in cpu cuda; do
+        base=debian-base
+        if [[ "${variant}" == cuda ]]; then
+            base=cuda-base
+        fi
+        docker buildx build -f Dockerfile.debian --target "${base}" --platform linux/amd64 \
+            --load --tag "nervix:onnxruntime-${variant}-base-check" .
+        image="nervix:onnxruntime-${variant}-check"
+        docker buildx build -f Dockerfile.debian --target "${variant}" --platform linux/amd64 \
+            --build-context "builder=${fixture_context}" --load --tag "${image}" .
+        test "$(docker run --rm "${image}")" = nervix-server
+        docker run --rm --entrypoint /bin/sh "${image}" -c '
+            set -eu
+            if test -f /usr/local/lib/libonnxruntime_providers_cuda.so; then
+                ldconfig -p | grep -F libcudnn.so.9
+            fi
+            for library in /usr/local/lib/libonnxruntime*.so /usr/lib/x86_64-linux-gnu/libcudnn*.so.9; do
+                test -f "${library}" || continue
+                dependencies="$(ldd "${library}")"
+                printf "%s\n%s\n" "${library}" "${dependencies}"
+                # The NVIDIA container runtime injects the host driver when --gpus is used.
+                missing="$(printf "%s\n" "${dependencies}" | awk '\''/not found/ && $1 != "libcuda.so.1"'\'')"
+                test -z "${missing}"
+            done
+        '
+    done
+    uv run --locked python - <<'PY'
+    import json
+    import subprocess
+
+    def layers(image):
+        result = subprocess.check_output(["docker", "image", "inspect", image], text=True)
+        return json.loads(result)[0]["RootFS"]["Layers"]
+
+    def filesystem_history(image):
+        result = subprocess.check_output([
+            "docker", "image", "history", "--no-trunc", "--human=false", "--format", "json", image,
+        ], text=True)
+        rows = [json.loads(line) for line in result.splitlines()]
+        return [row["CreatedBy"] for row in reversed(rows) if int(row["Size"]) > 0]
+
+    debian = layers("nervix:onnxruntime-cpu-base-check")
+    cuda = layers("nervix:onnxruntime-cuda-base-check")
+    if cuda[:len(debian)] != debian or len(cuda) != len(debian) + 1:
+        raise SystemExit("CUDA must add exactly one filesystem layer directly above Debian")
+    for variant, base in (("cpu", debian), ("cuda", cuda)):
+        image = f"nervix:onnxruntime-{variant}-check"
+        runtime = layers(image)
+        if runtime[:len(base)] != base or len(runtime) <= len(base):
+            raise SystemExit(f"{variant}: Nervix runtime layers must follow the selected base")
+        first_runtime_layer = " ".join(filesystem_history(image)[len(base)].split())
+        command = first_runtime_layer.partition(" /bin/sh -c ")[2]
+        if not command.startswith("apt-get update && apt-get upgrade -y"):
+            raise SystemExit(f"{variant}: Debian updates must immediately follow the selected base")
+
+    if layers("nervix:onnxruntime-cpu-check")[-4:] != layers("nervix:onnxruntime-cuda-check")[-4:]:
+        raise SystemExit("CPU and CUDA targets must share the Nervix binary and bundle layers")
+
+    cuda_base = "nervix:onnxruntime-cuda-base-check"
+    held = subprocess.check_output([
+        "docker", "run", "--rm", "--entrypoint", "apt-mark", cuda_base, "showhold",
+    ], text=True).splitlines()
+    if not held:
+        raise SystemExit("CUDA packages must be held at their pinned versions")
+
+    def cuda_versions(image):
+        return subprocess.check_output([
+            "docker", "run", "--rm", "--entrypoint", "dpkg-query", image,
+            "-W", "-f=${Package}=${Version}\\n", *held,
+        ], text=True)
+    if cuda_versions(cuda_base) != cuda_versions("nervix:onnxruntime-cuda-check"):
+        raise SystemExit("Debian upgrades must preserve the pinned CUDA package versions")
+    print("Verified CPU/CUDA final targets, shared Nervix layers, Debian updates, and CUDA pins")
+    PY
 
 reset-local-dashboard-state:
     #!/usr/bin/env bash
@@ -2489,25 +2586,39 @@ docker-prepare-qemu platform="linux/amd64":
         docker run --privileged --rm tonistiigi/binfmt --install all
     fi
 
-docker-build-debian debian_version="trixie" llvm_version="23" tag="nervix:debian" platform="linux/amd64" push="false" cache_from="" cache_to="":
+# Build the CPU image for amd64 or arm64.
+docker-build-debian llvm_version="23" tag="nervix:debian" platform="linux/amd64" push="false" cache_from="" cache_to="":
+    just docker-build-linux cpu {{ quote(llvm_version) }} \
+        {{ quote(tag) }} {{ quote(platform) }} {{ quote(push) }} {{ quote(cache_from) }} {{ quote(cache_to) }}
+
+# Build Debian trixie -> CUDA 13/cuDNN 9 -> Nervix, reusing CUDA across application builds.
+docker-build-cuda llvm_version="23" tag="nervix:cuda" platform="linux/amd64" push="false" cache_from="" cache_to="":
+    just docker-build-linux cuda {{ quote(llvm_version) }} \
+        {{ quote(tag) }} {{ quote(platform) }} {{ quote(push) }} {{ quote(cache_from) }} {{ quote(cache_to) }}
+
+[private]
+docker-build-linux image_target llvm_version tag platform push cache_from cache_to:
     #!/usr/bin/env bash
     set -euo pipefail
-    normalized_platform="{{ platform }}"
+    normalized_platform={{ quote(platform) }}
     if [[ "${normalized_platform}" == "linux/aarch64" ]]; then
         normalized_platform="linux/arm64"
     fi
+    if [[ {{ quote(image_target) }} == "cuda" && "${normalized_platform}" != "linux/amd64" ]]; then
+        echo "CUDA images require linux/amd64; ONNX Runtime publishes no GPU archive for ${normalized_platform}" >&2
+        exit 1
+    fi
     just docker-prepare-qemu "${normalized_platform}"
     output_flag="--load"
-    if [[ "{{ push }}" == "true" ]]; then
+    if [[ {{ quote(push) }} == "true" ]]; then
         output_flag="--push"
     fi
-    cache_from_flag=""
-    if [[ -n "{{ cache_from }}" ]]; then
-        cache_from_flag="--cache-from={{ cache_from }}"
+    cache_flags=()
+    if [[ -n {{ quote(cache_from) }} ]]; then
+        cache_flags+=(--cache-from={{ quote(cache_from) }})
     fi
-    cache_to_flag=""
-    if [[ -n "{{ cache_to }}" ]]; then
-        cache_to_flag="--cache-to={{ cache_to }}"
+    if [[ -n {{ quote(cache_to) }} ]]; then
+        cache_flags+=(--cache-to={{ quote(cache_to) }})
     fi
     : "${KACHE_S3_BUCKET:?KACHE_S3_BUCKET is required}"
     : "${KACHE_S3_REGION:?KACHE_S3_REGION is required}"
@@ -2516,20 +2627,19 @@ docker-build-debian debian_version="trixie" llvm_version="23" tag="nervix:debian
     : "${KACHE_S3_SECRET_KEY:?KACHE_S3_SECRET_KEY is required}"
     docker buildx build \
         -f Dockerfile.debian \
+        --target {{ quote(image_target) }} \
         --progress=plain \
         --platform "${normalized_platform}" \
         --build-arg "KACHE_VERSION=${KACHE_VERSION:-0.28.1}" \
         --build-arg RUST_VERSION={{ rust_toolchain_version }} \
-        --build-arg DEBIAN_VERSION={{ debian_version }} \
-        --build-arg LLVM_VERSION={{ llvm_version }} \
+        --build-arg LLVM_VERSION={{ quote(llvm_version) }} \
         --build-arg "KACHE_S3_BUCKET=${KACHE_S3_BUCKET}" \
         --build-arg "KACHE_S3_REGION=${KACHE_S3_REGION}" \
         --build-arg "KACHE_S3_ENDPOINT=${KACHE_S3_ENDPOINT}" \
         --build-arg "KACHE_S3_ACCESS_KEY=${KACHE_S3_ACCESS_KEY}" \
         --build-arg "KACHE_S3_SECRET_KEY=${KACHE_S3_SECRET_KEY}" \
-        ${cache_from_flag} \
-        ${cache_to_flag} \
-        -t {{ tag }} \
+        "${cache_flags[@]}" \
+        -t {{ quote(tag) }} \
         "${output_flag}" \
         .
 
