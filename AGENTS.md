@@ -932,7 +932,11 @@ build and the existing tests, and nothing in it changes behavior.
   `crates/model-harness/loom-inventory.toml`, and register a `[[qualification]]` weakening that
   must make the model fail. A standalone relaxed counter carries no cross-location claim, and an
   operation inside an opaque dependency is excluded from a claim rather than given a fictional
-  model.
+  model. A store-load claim, in which each side writes one location and then reads the other's,
+  holds only under sequential consistency, which acquire and release do not give and Loom cannot
+  check, because it models `SeqCst` accesses as acquire and release. The side off the hot path
+  therefore reads the other side's location by read-modify-write, so acquire and release decide the
+  claim and Loom can check it.
 - The evidence forms are complementary and none replaces another: Shuttle for interleavings of
   production owners, Loom for memory-ordering claims of synchronous production owners, Turmoil for
   network claims within the supported simulation, Deloxide for active deadlocks among the tracked
@@ -1171,6 +1175,13 @@ build and the existing tests, and nothing in it changes behavior.
   instrumented build directory; model and diagnostic reports never enter the ordinary coverage or
   CRAP gate. Coverage bookkeeping stays outside model processes and supplies no synchronization
   to the invariant.
+- `just coverage-patch [base] [report]` measures added executable lines from ordinary LCOV reports
+  and retains an advisory Markdown report under target. `--pr <number>` publishes or updates the
+  authenticated publisher's marked PR comment, after verifying the current PR head. CI uses the
+  same command with the tested merge commit's coordinates and a separate PR head fence. Coverage
+  percentages and reporting failures never fail a build; the complexity check remains independent.
+  `just test-patch-coverage` exercises accounting and publication, and
+  `just coverage-patch-runner` collects its Python line coverage.
 - Every public interface or NSPL surface change must update the relevant `docs/src` pages and the
   user-facing NSPL skill in the same change. Keep `.agents/skills/nspl/SKILL.md` and its references
   accurate for users configuring Nervix, then regenerate `docs/book` with `just book`.

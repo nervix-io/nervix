@@ -561,6 +561,12 @@ captures keep only their selected row views and shared Arrow carriers. Publicati
 row payload or a whole relay for an established update. Snapshot archives and storage ownership
 retain the current container and backup contract.
 
+A stopped backup selects materialized checkpoint readers alongside its other state from one
+immutable database view. Those readers keep the selected namespace, metadata and chunks through
+bounded group conversion, even if a later publication replaces or reclaims the generation.
+They retain one stored chunk and one charged group at a time and publish no runtime state.
+Running and paused backup capture continues to borrow current row views under the assignment barrier.
+
 The required-wait observation creates its notification before reading dependencies. The primitive
 boundary registers a `notify_waiters` observer at future creation, so an update after the read and
 before its first poll still wakes it. Broadcast publication occurs once after each changed batch
@@ -753,6 +759,23 @@ same reason: a batch that left an input collector for an output buffer was admit
 the move. Overcounting only delays a drain, while undercounting lets one conclude early, so the
 ordering is chosen in that direction. The counts are hot-path scalars and are never persisted.
 
+A local drain reads these counts together with the domain's relays, ingestors, generators,
+acknowledgement roots and emitters, and work keeps moving between them while it reads. No single
+order of reads follows every move. A node that takes a batch from a relay counts it before the relay
+lets it go, so the relay has to be read first, while a relay counts a batch a node publishes before
+the node lets it go, so the node has to be read first. Each relay therefore keeps two totals on
+each node that only rise: the batches it admitted, from its owner's publishers or from deliveries
+another node routed to its consumers here, and the batches it handed on. It holds their difference,
+and the admitted total is also its admission sequence. A drain observation reads every relay's
+sequence before and after everything else, and a relay whose sequence changed in between counts as
+work still moving. A batch the observation missed reached the place where it rests only after the
+read that would have counted it there, so it entered some relay between that relay's two readings.
+The observation reads force-flush obligations first: a participant completes its obligation after
+everything it did for the flush, including resuming a message parked on `REQUIRED WAIT`, so an
+observation that sees the obligation complete sees that work as well. The totals cost a relay's
+owner path the same two read-modify-writes per batch as the pending count they replace, a routed
+delivery two more, and a drain reads them only on its own poll.
+
 An ingestor route's force-flush participant releases its partial batches into branch execution;
 the admitted client submission's tracked ACK root stays outstanding until its downstream work
 settles. For a model alteration with a shared relay gate, the control plane suspends the affected
@@ -799,9 +822,14 @@ gate is held, and its synchronous guard never crosses an await.
 
 The relay dispatch gate separates ordinary publication from a model change, ownership handoff, or
 shutdown operation that must know every earlier dispatch has left. On the open path, a publisher
-increments an atomic in-flight count and checks an atomic closed flag. An engagement closes the
-gate before inspecting the count. These operations use one total order, so either the publisher
-enters and is counted by the engagement or it observes closure, rolls back its count, and waits.
+raises an atomic in-flight count with a read-modify-write and then checks an atomic closed flag. An
+engagement closes the gate and then reads the count with a read-modify-write as well.
+Read-modify-writes of one count are totally ordered, so either the publisher's comes first and the
+engagement counts it, or the engagement's comes first and the publisher's acquires it, observes the
+gate closed, rolls its count back, and waits. A plain load of the count would not do: it may return
+a count from before an increment that preceded it, while that publisher's own load of the flag still
+finds the gate open. Leaving releases what a dispatch did under its permit to the engagement's next
+read, and the last dispatch to leave a closed gate wakes the engagements waiting for it.
 
 The engagement state is consulted only while the gate is closed. Once all earlier permits leave,
 the engagement owns a lease and the protected mutation can proceed. The acquisition deadline bounds
@@ -814,8 +842,7 @@ until fan-out has attached the consumer ACK shares and resolved the owner's shar
 cannot replace the routes while that permit is live. If the gate has closed first, fan-out fails
 the record ACKs and returns the batch for source retry. Waiting for the gate here would deadlock
 the swap, because the swap's drain counts the
-buffered batch. The same sequentially consistent gate protocol orders the nonwaiting attempt and
-the swap engagement.
+buffered batch. The same gate protocol orders the nonwaiting attempt and the swap engagement.
 
 The three-node attached-emitter move scenario injects a stale zero buffered-batch drain report
 while an owner batch is paused. That puts fan-out beside the local swap even when the coordinator's
@@ -836,14 +863,20 @@ admission worker therefore tracks the batch's ACK root with the ingestor's drain
 and only then reads the quiesce publication. Either the read comes before the engagement, so the
 drain that follows counts the root and waits for it, or the read observes the engagement and the
 batch is refused with its root resolved before anything was dispatched under it. No batch can be
-dispatched after a drain concluded that the ingestor held no admitted work.
+dispatched after a drain concluded that the ingestor held no admitted work. The admission tracks the
+root with a read-modify-write, and the drain reads each root count with a read-modify-write after
+the engagement published, so one side observes the other in the C11 memory model, not only on
+processors whose read-modify-writes are full barriers.
 
 ### Assignment generations
 
 A runtime-state assignment packs its generation and capability into one atomic word. A hot
 operation increments the admission counter for that generation before comparing its token with the
 published binding. A rebind serializes with other rebinds, publishes the successor binding, and
-waits only for operations admitted under the generation it superseded. Even and odd generation
+waits only for operations admitted under the generation it superseded. It reads that generation's
+admission count with a read-modify-write, so an operation whose admission came first is waited for,
+and one whose admission came later acquires the rebind's read and observes the successor binding. An
+operation that finishes releases what it did to the rebind's read. Even and odd generation
 counters let work admitted under the successor proceed without extending that wait.
 
 This fence prevents a former owner from mutating or describing state after reassignment. Snapshot
@@ -880,7 +913,10 @@ it:
 - a WASM branch waits for its own checkpoint after each guest callback, bounded by the checkpoint
   deadline. The state store's durability barrier lets one writer at a time run a storage
   synchronization for every writer waiting, through one atomic runner slot and a ticket watermark;
-  it holds no lock across that wait, and the synchronization runs on the storage workers. Replica
+  it holds no lock across that wait, and the synchronization runs on the storage workers. The round
+  of a synchronization belongs to the storage job that flushes: it frees the runner slot and
+  records its outcome when that job ends, so a writer that stops waiting neither frees the slot
+  while the flush still runs nor loses a failed flush. Replica
   progress reaches the waiting branch through the replication of its own state.
 - one placement's replication changes its announcement, its replicas' reported progress and the
   handover between its announcers under a lock scoped to that placement, taken by its originator,
@@ -906,8 +942,17 @@ admission returns the admitted outcome.
 
 Relay fan-out itself uses one bounded queue per consumer. Publishers share no fan-out lock;
 capacity and receiver counts are atomic, and a publisher registers for notification only when a
-consumer queue is full. Removing one consumer does not stop the others, and changing capacity does
-not discard batches already queued.
+consumer queue is full. A waiting publisher raises a waiting count before it reads a consumer's
+admission count, and a consumer lowers its admission count before it reads the waiting count. Both
+reach the admission count by read-modify-write, so either the publisher reads the room the consumer
+freed or the consumer reads the waiting count raised and wakes the publisher. Removing one consumer
+does not stop the others, and changing capacity does not discard batches already queued.
+
+A publication counts the consumers it delivers to from the same snapshot of the registered
+consumers that it delivers through. A consumer that registers meanwhile receives later publications
+only, so the acknowledgement shares a publication reserves for its attached consumers always match
+its deliveries, and a routed delivery, which holds no dispatch permit, cannot resolve a share it
+never reserved.
 
 ## Ratchet And Review
 
@@ -1483,7 +1528,8 @@ runs in a disposable subprocess and must record its typed active cycle and exit 
 successful serial inversion, mixed modes and recursive read multiplicity, reused construction
 sites in separate lifetimes, read-only/consistent-order controls, runtime-disabled instrumentation,
 context/retention overload and failed/blocked output. The commands also run one-/three-node
-`@deadlock_diagnostics`, `@restore_installation`, `@client_ingestor_alter_drain` and the local
+`@deadlock_diagnostics`, `@restore_installation`, `@client_ingestor_alter_drain`,
+`@memory_pressure_pause`, `@client_io_03_consumer_restore`, `@client_io_03_generation` and the local
 `@deadlock_reports` workflow without retries. The commands also run `@paced_simulation_reopen` on
 one and three nodes: the Rust driver uses the selected diagnostic capability, while Python runs
 against diagnostic nodes with its ordinary shared binding. Python locks and condition variables
@@ -1532,7 +1578,11 @@ its own row stream. Large-generation and staging archive captures use a two-minu
 so positive capture waits accommodate concurrent diagnostic workloads.
 The three-node copy restore cordons its coordinator before planning, so every guest save uses the
 remote chunk transfer and the receiver's quota-owned completed file.
-Those restore scenarios also run in the ordinary public suite.
+Those restore scenarios also run in the ordinary public suite. The memory-pressure scenarios take
+the node's pause lock as the pause collects every registered quiesce control and as each starting
+ingestor reads the pause, on one and three nodes. The client consumer scenarios take the Rust
+client consumer's state and parked-read locks in the scenario process as a consumer is restored
+after a session restart and closed by a domain restart.
 
 Shuttle checks the production handoff's delivery/refusal and close races, including counter drain,
 through the registered replay-capable harness. The queue internals and OS wakeups are opaque; the
@@ -1738,7 +1788,11 @@ A family of names means each member runs independently through the recipe.
 | Force-flush obligations (`src/runtime/force_flush.rs`) | `shuttle_two_participant_generation_waits_for_every_obligation` prevents completion before all participants live at publication complete and redelivers a dropped, unhandled completion; `shuttle_stale_completions_never_clear_a_newer_generation` prevents an old completion from clearing new work; `shuttle_published_generation_wakes_a_waiting_participant` catches a lost publication wakeup; `shuttle_participant_lifecycle_balances_obligations_through_close` balances `pending()` across subscribe, request, participant drop, and close. |
 | Ingestor intake (`src/runtime/ingestors/source_shuttle_tests.rs`; `src/runtime/ingestor_quiesce.rs`) | `shuttle_broker_source_observes_engagement_during_dispatch`, `shuttle_paced_source_observes_engagement_during_dispatch`, and `shuttle_request_source_observes_engagement_during_dispatch` exercise host-loop engagement for memory pressure, entity gate, handoff, and shutdown: after engagement returns, no further payload dispatches, and a change during dispatch is observed. `shuttle_an_open_control_answers_intake_without_waiting_on_retained_payloads` keeps the open decision independent of a retained-payload lock. `shuttle_a_new_quiesce_ends_a_delivery_waiting_for_extension_room` and `shuttle_a_shutdown_ends_a_delivery_waiting_for_extension_room` race the engagement or the stop against a retained payload's delivery waiting for a place the extension class never frees: the waiter registers before it reads, so the delivery always ends, and its payload is back at the front of the buffer counted as it was. `shuttle_a_new_quiesce_decides_again_on_a_live_payload_waiting_for_extension_room` and `shuttle_a_stop_ends_a_live_payload_waiting_for_extension_room` race a `BUFFER` engagement or the stop against a live payload waiting for such a place: the wait always ends, a new decision becomes the one the payload is decided under next and its buffer retains it, counted with its bytes, and a stop leaves nothing retained. |
 | Relay dispatch gate and fan-out (`src/runtime/relay_channel_shuttle_tests.rs`) | `shuttle_dispatch_permits_never_overlap_a_quiescent_lease_and_release_frees_every_waiter`, `shuttle_overlapping_gate_leases_all_release_before_dispatch_resumes`, `shuttle_expired_gate_fence_frees_every_waiter_without_reporting_quiescence`, `shuttle_canceled_dispatch_returns_its_permit_to_the_gate_fence`, and `shuttle_dispatches_parked_behind_a_lease_wake_only_on_its_release` hold the fence, lease, expiry, cancellation, and waiter contract; in-flight dispatches drain before quiescence. `shuttle_capacity_shrink_keeps_buffered_batches_and_wakes_publishers_after_the_drain`, `shuttle_capacity_growth_admits_waiting_publishers_without_a_take`, `shuttle_publishers_wait_for_the_slowest_consumer_and_skip_consumers_that_leave`, and `shuttle_losing_every_consumer_delivers_or_returns_the_waiting_batch` keep queued batches across capacity changes, release waiting publishers, and return or deliver each batch when receivers leave. |
-| Relay owner fan-out (`src/runtime/relay_boundary_shuttle_tests.rs`) | `shuttle_owner_fanout_fails_its_ack_while_an_attached_consumer_moves` keeps a live sibling from completing a source ACK while another attached consumer leaves under a schedule fence; after release, a retry reaches the live consumer. |
+| Relay owner fan-out (`src/runtime/relay_boundary_shuttle_tests.rs`) | `shuttle_owner_fanout_fails_its_ack_while_an_attached_consumer_moves` keeps a live sibling from completing a source ACK while another attached consumer leaves under a schedule fence; after release, a retry reaches the live consumer. `shuttle_a_routed_batch_racing_a_joining_consumer_reserves_a_share_for_every_delivery` races a batch another node routed here against an attached consumer registering here: every consumer the batch reaches holds a share of its own, so one that fails the batch fails the source ACK. |
+| Local drain observation (`src/runtime/local_drain_shuttle_tests.rs`) | `shuttle_a_batch_published_while_a_drain_observes_is_never_missing_from_it`, `shuttle_a_batch_a_consumer_takes_while_a_drain_observes_is_never_missing_from_it`, and `shuttle_a_batch_its_owner_hands_on_while_a_drain_observes_is_never_missing_from_it` race a batch moving from a node into a relay, from a relay into a consumer's node, and from a relay's transit into its consumer's queue against one drain observation of the production read order: the observation shows the batch, or the relay's admission when the move went against the order of its reads. `shuttle_a_message_a_flush_resumed_is_seen_by_a_drain_that_sees_the_flush_complete` races a force flush that resumes a parked message and completes its obligation against the observation: one that sees the obligation complete sees the message as admitted work. |
+| Relay subscription definitions (`src/runtime/relay_subscription.rs`) | `shuttle_an_attachment_racing_a_redefinition_is_refused_or_closed_by_it` races a subscriber's attachment against a redeclaration of the relay with a field that became sensitive: the attachment is refused, or the redeclaration closes the receiver it attached, so no subscriber describes rows by a replaced definition. |
+| Materialized dependency waits (`src/runtime/materialized_read.rs`) | `shuttle_a_parked_message_is_woken_by_the_materialized_state_it_waits_for` races the arrival of the state a `REQUIRED WAIT` message is parked on against the processor branch reading it and parking: the wait registers before the read, and again before every retry, so the arrival always wakes it. |
+| Client emitter budget (`src/runtime/client_emitter_shuttle_tests.rs`) | `shuttle_competing_consumer_grants_never_exceed_the_node_budget`, `shuttle_consumer_loss_and_ack_race_release_one_retained_delivery` and `shuttle_publish_cancellation_and_ack_race_release_one_reservation` keep grants within the node budget and release each retained delivery and reservation once. `shuttle_a_reservation_waiting_for_a_full_budget_takes_the_bytes_a_release_returns` races a release against a reservation that finds the budget full: the reservation registers for the change before it reads the budget, so the release wakes it and it takes the bytes. |
 | Assignment authority and state updates (`src/runtime/state_store_shuttle_tests.rs`, `materialized_state.rs`, `kafka_offset_state.rs`) | `shuttle_a_rebind_yields_until_the_operation_admitted_under_its_replaced_binding_finishes` and `shuttle_no_operation_admitted_under_a_superseded_binding_outlives_its_superseding_rebind` fence admitted work even when generations reuse an even or odd counter. `shuttle_snapshot_installation_never_overlaps_origination_or_a_capture` keeps exclusive installation apart from originators and captures. `shuttle_an_originator_update_proceeds_while_the_assignment_barrier_is_held` and `shuttle_a_committed_offset_proceeds_while_the_assignment_barrier_is_held` keep ordinary admitted updates independent of a capture's barrier. |
 | ACK tree (`src/runtime_ack.rs`) | The `shuttle_tests` checks `concurrent_attachment_and_final_ack_leave_exact_tracking`, `concurrent_wait_and_active_ack_exempt_the_remaining_root`, `concurrent_wait_release_and_completion_leave_no_tracking`, `attachment_losing_its_reservation_to_completion_resolves_no_share`, `attachment_losing_its_reservation_to_completion_parks_no_share`, `wait_release_racing_the_last_active_ack_holds_domain_and_ingestor_handoff_once`, `attachment_racing_the_last_active_share_into_wait_publishes_one_active_share`, and `parked_remote_progress_survives_a_racing_heartbeat_and_resumes_once` keep pending, active, and handoff counts exact across attachment, `REQUIRED WAIT`, and remote progress. `concurrent_success_and_failure_choose_one_terminal_transition`, `fan_out_across_ingestors_with_a_failing_root_resolves_each_root_once_with_exact_counts`, and `parked_and_fanned_out_roots_hold_exact_counts_at_every_quiescent_point` require one terminal result per root, one observed completion, and zero outstanding counts after resolution. |
 | Forwarded acknowledgement silence (`src/runtime/remote_dispatch_shuttle_tests.rs`) | `shuttle_a_terminal_outcome_racing_the_final_sweep_resolves_the_share_once` races the receiver's terminal outcome against the sweep that would fail a forwarded share: exactly one of them removes it, and the root delivers that one's outcome. `shuttle_a_report_racing_the_final_sweep_keeps_the_share_it_reached` races a report against the same sweep: a report that reached the share keeps it pending with its root unresolved, and only a report that found it removed lets the sweep fail it. |
@@ -1748,7 +1802,7 @@ A family of names means each member runs independently through the recipe.
 | Emitter batch payloads (`src/runtime/emitter_record_writes_shuttle_tests.rs`) | `shuttle_a_retried_payload_acknowledges_each_fanned_in_member_once_after_every_emitter` and `shuttle_a_sibling_failure_resolves_each_fanned_in_member_once_despite_a_retry` fan two source messages out to a batching emitter and a sibling: each source acknowledgement completes once, successfully only after both emitters confirmed it, and the retry writes the retained payload's first bytes. `shuttle_a_cancelled_attempt_leaves_each_member_to_resolve_once` cuts an attempt short at any point and requires the next one to write only unanswered payloads and deliver each rejected member's message error once. `shuttle_a_drain_never_finds_the_emitter_empty_while_a_member_is_retained` races a drain's reads against a stalled write and the force flush that repeats it. |
 | Client ingestors (`src/runtime/client_ingestor_shuttle_tests.rs`) | `shuttle_racing_reservations_never_exceed_the_node_budget_and_return_every_byte` races opens that each need more than half the node's producer budget: at most one holds it at a time and every reservation returns its bytes. `shuttle_a_batch_racing_a_quiesce_is_either_counted_by_its_drain_or_refused_undispatched` races the admission fence against an engagement and its drain: no batch is dispatched after the drain concluded. `shuttle_a_closing_producer_answers_every_admitted_batch_once_before_its_release` and `shuttle_an_ending_endpoint_answers_every_batch_once_and_ends_its_producer_last` race a close or an endpoint end against the worker's admission reports and the batches' acknowledgements: every batch is answered exactly once, a close answers each with its real outcome before the release, and an end reports no admitted batch as not admitted and comes last. `shuttle_a_detach_racing_a_clearance_admits_only_a_cleared_batch_and_returns_its_slot` races a forwarded producer's detach against the clearance of its batch while a local producer waits for the window's one slot: the forwarded batch reaches the worker only after its clearance was recorded, and the local batch is admitted whichever comes first, so no slot leaks. `shuttle_an_end_racing_clearances_reports_a_batch_not_admitted_exactly_when_the_worker_never_took_it` races an endpoint end against the clearance of two batches while the worker holds the first without reporting it: each batch is answered once, not admitted exactly when the worker never took it, whether it was still being cleared or cleared and waiting for the worker, and of unknown outcome when it did. |
 | Rust client submission slots (`crates/client-core/src/producer/slots_shuttle_tests.rs`) | `shuttle_a_wait_racing_its_resolution_takes_the_outcome_once_and_returns_the_credit`, `shuttle_a_cancelled_wait_loses_neither_the_outcome_nor_the_credit`, and `shuttle_a_release_racing_its_resolution_returns_the_credit_exactly_once` race a submission's resolution against the application's wait, an aborted wait followed by a new one, and a release: the outcome is taken at most once, a cancelled wait leaves it retrievable, and the credit comes back exactly once. |
-| Rust client attachment recovery (`crates/client-core/src/producer.rs`, `consumer.rs`) | `shuttle_close_fences_a_producer_restore_started_on_the_same_exchange` and `shuttle_close_fences_a_consumer_restore_started_on_the_same_exchange` race close against beginning restoration. `shuttle_close_fences_a_producer_restore_interrupted_by_another_loss` and `shuttle_close_fences_a_consumer_restore_interrupted_by_another_loss` race close against another loss while restoring. Each check uses the production lifecycle owner and requires the final phase to remain closed, with subsequent restoration refused. |
+| Rust client attachment recovery (`crates/client-core/src/producer.rs`, `consumer.rs`) | `shuttle_close_fences_a_producer_restore_started_on_the_same_exchange` and `shuttle_close_fences_a_consumer_restore_started_on_the_same_exchange` race close against beginning restoration. `shuttle_close_fences_a_producer_restore_interrupted_by_another_loss` and `shuttle_close_fences_a_consumer_restore_interrupted_by_another_loss` race close against another loss while restoring. Each check uses the production lifecycle owner and requires the final phase to remain closed, with subsequent restoration refused. `shuttle_a_reply_racing_the_end_of_its_exchange_reports_the_gap_once` races a consumer's reply against the end of its exchange: the interruption is reported once, whichever observes the end first. `shuttle_a_read_parked_while_its_consumer_closes_does_not_outlive_the_close` races a read that parks for delivery against the close: the read ends with the close. `shuttle_a_submission_racing_its_producers_end_observes_the_end` races a submission's wait against its producer's end, and `shuttle_a_reader_racing_a_reported_gap_takes_it_without_another_change` (`subscriptions.rs`) races the application's next read against a subscription event the follower reports: each waiter subscribes before it reads, so neither waits for a later change. |
 | Relay branch presence (`src/runtime/relay_branch_presence_shuttle_tests.rs`) | `shuttle_an_observer_sees_every_owner_step_whole_and_never_an_older_one` races an owner at capacity one through admission, eviction, recreation and release against an observer that registers and reads throughout: every read is a membership the owner published whole and never older than the step the owner had finished. `shuttle_capacity_and_expiry_publish_whole_memberships` keeps every read within the owner's capacity and drops an expired branch from every read after the expiry. `shuttle_a_replaced_owner_never_publishes_over_its_successor` races a predecessor's admissions, expiry and release against its successor's claim: once the claim is visible no read holds a branch only the predecessor admitted, and the successor's branch survives the predecessor's release. |
 | Checkpoint replication (`src/runtime/kafka_offset_state.rs`, `src/runtime/state_replication/checkpoint_announcement_shuttle_tests.rs`) | `shuttle_a_replica_acknowledgement_racing_the_quorum_wait_is_never_missed` races a Kafka offset commit's replica quorum wait against its replica's acknowledgement: the wait registers before it reads, so it completes without its deadline, which a Shuttle timeout only reaches when a check triggers it. `shuttle_an_offer_racing_the_end_of_an_announcement_is_always_announced` races a second offer against the announcer of the first finding its replica caught up: the second revision is always announced and acknowledged. `shuttle_a_retired_replication_ends_its_announcer` ends an announcer whose replicated state goes away while its replica never acknowledges. `shuttle_an_announcement_racing_the_replica_wait_is_never_missed` races an owner's announcement against the replica task's synchronization and wait: an announcement that lands before the wait is kept as its permit. `shuttle_checkpoint_announcement_close_cancels_pending_dispatch` exercises the production task owner with close racing the first poll and close after dispatch starts: both cancel a dispatch that never becomes ready and release its retained announcer. |
 | Resolved state replication (`src/runtime/state_replication/routing_shuttle_tests.rs`) | `shuttle_state_replacement_and_retirement_fence_frames_in_flight` exercises the production routing owner: a frame can complete only on its selected lifetime, never change a successor, and cannot enter a route after retirement. ArcSwap internals remain opaque; this check covers owner use and scheduling, with no new Nervix-owned memory-ordering claim. |
@@ -1757,7 +1811,10 @@ A family of names means each member runs independently through the recipe.
 | Domain clock (`src/runtime/domain_clock.rs`) | `shuttle_lifecycle_tests::concurrent_reads_of_one_installed_generation_never_decrease` checks the nondecreasing watermark; `a_clock_bound_to_a_replaced_generation_is_refused_by_revalidation` rejects a superseded generation; `readers_never_observe_an_installation_older_than_one_they_observed` prevents publication regression. `shuttle_delivery_sends_state_before_ticks_without_regressing_progress` explores the production observer and attachment delivery order across accepted ticks, same-generation unassignment and reassignment, and a generation change. `shuttle_an_attach_waiting_for_the_first_installation_observes_its_domains` races an attach's wait and lookup against the node's first installation of the committed domains and requires the lookup to find the domain and its clock. `a_logical_waiter_wakes_when_its_generation_stops`, `a_logical_waiter_wakes_when_its_generation_is_replaced`, `a_logical_waiter_wakes_when_its_domain_is_removed`, and `a_logical_waiter_wakes_when_a_replacement_mapping_reaches_its_deadline` cover each lifecycle wakeup. |
 
 The checks of WASM checkpoint holds and the durability barrier use the same runner and replay
-contract. Their state semantics live in the WASM state documentation; they do not turn Shuttle
+contract. Among them, `shuttle_an_abandoned_writers_synchronization_keeps_the_barrier_until_it_ends`
+and `shuttle_an_abandoned_writers_failed_synchronization_still_refuses_what_it_covered` hold a
+synchronization round to the storage job that runs it: a writer that stops waiting frees neither the
+barrier nor the round's failure. Their state semantics live in the WASM state documentation; they do not turn Shuttle
 into a disk or replica simulator. [Deterministic interconnect simulation](./interconnect-simulation.md)
 and Cucumber cover the network and process behavior outside this in-process scheduling boundary.
 
@@ -1829,10 +1886,32 @@ ordering it claims, rather than passing because something else synchronized its 
 weakening whose original text no longer appears exactly once fails as well, so changing an owner's
 ordering means revisiting its qualification.
 
+Loom models a `SeqCst` access as an acquire or a release, and models only `fence(SeqCst)` exactly. A
+protocol in which each side writes one location and then reads the other, such as a dispatch that
+raises the in-flight count before it reads the closed flag while a fence closes the gate before it
+reads the count, is therefore written so that its correctness follows from acquire and release
+alone. The side off the hot path reads the other side's count with a read-modify-write, which reads
+the newest value in that count's modification order: either the hot side's read-modify-write came
+first and the cold side's read sees it, or the cold side's came first and the hot side's
+read-modify-write acquires it, and with it the write the cold side made before. That is exact in the
+C11 model and checkable by Loom, and it costs the hot path nothing. The qualification of such a
+model weakens the cold side's read-modify-write to a load, which is the store-buffering fault the
+protocol rules out.
+
 Loom's own limits bound every claim. It does not model every relaxed behavior the C11 model
 permits, and an operation inside a third-party dependency, such as a `triomphe` reference count or
 an `arc-swap` publication, is invisible to it and excluded from the claim rather than given a
-fictional model. A standalone counter carries no cross-location claim, whatever its ordering. Relay
+fictional model. The client batch admission fence reads its quiesce decision from such a
+publication, so its model checks the root counts the admission and the drain reach by
+read-modify-write, and the publication's own ordering stays outside the claim. A relay's
+subscription definition is another: an attachment and a redefinition each put a sequentially
+consistent fence between their own write and the read of the other's, but the attachment's write is
+its registration in the fan-out's consumer list, an `arc-swap` publication, so the protocol has no
+Loom model and its Shuttle check orders the two. The state store's durability barrier orders each
+writer's ticket after the write it covers and each synchronization's start before its flush, but
+those writes and the flush are the database's, inside its own synchronization, so it has no Loom
+model either; its Shuttle checks hold which tickets a synchronization covers. A standalone counter
+carries no cross-location claim, whatever its ordering. Relay
 branch presence is such a case: its owner lifetimes and publications are `arc-swap` compare-and-swap
 and read-copy-update operations with no Nervix-owned atomic beside them, so it has no Loom model;
 its Shuttle checks order its publications against observers and successors. Checkpoint
@@ -1846,6 +1925,21 @@ against reports and announcements.
 | `execution.cancellation.publication` | A job that observes its cancellation also observes every write its awaiting caller made before the cancellation: raising the flag releases and observing it acquires. The witness is read the moment the job observes the cancellation, before any join could order the two threads | `loom_a_job_that_observes_cancellation_observes_every_write_made_before_it` (`crates/execution/src/cancellation.rs`); fails when either the raising store or the observing load is weakened to `Relaxed` |
 | `execution.cancellation.cancel-on-drop` | Dropping an armed obligation cancels its job: once the drop is ordered before a check, every clone of the job's signal reports it, and a check never loses a cancellation an earlier check observed | `loom_dropping_the_obligation_cancels_every_later_check_of_the_job` |
 | `execution.cancellation.disarm` | A disarmed obligation never cancels its job, whether the job checks while it is disarmed or after it is dropped. Disarming writes nothing, so the model has a single schedule and fails if disarming or the drop after it ever raises the flag | `loom_a_disarmed_obligation_never_cancels_its_job` |
+| `runtime.relay-dispatch-gate.entry-fence` | A relay dispatch fence counts every dispatch that finds the gate open: a dispatch raises the in-flight count before it reads the closed flag, an engagement closes the gate before it reads the count, and both reach the count by read-modify-write, so one observes the other | `loom_a_fence_counts_every_dispatch_that_finds_the_gate_open` (`src/runtime/relay_channel_loom_models.rs`); fails when `let in_flight_dispatches = self.in_flight_dispatches.fetch_add(0, Ordering::AcqRel);` weakened to `let in_flight_dispatches = self.in_flight_dispatches.load(Ordering::Acquire);` |
+| `runtime.relay-dispatch-gate.lease-publication` | A fence that takes its lease observes everything each dispatch it counted did under its permit: leaving releases and the fence's read of the count acquires | `loom_a_lease_follows_what_every_counted_dispatch_did_under_its_permit` (`src/runtime/relay_channel_loom_models.rs`); fails when a dispatch's leaving is weakened from `AcqRel` to `Relaxed` |
+| `runtime.relay-dispatch-gate.drain-wakeup` | The last dispatch to leave a closed gate wakes the fence waiting for it: either the fence's read of the count sees the dispatch gone, or the dispatch's leaving acquires that read and observes the gate closed | `loom_the_last_dispatch_to_leave_a_closed_gate_wakes_its_fence` (`src/runtime/relay_channel_loom_models.rs`); fails when `let in_flight_dispatches = self.in_flight_dispatches.fetch_add(0, Ordering::AcqRel);` weakened to `let in_flight_dispatches = self.in_flight_dispatches.load(Ordering::Acquire);` |
+| `runtime.relay-dispatch-gate.reopen-publication` | A dispatch that finds the gate reopened observes what the protected mutation changed while it was closed: reopening releases and the dispatch's read of the flag acquires | `loom_a_dispatch_that_finds_the_gate_reopened_observes_the_protected_change` (`src/runtime/relay_channel_loom_models.rs`); fails when `.store(!state.engagements.is_empty(), Ordering::Release);` weakened to `.store(!state.engagements.is_empty(), Ordering::Relaxed);` |
+| `runtime.relay-fanout.admission-wakeup` | A consumer that frees room a waiting publisher needs either admits it or wakes it: the publisher raises the waiting count before it reads the admission count, the consumer lowers the admission count before it reads the waiting count, and both reach the admission count by read-modify-write, so one observes the other | `loom_a_consumer_freeing_room_admits_or_wakes_the_publisher_waiting_for_it` (`src/runtime/relay_channel_loom_models.rs`); fails when `let admitted = self.admitted.fetch_add(0, Ordering::AcqRel);` weakened to `let admitted = self.admitted.load(Ordering::Acquire);` |
+| `runtime.state-assignment.admission-fence` | An operation admitted under a runtime-state binding that a rebind supersedes either observes the new binding and is refused, or finishes before the rebind returns with everything it did visible to the rebinding side: the operation counts itself in before it reads the binding, the rebind publishes the binding before it reads the count, both reach the count by read-modify-write, and finishing releases what the read acquires | `loom_an_operation_admitted_under_a_superseded_binding_never_outlives_its_rebind` (`src/runtime/state_store_loom_models.rs`); fails when `while admitted.fetch_add(0, Ordering::AcqRel) != 0 {` weakened to `while admitted.load(Ordering::Acquire) != 0 {` or `.fetch_sub(1, Ordering::Release)` weakened to `.fetch_sub(1, Ordering::Relaxed)` |
+| `runtime.client-ingestor.admission-fence` | A client batch whose admission races a quiesce is either counted by the drain that follows the quiesce or refused before anything is dispatched under it: the admission tracks its root by read-modify-write before it reads the quiesce publication, the quiesce publishes before the drain reads the root counts, and the drain reads each count by read-modify-write, so one side observes the other | `loom_a_client_batch_racing_a_quiesce_is_counted_by_its_drain_or_refused` (`src/runtime/client_ingestor_loom_models.rs`); fails when `self.outstanding.fetch_add(0, Ordering::AcqRel)` weakened to `self.outstanding.load(Ordering::Acquire)` or `self.ownership_handoff_outstanding.fetch_add(0, Ordering::AcqRel)` weakened to `self.ownership_handoff_outstanding.load(Ordering::Acquire)` |
+| `runtime.local-drain.moving-batch` | A batch a node publishes into a relay while a drain observes the domain is never missing from the observation: the relay admits the batch before the node lets it go, the observation reads every relay's admission sequence before and after the node's count, and acquiring the node's release makes the admission visible to the closing read | `loom_a_batch_published_while_a_drain_observes_is_never_missing_from_it` (`src/runtime/local_drain_loom_models.rs`); fails when `self.admitted.load(Ordering::Acquire)` weakened to `self.admitted.load(Ordering::Relaxed)` |
+| `runtime.local-drain.taken-batch` | A batch a consumer takes from a relay while a drain observes the domain is never missing from the observation: the consumer's node counts the batch before the consumer returns the relay's admission, the observation reads the relay before the node, and returning the admission releases the node's count to the observation that acquires it | `loom_a_batch_a_consumer_takes_while_a_drain_observes_is_never_missing_from_it` (`src/runtime/local_drain_loom_models.rs`); fails when the consumer queue's return of an admission is weakened from `AcqRel` to `Relaxed` |
+| `runtime.local-drain.handed-on-batch` | A batch a relay's owner hands on to its consumer while a drain observes the domain is never missing from the observation: the consumer admits the batch before the owner hands it on, the observation reads the relay's transit before its consumers' queues, and handing on releases the consumer's admission to the observation that acquires it | `loom_a_batch_its_owner_hands_on_while_a_drain_observes_is_never_missing_from_it` (`src/runtime/local_drain_loom_models.rs`); fails when `self.handed_on.fetch_add(1, Ordering::Release);` weakened to `self.handed_on.fetch_add(1, Ordering::Relaxed);` |
+| `runtime.local-drain.flush-completion` | A message a force flush resumed is admitted work to a drain observation that sees the flush complete: the participant resumes the message before it completes its obligation, the observation reads the obligations before the node's work, and acquiring the completion makes the resumed message visible | `loom_a_message_a_flush_resumed_is_seen_by_a_drain_that_sees_the_flush_complete` (`src/runtime/local_drain_loom_models.rs`); fails when `self.force_flushes.load(Ordering::Acquire)` weakened to `self.force_flushes.load(Ordering::Relaxed)` |
+| `runtime.kafka-offset-state.snapshot-revision` | A Kafka offset snapshot stamped with a commit's revision encodes that commit's offset: the commit stores the partition's offset before it advances the revision, the snapshot reads the revision before the offsets, and advancing releases what reading the revision acquires | `loom_a_snapshot_carrying_a_commits_revision_carries_its_offset` (`src/runtime/kafka_offset_state.rs`); fails when `LsmSequence::advance` is weakened from `SeqCst` to `Relaxed` |
+| `server.backup.cut-includes-publication` | A quiesced backup cut waits for every branch state publication that registered before the cut closed, then reads every write those publications completed: closing and registering are read-modify-writes of one word, a publication leaves with a release and the cut's wait acquires | `loom_a_cut_includes_every_registered_publication` (`src/runtime/backup_capture_fence.rs`); fails when a publication's leaving is weakened from `Release` to `Relaxed` |
+| `server.backup.cut-generation` | A branch state publisher that enters after a backup cut acquires the cut generation and sees the coordinator's writes before it: reopening extends the closing release sequence, and a publisher's registration acquires it | `loom_a_publisher_acquires_the_cut_generation` (`src/runtime/backup_capture_fence.rs`); fails when the registration is weakened from `AcqRel` to `Release` |
+| `harness.loom.coroutine-stack` | A model body and the participants it spawns run debug frames with allocation instrumentation on the coroutine stacks they request, while Loom's coordinator only starts and joins the body | `loom_model_coroutines_support_instrumented_debug_frames` (`crates/model-harness/src/loom.rs`); fails when the stack request is cut to `4_096` |
 
 The cancellation protocol these models check is the bounded executor's. `Cancellation::armed`
 creates both ends of one job's cancellation: the executor keeps the obligation while its caller

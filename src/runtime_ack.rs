@@ -296,12 +296,24 @@ impl AckHandoffTracking {
 const _: () = assert!(AckHandoffTracking::MAX_ACTIVE_SHARES < AckHandoffTracking::COMPLETE);
 
 impl AckRootTracker {
+    /// The roots this tracker still waits for, read by read-modify-write.
+    ///
+    /// A drain reads this after its side stopped new roots from being admitted, for example by
+    /// publishing a quiesce, and an admission tracks its root before it reads whether it may
+    /// proceed. A read-modify-write reads the newest count, and read-modify-writes of one count are
+    /// totally ordered: a root tracked before this read is counted, and a root tracked after it
+    /// acquires the read and observes what the drain's side published before it, so its admission
+    /// is refused. A plain load could miss both: it may return a count from before an increment
+    /// that preceded it, while that admission's read returns the intake still open.
     pub fn outstanding(&self) -> usize {
-        self.outstanding.load(Ordering::Acquire)
+        self.outstanding.fetch_add(0, Ordering::AcqRel)
     }
 
+    /// The roots an ownership handoff still waits for, read by read-modify-write for the reason
+    /// [`Self::outstanding`] gives.
     pub fn outstanding_for_ownership_handoff(&self) -> usize {
-        self.ownership_handoff_outstanding.load(Ordering::Acquire)
+        self.ownership_handoff_outstanding
+            .fetch_add(0, Ordering::AcqRel)
     }
 }
 

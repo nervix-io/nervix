@@ -336,6 +336,172 @@ command exited nonzero with 30 timestamped memory findings, the source metric sa
 action timeline. The baseline, lifecycle and partition commands remain separate `just chaos`
 entries.
 
+Run snapshot catch-up of a follower that stayed offline:
+
+```bash
+just chaos run stale-follower --image nervix:debian
+```
+
+This three-node deployment sets two ordinary retention options,
+`NERVIX_RAFT_SNAPSHOT_ENTRY_THRESHOLD=64` and `NERVIX_RAFT_COVERED_LOG_ENTRIES_RETAINED=16`, and the
+runner checks both in every node's Docker inspection; every other scenario runs the product defaults
+of 10,000 and 1,000. The runner selects the observed follower that owns execution, acknowledges a
+`CREATE RESOURCE` control canary, and stops that follower with a digest-pinned Pumba
+`stop --time 60` whose dry run must select exactly its container. The stop must exit with status 0
+after every shutdown phase. The follower's own consensus metrics before the stop and its
+`raft transition: state=Shutdown` log line record the last log index it held, and the survivor
+leader's `nervix_consensus_log_last_index` once the survivors agree on a leader bounds it from above.
+
+While the follower is offline, the survivors must agree on a caught-up leader within 90 seconds, take
+over its execution within 120 seconds and keep delivering output. Through the survivor leader, the
+packaged CLI then creates the stopped domain `chaos_stale`, creates the schemas `chaos_stale_kept`
+and `chaos_stale_dropped` in it, drops `chaos_stale_dropped`, and relocates the relay onto the
+survivor that does not own it; each change must be acknowledged. Rounds of eight `CREATE RESOURCE`
+changes follow, run from one administration container with one CLI session per change, until every
+survivor's `nervix_consensus_log_purged_index` exceeds that upper bound, so the follower can no longer
+catch up from the log. Twelve rounds without that fail the run. Every round's log, snapshot and purge
+positions are kept in `stale/compaction.ndjson`.
+
+The runner then starts the same container from its image and volume. Within 120 seconds the
+restarted follower's `nervix_consensus_log_snapshot_index` must cover the survivors' purged index and
+its own `raft.last_applied` must reach the index the leader had applied at the restart, and the
+survivors' `nervix_interconnect_requests_total{operation="snapshot",outcome="answered"}` must rise,
+which shows the snapshot transfer itself. Through the restarted node's own public route, which
+answers these reads from its applied state, every acknowledged change must then be visible: the
+domain line in `SHOW CLUSTER STATUS`, the kept schema's `SHOW CREATE` text, the dropped schema's
+absence, the relay's new owner in `DESCRIBE RELAY` and in the node's schedule, every created
+resource, and all three voters. A change whose outcome was uncertain must read the same through the
+restarted node as through the leader. Finally every listener returns, the cluster settles with every
+peer connected within 150 seconds, output advances, a canary through the restarted node is
+acknowledged, the node events from the stop through recovery are exactly the follower's `kill` with
+signal 15, its exit 0 and the explicit start, the survivors keep their process incarnations, every
+node volume keeps its identity, and the exact ledger passes. `stale/applied.json` holds each change
+with its outcome and the effect read through each node, and `results/stale-follower-progress.json`
+summarizes the policy, bounds, positions and timings.
+
+Run a former owner's restart under peer-side isolation:
+
+```bash
+just chaos run former-owner-restart --image nervix:debian
+just chaos run former-owner-restart --image nervix:debian --isolation-seconds 90
+```
+
+The runner relocates the ingestor, relay and emitter onto the observed follower and requires that node
+to hold the source partition, which the Kafka consumer group shows by its fixed address, and to emit
+output. After a settled public read confirms that the leader and all three owners are unchanged, it
+SIGKILLs that former owner with digest-pinned Pumba. While the former owner is down, the survivors
+must take its work over, and an acknowledged `RELOCATE` through the packaged CLI moves each unit to
+the survivor that failover did not choose. The consumer group must then run only on the new
+scheduled ingestor owner, while the former owner's stored schedule still names it the owner of
+everything.
+
+Pumba netem and iptables rules on both survivors then drop the former owner's fixed address in each
+direction. The runner verifies the rules installed on the survivors before it starts the stopped
+container again from its image and volume at the same address. With the container running, it checks
+every node's rules against the plan and counts accepted ICMP echo requests to prove that the former
+owner reaches neither peer while the verifier and broker routes stay open. From then until at least
+`--isolation-seconds` (20–600, default 45) have passed, it samples the former owner about every five
+seconds with no gap over 20 seconds. Every sample must show its session, interconnect, console and
+observability listeners and its own status route answering, no Kafka consumer-group member at its
+address, no `nervix_messages_total` traffic on its metrics, an applied index that never advances, and
+no `runtime execution admitted after linearizable consensus catch-up` line in its log. Its readiness
+and the schedule its own status reports are recorded, and the survivors must keep delivering output
+during the window.
+
+Healing sends SIGTERM to every injector and requires default rules and an open link matrix. The
+former owner must then log runtime admission no earlier than the start of the heal, after having
+logged that it waited for linearizable consensus catch-up. Within 150 seconds every node must agree on
+a caught-up leader with every peer connected. `DESCRIBE` through the former owner and the schedule in
+its own status must report the changed owners, the consumer group must run only on the scheduled
+ingestor owner, output must advance, a canary through the former owner must be acknowledged, and the
+node events must be exactly the former owner's SIGKILL, exit and explicit start. The pre-admission
+samples, admission timing, rules and link matrices are kept under `former-owner/`, with a summary in
+`results/former-owner-restart-progress.json`.
+
+Run a whole-cluster process crash and restart:
+
+```bash
+just chaos run cluster-restart --image nervix:debian
+just chaos run cluster-restart --image nervix:debian --nodes 1
+```
+
+After the cluster settles, the runner acknowledges a `CREATE RESOURCE` canary and reads each node's
+committed configuration through that node's own route: its domains, its voting membership, the
+`SHOW CREATE` text of every model of the baseline graph, and the canary. All nodes must agree. One
+digest-pinned Pumba `kill --signal SIGKILL` then names every node container; its dry run must select
+exactly those containers, and the live Docker event recording must hold one signal-9 kill and one exit
+137 for each. The broker keeps accepting the independent producer's records while no node runs.
+After at least `--outage-seconds` (5–120, default 8), one `docker start` starts every original
+container, which must keep its image and named volume; the volumes' names, creation times and mount
+points are compared before and after. A sampler started before the restart reads every node's own
+`SHOW CLUSTER STATUS` several times a second for 40 seconds.
+
+Listeners must return within 120 seconds, the cluster must settle within 150 seconds and output must
+resume within 90 seconds. Ownership is then judged against the voter observation grace of the
+control-plane chapter: a leader waits ten seconds from its own process start for gossip to observe
+every voter before it fails over the work of a voter it has not heard from. When every node that led
+after the restart observed every voter live within ten seconds of its own Docker start event, each
+owner must keep its work; otherwise failover is permitted, and the verdict says which applied. Each
+node must report the same committed configuration as before the crash, the consumer group must run
+only on the scheduled ingestor owner, a canary after the restart must be acknowledged and visible
+through every node, each node's events must be exactly its kill, exit and start, and the final exact
+ledger shows that every accepted record was delivered from the replayable source.
+`results/cluster-restart-progress.json` records the Raft, liveness and retention settings read from
+Docker inspection, the fixed ten-second grace, the external bounds, the start times and the ownership
+verdict.
+
+These three scenarios record product violations that leave the run meaningful in
+`results/recovery-findings.ndjson`, continue through recovery and the final ledger, and then exit
+nonzero with the findings listed in their result file. A failure that leaves later steps meaningless
+stops the run at once, and `results/finding.json` keeps its category, phase and reproducer. They are
+process crash and restart experiments on one host: the host, its page cache and its disks survive,
+so they establish nothing about host power loss or storage corruption.
+
+### Restart and recovery qualification on the selected worker
+
+The worker ran Ubuntu 26.04.1, Linux 7.0.0-34-generic, Docker 29.8.1 with Compose 5.5.1, 24 CPUs
+and 66.7 GB of memory, shared with other workloads. The supplied image was
+`ghcr.io/nervix-io/nervix@sha256:0b39e7ab59ccbf22c8b6293c715affda49948d48c8ef4dc6d73ef89b6867677b`,
+the official AMD64 image built from the source tree of main commit `0913fddf`, and every run used
+the default 1,000-record fixture produced once a second.
+
+`stale-follower` passed four runs. Each time the stopped follower had held index 48 or 49. After
+the five structural changes, one round of eight resources moved the survivors' purged index to 111
+and their snapshot to 127. Within 2.9 to 4.3 seconds of its restart the follower held snapshot 127
+and had applied past the leader's boundary, the survivor leader had answered five snapshot
+requests, and all 14 acknowledged changes then read back through the follower. The ledgers matched
+76 to 100 records with no duplicates. In every run the follower's graceful drain request was refused
+as unauthenticated, because only the bootstrap node is given the default user's password, as in the
+documented Compose deployment. The stop still completed its local drain and exited 0, and failover
+moved the follower's work after it stopped.
+
+`former-owner-restart` passed two runs. Ten samples covered 45.0 and 46.4 seconds of verified
+isolation with no gap above 5.1 seconds. Throughout them the former owner answered on every
+listener, held no consumer-group member, reported no graph messages, applied nothing, and reported
+its own stale schedule, which named it the owner of all three units. Its `/readyz` answered ready
+the whole time, because its restored Raft state still names a leader it cannot reach. It logged
+runtime admission 0.86 and 1.03 seconds after the heal began, the cluster converged 2.7 and 3.4
+seconds after the heal, and the ledgers matched 189 and 202 records.
+
+`cluster-restart --nodes 1` passed twice. Listeners returned within 0.8 seconds and the node
+settled within 5.5 seconds; output resumed about 34 seconds after the start, once the broker's
+45-second session timeout released the killed consumer's partition. The ledgers matched 81 and 88
+records.
+
+Three-node `cluster-restart` passed three of four runs. Listeners returned within 2.4 seconds, the
+cluster settled within 16.2 seconds and output resumed within 26.5 seconds. The leader observed the
+other voters live 1.2 to 1.3 and 1.6 to 1.9 seconds after its own process start, every owner kept
+its work, and configuration and ledgers of 109 to 114 records matched. The fourth run,
+`cc07-restart-3b`, correctly exited nonzero with one ownership finding while its configuration and
+its 108-record ledger matched. node-1 resumed leadership within 40 ms of its process start and, 1.5
+seconds after its start, failed the emitter over from node-3 with
+`failover found no live replica; moving scheduled node without local replicated state`. Half a
+second later its gossip reported node-3 live, 2.15 seconds after node-1 started, well inside the
+ten-second grace. The chitchat failure detector declares a node dead until it has two heartbeat
+samples, and node-1 first heard of node-3 through node-2's gossip, so the grace did not wait for
+it. [Cluster Chaos 39: Keep a restarted voter's work when gossip hears of it before observing it
+live](https://app.clickup.com/t/86bcd4hzv) owns the product fix.
+
 The controller resolves the supplied reference to its immutable local image ID before Compose
 starts. If the reference is not local, it performs one bounded pull and then resolves the result.
 The Compose file has no build directives. Every Nervix node and every disposable administration
@@ -398,7 +564,9 @@ gives Pumba scenarios an exact target selector; Nervix nodes additionally carry
 `io.nervix.chaos.target=true`. Normal exit, failure, timeout, and catchable signals preserve
 diagnostics and remove the labeled resources. Pause cleanup first unpauses every run-owned paused
 container, including when Pumba fails or the controller receives a supported signal. Partition
-runs first stop their injectors and remove any Pumba-owned qdisc or INPUT rule left on a node. A
+runs first stop their injectors and remove any Pumba-owned qdisc or INPUT rule left on a node.
+Restart and recovery runs heal a former owner's isolation the same way and then start every node
+container they still hold stopped. A
 controller killed before its trap runs leaves its event subscriber to exit on its own 15 minutes
 after the run's timeout. To remove the run's resources in that case, use:
 

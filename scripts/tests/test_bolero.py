@@ -112,6 +112,9 @@ class InventoryTests(unittest.TestCase):
             "nspl-archive-model",
             "backup-record-manifest",
             "backup-runtime-state-records",
+            "backup-complete-archives",
+            "backup-malformed-records",
+            "backup-corrupt-archives",
             "backup-materialized-identities",
             "backup-materialized-columns",
             "client-processor-choice-request",
@@ -813,6 +816,7 @@ class ExecutionTests(unittest.TestCase):
         self.assertIn("property_suite", bolero.cargo_test_args(target))
         self.assertIn("fuzz-support", bolero.cargo_test_args(target))
         self.assertIn("fuzz-support", bolero.bolero_args(self.inventory, target))
+        self.assertIn("--engine-args=-print_funcs=0", bolero.bolero_args(self.inventory, target))
 
     def test_instrumented_cargo_scope_keeps_the_pinned_tool_and_wrapper(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -971,6 +975,8 @@ class ExecutionTests(unittest.TestCase):
             self.assertIn(str(run / "corpus"), flags)
             self.assertIn(str(run / "crashes"), flags)
             self.assertIn("-max_total_time=1", flags)
+            self.assertIn("-print_funcs=0", flags.split())
+            self.assertEqual(execute.call_args.kwargs["timeout"], 31)
 
         with tempfile.TemporaryDirectory() as directory:
             run = pathlib.Path(directory) / "run"
@@ -987,6 +993,76 @@ class ExecutionTests(unittest.TestCase):
             ):
                 with self.assertRaisesRegex(bolero.BoleroError, "did not report completion"):
                     bolero.fuzz_targets(self.inventory, (self.target,), 1)
+
+    def test_campaign_keeps_symbolizer_settings_and_records_progress_flags(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            run = pathlib.Path(directory)
+            binary = run / "fuzz-binary"
+            binary.write_text(
+                f"#!{sys.executable}\n"
+                "import json,os\n"
+                "print(json.dumps({name:os.environ[name] for name in "
+                "['ASAN_OPTIONS','ASAN_SYMBOLIZER_PATH','BOLERO_LIBFUZZER_ARGS']}))\n"
+                "print('#100 DONE')\n"
+            )
+            binary.chmod(0o700)
+            settings = {
+                "ASAN_OPTIONS": "symbolize=1:detect_leaks=0",
+                "ASAN_SYMBOLIZER_PATH": "/configured/llvm-symbolizer",
+            }
+            with (
+                mock.patch.dict(os.environ, settings),
+                mock.patch.object(bolero, "run_dir", return_value=run),
+                mock.patch.object(bolero, "build_instrumented", return_value=binary),
+                mock.patch.object(bolero, "verify_tool"),
+                mock.patch.object(bolero.coverage, "Campaign"),
+                contextlib.redirect_stdout(io.StringIO()),
+            ):
+                bolero.fuzz_targets(self.inventory, (self.target,), 2)
+            observed = json.loads((run / "fuzz.log").read_text().splitlines()[0])
+            for name, value in settings.items():
+                self.assertEqual(observed[name], value)
+            flags = observed["BOLERO_LIBFUZZER_ARGS"].split()
+            self.assertIn("-print_funcs=0", flags)
+            self.assertIn("-max_total_time=2", flags)
+            self.assertIn(f"-timeout={self.target.case_timeout_seconds}", flags)
+            report = json.loads((run / "metadata.json").read_text())
+            self.assertEqual(report["result"], "passed")
+            self.assertEqual(report["command"][0],
+                             "BOLERO_LIBFUZZER_ARGS=" + observed["BOLERO_LIBFUZZER_ARGS"])
+
+    def test_qualification_uses_bounded_engine_calls_without_function_progress(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            minimized = root / "minimized"
+            minimized.write_bytes(b"\x42")
+
+            def run_dir(target: bolero.Target) -> pathlib.Path:
+                path = root / target.id
+                path.mkdir()
+                return path
+
+            def execute(args: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+                if args[-1].endswith("fails_on_marker") and "--crashes-dir" in args:
+                    crashes = pathlib.Path(args[args.index("--crashes-dir") + 1])
+                    (crashes / "crash-input").write_bytes(b"\x42\x00")
+                return subprocess.CompletedProcess(args, 1, "timeout or intentional failure", "")
+
+            with (
+                mock.patch.object(bolero, "run_dir", side_effect=run_dir),
+                mock.patch.object(bolero, "verify_tool"),
+                mock.patch.object(bolero, "command", side_effect=execute) as commands,
+                mock.patch.object(bolero, "reduce_failure", return_value=minimized),
+                mock.patch.object(bolero, "replay", return_value=101),
+                mock.patch.object(bolero, "metadata"),
+                contextlib.redirect_stdout(io.StringIO()),
+            ):
+                bolero.qualify(self.inventory)
+            self.assertEqual(len(commands.call_args_list), 4)
+            for call in commands.call_args_list:
+                self.assertIn("--engine-args=-print_funcs=0", call.args[0])
+                expected_timeout = 10 if call.args[0][-1].endswith("times_out_on_marker") else 1800
+                self.assertEqual(call.kwargs["timeout"], expected_timeout)
 
     def test_replay_stages_exact_bytes_and_disables_random_cases(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -1064,11 +1140,13 @@ class ExecutionTests(unittest.TestCase):
                 mock.patch.object(bolero, "run_dir", return_value=run),
                 mock.patch.object(bolero, "build_instrumented",
                                   return_value=bolero.ROOT / "fake-binary"),
-                mock.patch.object(bolero, "run_instrumented"),
+                mock.patch.object(bolero, "run_instrumented") as reduce,
                 mock.patch.object(bolero, "metadata"),
             ):
                 with self.assertRaisesRegex(bolero.BoleroError, "did not save"):
                     bolero.reduce_failure(self.inventory, self.target, failure)
+                self.assertIn("-print_funcs=0", reduce.call_args.args[2])
+                self.assertEqual(reduce.call_args.kwargs["timeout"], 1800)
 
             def save_minimum(*args: object, **kwargs: object) -> None:
                 (run / "minimized").write_bytes(b"\x42")

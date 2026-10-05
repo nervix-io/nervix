@@ -15,11 +15,63 @@ cd nervix
 Nervix is developed on Linux x86_64, Linux aarch64, and macOS arm64. The `just` recipes fetch an
 ONNX Runtime build for the host and stop on any other.
 
+The server uses `ort` 2.0.0-rc.13 with its highest supported C API level, 28. The downloader pins
+ONNX Runtime 1.30.0 and installs it under `.nervix-deps/onnxruntime`. Download the CPU package or,
+on Linux x86_64, the CUDA 13 package:
+
+```bash
+just download-onnxruntime
+just download-onnxruntime gpu_cuda13
+```
+
+The optional second argument selects an upstream platform: `host` (the default), `linux-x64`,
+`linux-aarch64`, or `osx-arm64`. For example, `just download-onnxruntime cpu linux-aarch64`
+downloads for Linux ARM64 from another supported development host. CUDA packages are available
+only for `linux-x64`. Version and destination are fixed; update the runtime pin together with the
+selected `ort` API level.
+
 Install:
 
 - Rust via `rustup`
 - `just` (latest release)
 - `zellij`
+
+## Build Container Images
+
+```bash
+just docker-build-debian
+just docker-build-cuda
+```
+
+Both recipes require the repository's remote compiler-cache configuration: `KACHE_S3_BUCKET`,
+`KACHE_S3_REGION`, `KACHE_S3_ENDPOINT`, `KACHE_S3_ACCESS_KEY`, and `KACHE_S3_SECRET_KEY`. They build
+and load a local image by default; the existing tag, platform, push, and BuildKit cache arguments
+are available for publishing builds.
+
+`Dockerfile.debian` has two complete image targets: `cpu` (the default) and `cuda`. The recipes
+select them with `--target cpu` and `--target cuda`, respectively. Both targets copy the same
+binaries and Sonic bundle from the shared `builder` stage using `COPY --link`, so those artifact
+layers are shared across the images. Each target has its own runtime base and ONNX Runtime
+download stage; building the CPU target requires only the CPU stages.
+
+Both images pin their builder, downloader, and runtime base to `debian:trixie-20260918-slim`,
+with its multi-platform digest fixed in `Dockerfile.debian`. The Debian image contains the CPU
+runtime and supports AMD64 and ARM64. The CUDA image is AMD64 only. It installs pinned CUDA
+13.2.2 and cuDNN 9.25.1 packages from NVIDIA's Debian 13 repository in one filesystem layer
+directly above the Debian base. The next layer runs `apt-get update` and `apt-get upgrade` before
+installing Nervix's dependencies. CUDA packages are held at their pinned versions during that
+upgrade. Nervix's user, ONNX Runtime libraries, and binaries follow, so application changes reuse
+the large CUDA layer. Both images obtain ONNX Runtime through the same pinned downloader.
+
+The CPU layer order is Debian → Debian updates → Nervix; the GPU layer order is
+Debian → CUDA/cuDNN → Debian updates → Nervix. The CUDA layer is built by Nervix and reused
+across its image builds.
+
+`just test-onnxruntime` checks package selection and recipe targets. `just test-onnxruntime-docker`
+builds both final targets with fixture binaries replacing the compiler stage. It verifies shared
+binary layers, Debian upgrades immediately after the selected base, preserved CUDA pins, and
+runtime shared-library dependencies without requiring remote compiler-cache credentials. The
+host NVIDIA driver is provided at container startup by the NVIDIA Container Toolkit.
 
 ## Start The Server
 
@@ -351,14 +403,24 @@ just test-loom cancellation.publication
 The run fails when a registered invariant is missing, ignored or did not complete its exploration,
 and when a `loom_*` test is not registered in `crates/model-harness/loom-inventory.toml`. A failed
 model leaves its Loom checkpoint, output and `metadata.json` below
-`target/loom-failures/<package>/<test>/`; replay it with location tracking and tracing enabled:
+`target/loom-failures/<package>/<invariant>/`; replay it with location tracking and tracing enabled:
 
 ```bash
-just test-loom-replay target/loom-failures/<package>/<test>
+just test-loom-replay target/loom-failures/<package>/<invariant>
 ```
 
 `just test-loom-qualification` applies each registered weakening to a copy of the working tree and
-requires its model to fail.
+requires its model to fail. The copy lives below `target/loom-qualification-build/` and builds into a
+target directory of its own there, so a weakened build never stands in for the working tree's.
+Every file the copy takes or restores gets a fresh modification time, so each weakening rebuilds only
+what it changed, and qualifications that register the same weakening share one weakened build. The
+server's models embed the built web console, which the copy links rather than copies; the Loom
+recipes build it first. The copied sources are removed when the qualification ends, and the target
+directory stays, so a later run reuses the dependencies it built. The copy compiles incrementally,
+because its weakened builds serve that run alone, so a weakening recompiles what it changed rather
+than the whole crate. `just test-loom-qualification NUMBER/COUNT` qualifies one shard of the distinct
+weakenings, the ones at the inventory positions that leave `NUMBER - 1` when divided by `COUNT`; the
+default, `1/1`, qualifies them all.
 
 ### Primitive boundary and execution modes
 
@@ -565,7 +627,9 @@ hash, and `llvm-cov` warns that they have mismatched data and reads the function
 executables that ran it.
 
 CI's extra-tests job collects native extras, per-mode primitive conformance and the complete Loom
-inventory, and runs primitive compile checks and Loom weakening qualification independently.
+inventory, and runs primitive compile checks independently. Two loom-qualification jobs split Loom
+weakening qualification into shards, because it rebuilds the server once for each weakening of a
+server owner.
 The Shuttle job collects its complete inventory, including random/PCT exploration and paired
 nondeterminism checking, and runs schedule replay qualification independently. The jobs upload
 `lcov.info`, `completion.json`, `executions.jsonl`, `export.log` and model evidence as
@@ -586,23 +650,48 @@ just test-native-coverage
 
 The unit and scenario coverage recipes export `lcov-workspace.info` with every workspace package
 selected. CI merges those reports with the native extra reports, checks complexity against that
-complete report, and uploads it to Codecov. The separate `lcov.info` report selects the server,
+complete report, and retains it as the `coverage-merged` artifact. The separate `lcov.info` report selects the server,
 CLI and console for focused inspection; it does not replace the workspace export.
 Run the same complexity check locally with `just check-coverage <merged-workspace-report>`.
 
-Both ordinary and diagnostic coverage uploads use the verified Codecov CLI and explicitly select
-`https://codecov.io` as the API origin and OIDC audience. The diagnostic upload retains its
-`diagnostic-evidence` flag. Uploads require TLS verification and `fail_ci_if_error: true`; transport,
-authentication and upload failures fail their jobs. Each job retains its coverage artifacts with an
-`always()` upload so the report remains available for diagnosis.
+### Patch line coverage
 
-Codecov statuses and comments use its explicit notification boundary. The PR coverage job waits
-for every report producer, including diagnostic evidence and the shared Bolero gate, uploads the
-complete merged workspace report, and then sends notifications with the same verified CLI and
-OIDC authentication. This prevents an early diagnostic or runner upload from judging the patch
-before ordinary coverage arrives. Standalone scheduled and manual Bolero runs send notifications
-after their own gate succeeds. Finalization errors fail CI, and the configured patch target and
-threshold still apply to the completed report.
+CI runs `just coverage-patch` against the merged ordinary workspace report and updates one PR
+comment with patch line coverage, project line coverage, per-file totals and uncovered added line
+numbers. The comment names the merge base and tested commit and links to the workflow artifacts.
+Patch coverage is advisory: no percentage is a build gate, and a missing report or a failed comment
+publication does not fail CI. The independent complexity check retains its own verdict.
+
+Run the same calculation manually after collecting coverage for the committed source revision:
+
+```bash
+just coverage-patch origin/main lcov-workspace.info
+just coverage-patch origin/main lcov-workspace.info --pr 123 --repo nervix-io/nervix
+```
+
+The first command prints the Markdown report and writes `target/patch-coverage.md`; the second also
+creates or updates the authenticated publisher's marked PR comment through `gh`. Additional
+`--report <path>` arguments union line hits from multiple LCOV reports. Coverage must describe the
+tested commit's line coordinates. For reports collected in another checkout, use
+`--source-root <original-checkout-path>` to remap absolute source paths explicitly. Repeat it when
+reports come from multiple source roots. Ordinary CI inputs retain `coverage-source-root.txt` beside
+their reports, and the reporter receives each producer's metadata with `--source-root-file`.
+This accounts for the different checkout paths of Blacksmith and GitHub-hosted runners without
+guessing a file's origin. The merged artifact retains those source-root files for manual reuse.
+
+The command compares the base's merge base to `HEAD`, or to `--head <commit>`. Only added lines with
+LCOV `DA` counters enter its denominator; repeated records count each file/line once, and a hit in
+any report covers the line. Deleted lines, unchanged lines and non-executable additions do not
+enter it. A changed file absent from LCOV is shown as unavailable. An empty measured patch has no
+percentage. Project coverage describes the tracked files present in the supplied reports; no
+baseline project report is assumed.
+
+CI compares the PR base to the tested synthetic merge commit, so the diff uses the same line
+coordinates as the collected coverage. It passes the PR head separately with `--pr-head` and checks
+that the PR is still open at that head before publication. Fork PR tokens may lack comment access;
+the local report, workflow summary and artifact remain available. `just test-patch-coverage`
+exercises accounting and publication, and `just coverage-patch-runner` exports the reporter's
+measured Python coverage for CI.
 
 ### The scenario suite's execution budget
 

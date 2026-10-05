@@ -14,6 +14,8 @@
     )
 )]
 
+use std::pin::Pin;
+
 use error_stack::ResultExt as _;
 
 use super::{state_snapshot_exchange::MaterializedSnapshotExchangeError, *};
@@ -1070,6 +1072,84 @@ fn materialized_record_report(
         ingested_at_low_watermark: record.row.metadata().ingested_at_low_watermark(),
         ingested_at_high_watermark: record.row.metadata().ingested_at_high_watermark(),
     })
+}
+
+/// The wait of one branch task for the materialized state its parked messages need.
+///
+/// A message parks when the state it needs is missing, and the owner of that state notifies every
+/// waiter once it changes. A notification that lands between the read that parked a message and a
+/// registration made afterwards wakes nothing, so the wait registers when it is made, before the
+/// task processes anything that may park, stays registered until a change wakes it, and registers
+/// again before the task retries its parked messages, which reads the state again.
+pub(in crate::runtime) struct MaterializedStateWait<'runtime> {
+    notify: &'runtime Notify,
+    changed: Pin<Box<nervix_primitives::sync::futures::Notified<'runtime>>>,
+}
+
+impl<'runtime> MaterializedStateWait<'runtime> {
+    pub(in crate::runtime) fn new(notify: &'runtime Notify) -> Self {
+        let mut changed = Box::pin(notify.notified());
+        changed.as_mut().enable();
+        Self { notify, changed }
+    }
+
+    /// Waits for a change of materialized state since the wait was made or last registered again.
+    pub(in crate::runtime) async fn changed(&mut self) {
+        self.changed.as_mut().await;
+    }
+
+    /// Registers for the next change before a retry reads the state again.
+    pub(in crate::runtime) fn register_again(&mut self) {
+        self.changed.set(self.notify.notified());
+        self.changed.as_mut().enable();
+    }
+}
+
+#[cfg(all(test, feature = "shuttle"))]
+mod shuttle_tests {
+    use nervix_model_harness::shuttle::check_random_and_pct;
+    use nervix_primitives::sync::atomic::AtomicBool;
+
+    use super::*;
+
+    const MODEL_TASK_JOINS: &str =
+        "Shuttle fails the whole execution when a model task panics, so no join observes one";
+
+    /// Waits the way a branch task waits for a parked message's state: it reads the state that
+    /// decides whether the message stays parked, and waits for the next change while it does.
+    async fn wait_until_present(notify: Arc<Notify>, present: Arc<AtomicBool>) {
+        let mut wait = MaterializedStateWait::new(&notify);
+        loop {
+            nervix_primitives::task::consume_budget().await;
+            if present.load(Ordering::SeqCst) {
+                return;
+            }
+            wait.changed().await;
+            wait.register_again();
+        }
+    }
+
+    /// The owner of a materialized state publishes the state a branch task's parked message needs
+    /// while the task decides to park it: the task's wait observes that publication.
+    fn a_parked_message_is_woken_by_the_state_it_waits_for() {
+        shuttle::future::block_on(async {
+            let notify = Arc::new(Notify::new());
+            let present = Arc::new(AtomicBool::new(false));
+            let waiting =
+                nervix_primitives::task::spawn(wait_until_present(notify.clone(), present.clone()));
+            let publishing = nervix_primitives::task::spawn(async move {
+                present.store(true, Ordering::SeqCst);
+                notify.notify_waiters();
+            });
+            publishing.await.assured(MODEL_TASK_JOINS);
+            waiting.await.assured(MODEL_TASK_JOINS);
+        });
+    }
+
+    #[test]
+    fn shuttle_a_parked_message_is_woken_by_the_materialized_state_it_waits_for() {
+        check_random_and_pct(a_parked_message_is_woken_by_the_state_it_waits_for);
+    }
 }
 
 #[cfg(test)]

@@ -377,7 +377,7 @@ contact hints; current peer identity, incarnation, and endpoint still come from 
 | `nervix_execution_memory_reserved_bytes{class="commands"}` | Includes decoded follower batches held until durable answers and replication payload admission. It stays bounded by the Commands capacity. |
 | `nervix_interconnect_pending_operations{operation="append"}` | Live append-stream operations on the exporting node. |
 | `nervix_interconnect_stream_resets_total{class="replication"}` | Abnormal replication stream endings, separated by deadline, capacity, peer, shutdown, or malformed reason. |
-| `nervix_interconnect_bulk_bytes_total{class="bulk"}` | Bytes moving during snapshot catch-up. |
+| `nervix_interconnect_requests_total{operation="snapshot"}` and `nervix_interconnect_request_seconds_total{operation="snapshot"}` | On the sending node, the snapshot transfer requests a lagging follower answered or failed: the transfer's start, its 64 KiB chunks, and its finish. A transfer moves as these bounded requests in the Bulk pool rather than as a streamed body, so `nervix_interconnect_bulk_bytes_total` does not count it. |
 | `nervix_consensus_snapshot_pinned_generations`, `nervix_consensus_snapshot_pinned_readers`, `nervix_consensus_snapshot_unreferenced_generations` | Generations retained for outgoing transfers and generations awaiting durable deletion. |
 
 Normal membership changes appear at `info`. Append generation endings and invalid or foreign batches

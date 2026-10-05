@@ -2,16 +2,15 @@
 
 ARG RUST_VERSION=1.99
 ARG KACHE_VERSION=0.28.1
-ARG DEBIAN_VERSION=trixie
+ARG DEBIAN_IMAGE=debian:trixie-20260918-slim@sha256:a99cfc517144bc59b1978475ec53b46ecabec7e43635402ee5b77cc54cd1b20a
 ARG LLVM_VERSION=23
 ARG FLATBUFFERS_VERSION=25.12.19
 ARG FLATBUFFERS_SHA256=f81c3162b1046fe8b84b9a0dbdd383e24fdbcf88583b9cb6028f90d04d90696a
 
 ARG SONIC_PARALLELISM=2
 ARG SONIC_TARGET_CPUS=x86-64-v3
-ARG ONNXRUNTIME_VERSION=1.24.2
 
-FROM --platform=$BUILDPLATFORM debian:${DEBIAN_VERSION}-slim AS builder
+FROM --platform=$BUILDPLATFORM ${DEBIAN_IMAGE} AS builder
 
 ARG BUILDPLATFORM
 ARG TARGETPLATFORM
@@ -19,7 +18,6 @@ ARG BUILDARCH
 ARG TARGETARCH
 ARG RUST_VERSION
 ARG KACHE_VERSION
-ARG DEBIAN_VERSION
 ARG LLVM_VERSION
 ARG FLATBUFFERS_VERSION
 ARG FLATBUFFERS_SHA256
@@ -82,7 +80,7 @@ RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
 RUN mkdir -p /etc/apt/keyrings \
     && curl -fsSL https://apt.llvm.org/llvm-snapshot.gpg.key \
     | gpg --dearmor -o /etc/apt/keyrings/llvm.gpg \
-    && echo "deb [signed-by=/etc/apt/keyrings/llvm.gpg] http://apt.llvm.org/${DEBIAN_VERSION}/ llvm-toolchain-${DEBIAN_VERSION}-${LLVM_VERSION} main" \
+    && echo "deb [signed-by=/etc/apt/keyrings/llvm.gpg] http://apt.llvm.org/trixie/ llvm-toolchain-trixie-${LLVM_VERSION} main" \
         >/etc/apt/sources.list.d/llvm.list \
     && apt-get update \
     && apt-get install -y --no-install-recommends \
@@ -185,41 +183,115 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
     && cp "/app/target/${RUST_TARGET}/release/nervix-cli" /artifacts/nervix-cli \
     && cp "/app/target/${RUST_TARGET}/release/nervix-nspl-format" /artifacts/nervix-nspl-format
 
-ARG DEBIAN_VERSION=trixie
-FROM --platform=$BUILDPLATFORM debian:${DEBIAN_VERSION}-slim AS onnxruntime
+FROM --platform=$BUILDPLATFORM ${DEBIAN_IMAGE} AS onnxruntime-base
 
-ARG ONNXRUNTIME_VERSION
 ARG TARGETARCH
+
+WORKDIR /tmp
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
         ca-certificates \
         curl \
-    && rm -rf /var/lib/apt/lists/* \
-    && case "${TARGETARCH}" in \
-        amd64) export ORT_ARCH=x64; export ORT_FLAVOR=gpu_cuda13 ;; \
-        arm64) export ORT_ARCH=aarch64; export ORT_FLAVOR=cpu ;; \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY scripts/download_onnxruntime.sh /usr/local/bin/download-onnxruntime
+
+FROM onnxruntime-base AS onnxruntime-cpu
+
+RUN case "${TARGETARCH}" in \
+        amd64) ort_platform=linux-x64 ;; \
+        arm64) ort_platform=linux-aarch64 ;; \
         *) echo "unsupported TARGETARCH=${TARGETARCH}" >&2; exit 1 ;; \
     esac \
-    && if [ "${ORT_FLAVOR}" = "gpu_cuda13" ]; then \
-        export ORT_PACKAGE="onnxruntime-linux-${ORT_ARCH}-gpu_cuda13-${ONNXRUNTIME_VERSION}"; \
-    else \
-        export ORT_PACKAGE="onnxruntime-linux-${ORT_ARCH}-${ONNXRUNTIME_VERSION}"; \
-    fi \
-    && curl -L --proto '=https' --tlsv1.2 -sSf \
-        "https://github.com/microsoft/onnxruntime/releases/download/v${ONNXRUNTIME_VERSION}/${ORT_PACKAGE}.tgz" \
-        -o /tmp/onnxruntime.tgz \
+    && dylib_path="$(bash /usr/local/bin/download-onnxruntime \
+        --flavor cpu \
+        --platform "${ort_platform}")" \
     && mkdir -p /onnxruntime \
-    && tar -xzf /tmp/onnxruntime.tgz -C /onnxruntime --strip-components=1 \
-    && rm /tmp/onnxruntime.tgz
+    && library_dir="$(dirname "${dylib_path}")" \
+    && cp -a "${library_dir}/libonnxruntime.so"* /onnxruntime/ \
+    && cp -a "${library_dir}/libonnxruntime_providers_shared.so" /onnxruntime/ \
+    && rm -rf /tmp/.nervix-deps
 
-ARG DEBIAN_VERSION=trixie
-FROM debian:${DEBIAN_VERSION}-slim AS runtime
+FROM onnxruntime-base AS onnxruntime-cuda
+
+RUN case "${TARGETARCH}" in \
+        amd64) ;; \
+        *) echo "CUDA images require TARGETARCH=amd64" >&2; exit 1 ;; \
+    esac \
+    && dylib_path="$(bash /usr/local/bin/download-onnxruntime \
+        --flavor gpu_cuda13 \
+        --platform linux-x64)" \
+    && mkdir -p /onnxruntime \
+    && library_dir="$(dirname "${dylib_path}")" \
+    && cp -a "${library_dir}/libonnxruntime.so"* /onnxruntime/ \
+    && cp -a "${library_dir}/libonnxruntime_providers_shared.so" /onnxruntime/ \
+    && cp -a "${library_dir}/libonnxruntime_providers_cuda.so" /onnxruntime/ \
+    && rm -rf /tmp/.nervix-deps
+
+FROM ${DEBIAN_IMAGE} AS debian-base
+
+# CUDA is the first filesystem layer above Debian. This stage has no Nervix inputs, so changes
+# to the server or ONNX Runtime reuse the large CUDA layer.
+FROM debian-base AS cuda-base
+
+ARG TARGETARCH
+
+RUN case "${TARGETARCH}" in \
+        amd64) ;; \
+        *) echo "CUDA images require TARGETARCH=amd64" >&2; exit 1 ;; \
+    esac \
+    && . /etc/os-release \
+    && if [ "${ID}/${VERSION_ID}" != "debian/13" ]; then \
+        echo "CUDA images require Debian trixie (13)" >&2; exit 1; \
+    fi \
+    && apt-get update \
+    && apt-get install -y --no-install-recommends ca-certificates curl \
+    && curl -L --proto '=https' --tlsv1.2 -sSf \
+        https://developer.download.nvidia.com/compute/cuda/repos/debian13/x86_64/cuda-keyring_1.1-1_all.deb \
+        -o /tmp/cuda-keyring.deb \
+    && echo "d0d4ef986a44400f9db33c600ef33a985175e7cc63d805a10e1839c7a1e78f5f  /tmp/cuda-keyring.deb" | sha256sum --check - \
+    && dpkg -i /tmp/cuda-keyring.deb \
+    && apt-get update \
+    && apt-get install -y --no-install-recommends \
+        cuda-cudart-13-2=13.2.86-1 \
+        cuda-nvrtc-13-2=13.2.86-1 \
+        cuda-toolkit-13-2-config-common=13.2.86-1 \
+        cuda-toolkit-13-config-common=13.2.86-1 \
+        cuda-toolkit-config-common=13.2.86-1 \
+        libcublas-13-2=13.4.1.3-1 \
+        libcudnn9-cuda-13=9.25.1.1-1 \
+        libcurand-13-2=10.4.2.66-1 \
+        libnvjitlink-13-2=13.2.86-1 \
+    && apt-mark hold \
+        cuda-cudart-13-2 \
+        cuda-nvrtc-13-2 \
+        cuda-toolkit-13-2-config-common \
+        cuda-toolkit-13-config-common \
+        cuda-toolkit-config-common \
+        libcublas-13-2 \
+        libcudnn9-cuda-13 \
+        libcurand-13-2 \
+        libnvjitlink-13-2 \
+    && rm -f /tmp/cuda-keyring.deb \
+    && rm -rf /var/lib/apt/lists/* \
+    && ldconfig
+
+ENV CUDA_VERSION=13.2.2
+ENV PATH=/usr/local/nvidia/bin:/usr/local/cuda/bin:$PATH
+ENV LD_LIBRARY_PATH=/usr/local/nvidia/lib:/usr/local/nvidia/lib64:/usr/local/cuda/lib64
+ENV NVIDIA_VISIBLE_DEVICES=all
+ENV NVIDIA_DRIVER_CAPABILITIES=compute,utility
+ENV NVIDIA_REQUIRE_CUDA="cuda>=13.2"
+
+FROM debian-base AS runtime-cpu
 
 RUN apt-get update \
+    && apt-get upgrade -y \
     && apt-get install -y --no-install-recommends \
         ca-certificates \
         libstdc++6 \
+        zlib1g \
     && rm -rf /var/lib/apt/lists/*
 RUN groupadd --system --gid 10001 nervix \
     && useradd --system --uid 10001 --gid nervix --home-dir /var/lib/nervix --shell /usr/sbin/nologin nervix \
@@ -227,14 +299,50 @@ RUN groupadd --system --gid 10001 nervix \
     && chown -R nervix:nervix /var/lib/nervix
 VOLUME ["/var/lib/nervix"]
 ENV NERVIX_DB_PATH=/var/lib/nervix/db
-ENV LD_LIBRARY_PATH=/usr/local/lib
 ENV ORT_DYLIB_PATH=/usr/local/lib/libonnxruntime.so
 
-COPY --from=onnxruntime /onnxruntime/lib/libonnxruntime*.so* /usr/local/lib/
-COPY --from=builder /artifacts/nervix-server /usr/local/bin/nervix-server
-COPY --from=builder /artifacts/nervix-server.bundle /usr/local/bin/nervix-server.bundle
-COPY --from=builder /artifacts/nervix-cli /usr/local/bin/nervix-cli
-COPY --from=builder /artifacts/nervix-nspl-format /usr/local/bin/nervix-nspl-format
+COPY --from=onnxruntime-cpu /onnxruntime/ /usr/local/lib/
+RUN ldconfig
+
+FROM cuda-base AS runtime-cuda
+
+RUN apt-get update \
+    && apt-get upgrade -y \
+    && apt-get install -y --no-install-recommends \
+        ca-certificates \
+        libstdc++6 \
+        zlib1g \
+    && rm -rf /var/lib/apt/lists/*
+RUN groupadd --system --gid 10001 nervix \
+    && useradd --system --uid 10001 --gid nervix --home-dir /var/lib/nervix --shell /usr/sbin/nologin nervix \
+    && mkdir -p /var/lib/nervix \
+    && chown -R nervix:nervix /var/lib/nervix
+VOLUME ["/var/lib/nervix"]
+ENV NERVIX_DB_PATH=/var/lib/nervix/db
+ENV ORT_DYLIB_PATH=/usr/local/lib/libonnxruntime.so
+
+COPY --from=onnxruntime-cuda /onnxruntime/ /usr/local/lib/
+RUN ldconfig
+
+# cuda builds Nervix above the reusable CUDA/cuDNN base.
+FROM runtime-cuda AS cuda
+
+COPY --link --from=builder /artifacts/nervix-server /usr/local/bin/nervix-server
+COPY --link --from=builder /artifacts/nervix-server.bundle /usr/local/bin/nervix-server.bundle
+COPY --link --from=builder /artifacts/nervix-cli /usr/local/bin/nervix-cli
+COPY --link --from=builder /artifacts/nervix-nspl-format /usr/local/bin/nervix-nspl-format
+
+USER nervix:nervix
+
+CMD ["/usr/local/bin/nervix-server"]
+
+# cpu builds Nervix on Debian and is the default target.
+FROM runtime-cpu AS cpu
+
+COPY --link --from=builder /artifacts/nervix-server /usr/local/bin/nervix-server
+COPY --link --from=builder /artifacts/nervix-server.bundle /usr/local/bin/nervix-server.bundle
+COPY --link --from=builder /artifacts/nervix-cli /usr/local/bin/nervix-cli
+COPY --link --from=builder /artifacts/nervix-nspl-format /usr/local/bin/nervix-nspl-format
 
 USER nervix:nervix
 

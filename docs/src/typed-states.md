@@ -402,6 +402,14 @@ fingerprint binds once to the archived start generation for native storage, inde
 installation authority; payload values stay exact-schema Arrow columns. Typed branch identities,
 watermark ordering, counts and framing are validated before those values reach the runtime.
 
+A materialized capture carries either current rows or stored checkpoints as distinct variants.
+A captured materialized checkpoint is a selected immutable source. Opening it produces a reader
+whose complete header is required; there is no optional or defaulted generation metadata. Each
+bounded group retains its scalar identities and original Arrow bytes, and completion checks the
+whole declared group and row count. Running and paused domains capture current rows; stopped
+domains capture stored checkpoints. An empty generation still has its descriptor and
+zero group/row counts. RESTORE resets the stored ownership fence to zero explicitly.
+
 A restored domain has a replicated `Pending` installation from creation and an `Installing`
 authority once its state generation is admitted. Neither state permits `START`. Completion of the
 exact current generation removes the installation; terminal command failure does not. Authority
