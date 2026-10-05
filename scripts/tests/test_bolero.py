@@ -121,6 +121,7 @@ class InventoryTests(unittest.TestCase):
             "client-ffi-host-columns",
             "branch-membership",
             "restore-installation-wire",
+            "stopping-node-drain-wire",
             "restore-installation-storage",
             "typed-report", "typed-source-contract", "typed-site-union",
             "nspl-statement",

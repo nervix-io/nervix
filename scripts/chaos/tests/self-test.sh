@@ -103,6 +103,33 @@ jq '.[0].Mounts[0].Name = "other-volume"' \
 expect_restart_failure 'changed volume' started "${test_run_id}" "${test_project}" nervix-1 \
     "${test_image_id}" "${inspection_before}" "${tmp_dir}/wrong-volume.json"
 
+drain_verifier="${chaos_dir}/verify-drain-evidence.sh"
+expect_drain_failure() {
+    local case_name="$1"
+    local shutdown_log_path="$2"
+    local status=0
+    "${drain_verifier}" nervix-2 "${shutdown_log_path}" >"${tmp_dir}/drain-failure.txt" 2>&1 \
+        || status=$?
+    [[ "${status}" -eq 1 ]] || fail "${case_name} returned ${status}, expected failure 1"
+}
+printf '%s\n' \
+    'INFO nervix_server::application::scheduling: drained local node before graceful shutdown node_id=node-2 leader=node-1' \
+    'INFO nervix_server::application::shutdown: shutdown drain-support phase finished outcome=Completed' \
+    >"${tmp_dir}/completed-drain.log"
+"${drain_verifier}" nervix-2 "${tmp_dir}/completed-drain.log"
+printf '%s\n' \
+    'WARN nervix_server::application::scheduling: the leader did not answer the graceful shutdown drain of the local node node_id=node-2 leader=node-1' \
+    'INFO nervix_server::application::shutdown: shutdown drain-support phase finished outcome=Abandoned' \
+    >"${tmp_dir}/abandoned-drain.log"
+expect_drain_failure 'abandoned drain' "${tmp_dir}/abandoned-drain.log"
+grep -Fq 'the leader did not answer the graceful shutdown drain' "${tmp_dir}/drain-failure.txt" \
+    || fail 'an abandoned drain verdict did not name the drain record'
+printf '%s\n' 'INFO nervix_server::application::shutdown: shutdown admission phase finished outcome=Completed' \
+    >"${tmp_dir}/missing-drain.log"
+expect_drain_failure 'missing drain phase' "${tmp_dir}/missing-drain.log"
+cat "${tmp_dir}/completed-drain.log" "${tmp_dir}/completed-drain.log" >"${tmp_dir}/two-drains.log"
+expect_drain_failure 'two drain phases' "${tmp_dir}/two-drains.log"
+
 crash_verifier="${chaos_dir}/verify-crash-evidence.sh"
 inspection_killed="${tmp_dir}/killed.json"
 crash_events="${tmp_dir}/crash-events.ndjson"

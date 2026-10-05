@@ -173,8 +173,6 @@ const VHOST_TLS_KEY_PATH: &str = "tls.key";
 
 const VHOST_TLS_CA_PATH: &str = "ca.crt";
 
-pub(in crate::application) const INTERNAL_TLS_CA_FILE: &str = "ca.pem";
-
 const INTERNAL_TLS_CERT_FILE: &str = "node.pem";
 
 const INTERNAL_TLS_KEY_FILE: &str = "node-key.pem";
@@ -286,7 +284,7 @@ pub(in crate::application) enum HttpsListenerError {
     FaultInjected,
 }
 
-pub(in crate::application) fn internal_tls_path(file_name: &str) -> PathBuf {
+fn internal_tls_path(file_name: &str) -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("tls")
         .join("dev")

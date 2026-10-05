@@ -684,7 +684,13 @@ can use class and subject for routing, retry, and recovery without parsing text.
 failure carries the answering node's opaque operator description. That text is an explicit wire
 boundary for an already classified failure; it is not used to recover a new class. Runtime-state
 replication, a replica's branch checkpoint listing included, and materialized-snapshot description
-use this envelope, and local errors retain the remote class alongside their target and placement. A
+use this envelope, and local errors retain the remote class alongside their target and placement.
+A stopping node's `stopping_node_drain` request answers with outcomes of its own instead, because
+its only subject is the authenticated sender: completed or failed, each with the leader's report for
+the sender's log, or not the leader, which changed nothing and sends the sender to the leader it
+observes next. When that request fails in transport, the drain counts as requested but unanswered:
+the sender reports its drain-support phase abandoned and still clears the cordon the request may
+have set; see [Topology Cases](./shutdown.md#topology-cases). A
 listing that arrives but names a branch key that does not decode is a failure of its own, distinct
 from a failed request. A relay payload that does not decode is `RuntimeError::DecodeRemoteRelay`,
 naming the domain and relay, and its `RemoteRelayDecodeError` says what the payload got wrong: no
