@@ -995,6 +995,23 @@ coverage-report-workspace *args:
 check-coverage report="lcov-workspace.info":
     cargo crap --lcov {{ quote(report) }} --min 30 --threshold 30
 
+# Measure added executable lines; --pr <number> updates an advisory GitHub PR comment.
+coverage-patch base="origin/main" report="lcov-workspace.info" *args:
+    python3 -m scripts.patch_coverage --base {{ quote(base) }} --report {{ quote(report) }} --output {{ quote(cargo_target_dir + "/patch-coverage.md") }} {{ args }}
+
+# Exercise line accounting, Git source changes and advisory comment publication.
+test-patch-coverage:
+    python3 -m unittest scripts.tests.test_patch_coverage
+
+# Retain the reporter's own measured line coverage alongside other Python tooling reports.
+coverage-patch-runner:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    mkdir -p "{{ cargo_target_dir }}/patch-coverage"
+    coverage=(uvx --from coverage==7.11.0 coverage)
+    "${coverage[@]}" run --data-file "{{ cargo_target_dir }}/patch-coverage/python.coverage" --branch --source=scripts.patch_coverage -m unittest scripts.tests.test_patch_coverage
+    "${coverage[@]}" lcov --data-file "{{ cargo_target_dir }}/patch-coverage/python.coverage" -o "{{ cargo_target_dir }}/patch-coverage/python.lcov"
+
 # Measure changed server and CLI lines against the server's unit tests and selected Cucumber
 # features while iterating. The scenarios run the public CLI, so it is built instrumented and handed
 # to them exactly as `test-coverage` does. That recipe remains the CI gate for workspace coverage
