@@ -372,6 +372,8 @@ fn encode_restored_domain<'fbb>(
             domain: Some(name),
             resource_versions: domain.resource_versions,
             models: domain.models,
+            status: Some(domain.status.clone().into()),
+            start_version: Some(domain.start_version),
             planned_models,
         },
     ))
@@ -445,6 +447,8 @@ fn decode_restored_domain(
         domain: decoder.name("RestoredDomain.domain", domain.domain())?,
         resource_versions: domain.resource_versions(),
         models: domain.models(),
+        status: decoder.required_enumeration("RestoredDomain.status", domain.status())?,
+        start_version: decoder.required("RestoredDomain.start_version", domain.start_version())?,
         planned_models,
     })
 }

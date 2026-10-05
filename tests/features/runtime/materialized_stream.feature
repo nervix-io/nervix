@@ -183,9 +183,9 @@ Feature: Materialized relay state
       | 3            | 0             |
       | 3            | 1             |
 
-  Scenario: Materialized dependencies resolve in written order after REQUIRED WAIT wakes
+  Scenario Outline: Materialized dependencies resolve in written order after REQUIRED WAIT wakes
     Given runtime replication is configured with replica count 0 and snapshot interval "100ms"
-    And a 1 node nervix cluster is started
+    And a <cluster_size> node nervix cluster is started
     And the leader node is configured with these NSPL commands
       """
       CREATE UNPACED DOMAIN {{domain}};
@@ -258,6 +258,17 @@ Feature: Materialized relay state
           FLUSH IMMEDIATE
           ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
+      CREATE INGESTOR dependency_acknowledged_source
+        FROM CLIENT SCHEMA dependency_event
+          MODE ACK PARALLEL MAX 4 ACK TIMEOUT 30s RETRY POLICY BACKOFF 100ms MAX 1s
+          ON QUIESCE SUSPEND
+        TO dependency_input
+          INHERIT ALL
+          BRANCHED BY by_dependency_tenant
+          SET tenant = message.tenant
+          FLUSH IMMEDIATE
+          ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
       CREATE JUNCTION resolve_dependencies
         FROM dependency_input
         BRANCHED BY by_dependency_tenant
@@ -272,6 +283,8 @@ Feature: Materialized relay state
       CREATE SUBSCRIPTION dependency_output_subscription TO dependency_output;
       START;
       """
+    Given client "dependencies" is connected to the leader node
+    When client "dependencies" opens producer "dependency-input" on ingestor "dependency_acknowledged_source" expecting fields "tenant STRING, value STRING, first_value STRING OPTIONAL, second_value STRING OPTIONAL"
     When http payload is posted to node "node-1" with host "http-materialized-order-{{test_id}}.example.com" path "/dependency-input"
       """
       {"tenant":"acme","value":"input-acme"}
@@ -290,21 +303,43 @@ Feature: Materialized relay state
       """
       {"first_value":"first-acme","second_value":"second-acme","tenant":"acme","value":"input-acme"}
       """
-    When http payload is posted to node "node-1" with host "http-materialized-order-{{test_id}}.example.com" path "/dependency-input"
-      """
-      {"tenant":"beta","value":"input-beta"}
-      """
+    When producer "dependency-input" submits batch "beta-wait" with rows
+      | tenant | value      | first_value | second_value |
+      | beta   | input-beta |             |              |
     Then the relay subscription does not receive a payload within "300ms"
     When http payload is posted to node "node-1" with host "http-materialized-order-{{test_id}}.example.com" path "/first-state"
       """
       {"tenant":"beta","value":"first-beta"}
       """
+    # Completion acknowledges REQUIRED SKIP before the later dependency is published.
+    Then batch "beta-wait" completes
     Then the relay subscription does not receive a payload within "300ms"
     When http payload is posted to node "node-1" with host "http-materialized-order-{{test_id}}.example.com" path "/second-state"
       """
       {"tenant":"beta","value":"second-beta"}
       """
     Then the relay subscription does not receive a payload within "1s"
+    When http payload is posted to node "node-1" with host "http-materialized-order-{{test_id}}.example.com" path "/dependency-input"
+      """
+      {"tenant":"acme","value":"input-acme-again"}
+      """
+    Then within "5s" the relay subscription receives a payload
+      """
+      {"first_value":"first-acme","second_value":"second-acme","tenant":"acme","value":"input-acme-again"}
+      """
+    When producer "dependency-input" submits batch "beta-ready" with rows
+      | tenant | value            | first_value | second_value |
+      | beta   | input-beta-again |             |              |
+    Then batch "beta-ready" completes
+    And within "5s" the relay subscription receives a payload
+      """
+      {"first_value":"first-beta","second_value":"second-beta","tenant":"beta","value":"input-beta-again"}
+      """
+
+    Examples:
+      | cluster_size |
+      | 1            |
+      | 3            |
 
   Scenario Outline: Materialized relays keep the latest value by message watermark
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
@@ -451,7 +486,7 @@ Feature: Materialized relay state
       | 3            | 0             |
       | 3            | 1             |
 
-  Scenario Outline: Expiration deletes materialized relay state
+  Scenario Outline: Expiration and recreation publish isolated materialized branch lifetimes
     Given branched relay expiration scan interval is configured as "100ms"
     And runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
@@ -463,10 +498,12 @@ Feature: Materialized relay state
     When these NSPL commands are executed on the leader node
       """
       CREATE SCHEMA notification (
-        user_id I64
+        user_id I64,
+        note STRING
       );
         CREATE WIRE JSON SCHEMA notification_wire MODE STRICT (
-        user_id integer
+        user_id integer,
+        note string
       );
         CREATE CODEC notification_codec
         FROM WIRE JSON SCHEMA notification_wire
@@ -495,15 +532,32 @@ Feature: Materialized relay state
       """
     When http payload is posted to node "node-1" with host "http-{{test_id}}.example.com" path "/ingest"
       """
-      {"user_id":42}
+      {"note":"first","user_id":42}
       """
     Then within "5s" node "node-1" eventually reports materialized state for relay "notifications" containing
       """
-      key={"user_id":42} payload={"user_id":42}
+      key={"user_id":42} payload={"note":"first","user_id":42}
       """
     And within "5s" node "node-1" eventually reports materialized state for relay "notifications" containing
       """
       relay 'notifications' materialized state is empty
+      """
+
+    When http payload is posted to node "node-1" with host "http-{{test_id}}.example.com" path "/ingest"
+      """
+      {"note":"recreated-acme","user_id":42}
+      """
+    And http payload is posted to node "node-1" with host "http-{{test_id}}.example.com" path "/ingest"
+      """
+      {"note":"recreated-beta","user_id":43}
+      """
+    Then within "5s" node "node-1" eventually reports materialized state for relay "notifications" containing
+      """
+      key={"user_id":42} payload={"note":"recreated-acme","user_id":42}
+      """
+    And within "5s" node "node-1" eventually reports materialized state for relay "notifications" containing
+      """
+      key={"user_id":43} payload={"note":"recreated-beta","user_id":43}
       """
 
     Examples:

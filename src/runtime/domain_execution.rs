@@ -51,6 +51,9 @@ pub(crate) struct DomainRoutingSnapshot {
     pub(super) udfs: UdfExecutor,
     pub(super) relay_branchings: HashMap<RelayName, ResolvedBranching>,
     pub(super) materialized_stream_specs: HashMap<RelayName, RuntimeMaterializedRelaySpec>,
+    pub(super) materialized_stream_reads:
+        HashMap<RelayName, state_replication::routing::MaterializedRelayPublication>,
+    pub(super) relay_state_epoch: Arc<AtomicU64>,
     pub(super) materialized_stream_owner_nodes: HashMap<RelayName, Option<ClusterNodeName>>,
     pub(super) codecs: HashMap<CodecName, Arc<CompiledCodec>>,
     pub(super) signaling_protocols: HashMap<SignalingProtocolName, Arc<CompiledSignalingProtocol>>,
@@ -773,6 +776,9 @@ impl Runtime {
                         lookups: lookup_runtimes,
                         udfs: udf_executor,
                         relay_branchings,
+                        materialized_stream_reads: self
+                            .materialized_relay_publications(domain, &materialized_stream_specs),
+                        relay_state_epoch: self.relay_state_epoch(domain),
                         materialized_stream_specs,
                         materialized_stream_owner_nodes,
                         codecs,
@@ -1164,6 +1170,7 @@ mod tests {
         assert!(execution.codecs.contains_key("payload_codec"));
         assert!(execution.relay_schemas.contains_key("events"));
         assert!(execution.materialized_stream_specs.contains_key("events"));
+        assert!(execution.materialized_stream_reads.contains_key("events"));
         assert!(execution.signaling_protocols.contains_key("handshake"));
         assert_eq!(
             execution.endpoint_routes["receive"].hostnames,

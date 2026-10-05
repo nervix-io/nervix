@@ -152,6 +152,7 @@ impl WireValues<'_> {
                 DomainPace::Unpaced
             };
             domains.push(DomainInfo {
+                start_version: self.arbitrary.entropy().any_u64(),
                 status: status.clone(),
                 domain: self.arbitrary.name(),
                 pace,

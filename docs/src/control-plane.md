@@ -524,6 +524,9 @@ The backup drain reads admitted work on every live node and uses a separate conf
 round after the cluster first appears quiet. A parked materialized-state wait is reported but does
 not keep the cut open. If work reappears, the leader drains and confirms again. Each drain request
 is bound to the authenticated coordinator process; a successor cannot reuse its cut identity.
+The cut captures each materialized relay's fresh Arrow views and scalar identities under its
+assignment barrier. Paused generators release their admitted-work guard after flushing, so the
+drain can reach zero while their branch tasks remain paused.
 
 ## Restoring A Backup
 
@@ -564,7 +567,10 @@ transaction. The lease keeps every other command from changing the domain while 
 it, so a leader that finds exactly the archived models already committed knows that an earlier
 attempt applied them. It stages all compatible state before any node replaces its published set,
 then publishes one durable batch per node. Only after every publication succeeds does it record
-the model step and release the start gate. Terminal failure releases mutation leases but retains
+the model step and release the start gate. For `RESUME`, this same consensus effect sets `Running`
+and installs the archived clock mapping, preserving the archived start generation and start point.
+State installation includes materialized checkpoints bound to that generation before any branch
+or generator activates. Default restoration remains stopped. Terminal failure releases mutation leases but retains
 the gate, so an incomplete restored domain cannot start after failure or restart.
 
 A step's effect and its record commit together, and an import or a model batch that committed

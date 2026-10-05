@@ -16,7 +16,7 @@ use std::{
 use super::{BlockedAttempt, BoundedText, LockSite, TrackedLockId, TrackedThreadId};
 
 pub const MAX_ORDER_EDGES: usize = 64;
-pub const MAX_ORDER_WITNESSES: usize = 64;
+pub const MAX_ORDER_WITNESSES: usize = 1_024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum LockLifetime {

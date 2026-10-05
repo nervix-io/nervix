@@ -313,6 +313,16 @@ eligible handoff residue are preserved across the quiesce cycle.
 
 ## Ingestion Timestamps
 
+`RESTORE ... RESUME` retains the archived start generation, latest start point and paced clock
+mapping after installing all compatible runtime state. That mapping projects the downtime, so
+`TIMESTAMP AT` admission uses the restored clock's reached windows. Unpaced domains resume without
+a mapping. A default restore stays stopped. A later normal `START` advances the generation and
+clears materialized relay rows while preserving compatible WASM state, source offsets and branch
+lifecycle. To start from the archived frontier with a new mapping, use a default restore and
+explicit `START AT '<frontier>' TIME RATE <rate>`. `DESCRIBE DOMAIN` exposes the generation, start
+point and mapping; `LIST DOMAINS` exposes pace, status and generation. See
+[Backup And Restore](backup-and-restore.md#restoring).
+
 Every ingested record receives internal ingestion metadata, including mandatory low and high watermarks with nanosecond precision.
 
 Timestamp sources:

@@ -992,6 +992,8 @@ fn a_restore_outcome_reports_its_steps() {
         nervix_models::DomainName::parse(name).assured("the test domain is a valid literal name")
     };
     let restored = |source: &str, versions: u64, models: u64| RestoredDomain {
+        status: nervix_models::DomainStatus::Stopped,
+        start_version: 4,
         source: domain(source),
         domain: domain(source),
         resource_versions: versions,

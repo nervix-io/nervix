@@ -91,6 +91,15 @@ Build configuration in dependency order:
 7. Define placement rules after every referenced runtime node, including each relay, exists.
 8. Commit the graph, inspect it, and start the active domain only when prerequisites exist.
 
+For backup recovery, `RESTORE ... FROM '<file>' RESUME` (CLI `--resume`) installs compatible
+materialized relay rows on owners and replicas, then makes the domain running at its archived
+start generation and latest start point. Paced recovery retains the wall/logical mapping and time
+rate verbatim and projects downtime under a newly selected clock authority. The default restore
+leaves the domain stopped; a normal `START` advances the generation and clears materialized state
+while preserving compatible WASM state, source offsets and branch lifecycle. `RESUME` precedes
+the user policy and `DRY RUN`; the dry run reports the planned status and generation. Read
+[Backup And Restore](https://docs.nervix.io/backup-and-restore.html) for format and memory limits.
+
 Use `BEGIN; ... COMMIT;` when sending multiple queueable configuration statements. A transaction
 belongs to one already-existing domain: `BEGIN` binds it to the selected domain and every queued
 statement must select that same domain. Transactions and commit progress are replicated and

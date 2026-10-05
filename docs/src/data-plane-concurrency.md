@@ -149,6 +149,24 @@ boundary blocking locks; Fjall's internal locks, async authority ordering and me
 their separate ordinary, Shuttle, Loom and Turmoil checks. Measurements and diagnostic artifacts
 are delivered to the owning task.
 
+Materialized capture shares row carriers under the existing assignment barrier, together with the
+revision, ownership fence and branch generation. Membership insertion and eviction use that same
+barrier; ordinary updates of existing branches keep their existing admission protocol. Fresh
+backup capture admits its bounded row-view metadata before allocation. Archive conversion stages
+one identity/Arrow group at a time. Native loading independently bounds typed-key and row-view
+metadata to 8 MiB, charges retained decoded columns to relay memory through installation, and
+uses bulk memory for one section's decoding scratch. A cumulative relay admission refusal ends
+loading instead of waiting while retaining earlier groups. A pinned database reader retains one
+snapshot and one stored chunk through all section reads. Replica installation checks monotonic
+revision under the existing exclusive assignment barrier before replacing any entry.
+
+`RESUME` changes the domain to running at its archived lifecycle in the consensus effect that
+records complete publication and releases the installation gate. No atomic field or memory
+ordering in the capture epoch, assignment protocol or relay revision changed. Existing Loom
+models continue to qualify their ordering; new Shuttle checks qualify branch membership capture,
+replica revision races and publication before activation. Paused generators release their
+admitted-work guard after flushing and reacquire it before producing more output.
+
 The backup coordinator waits for each node's admitted-work counters to reach zero, then orders one
 confirming force-flush generation across the cluster. The generation's obligations use the same
 atomic counters as shutdown; a parked `REQUIRED WAIT` batch stays visible separately and cannot
@@ -504,15 +522,81 @@ reads a membership that holds its branch.
 ### Materialized relay entries
 
 One assigned materialized-relay originator owns updates. The state contains at most one latest
-record for each concrete branch. Replacing an existing branch's record is admitted under the
-originator's assignment generation. Adding the first record for a branch or evicting a branch also
+record for each concrete branch. Its origination capability moves into the branch runtime or the
+scheduled relay-state task and cannot be cloned. That task owns an ordinary map of mutable branch
+records. An established branch retains its row publication: timestamp comparison uses the owner's
+record, then publishes one immutable Arrow-backed row view. It acquires no shared-map shard and
+does not republish or scan branch membership. A larger high watermark wins, then a larger low
+watermark; equal watermarks retain the first record and advance no revision.
+
+Replacing an existing branch's record is admitted under the originator's assignment generation.
+Adding the first record for a branch or evicting a branch also
 changes the branch lifecycle, so that narrower operation uses the assignment barrier and advances a
-branch generation.
+branch generation. The persistent membership publication changes only at those boundaries or a
+snapshot installation. Eviction first clears the exact row publication, then withdraws that member.
+Recreation allocates a new publication; a retained ended member never attaches to it. Rebinding
+waits for operations admitted under the preceding assignment before rebuilding the new task's
+mutable selections from the published views. Previous writer tokens refuse further mutations.
+
+Domain routing retains one materialized publication per relay and its relay-state epoch. The
+installed state-replication routes supply the relay's immutable branch index. Dependency reads and
+generator ticks load that retained relay index and the installed row views, rather than looking
+up or iterating node-wide materialized-state, presence or epoch registries. Presence comes from the
+retained relay services; placement identity comes from the shared immutable assignment publication.
+Live state owns absence: an empty concrete branch does not fall back to the relay snapshot, and a
+missing live row does not fall back to a pre-eviction stored snapshot.
+Cold installation and public observation retain their lifecycle registries.
 
 A snapshot capture holds the assignment boundary only long enough to take immutable row views,
 their revision, their ownership fence, and their branch generation. The Arrow columns stay shared,
 and sealing and encoding happen after the boundary is released. A snapshot from an earlier
 assignment or branch generation cannot restore state that a newer owner or eviction superseded.
+Installation also refuses a lower revision within the same fence and branch generation. A cached
+sealed snapshot answers a current read only when its revision and assignment fence still match.
+One sealed generation is cached and one build is admitted per placement; outstanding readers and
+captures keep only their selected row views and shared Arrow carriers. Publication never copies a
+row payload or a whole relay for an established update. Snapshot archives and storage ownership
+retain the current container and backup contract.
+
+The required-wait observation creates its notification before reading dependencies. The primitive
+boundary registers a `notify_waiters` observer at future creation, so an update after the read and
+before its first poll still wakes it. Broadcast publication occurs once after each changed batch
+and after a deletion. Periodic rechecks also cover remote changes; they do not establish the local
+wake invariant.
+
+The registered `materialized-publication-lifetimes` property exercises bounded updates, captures,
+deletes and rebinding, then restores every captured schema, logical value, watermark and branch.
+Production-owner Shuttle checks cover update/capture, eviction/recreation, assignment replacement
+and required-wait registration without a polling timer. The Loom invariant
+`server.state-assignment.drained-publication` proves the synchronous admission drain observes
+preceding writes; its relaxed completion weakening must fail. ArcSwap internals are opaque to
+these models. Supported Turmoil transfer checks establish network framing and replacement scope,
+not disk durability or whole-cluster recovery. Typed Ratchet 10 owns mandatory immutable-image
+materialized smoke/soak qualification. The same-host `just bench-materialized-state` measures row
+and batch cost for 1, 256 and 4096 branches, allocation and captured-carrier retention; instrumented
+benchmark smoke execution supplies coverage, not performance evidence. Assignment/capture
+barriers and sealed-cache locks are tracked by Deloxide; async notifications and opaque publication
+internals remain outside its detector.
+`just test-deloxide` and `just test-deloxide-order` include the materialized-publication diagnostic
+process, which starts the detector and exercises timestamp replacement, capture, sealing,
+installation lifetimes, rebinding, lazy relay installation, branch eviction and bounded complete
+snapshot properties. The latter also checks potential acquisition-order cycles among tracked lock
+instances. Each selection retains its own evidence alongside the other diagnostic processes under
+`target/deloxide/test-deloxide`; these instrumented executions supply correctness evidence, while
+the ordinary native benchmark supplies the row-publication cost measurements.
+
+Sealing retains bounded identity and Arrow pieces on quota-owned staging disk and concatenates
+through one 64 KiB read buffer. Row projection and its IPC result share one bulk admission and
+one CPU job; projected columns never wait for a second grant while holding the first. Typed
+identity conversion is charged before it allocates. The sealed cache holds the immutable file and descriptor, so its
+memory does not grow with container size. Periodic writers select their namespace before executor
+admission, write one 64 KiB database chunk per batch, synchronize the chunks, then synchronize the
+replacement checkpoint header. A queued writer whose namespace was replaced is inert, and a
+pinned reader continues through the same database snapshot. Replica installation rejects a lower
+revision before clearing its current entries.
+An incoming materialized snapshot releases its response stream at EOF, before local verification
+or Arrow decoding. Those local operations retain their own staging and memory admission; they do
+not keep Snapshot request or connection-stream permits while waiting for executor work.
 
 ### Acknowledgement state
 
@@ -908,8 +992,9 @@ second operation fails even when Rust would regard the expectation as fulfilled.
 
 Task handles remove recurring status, freeze, metric and checkpoint lookups. Source readiness,
 relay channels, buffered error delivery, domain selection and transport leasing use retained handles
-or immutable publications. Typed Ratchet 04 owns materialized branch discovery and Typed Ratchet 05
-owns remaining remote acknowledgement/admission discovery. Replica catch-up retains the entity's
+or immutable publications. Materialized writers own their mutable branch records and readers
+retain per-relay publications. Typed Ratchet 05 owns remaining remote acknowledgement/admission
+discovery. Replica catch-up retains the entity's
 lifecycle handle, assignment slot and its own record of each branch. Replication frames,
 synchronization and listing requests select published state handles; announcers retain their route
 and assignment slot. Their runtime registries handle installation, replacement and teardown.
@@ -1320,9 +1405,12 @@ line was reused.
 
 **Bounds and handoff.** The live registry owns the live lock, waiting attempt and thread records;
 none of its shard guards cross a tracked acquisition. Order instrumentation adds a run-bounded
-history of at most 8,192 directed instance edges, 64 source witnesses per edge, and 64 guard
+history of at most 8,192 directed instance edges, 1,024 source witnesses per edge, and 64 guard
 leases per thread. Ending a lock does not reclaim the historical edge budget. Refused history or
-count overflow becomes an explicit overload finding.
+count overflow becomes an explicit overload finding. The witness budget retains distinct storage
+worker identities across checkpoint staging. Its process regression retains all 512 worker
+contexts in one historical edge; a separate 1,025-context workload must record order-history
+overload and fail qualification. The independent edge and held-guard limits remain fatal too.
 
 The vendor dispatcher has an unbounded channel and swallows callback panics. The boundary callback
 therefore only retains bounded identity vectors, submits to its lock-free `ReportHandoff` of 64
@@ -1647,7 +1735,7 @@ A family of names means each member runs independently through the recipe.
 | Checkpoint replication (`src/runtime/kafka_offset_state.rs`, `src/runtime/state_replication/checkpoint_announcement_shuttle_tests.rs`) | `shuttle_a_replica_acknowledgement_racing_the_quorum_wait_is_never_missed` races a Kafka offset commit's replica quorum wait against its replica's acknowledgement: the wait registers before it reads, so it completes without its deadline, which a Shuttle timeout only reaches when a check triggers it. `shuttle_an_offer_racing_the_end_of_an_announcement_is_always_announced` races a second offer against the announcer of the first finding its replica caught up: the second revision is always announced and acknowledged. `shuttle_a_retired_replication_ends_its_announcer` ends an announcer whose replicated state goes away while its replica never acknowledges. `shuttle_an_announcement_racing_the_replica_wait_is_never_missed` races an owner's announcement against the replica task's synchronization and wait: an announcement that lands before the wait is kept as its permit. `shuttle_checkpoint_announcement_close_cancels_pending_dispatch` exercises the production task owner with close racing the first poll and close after dispatch starts: both cancel a dispatch that never becomes ready and release its retained announcer. |
 | Resolved state replication (`src/runtime/state_replication/routing_shuttle_tests.rs`) | `shuttle_state_replacement_and_retirement_fence_frames_in_flight` exercises the production routing owner: a frame can complete only on its selected lifetime, never change a successor, and cannot enter a route after retirement. ArcSwap internals remain opaque; this check covers owner use and scheduling, with no new Nervix-owned memory-ordering claim. |
 | Replica catch-up announcements (`src/runtime/branch_lifecycle_state_shuttle_tests.rs`) | `shuttle_an_announced_branch_racing_the_replica_round_is_never_missed` races an owner's announcement of a branch checkpoint against the replica task taking the pending announcements and waiting for the next: the task takes it whether it lands before the take, between the take and the wait, or during the wait. `shuttle_announcements_of_one_branch_keep_the_newest_pending` delivers two announcements of one branch in either order while the task takes them: an older one never replaces a newer one still pending. |
-| Backup capture, restore publication and reclamation (`src/runtime/backup_capture_fence.rs`, `crates/consensus/src/restore.rs`) | `shuttle_backup_cut_includes_pre_cut_branch_publication` requires every registered publication observed before a cut to be present in its view. `shuttle_restore_publication_and_handle_clear_cannot_cross_a_successors_start` drives the production applied-state authority guard against a new restore generation and START, so stale publication changes neither checkpoints nor runtime handles. `shuttle_restore_reclamation_holds_the_revision_through_queued_installation` races the production reclamation guard with a successor's applied generation and queued installer, requiring the borrowed revision to stay fixed through deletion and preserving the current installation. They register in the shared Shuttle inventory and run through its exploration, nondeterminism and replay contract. |
+| Backup capture, restore publication and reclamation (`src/runtime/backup_capture_fence.rs`, `crates/consensus/src/restore.rs`, `materialized_state.rs`) | `shuttle_backup_cut_includes_pre_cut_branch_publication` includes every registered publication before a cut. `shuttle_restore_publication_and_handle_clear_precede_resume_and_fence_delayed_publishers` drives the applied-state authority guard against a successor generation and RESUME, requiring complete publication and cleared handles before activation. `shuttle_materialized_capture_names_exactly_its_branch_generation` races capture with an update and eviction. `shuttle_replica_synchronization_preserves_the_restored_materialized_revision` races delayed and current owner snapshots. `shuttle_restore_reclamation_holds_the_revision_through_queued_installation` races the reclamation guard with a successor generation and queued installer, requiring the borrowed revision to stay fixed through deletion and preserving the current installation. They register in the shared Shuttle inventory and use its exploration, nondeterminism and replay contract. |
 | Domain clock (`src/runtime/domain_clock.rs`) | `shuttle_lifecycle_tests::concurrent_reads_of_one_installed_generation_never_decrease` checks the nondecreasing watermark; `a_clock_bound_to_a_replaced_generation_is_refused_by_revalidation` rejects a superseded generation; `readers_never_observe_an_installation_older_than_one_they_observed` prevents publication regression. `shuttle_delivery_sends_state_before_ticks_without_regressing_progress` explores the production observer and attachment delivery order across accepted ticks, same-generation unassignment and reassignment, and a generation change. `shuttle_an_attach_waiting_for_the_first_installation_observes_its_domains` races an attach's wait and lookup against the node's first installation of the committed domains and requires the lookup to find the domain and its clock. `a_logical_waiter_wakes_when_its_generation_stops`, `a_logical_waiter_wakes_when_its_generation_is_replaced`, `a_logical_waiter_wakes_when_its_domain_is_removed`, and `a_logical_waiter_wakes_when_a_replacement_mapping_reaches_its_deadline` cover each lifecycle wakeup. |
 
 The checks of WASM checkpoint holds and the durability barrier use the same runner and replay

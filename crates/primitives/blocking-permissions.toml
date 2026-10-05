@@ -313,6 +313,20 @@ path = "src/runtime/materialized_state.rs"
 reason = "Test participants exercise this owner concurrently outside a node executor; model participants use the selected scheduler."
 
 [[permission]]
+bound = "Each model creates one finite writer participant and joins it before returning; the registered runner bounds exploration."
+items = ["thread::spawn"]
+owner = "Materialized branch publication and assignment Shuttle checks."
+path = "src/runtime/materialized_state_publication_tests.rs"
+reason = "The writer races the production capture and assignment owners under the selected scheduler."
+
+[[permission]]
+bound = "One capture participant per finite sample takes sixteen snapshots and is joined before returning; the caller performs ten thousand bounded row updates."
+items = ["thread::spawn"]
+owner = "Same-host materialized capture and update measurement."
+path = "src/runtime/materialized_state_cost_tests.rs"
+reason = "A benchmark participant measures concurrent synchronous capture outside a node executor; it carries no production execution work."
+
+[[permission]]
 bound = "Each test or model creates its fixed finite participants for one case and joins them before it returns; modeled exploration and its watchdog use the registered runner bounds."
 items = ["thread::spawn"]
 owner = "Relay branch-presence publication Shuttle checks."

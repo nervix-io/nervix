@@ -21,10 +21,11 @@ use nervix_models::{
     RebindResourceMembers, RebindResourceSelection, RelayBranching, RelayName, Relocation,
     RelocationMember, RelocationPreferenceOverride, RelocationPreferenceStrategy,
     RelocationSelection, ResetWasmBranchField, ResetWasmState, ResetWasmStateScope, Restore,
-    RestoreMode, RestoreScope, RestoreState, ShowClusterStatus, ShowCreate, ShowIngestors,
-    ShowPlacements, ShowRelayMaterializedState, ShowTransactions, ShowUdfs, StartDomain, Statement,
-    StopDomain, SubscriptionBinding, SubscriptionLiteral, Timestamp, TransactionInspectionRequest,
-    TransactionInspectionTarget, TransactionOperationNumber, UncordonNode, UploadResource,
+    RestoreLifecycle, RestoreMode, RestoreScope, RestoreState, ShowClusterStatus, ShowCreate,
+    ShowIngestors, ShowPlacements, ShowRelayMaterializedState, ShowTransactions, ShowUdfs,
+    StartDomain, Statement, StopDomain, SubscriptionBinding, SubscriptionLiteral, Timestamp,
+    TransactionInspectionRequest, TransactionInspectionTarget, TransactionOperationNumber,
+    UncordonNode, UploadResource,
 };
 use strum::IntoEnumIterator as _;
 
@@ -362,6 +363,9 @@ impl Arbitrary<'_> {
                     scope,
                     source: self.non_empty_string(),
                     mode: self.entropy.pick([RestoreMode::Apply, RestoreMode::DryRun]),
+                    lifecycle: self
+                        .entropy
+                        .pick([RestoreLifecycle::Stopped, RestoreLifecycle::Resume]),
                     state: self.entropy.pick([
                         RestoreState::All,
                         RestoreState::WithoutSourceOffsets,

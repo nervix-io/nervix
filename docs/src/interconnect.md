@@ -873,6 +873,14 @@ and the leader stages and verifies the stream before adding it to the archive. T
 staged section only for the coordinator process that requested it and releases expired stages.
 The fetch stream authenticates that process identity before its handler can consume the stage; a
 partitioned or cancelled fetch leaves any unconsumed stage available until expiry.
+Materialized inventories distinguish archive descriptors, scalar identity groups and Arrow
+column groups. Their bounded sections are staged from a fresh assignment-qualified capture and
+fetched through the same authenticated stream; the capture never transfers an entire container
+as one bulk response allocation. The leader verifies each length and digest before assembly.
+An opening refused solely for request capacity is retried within one 30-second opening deadline;
+other failures end the fetch. The captured stage remains unconsumed on an admission refusal.
+Completed backup and materialized-state response streams release their Snapshot request and
+connection-stream permits before local file verification or Arrow decoding.
 
 Restore state installation uses the snapshot bulk subquota after the stopped-domain schedule is
 published. The leader admits a replicated installation authority carrying its identity and term,
@@ -883,6 +891,10 @@ finish verifies the staged file, then reads it directly inside a filesystem stor
 reserves 2 MiB and stages bounded checkpoint chunks into an invisible installation namespace.
 It retains the upload's disk-quota owner through that job. There is no full guest buffer or nested
 staged-reader reservation. Incomplete transfers expire under the node's staging quota.
+Materialized restoration first converts archive-owned identities and exact-schema Arrow sections
+to a staged native sealed file. That file uses these same begin/chunk/finish requests, preserving
+its revision and branch generation and establishing its ownership fence in the new cluster.
+Large materialized containers never use the encoded metadata install request.
 
 After all checkpoints are staged, the leader sends each target node a publish request with the
 complete checkpoint and byte counts. The receiver reserves a fixed 2 MiB, validates receipts,
@@ -899,6 +911,18 @@ carry the same counts and repeats durability and cleanup before acknowledging co
 A failure after pointer commit can leave that complete generation selected with the start gate
 closed; it cannot authorize START or clear handles before durable completion.
 The domain's replicated start gate is released only after all nodes acknowledge publication.
+`RESUME` activates its archived lifecycle in that same completion effect; delayed coordinators
+are refused once the domain is running. The transfer authority remains independent of the
+archived domain start generation and the relay checkpoint revision.
+The seeded transport checks stream six 6 MiB sections, above the default 32 MiB bulk budget,
+through capture fetch and ordered state installation after link repair. A second check restarts
+the receiving process after the first 64 KiB install chunk: its replacement refuses an incomplete
+finish and publishes only after a complete new 36 MiB transfer. The handlers retain counts and
+digests; these checks qualify the authenticated transport, while the public restore scenarios
+and storage checks qualify native containers, atomic publication and activation.
+Capture fetch and state installation share the peer connection's one reserved snapshot stream
+slot. The archive staging phase finishes and releases its fetch stream before installation starts;
+an installer cannot retain a fetch stream while awaiting another snapshot request to that peer.
 Staging and publication run on the admitted filesystem worker class. Authority is checked inside
 the storage job after admission, so waiting for a worker cannot preserve an expired installation
 right. Durable synchronization does not run on the async reactor.
@@ -1023,6 +1047,15 @@ installed. A section that exceeds its bulk limit or disagrees with the container
 Sealing also refuses a container that cannot fit the available bulk memory reservation, instead
 of waiting for a reservation larger than that budget.
 
+Materialized relay snapshots seal to quota-owned files one bounded identity/Arrow group at a
+time. Descriptions retain the file's exact length, digest and revision; fetch responses open an
+independent reader and release each bounded chunk before the next. The sealed cache retains no
+whole-container byte allocation. Local periodic persistence writes the same container as 64 KiB
+segments, synchronizes data before replacing the header, and retains the namespace selected
+before executor admission. Neither path requires a reservation proportional to container length.
+The synchronous ownership-handoff metadata boundary still admits its resident checkpoint entry
+against the bulk budget; exceeding that admission is a typed checkpoint refusal.
+
 Runtime-state synchronization replies and materialized-snapshot descriptions carry the shared
 typed remote-operation failure envelope. Rejection, absence, temporary unreadiness, and execution
 failure remain distinct across the node boundary, and the requester keeps that classification in
@@ -1030,6 +1063,14 @@ its local replication or snapshot-exchange error. Only an execution failure incl
 node's opaque diagnostic text. A materialized snapshot is streamed only after a successful typed
 description identifies its exact length, digest, revision, fence, and branch generation; the
 placement that the request names supplies its schema fingerprint.
+
+Domain routing retains each materialized relay's installed-state publication from the shared
+state-replication routing owner. Branch reads and generator scans use that relay's immutable index,
+while the selected route validates its retained assignment identity. Retirement ends the exact
+state intake before removing its member; an ending predecessor cannot withdraw its replacement.
+Materialized installation refuses a lower revision, fence or branch generation before changing
+live rows. Transport decoding and the snapshot container remain owned by their existing engines;
+this publication introduces no wire or stored-container variant.
 
 A materialized dependency reader may observe the committed destination just before that node
 activates its prepared state, or the previous destination just after it leaves the assignment. A

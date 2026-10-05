@@ -331,7 +331,7 @@ the bounded storage executor, but consensus has its own single ordered worker.
 
 The dedicated database owns exactly four current keyspaces: `raft_count_logs`, `raft_count_meta`,
 `raft_count_state`, and `raft_count_snapshots`. Opening it validates the complete keyspace namespace
-before reading any records. Its state metadata requires the current `RestoreCounts` encoding,
+before reading any records. Its state metadata requires the current `RestoredLifecycle` encoding,
 including the durable restore installation gate. Native counts in commands, queued transactions, progress, outcomes, and plan, report and topology headers
 are archived as fixed-width 64-bit values with checked native decoding. Log replay, state recovery
 and snapshot installation therefore retain their complete magnitudes. See
@@ -432,4 +432,6 @@ release or terminal execution failure. Runtime state bytes remain in the node-ow
 A local storage mutation holds the applied-state read guard through its authority validation,
 checkpoint mutation and handle clearing; a newer applied authority or start-gate release cannot
 cross that boundary. The current state encoding requires these records and rejects a database
-whose encoding does not match, requiring recreation under the alpha persistence contract.
+whose encoding does not match, requiring recreation under the alpha persistence contract. The current encoding also requires a restore's explicit lifecycle policy and its
+installed-state effect's clock. RESUME changes the domain to running and removes its complete-set
+installation gate in that single applied effect; it preserves the archived generation and mapping.
