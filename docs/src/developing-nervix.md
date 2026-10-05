@@ -471,6 +471,9 @@ proves the record and replay path end to end. [Deterministic Interconnect
 Simulation](./interconnect-simulation.md) defines what the simulation controls, its fault model and
 limits, the scenario matrix, and how to investigate a failure.
 
+CI runs the suite and the replay check only for a pull request labeled `turmoil`. Label a pull
+request that changes the interconnect or a seam the simulation plugs into.
+
 ### SIMD kernel development
 
 [SIMD Kernels](./simd-kernels.md) owns the typed-buffer admission rule, caller catalog, dispatch

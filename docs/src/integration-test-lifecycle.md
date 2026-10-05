@@ -958,9 +958,10 @@ Every example of a runtime other than the in-process probe is tagged `@client_co
 and one `@client_probe_<runtime>` tag, and the suite excludes the first tag unless a run selects its
 own tags, because those examples need toolchains the suite's job does not install. `just
 test-client-conformance` builds every probe artifact and runs them; its first argument is the tag
-expression that selects runtimes. The `client-conformance` CI job runs it on its own runner with a
-60-minute limit and a 15-minute suite budget, which leaves the builds before the scenarios up to 40
-minutes of the limit and keeps the same 5-minute reserve.
+expression that selects runtimes. The `client-conformance` CI job, which runs only for a pull
+request labeled `client-conformance`, runs it on its own runner with a 60-minute limit and a
+15-minute suite budget, which leaves the builds before the scenarios up to 40 minutes of the limit
+and keeps the same 5-minute reserve.
 
 ## The Suite Watchdog
 

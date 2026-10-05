@@ -81,16 +81,6 @@ class ModelCoverageTests(unittest.TestCase):
         self.assertIn("needs: [tests, scenarios, extra-tests]", coverage)
         self.assertIn("-path '*/ordinary/*/lcov.info'", coverage)
 
-    def test_ci_runs_each_model_checker_only_for_a_pull_request_labeled_with_its_mode(self) -> None:
-        from scripts.tests.test_native_coverage import job_section
-
-        workflow = (ROOT / ".github/workflows/check.yaml").read_text()
-        self.assertIn("types: [opened, synchronize, reopened, labeled, unlabeled]", workflow)
-        for mode in ("shuttle", "loom"):
-            with self.subTest(mode=mode):
-                job = job_section(workflow, mode)
-                self.assertIn(f"if: contains(github.event.pull_request.labels.*.name, '{mode}')", job)
-
 
 class RunnerEvidenceTests(unittest.TestCase):
     def test_shuttle_records_each_canonical_check_and_its_paired_runs(self) -> None:

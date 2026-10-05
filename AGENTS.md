@@ -1118,6 +1118,10 @@ build and the existing tests, and nothing in it changes behavior.
 - Use `just test-scenarios --input <feature> ...` for targeted cucumber runs so the configured test
   environment is applied. Add a focused `justfile` task when a needed invocation is not represented
   instead of running the scenario test binary directly.
+- `just test-client-conformance [tags]` builds the cross-language client probes and runs them
+  against one- and three-node clusters. CI runs it only for a pull request labeled
+  `client-conformance`; a pull request that changes the client protocol, the shared binding or a
+  probe carries that label.
 - `just nspl-completion-walk` walks the NSPL completion graph and fails on any branch that cannot be
   completed by accepting the suggestions the parser offers. It is deliberately outside `just test`
   and runs in CI beside the main tests, in the job that carries the workspace-wide checks. Grammar
@@ -1143,11 +1147,11 @@ build and the existing tests, and nothing in it changes behavior.
   `just test-loom-qualification` shows each model fails under its registered weakening.
   `just test-turmoil` fails when one of its invocations executes no test, when a test
   `tests/turmoil-inventory.toml` registers did not run or ran ignored, and when a simulation test
-  ran unregistered. Required CI runs Turmoil independently of the ordinary tests. CI runs Shuttle
-  and its replay check only for a pull request labeled `shuttle`, and Loom and its qualification
-  only for one labeled `loom`, each in a job of its own; a pull request that affects either mode
-  carries that mode's label. `just cargo-clippy-loom`, part of `just lint`, keeps every Loom build
-  compiling, including the server and consensus libraries as they ship and in test mode.
+  ran unregistered. CI runs Shuttle and its replay check, Loom and its qualification, and Turmoil
+  and its replay check each in a job of its own, only for a pull request labeled `shuttle`, `loom`
+  or `turmoil` respectively; a pull request that affects one of these modes carries that mode's
+  label. `just cargo-clippy-loom`, part of `just lint`, keeps every Loom build compiling,
+  including the server and consensus libraries as they ship and in test mode.
   `just cargo-clippy-shuttle`, also part of `just lint`, lints every Shuttle build with warnings
   denied, including each package `just test-shuttle` explores in test mode, so a warning in a check
   fails validation.

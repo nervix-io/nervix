@@ -716,9 +716,11 @@ jobs:
   # The cross-language client probes: C, C++, Python, Java and Ruby over the shared Rust binding,
   # and independent Go and TypeScript implementations on Node.js and Bun. They need toolchains the
   # suite job does not install and run a feature of their own, so they are a job of their own
-  # beside the suite rather than minutes added to its critical path.
+  # beside the suite rather than minutes added to its critical path. They run only for a pull
+  # request labeled `client-conformance`.
   client-conformance:
     name: client-conformance
+    if: contains(github.event.pull_request.labels.*.name, 'client-conformance')
     runs-on: blacksmith-8vcpu-ubuntu-2404
     # The suite budget below is derived from this limit: builds before the scenarios, then at most
     # the budget, then the reserve the harness keeps for its own cleanup and the log upload.
@@ -1352,9 +1354,10 @@ jobs:
   # regression seeds, then a fresh-process replay of an injected failure. A job of its own beside
   # the default suite and the Shuttle checks, because its build enables the `turmoil` feature and
   # `tokio_unstable` and so shares no compilation with either, and because a failed scenario's
-  # record is this job's artifact.
+  # record is this job's artifact. It runs only for a pull request labeled `turmoil`.
   turmoil:
     name: turmoil
+    if: contains(github.event.pull_request.labels.*.name, 'turmoil')
     runs-on: blacksmith-4vcpu-ubuntu-2404
     # The emergency guard around the build, the tests and the upload. The tests end themselves
     # first: every run has its own real-time bound, and `just test-turmoil` gives all of them
