@@ -61,8 +61,8 @@ durably before opening one database snapshot that also
 contains the already durable WASM guest saves. A stopped domain reads its stored checkpoints
 without active task requests.
 The drain uses the shutdown admitted-work view: active intake and generators, active source ACK
-roots, relay and node buffers, and emitter buffers or publishes. Parked `REQUIRED WAIT` messages
-are exempt. Once every node reports no admitted work, the leader requests a confirming force-flush
+roots, relay and node buffers, relays that admitted a batch while the node read that view, and
+emitter buffers or publishes. Parked `REQUIRED WAIT` messages are exempt. Once every node reports no admitted work, the leader requests a confirming force-flush
 generation on every node and waits for its obligations to finish before asking owners to capture.
 An unavailable sink keeps its publish and ACK counts outstanding until `TIMEOUT` expires; the
 failed backup reports those counts and resumes the domain.

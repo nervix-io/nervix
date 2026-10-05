@@ -205,6 +205,7 @@ impl SessionServiceImpl {
             admitting_ingestors: status.admitting_ingestors.arch_into(),
             active_generators: status.active_generators.arch_into(),
             admitted_acks: status.outstanding_acks.arch_into(),
+            admitting_relays: status.admitting_relays.arch_into(),
             buffered_relay_batches: status.buffered_relay_batches.arch_into(),
             node_work_items: status.node_work_items.arch_into(),
             buffered_emitter_messages: status.buffered_emitter_messages.arch_into(),
