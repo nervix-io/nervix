@@ -13,7 +13,7 @@ walks the NSPL completion graph. `test-shuttle` and `test-loom` collect the cano
 `test-deloxide` and `test-deloxide-order` run the whole Deloxide diagnostic lane of each selection.
 `test-primitives` selects the native conformance producers of every mode. Without names every producer runs. A producer runs
 its check exactly as `just <producer>` does and fails when the check fails, which is why CI's
-extra-tests job runs those checks through this command instead of beside it.
+jobs run those checks through this command instead of beside it.
 
 A check's recipes fall into three parts, and the justfile must compose the check from exactly
 those parts. The prepare recipes, such as the web console the server benches link, run first in the

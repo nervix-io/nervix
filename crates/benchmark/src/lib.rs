@@ -31,4 +31,4 @@ pub use metrics_report::{
     BatchTargetMetrics, MetricsReportError, NERVIX_METRICS_PROMETHEUS_FILE,
     NERVIX_METRICS_REPORT_FILE, NervixMetricsReport, RelayBufferMetrics,
 };
-pub use settings::{ByteSizeError, RunSettings, SettingsError};
+pub use settings::{ByteSizeError, ParameterValueError, RunSettings, SettingsError};

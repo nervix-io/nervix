@@ -12,7 +12,9 @@ pub(crate) use nervix_test_environment::{
     PULSAR_TLS_ADDR, QUICKWIT_ADDR, RABBITMQ_ADDR, RABBITMQ_TLS_ADDR, REDIS_ADDR, REDIS_TLS_ADDR,
     RUSTFS_ADDR, SQS_ENDPOINT, SQS_TLS_ENDPOINT,
 };
-use nervix_test_environment::{ContainerMode, DependencyEnvironment, configure_process_lifecycle};
+use nervix_test_environment::{
+    ContainerMode, DependencyEnvironment, TeardownFailures, configure_process_lifecycle,
+};
 
 static SUITE_DEPENDENCIES: OnceLock<Mutex<DependencyEnvironment>> = OnceLock::new();
 
@@ -221,9 +223,9 @@ impl TestDependencies {
         suite.lock().await.otel_collector_logs().await
     }
 
-    pub(crate) async fn shutdown_suite() -> Vec<String> {
+    pub(crate) async fn shutdown_suite() -> Result<(), TeardownFailures> {
         let Some(suite) = SUITE_DEPENDENCIES.get() else {
-            return Vec::new();
+            return Ok(());
         };
         suite.lock().await.shutdown().await
     }

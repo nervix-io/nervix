@@ -43,7 +43,8 @@ neither is probed.
 `just test-client-conformance` builds every artifact below into `target/client-conformance` and runs
 every probe against one- and three-node clusters. Its argument selects runtimes by tag, for example
 `just test-client-conformance '@client_probe_python or @client_probe_bun'`. The in-process probe
-runs in the ordinary scenario suite. The CI job `client-conformance` runs the whole ledger.
+runs in the ordinary scenario suite. The CI job `client-conformance` runs the whole ledger for a
+pull request labeled `client-conformance`.
 
 | Runtime | Build | Run |
 | --- | --- | --- |

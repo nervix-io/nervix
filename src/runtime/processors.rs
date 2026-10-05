@@ -6,8 +6,8 @@ use meticulous::OptionExt as _;
 use nervix_models::{
     Assignment, AssignmentTarget, BranchName, CorrelationTimeoutPolicy, CorrelatorMatchPolicy,
     ErrorPolicies, FieldName, InferencerTensorDeclaration, InferencerTensorMapping,
-    MessageErrorPolicy, ModelKind, ModelName, RelayName, ResourceName, RouteConstruction,
-    StructuredMessageError, Timestamp,
+    MessageErrorOperation, MessageErrorPolicy, ModelKind, ModelName, RelayName, ResourceName,
+    RouteConstruction, StructuredMessageError, Timestamp,
 };
 use nervix_primitives::sync::{Arc, StdArc};
 use nervix_roto::UdfExecutor;
@@ -1042,20 +1042,142 @@ pub(super) struct PlannedMessageError {
     pub(super) execution_now: Timestamp,
 }
 
-#[derive(thiserror::Error)]
-#[error("{reason}")]
-pub(super) struct PlannedGeneralError {
-    pub(super) acks: Vec<AckSet>,
-    pub(super) reason: String,
+/// Why a planned batch failed as a whole rather than one message at a time.
+///
+/// A variant names the step that failed and, where a program ran it, the program by the operation
+/// its rejected messages report. The failure the step itself returned stays beneath it in the
+/// report, and nothing is formatted until the node's error policy reports the failure.
+#[derive(Debug, PartialEq, thiserror::Error)]
+pub(super) enum PlannedGeneralError {
+    #[error(
+        "{} received {found} {sidecar} rows for {expected} records",
+        ProgramName::of(.operation)
+    )]
+    SidecarRowCount {
+        operation: MessageErrorOperation,
+        sidecar: PlannedSidecar,
+        expected: usize,
+        found: usize,
+    },
+    #[error(
+        "{} produced {produced} rows for {selected} selected rows",
+        ProgramName::of(.operation)
+    )]
+    SelectedRowCount {
+        operation: MessageErrorOperation,
+        produced: usize,
+        selected: usize,
+    },
+    #[error("{} selected row {row} outside its {rows}-row input", ProgramName::of(.operation))]
+    SelectedRowOutOfBounds {
+        operation: MessageErrorOperation,
+        row: usize,
+        rows: usize,
+    },
+    #[error("failed to prepare {} LOOKUP_HASH_MAP inputs", ProgramName::of(.operation))]
+    PrepareLookups { operation: MessageErrorOperation },
+    #[error("failed to prepare {} input batch", ProgramName::of(.operation))]
+    PrepareInput { operation: MessageErrorOperation },
+    #[error("{} execution failed", ProgramName::of(.operation))]
+    Execute { operation: MessageErrorOperation },
+    #[error("failed to materialize {} error input row {row}", ProgramName::of(.operation))]
+    MaterializeErrorInput {
+        operation: MessageErrorOperation,
+        row: usize,
+    },
+    #[error("failed to materialize successful {} rows", ProgramName::of(.operation))]
+    MaterializeOutput { operation: MessageErrorOperation },
+    #[error("failed to build {} output batch", ProgramName::of(.operation))]
+    BuildOutputBatch { operation: MessageErrorOperation },
+    #[error("evaluated output route '{relay}' without preparing its relay schema")]
+    OutputSchemaUnprepared { relay: RelayName },
+    #[error("failed to project output relay '{relay}'")]
+    ProjectOutput { relay: RelayName },
+    #[error("FILTER-MAP output schema does not match relay '{relay}'")]
+    OutputSchemaMismatch { relay: RelayName },
+    #[error("failed to select the input rows of branch construction")]
+    SelectBranchInputs,
+    #[error("branch construction wrote '{field}', which is not a field name")]
+    BranchFieldName { field: String },
+    #[error("branch construction wrote field '{field}' as a type no branch key holds")]
+    BranchFieldType { field: FieldName },
+    #[error("failed to read branch field '{field}'")]
+    BranchFieldValue { field: FieldName },
+    #[error("branch field '{field}' is null")]
+    BranchFieldNull { field: FieldName },
+    #[error("branch construction wrote no branch key")]
+    BranchKey,
+    #[error("branch construction failed for input row {row}")]
+    BranchRow { row: usize },
+    #[error("failed to group output rows by their branch")]
+    GroupByBranch,
+    #[error("ordering group expression produced no ordering group column")]
+    OrderingGroupColumn,
+    #[error("ordering group expression produced {data_type}, expected STRING")]
+    OrderingGroupType { data_type: arrow_schema::DataType },
+    #[error("ordering group expression referenced missing input row {row}")]
+    OrderingGroupRow { row: usize },
+    #[error("failed to prepare the HTTP requests of the batch")]
+    HttpRequests,
 }
 
 pub(super) type PlannedGeneralResult<T> = error_stack::Result<T, PlannedGeneralError>;
 
-impl std::fmt::Debug for PlannedGeneralError {
+/// A row sidecar a planned program reads beside the batch it runs over.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, strum::Display)]
+pub(super) enum PlannedSidecar {
+    #[strum(serialize = "runtime metadata")]
+    RuntimeMetadata,
+    #[strum(serialize = "branch key")]
+    BranchKeys,
+    #[strum(serialize = "ingest metadata")]
+    IngestMetadata,
+    #[strum(serialize = "input")]
+    Input,
+}
+
+/// How a planned failure names the program whose rejected messages report `operation`: by the
+/// clause the node's NSPL spells it with, or by the operation's own name.
+pub(super) struct ProgramName(MessageErrorOperation);
+
+impl ProgramName {
+    pub(super) fn of(operation: &MessageErrorOperation) -> Self {
+        Self(*operation)
+    }
+}
+
+impl std::fmt::Display for ProgramName {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let name = match &self.0 {
+            MessageErrorOperation::SourceWhere => "FROM WHERE",
+            MessageErrorOperation::FilterWhere => "FILTER WHERE",
+            MessageErrorOperation::RouteWhere => "ROUTE WHERE",
+            MessageErrorOperation::Set => "FILTER-MAP",
+            MessageErrorOperation::BranchSet => "branch construction",
+            operation => operation.as_ref(),
+        };
+        formatter.write_str(name)
+    }
+}
+
+/// A failure that ends a whole planned batch, with the acknowledgements of every message the batch
+/// held. Whoever reports the failure resolves them through the node's error policy.
+pub(super) struct PlannedGeneralFailure {
+    pub(super) error: Report<PlannedGeneralError>,
+    pub(super) acks: Vec<AckSet>,
+}
+
+impl PlannedGeneralFailure {
+    pub(super) fn new(error: Report<PlannedGeneralError>, acks: Vec<AckSet>) -> Self {
+        Self { error, acks }
+    }
+}
+
+impl std::fmt::Debug for PlannedGeneralFailure {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("PlannedGeneralError")
+        f.debug_struct("PlannedGeneralFailure")
+            .field("error", &self.error)
             .field("ack_count", &self.acks.len())
-            .field("reason", &self.reason)
             .finish()
     }
 }

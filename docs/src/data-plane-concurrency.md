@@ -1831,8 +1831,9 @@ test-shuttle-replay <schedule>` replays exactly that check in a fresh process wi
 which ends where its execution failed and so replays that failure. `just test-shuttle-replay-check`
 proves the path end to end: it fails one check deliberately after its invariant held, requires one
 persisted schedule, and requires it to reproduce the failure in a fresh process. CI's dedicated
-`shuttle` job runs both and uploads `target/shuttle-failures` as the `shuttle-failures` artifact
-when a check fails. See the command recipes in [Developing Nervix](./developing-nervix.md).
+`shuttle` job runs both, only for a pull request labeled `shuttle`, and uploads
+`target/shuttle-failures` as the `shuttle-failures` artifact when a check fails. See the command
+recipes in [Developing Nervix](./developing-nervix.md).
 
 ### Protocols and their checks
 
@@ -1934,9 +1935,10 @@ selects none fails. A failed model leaves `target/loom-failures/<package>/<invar
 checkpoint of the failed execution, the run's output, and metadata naming the invariant, revision,
 toolchain, Loom version and exploration bounds. `just test-loom-replay` resumes Loom from that
 checkpoint with location tracking and tracing, so the failed execution runs first. The artifacts
-hold model output only, never payloads or secrets. CI runs the models on every change and uploads
-the failure directory. Invariant IDs use ASCII letters, digits, dots and hyphens, so these paths
-are valid artifact names; metadata retains the exact Rust test name used for replay.
+hold model output only, never payloads or secrets. For a pull request labeled `loom`, CI runs the
+models in its dedicated `loom` job, which uploads the failure directory, and their qualification
+in the loom-qualification jobs. Invariant IDs use ASCII letters, digits, dots and hyphens, so
+these paths are valid artifact names; metadata retains the exact Rust test name used for replay.
 
 Every model also registers a weakening that must make it fail. `just test-loom-qualification`
 applies each to a copy of the working tree, requires the model to fail with the registered message,

@@ -110,7 +110,8 @@ remain enforced by the shared runner. Validation uses an 8-CPU runner and a two-
 to complete Clippy and the declared compiler synchronization matrix from a cold cache. Bolero
 inventory and compiled discovery run through the dedicated Bolero commands and workflow.
 The native extra-checks job retains its 8-CPU allocation and the same two-hour limit for ordinary
-instrumentation and the full modeled suite.
+instrumentation and per-mode primitive conformance; the Shuttle and Loom suites run in jobs of
+their own.
 
 The inventory also records exact full test names, required features, corpus paths, case timeouts
 and each invariant. Its corpus path is Bolero's source-adjacent

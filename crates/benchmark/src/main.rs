@@ -359,17 +359,15 @@ async fn run_benchmark(
         &mut environment,
     )
     .await;
-    let teardown_errors = environment.shutdown().await;
-    let outcome = if !teardown_errors.is_empty() {
-        let teardown = teardown_errors.join("; ");
-        match execution {
-            Ok(()) => Err(anyhow!("benchmark dependency teardown failed: {teardown}")),
+    let teardown = environment.shutdown().await;
+    let outcome = match teardown {
+        Ok(()) => execution,
+        Err(failures) => match execution {
+            Ok(()) => Err(anyhow!("benchmark dependency teardown failed: {failures}")),
             Err(error) => Err(error.context(format!(
-                "benchmark dependency teardown also failed: {teardown}"
+                "benchmark dependency teardown also failed: {failures}"
             ))),
-        }
-    } else {
-        execution
+        },
     };
     let status = if outcome.is_ok() { "pass\n" } else { "fail\n" };
     fs::write(resolved.run_directory.join("status.txt"), status)?;
@@ -726,7 +724,8 @@ impl ResolvedRun {
             benchmark.definition(),
             &args.options.workload.parameter_overrides,
             args.options.workload.duration_seconds,
-        )?;
+        )
+        .map_err(|error| anyhow!("{error:#}"))?;
         let partitions = args
             .options
             .workload

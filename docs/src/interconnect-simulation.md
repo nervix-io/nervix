@@ -489,12 +489,13 @@ committed seed of that case.
 
 ## CI And Budgets
 
-CI runs the simulation as a job of its own, `turmoil`, beside the default tests and the
-dedicated `shuttle` job. Its build enables the `turmoil` feature and
-`tokio_unstable`, so it shares no compilation with them, and a failed case's record is its own
-artifact. The job runs `just test-turmoil`, then `just test-turmoil-replay-check`, and on failure
-uploads `target/turmoil-failures` as the `turmoil-failures` artifact. The coverage job does not run
-the simulation; `just coverage-turmoil` measures its lines locally.
+CI runs the simulation as a job of its own, `turmoil`, only for a pull request labeled
+`turmoil`, beside the default tests and the `shuttle` and `loom` jobs. Its build enables the
+`turmoil` feature and `tokio_unstable`, so it shares no compilation with them, and a failed
+case's record is its own artifact. The job runs `just test-turmoil`, then
+`just test-turmoil-replay-check`, and on failure uploads `target/turmoil-failures` as the
+`turmoil-failures` artifact. The coverage job does not run the simulation; `just coverage-turmoil`
+measures its lines locally.
 
 The job uses the shared native [CI linker](./developing-nervix.md#validation-and-tests), so
 adding `--cfg tokio_unstable` to `RUSTFLAGS` preserves Wild linking.

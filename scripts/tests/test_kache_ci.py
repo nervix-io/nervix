@@ -37,6 +37,7 @@ class KacheCiTests(unittest.TestCase):
             "client-conformance",
             "extra-tests",
             "shuttle",
+            "loom",
             "turmoil",
             "deloxide",
             "benchmark",

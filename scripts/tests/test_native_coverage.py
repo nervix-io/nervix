@@ -198,6 +198,8 @@ class InventoryTests(unittest.TestCase):
             with self.subTest(producer=producer.name):
                 if producer.name == "test-shuttle":
                     selected_job = job_section(workflow, "shuttle")
+                elif producer.name == "test-loom":
+                    selected_job = job_section(workflow, "loom")
                 elif producer.diagnostic_lane:
                     lane = job_section(workflow, "deloxide")
                     self.assertRegex(lane, r"selection: \[deloxide, deloxide-order\]")
