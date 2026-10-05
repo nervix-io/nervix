@@ -159,9 +159,10 @@ The CI jobs divide the work at the scenario boundary:
 | `tests` | Instrumented workspace build and all tests except the scenario target |
 | `scenarios` | Instrumented server, CLI and paced simulation drivers, the unsharded scenario suite at factor 2, and scenario logs |
 | `coverage` | After tests, scenarios and extra tests, merge their ordinary-mode workspace reports for CRAP, retained artifacts and an advisory patch line coverage comment |
-| `extra-tests` | Native coverage collectors plus capability doctests, Miri, mutation, compiler, and Loom checks |
-| `loom-qualification` | Two shards of the Loom weakening qualifications, one weakened server build for each, and the runs of a failed qualification |
-| `shuttle` | Modeled in-process concurrency checks, uncontrolled-nondeterminism rechecks, and failure schedules |
+| `extra-tests` | Native coverage collectors plus capability doctests, Miri, mutation, compiler, and primitive conformance checks |
+| `shuttle` | Only for a pull request labeled `shuttle`: modeled in-process concurrency checks, uncontrolled-nondeterminism rechecks, and failure schedules |
+| `loom` | Only for a pull request labeled `loom`: exhaustive memory-ordering models and failure checkpoints |
+| `loom-qualification` | Only for a pull request labeled `loom`: two shards of the Loom weakening qualifications, one weakened server build for each, and the runs of a failed qualification |
 
 The `tests` and `scenarios` jobs also sample runner CPU utilization and steal time every five
 seconds. Every kache-backed job uses kache 0.28.1, records `doctor` output without making it a
@@ -965,9 +966,10 @@ Every example of a runtime other than the in-process probe is tagged `@client_co
 and one `@client_probe_<runtime>` tag, and the suite excludes the first tag unless a run selects its
 own tags, because those examples need toolchains the suite's job does not install. `just
 test-client-conformance` builds every probe artifact and runs them; its first argument is the tag
-expression that selects runtimes. The `client-conformance` CI job runs it on its own runner with a
-60-minute limit and a 15-minute suite budget, which leaves the builds before the scenarios up to 40
-minutes of the limit and keeps the same 5-minute reserve.
+expression that selects runtimes. The `client-conformance` CI job, which runs only for a pull
+request labeled `client-conformance`, runs it on its own runner with a 60-minute limit and a
+15-minute suite budget, which leaves the builds before the scenarios up to 40 minutes of the limit
+and keeps the same 5-minute reserve.
 
 ## The Suite Watchdog
 
