@@ -124,8 +124,9 @@ jobs:
     name: bolero-fuzz
     if: inputs.event-name == 'pull_request' && contains(fromJSON(inputs.labels-json || '[]'), 'fuzz')
     runs-on: blacksmith-16vcpu-ubuntu-2404
-    # Cold sanitizer builds precede the full per-target campaign and qualification.
-    timeout-minutes: 180
+    # The measured 68-target campaign took 125 minutes after preparation; 85 targets
+    # plus cold sanitizer builds need a four-hour job bound without reducing breadth.
+    timeout-minutes: 240
     env:
       CARGO_BUILD_JOBS: "1"
     permissions:
