@@ -763,10 +763,16 @@ process-start admission proof only: connectivity lost after admission does not r
 ### Whole-Cluster Restart Keeps Ownership
 
 When every node restarts, the first node to lead can form a quorum while the others are still
-starting and gossip has not heard from them yet. Its automatic scheduling therefore waits, for the
-first ten seconds of its reconciliation, while any voter is neither reported live nor declared dead.
+starting and gossip has not observed them live yet. Its automatic scheduling therefore waits, for
+the first ten seconds of its reconciliation, while any current voter has never been observed live
+by this process's reconciliation task. A first heartbeat relayed by another peer can initially put
+the voter in Chitchat's dead set before sufficient heartbeat intervals establish liveness. That
+initial dead verdict keeps the voter unobserved during the grace.
 Each owner that returns in that time keeps its work and restores it from its own storage and
-replicas, instead of having it failed over without its state. See
+replicas. Live observations made while following survive a leadership change, and the original
+ten-second deadline continues running. Once it expires, a voter that never returned is eligible for
+ordinary failover. The observation history is private to this process and is discarded after the
+grace. See
 [Planned Ownership Handoffs And Failover](./control-plane.md#planned-ownership-handoffs-and-failover).
 
 ### Checkpoint Identity

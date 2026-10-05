@@ -122,6 +122,14 @@ reachable member through an empty address. Other service advertisements, includi
 may be absent independently. Absence says the service is unavailable; it does not invent a reason.
 Peer selection and transport handling follow the [interconnect contract](./interconnect.md).
 
+**Startup voter evidence.** The reconciliation task owns a process-local set of typed node names
+actually observed live, including observations made while following. An absent voter in that set
+means no live observation; Chitchat's current dead verdict does not supply one. A first relayed
+heartbeat can therefore leave a voter unobserved even though gossip knows its identity. Expiring the
+ten-second startup grace ends the observation requirement without declaring that voter live, and a
+leadership change retains the original deadline. The set is discarded after expiry. See
+[Whole-Cluster Restart Keeps Ownership](./shutdown.md#whole-cluster-restart-keeps-ownership).
+
 ## Identity Across Scheduling And Recovery
 
 Schema-bound runtime state is keyed by a computed `SchemaFingerprint` supplied by the committed

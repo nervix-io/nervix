@@ -6,21 +6,152 @@
 //! - **Depends on.** The application scheduling decisions and the shared application test fixtures.
 //! - **Must not know.** Runtime execution, consensus storage or edge protocols.
 
-use std::collections::BTreeSet;
+use std::{collections::BTreeSet, time::Duration};
 
+use nervix_consensus::{GossipNode, GossipState};
 use nervix_models::{
-    ClusterNodeName, DomainName, DomainSchedule, KafkaPartitionSchedule, Model, ModelKind,
-    WasmStateGenerations,
+    ClusterNodeIncarnation, ClusterNodeName, DomainName, DomainSchedule, KafkaPartitionSchedule,
+    Model, ModelKind, WasmStateGenerations,
 };
 use nonzero_ext::nonzero;
 
-use super::super::{
-    ownership_handoff::{DrainMove, prefer_former_owners_as_replicas},
-    session_service::SessionServiceImpl,
-    test_fixtures::{
-        named, node_named, placement_group, placement_member, scheduled_node, scheduled_node_on,
+use super::{
+    super::{
+        ownership_handoff::{DrainMove, prefer_former_owners_as_replicas},
+        session_service::SessionServiceImpl,
+        test_fixtures::{
+            named, node_named, placement_group, placement_member, scheduled_node, scheduled_node_on,
+        },
     },
+    StartupVoterObservations, VOTER_OBSERVATION_GRACE,
 };
+
+fn voter_gossip(live: &[&str], dead: &[&str]) -> GossipState {
+    GossipState {
+        live_nodes: live
+            .iter()
+            .map(|name| GossipNode {
+                node_id: named(name),
+                incarnation: ClusterNodeIncarnation::new(1),
+                terminating: false,
+                client_url: None,
+                console_url: None,
+                interconnect_endpoint: None,
+            })
+            .collect(),
+        dead_node_ids: dead.iter().map(|name| named(name)).collect(),
+        dead_node_identities: BTreeSet::new(),
+    }
+}
+
+#[test]
+fn startup_voter_observations_wait_for_dead_and_unknown_voters_never_seen_live() {
+    let voters = ["node-1", "node-2", "node-3", "node-4"].map(named::<ClusterNodeName>);
+    let mut observations = StartupVoterObservations::default();
+    observations.observe(
+        &voter_gossip(&["node-1", "node-2", "node-3"], &["node-3"]),
+        Duration::from_secs(1),
+    );
+
+    assert_eq!(
+        observations.unobserved_voters(&voters, Duration::from_secs(1)),
+        BTreeSet::from([named("node-3"), named("node-4")])
+    );
+}
+
+#[test]
+fn startup_voter_observations_retain_live_evidence_before_leadership_and_after_failure() {
+    let voters = ["node-1", "node-2", "node-3"].map(named);
+    let mut observations = StartupVoterObservations::default();
+    observations.observe(
+        &voter_gossip(&["node-1", "node-2", "node-3"], &[]),
+        Duration::from_secs(1),
+    );
+    observations.observe(
+        &voter_gossip(&["node-1", "node-2"], &["node-3"]),
+        Duration::from_secs(2),
+    );
+
+    assert!(
+        observations
+            .unobserved_voters(&voters, Duration::from_secs(2))
+            .is_empty()
+    );
+}
+
+#[test]
+fn startup_voter_observations_expire_at_the_grace_boundary_for_a_missing_voter() {
+    let voters = [named("node-1"), named("node-3")];
+    let gossip = voter_gossip(&["node-1"], &["node-3"]);
+    let mut observations = StartupVoterObservations::default();
+    let before_expiry = VOTER_OBSERVATION_GRACE - Duration::from_nanos(1);
+    observations.observe(&gossip, before_expiry);
+    assert_eq!(
+        observations.unobserved_voters(&voters, before_expiry),
+        BTreeSet::from([named("node-3")])
+    );
+
+    assert!(
+        observations
+            .unobserved_voters(&voters, VOTER_OBSERVATION_GRACE)
+            .is_empty()
+    );
+    observations.observe(&gossip, VOTER_OBSERVATION_GRACE);
+    assert!(observations.observed_live.is_empty());
+    assert!(
+        observations
+            .unobserved_voters(&voters, VOTER_OBSERVATION_GRACE + Duration::from_secs(1))
+            .is_empty()
+    );
+}
+
+#[test]
+fn startup_voter_observations_follow_the_current_voting_membership() {
+    let mut observations = StartupVoterObservations::default();
+    observations.observe(&voter_gossip(&["node-1", "node-2"], &[]), Duration::ZERO);
+    let voters = ["node-1", "node-2", "node-3"].map(named);
+    assert_eq!(
+        observations.unobserved_voters(&voters, Duration::from_secs(1)),
+        BTreeSet::from([named("node-3")])
+    );
+
+    let voters = ["node-1", "node-2"].map(named);
+    assert!(
+        observations
+            .unobserved_voters(&voters, Duration::from_secs(2))
+            .is_empty()
+    );
+    let voters = ["node-1", "node-2", "node-4"].map(named);
+    assert_eq!(
+        observations.unobserved_voters(&voters, Duration::from_secs(3)),
+        BTreeSet::from([named("node-4")])
+    );
+}
+
+#[test]
+fn startup_voter_observations_belong_to_one_reconciliation_process() {
+    let voters = ["node-1", "node-2", "node-3"].map(named);
+    let mut first_process = StartupVoterObservations::default();
+    first_process.observe(
+        &voter_gossip(&["node-1", "node-2", "node-3"], &[]),
+        Duration::ZERO,
+    );
+    assert!(
+        first_process
+            .unobserved_voters(&voters, Duration::ZERO)
+            .is_empty()
+    );
+
+    let mut restarted_process = StartupVoterObservations::default();
+    restarted_process.observe(
+        &voter_gossip(&["node-1"], &["node-2", "node-3"]),
+        Duration::ZERO,
+    );
+    assert_eq!(
+        restarted_process.unobserved_voters(&voters, Duration::ZERO),
+        BTreeSet::from([named("node-2"), named("node-3")])
+    );
+}
 
 #[test]
 fn drop_node_quorum_error_allows_available_current_quorum() {

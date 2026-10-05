@@ -158,6 +158,7 @@ mod endpoint_intake;
 mod ingestion_time;
 mod paced_simulation;
 mod process_cluster;
+mod restarted_voter;
 mod session_protocol;
 
 const SCENARIOS_PATH: &str = "tests/features";

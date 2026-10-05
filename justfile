@@ -496,7 +496,7 @@ test-deloxide-selection selection budget_seconds: tests-deps
     within_budget scenarios \
         cargo test --features {{ quote("testing " + selection) }} --test scenarios -- \
             --input 'tests/features/**/*.feature' \
-            --tags '@deadlock_diagnostics or @restore_installation or @client_ingestor_alter_drain or @deadlock_reports or @memory_pressure_pause or @client_io_03_consumer_restore or @client_io_03_generation' \
+            --tags '@deadlock_diagnostics or @restore_installation or @client_ingestor_alter_drain or @deadlock_reports or @memory_pressure_pause or @client_io_03_consumer_restore or @client_io_03_generation or @restarted_voter_observation' \
             --retry 0
     summary="$(grep -E '^[0-9]+ scenarios? \(' "${logs}/scenarios.log" | tail -n 1 || true)"
     if [[ ! "${summary}" =~ ^([1-9][0-9]*)\ scenarios?\ \(([0-9]+)\ passed\)$ ]] \

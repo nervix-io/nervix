@@ -329,6 +329,7 @@ awaiting replicas offers its revision through the offset state it retains and re
 | consensus `incoming_snapshots` | per snapshot chunk, consensus bulk traffic | retain: bounded protocol (one transfer per peer) |
 | client-core `previews`, `servers`, `submissions`, exchange requests | client-side | retain: client-side |
 | `FaultInjectionState::executions` | registered once per testing-node startup; queried by explicit occupancy, saturation and release controls | test-only |
+| `FaultInjectionState::startup_voter_gossip` | Armed after cluster stop; direct-link controls, digest heartbeat freezing, and the first reconciliation barrier read receiver-scoped entries; release removes the entry after that pass completes | test-only startup fault observation |
 | Other `src/fault_injection.rs` maps, consensus `append_stream_opens`, the test DNS authority | test-only | test-only |
 
 ### Rust client attachment recovery

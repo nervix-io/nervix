@@ -910,22 +910,6 @@ impl GossipState {
         self.latest_admission_candidates().into_keys().collect()
     }
 
-    /// The nodes of `nodes` this view neither reports live nor declares dead: a node gossip has
-    /// not heard from since this process started, which may still be starting.
-    pub fn unobserved_node_ids<'a>(
-        &self,
-        nodes: impl IntoIterator<Item = &'a ClusterNodeName>,
-    ) -> BTreeSet<ClusterNodeName> {
-        let live = self.live_node_ids();
-        let mut unobserved = BTreeSet::new();
-        for node in nodes {
-            if !live.contains(node) && !self.dead_node_ids.contains(node) {
-                unobserved.insert(node.clone());
-            }
-        }
-        unobserved
-    }
-
     pub fn placement_candidate_node_ids(&self) -> BTreeSet<ClusterNodeName> {
         let current = self.latest_admission_candidates();
         let mut candidates = BTreeSet::new();
@@ -6768,24 +6752,6 @@ mod tests {
         assert_eq!(
             state.latest_observed_identity(&stopped),
             Some(node_identity("node-2", 4))
-        );
-    }
-
-    /// A voter gossip has neither heard from nor declared dead is unobserved: it may still be
-    /// starting. A live voter and a dead one are both observed.
-    #[test]
-    fn a_voter_gossip_neither_heard_from_nor_declared_dead_is_unobserved() {
-        let node = |name: &str| ClusterNodeName::parse(name).expect("valid node name");
-        let state = GossipState {
-            live_nodes: vec![undiscovered_node("node-1", 1)],
-            dead_node_ids: BTreeSet::from([node("node-2")]),
-            dead_node_identities: BTreeSet::new(),
-        };
-        let voters = [node("node-1"), node("node-2"), node("node-3")];
-
-        assert_eq!(
-            state.unobserved_node_ids(voters.iter()),
-            BTreeSet::from([node("node-3")])
         );
     }
 

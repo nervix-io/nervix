@@ -1269,6 +1269,14 @@ interval falls back to its gossip liveness, even though no failure was recorded.
 therefore leaves scheduling and runtime availability no later than when gossip declares it dead and
 its last observation has aged out, whether or not any probe to it completes.
 
+During startup, Chitchat's dead set can also contain a voter whose first heartbeat arrived through
+another peer's digest: the failure detector has insufficient heartbeat intervals to establish
+liveness. Automatic scheduling uses a separate process-local live-observation history for its
+first ten seconds, including observations made before acquiring leadership. A voter that has never
+been observed live keeps scheduling in that bounded wait even when Chitchat lists it dead. Once all
+current voters have been observed or the grace expires, ordinary effective availability governs
+automatic failover. See [Whole-Cluster Restart Keeps Ownership](./shutdown.md#whole-cluster-restart-keeps-ownership).
+
 Command completion reads the leader's effective availability view through the
 `application_completion_peers` management progress request. The response names the leader's
 incarnation, Raft term, and required process incarnations. A follower uses it only while its own

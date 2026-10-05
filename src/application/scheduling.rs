@@ -3,7 +3,8 @@
 //! Layer: control plane.
 //!
 //! - **Owns.** Publishing a domain schedule, cordon and drain, relocation, failover onto live
-//!   members, and the Kafka partition schedule the leader watches.
+//!   members, process-local startup voter observations, and the Kafka partition schedule the leader
+//!   watches.
 //! - **Depends on.** The registry to compute a schedule, consensus to publish it, and the ownership
 //!   handoff to move state the schedule moves.
 //! - **Must not know.** How a scheduled node executes once it is placed.
@@ -16,7 +17,7 @@ use meticulous::OptionExt as _;
 use nervix_client_core::Client as NervixClient;
 use nervix_connector_kafka::TopicPartitionInspector;
 use nervix_consensus::{
-    CommandExecution, ConsensusError, DomainMutationLease, DomainPlanningInputs,
+    CommandExecution, ConsensusError, DomainMutationLease, DomainPlanningInputs, GossipState,
     TransactionScheduleEligibility,
 };
 use nervix_models::{
@@ -49,15 +50,48 @@ use crate::{
     runtime::LocalGraphDrainOutcome,
 };
 
-/// How long a leader's automatic scheduling waits, after its reconciliation starts, for gossip to
-/// hear from or give up on every voter before it treats a voter it has not heard from as failed.
+/// How long automatic scheduling waits, after this process's reconciliation starts, to observe
+/// every voter live before treating an unobserved voter as failed.
 ///
 /// After a whole cluster restarts, the first node to lead can reach a quorum before gossip has
-/// heard from the other nodes, which are still starting. Failing their work over then would move it
+/// observed the other nodes live, which are still starting. Failing their work over then would move it
 /// away from the node that holds its state and start that state afresh. Gossip exchanges state every
 /// half second, so the grace covers many rounds, and a voter that has not appeared by its end is
 /// treated as failed exactly as before.
 pub(in crate::application) const VOTER_OBSERVATION_GRACE: Duration = Duration::from_secs(10);
+
+/// Live voter observations owned by one process's reconciliation task, including while it follows.
+/// A first relayed heartbeat can be classified dead before gossip has enough samples for liveness;
+/// that verdict supplies no live observation and cannot end the startup wait.
+#[derive(Default)]
+pub(in crate::application) struct StartupVoterObservations {
+    observed_live: BTreeSet<ClusterNodeName>,
+}
+
+impl StartupVoterObservations {
+    pub(in crate::application) fn observe(&mut self, gossip: &GossipState, elapsed: Duration) {
+        if elapsed < VOTER_OBSERVATION_GRACE {
+            self.observed_live.extend(gossip.live_node_ids());
+        } else {
+            self.observed_live.clear();
+        }
+    }
+
+    pub(in crate::application) fn unobserved_voters(
+        &self,
+        voters: &[ClusterNodeName],
+        elapsed: Duration,
+    ) -> BTreeSet<ClusterNodeName> {
+        if elapsed >= VOTER_OBSERVATION_GRACE {
+            return BTreeSet::new();
+        }
+        voters
+            .iter()
+            .filter(|voter| !self.observed_live.contains(*voter))
+            .cloned()
+            .collect()
+    }
+}
 
 pub(in crate::application) const LEADER_KAFKA_PARTITION_WATCH_INTERVAL: Duration =
     Duration::from_secs(1);

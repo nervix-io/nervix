@@ -1527,7 +1527,9 @@ sites in separate lifetimes, read-only/consistent-order controls, runtime-disabl
 context/retention overload and failed/blocked output. The commands also run one-/three-node
 `@deadlock_diagnostics`, `@restore_installation`, `@client_ingestor_alter_drain`,
 `@memory_pressure_pause`, `@client_io_03_consumer_restore`, `@client_io_03_generation` and the local
-`@deadlock_reports` workflow without retries. The commands also run `@paced_simulation_reopen` on
+`@deadlock_reports` workflow without retries. The `@restarted_voter_observation` workload reaches
+whole-cluster restart and automatic scheduling with one relayed voter heartbeat; its test-only
+watch channels and concurrent fault map remain untracked. The commands also run `@paced_simulation_reopen` on
 one and three nodes: the Rust driver uses the selected diagnostic capability, while Python runs
 against diagnostic nodes with its ordinary shared binding. Python locks and condition variables
 remain outside the detector. Zero probes or incomplete scenario accounting fail. After successful process outcomes,

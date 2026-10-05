@@ -61,7 +61,11 @@ The diagnostic commands also select the ordinary `@restore_installation` and
 inspection/export/triage workflow. They exercise
 the blocking applied-state guard through interrupted checkpoint staging, complete publication and
 runtime handle clearing, including a delayed coordinator after leadership transfer and a
-successor's START. The report tool is an ordinary local executable, even when the scenario process selects order
+successor's START. The `@restarted_voter_observation` scenario also runs in both selections, reaching
+whole-cluster teardown, reopening each node's store, and automatic scheduling after the first
+relayed voter heartbeat. Its watch-channel barrier and concurrent fault map are untracked; the
+diagnostic evidence covers blocking locks reached by restart and scheduling.
+The report tool is an ordinary local executable, even when the scenario process selects order
 analysis. Potential findings remain recorded without ending the process; any unreviewed workload
 finding prevents diagnostic qualification. Real server children and the scenario process record
 the same compile-time/runtime selection, and each invocation retains a fresh artifact directory.
@@ -245,6 +249,18 @@ The boundary between them is kept in four places.
   run again. A killed voter restarts from its own database and ports, and the step then waits for
   the same leader and three voters as a whole restart does. While a voter is killed or frozen, the
   fixture asks only the running ones which node leads.
+  The restarted-voter observation fixture stops every in-process node before arming its fault.
+  It blocks direct gossip between the first leader and one voter, then holds that voter's first
+  relayed heartbeat while allowing the other voters' heartbeats to advance. The leader's
+  reconciliation starts after that sample arrives, so slow harness startup cannot consume the
+  product's observation grace. A one-shot barrier captures a scheduling pass inside that grace
+  with the voter marked unavailable; its elapsed-time decision is captured before the barrier
+  waits. The scenario checks the failure-detector verdict and final ownership through public
+  cluster status. Releasing the barrier waits for that pass to finish before restoring heartbeats
+  and application health. While the heartbeat is held, peer startup waits for listeners; Raft
+  catch-up is checked after release, so the fixture never waits for progress its own fault prevents.
+  This is an in-process scheduling regression; immutable-image external
+  Chaos runs retain the real-process crash and restart evidence.
 - **Test defaults.** An in-process node's shutdown timeout defaults to four minutes rather than the
   product's `50s`, which leaves the bounded shutdown phases scenarios configure by default room to
   finish, so only a scenario about the deadline reaches it. A server process runs with the product
