@@ -218,6 +218,20 @@ class PublicationTests(unittest.TestCase):
             self.assertIn("read-only token", errors.getvalue())
             self.assertIn("Advisory", output.read_text())
 
+    def test_repository_discovery_failure_also_retains_the_local_report(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            output = root / "report.md"
+            patch = patch_coverage.Patch("base", "head", {})
+            with mock.patch.dict("os.environ", {"GITHUB_REPOSITORY": ""}):
+                with mock.patch.object(patch_coverage.Patch, "load", return_value=patch):
+                    with mock.patch.object(patch_coverage.Coverage, "load", return_value=patch_coverage.Coverage({})):
+                        with mock.patch.object(patch_coverage, "command", side_effect=OSError("gh unavailable")):
+                            with redirect_stderr(io.StringIO()), redirect_stdout(io.StringIO()):
+                                status = patch_coverage.main(["--pr", "12", "--output", str(output)], root=root)
+            self.assertEqual(status, 0)
+            self.assertIn("Advisory", output.read_text())
+
 
 class WorkflowTests(unittest.TestCase):
     def test_ci_runs_the_advisory_command_with_the_pr_head_and_retains_its_report(self) -> None:

@@ -235,8 +235,6 @@ def main(arguments: Sequence[str] | None = None, *, root: Path = ROOT) -> int:
         coverage = Coverage.load(root, options.report or [root / "lcov-workspace.info"], options.source_root)
         measured = coverage.measure(patch)
         repo = options.repo
-        if options.pr and not repo:
-            repo = command(["gh", "repo", "view", "--json", "nameWithOwner", "--jq", ".nameWithOwner"], root=root).strip()
         body = measured.markdown(repo)
         output = root / options.output
         output.parent.mkdir(parents=True, exist_ok=True)
@@ -246,6 +244,8 @@ def main(arguments: Sequence[str] | None = None, *, root: Path = ROOT) -> int:
             with Path(summary).open("a", encoding="utf-8") as content:
                 content.write(body)
         if options.pr:
+            if not repo:
+                repo = command(["gh", "repo", "view", "--json", "nameWithOwner", "--jq", ".nameWithOwner"], root=root).strip()
             Publication(repo, options.pr, options.pr_head or patch.head).publish(body)
     except (OSError, RunnerError, RuntimeError, ValueError, SyntaxError, KeyError, subprocess.SubprocessError) as error:
         print(f"patch coverage: {error}", file=sys.stderr)
