@@ -58,10 +58,10 @@ jobs:
       - name: Setup uv
         uses: astral-sh/setup-uv@v6
 
-      - name: Install just
+      - name: Install just and toml-cli
         uses: taiki-e/install-action@v2
         with:
-          tool: just@latest
+          tool: just@latest,toml-cli
 
       - name: Measure Python runner coverage
         run: just coverage-bolero-runner
