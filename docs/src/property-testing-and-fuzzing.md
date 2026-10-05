@@ -228,13 +228,16 @@ metadata with a 7,200-second compilation deadline; it does not count as a comple
 The sanitizer CI job runs only on PRs labeled `fuzz`, prepares that server binary with one Cargo
 build job to bound compiler memory, and allows 180 minutes for preparation, all target campaigns,
 failure qualification and artifact upload. An expected sanitizer skip contributes no execution or
-coverage evidence. The Check workflow's validation job and the dedicated Bolero discovery job
-retain their separate scopes and limits.
+coverage evidence. The Check workflow's validation job and the Bolero randomized job
+retain their separate scopes and limits. Check calls the reusable Bolero workflow with its exact
+tested SHA, event and label snapshot. Scheduled and manual Bolero runs execute randomized checks
+and record a deliberate sanitizer skip.
 
 The fuzz profile uses one codegen unit, optimization level two and debug level one. The full
 server package uses optimization level one and no debug output to keep its instrumented build
 within the compilation budget. Both profiles retain debug assertions, overflow checks,
-AddressSanitizer and libFuzzer coverage feedback; ordinary and release builds are unchanged.
+AddressSanitizer and libFuzzer coverage feedback. Live campaigns also use Rust source
+instrumentation; ordinary and release builds retain their own settings.
 
 An instrumented build has a 1,800-second deadline. On a loaded development host,
 `BOLERO_BUILD_TIMEOUT_SECONDS=7200 just fuzz <id> 30` grants compilation more time. The override
@@ -265,6 +268,7 @@ just test-bolero
 just test-bolero nspl-model
 just fuzz nspl-model 30
 just fuzz-all 30
+just coverage-bolero 30
 just fuzz-replay nspl-model <saved-input>
 just fuzz-reduce nspl-model <saved-input>
 ```
@@ -310,7 +314,8 @@ CI prepares the server library with both the empty and `testing` feature sets.
 The target must subsequently pass `just fuzz <id>` with the ordinary build and case
 limits; CI campaigns continue to use that bounded runner.
 
-PR CI runs a required ordinary randomized/corpus job. The sanitizer libFuzzer job runs only when
+PR CI runs a required ordinary randomized/corpus job through Check's reusable Bolero call. The
+sanitizer libFuzzer job runs only when
 the PR has the `fuzz` label, with 30 seconds of engine time per target. Both jobs use the native
 [CI linker](./developing-nervix.md#validation-and-tests), including sanitizer builds that supply
 their own compiler flags. Adding or removing the
@@ -326,6 +331,54 @@ inputs before cleanup. `fuzz-replay` stages saved bytes in the target's actual c
 directory and runs the ordinary assertion with zero randomized cases. `fuzz-reduce`
 uses libFuzzer crash minimization and verifies that minimized bytes still fail that assertion.
 A random seed reproduces one generated case, not an entire entropy-driven campaign.
+
+## Live Rust Source Coverage
+
+`just fuzz <id> <seconds>` and `just fuzz-all <seconds>` collect Rust source coverage from the
+inputs the live libFuzzer process executes, including candidates it discards from its retained
+corpus. `just coverage-bolero <seconds>` runs the command/artifact tests, all live campaigns and
+failure qualification while collecting the separate Python runner report. It does not rerun the
+randomized producer that CI already requires independently.
+
+The shared build path adds `-C instrument-coverage` to cargo-bolero's sanitizer flags, retaining
+the pinned nightly, assertions, optimization settings, case/input limits and kache wrapper.
+Encoded Cargo flags are rejected because they would override cargo-bolero's sanitizer flags.
+Preparation and the zero-run build probe discard their counters. Ordinary discovery, exact replay
+and deliberate failure qualification also discard counters; they cannot enter a product campaign
+report or mix stable profiles with nightly profiles.
+
+Each invocation allocates a fresh
+`target/native-coverage/bolero-fuzz/fuzz/<nightly>/<attempt>/` directory. Each selected target
+has its own `targets/<id>/` directory there, with `profiles/%p-%m.profraw`, `executions.jsonl`,
+`lcov.info`, `export.log` and `completion.json`. The runner records the exact executable returned
+by the hashed fuzz build and its Cargo fingerprint, effective compiler flags and profile settings.
+It holds the fuzz build directory through execution and export, so another collector cannot
+replace those objects. The shared native exporter matches profile binary IDs to retained
+executables and any required child objects, using the producing nightly's own `llvm-profdata`
+and `llvm-cov`. Missing objects, absent counters and unreadable or mixed-format profiles fail
+collection. LCOV paths are repository-relative; dependency, generated and harness files follow
+the native collector's exclusion policy. Tests inline in an included source file retain that
+file's attribution.
+
+A successful target has a `complete` record only after a successful engine exit with nonzero
+completed inputs and a successful source export. The aggregate report beside the invocation's
+completion record is complete only after all selected registered targets complete. The record
+retains the inventory digest and exact entries, selection and discovered/executed/completed
+counts, revision and whether it was modified, compiler/LLVM identity, workflow run and attempt,
+event and labels, campaign limits, input throughput and source attribution. A focused invocation
+states its selection and never claims the rest of the inventory ran.
+
+A crash, abort, deadline or interrupt stays failed or interrupted even if it left some counters.
+The runner retains its original corpus, crash input, logs and incomplete evidence; it does not
+export those counters as a successful campaign. Failure minimization and exact replay remain
+independent qualification, with their original failure retained. No corpus replay substitutes for
+the live measurement.
+
+CI publishes `coverage-bolero-fuzz` for live campaign reports and completion evidence,
+`bolero-runs` for corpus/crash and qualification artifacts, and `bolero-selection` for the exact
+eligible producer verdicts, including deliberate skips. The native report uses the `bolero-fuzz`
+Codecov flag; the Python report keeps `bolero`. Fuzz reports remain separate from ordinary
+workspace coverage and its CRAP gate. A sanitizer skip publishes no fuzz coverage artifact.
 
 ## Adding A Target
 

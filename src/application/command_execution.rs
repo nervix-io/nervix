@@ -475,7 +475,7 @@ impl SessionServiceImpl {
                 let result = service
                     .execute_persistent_command(&execution, &mut subscriptions)
                     .await;
-                if result.is_not_leader() {
+                if command_awaits_recovery(&result) {
                     return;
                 }
                 if let Err(error) = service
@@ -486,6 +486,7 @@ impl SessionServiceImpl {
                         &result,
                     )
                     .await
+                    && !command_awaits_recovery(&error)
                 {
                     service.broadcast_error(format!(
                         "failed to record resumed command execution '{}': {}",
@@ -848,7 +849,7 @@ impl SessionServiceImpl {
         request_digest: [u8; 32],
         result: &CommandResult,
     ) -> Result<CommandResult, Box<CommandResult>> {
-        let durable_result = durable_command_result(result);
+        let durable_result = durable_command_result(result)?;
         let execution = match self
             .inner
             .consensus
@@ -1046,12 +1047,20 @@ fn outcome_unknown(cause: OutcomeUnknownCause, message: String) -> CommandResult
     }
 }
 
-/// The record the execution ledger keeps of a finished command.
-///
-/// Only a completion, a failure and a refused commit are ever recorded: a command that was
-/// redirected or whose outcome is unknown is not finished. Such a disposition reaching this point
-/// is kept as a failure.
-fn durable_command_result(result: &CommandResult) -> CommandExecutionResult {
+/// Whether another attempt under the same reference must determine the outcome.
+fn command_awaits_recovery(result: &CommandResult) -> bool {
+    matches!(
+        result.disposition,
+        CommandDisposition::NotLeader(_)
+            | CommandDisposition::OutcomeUnknown(_)
+            | CommandDisposition::TransactionDetached { .. }
+    )
+}
+
+/// A terminal record, or the unchanged disposition that leaves the execution applying.
+fn durable_command_result(
+    result: &CommandResult,
+) -> Result<CommandExecutionResult, Box<CommandResult>> {
     let disposition = match &result.disposition {
         CommandDisposition::Completed { already_existed } => {
             CommandExecutionDisposition::Completed {
@@ -1064,15 +1073,17 @@ fn durable_command_result(result: &CommandResult) -> CommandExecutionResult {
                 current: current.clone(),
             })
         }
-        CommandDisposition::Failed
-        | CommandDisposition::NotLeader(_)
-        | CommandDisposition::TransactionDetached { .. }
-        | CommandDisposition::TransactionTakenOver { .. }
+        CommandDisposition::NotLeader(_)
         | CommandDisposition::OutcomeUnknown(_)
+        | CommandDisposition::TransactionDetached { .. } => {
+            return Err(Box::new(result.clone()));
+        }
+        CommandDisposition::Failed
+        | CommandDisposition::TransactionTakenOver { .. }
         | CommandDisposition::ExecutionReferenceConflict(_)
         | CommandDisposition::ExecutionReferenceExpired => CommandExecutionDisposition::Failed,
     };
-    CommandExecutionResult {
+    Ok(CommandExecutionResult {
         disposition,
         message: result.message.clone(),
         diagnostics: result
@@ -1089,7 +1100,7 @@ fn durable_command_result(result: &CommandResult) -> CommandExecutionResult {
         transaction_admission: result.transaction_admission.clone(),
         backup: result.backup.as_deref().cloned(),
         restore: result.restore.as_deref().cloned(),
-    }
+    })
 }
 
 fn durable_transaction_status(status: &TransactionStatus) -> CommandExecutionTransactionStatus {
@@ -1369,25 +1380,39 @@ mod tests {
             )
         };
 
-        let restored = command_result(durable_command_result(&result));
+        let restored = command_result(
+            durable_command_result(&result).assured("the command has a terminal outcome"),
+        );
 
         assert_eq!(restored, result);
     }
 
     #[test]
-    fn durable_command_results_keep_only_finished_dispositions() {
+    fn an_unknown_command_outcome_remains_unfinished() {
+        for cause in [
+            OutcomeUnknownCause::LeadershipLost,
+            OutcomeUnknownCause::StillApplying,
+            OutcomeUnknownCause::NotYetAuthoritative,
+        ] {
+            let result = outcome_unknown(cause, "the admitted command needs recovery".to_string());
+            assert!(command_awaits_recovery(&result));
+            assert_eq!(durable_command_result(&result), Err(Box::new(result)));
+        }
+    }
+
+    #[test]
+    fn routing_results_leave_the_admitted_command_applying() {
         for disposition in [
             CommandDisposition::NotLeader(crate::application::command_result::LeaderRedirect {
                 leader: None,
             }),
-            CommandDisposition::OutcomeUnknown(OutcomeUnknownCause::LeadershipLost),
-            CommandDisposition::ExecutionReferenceExpired,
+            CommandDisposition::TransactionDetached {
+                transaction_id: "transaction-1".to_string(),
+            },
         ] {
             let result = CommandResult::new(disposition, "not finished".to_string());
-            let durable = durable_command_result(&result);
-            assert_eq!(durable.disposition, CommandExecutionDisposition::Failed);
-            let restored = command_result(durable);
-            assert_eq!(restored.disposition, CommandDisposition::Failed);
+            assert!(command_awaits_recovery(&result));
+            assert_eq!(durable_command_result(&result), Err(Box::new(result)));
         }
     }
 
@@ -1401,7 +1426,9 @@ mod tests {
             "transaction 'transaction-1' was planned from different inputs".to_string(),
         );
 
-        let restored = command_result(durable_command_result(&result));
+        let restored = command_result(
+            durable_command_result(&result).assured("the refused commit has a terminal outcome"),
+        );
 
         assert_eq!(restored, result);
     }

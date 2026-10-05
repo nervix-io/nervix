@@ -24,6 +24,12 @@ deloxide = [
   "nervix-deadlock/deloxide",
   "nervix-primitives/deloxide",
 ]
+# The same diagnostic mode with compile-time historical lock-order instrumentation.
+deloxide-order = [
+  "deloxide",
+  "nervix-deadlock/deloxide-order",
+  "nervix-primitives/deloxide-order",
+]
 # Selects Loom's primitives for the whole graph, and runs the Loom models of the server's owners.
 loom = [
   "nervix-consensus/loom",
@@ -55,6 +61,7 @@ shuttle = [
   "nervix-connector-syslog/shuttle",
   "nervix-connector-zeromq/shuttle",
   "nervix-consensus/shuttle",
+  "nervix-deadlock?/shuttle",
   "nervix-execution/shuttle",
   "nervix-interconnect/shuttle",
   "nervix-model-harness/shuttle",

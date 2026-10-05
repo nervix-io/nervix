@@ -585,6 +585,11 @@ archive summary of a completed backup. It does
 not keep the typed inspection, WASM state, or resource description that a describing statement
 returns, because those statements are reads and record nothing.
 
+An execution whose attempt returns `OutcomeUnknown`, a leader redirect, or `TransactionDetached`
+stays applying. The finalization boundary returns that disposition unchanged and leaves recovery
+under the original reference to determine the terminal outcome. Reconciliation follows the same
+rule when an attempt is interrupted after admission.
+
 The same rule covers every transaction control:
 
 - **`BEGIN`.** The new transaction's identity is fixed when the request is admitted. Repeating a

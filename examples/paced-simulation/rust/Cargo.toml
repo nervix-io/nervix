@@ -15,6 +15,11 @@ deloxide = [
   "nervix-deadlock/deloxide",
   "nervix-primitives/deloxide",
 ]
+deloxide-order = [
+  "deloxide",
+  "nervix-deadlock/deloxide-order",
+  "nervix-primitives/deloxide-order",
+]
 
 [lib]
 path = "src/lib.rs"

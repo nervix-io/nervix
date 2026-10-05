@@ -181,3 +181,10 @@ checks = [
   "restore::tests::shuttle_restore_reclamation_holds_the_revision_through_queued_installation",
 ]
 name = "nervix-consensus"
+
+[[package]]
+checks = [
+  "handoff_tests::shuttle_bounded_report_handoff_accounts_for_concurrent_delivery_and_refusals",
+  "handoff_tests::shuttle_report_handoff_close_preserves_admitted_reports_and_counts_refusals",
+]
+name = "nervix-deadlock"

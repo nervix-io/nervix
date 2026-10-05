@@ -37,53 +37,53 @@ bolero-deps: build-web-console
 
 # Prepare one declared sanitizer target through the shared build path, without a campaign.
 prepare-bolero target: bolero-deps
-    BOLERO_BUILD_TIMEOUT_SECONDS=7200 python3 scripts/bolero.py prepare {{ quote(target) }}
+    BOLERO_BUILD_TIMEOUT_SECONDS=7200 python3 -m scripts.bolero prepare {{ quote(target) }}
 
 # The registry and window properties share this declared server library and feature set.
 prepare-archive-counts-fuzz: (prepare-bolero "registry-archived-models")
 
 # Run all registered properties with bounded randomized cases and source-adjacent corpus replay.
 test-bolero filter="": bolero-deps
-    python3 scripts/bolero.py test {{ quote(filter) }}
+    python3 -m scripts.bolero test {{ quote(filter) }}
 
 # List every compiled, registered Bolero target after checking the inventory.
 fuzz-list: bolero-deps
-    python3 scripts/bolero.py list
+    python3 -m scripts.bolero list
 
 # Run one target through sanitizer-backed libFuzzer. Duration is in seconds.
 fuzz target duration="30": bolero-deps
-    python3 scripts/bolero.py fuzz {{ quote(target) }} {{ quote(duration) }}
+    python3 -m scripts.bolero fuzz {{ quote(target) }} {{ quote(duration) }}
 
 # Run every target through sanitizer-backed libFuzzer. Duration is per target in seconds.
 fuzz-all duration="30": bolero-deps
-    python3 scripts/bolero.py fuzz-all {{ quote(duration) }}
+    python3 -m scripts.bolero fuzz-all {{ quote(duration) }}
 
 # Replay the exact saved input through its ordinary property assertion.
 fuzz-replay target failure: bolero-deps
-    python3 scripts/bolero.py replay {{ quote(target) }} {{ quote(failure) }}
+    python3 -m scripts.bolero replay {{ quote(target) }} {{ quote(failure) }}
 
 # Minimize a saved failure with libFuzzer and verify the minimized input still fails.
 fuzz-reduce target failure: bolero-deps
-    python3 scripts/bolero.py reduce {{ quote(target) }} {{ quote(failure) }}
+    python3 -m scripts.bolero reduce {{ quote(target) }} {{ quote(failure) }}
 
 # Compare the inventory, package declarations, test harness and compiled Bolero targets.
 validate-bolero: bolero-deps
-    python3 scripts/bolero.py validate
+    python3 -m scripts.bolero validate
 
 # Check the dedicated Bolero workflow with the pinned Actions linter.
 validate-bolero-workflow: (validate-workflows ".github/workflows/bolero.yaml")
 
 # Check selected Actions workflows, or all workflows when no paths are supplied.
 validate-workflows *workflows:
-    go run github.com/rhysd/actionlint/cmd/actionlint@v1.7.7 {{ workflows }}
+    go run github.com/rhysd/actionlint/cmd/actionlint@v1.7.12 {{ workflows }}
 
 # Qualify nonzero failures, saved crashes, minimization, exact replay and case timeouts.
 qualify-bolero: bolero-deps
-    python3 scripts/bolero.py qualify
+    python3 -m scripts.bolero qualify
 
 # Exercise the inventory and runner's validation and failure paths.
 test-bolero-runner: build-web-console
-    python3 -m unittest scripts.tests.test_bolero
+    python3 -m unittest scripts.tests.test_bolero scripts.tests.test_bolero_coverage
 
 # Measure runner edits without launching unrelated product fuzz campaigns.
 coverage-bolero-runner:
@@ -91,20 +91,19 @@ coverage-bolero-runner:
     set -euo pipefail
     mkdir -p target/bolero
     coverage=(uvx --from coverage==7.11.0 coverage)
-    "${coverage[@]}" run --data-file target/bolero/runner.coverage --branch --source=scripts.bolero,scripts.build_web_console,scripts.tests.test_bolero -m unittest scripts.tests.test_bolero
+    "${coverage[@]}" run --data-file target/bolero/runner.coverage --branch --source=scripts.bolero,scripts.bolero_coverage,scripts.build_web_console,scripts.tests.test_bolero,scripts.tests.test_bolero_coverage -m unittest scripts.tests.test_bolero scripts.tests.test_bolero_coverage
     "${coverage[@]}" lcov --data-file target/bolero/runner.coverage -o target/bolero/python-runner.lcov
 
-# Collect runner line coverage while exercising real libFuzzer and its failure qualification.
+# Collect distinct Python runner and live Rust source reports, then qualify failure retention.
 # The duration is per product target; CI passes 30 on PRs labeled `fuzz`.
 coverage-bolero duration="2": bolero-deps
     #!/usr/bin/env bash
     set -euo pipefail
     coverage=(uvx --from coverage==7.11.0 coverage)
     "${coverage[@]}" erase
-    "${coverage[@]}" run --branch --source=scripts.bolero,scripts.build_web_console,scripts.tests.test_bolero -m unittest scripts.tests.test_bolero
-    "${coverage[@]}" run --branch -a --source=scripts.bolero,scripts.build_web_console,scripts.tests.test_bolero scripts/bolero.py test
-    "${coverage[@]}" run --branch -a --source=scripts.bolero,scripts.build_web_console,scripts.tests.test_bolero scripts/bolero.py fuzz-all {{ quote(duration) }}
-    "${coverage[@]}" run --branch -a --source=scripts.bolero,scripts.build_web_console,scripts.tests.test_bolero scripts/bolero.py qualify
+    "${coverage[@]}" run --branch --source=scripts.bolero,scripts.bolero_coverage,scripts.build_web_console,scripts.tests.test_bolero,scripts.tests.test_bolero_coverage -m unittest scripts.tests.test_bolero scripts.tests.test_bolero_coverage
+    "${coverage[@]}" run --branch -a --source=scripts.bolero,scripts.bolero_coverage,scripts.build_web_console,scripts.tests.test_bolero,scripts.tests.test_bolero_coverage -m scripts.bolero fuzz-all {{ quote(duration) }}
+    "${coverage[@]}" run --branch -a --source=scripts.bolero,scripts.bolero_coverage,scripts.build_web_console,scripts.tests.test_bolero,scripts.tests.test_bolero_coverage -m scripts.bolero qualify
     mkdir -p target/bolero
     "${coverage[@]}" lcov -o target/bolero/python.lcov
     "${coverage[@]}" report --fail-under=80
@@ -115,19 +114,25 @@ coverage-bolero-restore duration="30": build-web-console
     set -euo pipefail
     coverage=(uvx --from coverage==7.11.0 coverage)
     "${coverage[@]}" erase
-    "${coverage[@]}" run --branch --source=scripts.bolero -m unittest scripts.tests.test_bolero
-    "${coverage[@]}" run --branch -a scripts/bolero.py test restore-installation
+    "${coverage[@]}" run --branch --source=scripts.bolero -m unittest scripts.tests.test_bolero scripts.tests.test_bolero_coverage
+    "${coverage[@]}" run --branch -a -m scripts.bolero test restore-installation
     for target in restore-installation-wire restore-installation-storage; do
-        "${coverage[@]}" run --branch -a scripts/bolero.py fuzz "${target}" {{ quote(duration) }}
+        "${coverage[@]}" run --branch -a -m scripts.bolero fuzz "${target}" {{ quote(duration) }}
     done
-    "${coverage[@]}" run --branch -a scripts/bolero.py qualify
+    "${coverage[@]}" run --branch -a -m scripts.bolero qualify
     mkdir -p target/bolero
     "${coverage[@]}" lcov -o target/bolero/python.lcov
     "${coverage[@]}" report --fail-under=80
 
 build-deps: generate-test-onnx download-onnxruntime build-web-console wasm-processor-guests
 
-tests-deps: build-deps build-nspl-format build-test-cli build-paced-simulation
+tests-deps: build-deps build-nspl-format build-test-cli build-paced-simulation build-deadlock-report
+
+build-deadlock-report:
+    CARGO_TARGET_DIR={{ cargo_target_dir }} cargo build --package nervix-deadlock --features report-tool --bin nervix-deadlock-report
+
+deadlock-report *args:
+    cargo run --quiet --package nervix-deadlock --features report-tool --bin nervix-deadlock-report -- {{ args }}
 
 build-test-cli:
     CARGO_TARGET_DIR={{ cargo_target_dir }} cargo build --package nervix-cli --bin nervix-cli
@@ -389,6 +394,7 @@ test-primitives-turmoil:
 
 test-primitives-deloxide:
     cargo test --package nervix-primitives --features 'deloxide native' --lib
+    cargo test --package nervix-primitives --features 'deloxide-order native' --lib
 
 # The conformance checks that compile rather than run: the documentation tests that a runtime
 # attribute refuses a crate path, that a product binary has the forms each mode builds, and that the
@@ -397,6 +403,7 @@ test-primitives-deloxide:
 test-primitives-compile:
     cargo test --package nervix-primitives --features native --doc
     cargo test --package nervix-primitives --features 'deloxide native' --doc
+    cargo test --package nervix-primitives --features 'deloxide-order native' --doc
     cargo check --package nervix-primitives --lib --target wasm32-unknown-unknown
 
 # Run the diagnostic mode's checks in builds of their own under target/deloxide, so the diagnostic
@@ -407,8 +414,9 @@ test-primitives-compile:
 # start-up, quiet-output and recording-failure cases end as their contract says. A child that never
 # ends is killed by its probe's watchdog and fails it. The diagnostic node smoke then runs the
 # `@deadlock_diagnostics`, `@restore_installation`, `@client_ingestor_alter_drain`,
-# `@memory_pressure_pause`, `@client_io_03_consumer_restore` and `@client_io_03_generation`
-# scenarios, without retries, in a scenario binary built for the mode: in-process nodes, real
+# `@deadlock_reports`, `@memory_pressure_pause`, `@client_io_03_consumer_restore` and
+# `@client_io_03_generation` scenarios, without retries, in a scenario binary built for the mode:
+# in-process nodes, real
 # diagnostic server processes on one and three nodes, buffered client alterations, interrupted
 # restore installation and stale publication after leadership transfer, the memory-pressure pause
 # of starting and running ingestors, and Rust client consumers restored after a session restart and
@@ -418,17 +426,27 @@ test-primitives-compile:
 # invocation's output stays under target/deloxide/test-deloxide, and the scenario binary's own
 # evidence under its evidence directory there. State-store owner tests also exercise staging,
 # snapshot views, queued writers, interrupted publication and multi-batch cleanup under tracked
-# installation locks. An invocation that executed no check fails the run,
-# and so does a smoke whose scenarios did not all run and pass. The whole run is bounded by
-# `budget_seconds` and exits with 124 when it expires.
-test-deloxide budget_seconds="2400": tests-deps
+# installation locks. An invocation that executed no check fails the run, and so does a smoke
+# whose scenarios did not all run and pass. Diagnostic compilation and execution share
+# `budget_seconds` and exit with 124 when it expires; prerequisites run first.
+test-deloxide budget_seconds="2400": (test-deloxide-selection "deloxide" budget_seconds)
+
+# Historical order instrumentation, with the same active probes and real node workloads.
+test-deloxide-order budget_seconds="2400": (test-deloxide-selection "deloxide-order" budget_seconds)
+
+[private]
+test-deloxide-selection selection budget_seconds: tests-deps
     #!/usr/bin/env bash
     set -euo pipefail
     export CARGO_TARGET_DIR={{ quote(cargo_target_dir + "/deloxide") }}
     export NERVIX_TEST_CLI_PATH={{ quote(cargo_target_dir + "/debug/nervix-cli") }}
-    logs="${CARGO_TARGET_DIR}/test-deloxide"
-    rm -rf "${logs}"
+    root="${CARGO_TARGET_DIR}/test-deloxide/{{ selection }}"
+    mkdir -p "${root}"
+    logs="$(mktemp -d "${root}/run.XXXXXX")"
     mkdir -p "${logs}/evidence"
+    export NERVIX_DEADLOCK_PROBE_ARTIFACTS="${logs}/probes"
+    export NERVIX_DEADLOCK_REPORT_TOOL={{ quote(cargo_target_dir + "/debug/nervix-deadlock-report") }}
+    git rev-parse HEAD >"${logs}/revision"
     deadline=$(( $(date +%s) + {{ budget_seconds }} ))
     within_budget() {
         local name="$1"
@@ -450,22 +468,25 @@ test-deloxide budget_seconds="2400": tests-deps
             exit "${status}"
         fi
     }
-    cargo test --no-run --package nervix-deadlock --features deloxide --test active_cycles
+    within_budget probes-build \
+        cargo test --no-run --package nervix-deadlock --features {{ quote(selection) }} --test active_cycles
     within_budget probes \
-        cargo test --package nervix-deadlock --features deloxide --test active_cycles
+        cargo test --package nervix-deadlock --features {{ quote(selection) }} --test active_cycles
     python3 -m scripts.libtest_accounting deloxide "${logs}/probes.log"
     export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
     export NERVIX_DEADLOCK_EVIDENCE="${logs}/evidence"
-    cargo test --no-run --features 'testing deloxide' --lib
+    within_budget restore-storage-build \
+        cargo test --no-run --features {{ quote("testing " + selection) }} --lib
     within_budget restore-storage \
-        cargo test --features 'testing deloxide' --lib -- \
+        cargo test --features {{ quote("testing " + selection) }} --lib -- \
             runtime::state_store::backup::tests::deloxide_restore_storage --exact
     python3 -m scripts.libtest_accounting deloxide "${logs}/restore-storage.log"
-    cargo test --no-run --features 'testing deloxide' --test scenarios
+    within_budget scenarios-build \
+        cargo test --no-run --features {{ quote("testing " + selection) }} --test scenarios
     within_budget scenarios \
-        cargo test --features 'testing deloxide' --test scenarios -- \
+        cargo test --features {{ quote("testing " + selection) }} --test scenarios -- \
             --input 'tests/features/**/*.feature' \
-            --tags '@deadlock_diagnostics or @restore_installation or @client_ingestor_alter_drain or @memory_pressure_pause or @client_io_03_consumer_restore or @client_io_03_generation' \
+            --tags '@deadlock_diagnostics or @restore_installation or @client_ingestor_alter_drain or @deadlock_reports or @memory_pressure_pause or @client_io_03_consumer_restore or @client_io_03_generation' \
             --retry 0
     summary="$(grep -E '^[0-9]+ scenarios? \(' "${logs}/scenarios.log" | tail -n 1 || true)"
     if [[ ! "${summary}" =~ ^([1-9][0-9]*)\ scenarios?\ \(([0-9]+)\ passed\)$ ]] \
@@ -474,11 +495,12 @@ test-deloxide budget_seconds="2400": tests-deps
         exit 1
     fi
     echo "test-deloxide: probes accounted for and ${summary}"
-    cargo build --package nervix-paced-simulation --features deloxide
+    within_budget paced-driver-build \
+        cargo build --package nervix-paced-simulation --features {{ quote(selection) }}
     export NERVIX_PACED_SIMULATION_PATH="${CARGO_TARGET_DIR}/debug/nervix-paced-simulation"
     export NERVIX_CLIENT_LIBRARY={{ quote(cargo_target_dir + "/debug/libnervix_client_ffi.so") }}
     within_budget paced-simulation \
-        cargo test --features 'testing deloxide' --test scenarios -- \
+        cargo test --features {{ quote("testing " + selection) }} --test scenarios -- \
             --input tests/features/runtime/paced_simulation.feature \
             --tags @paced_simulation_reopen --retry 0
     summary="$(grep -E '^[0-9]+ scenarios? \(' "${logs}/paced-simulation.log" | tail -n 1 || true)"
@@ -488,11 +510,24 @@ test-deloxide budget_seconds="2400": tests-deps
         exit 1
     fi
     echo "test-deloxide: paced driver ${summary}"
+    mapfile -d '' -t evidence_files < <(find "${logs}/evidence" -type f -name 'deadlock-*.rkyv' -print0)
+    if (( ${#evidence_files[@]} == 0 )); then
+        echo "test-deloxide: no process evidence was retained" >&2
+        exit 1
+    fi
+    for index in "${!evidence_files[@]}"; do
+        within_budget "evidence-${index}" "${NERVIX_DEADLOCK_REPORT_TOOL}" qualify "${evidence_files[index]}"
+    done
+    echo "test-deloxide: ${#evidence_files[@]} process observations qualified"
+
+# Focused disposable-process reproducer and diagnostic checks, preserving configured kache.
+test-deadlock-probes features="deloxide" *args:
+    CARGO_TARGET_DIR={{ quote(cargo_target_dir + "/deloxide") }} cargo test --package nervix-deadlock --features {{ quote(features) }} --test active_cycles {{ args }}
 
 # The packages whose `shuttle_` checks `test-shuttle` explores, as the Shuttle inventory lists them,
 # and whose test builds `shuttle-clippy-targets` lints. scripts/tests/test_shuttle_checks.py holds
 # this list to the inventory.
-shuttle_test_packages := ["nervix-execution", "nervix-interconnect", "nervix-client-core", "nervix-consensus", "nervix-server"]
+shuttle_test_packages := ["nervix-execution", "nervix-interconnect", "nervix-client-core", "nervix-consensus", "nervix-server", "nervix-deadlock"]
 
 # Explore every registered Shuttle check of a production owner, each in its own process: under the
 # exploration it declares, then under the uncontrolled-nondeterminism detector. The inventory in
@@ -927,6 +962,8 @@ test-scenarios-coverage: tests-deps
     export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
     cargo llvm-cov clean --workspace
     just coverage-cli-binary
+    just coverage-deadlock-report-binary
+    export NERVIX_DEADLOCK_REPORT_TOOL={{ quote(cargo_target_dir + "/llvm-cov-target/debug/nervix-deadlock-report") }}
     export NERVIX_TEST_CLI_PATH={{ quote(cargo_target_dir + "/llvm-cov-target/debug/nervix-cli") }}
     just coverage-paced-simulation-binaries
     export NERVIX_PACED_SIMULATION_PATH={{ quote(cargo_target_dir + "/llvm-cov-target/debug/nervix-paced-simulation") }}
@@ -963,6 +1000,8 @@ test-coverage-feature +features: tests-deps
     export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
     cargo llvm-cov clean --workspace
     just coverage-cli-binary
+    just coverage-deadlock-report-binary
+    export NERVIX_DEADLOCK_REPORT_TOOL={{ quote(cargo_target_dir + "/llvm-cov-target/debug/nervix-deadlock-report") }}
     export NERVIX_TEST_CLI_PATH={{ quote(cargo_target_dir + "/llvm-cov-target/debug/nervix-cli") }}
     install -m 755 {{ quote(cargo_target_dir + "/debug/nervix-nspl-format") }} \
         {{ quote(cargo_target_dir + "/llvm-cov-target/debug/nervix-nspl-format") }}
@@ -1007,6 +1046,8 @@ test-coverage-clients: tests-deps
     cargo llvm-cov --no-report --bins \
         --package nervix-web-console --package nervix-cli
     just coverage-cli-binary
+    just coverage-deadlock-report-binary
+    export NERVIX_DEADLOCK_REPORT_TOOL={{ quote(cargo_target_dir + "/llvm-cov-target/debug/nervix-deadlock-report") }}
     export NERVIX_TEST_CLI_PATH={{ quote(cargo_target_dir + "/llvm-cov-target/debug/nervix-cli") }}
     install -m 755 {{ quote(cargo_target_dir + "/debug/nervix-nspl-format") }} \
         {{ quote(cargo_target_dir + "/llvm-cov-target/debug/nervix-nspl-format") }}
@@ -1039,6 +1080,14 @@ coverage-cli-binary:
     source <(cargo llvm-cov show-env --sh 2>/dev/null)
     CARGO_TARGET_DIR={{ quote(cargo_target_dir + "/llvm-cov-target") }} \
         cargo build --package nervix-cli --bin nervix-cli
+
+# The local diagnostic report workflow uses this ordinary instrumented executable.
+coverage-deadlock-report-binary:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    source <(cargo llvm-cov show-env --sh --no-rustc-wrapper 2>/dev/null)
+    CARGO_TARGET_DIR={{ quote(cargo_target_dir + "/llvm-cov-target") }} \
+        cargo build --package nervix-deadlock --features report-tool --bin nervix-deadlock-report
 
 # Build the paced simulation's Rust driver, and the shared C binding its Python driver loads, with
 # the same coverage flags, so the public scenarios that run both drivers count the lines they reach.
@@ -1155,6 +1204,8 @@ coverage-scenarios output *args: tests-deps
     set -euo pipefail
     export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
     just coverage-cli-binary
+    just coverage-deadlock-report-binary
+    export NERVIX_DEADLOCK_REPORT_TOOL={{ quote(cargo_target_dir + "/llvm-cov-target/debug/nervix-deadlock-report") }}
     export NERVIX_TEST_CLI_PATH={{ quote(cargo_target_dir + "/llvm-cov-target/debug/nervix-cli") }}
     just coverage-paced-simulation-binaries
     export NERVIX_PACED_SIMULATION_PATH={{ quote(cargo_target_dir + "/llvm-cov-target/debug/nervix-paced-simulation") }}
@@ -1169,6 +1220,8 @@ coverage-scenarios-append output *args: tests-deps
     set -euo pipefail
     export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
     just coverage-cli-binary
+    just coverage-deadlock-report-binary
+    export NERVIX_DEADLOCK_REPORT_TOOL={{ quote(cargo_target_dir + "/llvm-cov-target/debug/nervix-deadlock-report") }}
     export NERVIX_TEST_CLI_PATH={{ quote(cargo_target_dir + "/llvm-cov-target/debug/nervix-cli") }}
     just coverage-paced-simulation-binaries
     export NERVIX_PACED_SIMULATION_PATH={{ quote(cargo_target_dir + "/llvm-cov-target/debug/nervix-paced-simulation") }}
@@ -1240,6 +1293,8 @@ coverage-redis output="target/redis-dns.lcov": tests-deps
     cargo llvm-cov --no-report --lib --package nervix-server -- redis_
     cargo llvm-cov --no-report --lib --package nervix-server -- sources_that_resolve_names_report_missing_node_dns_as_start_failure
     just coverage-cli-binary
+    just coverage-deadlock-report-binary
+    export NERVIX_DEADLOCK_REPORT_TOOL={{ quote(cargo_target_dir + "/llvm-cov-target/debug/nervix-deadlock-report") }}
     export NERVIX_TEST_CLI_PATH={{ quote(cargo_target_dir + "/llvm-cov-target/debug/nervix-cli") }}
     cargo llvm-cov --no-report --features testing --package nervix-server --test scenarios -- \
         --input tests/features/runtime/redis_dns_resolution.feature --name Redis --retry 0 --concurrency 1
@@ -1288,6 +1343,8 @@ coverage-dns-clients output="target/dns-clients.lcov": tests-deps
         --package nervix-connector-sqs \
         --package nervix-interconnect
     just coverage-cli-binary
+    just coverage-deadlock-report-binary
+    export NERVIX_DEADLOCK_REPORT_TOOL={{ quote(cargo_target_dir + "/llvm-cov-target/debug/nervix-deadlock-report") }}
     export NERVIX_TEST_CLI_PATH={{ quote(cargo_target_dir + "/llvm-cov-target/debug/nervix-cli") }}
     cargo llvm-cov --no-report --features testing --package nervix-server --lib
     run_scenario() {
@@ -1766,7 +1823,7 @@ ordinary-clippy-targets: \
     (clippy-target "nervix-consensus" ["--all-targets", "--features", "testing"]) \
     (clippy-target "nervix-primitives" ["--all-targets", "--features", "native"]) \
     (clippy-target "nervix-primitives" ["--all-targets", "--features", "native test-util"]) \
-    (clippy-target "nervix-deadlock" ["--all-targets"]) \
+    (clippy-target "nervix-deadlock" ["--all-targets", "--features", "report-tool"]) \
     *(clippy-target *["nervix-cli", "nervix-server", "nervix-nspl-format", "nervix-web-console"] ["--all-targets"]) \
     (clippy-target "nervix-client-wire" ["--target", "wasm32-unknown-unknown"])
 
@@ -1812,7 +1869,12 @@ deloxide-clippy-targets: \
     (clippy-target "nervix-deadlock" ["--all-targets", "--features", "deloxide"]) \
     (clippy-target "nervix-paced-simulation" ["--all-targets", "--features", "deloxide"]) \
     (clippy-target "nervix-server" ["--lib", "--bins", "--features", "deloxide"]) \
-    (clippy-target "nervix-server" ["--all-targets", "--features", "deloxide testing"])
+    (clippy-target "nervix-server" ["--all-targets", "--features", "deloxide testing"]) \
+    (clippy-target "nervix-primitives" ["--all-targets", "--features", "deloxide-order native"]) \
+    (clippy-target "nervix-deadlock" ["--all-targets", "--features", "deloxide-order"]) \
+    (clippy-target "nervix-paced-simulation" ["--all-targets", "--features", "deloxide-order"]) \
+    (clippy-target "nervix-server" ["--lib", "--bins", "--features", "deloxide-order"]) \
+    (clippy-target "nervix-server" ["--all-targets", "--features", "deloxide-order testing"])
 
 # The shared Clippy command accepts one package and its Cargo arguments. Target, feature,
 # profile and toolchain differences identify separate build directories. Keep kache configured.
@@ -1924,7 +1986,7 @@ coverage-typed-ratchet-python: test-typed-ratchet-compiler test-typed-ratchet-mo
     set -euo pipefail
     coverage=(uvx --from coverage==7.11.0 coverage)
     export COVERAGE_FILE="{{ cargo_target_dir }}/typed-ratchet/python.coverage"
-    "${coverage[@]}" run --branch --source=scripts.typed_ratchet,scripts.typed_lint_wrapper,scripts.ratchet,scripts.native_coverage,scripts.bolero,scripts.build_web_console,scripts.tests.test_bolero -m unittest scripts.tests.test_typed_ratchet scripts.tests.compiler_fixture_checks scripts.tests.test_ratchet scripts.tests.test_native_coverage scripts.tests.test_bolero
+    "${coverage[@]}" run --branch --source=scripts.typed_ratchet,scripts.typed_lint_wrapper,scripts.ratchet,scripts.native_coverage,scripts.bolero,scripts.bolero_coverage,scripts.build_web_console,scripts.tests.test_bolero,scripts.tests.test_bolero_coverage -m unittest scripts.tests.test_typed_ratchet scripts.tests.compiler_fixture_checks scripts.tests.test_ratchet scripts.tests.test_native_coverage scripts.tests.test_bolero scripts.tests.test_bolero_coverage
     "${coverage[@]}" lcov -o "{{ cargo_target_dir }}/typed-ratchet/python.lcov"
     "${coverage[@]}" report
 
@@ -2333,8 +2395,8 @@ build-chaos-local-image tag="nervix:backup-local" base="nervix:chaos-current":
 # Build a diagnostic node: nervix-server in the `deloxide` mode, whose tracked locks report an active
 # deadlock with evidence and end the process. Its own target directory keeps it from replacing the
 # ordinary binary; it is a diagnostic artifact, never a release product.
-build-diagnostic-server:
-    CARGO_TARGET_DIR={{ cargo_target_dir }}/deloxide cargo build {{ release_flag }} --package nervix-server --bin nervix-server --features deloxide
+build-diagnostic-server selection="deloxide":
+    CARGO_TARGET_DIR={{ cargo_target_dir }}/deloxide cargo build {{ release_flag }} --package nervix-server --bin nervix-server --features {{ quote(selection) }}
 
 build-cli:
     CARGO_TARGET_DIR={{ cargo_target_dir }}/cli cargo build {{ release_flag }} --package nervix-cli --bin nervix-cli
@@ -2633,3 +2695,25 @@ bench-retained-channels: build-web-console wasm-processor-guests download-onnxru
 bench-retained-channels-bodies:
     ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)" cargo test --package nervix-server --features testing --lib relay_channel_cost -- --ignored --nocapture
     cargo test --package nervix-interconnect --lib established_pool_cost -- --ignored --nocapture
+
+# Native diagnostic owners and probes, composed separately from the ordinary report command.
+test-deadlock-evidence-order:
+    cargo test --package nervix-deadlock --features deloxide-order --lib
+    cargo test --package nervix-primitives --features 'native deloxide-order' --lib
+    cargo test --package nervix-deadlock --features deloxide-order --test active_cycles
+
+test-deadlock-report:
+    cargo test --package nervix-deadlock --features report-tool --test report_cli
+
+# Collect both focused checks in their own mode's build and retain canonical completion evidence.
+# The combined report is labeled diagnostic-evidence, outside ordinary coverage and the CRAP gate.
+coverage-deadlock output="target/deadlock.lcov":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    mkdir -p {{ quote(cargo_target_dir + "/diagnostic-evidence") }}
+    reports="$(mktemp -d {{ quote(cargo_target_dir + "/diagnostic-evidence/coverage.XXXXXX") }})"
+    python3 -m scripts.native_coverage --target-dir {{ quote(cargo_target_dir) }} run test-deadlock-evidence-order --output "${reports}/order.lcov"
+    python3 -m scripts.native_coverage --target-dir {{ quote(cargo_target_dir) }} run test-deadlock-report --output "${reports}/report.lcov"
+    cat "${reports}/order.lcov" "${reports}/report.lcov" > "${reports}/combined.lcov"
+    mkdir -p "$(dirname {{ quote(output) }})"
+    mv "${reports}/combined.lcov" {{ quote(output) }}

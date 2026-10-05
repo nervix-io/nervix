@@ -2,7 +2,7 @@ name: Check
 
 on:
   pull_request:
-    types: [opened, synchronize, reopened]
+    types: [opened, synchronize, reopened, labeled, unlabeled]
 
 env:
   KACHE_VERSION: "0.28.1"
@@ -17,6 +17,17 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  bolero:
+    uses: ./.github/workflows/bolero.yaml
+    permissions:
+      contents: read
+      id-token: write
+    secrets: inherit
+    with:
+      tested-sha: ${{ github.sha }}
+      event-name: ${{ github.event_name }}
+      labels-json: ${{ toJSON(github.event.pull_request.labels.*.name) }}
+
   conventional-pr-title:
     if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
@@ -164,6 +175,112 @@ jobs:
         with:
           name: kache-${{ github.job }}-${{ runner.os }}-${{ runner.arch }}
           path: ${{ runner.temp }}/kache-report
+          if-no-files-found: warn
+
+  # Diagnostic coverage is a distinct execution mode and never contributes to native cost counts.
+  diagnostic-evidence:
+    name: diagnostic-evidence
+    runs-on: blacksmith-8vcpu-ubuntu-2404
+    timeout-minutes: 45
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@1.99
+        with:
+          components: llvm-tools
+
+      - name: Install cargo tools
+        uses: taiki-e/install-action@v2
+        with:
+          tool: just@latest,toml-cli,cargo-llvm-cov,wild-linker
+
+      - name: Setup flatc
+        uses: Nugine/setup-flatc@v1
+        with:
+          version: "25.12.19"
+
+      - name: Install Latest LLVM
+        run: |
+          wget https://apt.llvm.org/llvm.sh
+          chmod +x llvm.sh
+          sudo ./llvm.sh 23
+
+      - name: Configure cargo
+        run: |
+          tee <<EOF > ~/.cargo/config.toml
+          [target.x86_64-unknown-linux-gnu]
+          ar = "llvm-ar-23"
+          linker = "${GITHUB_WORKSPACE}/scripts/ci_linker.sh"
+          EOF
+
+      - name: Configure kache daemon remote
+        env:
+          KACHE_S3_BUCKET: ${{ vars.KACHE_BUCKET }}
+          KACHE_S3_REGION: ${{ vars.KACHE_BUCKET_REGION }}
+          KACHE_S3_ENDPOINT: ${{ vars.KACHE_BUCKET_ENDPOINT }}
+          KACHE_S3_ACCESS_KEY: ${{ secrets.KACHE_BUCKET_ACCESS_KEY_ID }}
+          KACHE_S3_SECRET_KEY: ${{ secrets.KACHE_BUCKET_SECRET_ACCESS_KEY }}
+        run: |
+          config="${RUNNER_TEMP}/kache-${GITHUB_JOB}.toml"
+          bash scripts/configure_kache_remote.sh "${config}"
+          echo "KACHE_CONFIG=${config}" >> "${GITHUB_ENV}"
+
+      - name: Setup kache
+        uses: kunobi-ninja/kache-action@v1
+        with:
+          version: ${{ env.KACHE_VERSION }}
+          github-cache: "false"
+          sync: "false"
+          cache-executables: "true"
+          max-size: "1TiB"
+          manifest-key: ${{ github.job }}-${{ runner.os }}-${{ runner.arch }}
+          pr-comment: "false"
+          s3-bucket: ${{ vars.KACHE_BUCKET }}
+          s3-prefix: "artifacts"
+          s3-region: ${{ vars.KACHE_BUCKET_REGION }}
+          s3-endpoint: ${{ vars.KACHE_BUCKET_ENDPOINT }}
+          s3-access-key-id: ${{ secrets.KACHE_BUCKET_ACCESS_KEY_ID }}
+          s3-secret-access-key: ${{ secrets.KACHE_BUCKET_SECRET_ACCESS_KEY }}
+
+      - name: Check diagnostic evidence and report tool coverage
+        run: just coverage-deadlock
+        env:
+          NERVIX_DEADLOCK_PROBE_ARTIFACTS: target/diagnostic-evidence/probes
+
+      - name: Install verified Codecov CLI
+        id: codecov-cli
+        uses: ./.github/actions/setup-codecov
+
+      - name: Upload diagnostic coverage to Codecov
+        uses: codecov/codecov-action@v5
+        with:
+          binary: ${{ steps.codecov-cli.outputs.binary }}
+          disable_search: true
+          fail_ci_if_error: true
+          files: target/deadlock.lcov
+          flags: diagnostic-evidence
+          use_oidc: true
+          url: https://codecov.io
+
+      - name: Upload diagnostic evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: diagnostic-evidence
+          path: |
+            target/deadlock.lcov
+            target/diagnostic-evidence
+            target/native-coverage/test-deadlock-*/**/completion.json
+            target/native-coverage/test-deadlock-*/**/lcov.info
+            target/native-coverage/test-deadlock-*/**/executions.jsonl
+            target/native-coverage/test-deadlock-*/**/export.log
           if-no-files-found: warn
 
   tests:
@@ -584,13 +701,19 @@ jobs:
           done < <(find coverage-inputs/native-extras -path '*/ordinary/*/lcov.info' -o -name python.lcov)
           just check-coverage
 
+      - name: Install verified Codecov CLI
+        id: codecov-cli
+        uses: ./.github/actions/setup-codecov
+
       - name: Upload coverage to Codecov
         uses: codecov/codecov-action@v5
         with:
+          binary: ${{ steps.codecov-cli.outputs.binary }}
           disable_search: true
           fail_ci_if_error: true
           files: ./lcov-workspace.info
           use_oidc: true
+          url: https://codecov.io
 
       - name: Upload merged coverage
         if: always()
