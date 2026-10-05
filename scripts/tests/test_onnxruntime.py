@@ -140,7 +140,7 @@ class OnnxRuntimeDownloadTests(unittest.TestCase):
             self.work / ".nervix-deps/onnxruntime" / package / "lib/libonnxruntime.so",
         )
 
-    def test_cuda_recipe_selects_matching_builder_runtime_and_provider(self) -> None:
+    def test_image_recipes_select_the_target_and_build_options(self) -> None:
         self.fake_executable("docker")
         environment = self.environment | {
             "KACHE_S3_BUCKET": "test-bucket",
@@ -149,30 +149,32 @@ class OnnxRuntimeDownloadTests(unittest.TestCase):
             "KACHE_S3_ACCESS_KEY": "test-key",
             "KACHE_S3_SECRET_KEY": "test-secret",
         }
-        result = subprocess.run(
-            [
-                "just", "docker-build-cuda", "23", "nervix:test-cuda", "linux/amd64",
-                "true", "type=local,src=cache input", "type=local,dest=cache output",
-            ],
-            cwd=REPOSITORY,
-            env=environment,
-            capture_output=True,
-            text=True,
-            check=False,
-        )
-        self.assertEqual(result.returncode, 0, result.stderr)
-        commands = [json.loads(line) for line in self.calls.read_text().splitlines()]
-        builds = [arguments for arguments in commands if arguments[:2] == ["buildx", "build"]]
-        self.assertEqual(len(builds), 1)
-        arguments = builds[0]
-        self.assertEqual(arguments[:2], ["buildx", "build"])
-        self.assertIn("BUILD_BASE=ubuntu:24.04", arguments)
-        self.assertIn("LLVM_CODENAME=noble", arguments)
-        self.assertIn("RUNTIME_BASE=nvidia/cuda:13.0.2-cudnn-runtime-ubuntu24.04", arguments)
-        self.assertIn("ONNXRUNTIME_FLAVOR=gpu_cuda13", arguments)
-        self.assertIn("--push", arguments)
-        self.assertIn("--cache-from=type=local,src=cache input", arguments)
-        self.assertIn("--cache-to=type=local,dest=cache output", arguments)
+        for recipe, target in (("docker-build-debian", "cpu"), ("docker-build-cuda", "cuda")):
+            with self.subTest(recipe=recipe):
+                self.calls.unlink(missing_ok=True)
+                result = subprocess.run(
+                    [
+                        "just", recipe, "23", "nervix:test", "linux/amd64",
+                        "true", "type=local,src=cache input", "type=local,dest=cache output",
+                    ],
+                    cwd=REPOSITORY,
+                    env=environment,
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                )
+                self.assertEqual(result.returncode, 0, result.stderr)
+                commands = [json.loads(line) for line in self.calls.read_text().splitlines()]
+                builds = [arguments for arguments in commands if arguments[:2] == ["buildx", "build"]]
+                self.assertEqual(len(builds), 1)
+                arguments = builds[0]
+                self.assertEqual(arguments[:2], ["buildx", "build"])
+                self.assertIn("LLVM_VERSION=23", arguments)
+                self.assertEqual(arguments[arguments.index("--target") + 1], target)
+                self.assertIn("nervix:test", arguments)
+                self.assertIn("--push", arguments)
+                self.assertIn("--cache-from=type=local,src=cache input", arguments)
+                self.assertIn("--cache-to=type=local,dest=cache output", arguments)
 
     def test_cuda_recipe_rejects_a_platform_without_an_upstream_gpu_build(self) -> None:
         self.fake_executable("docker")
