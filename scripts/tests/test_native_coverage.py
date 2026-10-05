@@ -27,7 +27,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from unittest import mock
 
-from scripts import native_coverage
+from scripts import deloxide_lane, native_coverage
 from scripts.native_coverage import (
     Captured,
     Classification,
@@ -114,12 +114,19 @@ class InventoryTests(unittest.TestCase):
             ["test-typed-ratchet", "bench-smoke", "test-primitives-ordinary",
              "test-primitives-shuttle", "test-primitives-loom", "test-primitives-turmoil",
              "test-primitives-deloxide", "nspl-completion-walk", "test-shuttle", "test-loom",
-             "test-deadlock-evidence-order", "test-deadlock-report"],
+             "test-deadlock-evidence-order", "test-deadlock-report", "test-deloxide",
+             "test-deloxide-order"],
         )
         for producer in native_coverage.PRODUCERS:
             self.assertEqual(producer.rerun(), f"just coverage-native-extras {producer.name}")
             if producer.name.startswith("test-primitives-"):
                 self.assertEqual(producer.name, f"test-primitives-{producer.mode}")
+            # Each selection of the diagnostic lane collects in its own mode's build, and only
+            # after the prerequisites the lane takes its prepared binaries from.
+            if producer.diagnostic_lane:
+                self.assertEqual(producer.name, f"test-{producer.mode}")
+                self.assertEqual(producer.prepare, ("tests-deps",))
+                self.assertEqual(producer.instrumented, f"test-{producer.mode}-workloads")
 
     def test_a_check_composed_otherwise_than_its_producer_is_refused(self) -> None:
         producer = Producer("check", "ordinary", ("prepare",), "body", ("finish",))
@@ -191,6 +198,22 @@ class InventoryTests(unittest.TestCase):
             with self.subTest(producer=producer.name):
                 if producer.name == "test-shuttle":
                     selected_job = job_section(workflow, "shuttle")
+                elif producer.diagnostic_lane:
+                    lane = job_section(workflow, "deloxide")
+                    self.assertRegex(lane, r"selection: \[deloxide, deloxide-order\]")
+                    self.assertIn("SELECTION: ${{ matrix.selection }}", lane)
+                    self.assertRegex(lane, r"tool: [^\n]*\bcargo-llvm-cov\b")
+                    self.assertIn('just coverage-native-extras "test-${SELECTION}"\n', lane)
+                    self.assertIn('just test-deloxide-qualification "${SELECTION}"\n', lane)
+                    upload = step_section(lane, "Upload diagnostic lane evidence")
+                    self.assertIn("if: always()", upload)
+                    for artifact in ("completion.json", "lcov.info", "lane.json"):
+                        self.assertIn(f"target/native-coverage/test-${{{{ matrix.selection }}}}/**/{artifact}", upload)
+                    self.assertNotIn("profraw", upload)
+                    # Diagnostic coverage never joins ordinary coverage or the CRAP gate.
+                    coverage = job_section(workflow, "coverage")
+                    self.assertNotIn("deloxide", coverage)
+                    continue
                 elif producer.name.startswith("test-deadlock-"):
                     selected_job = job_section(workflow, "diagnostic-evidence")
                     self.assertIn("run: just coverage-deadlock\n", selected_job)
@@ -1015,7 +1038,17 @@ class CollectTests(unittest.TestCase):
         self.assertEqual(record["sources"]["covered"], 7)
         self.assertEqual(record["report"], "lcov.info")
         self.assertEqual(record["started_at"], "2026-09-29T12:00:00Z")
-        self.assertEqual(record["finished_at"], "2026-09-29T12:00:01Z")
+        self.assertEqual(
+            record["stages"],
+            {
+                "prepare": "2026-09-29T12:00:01Z",
+                "instrument": "2026-09-29T12:00:02Z",
+                "run": "2026-09-29T12:00:03Z",
+                "export": "2026-09-29T12:00:04Z",
+                "finish": "2026-09-29T12:00:05Z",
+            },
+        )
+        self.assertEqual(record["finished_at"], "2026-09-29T12:00:06Z")
         self.assertTrue((collected.attempt / "profiles").is_dir())
 
         recipes = [streamed.arguments for streamed in commands.streamed]
@@ -1028,7 +1061,57 @@ class CollectTests(unittest.TestCase):
         self.assertEqual(instrumented["RUSTC_WRAPPER"], "kache")
         self.assertEqual(instrumented["LLVM_PROFILE_FILE"], "/dev/null")
         self.assertEqual(instrumented[native_coverage.ATTEMPT_VARIABLE], str(collected.attempt))
+        self.assertEqual(
+            instrumented[native_coverage.PREPARED_TARGET_VARIABLE], str(self.root / "target")
+        )
+        self.assertNotIn(deloxide_lane.REPORT_VARIABLE, instrumented)
         self.assertIn(RUNNER, instrumented)
+
+    def test_a_diagnostic_lane_is_exported_only_from_its_complete_record(self) -> None:
+        lane_producer = Producer(
+            "test-deloxide", "deloxide", ("tests-deps",), "test-deloxide-workloads", (),
+            diagnostic_lane=True,
+        )
+
+        def lane_record(verdict: str) -> dict[str, object]:
+            return {
+                "selection": "deloxide",
+                "verdict": verdict,
+                "workspace": {"attempt": "target/native-coverage-build-deloxide/test-deloxide/deloxide/run.x"},
+                "counts": {"discovered": 3, "selected": 2, "executed": 2, "completed": 2},
+                "workloads": [{"id": "probe.a", "completed": True}, {"id": "probe.b", "completed": True}],
+                "findings": {"observations": 4, "qualifying": 4},
+            }
+
+        def writes(content: dict[str, object] | None) -> Callable[[], int]:
+            def run() -> int:
+                instrumented = commands.streamed[-1].environment
+                path = Path(instrumented[deloxide_lane.REPORT_VARIABLE])
+                self.assertEqual(path.parent, next(self.root.rglob("completion.json")).parent)
+                if content is not None:
+                    path.write_text(json.dumps(content))
+                return 0
+            return run
+
+        commands = FakeCommands(self.root, {"test-deloxide-workloads": writes(lane_record("complete"))})
+        collected = self.collect(commands, producer=lane_producer)
+        record = self.record(collected)
+        self.assertEqual(collected.status, 0)
+        self.assertEqual(record["verdict"], "complete")
+        self.assertEqual(record["lane"]["counts"]["completed"], 2)
+        self.assertEqual(record["lane"]["findings"], {"observations": 4, "qualifying": 4})
+        self.assertEqual([streamed.arguments for streamed in commands.streamed][0], ["just", "tests-deps"])
+
+        for case, content in {"no record": None, "a failed lane": lane_record("failed")}.items():
+            with self.subTest(case=case):
+                self.setUp()
+                commands = FakeCommands(self.root, {"test-deloxide-workloads": writes(content)})
+                collected = self.collect(commands, producer=lane_producer)
+                record = self.record(collected)
+                self.assertEqual(collected.status, 1)
+                self.assertEqual(record["verdict"], "failed")
+                self.assertEqual(record["failure"]["stage"], "run")
+                self.assertNotIn("sources", record)
 
     def test_a_failing_part_fails_the_collection_at_its_stage(self) -> None:
         cases = {

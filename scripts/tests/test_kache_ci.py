@@ -38,6 +38,7 @@ class KacheCiTests(unittest.TestCase):
             "extra-tests",
             "shuttle",
             "turmoil",
+            "deloxide",
             "benchmark",
             "build-book",
         )

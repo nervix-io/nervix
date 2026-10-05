@@ -939,15 +939,25 @@ build and the existing tests, and nothing in it changes behavior.
   thread-blocking locks of real diagnostic processes, Cucumber for public behavior, and the
   external Chaos suite against an immutable product image for real-process recovery.
 - A change that adds or alters thread-blocking synchronization, a `sync::blocking` lock or
-  condition variable, the order in which tracked locks are acquired, or a lifecycle or ownership
-  path that uses tracked locks runs `just test-deloxide` and `just test-deloxide-order`, and extends
-  their probes or diagnostic scenarios where they do not yet reach the changed path. The change records what the diagnostic
-  run covered, what it cannot see, and the evidence it retained under
-  `target/deloxide/test-deloxide`. An active cycle it reports is fixed in the owner, never
-  suppressed, retried away or excluded from the run. A run that executed no check, lost a finding
-  or could not record one is a failed diagnostic execution, never a clean result. Every
-  potential-order finding remains visible until its owner fixes it or records a specific
-  non-overlap, shared-reader or lifecycle proof together with retained regression evidence. A
+  condition variable, the order in which tracked locks are acquired, or a shutdown, drain, restore,
+  cancellation, handoff or other lifecycle or ownership path that uses tracked locks runs
+  `just test-deloxide` and `just test-deloxide-order`, and the required `deloxide` CI job runs both
+  on every pull request. Where the lane's workloads do not yet reach the changed path, the change
+  extends its probes, owner tests or tagged scenarios and registers each in
+  `tests/deloxide-inventory.toml` with a stable identity, the invariant it owns, its selections and
+  the coverage it declares. A source file that starts acquiring tracked blocking locks gets an
+  `[[owner]]` record there naming the workloads that reach its locks, or the specific path the lane
+  does not reach and why; `just validate-deloxide-applicability` holds the records to the compiler's
+  acquisition catalog, and a recorded gap is a reviewed declaration, never a waiver of the other
+  evidence. The change records what the diagnostic run covered, what it cannot see, and the
+  evidence it retained: the lane's attempts under `target/deloxide/test-deloxide` and the CI job's
+  artifacts. An active cycle it reports is fixed in the owner, never suppressed, retried away or
+  excluded from the run. A run that executed no check, lost a finding or could not record one is a
+  failed diagnostic execution, never a clean result. Every potential-order finding remains visible
+  until its owner fixes it or records a specific non-overlap, shared-reader or lifecycle proof
+  together with retained regression evidence. In the lane a potential cycle fails the run: the lane
+  keeps no ledger of approved cycles, so a correction removes the order from the exercised
+  workload, and a reviewed proof qualifies only the evidence it reviews. A
   historical cycle alone does not declare an active outage or end an operator's workload. Missing
   source context, truncated cycles, overload and unreviewed findings prevent qualification. Order
   evidence preserves run-local lock instances and lifetimes, thread identities, acquisition modes
@@ -1128,8 +1138,13 @@ build and the existing tests, and nothing in it changes behavior.
   affects: `just test-shuttle [filter]` for interleavings, `just test-loom [filter]` for
   memory-ordering claims, `just test-turmoil` for the simulated network, and `just test-deloxide`
   for active deadlocks and `just test-deloxide-order` for potential acquisition-order cycles among
-  tracked locks, beside the ordinary suite. `just test-primitives` runs the boundary's own
-  conformance checks once per mode. Every mode
+  tracked locks, beside the ordinary suite. The two Deloxide commands run the diagnostic lane over
+  the bounded inventory in `tests/deloxide-inventory.toml`: a registered workload that is missing,
+  ignored or incomplete fails it, so does a discovered probe, owner test or tagged scenario that is
+  not registered, and every run keeps an attempt that `just test-deloxide-replay` replays.
+  `just test-deloxide-qualification` proves the lane fails, keeps its evidence and leaves no
+  process behind for each way a diagnostic process can fail. `just test-primitives` runs the
+  boundary's own conformance checks once per mode. Every mode
   command reports how many checks it discovered, selected, executed and saw complete; a selection
   that executes nothing across its whole scope fails, though a package with no match inside a
   nonempty selection is fine. `just test-shuttle` runs every registered check in its own process
@@ -1152,7 +1167,8 @@ build and the existing tests, and nothing in it changes behavior.
 - `just coverage-native-extras [producer ...]` runs eligible native extra checks under LLVM source
   instrumentation: `test-typed-ratchet`, `bench-smoke`, `nspl-completion-walk`, the canonical
   `test-shuttle` and `test-loom` runners, each `test-primitives-<mode>` conformance recipe,
-  `test-deadlock-evidence-order` and `test-deadlock-report`.
+  `test-deadlock-evidence-order`, `test-deadlock-report`, and the `test-deloxide` and
+  `test-deloxide-order` lanes, which export only from a complete `lane.json`.
   `test-primitives` selects every native conformance mode. CI runs these checks through collection;
   primitive compile/browser checks, replay qualification and Loom weakening qualification retain
   independent verdicts outside its instrumentation. Each run writes `lcov.info`, `completion.json`,
@@ -1184,6 +1200,11 @@ build and the existing tests, and nothing in it changes behavior.
 - Keep parser tests near the grammar they protect.
 - Final implementation reports must name the cucumber scenario added or updated. If none was added,
   state the explicit user-approved reason.
+- Final implementation reports of concurrency-related work state whether the Deloxide rule applies.
+  When it applies, they name the lane runs of both selections, whether the registered workloads
+  reach the changed path, and the inventory and owner records the change added. When the work is
+  async-only or otherwise untracked, they record that the detector does not see it and name the
+  Shuttle, Loom, Turmoil, Chaos or Bolero evidence that covers it instead.
 - After completing requested repository changes, include a proposed Conventional Commit title and
   description in the final response. Follow Conventional Commits and select the title type from the
   current `type-enum` in `./commitlint.config.js`. Put the title and description together in one

@@ -53,12 +53,11 @@ async fn when_materialized_workload_is_created(world: &mut ScenarioWorld, relays
     commands.push_str(
         "ON GENERAL ERROR LOG; START; CREATE SUBSCRIPTION summary_subscription TO summaries;",
     );
-    let leader = current_leader_node(world).await;
-    let session = crate::execute_nspl_commands_on_node(world, &leader, &commands)
+    let ran = crate::execute_nspl_commands_on_leader(world, &commands)
         .await
         .assured("the public materialized workload is valid");
-    world.active_session = Some(session);
-    world.active_session_node = Some(leader);
+    world.active_session = Some(ran.session);
+    world.active_session_node = Some(ran.node);
     world.active_session_has_subscription = true;
 }
 

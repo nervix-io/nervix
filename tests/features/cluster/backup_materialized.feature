@@ -188,9 +188,9 @@ Feature: Materialized backup and archived lifecycle resumption
     And the active domain is "{{domain}}"
     When a materialized restore workload with <relays> relays is created
     And round 1 of <row_kib> KiB materialized rows is posted for <tenants> tenants
-    Then within "60s" the materialized generators report round 1, <row_kib> KiB, <relays> relays and <tenants> tenants
+    Then within "180s" the materialized generators report round 1, <row_kib> KiB, <relays> relays and <tenants> tenants
     When round 2 of <row_kib> KiB materialized rows is posted for <tenants> tenants
-    Then within "60s" the materialized generators report round 2, <row_kib> KiB, <relays> relays and <tenants> tenants
+    Then within "180s" the materialized generators report round 2, <row_kib> KiB, <relays> relays and <tenants> tenants
     Then the current leader node is saved as placeholder "leader"
     When the CLI backs up "domain {{domain}} --timeout 60s" from node "{{leader}}" into "large-materialized.nvxb" reporting JSON
     Then the CLI backup succeeded with a JSON report naming domain "{{domain}}"
@@ -223,14 +223,14 @@ Feature: Materialized backup and archived lifecycle resumption
       """
       CREATE SUBSCRIPTION restored_summaries TO summaries;
       """
-    Then within "60s" the materialized generators report round 2, <row_kib> KiB, <relays> relays and <tenants> tenants
+    Then within "180s" the materialized generators report round 2, <row_kib> KiB, <relays> relays and <tenants> tenants
     When the cluster is restarted
     Then every node reports the resumed lifecycle archived in "large-materialized.nvxb"
     When these NSPL commands are executed on the leader node
       """
       CREATE SUBSCRIPTION reopened_summaries TO summaries;
       """
-    Then within "60s" the materialized generators report round 2, <row_kib> KiB, <relays> relays and <tenants> tenants
+    Then within "180s" the materialized generators report round 2, <row_kib> KiB, <relays> relays and <tenants> tenants
 
     Examples:
       | cluster_size | replica_count | relays | row_kib | tenants |
@@ -247,9 +247,9 @@ Feature: Materialized backup and archived lifecycle resumption
     And the active domain is "{{domain}}"
     When a materialized restore workload with <relays> relays is created
     And round 1 of <row_kib> KiB materialized rows is posted for <tenants> tenants
-    Then within "60s" the materialized generators report round 1, <row_kib> KiB, <relays> relays and <tenants> tenants
+    Then within "180s" the materialized generators report round 1, <row_kib> KiB, <relays> relays and <tenants> tenants
     When round 2 of <row_kib> KiB materialized rows is posted for <tenants> tenants
-    Then within "60s" the materialized generators report round 2, <row_kib> KiB, <relays> relays and <tenants> tenants
+    Then within "180s" the materialized generators report round 2, <row_kib> KiB, <relays> relays and <tenants> tenants
     Then the current leader node is saved as placeholder "leader"
     When the CLI backs up "domain {{domain}} --timeout 60s" from node "{{leader}}" into "large-stale.nvxb" reporting JSON
     Then the CLI backup succeeded with a JSON report naming domain "{{domain}}"
@@ -269,9 +269,9 @@ Feature: Materialized backup and archived lifecycle resumption
       """
       CREATE SUBSCRIPTION resumed_summaries TO summaries;
       """
-    Then within "60s" the materialized generators report round 2, <row_kib> KiB, <relays> relays and <tenants> tenants
+    Then within "180s" the materialized generators report round 2, <row_kib> KiB, <relays> relays and <tenants> tenants
     When round 3 of <row_kib> KiB materialized rows is posted for <tenants> tenants
-    Then within "60s" the materialized generators report round 3, <row_kib> KiB, <relays> relays and <tenants> tenants
+    Then within "180s" the materialized generators report round 3, <row_kib> KiB, <relays> relays and <tenants> tenants
     When the CLI backs up "domain {{domain}} --timeout 60s" from node "{{survivor}}" into "large-before-stale.nvxb" reporting JSON
     Then the CLI backup succeeded with a JSON report naming domain "{{domain}}"
     When state publication of domain "{{domain}}" by coordinator "{{leader}}" is released

@@ -127,7 +127,10 @@ use crate::common::{
     node_trace_export::NodeTraceExport,
     peer_addressing::{FixtureAnswer, PeerAddressing},
     phase_deadline::{BeforeDeadline, PhaseDeadline},
-    raw_session::{TestUpload, TestUploadPart, WireOutcome as _},
+    raw_session::{
+        TestUpload, TestUploadPart, WireOutcome as _, flatten_command_messages,
+        fresh_execution_reference, outcome_not_leader, outcome_succeeded, outcome_unknown,
+    },
     scenario_phase::{
         ActiveScenario, ActiveScenarioRegistration, ScenarioIdentity, ScenarioPhase,
         begin_suite_measurement, suite_summary,
@@ -323,6 +326,8 @@ struct ScenarioWorld {
     last_restore_end: Option<crate::common::raw_session::TestRestoreEnd>,
     /// A restore stream a scenario sent in the background.
     background_restore: Option<AbortOnDropHandle<crate::common::raw_session::TestRestoreEnd>>,
+    /// A leadership move a scenario armed underneath the next durably admitted command.
+    leadership_move: Option<AbortOnDropHandle<std::io::Result<()>>>,
     /// The restore step pause a scenario armed and has not released.
     restore_step_pause: Option<backup::restore::ArmedRestorePause>,
     /// The outcome of the last command a scenario sent through its own session.
@@ -10319,6 +10324,37 @@ async fn when_leadership_is_transferred_from_node_to_node(
         .transfer_leadership(&from_node_id, &to_node_id);
 }
 
+#[given(
+    expr = "leadership moves from node {string} to node {string} under its next durably admitted \
+            command"
+)]
+async fn given_leadership_moves_under_next_durable_admission(
+    world: &mut ScenarioWorld,
+    from_node_id: String,
+    to_node_id: String,
+) {
+    let from_node_id = expand_placeholders(world, &from_node_id);
+    let to_node_id = expand_placeholders(world, &to_node_id);
+    let moved = world
+        .cluster()
+        .move_leadership_after_next_durable_admission(&from_node_id, &to_node_id);
+    world.leadership_move = Some(moved);
+}
+
+#[then("the leadership move under the durably admitted command completed")]
+async fn then_leadership_move_under_durable_admission_completed(world: &mut ScenarioWorld) {
+    let moved = world
+        .leadership_move
+        .take()
+        .expect("a preceding step armed a leadership move");
+    let ended = nervix_primitives::time::timeout(Duration::from_secs(60), moved)
+        .await
+        .expect("the leadership move ends once its command was released");
+    ended
+        .expect("the leadership move task runs to its end")
+        .expect("the successor reported itself the leader before the command was released");
+}
+
 #[given("the leader node forgets its transaction session bindings")]
 async fn given_leader_forgets_transaction_bindings(world: &mut ScenarioWorld) {
     let leader = current_leader_node(world).await;
@@ -12207,6 +12243,86 @@ async fn execute_nspl_commands_on_node(
 
     record_mqtt_ingestors(world, commands);
     Ok(session)
+}
+
+/// A session that ran a step's commands on the leader, and the node it ended on.
+struct LeaderSession {
+    session: TestSession,
+    node: String,
+}
+
+/// How long one command may take, in all, to learn an outcome that leadership changes left
+/// unknown. A test cluster elects a leader within its two-second election timeout; the rest is
+/// slack for a loaded machine.
+const UNKNOWN_OUTCOME_RECOVERY: Duration = Duration::from_secs(60);
+
+/// Runs `commands` on the current leader in one session. When leadership moves before a command
+/// reached the leader, or after the leader admitted it and before its outcome was known, the command
+/// is sent again with the same execution reference to the current leader, as the client protocol
+/// requires, and the step goes on there once the outcome is known. The session moves with the
+/// command only while it holds no subscription and no transaction, which no other session could
+/// continue; a command whose outcome stays unknown past that point fails the step as before.
+async fn execute_nspl_commands_on_leader(
+    world: &mut ScenarioWorld,
+    commands: &str,
+) -> Result<LeaderSession, String> {
+    let mut node = current_leader_node(world).await;
+    if !requires_persistent_session(commands) {
+        // The client library sends each command and recovers its outcome itself.
+        let session = execute_nspl_commands_on_node(world, &node, commands).await?;
+        return Ok(LeaderSession { session, node });
+    }
+    record_avro_wire_optional_fields(world, commands);
+    append_cucumber_log_line(&format!(
+        "nspl commands on node {node}: {}",
+        commands.replace('\n', "\\n")
+    ));
+    let mut session = world
+        .cluster()
+        .open_session(&node, &world.domain)
+        .await
+        .map_err(|error| error.to_string())?;
+    let mut session_bound = false;
+    for command in nspl_statements(commands) {
+        nervix_primitives::task::consume_budget().await;
+        append_cucumber_log_line(&format!("nspl command on session {node}: {command}"));
+        let reference = fresh_execution_reference();
+        let deadline = Instant::now() + UNKNOWN_OUTCOME_RECOVERY;
+        let outcome = loop {
+            nervix_primitives::task::consume_budget().await;
+            let outcome = session
+                .run_command_result_with_reference(&command, &reference)
+                .await
+                .map_err(|error| error.to_string())?;
+            let awaits_leader = outcome_unknown(&outcome) || outcome_not_leader(&outcome);
+            if !awaits_leader || session_bound || Instant::now() >= deadline {
+                break outcome;
+            }
+            node = current_leader_node(world).await;
+            append_cucumber_log_line(&format!(
+                "leadership moved before execution reference {reference} reached a known outcome; \
+                 sending it to node {node}"
+            ));
+            session = world
+                .cluster()
+                .open_session(&node, &world.domain)
+                .await
+                .map_err(|error| error.to_string())?;
+        };
+        if !outcome_succeeded(&outcome) {
+            return Err(format!(
+                "command failed: {}\ndiagnostics: {:?}",
+                outcome.message, outcome.diagnostics
+            ));
+        }
+        world.last_command_output = Some(flatten_command_messages(&outcome));
+        let statement = command.trim().to_ascii_uppercase();
+        if command_updates_subscription_state(false, &command) || statement == "BEGIN;" {
+            session_bound = true;
+        }
+    }
+    record_mqtt_ingestors(world, commands);
+    Ok(LeaderSession { session, node })
 }
 
 #[given(expr = "the active domain is {string}")]
@@ -14363,12 +14479,12 @@ async fn when_these_nspl_commands_are_executed_on_leader_node(
         }
         return;
     }
-    let session = if retry_safe {
+    let ran = if retry_safe {
         let deadline = Instant::now() + Duration::from_secs(5);
         loop {
             nervix_primitives::task::consume_budget().await;
-            match execute_nspl_commands_on_node(world, &leader, &commands).await {
-                Ok(session) => break session,
+            match execute_nspl_commands_on_leader(world, &commands).await {
+                Ok(ran) => break ran,
                 Err(error) => {
                     assert!(
                         Instant::now() < deadline,
@@ -14379,12 +14495,12 @@ async fn when_these_nspl_commands_are_executed_on_leader_node(
             }
         }
     } else {
-        execute_nspl_commands_on_node(world, &leader, &commands)
+        execute_nspl_commands_on_leader(world, &commands)
             .await
             .expect("failed to execute NSPL setup command on leader")
     };
-    world.active_session = Some(session);
-    world.active_session_node = Some(leader);
+    world.active_session = Some(ran.session);
+    world.active_session_node = Some(ran.node);
     world.active_session_has_subscription = commands_update_subscription_state(false, &commands);
 }
 

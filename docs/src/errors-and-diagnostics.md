@@ -925,11 +925,18 @@ clean. A tracked constructor before installation panics with a configuration fai
 out-of-bound current values, invalid proof, missing finding, nonpotential finding, incomplete
 context, and an exclusive mode contradicting a reader proof. The ordinary local report tool
 preserves these in `error_stack::Report`, exits `4` on an operation failure and `5` when valid
-evidence does not qualify. It does not reinterpret a prior evidence shape.
+evidence does not qualify. Before its verdict, `qualify` prints one `evidence summary:` line of
+counts: findings by kind, unreviewed and nonqualifying records, repeated deliveries of a retained
+cycle, and findings lost to each overload source. A qualification without that line is a tool
+failure, never a clean observation. It does not reinterpret a prior evidence shape.
 [Data-Plane Concurrency](./data-plane-concurrency.md#diagnostic-deadlock-detection) owns the selections,
 source correlations, deduplication, bounds, triage examples and detection gaps, including omitted
 requested-read edges and the upstream dispatcher backlog. Qualification is about recorded evidence
-and requires the run's completion/coverage record too.
+and requires the run's completion/coverage record too. The diagnostic lane classifies each
+supervised process's ending, an active cycle, a diagnostic failure, a signal, a timeout, a leftover
+process, incomplete accounting, and missing, partly written or nonqualifying evidence, as one named
+failure class with its own status, and reports a failed invocation's recorded active cycle as the
+failure it is.
 
 The isolated architecture compiler emits ordinary Rust tool diagnostics:
 `nervix::sync_acquisition`, `nervix::lifecycle_call`, `nervix::unknown_effect` and

@@ -8,9 +8,10 @@ source diagnostics, generated reports, semantic fixtures and paired API doctests
 compiler's matching LLVM tools; `bench-smoke` exercises every Criterion body once,
 `test-primitives` runs the primitive boundary's conformance checks, and `nspl-completion-walk`
 walks the NSPL completion graph. `test-shuttle` and `test-loom` collect the canonical inventories,
-`test-deadlock-evidence-order` executes diagnostic owners and disposable-process probes, and
-`test-deadlock-report` exercises the ordinary local report command in its own build.
-and `test-primitives` selects the native conformance producers of every mode. Without names every producer runs. A producer runs
+`test-deadlock-evidence-order` executes diagnostic owners and disposable-process probes,
+`test-deadlock-report` exercises the ordinary local report command in its own build, and
+`test-deloxide` and `test-deloxide-order` run the whole Deloxide diagnostic lane of each selection.
+`test-primitives` selects the native conformance producers of every mode. Without names every producer runs. A producer runs
 its check exactly as `just <producer>` does and fails when the check fails, which is why CI's
 extra-tests job runs those checks through this command instead of beside it.
 
@@ -61,8 +62,15 @@ diagnostics, each bounded.
 
 The model runners write `models.json` with the canonical discovery, selection, executions and
 completions. Shuttle retains both exploration and nondeterminism records, and Loom retains each
-InvariantId, execution count and bounds. The collector requires complete matching evidence before
-export; qualification never supplies current-source counters.
+InvariantId, execution count and bounds. The Deloxide lane writes `lane.json` with its discovery,
+selection, executions, completions and the qualification of every process's evidence. The
+collector requires complete matching evidence before export; qualification never supplies
+current-source counters. The instrumented recipe also learns the target directory its prepare
+recipes built into, so a check runs prepared binaries from there while it builds its own
+instrumented.
+
+The record times every stage it reaches, so a check's budget can be set from what preparation,
+the instrumented run, export and finishing each took.
 """
 
 from __future__ import annotations
@@ -89,6 +97,9 @@ REPOSITORY = SCRIPT.parent.parent
 BUILD_DIRECTORY = "native-coverage-build"
 COLLECTION_DIRECTORY = "native-coverage"
 ATTEMPT_VARIABLE = "NERVIX_NATIVE_COVERAGE_ATTEMPT"
+# The target directory the prepare recipes built into, which the instrumented recipe reads prepared
+# binaries from.
+PREPARED_TARGET_VARIABLE = "NERVIX_PREPARED_TARGET_DIR"
 EXECUTIONS = "executions.jsonl"
 PROFILES = "profiles"
 MERGED_PROFILE = "merged.profdata"
@@ -168,6 +179,8 @@ class Producer:
     finish: tuple[str, ...]
     toolchain: str | None = None
     filterable: bool = False
+    # Its instrumented recipe is the Deloxide lane, whose complete record export requires.
+    diagnostic_lane: bool = False
 
     def rerun(self, filter_text: str = "") -> str:
         command = f"just coverage-native-extras {self.name}"
@@ -232,6 +245,13 @@ PRODUCERS: tuple[Producer, ...] = (
     Producer(
         name="test-deadlock-report", mode="ordinary", prepare=(),
         instrumented="test-deadlock-report", finish=(),
+    ),
+    *(
+        Producer(
+            name=f"test-{mode}", mode=mode, prepare=("tests-deps",),
+            instrumented=f"test-{mode}-workloads", finish=(), diagnostic_lane=True,
+        )
+        for mode in ("deloxide", "deloxide-order")
     ),
 )
 
@@ -666,6 +686,7 @@ def instrumentation(
     environment["LLVM_PROFILE_FILE"] = BUILD_TIME_PROFILE
     environment[runner] = " ".join(command)
     environment[ATTEMPT_VARIABLE] = str(attempt)
+    environment[PREPARED_TARGET_VARIABLE] = str(workspace.target)
     return Instrumentation(environment=environment, flags=tuple(flags))
 
 
@@ -1267,6 +1288,12 @@ def collect(
         VARIABLE as MODEL_VARIABLE,
         read_complete,
     )
+    from scripts.deloxide_lane import (
+        RECORD as LANE_REPORT,
+        REPORT_VARIABLE as LANE_VARIABLE,
+        RecordError,
+        read_complete as read_complete_lane,
+    )
 
     workspace = Workspace(context.workspace.root, context.workspace.target, mode=producer.mode)
     toolchain = context.toolchain
@@ -1294,8 +1321,15 @@ def collect(
             },
         },
     )
-    record.write()
-    stage = Stage.PREPARE
+    stages: dict[str, str] = {}
+    record.content["stages"] = stages
+
+    def enter(next_stage: Stage) -> Stage:
+        stages[str(next_stage)] = timestamp(context.clock())
+        record.write()
+        return next_stage
+
+    stage = enter(Stage.PREPARE)
     try:
         for recipe in producer.prepare:
             status = commands.stream(["just", recipe], environment=context.environment)
@@ -1310,17 +1344,19 @@ def collect(
             record.content["toolchain"] = toolchain.describe()
             record.write()
 
-        stage = Stage.INSTRUMENT
+        stage = enter(Stage.INSTRUMENT)
         instrumented = instrumentation(
             commands, workspace, toolchain, attempt, environment
         )
         if producer.filterable:
             instrumented.environment[MODEL_VARIABLE] = str(attempt / MODEL_REPORT)
             record.content["filter"] = filter_text
+        if producer.diagnostic_lane:
+            instrumented.environment[LANE_VARIABLE] = str(attempt / LANE_REPORT)
         record.content["instrumentation"] = instrumented.describe(workspace)
         record.write()
 
-        stage = Stage.RUN
+        stage = enter(Stage.RUN)
         with workspace.build_lock():
             arguments = ["just", producer.instrumented]
             if producer.filterable:
@@ -1335,7 +1371,16 @@ def collect(
             if producer.filterable:
                 record.content["models"] = read_complete(attempt / MODEL_REPORT, producer.mode, filter_text)
                 record.write()
-            stage = Stage.EXPORT
+            if producer.diagnostic_lane:
+                lane = read_complete_lane(attempt / LANE_REPORT, producer.mode)
+                record.content["lane"] = {
+                    "record": LANE_REPORT,
+                    "attempt": dict(lane["workspace"])["attempt"],
+                    "counts": lane["counts"],
+                    "findings": lane["findings"],
+                }
+                record.write()
+            stage = enter(Stage.EXPORT)
             exported = export(commands, workspace, toolchain, context.packages, attempt)
         record.content["selection"] = exported.selection.describe(workspace)
         record.content["profiles"] = exported.selection.describe_profiles()
@@ -1344,7 +1389,7 @@ def collect(
         record.content["report"] = REPORT
         record.write()
 
-        stage = Stage.FINISH
+        stage = enter(Stage.FINISH)
         for recipe in producer.finish:
             status = commands.stream(["just", recipe], environment=environment)
             if status != 0:
@@ -1358,7 +1403,7 @@ def collect(
         detail = f"interrupted by {interruption}"
         record.fail(Verdict.INTERRUPTED, stage, detail, context.clock())
         return Collected(128 + interruption.number, attempt, record)
-    except (RunnerError, EvidenceError) as error:
+    except (RunnerError, EvidenceError, RecordError) as error:
         record.fail(Verdict.FAILED, stage, str(error), context.clock())
         return Collected(1, attempt, record)
     record.conclude(Verdict.COMPLETE, context.clock())

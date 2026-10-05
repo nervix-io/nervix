@@ -62,7 +62,7 @@ use nervix_primitives::{
     net::{TcpListener as TokioTcpListener, TcpStream},
     stream::StreamExt,
     sync::{Arc, CancellationToken, blocking::Mutex, mpsc, oneshot, watch},
-    task::JoinHandle,
+    task::{AbortOnDropHandle, JoinHandle},
     time::{sleep, timeout},
 };
 use nervix_server::{
@@ -2872,6 +2872,57 @@ impl Cluster {
     pub(crate) fn transfer_leadership(&self, from_node_id: &str, to_node_id: &str) {
         self.fault_injection
             .request_leadership_transfer(node_name(from_node_id), node_name(to_node_id));
+    }
+
+    /// Moves leadership from `from_node_id` to `to_node_id` underneath the next command that
+    /// `from_node_id` durably admits. The command stays paused after its durable admission until
+    /// `to_node_id` reports itself the leader, so the node that admitted it cannot know its
+    /// outcome. The returned task ends once the command is released.
+    pub(crate) fn move_leadership_after_next_durable_admission(
+        &self,
+        from_node_id: &str,
+        to_node_id: &str,
+    ) -> AbortOnDropHandle<io::Result<()>> {
+        let from = node_name(from_node_id);
+        let to = node_name(to_node_id);
+        let successor_id = to_node_id.to_string();
+        let successor = self
+            .nodes
+            .get(to_node_id)
+            .unwrap_or_else(|| panic!("unknown node '{to_node_id}'"))
+            .status_endpoint();
+        let fault_injection = self.fault_injection.clone();
+        fault_injection.pause_command_after_durable_admission_on(from.clone());
+        AbortOnDropHandle::new(nervix_primitives::task::spawn(async move {
+            fault_injection
+                .wait_for_command_durable_admission_pause(&from)
+                .await;
+            fault_injection.request_leadership_transfer(from.clone(), to);
+            let deadline = PhaseDeadline::after(STATUS_WAIT_BUDGET);
+            let elected = deadline
+                .poll_until(
+                    POLL_INTERVAL,
+                    |phase| {
+                        let successor = &successor;
+                        async move {
+                            let status = successor.cluster_status(phase).await?;
+                            Ok::<_, Report<StatusRequestError>>(ClusterStatus::parse(status))
+                        }
+                    },
+                    |status| status.current_leader.as_deref() == Some(successor_id.as_str()),
+                )
+                .await;
+            fault_injection.release_command_durable_admission_pause(&from);
+            match elected {
+                Ok(_) => Ok(()),
+                Err(expired) => Err(io::Error::other(format!(
+                    "node '{successor_id}' did not report itself leader within {:?}; last status: \
+                     {:?}",
+                    deadline.elapsed(),
+                    expired.last_output.map(|status| status.raw)
+                ))),
+            }
+        }))
     }
     async fn wait_until<F>(&self, node_id: &str, predicate: F) -> io::Result<()>
     where
