@@ -104,7 +104,8 @@ pub use command_execution::{
 };
 pub use domain_mutation::{DomainMutationLease, DomainMutationOwner, DomainMutationRecoveryFence};
 pub use restore::{
-    RestoreExecution, RestoreStateInstallationError, RestoreStepEffect, RestoredResource,
+    RestoreExecution, RestoreStateInstallationError, RestoreStateRetention, RestoreStepEffect,
+    RestoredResource,
 };
 pub use retention::RaftRetentionPolicy;
 pub use snapshot::{SealedSnapshot, SnapshotRetention};
@@ -2563,6 +2564,18 @@ impl Observer {
             || self.current_leader_tenure(),
             publish,
         )
+    }
+
+    /// Holds an applied revision across synchronous reclamation on any node. No consensus state
+    /// or activation gate is changed by this operation.
+    pub fn with_restore_state_reclamation<T>(
+        &self,
+        reclaim: impl FnOnce(&RestoreStateRetention<'_>) -> T,
+    ) -> T {
+        self.inner
+            .store
+            .inner
+            .with_restore_state_reclamation(reclaim)
     }
     pub async fn current_command_execution(
         &self,

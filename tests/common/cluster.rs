@@ -740,6 +740,7 @@ pub(crate) struct TestClusterConfig {
     #[cfg(feature = "testing")]
     pub scheduler_mode: Option<SchedulerMode>,
     pub state_snapshot_interval: Duration,
+    pub restore_staging_max_bytes: u64,
     pub transaction_idle_timeout: Duration,
     pub transaction_tombstone_retention: Duration,
     pub command_retry_validity: Duration,
@@ -770,6 +771,7 @@ impl Default for TestClusterConfig {
             #[cfg(feature = "testing")]
             scheduler_mode: None,
             state_snapshot_interval: TEST_STATE_SNAPSHOT_INTERVAL,
+            restore_staging_max_bytes: 128 * 1024 * 1024 * 1024,
             transaction_idle_timeout: Duration::from_secs(15 * 60),
             transaction_tombstone_retention: Duration::from_secs(15 * 60),
             command_retry_validity: Duration::from_secs(15 * 60),
@@ -2978,6 +2980,7 @@ impl NodeHandle {
             .replica_count(self.config.replica_count);
         let application = application_builder
             .state_snapshot_interval(self.config.state_snapshot_interval)
+            .restore_staging_max_bytes(self.config.restore_staging_max_bytes)
             .transaction_idle_timeout(self.config.transaction_idle_timeout)
             .transaction_tombstone_retention(self.config.transaction_tombstone_retention)
             .command_execution(CommandExecutionPolicy::new(
