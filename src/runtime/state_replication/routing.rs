@@ -17,6 +17,7 @@ use imbl::{GenericHashMap, shared_ptr::DefaultSharedPtr};
 use nervix_primitives::publication::{ArcSwap, ArcSwapOption};
 
 use super::*;
+use crate::runtime::materialized_state::MaterializedRelayStateRead;
 
 type Routes = GenericHashMap<
     RuntimeStatePlacement,
@@ -26,11 +27,135 @@ type Routes = GenericHashMap<
 >;
 type Assignments =
     GenericHashMap<DomainNodeRef, SharedStateAssignment, ahash::RandomState, DefaultSharedPtr>;
+type MaterializedRelays = GenericHashMap<
+    DomainNodeRef,
+    MaterializedRelayPublication,
+    ahash::RandomState,
+    DefaultSharedPtr,
+>;
+type MaterializedRoutes = GenericHashMap<
+    Option<BranchKey>,
+    Arc<StateReplicationRoute>,
+    ahash::RandomState,
+    DefaultSharedPtr,
+>;
 
 #[derive(Clone, Default)]
 struct Routing {
     routes: Routes,
     assignments: Assignments,
+    materialized: MaterializedRelays,
+}
+
+/// A domain routing revision retains this relay's installed state lifetimes. Branch discovery
+/// loads only its immutable index; dependency reads never scan node-wide state registries.
+#[derive(Clone)]
+pub(in crate::runtime) struct MaterializedRelayPublication {
+    current: Arc<ArcSwap<MaterializedRoutes>>,
+}
+
+impl MaterializedRelayPublication {
+    fn new() -> Self {
+        Self {
+            current: Arc::new(ArcSwap::from_pointee(MaterializedRoutes::default())),
+        }
+    }
+
+    pub(in crate::runtime) fn record(
+        &self,
+        branch: &Option<BranchKey>,
+    ) -> Option<MaterializedGenerationRecord> {
+        let routes = self.current.load();
+        if let Some(route) = routes.get(branch)
+            && let Some(state) = route.materialized_read()
+        {
+            return state.record(branch);
+        }
+        if branch.is_some()
+            && let Some(route) = routes.get(&None)
+            && let Some(state) = route.materialized_read()
+        {
+            return state.record(branch);
+        }
+        None
+    }
+
+    pub(in crate::runtime) fn states(&self) -> Vec<MaterializedRelayStateRead> {
+        let mut states = Vec::new();
+        for route in self.current.load().values() {
+            if let Some(state) = route.materialized_read() {
+                states.push(state);
+            }
+        }
+        states
+    }
+
+    pub(in crate::runtime) fn has_state_for(&self, branch: &Option<BranchKey>) -> bool {
+        let routes = self.current.load();
+        if let Some(route) = routes.get(branch)
+            && route.is_current()
+        {
+            return true;
+        }
+        branch.is_some() && routes.get(&None).is_some_and(|route| route.is_current())
+    }
+
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            lifecycle,
+            reason = "state installation publishes the relay's exact installed route"
+        )
+    )]
+    fn install(&self, route: &Arc<StateReplicationRoute>) {
+        self.current.rcu(|current| {
+            let mut next = current.as_ref().clone();
+            if !route.is_current() {
+                return next;
+            }
+            if let Some(previous) = next.insert(route.placement.branch_key.clone(), route.clone())
+                && !Arc::ptr_eq(&previous, route)
+            {
+                previous.end();
+            }
+            next
+        });
+    }
+
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            lifecycle,
+            reason = "state retirement withdraws only the exact ended route"
+        )
+    )]
+    fn retire(&self, ended: &Arc<StateReplicationRoute>) {
+        self.current.rcu(|current| {
+            let mut next = current.as_ref().clone();
+            if let Some(route) = next.get(&ended.placement.branch_key)
+                && Arc::ptr_eq(route, ended)
+            {
+                route.end();
+                next.remove(&ended.placement.branch_key);
+            }
+            next
+        });
+    }
+
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            lifecycle,
+            reason = "assignment reconciliation reclaims ended relay route publications"
+        )
+    )]
+    fn purge_stale(&self) {
+        self.current.rcu(|current| {
+            let mut next = current.as_ref().clone();
+            next.retain(|_, route| route.is_current());
+            next
+        });
+    }
 }
 
 /// A resolved checkpoint source. Frames select it at admission and keep its state across
@@ -74,6 +199,13 @@ impl ReplicatedState {
 }
 
 impl StateReplicationRoute {
+    fn materialized_read(&self) -> Option<MaterializedRelayStateRead> {
+        let state = self.current_state()?;
+        if let ReplicatedState::MaterializedRelay(state) = state.as_ref() {
+            return Some(ReplicatedMaterializedRelayState::read(state));
+        }
+        None
+    }
     pub(in crate::runtime) fn state(&self) -> Option<StdArc<ReplicatedState>> {
         self.state.load_full()
     }
@@ -223,11 +355,21 @@ impl StateReplicationRouting {
         &self,
         placement: &RuntimeStatePlacement,
     ) -> Option<SharedStateAssignment> {
-        self.current
-            .load()
-            .assignments
-            .get(&placement.entity())
-            .cloned()
+        self.assignment_for_entity(&placement.entity())
+    }
+
+    pub(in crate::runtime) fn assignment_for_entity(
+        &self,
+        entity: &DomainNodeRef,
+    ) -> Option<SharedStateAssignment> {
+        self.current.load().assignments.get(entity).cloned()
+    }
+
+    pub(in crate::runtime) fn materialized(
+        &self,
+        entity: &DomainNodeRef,
+    ) -> Option<MaterializedRelayPublication> {
+        self.current.load().materialized.get(entity).cloned()
     }
 
     #[cfg_attr(
@@ -245,6 +387,10 @@ impl StateReplicationRouting {
         self.current.rcu(|current| {
             let mut next = current.as_ref().clone();
             next.assignments.insert(entity.clone(), assignment.clone());
+            if entity.kind() == ModelKind::Relay && !next.materialized.contains_key(entity) {
+                next.materialized
+                    .insert(entity.clone(), MaterializedRelayPublication::new());
+            }
             next
         });
     }
@@ -263,6 +409,7 @@ impl StateReplicationRouting {
         assignment: SharedStateAssignment,
         state: ReplicatedState,
     ) {
+        let materialized = matches!(&state, ReplicatedState::MaterializedRelay(_));
         let route = Arc::new(StateReplicationRoute {
             placement: placement.clone(),
             assignment,
@@ -270,11 +417,23 @@ impl StateReplicationRouting {
         });
         self.current.rcu(|current| {
             let mut next = current.as_ref().clone();
-            if let Some(previous) = next.routes.insert(placement.clone(), route.clone()) {
+            if let Some(previous) = next.routes.insert(placement.clone(), route.clone())
+                && !Arc::ptr_eq(&previous, &route)
+            {
                 previous.end();
+            }
+            if materialized {
+                let entity = placement.entity();
+                if !next.materialized.contains_key(&entity) {
+                    next.materialized
+                        .insert(entity.clone(), MaterializedRelayPublication::new());
+                }
             }
             next
         });
+        if materialized && let Some(published) = self.materialized(&placement.entity()) {
+            published.install(&route);
+        }
     }
 
     #[cfg_attr(
@@ -285,13 +444,18 @@ impl StateReplicationRouting {
         )
     )]
     pub(in crate::runtime) fn retire(&self, placement: &RuntimeStatePlacement) {
-        self.current.rcu(|current| {
+        let preceding = self.current.rcu(|current| {
             let mut next = current.as_ref().clone();
             if let Some(previous) = next.routes.remove(placement) {
                 previous.end();
             }
             next
         });
+        if let Some(ended) = preceding.routes.get(placement)
+            && let Some(published) = self.materialized(&placement.entity())
+        {
+            published.retire(ended);
+        }
     }
 
     #[cfg_attr(
@@ -319,6 +483,11 @@ impl StateReplicationRouting {
                 route.end();
                 false
             });
+            for (entity, published) in next.materialized.iter() {
+                if &entity.domain == domain {
+                    published.purge_stale();
+                }
+            }
             next
         });
     }
@@ -340,6 +509,9 @@ impl StateReplicationRouting {
                 route.end();
                 false
             });
+            if let Some(published) = next.materialized.get(entity) {
+                published.purge_stale();
+            }
             next
         });
     }
@@ -356,6 +528,7 @@ impl StateReplicationRouting {
         self.current.rcu(|current| {
             let mut next = current.as_ref().clone();
             next.assignments.remove(entity);
+            next.materialized.remove(entity);
             next
         });
     }
@@ -377,6 +550,11 @@ impl StateReplicationRouting {
                 route.end();
                 false
             });
+            for (entity, published) in next.materialized.iter() {
+                if &entity.domain == domain {
+                    published.purge_stale();
+                }
+            }
             next
         });
     }
@@ -389,6 +567,9 @@ impl StateReplicationRouting {
         self.current.rcu(|current| {
             for route in current.routes.values() {
                 route.end();
+            }
+            for published in current.materialized.values() {
+                published.purge_stale();
             }
             Routing::default()
         });

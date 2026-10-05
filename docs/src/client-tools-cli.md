@@ -299,7 +299,13 @@ and exits with a nonzero status whenever the restore did not complete:
 nervix-cli restore cluster --input cluster.nvxb --on-existing-user skip
 nervix-cli restore domain payments --as payments_copy --input cluster.nvxb
 nervix-cli restore domain payments --input payments.nvxb --dry-run --format json
+nervix-cli restore domain payments --input payments.nvxb --resume --format json
 ```
+
+`--resume` starts the complete restored domain at its archived generation and mapping, preserving
+materialized rows. The default leaves it stopped; a subsequent normal `START` advances its
+generation and clears materialized state. Text and JSON reports include each domain's status and
+start generation, including the planned lifecycle of a dry run.
 
 `--dry-run` verifies the archive and plans the restore without changing anything, and `--format
 json` prints the report, or the failure, as one JSON document. The Rust client sends the archive

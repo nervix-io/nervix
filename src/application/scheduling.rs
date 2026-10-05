@@ -44,7 +44,10 @@ use super::{
     session_service::SessionServiceImpl,
     shutdown::{ShutdownDeadline, ShutdownPhaseOutcome},
 };
-use crate::{registry::ActiveGraph, runtime::LocalGraphDrainOutcome};
+use crate::{
+    registry::{ActiveGraph, assign_server_listener_nodes},
+    runtime::LocalGraphDrainOutcome,
+};
 
 /// How long a leader's automatic scheduling waits, after its reconciliation starts, for gossip to
 /// hear from or give up on every voter before it treats a voter it has not heard from as failed.
@@ -1705,6 +1708,7 @@ impl SessionServiceImpl {
         existing: Option<&nervix_models::DomainSchedule>,
         live_node_ids: &[ClusterNodeName],
     ) {
+        assign_server_listener_nodes(schedule, live_node_ids);
         let Some(existing) = existing else {
             return;
         };

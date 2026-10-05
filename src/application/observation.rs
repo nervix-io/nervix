@@ -388,7 +388,17 @@ impl SessionServiceImpl {
         let mut lines = vec![
             format!("domain: {}", domain.as_str()),
             format!("status: {:?}", domain_state.status).to_ascii_lowercase(),
+            format!("start version: {}", domain_state.start_version),
+            format!("start point: {:?}", domain_state.last_start),
         ];
+        if let Some(mapping) = &domain_state.clock {
+            lines.push(format!(
+                "clock mapping: UTC anchor {}, logical origin {}, time rate {}",
+                mapping.wall_started_at(),
+                mapping.logical_start(),
+                mapping.time_rate()
+            ));
+        }
         lines.extend(self.inner.runtime.describe_domain_statistics(domain));
         lines.push("placement:".to_string());
         lines.push(format!(

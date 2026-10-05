@@ -88,6 +88,7 @@ class InventoryTests(unittest.TestCase):
     def test_inventory_has_current_targets_and_exact_corpus_paths(self) -> None:
         inventory = bolero.load_inventory()
         self.assertEqual({target.id for target in inventory.targets}, {
+            "materialized-publication-lifetimes",
             "task-status-transitions",
             "entity-freeze-transitions",
             "endpoint-route-table",
@@ -111,6 +112,8 @@ class InventoryTests(unittest.TestCase):
             "nspl-archive-model",
             "backup-record-manifest",
             "backup-runtime-state-records",
+            "backup-materialized-identities",
+            "backup-materialized-columns",
             "client-processor-choice-request",
             "client-ffi-host-columns",
             "branch-membership",

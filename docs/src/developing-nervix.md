@@ -590,6 +590,20 @@ complete report, and uploads it to Codecov. The separate `lcov.info` report sele
 CLI and console for focused inspection; it does not replace the workspace export.
 Run the same complexity check locally with `just check-coverage <merged-workspace-report>`.
 
+Both ordinary and diagnostic coverage uploads use the verified Codecov CLI and explicitly select
+`https://codecov.io` as the API origin and OIDC audience. The diagnostic upload retains its
+`diagnostic-evidence` flag. Uploads require TLS verification and `fail_ci_if_error: true`; transport,
+authentication and upload failures fail their jobs. Each job retains its coverage artifacts with an
+`always()` upload so the report remains available for diagnosis.
+
+Codecov statuses and comments use its explicit notification boundary. The PR coverage job waits
+for every report producer, including diagnostic evidence and the shared Bolero gate, uploads the
+complete merged workspace report, and then sends notifications with the same verified CLI and
+OIDC authentication. This prevents an early diagnostic or runner upload from judging the patch
+before ordinary coverage arrives. Standalone scheduled and manual Bolero runs send notifications
+after their own gate succeeds. Finalization errors fail CI, and the configured patch target and
+threshold still apply to the completed report.
+
 ### The scenario suite's execution budget
 
 The Cucumber suite bounds its own run. A step, a teardown diagnostic or a node stop that never

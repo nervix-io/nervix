@@ -236,7 +236,7 @@ fn parse_entity(path: &str, raw: &str) -> Result<ModelName, Report<ArchiveReadEr
     ModelName::parse(raw).map_err(|_| invalid(path, "state entity name"))
 }
 
-fn validate_branch(
+pub(crate) fn validate_branch(
     path: &str,
     key: &Option<Vec<StateField>>,
 ) -> Result<(), Report<ArchiveReadError>> {

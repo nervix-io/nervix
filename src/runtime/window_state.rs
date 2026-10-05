@@ -207,7 +207,7 @@ pub(super) async fn encode_window_processor_snapshot(
     let branch_generation = snapshot.incarnation.unwrap_or_default();
     let input =
         MaterializedGeneration::new(revision, 0, branch_generation, input_schema, input_records)
-            .seal(executor)
+            .encode_resident_container(executor)
             .await
             .change_context(WindowSnapshotError::Encode {
                 section: WindowSnapshotSection::Input,
@@ -219,7 +219,7 @@ pub(super) async fn encode_window_processor_snapshot(
         argument_schema,
         argument_records,
     )
-    .seal(executor)
+    .encode_resident_container(executor)
     .await
     .change_context(WindowSnapshotError::Encode {
         section: WindowSnapshotSection::Arguments,
@@ -290,12 +290,10 @@ pub(super) async fn encode_window_processor_snapshot(
                 section: WindowSnapshotSection::Header,
             },
         )?,
-        input_bytes: u64::try_from(input.bytes.len()).change_context(
-            WindowSnapshotError::Encode {
-                section: WindowSnapshotSection::Header,
-            },
-        )?,
-        argument_bytes: u64::try_from(arguments.bytes.len()).change_context(
+        input_bytes: u64::try_from(input.len()).change_context(WindowSnapshotError::Encode {
+            section: WindowSnapshotSection::Header,
+        })?,
+        argument_bytes: u64::try_from(arguments.len()).change_context(
             WindowSnapshotError::Encode {
                 section: WindowSnapshotSection::Header,
             },
@@ -330,11 +328,9 @@ pub(super) async fn encode_window_processor_snapshot(
     let mut length = WINDOW_SNAPSHOT_FRAME_BYTES
         .checked_add(header.len())
         .ok_or_else(length_error)?;
+    length = length.checked_add(input.len()).ok_or_else(length_error)?;
     length = length
-        .checked_add(input.bytes.len())
-        .ok_or_else(length_error)?;
-    length = length
-        .checked_add(arguments.bytes.len())
+        .checked_add(arguments.len())
         .ok_or_else(length_error)?;
     for section in &typed_sections {
         let framed = length.checked_add(4).ok_or_else(length_error)?;
@@ -368,15 +364,15 @@ pub(super) async fn encode_window_processor_snapshot(
                     section: WindowSnapshotSection::Header,
                 })?;
             buffer
-                .write_all(input.bytes.as_ref())
+                .write_all(input.as_ref())
                 .change_context(WindowSnapshotError::Encode {
                     section: WindowSnapshotSection::Input,
                 })?;
-            buffer.write_all(arguments.bytes.as_ref()).change_context(
-                WindowSnapshotError::Encode {
+            buffer
+                .write_all(arguments.as_ref())
+                .change_context(WindowSnapshotError::Encode {
                     section: WindowSnapshotSection::Arguments,
-                },
-            )?;
+                })?;
             for section in typed_sections {
                 cancellation
                     .check()

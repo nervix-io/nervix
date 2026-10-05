@@ -19,6 +19,9 @@ use crate::{
     manifest::{
         ArchiveScope, BackupManifest, DomainCapture, SectionContent, SectionDigest, SectionEntry,
     },
+    materialized::{
+        MATERIALIZED_IDENTITIES_BYTES, MaterializedIdentitiesRecord, MaterializedRelayDescriptor,
+    },
     path::{MANIFEST_PATH, SectionPath},
     reader::{SectionReader, SectionVisitor, read_archive},
     records::{DomainRecord, ResourceVersionRecord, UsersRecord},
@@ -82,6 +85,19 @@ pub enum DescribedRuntimeState {
         lifecycle: BranchLifecycleRecord,
         record: DescribedSection,
     },
+    Materialized {
+        descriptor: MaterializedRelayDescriptor,
+        record: DescribedSection,
+        groups: Vec<DescribedMaterializedGroup>,
+    },
+}
+
+/// A verified group whose identities and columns stay in the archive until conversion.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DescribedMaterializedGroup {
+    pub identities: DescribedSection,
+    pub columns: DescribedSection,
+    pub record_count: u64,
 }
 
 /// One resource version of an archive.
@@ -197,6 +213,8 @@ struct Describer {
     archive_paths: BTreeMap<SectionPath, VersionSlot>,
     wasm_blob_paths: BTreeMap<SectionPath, (DomainName, usize)>,
     skipped_wasm_blobs: BTreeSet<SectionPath>,
+    materialized_paths: BTreeMap<SectionPath, (DomainName, usize)>,
+    skipped_materialized_prefixes: BTreeSet<String>,
 }
 
 /// A domain whose sections are still arriving.
@@ -223,6 +241,18 @@ enum AssembledRuntimeState {
         lifecycle: BranchLifecycleRecord,
         record: DescribedSection,
     },
+    Materialized {
+        descriptor: MaterializedRelayDescriptor,
+        record: DescribedSection,
+        groups: BTreeMap<u32, MaterializedGroupParts>,
+    },
+}
+
+#[derive(Default)]
+struct MaterializedGroupParts {
+    identities: Option<DescribedSection>,
+    columns: Option<DescribedSection>,
+    record_count: u64,
 }
 
 /// The resource version a resource archive section belongs to.
@@ -267,6 +297,13 @@ impl SectionVisitor for Describer {
         entry: &SectionEntry,
         content: &mut SectionReader<'_>,
     ) -> Result<(), Report<ArchiveReadError>> {
+        if self
+            .skipped_materialized_prefixes
+            .iter()
+            .any(|prefix| entry.path.as_str().starts_with(prefix))
+        {
+            return Ok(());
+        }
         match entry.content {
             SectionContent::Record(RecordKind::Users) => self.users(entry, content),
             SectionContent::Record(RecordKind::Domain) => self.domain_record(entry, content),
@@ -285,6 +322,15 @@ impl SectionVisitor for Describer {
                 let decoded = self.branch_lifecycle(entry, content);
                 self.state_record_or_skip(entry, decoded)
             }
+            SectionContent::Record(RecordKind::MaterializedRelayDescriptor) => {
+                let decoded = self.materialized_descriptor(entry, content);
+                self.state_record_or_skip(entry, decoded)
+            }
+            SectionContent::Record(RecordKind::MaterializedIdentities) => {
+                let decoded = self.materialized_identities(entry, content);
+                self.state_record_or_skip(entry, decoded)
+            }
+            SectionContent::MaterializedColumns => self.materialized_columns(entry, content),
             SectionContent::Record(RecordKind::Manifest) => Err(misplaced(entry)),
             SectionContent::Nspl => self.models(entry, content),
             SectionContent::ResourceArchive => self.resource_archive(entry, content),
@@ -334,6 +380,28 @@ impl Describer {
             let blob = SectionPath::parse(&format!("{prefix}/guest.bin"))?;
             self.skipped_wasm_blobs.insert(blob);
         }
+        if matches!(
+            entry.content,
+            SectionContent::Record(
+                RecordKind::MaterializedRelayDescriptor | RecordKind::MaterializedIdentities
+            )
+        ) {
+            let (prefix, _) = entry
+                .path
+                .as_str()
+                .rsplit_once(
+                    if entry.content
+                        == SectionContent::Record(RecordKind::MaterializedRelayDescriptor)
+                    {
+                        "/descriptor.rkyv"
+                    } else {
+                        "/groups/"
+                    },
+                )
+                .ok_or_else(|| misplaced(entry))?;
+            self.skipped_materialized_prefixes
+                .insert(format!("{prefix}/"));
+        }
         self.domains
             .get_mut(&domain)
             .ok_or_else(|| misplaced(entry))?
@@ -342,6 +410,135 @@ impl Describer {
                 path: entry.path.clone(),
                 reason,
             });
+        Ok(())
+    }
+
+    fn materialized_descriptor(
+        &mut self,
+        entry: &SectionEntry,
+        content: &mut SectionReader<'_>,
+    ) -> Result<(), Report<ArchiveReadError>> {
+        let bytes = content.read_all(entry, MAX_RECORD_BYTES)?;
+        let descriptor = MaterializedRelayDescriptor::decode(entry.path.as_str(), &bytes)?;
+        if entry.path
+            != SectionPath::materialized_descriptor(&descriptor.domain, &descriptor.entity)
+        {
+            return Err(misplaced(entry));
+        }
+        let domain = self
+            .domains
+            .get_mut(&descriptor.domain)
+            .ok_or_else(|| misplaced(entry))?;
+        if self
+            .materialized_paths
+            .insert(
+                entry.path.clone(),
+                (descriptor.domain.clone(), domain.state.len()),
+            )
+            .is_some()
+        {
+            return Err(misplaced(entry));
+        }
+        domain.state.push(AssembledRuntimeState::Materialized {
+            descriptor,
+            record: DescribedSection::read_at(entry, content),
+            groups: BTreeMap::new(),
+        });
+        Ok(())
+    }
+
+    fn materialized_identities(
+        &mut self,
+        entry: &SectionEntry,
+        content: &mut SectionReader<'_>,
+    ) -> Result<(), Report<ArchiveReadError>> {
+        let bytes = content.read_all(entry, MATERIALIZED_IDENTITIES_BYTES)?;
+        let identities = MaterializedIdentitiesRecord::decode(entry.path.as_str(), &bytes)?;
+        if entry.path
+            != SectionPath::materialized_identities(
+                &identities.domain,
+                &identities.entity,
+                identities.group,
+            )
+        {
+            return Err(misplaced(entry));
+        }
+        let path = SectionPath::materialized_descriptor(&identities.domain, &identities.entity);
+        let (domain, index) = self
+            .materialized_paths
+            .get(&path)
+            .ok_or_else(|| misplaced(entry))?;
+        let domain = self
+            .domains
+            .get_mut(domain)
+            .ok_or_else(|| misplaced(entry))?;
+        let state = domain
+            .state
+            .get_mut(*index)
+            .ok_or_else(|| misplaced(entry))?;
+        let AssembledRuntimeState::Materialized {
+            descriptor, groups, ..
+        } = state
+        else {
+            return Err(misplaced(entry));
+        };
+        if identities.group >= descriptor.groups {
+            return Err(misplaced(entry));
+        }
+        let group = groups.entry(identities.group).or_default();
+        if group.identities.is_some() {
+            return Err(misplaced(entry));
+        }
+        let count = u64::try_from(identities.identities.len()).map_err(|_| misplaced(entry))?;
+        group.identities = Some(DescribedSection::read_at(entry, content));
+        group.record_count = count;
+        Ok(())
+    }
+
+    fn materialized_columns(
+        &mut self,
+        entry: &SectionEntry,
+        content: &SectionReader<'_>,
+    ) -> Result<(), Report<ArchiveReadError>> {
+        let (prefix, group_path) = entry
+            .path
+            .as_str()
+            .rsplit_once("/groups/")
+            .ok_or_else(|| misplaced(entry))?;
+        let group = group_path
+            .strip_suffix("/columns.arrow")
+            .ok_or_else(|| misplaced(entry))?;
+        let group = group.parse::<u32>().map_err(|_| misplaced(entry))?;
+        let descriptor_path = SectionPath::parse(&format!("{prefix}/descriptor.rkyv"))?;
+        let (domain, index) = self
+            .materialized_paths
+            .get(&descriptor_path)
+            .ok_or_else(|| misplaced(entry))?;
+        let domain = self
+            .domains
+            .get_mut(domain)
+            .ok_or_else(|| misplaced(entry))?;
+        let state = domain
+            .state
+            .get_mut(*index)
+            .ok_or_else(|| misplaced(entry))?;
+        let AssembledRuntimeState::Materialized {
+            descriptor, groups, ..
+        } = state
+        else {
+            return Err(misplaced(entry));
+        };
+        if group >= descriptor.groups
+            || entry.path
+                != SectionPath::materialized_columns(&descriptor.domain, &descriptor.entity, group)
+        {
+            return Err(misplaced(entry));
+        }
+        let group = groups.entry(group).or_default();
+        if group.columns.is_some() {
+            return Err(misplaced(entry));
+        }
+        group.columns = Some(DescribedSection::read_at(entry, content));
         Ok(())
     }
 
@@ -595,6 +792,13 @@ impl Describer {
                 state: assembled
                     .state
                     .into_iter()
+                    .filter(|state| match state {
+                        AssembledRuntimeState::Materialized { record, .. } => !self
+                            .skipped_materialized_prefixes
+                            .iter()
+                            .any(|prefix| record.path.as_str().starts_with(prefix)),
+                        _ => true,
+                    })
                     .map(|state| match state {
                         AssembledRuntimeState::Wasm {
                             descriptor,
@@ -613,6 +817,48 @@ impl Describer {
                         }
                         AssembledRuntimeState::BranchLifecycle { lifecycle, record } => {
                             Ok(DescribedRuntimeState::BranchLifecycle { lifecycle, record })
+                        }
+                        AssembledRuntimeState::Materialized {
+                            descriptor,
+                            record,
+                            groups,
+                        } => {
+                            if usize::try_from(descriptor.groups).ok() != Some(groups.len()) {
+                                return Err(incomplete(&capture.domain, "materialized groups"));
+                            }
+                            let groups = groups
+                                .into_values()
+                                .map(|group| {
+                                    Ok(DescribedMaterializedGroup {
+                                        identities: group.identities.ok_or_else(|| {
+                                            incomplete(&capture.domain, "materialized identities")
+                                        })?,
+                                        columns: group.columns.ok_or_else(|| {
+                                            incomplete(&capture.domain, "materialized columns")
+                                        })?,
+                                        record_count: group.record_count,
+                                    })
+                                })
+                                .collect::<Result<Vec<_>, Report<ArchiveReadError>>>()?;
+                            let count = groups
+                                .iter()
+                                .try_fold(0_u64, |total, group| {
+                                    total.checked_add(group.record_count)
+                                })
+                                .ok_or_else(|| {
+                                    incomplete(&capture.domain, "materialized record count")
+                                })?;
+                            if count != descriptor.record_count {
+                                return Err(incomplete(
+                                    &capture.domain,
+                                    "materialized record count",
+                                ));
+                            }
+                            Ok(DescribedRuntimeState::Materialized {
+                                descriptor,
+                                record,
+                                groups,
+                            })
                         }
                     })
                     .collect::<Result<Vec<_>, _>>()?,

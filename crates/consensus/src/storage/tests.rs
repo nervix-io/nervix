@@ -58,6 +58,7 @@ async fn restore_installation_authority_and_start_gate_survive_restart() -> Test
                 source: "archive.nvxb".into(),
                 mode: RestoreMode::Apply,
                 state: RestoreState::All,
+                lifecycle: nervix_models::RestoreLifecycle::Stopped,
             },
             RestoreArchive {
                 total_bytes: NonZeroU64::MIN,
@@ -189,7 +190,10 @@ async fn restore_installation_authority_and_start_gate_survive_restart() -> Test
             ConsensusCommand::ApplyRestoreStep {
                 reference,
                 step: RestoreStep::ApplyModels(domain.clone()),
-                effect: Box::new(RestoreStepEffect::InstalledState(current.clone())),
+                effect: Box::new(RestoreStepEffect::InstalledState {
+                    authority: current.clone(),
+                    clock: None,
+                }),
             },
         )
         .await?;

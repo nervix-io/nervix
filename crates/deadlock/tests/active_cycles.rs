@@ -267,7 +267,7 @@ fn serial_inversion(run: &DiagnosticRun) {
     wait_for_potential(run);
 }
 
-const WORKER_CONTEXTS: usize = 32;
+const WORKER_CONTEXTS: usize = 512;
 
 fn many_worker_contexts(run: &DiagnosticRun) {
     let locks = Arc::new([Mutex::new(()), Mutex::new(())]);
@@ -378,7 +378,7 @@ fn shared_order_inversion() {
 
 #[cfg(feature = "deloxide-order")]
 #[test]
-fn a_historical_edge_retains_every_context_from_thirty_two_workers() {
+fn a_historical_edge_retains_every_distinct_worker_context() {
     let directory = tempfile::tempdir().assured("temporary evidence directory");
     let child = run_child("many_worker_contexts", Some(directory.path()));
     assert_eq!(child.exit_code(), 0, "{}", child.describe());
@@ -609,6 +609,15 @@ fn order_context_and_retention_overload_leave_failure_evidence() {
         );
         assert!(!evidence.qualifies());
         assert!(child.stderr.contains("overload"), "{}", child.describe());
+        if matches!(workload, "history_overload" | "witness_overload") {
+            assert!(evidence.findings().iter().any(|finding| matches!(
+                finding,
+                Finding::Overflow {
+                    source: nervix_deadlock::EvidenceLossSource::OrderHistory,
+                    ..
+                }
+            )));
+        }
     }
 }
 

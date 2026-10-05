@@ -291,6 +291,10 @@ syntax, inheritance, diagnostics and operation-specific repair expectations.
 
 ## Source boundary
 
+Endpoint and Syslog sources are assigned to all live voters when a schedule is prepared, including
+cordoned nodes excluded from placed work. Restore, rescheduling, and voter removal use that same
+decision, so a restored coordinator serves intake after `RESUME` even when its relays run elsewhere.
+
 Each domain revision installs its ingestor plans with its schedule. Building a domain, swapping or
 relocating an ingestor, starting the ingestors a runtime revision leaves missing, and placing Kafka
 domain offsets all read those same plans; none of them reads the ingestor's Model. Starting an
@@ -521,6 +525,10 @@ admission according to each source's declared quiesce policy, reports admitted A
 publishing sinks to the domain drain, and runs a confirming force flush after admitted work clears.
 Listeners for other domains continue serving. A sink that does not confirm before the backup's
 quiesce timeout leaves the backup incomplete; it is not treated as a successful publish.
+
+Generated source loops flush pending work when paused and release their in-flight work guard
+before waiting for resume. They acquire a new guard before executing again. This lets the host
+finish quiescence and capture fresh materialized state while the installed generator task waits.
 
 When that policy sends a failed emitter record to a DLQ, the host executes the message-error SET
 program bound during domain installation or replacement. The prepared route retains the input and

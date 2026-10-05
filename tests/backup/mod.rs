@@ -22,6 +22,7 @@ use crate::common::{
     raw_session::{TestDownload, TestDownloadEnd, download_backup},
 };
 
+mod materialized;
 pub(crate) mod restore;
 mod staging;
 
