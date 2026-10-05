@@ -32,6 +32,9 @@ EXECUTABLE = re.compile(r"Executable (?P<description>[^(]+?) \((?P<path>[^)]+)\)
 MACRO = re.compile(r"\bbolero::check!\s*\(")
 UNQUALIFIED_CHECK = re.compile(r"(?<![:\w])check!\s*\(")
 FUNCTION = re.compile(r"\bfn\s+([A-Za-z_][A-Za-z_0-9]*)\s*\(")
+# Symbolizing NEW_FUNC progress can exhaust a short campaign's deadline. Crash stacks
+# still use the configured symbolizer when function progress is disabled.
+LIBFUZZER_PROGRESS_FLAG = "-print_funcs=0"
 
 
 class BoleroError(Exception):
@@ -604,6 +607,7 @@ def bolero_args(inventory: Inventory, target: Target) -> list[str]:
         str(target.max_input_bytes),
         "--timeout",
         f"{target.case_timeout_seconds}s",
+        f"--engine-args={LIBFUZZER_PROGRESS_FLAG}",
     ]
     if target.manifest:
         args.extend(["--manifest-path", str(target.manifest)])
@@ -797,6 +801,7 @@ def fuzz_targets(
             f"-max_len={target.max_input_bytes}",
             f"-max_total_time={duration}",
             "-rss_limit_mb=2048",
+            LIBFUZZER_PROGRESS_FLAG,
         ]
         engine_args = [
             "BOLERO_LIBFUZZER_ARGS=" + " ".join(flags),
@@ -886,6 +891,7 @@ def reduce_failure(
             f"-exact_artifact_path={minimized}",
             f"-timeout={target.case_timeout_seconds}",
             "-max_total_time=60",
+            LIBFUZZER_PROGRESS_FLAG,
         ]
         run_instrumented(
             binary,
