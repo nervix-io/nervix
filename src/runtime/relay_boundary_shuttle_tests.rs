@@ -111,3 +111,64 @@ fn shuttle_owner_fanout_fails_its_ack_while_an_attached_consumer_moves() {
         1_000,
     );
 }
+
+/// A batch another node routed here reaches this node's attached consumers while one more attached
+/// consumer of the relay registers here. Every consumer the batch is delivered to must hold a share
+/// of its acknowledgement, so the source is acknowledged only once each of them acknowledged it: a
+/// consumer that joins in time and fails the batch fails the source acknowledgement.
+#[test]
+fn shuttle_a_routed_batch_racing_a_joining_consumer_reserves_a_share_for_every_delivery() {
+    check_random(
+        || {
+            shuttle::future::block_on(async {
+                let services = test_relay_boundary_services();
+                let mut sibling = services.add_local_runtime_consumer(AckMode::Attached);
+                let (root, completion) = AckSet::root();
+                let mut batch = quiesce_test_batch();
+                batch.acks = vec![root];
+                let routing_services = services.clone();
+                let routing = nervix_primitives::task::spawn(async move {
+                    let routed = routing_services.inject_remote_message(&batch).await;
+                    // The dispatcher resolves the share it routed the batch with once the batch
+                    // reached this node's consumers, as remote dispatch does.
+                    if routed.is_ok() {
+                        batch.ack_success();
+                    }
+                });
+                let joining_services = services.clone();
+                let joining = nervix_primitives::task::spawn(async move {
+                    joining_services.add_local_runtime_consumer(AckMode::Attached)
+                });
+                routing
+                    .await
+                    .assured("the routing side only routes one batch");
+                let mut joined = joining
+                    .await
+                    .assured("the joining side only registers its consumer");
+
+                if let RelayTryRecv::Batch(delivered) = sibling.try_recv() {
+                    delivered.ack_success();
+                }
+                let joined_received = match joined.try_recv() {
+                    RelayTryRecv::Batch(delivered) => {
+                        for ack in delivered.acks.iter() {
+                            ack.no_ack("the joining consumer fails the batch it received");
+                        }
+                        true
+                    }
+                    RelayTryRecv::Empty | RelayTryRecv::Closed => false,
+                };
+                let outcome = completion.wait().await;
+                if joined_received {
+                    assert_ne!(
+                        outcome,
+                        AckOutcome::Ack,
+                        "the source was acknowledged although a consumer that received the batch \
+                         failed it"
+                    );
+                }
+            });
+        },
+        1_000,
+    );
+}

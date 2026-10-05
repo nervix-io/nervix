@@ -124,7 +124,7 @@ impl TransportState {
             };
             // A dial-policy publication retains the exact pool lifetime under a new wrapper.
             // Only a newly created pool may survive withdrawal of this retained owner.
-            if !Arc::ptr_eq(&published.slots, &target.slots) {
+            if !Arc::ptr_eq(&published.pool, &target.pool) {
                 return;
             }
             let mut next = (*current).clone();
@@ -138,7 +138,7 @@ impl TransportState {
     }
 
     pub(super) fn retire_target(&self, target: &OutboundTarget) {
-        for slots in target.slots.iter() {
+        for slots in target.pool.slots.iter() {
             for slot in slots.iter() {
                 self.retire_slot(slot);
             }

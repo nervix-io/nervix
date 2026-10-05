@@ -1,5 +1,6 @@
 Feature: Memory pressure
 
+  @memory_pressure_pause
   Scenario Outline: Memory high watermark pauses scheduled ingestors
     Given runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And memory pressure is configured with high watermark "1B" and low watermark "0B"

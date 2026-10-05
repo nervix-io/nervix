@@ -19,7 +19,7 @@
 
 use error_stack::ResultExt as _;
 
-use super::*;
+use super::{materialized_read::MaterializedStateWait, *};
 
 /// Every way starting or restoring a processor's branch tasks fails.
 #[derive(Debug, thiserror::Error)]
@@ -1456,6 +1456,8 @@ async fn run_processor_branch_task(
         )
     );
     let domain_clock = branch.domain_clock.clone();
+    let mut materialized_wait =
+        MaterializedStateWait::new(&runtime_handle.inner.materialized_state_changed);
     quiesce_gauges.observe(&branch, &processor);
     let stop_mode;
     let mut handoff_execution_snapshot = None;
@@ -1601,10 +1603,11 @@ async fn run_processor_branch_task(
             }
             _ = async {
                 nervix_primitives::select! {
-                    _ = runtime_handle.inner.materialized_state_changed.notified() => {}
+                    () = materialized_wait.changed() => {}
                     _ = sleep(runtime_handle.inner.state_replication_poll_interval) => {}
                 }
             }, if has_pending_materialized && !ownership_frozen => {
+                materialized_wait.register_again();
                 branch
                     .retry_processor_pending_materialized(&processor)
                     .await;
@@ -1631,6 +1634,7 @@ async fn run_processor_branch_task(
                 // A generation releases everything the branch can release now, including parked
                 // messages whose materialized dependency arrived after they were parked.
                 if branch.processor_has_pending_materialized(&processor) {
+                    materialized_wait.register_again();
                     branch
                         .retry_processor_pending_materialized(&processor)
                         .await;

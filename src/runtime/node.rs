@@ -31,7 +31,7 @@ pub(in crate::runtime) struct RuntimeInner {
     /// Also held by the entity gate's deadline task, alongside `ingestors`.
     pub(in crate::runtime) ingestor_quiescence:
         Arc<DashMap<DomainNodeRef, Arc<IngestorQuiesceControl>, RandomState>>,
-    pub(in crate::runtime) ingestors_paused_for_memory_pressure: AtomicBool,
+    pub(in crate::runtime) memory_pressure: MemoryPressurePause,
     pub(in crate::runtime) ingestor_statuses:
         DashMap<DomainNodeRef, Arc<task_status::TaskStatus<RuntimeReconnectStatus>>, RandomState>,
     pub(in crate::runtime) ingestor_readiness:
