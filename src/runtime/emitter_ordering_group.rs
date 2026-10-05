@@ -79,11 +79,10 @@ impl CompiledOrderingGroup {
     pub(super) async fn evaluate(
         &self,
         executor: &Executor,
-        emitter: &EmitterName,
         batch: &RelayRecordBatch,
         execution_now: Timestamp,
         side_inputs: &HashMap<String, RuntimeValue>,
-    ) -> PlannedGeneralResult<OrderingGroups> {
+    ) -> Result<OrderingGroups, PlannedGeneralFailure> {
         let program = match self {
             Self::FromBranch => return Ok(OrderingGroups::from_branch(batch.key.as_ref())),
             Self::Expression(program) => program,
@@ -93,8 +92,6 @@ impl CompiledOrderingGroup {
                 executor,
                 now: execution_now,
             },
-            "emitter",
-            emitter,
             program,
             FilterMapBatchInputs {
                 carrier: &batch.batch,
@@ -107,7 +104,8 @@ impl CompiledOrderingGroup {
             None,
         )
         .await?;
-        let groups = EvaluatedOrderingGroups::from_executed(emitter, batch, executed)?;
+        let groups = EvaluatedOrderingGroups::from_executed(batch, executed)
+            .map_err(|error| PlannedGeneralFailure::new(error, batch.acks.clone()))?;
         Ok(OrderingGroups::Evaluated(groups))
     }
 }
@@ -233,32 +231,19 @@ impl EvaluatedOrderingGroups {
         )
     )]
     fn from_executed(
-        emitter: &EmitterName,
         batch: &RelayRecordBatch,
         executed: ExecutedFilterMap,
     ) -> PlannedGeneralResult<Self> {
-        let evaluation_failed = |reason: String| {
-            Report::new(PlannedGeneralError {
-                acks: batch.acks.clone(),
-                reason: format!(
-                    "emitter '{}' ordering group expression {reason}",
-                    emitter.as_str()
-                ),
-            })
-        };
         let row_count = batch.batch.batch().num_rows();
         let evaluated = executed.batch;
         let Ok(column_index) = evaluated.schema().index_of(ORDERING_GROUP_FIELD) else {
-            return Err(evaluation_failed(
-                "produced no ordering group column".to_string(),
-            ));
+            return Err(Report::new(PlannedGeneralError::OrderingGroupColumn));
         };
         let column = evaluated.column(column_index).to_array_ref();
         let Some(values) = column.as_any().downcast_ref::<StringArray>() else {
-            return Err(evaluation_failed(format!(
-                "produced {}, expected STRING",
-                column.data_type()
-            )));
+            return Err(Report::new(PlannedGeneralError::OrderingGroupType {
+                data_type: column.data_type().clone(),
+            }));
         };
 
         // A program that evaluated every row in order, without an error or a missing value,
@@ -277,9 +262,9 @@ impl EvaluatedOrderingGroups {
         let mut output_rows = vec![None; row_count];
         for (output_row, input_row) in executed.selected_rows.iter().enumerate() {
             let Some(slot) = output_rows.get_mut(input_row) else {
-                return Err(evaluation_failed(format!(
-                    "referenced missing input row {input_row}"
-                )));
+                return Err(Report::new(PlannedGeneralError::OrderingGroupRow {
+                    row: input_row,
+                }));
             };
             *slot = Some(output_row);
         }
@@ -461,7 +446,6 @@ mod tests {
         group
             .evaluate(
                 &Executor::default(),
-                &named("ordered_notifications"),
                 batch,
                 Timestamp::from_unix_nanos(1),
                 &HashMap::default(),
@@ -606,12 +590,10 @@ mod tests {
                 .map(|tenant| vec![("tenant", RuntimeValue::String(tenant.to_string()))])
                 .collect(),
         );
-        let emitter = named("ordered_notifications");
         let nullable_group =
             arrow_schema::Field::new(ORDERING_GROUP_FIELD, ArrowDataType::Utf8, true);
 
         let groups = EvaluatedOrderingGroups::from_executed(
-            &emitter,
             &batch,
             executed(
                 nullable_group.clone(),
@@ -630,38 +612,41 @@ mod tests {
             ]
         );
 
-        for (field, column, selected_rows, reason) in [
+        for (field, column, selected_rows, expected, reason) in [
             (
                 arrow_schema::Field::new("unrelated", ArrowDataType::Utf8, false),
                 VmTypedArray::Utf8(StringArray::from(vec!["acme"; 3])),
                 nervix_vm::RowSelection::All(3),
+                PlannedGeneralError::OrderingGroupColumn,
                 "produced no ordering group column",
             ),
             (
                 arrow_schema::Field::new(ORDERING_GROUP_FIELD, ArrowDataType::Int64, false),
                 VmTypedArray::Int64(arrow_array::Int64Array::from(vec![1_i64; 3])),
                 nervix_vm::RowSelection::All(3),
+                PlannedGeneralError::OrderingGroupType {
+                    data_type: ArrowDataType::Int64,
+                },
                 "produced Int64, expected STRING",
             ),
             (
                 nullable_group.clone(),
                 VmTypedArray::Utf8(StringArray::from(vec![Some("acme")])),
                 nervix_vm::RowSelection::Selected(vec![3]),
+                PlannedGeneralError::OrderingGroupRow { row: 3 },
                 "referenced missing input row 3",
             ),
         ] {
             let error = EvaluatedOrderingGroups::from_executed(
-                &emitter,
                 &batch,
                 executed(field, column, selected_rows),
             )
             .expect_err("an output the groups cannot be read from fails the batch");
-            let error = error.current_context();
+            assert_eq!(error.current_context(), &expected);
             assert_eq!(
-                error.reason,
-                format!("emitter 'ordered_notifications' ordering group expression {reason}")
+                format!("{error:#}"),
+                format!("ordering group expression {reason}")
             );
-            assert_eq!(error.acks.len(), 3);
         }
     }
 

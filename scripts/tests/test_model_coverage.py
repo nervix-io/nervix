@@ -69,16 +69,17 @@ class ModelCoverageTests(unittest.TestCase):
         self.assertIn("just coverage-native-extras test-shuttle", job)
         self.assertIn("just test-shuttle-replay-check", job)
         self.assertIn("target/native-coverage/**/models.json", job)
+        loom = job_section(workflow, "loom")
+        self.assertIn("cargo-llvm-cov", loom)
+        self.assertIn("just coverage-native-extras test-loom", loom)
+        self.assertIn("target/native-coverage/**/models.json", loom)
+        self.assertIn("target/native-coverage-build-loom/loom-failures", loom)
         extra = job_section(workflow, "extra-tests")
-        self.assertIn("just coverage-native-extras test-loom", extra)
         self.assertIn("just test-primitives-compile", extra)
         qualification = job_section(workflow, "loom-qualification")
         self.assertIn("just test-loom-qualification", qualification)
         coverage = job_section(workflow, "coverage")
-        self.assertIn(
-            "needs: [tests, scenarios, extra-tests, shuttle]",
-            coverage,
-        )
+        self.assertIn("needs: [tests, scenarios, extra-tests]", coverage)
         self.assertIn("-path '*/ordinary/*/lcov.info'", coverage)
 
 

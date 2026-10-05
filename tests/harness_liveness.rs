@@ -78,6 +78,7 @@ mod tests {
     };
     use nervix_recovery::NoReceiver as _;
     use nervix_server::application::AppError;
+    use nervix_test_environment::{ContainerTeardownError, TeardownFailures};
     use rcgen::{BasicConstraints, CertificateParams, IsCa, KeyPair};
     use tempfile::TempDir;
     use tonic::{
@@ -3044,7 +3045,7 @@ mod tests {
 
         let teardown = SuiteTeardown::bounded(async {
             future::pending::<()>().await;
-            Vec::new()
+            Ok(())
         })
         .await;
 
@@ -3069,19 +3070,32 @@ mod tests {
 
     #[nervix_primitives::test(start_paused = true)]
     async fn a_dependency_stop_that_finishes_keeps_what_it_reported() {
-        let clean = SuiteTeardown::bounded(async { Vec::new() }).await;
+        let clean = SuiteTeardown::bounded(async { Ok(()) }).await;
         assert!(clean.is_clean(), "{clean}");
 
-        let failed =
-            SuiteTeardown::bounded(async { vec!["redis container did not stop".to_string()] })
-                .await;
+        let failed = SuiteTeardown::bounded(async {
+            let stop = Report::new(io::Error::other("the container did not answer"))
+                .change_context(ContainerTeardownError::Stop {
+                    container: "redis".to_string(),
+                });
+            Err(TeardownFailures::from(stop))
+        })
+        .await;
         assert!(
             !failed.is_clean(),
             "a dependency that reported a failure is not a clean teardown: {failed}"
         );
+        let SuiteTeardown::Failed(failures) = &failed else {
+            panic!("a stop that finished with a failure keeps it: {failed}");
+        };
         assert!(
-            failed.to_string().contains("redis container did not stop"),
-            "{failed}"
+            failures.reports()[0].contains::<io::Error>(),
+            "the failure keeps the cause it was given: {failed}"
+        );
+        assert_eq!(
+            failed.to_string(),
+            "suite dependency teardown failed: failed to stop test container redis: the container \
+             did not answer"
         );
     }
 }

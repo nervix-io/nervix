@@ -1421,23 +1421,29 @@ exec /pulsar/bin/pulsar standalone --no-functions-worker --no-stream-storage -c 
         }
     }
 
-    pub async fn shutdown(&mut self) -> Vec<String> {
-        let mut errors = Vec::new();
+    /// Stops and removes every container this environment started, then its Ryuk cleanup
+    /// container. A container that fails to tear down does not stop the others from being torn
+    /// down, and its failure is kept with the rest.
+    pub async fn shutdown(&mut self) -> Result<(), TeardownFailures> {
+        let mut failures = Vec::new();
         for container in std::mem::take(&mut self.containers).into_iter().rev() {
             if self.mode.is_reusable() {
                 drop(container);
             } else if let Err(error) = container.stop_and_remove().await {
-                errors.push(format!("{error:#}"));
+                failures.push(error);
             }
         }
         self.running.clear();
         self.endpoints = DependencyEndpoints::default();
         self.tls = None;
         self.tls_configuration_hash = None;
-        if let Err(error) = self.reaper.shutdown(errors.is_empty()).await {
-            errors.push(error.to_string());
+        if let Err(error) = self.reaper.shutdown(failures.is_empty()).await {
+            failures.push(error);
         }
-        errors
+        match TeardownFailures::of(failures) {
+            None => Ok(()),
+            Some(failures) => Err(failures),
+        }
     }
 
     async fn mark_starting(&mut self, dependency: &'static str) -> io::Result<bool> {
@@ -2079,11 +2085,54 @@ impl RunningContainer {
 /// Why a test container could not be torn down. Removal is attempted even when the stop fails, so
 /// one teardown can report both.
 #[derive(Debug, Error)]
-enum ContainerTeardownError {
+pub enum ContainerTeardownError {
     #[error("failed to stop test container {container}")]
     Stop { container: String },
     #[error("failed to remove test container {container}")]
     Remove { container: String },
+    #[error("failed to remove Ryuk container {container}")]
+    RemoveReaper { container: String },
+}
+
+/// What a teardown failed to do: the report of each container that would not stop or be removed,
+/// in the order the teardown met them. It holds at least one.
+#[derive(Debug)]
+pub struct TeardownFailures(Vec<Report<ContainerTeardownError>>);
+
+impl TeardownFailures {
+    /// The failures among `reports`, or none when the teardown failed nothing.
+    fn of(reports: Vec<Report<ContainerTeardownError>>) -> Option<Self> {
+        if reports.is_empty() {
+            None
+        } else {
+            Some(Self(reports))
+        }
+    }
+
+    /// The report of every failure, in the order the teardown met them.
+    pub fn reports(&self) -> &[Report<ContainerTeardownError>] {
+        &self.0
+    }
+}
+
+impl From<Report<ContainerTeardownError>> for TeardownFailures {
+    fn from(failure: Report<ContainerTeardownError>) -> Self {
+        Self(vec![failure])
+    }
+}
+
+impl fmt::Display for TeardownFailures {
+    /// Every failure with each cause beneath it, the failures separated by semicolons, so a
+    /// teardown is reported on one line however many containers failed.
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        for (index, failure) in self.0.iter().enumerate() {
+            if index > 0 {
+                formatter.write_str("; ")?;
+            }
+            write!(formatter, "{failure:#}")?;
+        }
+        Ok(())
+    }
 }
 
 async fn stop_and_remove<I: Image>(
@@ -2342,16 +2391,54 @@ mod tests {
     use std::{ffi::OsStr, num::NonZeroUsize};
 
     use clap::{CommandFactory as _, Parser as _};
+    use error_stack::Report;
 
     use super::{
-        ClientError, DockerError, KafkaImage, TEST_CONCURRENCY_FACTOR_ENV, TestParallelism,
-        TestParallelismArgs, TestcontainersError, host_port_bind_conflict,
+        ClientError, ContainerTeardownError, DockerError, KafkaImage, TEST_CONCURRENCY_FACTOR_ENV,
+        TeardownFailures, TestParallelism, TestParallelismArgs, TestcontainersError,
+        host_port_bind_conflict,
     };
 
     #[derive(clap::Parser)]
     struct TestCli {
         #[command(flatten)]
         parallelism: TestParallelismArgs,
+    }
+
+    #[test]
+    fn a_teardown_reports_every_failure_with_its_cause_on_one_line() {
+        assert!(TeardownFailures::of(Vec::new()).is_none());
+
+        let mut kafka = Report::new(std::io::Error::other("stop timed out")).change_context(
+            ContainerTeardownError::Stop {
+                container: "kafka".to_string(),
+            },
+        );
+        kafka.extend_one(
+            Report::new(std::io::Error::other("container is running")).change_context(
+                ContainerTeardownError::Remove {
+                    container: "kafka".to_string(),
+                },
+            ),
+        );
+        let reaper = Report::new(std::io::Error::other("no such container")).change_context(
+            ContainerTeardownError::RemoveReaper {
+                container: "ryuk".to_string(),
+            },
+        );
+        let failures =
+            TeardownFailures::of(vec![kafka, reaper]).expect("a teardown with failures keeps them");
+
+        assert_eq!(failures.reports().len(), 2);
+        assert!(matches!(
+            failures.reports()[1].current_context(),
+            ContainerTeardownError::RemoveReaper { container } if container == "ryuk"
+        ));
+        assert_eq!(
+            failures.to_string(),
+            "failed to stop test container kafka: stop timed out: failed to remove test container \
+             kafka: container is running; failed to remove Ryuk container ryuk: no such container"
+        );
     }
 
     #[test]

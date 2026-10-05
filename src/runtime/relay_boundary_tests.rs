@@ -989,10 +989,168 @@ async fn a_routed_attached_delivery_fails_on_a_node_that_no_longer_runs_its_cons
         .await;
 
     assert!(
-        delivery.is_err(),
+        matches!(delivery, Err(RuntimeError::DispatchRemoteRelay { .. })),
         "an attached record routed to a node without an attached consumer of its relay must not \
-         be acknowledged as delivered"
+         be acknowledged as delivered: {delivery:?}"
     );
+}
+
+/// A relay payload whose parts do not describe one batch of its relay is refused before any of its
+/// rows reaches the relay, naming what the payload got wrong with the decoder's failure beneath.
+#[nervix_primitives::test]
+async fn a_remote_payload_that_does_not_decode_names_its_defect() {
+    let runtime = Runtime::default();
+    let domain = domain("default");
+    let relay = named::<RelayName>("orders");
+    let schema = test_schema(&[("value", ParseAsType::I64)]);
+    install_test_domain_execution(
+        &runtime,
+        &domain,
+        Vec::new(),
+        DomainRoutingSnapshot {
+            relay_schemas: HashMap::from_iter([(relay.clone(), schema.clone())]),
+            relay_services: HashMap::from_iter([(relay.clone(), test_relay_boundary_services())]),
+            ..DomainRoutingSnapshot::default()
+        },
+    );
+    let batch_ipc = routed_test_batch(schema, AckSet::empty())
+        .batch
+        .encode_arrow_ipc(runtime.executor())
+        .await
+        .expect("the routed test batch encodes");
+    let one_row = || vec![test_runtime_row([]).metadata().to_remote()];
+    let cases = [
+        (
+            Some(Vec::new()),
+            one_row(),
+            vec![None],
+            RemoteRelayDecodeError::BranchKey,
+            "failed to decode the remote branch key: a concrete branch key names at least one \
+             field",
+        ),
+        (
+            None,
+            Vec::new(),
+            vec![None],
+            RemoteRelayDecodeError::MetadataCount {
+                metadata: 0,
+                rows: 1,
+            },
+            "remote metadata count 0 does not match batch row count 1",
+        ),
+        (
+            None,
+            one_row(),
+            vec![None, None],
+            RemoteRelayDecodeError::AckCount { acks: 2, rows: 1 },
+            "remote ack count 2 does not match batch row count 1",
+        ),
+    ];
+    for (key, metadata, acks, expected, reason) in cases {
+        let delivery = runtime
+            .handle_remote_stream_payload_with_owner_ingress(
+                RelayPayload {
+                    delivery: RelayDelivery {
+                        channel_incarnation: [4; 16],
+                        sequence: 0,
+                    },
+                    kind: RelayPayloadKind::Routed,
+                    domain: domain.clone(),
+                    relay: relay.clone(),
+                    key,
+                    batch_ipc: batch_ipc.clone(),
+                    metadata,
+                    acks,
+                    admission: None,
+                },
+                false,
+            )
+            .await;
+
+        let Err(error) = delivery else {
+            panic!("a payload that does not decode must not be delivered");
+        };
+        let RuntimeError::DecodeRemoteRelay { report, .. } = &error else {
+            panic!("the payload is refused as a decode failure: {error:?}");
+        };
+        assert_eq!(report.current_context(), &expected);
+        assert_eq!(
+            error.to_string(),
+            format!("failed to decode remote relay 'orders' in domain 'default': {reason}")
+        );
+    }
+}
+
+/// Subscription fan-out ends at admission, so a fan-out that carries record acknowledgement
+/// registrations is refused rather than delivered without them, and so is one whose rows do not
+/// match the metadata sent beside them.
+#[nervix_primitives::test]
+async fn a_subscription_fanout_that_does_not_decode_is_refused() {
+    let runtime = Runtime::default();
+    let domain = domain("default");
+    let relay = named::<RelayName>("orders");
+    let schema = test_schema(&[("value", ParseAsType::I64)]);
+    install_test_domain_execution(
+        &runtime,
+        &domain,
+        Vec::new(),
+        DomainRoutingSnapshot {
+            relay_schemas: HashMap::from_iter([(relay.clone(), schema.clone())]),
+            relay_services: HashMap::from_iter([(relay.clone(), test_relay_boundary_services())]),
+            ..DomainRoutingSnapshot::default()
+        },
+    );
+    let batch_ipc = routed_test_batch(schema, AckSet::empty())
+        .batch
+        .encode_arrow_ipc(runtime.executor())
+        .await
+        .expect("the fan-out test batch encodes");
+    let registration = RemoteAckRegistration {
+        ack_id: 7,
+        registrar: ClusterNodeIdentity::new(
+            ClusterNodeName::parse("node-1").expect("the registrar name is valid"),
+            ClusterNodeIncarnation::new(1),
+        ),
+    };
+    let cases = [
+        (
+            vec![test_runtime_row([]).metadata().to_remote()],
+            vec![Some(registration)],
+            RemoteRelayDecodeError::SubscriptionAcks,
+        ),
+        (
+            Vec::new(),
+            vec![None],
+            RemoteRelayDecodeError::MetadataCount {
+                metadata: 0,
+                rows: 1,
+            },
+        ),
+    ];
+    for (metadata, acks, expected) in cases {
+        let error = runtime
+            .handle_remote_subscription_payload(RelayPayload {
+                delivery: RelayDelivery {
+                    channel_incarnation: [5; 16],
+                    sequence: 0,
+                },
+                kind: RelayPayloadKind::SubscriptionFanout,
+                domain: domain.clone(),
+                relay: relay.clone(),
+                key: None,
+                batch_ipc: batch_ipc.clone(),
+                metadata,
+                acks,
+                admission: None,
+            })
+            .await
+            .expect_err("a fan-out that does not decode is refused");
+
+        let RuntimeError::DecodeRemoteRelay { report, .. } = error.current_context() else {
+            panic!("the fan-out is refused as a decode failure: {error:?}");
+        };
+        assert_eq!(report.current_context(), &expected);
+    }
 }
 
 #[nervix_primitives::test]
