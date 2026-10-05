@@ -323,10 +323,12 @@ properties. Job limits reserve additional time for compilation, artifacts and cl
 cache may seed a campaign but cannot skip a target or replace checked-in regressions. An empty
 selection, timeout, engine failure, sanitizer finding or property failure fails the job.
 
-Both coverage upload jobs use `.github/actions/setup-codecov` to verify the pinned CLI
+The workspace, sanitizer-runner Python, and diagnostic coverage upload jobs use
+`.github/actions/setup-codecov` to verify the pinned CLI
 wheel's SHA-256 and Codecov publisher attestation before installing it in an isolated environment.
 The verified executable is passed to the Codecov action; OIDC authentication and fatal upload
-errors apply to both ordinary workspace coverage and the sanitizer runner's Python coverage.
+errors apply to all three uploads. Diagnostic coverage retains its separate flag and is excluded
+from ordinary coverage and CRAP accounting.
 
 Each fuzz run retains its corpus, crashes, log and metadata with revision, target, domain version,
 toolchain, features, flags, result and an exact-input reproduction command. Retain failure
