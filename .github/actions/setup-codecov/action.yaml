@@ -1,0 +1,30 @@
+name: Install verified Codecov CLI
+description: Check the pinned wheel checksum and Codecov's PyPI publisher attestation before installing the CLI.
+
+outputs:
+  binary:
+    description: Path to the verified Codecov CLI executable.
+    value: ${{ steps.install.outputs.binary }}
+
+runs:
+  using: composite
+  steps:
+    - id: install
+      shell: bash
+      run: |
+        set -euo pipefail
+        codecov_env="${RUNNER_TEMP}/verified-codecov-cli"
+        codecov_wheels="${RUNNER_TEMP}/verified-codecov-wheels"
+        python3 -m venv "$codecov_env"
+        mkdir -p "$codecov_wheels"
+        "$codecov_env/bin/python" -m pip install --disable-pip-version-check 'pypi-attestations==0.0.30'
+        "$codecov_env/bin/python" -m pip download --no-deps --only-binary=:all: \
+          --dest "$codecov_wheels" 'codecov-cli==11.3.1'
+        codecov_wheel="$codecov_wheels/codecov_cli-11.3.1-py3-none-any.whl"
+        printf '%s  %s\n' '69e2521a4904e15cc87e4bb71ad1ddcfa6a48f1340ec28a2419ed94c723c027d' \
+          "$codecov_wheel" | sha256sum --check --strict
+        "$codecov_env/bin/pypi-attestations" verify pypi \
+          --repository https://github.com/codecov/codecov-cli "$codecov_wheel"
+        "$codecov_env/bin/python" -m pip install --disable-pip-version-check "$codecov_wheel"
+        "$codecov_env/bin/codecovcli" --version
+        echo "binary=$codecov_env/bin/codecovcli" >> "$GITHUB_OUTPUT"

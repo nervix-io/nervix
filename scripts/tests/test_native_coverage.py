@@ -113,7 +113,8 @@ class InventoryTests(unittest.TestCase):
             [producer.name for producer in native_coverage.PRODUCERS],
             ["test-typed-ratchet", "bench-smoke", "test-primitives-ordinary",
              "test-primitives-shuttle", "test-primitives-loom", "test-primitives-turmoil",
-             "test-primitives-deloxide", "nspl-completion-walk", "test-shuttle", "test-loom"],
+             "test-primitives-deloxide", "nspl-completion-walk", "test-shuttle", "test-loom",
+             "test-deadlock-evidence-order", "test-deadlock-report"],
         )
         for producer in native_coverage.PRODUCERS:
             self.assertEqual(producer.rerun(), f"just coverage-native-extras {producer.name}")
@@ -190,6 +191,12 @@ class InventoryTests(unittest.TestCase):
             with self.subTest(producer=producer.name):
                 if producer.name == "test-shuttle":
                     selected_job = job_section(workflow, "shuttle")
+                elif producer.name.startswith("test-deadlock-"):
+                    selected_job = job_section(workflow, "diagnostic-evidence")
+                    self.assertIn("run: just coverage-deadlock\n", selected_job)
+                    justfile = (REPOSITORY / "justfile").read_text(encoding="utf-8")
+                    self.assertIn(f" run {producer.name} --output ", justfile)
+                    continue
                 else:
                     selected_job = job
                 name = "test-primitives" if producer.name.startswith("test-primitives-") else producer.name

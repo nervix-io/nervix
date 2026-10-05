@@ -7,6 +7,11 @@ use crate::evidence::EvidenceOutOfBounds;
 /// Why evidence could not be encoded, decoded, written or read.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum EvidenceError {
+    #[error("finding {finding} cannot be reviewed: {refusal}")]
+    Triage {
+        finding: usize,
+        refusal: crate::TriageRefusal,
+    },
     #[error("the evidence could not be encoded")]
     Encode,
     #[error(

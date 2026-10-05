@@ -12,9 +12,9 @@
 //! logs and the completion scripts it prints, so the start runs with the descriptor pointed at
 //! `/dev/null`, before any other thread of the process writes to it, and restored afterwards.
 //!
-//! Only cycles of the wait-for graph reach the callback: Deloxide reports potential lock-order
-//! cycles only when it is built with its `lock-order-graph` feature, which this crate does not
-//! enable and the primitive boundary allows no other crate to name.
+//! The callback preserves the upstream source: active wait-for cycles and historical order cycles
+//! are different findings. Order instrumentation is compiled only by `deloxide-order`; an
+//! instrumented build can disable checking at runtime, but keeps the upstream acquisition cost.
 
 #![cfg_attr(
     nervix_lint,
@@ -29,8 +29,8 @@ use std::{
     collections::BTreeMap,
     fs::OpenOptions,
     io::{self, Write as _},
-    num::NonZeroU64,
     panic::{AssertUnwindSafe, catch_unwind},
+    sync::OnceLock,
     thread::{self, Thread},
     time::SystemTime,
 };
@@ -38,13 +38,13 @@ use std::{
 use error_stack::{Report, ResultExt as _};
 use meticulous::{OptionExt as _, ResultExt as _};
 
-use super::{ActiveCycle, Finding, MAX_CYCLE_THREADS, registry::Registry};
-use crate::{
-    collections::ConcurrentQueue,
-    sync::{
-        Arc,
-        atomic::{AtomicBool, AtomicU64, Ordering},
-    },
+use super::{
+    ActiveCycle, DiagnosticSelection, Finding, MAX_CYCLE_THREADS, MAX_ORDER_EDGES, OverflowSource,
+    handoff::ReportHandoff, registry::Registry,
+};
+use crate::sync::{
+    Arc,
+    atomic::{AtomicBool, Ordering},
 };
 
 /// How many reports wait for the sink at most. The first active cycle normally ends a diagnostic
@@ -56,7 +56,48 @@ const FINDINGS_THREAD: &str = "nervix-deadlock-findings";
 /// Set by the first installation attempt, successful or not. Standalone flags: neither publishes
 /// any other state, which the detector, the queue and the thread handles synchronize themselves.
 static CLAIMED: AtomicBool = AtomicBool::new(false);
-static INSTALLED: AtomicBool = AtomicBool::new(false);
+static ORDER_ENABLED: AtomicBool = AtomicBool::new(false);
+
+// Installation readiness is the OnceLock's initialized state itself. No standalone flag is used
+// to publish another location; the same publication holds the queue the callback uses.
+static SELF_WAIT_HANDOFF: OnceLock<SelfWaitHandoff> = OnceLock::new();
+struct SelfWaitHandoff {
+    handoff: Arc<Handoff>,
+    findings: Thread,
+}
+
+/// A failed mutex acquisition by a thread with its own live exclusive guard is an active cycle
+/// of one. The upstream common-lock filter cannot establish infeasibility for one participant:
+/// when order instrumentation records its held set, it filters this real cycle. The boundary
+/// reports the actual guard/failed-acquisition pair through its ordinary findings handoff.
+pub(crate) fn report_self_wait(registry: &Registry, lock: usize) {
+    if !registry.history.holds_exclusively(lock) {
+        return;
+    }
+    let Some(thread) = registry.current_thread() else {
+        registry.history.loss();
+        return;
+    };
+    let thread =
+        usize::try_from(thread.get().get()).assured("the vendor assigned this identity as usize");
+    let handoff = SELF_WAIT_HANDOFF
+        .get()
+        .assured("tracked acquisitions require successful installation");
+    handoff
+        .handoff
+        .reports
+        .submit(CycleReport::Active(ActiveReport {
+            detected_at: SystemTime::now(),
+            threads: vec![thread],
+            waits: vec![Wait { thread, lock }],
+            omitted_threads: 0,
+        }));
+    handoff.findings.unpark();
+}
+
+pub fn order_enabled() -> bool {
+    cfg!(feature = "deloxide-order") && ORDER_ENABLED.load(Ordering::Relaxed)
+}
 
 /// Proof that this process installed its detector. The detector stays installed for the life of the
 /// process: dropping this does not remove it.
@@ -68,6 +109,8 @@ pub struct Detector {
 /// Why the detector could not be installed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub enum InstallError {
+    #[error("diagnostic selection {selection:?} is unavailable in this build")]
+    SelectionUnavailable { selection: DiagnosticSelection },
     #[error("this process has already installed, or tried to install, its deadlock detector")]
     AlreadyClaimed,
     #[error("the thread that hands deadlock findings to their sink could not be started")]
@@ -82,7 +125,7 @@ pub enum InstallError {
 
 /// Whether this process installed its detector.
 pub fn is_installed() -> bool {
-    INSTALLED.load(Ordering::Relaxed)
+    SELF_WAIT_HANDOFF.get().is_some()
 }
 
 /// Fail the calling operation unless this process installed its detector.
@@ -113,12 +156,26 @@ pub fn install<Sink>(sink: Sink) -> Result<Detector, Report<InstallError>>
 where
     Sink: FnMut(Finding) + Send + 'static,
 {
+    install_selected(DiagnosticSelection::for_build(false), sink)
+}
+
+pub fn install_selected<Sink>(
+    selection: DiagnosticSelection,
+    sink: Sink,
+) -> Result<Detector, Report<InstallError>>
+where
+    Sink: FnMut(Finding) + Send + 'static,
+{
+    if selection != DiagnosticSelection::for_build(!selection.checks_order()) {
+        return Err(Report::new(InstallError::SelectionUnavailable {
+            selection,
+        }));
+    }
     if CLAIMED.swap(true, Ordering::Relaxed) {
         return Err(Report::new(InstallError::AlreadyClaimed));
     }
     let handoff = Arc::new(Handoff {
-        reports: ConcurrentQueue::bounded(HANDOFF_CAPACITY),
-        lost: AtomicU64::new(0),
+        reports: ReportHandoff::new(HANDOFF_CAPACITY),
     });
     let findings = {
         let handoff = Arc::clone(&handoff);
@@ -129,13 +186,30 @@ where
     };
     // Nothing joins the findings thread: it runs for the life of the process.
     let findings = findings.thread().clone();
-    start_quietly(move |report: deloxide::DeadlockInfo| handoff.accept(report, &findings))?;
-    INSTALLED.store(true, Ordering::Relaxed);
+    ORDER_ENABLED.store(selection.checks_order(), Ordering::Relaxed);
+    let callback_handoff = Arc::clone(&handoff);
+    let callback_findings = findings.clone();
+    if let Err(error) = start_quietly(selection, move |report: deloxide::DeadlockInfo| {
+        callback_handoff.accept(report, &callback_findings)
+    }) {
+        handoff.reports.close();
+        findings.unpark();
+        return Err(error);
+    }
+    assert!(
+        SELF_WAIT_HANDOFF
+            .set(SelfWaitHandoff { handoff, findings })
+            .is_ok(),
+        "installation is claimed once before publishing its handoff"
+    );
     Ok(Detector { _installed: () })
 }
 
 /// Start Deloxide with `callback`, keeping its banner off standard output.
-fn start_quietly<Callback>(callback: Callback) -> Result<(), Report<InstallError>>
+fn start_quietly<Callback>(
+    selection: DiagnosticSelection,
+    callback: Callback,
+) -> Result<(), Report<InstallError>>
 where
     Callback: Fn(deloxide::DeadlockInfo) + Send + Sync + 'static,
 {
@@ -150,7 +224,16 @@ where
         .flush()
         .change_context(InstallError::SilenceStandardOutput)?;
     nix::unistd::dup2_stdout(&discard).change_context(InstallError::SilenceStandardOutput)?;
-    let started = deloxide::Deloxide::new().callback(callback).start();
+    let detector = deloxide::Deloxide::new().callback(callback);
+    #[cfg(feature = "deloxide-order")]
+    let detector = if selection.checks_order() {
+        detector.with_lock_order_checking()
+    } else {
+        detector.no_lock_order_checking()
+    };
+    #[cfg(not(feature = "deloxide-order"))]
+    let _selection = selection;
+    let started = detector.start();
     // The banner ends with a line break, which flushed it; whatever remains goes to `/dev/null`.
     let flushed = io::stdout().flush();
     nix::unistd::dup2_stdout(&saved).change_context(InstallError::RestoreStandardOutput)?;
@@ -163,16 +246,26 @@ where
 
 /// The queue between Deloxide's callback and the findings thread.
 struct Handoff {
-    reports: ConcurrentQueue<CycleReport>,
-    /// Reports the full queue refused since the findings thread last looked.
-    lost: AtomicU64,
+    reports: ReportHandoff<CycleReport>,
 }
 
 /// The identities of one report, copied out of Deloxide's.
-struct CycleReport {
+enum CycleReport {
+    Active(ActiveReport),
+    Potential(OrderReport),
+}
+
+struct OrderReport {
+    detected_at: SystemTime,
+    locks: Vec<usize>,
+    total_edges: u64,
+}
+
+struct ActiveReport {
     detected_at: SystemTime,
     threads: Vec<usize>,
     waits: Vec<Wait>,
+    omitted_threads: u64,
 }
 
 /// A thread of a reported cycle and the lock Deloxide reported it waiting for.
@@ -184,24 +277,60 @@ struct Wait {
 impl Handoff {
     /// Deloxide's callback, on its dispatcher thread.
     fn accept(&self, report: deloxide::DeadlockInfo, findings: &Thread) {
-        let mut waits = Vec::with_capacity(report.thread_waiting_for_locks.len());
-        for (thread, lock) in report.thread_waiting_for_locks {
-            waits.push(Wait { thread, lock });
-        }
-        let report = CycleReport {
-            detected_at: SystemTime::now(),
-            threads: report.thread_cycle,
-            waits,
+        let report = match report.source {
+            deloxide::DeadlockSource::WaitForGraph => {
+                let total = report.thread_cycle.len();
+                let threads: Vec<_> = report
+                    .thread_cycle
+                    .iter()
+                    .copied()
+                    .take(MAX_CYCLE_THREADS)
+                    .collect();
+                let mut waits = Vec::with_capacity(threads.len());
+                // Both retained vectors are bounded, even if the upstream report is larger.
+                // The upstream vector is searched, not retained by this handoff.
+                for thread in &threads {
+                    if let Some((_, lock)) = report
+                        .thread_waiting_for_locks
+                        .iter()
+                        .find(|(waiting, _)| waiting == thread)
+                    {
+                        waits.push(Wait {
+                            thread: *thread,
+                            lock: *lock,
+                        });
+                    }
+                }
+                let omitted_threads = u64::try_from(total - threads.len())
+                    .assured("supported targets address at most 64 bits");
+                CycleReport::Active(ActiveReport {
+                    detected_at: SystemTime::now(),
+                    threads,
+                    waits,
+                    omitted_threads,
+                })
+            }
+            deloxide::DeadlockSource::LockOrderViolation => {
+                let Some(mut locks) = report.lock_order_cycle else {
+                    Registry::global().history.loss();
+                    findings.unpark();
+                    return;
+                };
+                if locks.first() == locks.last() {
+                    locks.pop();
+                }
+                let total_edges =
+                    u64::try_from(locks.len()).assured("supported targets address at most 64 bits");
+                // A partial cycle needs the next identity for its last retained directed edge.
+                let locks = locks.into_iter().take(MAX_ORDER_EDGES + 1).collect();
+                CycleReport::Potential(OrderReport {
+                    detected_at: SystemTime::now(),
+                    locks,
+                    total_edges,
+                })
+            }
         };
-        if self.reports.push(report).is_err() {
-            // A count of lost reports means at least that many, so at the largest count it stays.
-            let counted = self
-                .lost
-                .try_update(Ordering::Relaxed, Ordering::Relaxed, |lost| {
-                    Some(lost.checked_add(1).unwrap_or(lost))
-                });
-            counted.assured("the update always produces a count");
-        }
+        self.reports.submit(report);
         findings.unpark();
     }
 
@@ -213,20 +342,49 @@ impl Handoff {
     {
         loop {
             while let Ok(report) = self.reports.pop() {
-                deliver_one(|| {
-                    let finding = Finding::ActiveCycle(report.describe(Registry::global()));
-                    sink(finding);
+                deliver_one(|| match report {
+                    CycleReport::Active(report) => {
+                        sink(Finding::ActiveCycle(report.describe(Registry::global())))
+                    }
+                    CycleReport::Potential(report) => {
+                        let registry = Registry::global();
+                        if let Some(cycle) = registry.history.describe(
+                            registry,
+                            report.detected_at,
+                            report.locks,
+                            report.total_edges,
+                        ) {
+                            sink(Finding::PotentialCycle(cycle));
+                        }
+                    }
                 });
             }
-            if let Some(lost) = NonZeroU64::new(self.lost.swap(0, Ordering::Relaxed)) {
-                deliver_one(|| sink(Finding::Overflow { lost }));
+            if let Some(lost) = self.reports.take_lost() {
+                deliver_one(|| {
+                    sink(Finding::Overflow {
+                        lost,
+                        source: OverflowSource::Handoff,
+                    })
+                });
             }
-            thread::park();
+            if let Some(lost) = Registry::global().history.take_lost() {
+                deliver_one(|| {
+                    sink(Finding::Overflow {
+                        lost,
+                        source: OverflowSource::OrderHistory,
+                    })
+                });
+            }
+            if self.reports.is_closed() {
+                return;
+            }
+            // Context overflow can occur without a Deloxide cycle and must still reach the sink.
+            thread::park_timeout(std::time::Duration::from_millis(100));
         }
     }
 }
 
-impl CycleReport {
+impl ActiveReport {
     /// The cycle in source terms: every thread in cycle order, up to the bound, with what the
     /// registry recorded for it.
     fn describe(self, registry: &Registry) -> ActiveCycle {
@@ -238,13 +396,7 @@ impl CycleReport {
         for thread in self.threads.iter().take(MAX_CYCLE_THREADS) {
             threads.push(registry.blocked_thread(*thread, waited.get(thread).copied()));
         }
-        let omitted = self
-            .threads
-            .len()
-            .checked_sub(threads.len())
-            .assured("a cycle describes at most the threads it has");
-        let omitted = u64::try_from(omitted).assured("supported targets address at most 64 bits");
-        ActiveCycle::new(self.detected_at, threads, omitted).assured(
+        ActiveCycle::new(self.detected_at, threads, self.omitted_threads).assured(
             "Deloxide reports only a validated, non-empty cycle, and the bound is applied above",
         )
     }

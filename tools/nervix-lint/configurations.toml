@@ -1,6 +1,7 @@
 # Only these compiled configurations are claimed by the synchronization gate. Primitive provenance
 # in authored macros and inactive cfg continues to be enforced by the mandatory source validator.
 [[configuration]]
+features = ["nervix-deadlock/report-tool"]
 kinds = ["lib", "bin"]
 manifest = "Cargo.toml"
 name = "ordinary"
@@ -32,7 +33,40 @@ packages = ["nervix-primitives", "nervix-interconnect"]
 
 [[configuration]]
 features = ["native", "deloxide"]
-kinds = ["lib", "bin"]
+kinds = ["lib"]
 manifest = "Cargo.toml"
 name = "deloxide"
-packages = ["nervix-primitives", "nervix-deadlock", "nervix-server"]
+packages = [
+  "nervix-primitives",
+  "nervix-deadlock",
+  "nervix-paced-simulation",
+  "nervix-server",
+]
+
+[[configuration]]
+features = ["native", "deloxide-order"]
+kinds = ["lib"]
+manifest = "Cargo.toml"
+name = "deloxide-order"
+packages = [
+  "nervix-primitives",
+  "nervix-deadlock",
+  "nervix-paced-simulation",
+  "nervix-server",
+]
+
+# The local report tool is an ordinary product binary. Diagnostic binaries are checked separately
+# from the reporting library, so these configurations never enable its report-tool capability.
+[[configuration]]
+features = ["native", "deloxide"]
+kinds = ["bin"]
+manifest = "Cargo.toml"
+name = "deloxide-binaries"
+packages = ["nervix-primitives", "nervix-paced-simulation", "nervix-server"]
+
+[[configuration]]
+features = ["native", "deloxide-order"]
+kinds = ["bin"]
+manifest = "Cargo.toml"
+name = "deloxide-order-binaries"
+packages = ["nervix-primitives", "nervix-paced-simulation", "nervix-server"]

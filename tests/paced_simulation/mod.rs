@@ -618,9 +618,40 @@ async fn given_the_leader_node_is_configured_with_the_example_graph(world: &mut 
         commands.push('\n');
     }
     let leader = current_leader_node(world).await;
-    let session = execute_nspl_commands_on_node(world, &leader, &commands)
+    let server = world
+        .cluster()
+        .grpc_uri(&leader)
+        .expect("the leader has a gRPC endpoint");
+    let client = Client::connect_with_options(
+        &server,
+        client_domain(&world.domain),
+        client_connect_options(&server).expect("the cluster has valid client options"),
+    )
+    .await
+    .unwrap_or_else(|error| panic!("the example graph client did not connect: {error}"));
+    // One native client retains BEGIN/COMMIT state and each command's execution reference across
+    // a leader change. A raw wire probe deliberately exposes OutcomeUnknown to its caller.
+    for command in nspl_statements(&commands) {
+        append_cucumber_log_line(&format!("paced example graph command: {command}"));
+        let outcome = client
+            .execute(command)
+            .await
+            .unwrap_or_else(|error| panic!("the example graph did not load: {error}"));
+        assert!(
+            outcome.succeeded(),
+            "the example graph did not load: {outcome:?}"
+        );
+        world.last_command_output =
+            Some(crate::common::cluster::flatten_outcome_messages(&outcome));
+    }
+    let leader = current_leader_node(world).await;
+    let session = world
+        .cluster()
+        .open_session(&leader, &world.domain)
         .await
-        .unwrap_or_else(|error| panic!("the example graph did not load: {error}"));
+        .unwrap_or_else(|error| {
+            panic!("the configured example graph session did not open: {error}")
+        });
     world.active_session = Some(session);
     world.active_session_node = Some(leader);
     world.active_session_has_subscription = false;

@@ -285,6 +285,21 @@ drafts become the existing semantic Model only when every required choice and ex
 Changing the captured domain or a dependent reference invalidates selected references while
 keeping the operator's draft text visible for correction.
 
+### Diagnostic evidence states
+
+The diagnostic owner distinguishes active cycles, potential order and overload. Potential records
+carry `Unreviewed` or `Reviewed(TriageProof)`, with a bounded explicit basis, reason and retained
+regression reference. New source/lifetime context revokes a review. `Live`, `Ended` and `Unrecorded`
+lock instances preserve different observations; absent construction or acquisition context stays
+absent. Reused source sites never replace run-local instance identity.
+
+`ProcessRecord` requires its compile-time/runtime diagnostic selection, and an artifact requires
+whole-process or selected scope. A selected export cannot qualify a source process whose other
+findings it omitted. The current version-2 wire conversion checks every required field, bound,
+identity and review once; unsupported versions fail from their header without another shape or a
+default. [Data-Plane Concurrency](./data-plane-concurrency.md#diagnostic-deadlock-detection) owns the
+current representation, qualification policy and coverage limits.
+
 ## Validation And Failure Boundaries
 
 The registry rejects unresolved or contradictory contracts before a graph becomes active. It
