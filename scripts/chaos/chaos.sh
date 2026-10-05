@@ -15,6 +15,9 @@ Usage:
   just chaos run partition-recovery --image IMAGE [--case CASE] [--partition-seconds N] [--records N]
   just chaos run degraded-links --image IMAGE [--profile PROFILE] [--records N]
   just chaos run backup --image IMAGE [--nodes 1|3] [--records N]
+  just chaos run stale-follower --image IMAGE [--records N]
+  just chaos run former-owner-restart --image IMAGE [--isolation-seconds N] [--records N]
+  just chaos run cluster-restart --image IMAGE [--nodes 1|3] [--outage-seconds N] [--records N]
   just chaos cleanup --run-id RUN_ID
   just chaos self-test
 
@@ -44,6 +47,10 @@ degraded-links  Measured delay, jitter, random and burst loss, rate limits, and 
                 against one directed cluster link (three-node; --profile, default all)
 backup  Quiesced domain backup during acknowledged Kafka traffic, verified offline
         topologies: one-node (--nodes 1), three-node (--nodes 3, default)
+stale-follower  Offline follower, survivor log compaction and snapshot catch-up (three-node)
+former-owner-restart  Former owner restarted behind peer-side isolation before startup admission (three-node)
+cluster-restart  Every node SIGKILLed and started from its own volume
+                 topologies: one-node (--nodes 1), three-node (--nodes 3, default)
 EOF
 }
 
@@ -88,6 +95,9 @@ case "${command_name}" in
                 ;;
             backup)
                 exec "${script_dir}/run-backup.sh" "$@"
+                ;;
+            stale-follower | former-owner-restart | cluster-restart)
+                exec "${script_dir}/run-recovery.sh" --scenario "${scenario}" "$@"
                 ;;
             *)
                 printf 'unknown chaos scenario: %s\n' "${scenario}" >&2

@@ -735,6 +735,12 @@ A former owner restarted while cut off from consensus therefore produces no outp
 connectivity is restored it observes the current schedule and forwards traffic to the node that now
 owns the work.
 
+The node's log marks the boundary. When its first read attempt fails, it logs this once per process
+at `warn`:
+`runtime execution is waiting for linearizable consensus catch-up`. When admission succeeds, it logs
+`runtime execution admitted after linearizable consensus catch-up` at `info`, with the
+`committed_log_index` it applied through.
+
 At startup the node offers the peer endpoints retained in its Raft membership as gossip seeds. A
 former bootstrap node therefore has a path back to surviving peers even if it was originally
 configured without a bootstrap host. The endpoints only initiate authenticated contact; gossip
