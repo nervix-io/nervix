@@ -267,7 +267,7 @@ jobs:
           files: target/deadlock.lcov
           flags: diagnostic-evidence
           use_oidc: true
-          use_legacy_upload_endpoint: true
+          url: https://codecov.io
 
       - name: Upload diagnostic evidence
         if: always()
@@ -713,7 +713,7 @@ jobs:
           fail_ci_if_error: true
           files: ./lcov-workspace.info
           use_oidc: true
-          use_legacy_upload_endpoint: true
+          url: https://codecov.io
 
       - name: Upload merged coverage
         if: always()

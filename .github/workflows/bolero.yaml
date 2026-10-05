@@ -79,7 +79,7 @@ jobs:
           files: target/bolero/python-runner.lcov
           flags: bolero
           use_oidc: true
-          use_legacy_upload_endpoint: true
+          url: https://codecov.io
 
   bolero-random:
     name: bolero-random
@@ -277,7 +277,7 @@ jobs:
           files: target/bolero/python.lcov
           flags: bolero
           use_oidc: true
-          use_legacy_upload_endpoint: true
+          url: https://codecov.io
 
       - name: Publish live Rust source coverage
         id: rust-coverage
@@ -296,7 +296,7 @@ jobs:
           files: ${{ steps.rust-coverage.outputs.report }}
           flags: bolero-fuzz
           use_oidc: true
-          use_legacy_upload_endpoint: true
+          url: https://codecov.io
 
       - name: Upload live campaign coverage and completion evidence
         if: always()
