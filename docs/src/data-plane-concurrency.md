@@ -1394,12 +1394,17 @@ restart. The node-local sweeper takes the applied consensus read guard before th
 installation barrier, matching staging and publication; both remain held through bounded deletion.
 The public quota scenarios retain active staging through completed sweeps and prove failed
 targets remain gated after reclamation and restart on one and three nodes. The command
-then runs the `@deadlock_diagnostics`, `@restore_installation`, and
-`@client_ingestor_alter_drain` scenarios, without retries, in a
+then runs the `@deadlock_diagnostics`, `@restore_installation`, `@client_ingestor_alter_drain`,
+`@memory_pressure_pause`, `@client_io_03_consumer_restore` and `@client_io_03_generation`
+scenarios, without retries, in a
 scenario binary built for the mode: in-process diagnostic nodes running a workload, real diagnostic
 server processes that stop gracefully with evidence that records a running detector and no
 findings, each on one and three nodes, the buffered client alterations with overlapping holds and
-failed drains or full-hold engagement, and the restore installation workloads. The latter exercise
+failed drains or full-hold engagement, and the restore installation workloads. The memory-pressure
+scenarios take the node's pause lock as the pause collects every registered quiesce control and as
+each starting ingestor reads the pause, on one and three nodes. The client consumer scenarios take
+the Rust client consumer's state and parked-read locks in the scenario process as a consumer is
+restored after a session restart and closed by a domain restart. The latter exercise
 the blocking applied-state authority guard through staging failure, complete publication, runtime
 handle clearing and a delayed coordinator across leadership transfer and a successor's START.
 The large-generation scenarios cover two 20 MiB saves and forty 1 MiB saves on one and three nodes,
@@ -1760,6 +1765,9 @@ against reports and announcements.
 | `runtime.local-drain.handed-on-batch` | A batch a relay's owner hands on to its consumer while a drain observes the domain is never missing from the observation: the consumer admits the batch before the owner hands it on, the observation reads the relay's transit before its consumers' queues, and handing on releases the consumer's admission to the observation that acquires it | `loom_a_batch_its_owner_hands_on_while_a_drain_observes_is_never_missing_from_it` (`src/runtime/local_drain_loom_models.rs`); fails when `self.handed_on.fetch_add(1, Ordering::Release);` weakened to `self.handed_on.fetch_add(1, Ordering::Relaxed);` |
 | `runtime.local-drain.flush-completion` | A message a force flush resumed is admitted work to a drain observation that sees the flush complete: the participant resumes the message before it completes its obligation, the observation reads the obligations before the node's work, and acquiring the completion makes the resumed message visible | `loom_a_message_a_flush_resumed_is_seen_by_a_drain_that_sees_the_flush_complete` (`src/runtime/local_drain_loom_models.rs`); fails when `self.force_flushes.load(Ordering::Acquire)` weakened to `self.force_flushes.load(Ordering::Relaxed)` |
 | `runtime.kafka-offset-state.snapshot-revision` | A Kafka offset snapshot stamped with a commit's revision encodes that commit's offset: the commit stores the partition's offset before it advances the revision, the snapshot reads the revision before the offsets, and advancing releases what reading the revision acquires | `loom_a_snapshot_carrying_a_commits_revision_carries_its_offset` (`src/runtime/kafka_offset_state.rs`); fails when `LsmSequence::advance` is weakened from `SeqCst` to `Relaxed` |
+| `server.backup.cut-includes-publication` | A quiesced backup cut waits for every branch state publication that registered before the cut closed, then reads every write those publications completed: closing and registering are read-modify-writes of one word, a publication leaves with a release and the cut's wait acquires | `loom_a_cut_includes_every_registered_publication` (`src/runtime/backup_capture_fence.rs`); fails when a publication's leaving is weakened from `Release` to `Relaxed` |
+| `server.backup.cut-generation` | A branch state publisher that enters after a backup cut acquires the cut generation and sees the coordinator's writes before it: reopening extends the closing release sequence, and a publisher's registration acquires it | `loom_a_publisher_acquires_the_cut_generation` (`src/runtime/backup_capture_fence.rs`); fails when the registration is weakened from `AcqRel` to `Release` |
+| `harness.loom.coroutine-stack` | A model body and the participants it spawns run debug frames with allocation instrumentation on the coroutine stacks they request, while Loom's coordinator only starts and joins the body | `loom_model_coroutines_support_instrumented_debug_frames` (`crates/model-harness/src/loom.rs`); fails when the stack request is cut to `4_096` |
 
 The cancellation protocol these models check is the bounded executor's. `Cancellation::armed`
 creates both ends of one job's cancellation: the executor keeps the obligation while its caller
