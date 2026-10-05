@@ -229,9 +229,9 @@ For representation properties and sanitizer fuzzing, see
 `just fuzz <target> [duration]`. These commands and the dedicated Bolero workflow own target
 discovery; repository validation does not run Bolero checks. `just help` lists the recipes.
 
-Native CI builds for validation, unit tests, scenarios, client conformance, Turmoil, Bolero and
-extra checks use Clang 23 with Wild. Cargo's `x86_64-unknown-linux-gnu` linker points to
-`scripts/ci_linker.sh`, which selects Wild independently of `RUSTFLAGS` and
+Native CI builds for validation, unit tests, scenarios, client conformance, Turmoil, Shuttle,
+Loom, Bolero and extra checks use Clang 23 with Wild. Cargo's `x86_64-unknown-linux-gnu` linker
+points to `scripts/ci_linker.sh`, which selects Wild independently of `RUSTFLAGS` and
 `CARGO_ENCODED_RUSTFLAGS` supplied by coverage, simulation or sanitizer tooling. Browser targets
 use their own linker. `just validate-workflows` checks the Actions workflow definitions.
 
@@ -333,6 +333,9 @@ fresh process. Use `SHUTTLE_REPORT_STEPS=1` to inspect the highest explored step
 a check's iteration and step budgets. [Data-Plane Concurrency](./data-plane-concurrency.md) defines
 what these checks model, their limits, and the invariant held by each protocol.
 
+CI runs the checks and the replay check only for a pull request labeled `shuttle`. Label a pull
+request that changes a protocol a Shuttle check holds.
+
 ### Memory-ordering models
 
 Explore every registered Loom model of a production owner to exhaustion, each in its own process:
@@ -359,6 +362,9 @@ just test-loom-replay target/loom-failures/<package>/<test>
 
 `just test-loom-qualification` applies each registered weakening to a copy of the working tree and
 requires its model to fail.
+
+CI runs the models and their qualification only for a pull request labeled `loom`. Label a pull
+request that changes an ordering a Loom model holds.
 
 ### Primitive boundary and execution modes
 
@@ -564,12 +570,14 @@ them run, such as an inlined dependency function, the copies that never ran can 
 hash, and `llvm-cov` warns that they have mismatched data and reads the function from the
 executables that ran it.
 
-CI's extra-tests job collects native extras, per-mode primitive conformance and the complete Loom
-inventory, and runs primitive compile checks and Loom weakening qualification independently.
-The Shuttle job collects its complete inventory, including random/PCT exploration and paired
-nondeterminism checking, and runs schedule replay qualification independently. The jobs upload
-`lcov.info`, `completion.json`, `executions.jsonl`, `export.log` and model evidence as
-`coverage-native-extras` and `coverage-shuttle`, whatever the verdict. The ordinary coverage/CRAP
+CI's extra-tests job collects native extras and per-mode primitive conformance, and runs primitive
+compile checks independently. The `shuttle` job, which runs only for a pull request labeled
+`shuttle`, collects its complete inventory, including random/PCT exploration and paired
+nondeterminism checking, and runs schedule replay qualification independently. The `loom` job,
+which runs only for a pull request labeled `loom`, collects the complete Loom inventory and runs
+weakening qualification independently. The jobs upload `lcov.info`, `completion.json`,
+`executions.jsonl`, `export.log` and model evidence as `coverage-native-extras`,
+`coverage-shuttle` and `coverage-loom`, whatever the verdict. The ordinary coverage/CRAP
 gate merges ordinary artifacts only; mode reports describe modeled or diagnostic execution and
 retain separate attribution. `just coverage-shuttle <output> [filter]` and
 `just coverage-loom <output> [filter]` copy a successfully completed canonical report to the

@@ -191,6 +191,8 @@ class InventoryTests(unittest.TestCase):
             with self.subTest(producer=producer.name):
                 if producer.name == "test-shuttle":
                     selected_job = job_section(workflow, "shuttle")
+                elif producer.name == "test-loom":
+                    selected_job = job_section(workflow, "loom")
                 elif producer.name.startswith("test-deadlock-"):
                     selected_job = job_section(workflow, "diagnostic-evidence")
                     self.assertIn("run: just coverage-deadlock\n", selected_job)

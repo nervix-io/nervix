@@ -69,16 +69,27 @@ class ModelCoverageTests(unittest.TestCase):
         self.assertIn("just coverage-native-extras test-shuttle", job)
         self.assertIn("just test-shuttle-replay-check", job)
         self.assertIn("target/native-coverage/**/models.json", job)
+        loom = job_section(workflow, "loom")
+        self.assertIn("cargo-llvm-cov", loom)
+        self.assertIn("just coverage-native-extras test-loom", loom)
+        self.assertIn("just test-loom-qualification", loom)
+        self.assertIn("target/native-coverage/**/models.json", loom)
+        self.assertIn("target/native-coverage-build-loom/loom-failures", loom)
         extra = job_section(workflow, "extra-tests")
-        self.assertIn("just coverage-native-extras test-loom", extra)
-        self.assertIn("just test-loom-qualification", extra)
         self.assertIn("just test-primitives-compile", extra)
         coverage = job_section(workflow, "coverage")
-        self.assertIn(
-            "needs: [tests, scenarios, extra-tests, shuttle]",
-            coverage,
-        )
+        self.assertIn("needs: [tests, scenarios, extra-tests]", coverage)
         self.assertIn("-path '*/ordinary/*/lcov.info'", coverage)
+
+    def test_ci_runs_each_model_checker_only_for_a_pull_request_labeled_with_its_mode(self) -> None:
+        from scripts.tests.test_native_coverage import job_section
+
+        workflow = (ROOT / ".github/workflows/check.yaml").read_text()
+        self.assertIn("types: [opened, synchronize, reopened, labeled, unlabeled]", workflow)
+        for mode in ("shuttle", "loom"):
+            with self.subTest(mode=mode):
+                job = job_section(workflow, mode)
+                self.assertIn(f"if: contains(github.event.pull_request.labels.*.name, '{mode}')", job)
 
 
 class RunnerEvidenceTests(unittest.TestCase):
