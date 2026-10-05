@@ -20,6 +20,8 @@ import tomllib
 from collections import Counter
 from typing import Any, Iterator
 
+from scripts import bolero_coverage as coverage
+
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 INVENTORY = ROOT / "tests/bolero-targets.toml"
 RUNS = ROOT / "target/bolero/runs"
@@ -300,6 +302,9 @@ def command(
                 process.wait()
                 stream.write(f"\ntimeout after {timeout}s\n".encode())
                 raise BoleroError(f"command timed out after {timeout}s: {args}") from error
+            except BaseException:
+                coverage.native.stop(process, signal.SIGINT)
+                raise
             stream.flush()
             stream.seek(max(0, stream.tell() - 1_000_000))
             output = stream.read().decode(errors="replace")
@@ -322,6 +327,9 @@ def command(
                 pass
             process.communicate()
             raise BoleroError(f"command timed out after {timeout}s: {args}") from error
+        except BaseException:
+            coverage.native.stop(process, signal.SIGINT)
+            raise
         result = subprocess.CompletedProcess(args, process.returncode, stdout, stderr)
     output = result.stdout + result.stderr
     if result.returncode not in allowed_status:
@@ -705,7 +713,8 @@ def build_instrumented(
     ]
     print(f"{target.id}: instrumented build deadline {build_timeout}s", flush=True)
     build = command(
-        args, env=scoped_build_env(target, path), timeout=build_timeout, log=path / "build.log"
+        args, env={**scoped_build_env(target, path), **coverage.build_environment()},
+        timeout=build_timeout, log=path / "build.log"
     )
     executables = EXECUTABLE.findall(build.stdout)
     matches = [
@@ -742,6 +751,7 @@ def run_instrumented(
     timeout: int,
     log: pathlib.Path,
     allowed_status: tuple[int, ...] = (0,),
+    environment: dict[str, str] | None = None,
 ) -> subprocess.CompletedProcess[str]:
     args = [
         str(binary),
@@ -758,6 +768,7 @@ def run_instrumented(
             "BOLERO_LIBFUZZER_ARGS": " ".join(flags),
             "BOLERO_TEST_NAME": target.test,
             "BOLERO_LIBTEST_HARNESS": "1",
+            **(environment or {}),
         },
         timeout=timeout,
         log=log,
@@ -769,65 +780,49 @@ def fuzz_targets(
     inventory: Inventory, selected: tuple[Target, ...], duration: int
 ) -> None:
     verify_tool(inventory)
-    executed = 0
-    completed = 0
-    for target in selected:
-        path = run_dir(target)
-        started = time.monotonic()
-        executed += 1
-        try:
-            binary = build_instrumented(inventory, target, path)
-        except BoleroError:
-            metadata(
-                path,
-                target,
-                bolero_args(inventory, target),
-                "failed build",
-                time.monotonic() - started,
-            )
-            raise
-        runtime_corpus = path / "corpus"
-        runtime_corpus.mkdir()
-        for seed in target.corpus.iterdir():
-            if seed.is_file() and not seed.name.startswith("."):
-                shutil.copy2(seed, runtime_corpus / seed.name)
-        crashes = path / "crashes"
-        crashes.mkdir()
-        flags = [
-            str(runtime_corpus),
-            str(crashes),
-            f"-artifact_prefix={crashes}/",
-            f"-timeout={target.case_timeout_seconds}",
-            f"-max_len={target.max_input_bytes}",
-            f"-max_total_time={duration}",
-            "-rss_limit_mb=2048",
-            LIBFUZZER_PROGRESS_FLAG,
-        ]
-        engine_args = [
-            "BOLERO_LIBFUZZER_ARGS=" + " ".join(flags),
-            str(binary),
-            target.test,
-        ]
-        try:
-            result = run_instrumented(
-                binary,
-                target,
-                flags,
-                timeout=duration + max(30, target.case_timeout_seconds * 3),
-                log=path / "fuzz.log",
-            )
-            if "DONE" not in result.stdout + result.stderr:
-                raise BoleroError(f"{target.id}: libFuzzer did not report completion")
-        except BoleroError:
-            metadata(path, target, engine_args, "failed", time.monotonic() - started)
-            raise
-        metadata(path, target, engine_args, "passed", time.monotonic() - started)
-        completed += 1
-        print(f"{target.id}: libFuzzer completed; artifacts: {path}")
-    print(
-        f"Bolero discovered={len(inventory.targets)} selected={len(selected)} "
-        f"executed={executed} completed={completed}"
-    )
+    with coverage.Campaign(ROOT, inventory, selected, duration) as campaign:
+        for target in selected:
+            path = run_dir(target)
+            started = time.monotonic()
+            with campaign.target(target, path) as measured:
+                try:
+                    binary = build_instrumented(inventory, target, path)
+                except BaseException:
+                    metadata(path, target, bolero_args(inventory, target), "failed build", time.monotonic() - started)
+                    raise
+                runtime_corpus = path / "corpus"
+                runtime_corpus.mkdir()
+                for seed in target.corpus.iterdir():
+                    if seed.is_file() and not seed.name.startswith("."):
+                        shutil.copy2(seed, runtime_corpus / seed.name)
+                crashes = path / "crashes"
+                crashes.mkdir()
+                flags = [
+                    str(runtime_corpus), str(crashes), f"-artifact_prefix={crashes}/",
+                    f"-timeout={target.case_timeout_seconds}", f"-max_len={target.max_input_bytes}",
+                    f"-max_total_time={duration}", "-rss_limit_mb=2048", LIBFUZZER_PROGRESS_FLAG,
+                ]
+                engine_args = ["BOLERO_LIBFUZZER_ARGS=" + " ".join(flags), str(binary), target.test]
+                try:
+                    environment = measured.execute(binary, flags)
+                    engine_started = time.monotonic()
+                    result = run_instrumented(
+                        binary, target, flags,
+                        timeout=duration + max(30, target.case_timeout_seconds * 3),
+                        log=path / "fuzz.log", environment=environment,
+                    )
+                    output = result.stdout + result.stderr
+                    if "DONE" not in output:
+                        raise BoleroError(f"{target.id}: libFuzzer did not report completion")
+                    measured.complete(output, time.monotonic() - engine_started)
+                except BaseException:
+                    metadata(path, target, engine_args, "failed", time.monotonic() - started)
+                    raise
+                metadata(path, target, engine_args, "passed", time.monotonic() - started)
+                print(f"{target.id}: libFuzzer completed; artifacts: {path}")
+        campaign.complete()
+        counts = campaign.record.content["counts"]
+        print(f"Bolero discovered={counts['discovered']} selected={counts['selected']} executed={counts['executed']} completed={counts['completed']}")
 
 
 def exact_target(inventory: Inventory, target_id: str) -> Target:
@@ -1110,7 +1105,11 @@ def main() -> int:
 
 if __name__ == "__main__":
     try:
-        sys.exit(main())
-    except (BoleroError, OSError, KeyError, ValueError, tomllib.TOMLDecodeError) as error:
+        with coverage.suppressed_profiles(), coverage.native.interruptible():
+            sys.exit(main())
+    except (BoleroError, coverage.native.RunnerError, OSError, KeyError, ValueError, tomllib.TOMLDecodeError) as error:
         print(f"Bolero: {error}", file=sys.stderr)
         sys.exit(1)
+    except (KeyboardInterrupt, coverage.native.Interrupted):
+        print("Bolero: interrupted; retained campaigns are incomplete", file=sys.stderr)
+        sys.exit(130)
