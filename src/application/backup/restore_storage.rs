@@ -20,6 +20,7 @@ use nervix_execution::{MemoryClass, StorageClass};
 use nervix_interconnect::RemoteOperationFailure;
 use nervix_models::{DomainName, RestoreStateAuthority};
 use nervix_primitives::sync::Arc;
+use tracing::warn;
 
 use super::interconnect::RestoreStateInventory;
 use crate::{
@@ -100,6 +101,49 @@ fn failed(domain: &DomainName, reason: &str) -> RemoteOperationFailure {
 }
 
 impl SessionServiceImpl {
+    pub(in crate::application) async fn sweep_restore_checkpoint_staging(&self) {
+        let executor = self.inner.runtime.executor();
+        let charge = match executor
+            .reserve(MemoryClass::Bulk, RESTORE_STATE_WORKING_BYTES)
+            .await
+        {
+            Ok(charge) => charge,
+            Err(error) => {
+                warn!(%error, "restore checkpoint maintenance admission failed");
+                return;
+            }
+        };
+        let service = self.clone();
+        let result = executor
+            .run_storage(
+                StorageClass::Filesystem,
+                charge,
+                move |_charge, cancellation| {
+                    service
+                        .inner
+                        .consensus
+                        .with_restore_state_reclamation(|retention| {
+                            service.inner.runtime.reclaim_restore_checkpoint_staging(
+                                |domain, generation| retention.retains(domain, generation),
+                                cancellation,
+                            )
+                        })
+                },
+            )
+            .await;
+        match result {
+            Ok(Ok(observation)) => self
+                .inner
+                .runtime
+                .metrics()
+                .record_restore_staging(observation),
+            Ok(Err(error)) => {
+                warn!(error = %format!("{error:#}"), "restore checkpoint maintenance failed")
+            }
+            Err(error) => warn!(%error, "restore checkpoint maintenance executor failed"),
+        }
+    }
+
     pub(in crate::application) async fn stage_restored_state_checkpoint(
         &self,
         authority: &RestoreStateAuthority,
