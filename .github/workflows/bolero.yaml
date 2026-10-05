@@ -200,9 +200,15 @@ jobs:
         run: |
           just coverage-bolero 30
 
+      - name: Install Codecov CLI
+        run: |
+          uv venv "${RUNNER_TEMP}/codecov-cli"
+          uv pip install --python "${RUNNER_TEMP}/codecov-cli/bin/python" 'codecov-cli==11.3.1'
+
       - name: Upload runner coverage to Codecov
         uses: codecov/codecov-action@v5
         with:
+          binary: ${{ runner.temp }}/codecov-cli/bin/codecov-cli
           disable_search: true
           fail_ci_if_error: true
           files: target/bolero/python.lcov

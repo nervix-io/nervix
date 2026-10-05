@@ -584,9 +584,18 @@ jobs:
           done < <(find coverage-inputs/native-extras -path '*/ordinary/*/lcov.info' -o -name python.lcov)
           just check-coverage
 
+      - name: Setup uv for Codecov CLI
+        uses: astral-sh/setup-uv@v6
+
+      - name: Install Codecov CLI
+        run: |
+          uv venv "${RUNNER_TEMP}/codecov-cli"
+          uv pip install --python "${RUNNER_TEMP}/codecov-cli/bin/python" 'codecov-cli==11.3.1'
+
       - name: Upload coverage to Codecov
         uses: codecov/codecov-action@v5
         with:
+          binary: ${{ runner.temp }}/codecov-cli/bin/codecov-cli
           disable_search: true
           fail_ci_if_error: true
           files: ./lcov-workspace.info
