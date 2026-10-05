@@ -29,6 +29,8 @@ Options:
   --case CASE            partition-recovery case: all, follower, asymmetric, leader,
                          or quorum-loss (default: ${partition_case}).
   --partition-seconds N  Minimum verified partition window, 20..600 (default: ${partition_seconds}).
+  --isolation-seconds N  former-owner-restart window in which the restarted former owner stays
+                         isolated before startup admission, 20..600 (default: ${isolation_seconds}).
   --profile NAME         degraded-links profile: all, delay, jitter, random-loss,
                          burst-loss, rate-limit, combined (default: ${degradation_profile}).
   --load-interval-ms N   Fixed producer interval, 100..5000 (default: ${load_interval_ms}).
@@ -65,6 +67,8 @@ outage_option_set=false
 partition_case=all
 partition_seconds=45
 partition_option_set=false
+isolation_seconds=45
+isolation_option_set=false
 degradation_profile=all
 degradation_option_set=false
 load_interval_ms=750
@@ -140,6 +144,12 @@ while [[ "$#" -gt 0 ]]; do
             partition_option_set=true
             shift 2
             ;;
+        --isolation-seconds)
+            [[ "$#" -ge 2 ]] || setup_error '--isolation-seconds requires a value'
+            isolation_seconds="$2"
+            isolation_option_set=true
+            shift 2
+            ;;
         --profile | --load-interval-ms | --baseline-seconds | --degrade-seconds | --drain-seconds | --max-backlog | --max-recovery-backlog | --max-memory-bytes | --max-pending | --min-throughput-pct)
             [[ "$#" -ge 2 ]] || setup_error "$1 requires a value"
             case "$1" in
@@ -173,12 +183,17 @@ done
 
 [[ -n "${image_ref}" ]] || setup_error '--image is required and must name an already-built Nervix image'
 case "${scenario}" in
-    baseline | rolling-restart | leader-crash | follower-crash | ingestor-owner-crash | emitter-owner-crash | pause-resume | partition-recovery | degraded-links | backup) ;;
+    baseline | rolling-restart | leader-crash | follower-crash | ingestor-owner-crash | emitter-owner-crash | pause-resume | partition-recovery | degraded-links | backup | stale-follower | former-owner-restart | cluster-restart) ;;
     *) setup_error "unknown scenario: ${scenario}" ;;
 esac
 [[ "${node_count}" == "1" || "${node_count}" == "3" ]] \
     || setup_error '--nodes must be 1 or 3'
-if [[ "${scenario}" != baseline && "${scenario}" != backup && "${scenario}" != rolling-restart && "${scenario}" != leader-crash && "${node_count}" != 3 ]]; then
+# The restart and recovery scenarios share their traffic, findings and exit handling.
+recovery_scenario=false
+case "${scenario}" in
+    stale-follower | former-owner-restart | cluster-restart) recovery_scenario=true ;;
+esac
+if [[ "${scenario}" != baseline && "${scenario}" != backup && "${scenario}" != rolling-restart && "${scenario}" != leader-crash && "${scenario}" != cluster-restart && "${node_count}" != 3 ]]; then
     setup_error "${scenario} requires --nodes 3"
 fi
 if [[ "${scenario}" == pause-resume && "${outage_option_set}" == true ]]; then
@@ -190,6 +205,16 @@ fi
 if [[ "${scenario}" != partition-recovery && "${partition_option_set}" == true ]]; then
     setup_error '--case and --partition-seconds apply only to partition-recovery'
 fi
+if [[ ( "${scenario}" == stale-follower || "${scenario}" == former-owner-restart ) && "${outage_option_set}" == true ]]; then
+    setup_error "${scenario} holds its outage until its recovery conditions; --outage-seconds is for crash and cluster-restart scenarios"
+fi
+if [[ "${scenario}" != former-owner-restart && "${isolation_option_set}" == true ]]; then
+    setup_error '--isolation-seconds applies only to former-owner-restart'
+fi
+[[ "${isolation_seconds}" =~ ^[0-9]+$ ]] \
+    || setup_error '--isolation-seconds must be an integer from 20 through 600'
+((isolation_seconds >= 20 && isolation_seconds <= 600)) \
+    || setup_error '--isolation-seconds must be an integer from 20 through 600'
 if [[ "${scenario}" != degraded-links && "${degradation_option_set}" == true ]]; then
     setup_error 'degradation profiles and thresholds apply only to degraded-links'
 fi
@@ -301,6 +326,16 @@ fi
 if [[ "${scenario}" == degraded-links ]]; then
     CHAOS_LOAD_INTERVAL="$(awk -v ms="${load_interval_ms}" 'BEGIN {printf "%.3f", ms / 1000}')"
     export CHAOS_LOAD_INTERVAL
+fi
+if [[ "${scenario}" == stale-follower || "${scenario}" == former-owner-restart || "${scenario}" == cluster-restart ]]; then
+    # One record a second keeps the bounded fixture flowing through the slowest recovery case.
+    export CHAOS_LOAD_INTERVAL=1.0
+fi
+if [[ "${scenario}" == stale-follower ]]; then
+    # Ordinary retention options small enough that acknowledged changes made while one follower is
+    # offline snapshot and purge the survivors' logs past its position within a bounded run.
+    export CHAOS_RAFT_SNAPSHOT_ENTRY_THRESHOLD=64
+    export CHAOS_RAFT_COVERED_LOG_ENTRIES_RETAINED=16
 fi
 
 jq -n \
@@ -539,10 +574,16 @@ finish() {
             fi
         fi
     fi
-    if [[ "${scenario}" == partition-recovery || "${scenario}" == degraded-links ]]; then
+    if [[ -n "${cluster_restart_sampler_pid:-}" ]]; then
+        kill "${cluster_restart_sampler_pid}" 2>/dev/null
+        wait "${cluster_restart_sampler_pid}" 2>/dev/null
+    fi
+    if [[ "${scenario}" == partition-recovery || "${scenario}" == degraded-links || "${scenario}" == former-owner-restart ]]; then
         local heal_prefix=network
         if [[ "${scenario}" == partition-recovery ]]; then
             heal_prefix=partition
+        elif [[ "${scenario}" == former-owner-restart ]]; then
+            heal_prefix=isolation
         fi
         # Heal before anything else so neither retained resources nor diagnostics stay partitioned.
         timeout --foreground --kill-after=5s 180s \
@@ -558,6 +599,17 @@ finish() {
                 >"${artifact_dir}/diagnostics/partition-restart-heal.txt" 2>&1
         fi
     fi
+    # A recovery case can end while it holds nodes stopped; start them after every heal so retained
+    # resources and diagnostics never leave a node down.
+    local stopped_id
+    for stopped_id in ${recovery_stopped_ids[@]+"${recovery_stopped_ids[@]}"}; do
+        timeout --foreground --kill-after=5s 20s docker inspect "${stopped_id}" \
+            >"${artifact_dir}/diagnostics/stopped-node-${stopped_id:0:12}.json" 2>&1
+        if [[ "$(timeout --foreground --kill-after=5s 20s docker inspect --format '{{.State.Running}}' "${stopped_id}" 2>/dev/null)" == false ]]; then
+            timeout --foreground --kill-after=5s 30s docker start "${stopped_id}" \
+                >>"${artifact_dir}/diagnostics/stopped-node-heal.txt" 2>&1
+        fi
+    done
     if [[ "${scenario}" == *-crash && -n "${crash_target_id:-}" \
         && "${crash_restarted:-false}" != true ]]; then
         timeout --foreground --kill-after=5s 20s docker inspect "${crash_target_id}" \
@@ -597,7 +649,7 @@ finish() {
         fi
     fi
 
-    if [[ "${status}" -ne 0 && ( "${scenario}" == *-crash || "${scenario}" == pause-resume || "${scenario}" == partition-recovery || "${scenario}" == degraded-links ) ]]; then
+    if [[ "${status}" -ne 0 && ( "${scenario}" == *-crash || "${scenario}" == pause-resume || "${scenario}" == partition-recovery || "${scenario}" == degraded-links || "${recovery_scenario}" == true ) ]]; then
         local reproducer_image="${image_id:-${image_ref}}"
         if [[ "${image_ref}" == *@sha256:* ]]; then
             reproducer_image="${image_ref}"
@@ -611,6 +663,12 @@ finish() {
         elif [[ "${scenario}" == partition-recovery ]]; then
             reproducer="$(printf 'just chaos run %q --image %q --records %q --case %q --partition-seconds %q' \
                 "${scenario}" "${reproducer_image}" "${record_count}" "${partition_case}" "${partition_seconds}")"
+        elif [[ "${scenario}" == stale-follower ]]; then
+            reproducer="$(printf 'just chaos run %q --image %q --records %q' \
+                "${scenario}" "${reproducer_image}" "${record_count}")"
+        elif [[ "${scenario}" == former-owner-restart ]]; then
+            reproducer="$(printf 'just chaos run %q --image %q --records %q --isolation-seconds %q' \
+                "${scenario}" "${reproducer_image}" "${record_count}" "${isolation_seconds}")"
         elif [[ "${scenario}" == degraded-links ]]; then
             reproducer="$(printf 'just chaos run %q --image %q --records %q --profile %q --load-interval-ms %q --baseline-seconds %q --degrade-seconds %q --drain-seconds %q --max-backlog %q --max-recovery-backlog %q --max-memory-bytes %q --max-pending %q --min-throughput-pct %q' \
                 "${scenario}" "${reproducer_image}" "${record_count}" "${degradation_profile}" "${load_interval_ms}" "${baseline_seconds}" "${degrade_seconds}" "${drain_seconds}" "${max_backlog}" "${max_recovery_backlog}" "${max_memory_bytes}" "${max_pending}" "${min_throughput_pct}")"
@@ -668,6 +726,24 @@ finish() {
                 -o -name 'kill-events.ndjson' \
                 -o -name 'isolation-boundary.json' -o -name 'observer.log' \) \
                 -size +0c 2>/dev/null | sort)
+        fi
+        if [[ "${recovery_scenario}" == true ]]; then
+            for evidence_path in "results/${scenario}-progress.json" results/recovery-findings.ndjson \
+                diagnostics/isolation-heal.txt diagnostics/network-preflight.txt \
+                diagnostics/stopped-node-heal.txt; do
+                if [[ -s "${artifact_dir}/${evidence_path}" ]]; then
+                    evidence_paths+=("${evidence_path}")
+                fi
+            done
+            local case_directory
+            for case_directory in stale former-owner restart; do
+                [[ -d "${artifact_dir}/${case_directory}" ]] || continue
+                while IFS= read -r evidence_path; do
+                    evidence_paths+=("${evidence_path#"${artifact_dir}/"}")
+                done < <(find "${artifact_dir}/${case_directory}" -maxdepth 1 -type f \
+                    \( -name '*.json' -o -name '*.ndjson' -o -name 'pumba*.txt' -o -name '*.log' \) \
+                    -size +0c 2>/dev/null | sort)
+            done
         fi
         if [[ "${scenario}" == degraded-links ]]; then
             for evidence_path in results/degraded-progress.json results/degraded-links.json \
@@ -1053,7 +1129,7 @@ if [[ "${scenario}" != "baseline" && "${scenario}" != backup ]]; then
     resolve_tool_image pumba "${CHAOS_PUMBA_IMAGE}"
     pumba_image_id="${tool_image_ids[pumba]}"
 fi
-if [[ "${scenario}" == partition-recovery || "${scenario}" == degraded-links ]]; then
+if [[ "${scenario}" == partition-recovery || "${scenario}" == degraded-links || "${scenario}" == former-owner-restart ]]; then
     resolve_tool_image nettools "${CHAOS_NETTOOLS_IMAGE}"
 fi
 
@@ -1087,7 +1163,7 @@ if [[ "${scenario}" != "baseline" && "${scenario}" != backup ]]; then
         --mount type=bind,src=/var/run/docker.sock,dst=/var/run/docker.sock \
         "${pumba_image_id}" --version >"${artifact_dir}/pumba-version.txt"
     pumba_preflight=(stop --time 60 impossible-chaos-preflight-target)
-    if [[ "${scenario}" == *-crash ]]; then
+    if [[ "${scenario}" == *-crash || "${scenario}" == former-owner-restart || "${scenario}" == cluster-restart ]]; then
         pumba_preflight=(kill --signal SIGKILL impossible-chaos-preflight-target)
     elif [[ "${scenario}" == pause-resume ]]; then
         pumba_preflight=(pause --duration 1s impossible-chaos-preflight-target)
@@ -1101,7 +1177,7 @@ if [[ "${scenario}" != "baseline" && "${scenario}" != backup ]]; then
         >"${artifact_dir}/diagnostics/pumba-docker-preflight.txt" 2>&1 \
         || setup_error 'Pumba cannot access the selected Docker daemon'
 fi
-if [[ "${scenario}" == partition-recovery || "${scenario}" == degraded-links ]]; then
+if [[ "${scenario}" == partition-recovery || "${scenario}" == degraded-links || "${scenario}" == former-owner-restart ]]; then
     # Pumba's netem and iptables faults must take effect on this worker's kernel and heal on SIGTERM.
     run_bounded 120 "${script_dir}/network-faults.sh" preflight --run-id "${run_id}" \
         --pumba "${pumba_image_id}" --nettools "${CHAOS_NETTOOLS_IMAGE}" \
@@ -1122,6 +1198,19 @@ if [[ "${scenario}" == partition-recovery ]]; then
     # shellcheck disable=SC2016
     update_manifest '.partition = {case: $case, minimum_window_seconds: ($seconds | tonumber)}' \
         --arg case "${partition_case}" --arg seconds "${partition_seconds}"
+fi
+if [[ "${scenario}" == stale-follower ]]; then
+    # The dollars in this jq filter are jq variables, not shell expansion.
+    # shellcheck disable=SC2016
+    update_manifest '.recovery = {snapshot_entry_threshold: $entries, covered_log_entries_retained: $covered}' \
+        --argjson entries "${CHAOS_RAFT_SNAPSHOT_ENTRY_THRESHOLD}" \
+        --argjson covered "${CHAOS_RAFT_COVERED_LOG_ENTRIES_RETAINED}"
+elif [[ "${scenario}" == former-owner-restart ]]; then
+    # shellcheck disable=SC2016
+    update_manifest '.recovery = {minimum_isolation_seconds: $seconds}' --argjson seconds "${isolation_seconds}"
+elif [[ "${scenario}" == cluster-restart ]]; then
+    # shellcheck disable=SC2016
+    update_manifest '.recovery = {minimum_outage_seconds: $seconds}' --argjson seconds "${outage_seconds}"
 fi
 if [[ "${scenario}" == degraded-links ]]; then
     # The dollars in this jq filter are jq variables, not shell expansion.
@@ -1286,6 +1375,18 @@ if [[ "${scenario}" != "baseline" ]]; then
         # shellcheck source=backup-scenario.sh
         source "${script_dir}/backup-scenario.sh"
         run_backup_scenario
+    elif [[ "${scenario}" == stale-follower ]]; then
+        # shellcheck source=stale-follower-scenario.sh
+        source "${script_dir}/stale-follower-scenario.sh"
+        run_stale_follower
+    elif [[ "${scenario}" == former-owner-restart ]]; then
+        # shellcheck source=former-owner-scenario.sh
+        source "${script_dir}/former-owner-scenario.sh"
+        run_former_owner_restart
+    elif [[ "${scenario}" == cluster-restart ]]; then
+        # shellcheck source=cluster-restart-scenario.sh
+        source "${script_dir}/cluster-restart-scenario.sh"
+        run_cluster_restart
     else
         # shellcheck source=crash-scenario.sh
         source "${script_dir}/crash-scenario.sh"
@@ -1334,7 +1435,7 @@ if [[ "${scenario}" != backup ]]; then
         "${artifact_dir}/traffic/consumer-group-final.txt"
 fi
 output_wait_timed_out=false
-if [[ "${scenario}" == *-crash || "${scenario}" == pause-resume || "${scenario}" == partition-recovery || "${scenario}" == degraded-links || "${scenario}" == backup ]]; then
+if [[ "${scenario}" == *-crash || "${scenario}" == pause-resume || "${scenario}" == partition-recovery || "${scenario}" == degraded-links || "${scenario}" == backup || "${recovery_scenario}" == true ]]; then
     output_wait_seconds=120
     if [[ "${scenario}" == degraded-links ]]; then
         output_wait_seconds="${drain_seconds}"
@@ -1366,7 +1467,7 @@ observed_count="$(wc -l <"${artifact_dir}/traffic/observed-output.ndjson")"
 
 phase "external ledger verification"
 ledger_args=()
-if [[ "${scenario}" == *-crash || "${scenario}" == pause-resume || "${scenario}" == partition-recovery || "${scenario}" == degraded-links || "${scenario}" == backup ]]; then
+if [[ "${scenario}" == *-crash || "${scenario}" == pause-resume || "${scenario}" == partition-recovery || "${scenario}" == degraded-links || "${scenario}" == backup || "${recovery_scenario}" == true ]]; then
     ledger_args+=(--allow-replay-duplicates)
 fi
 "${script_dir}/verify-ledger.sh" \
@@ -1508,6 +1609,33 @@ elif [[ "${scenario}" == "partition-recovery" ]]; then
         printf 'partition-recovery recorded %d product finding(s):\n' \
             "$(jq '.findings | length' "${artifact_dir}/results/partition-recovery.json")" >&2
         jq -r '.findings[] | "- \(.case): \(.message)"' "${artifact_dir}/results/partition-recovery.json" >&2
+        exit 1
+    fi
+elif [[ "${recovery_scenario}" == true ]]; then
+    jq -n \
+        --arg run_id "${run_id}" \
+        --arg scenario "${scenario}" \
+        --arg image_id "${image_id}" \
+        --argjson tool_images "${tool_images_json}" \
+        --argjson nodes "${node_count}" \
+        --argjson accepted_records "${input_end}" \
+        --argjson observed_records "${output_end}" \
+        --slurpfile progress "${artifact_dir}/results/${scenario}-progress.json" \
+        --slurpfile ledger "${artifact_dir}/results/ledger.json" \
+        --slurpfile findings "${artifact_dir}/results/recovery-findings.ndjson" \
+        '{verdict:(if ($findings | length) == 0 then "pass" else "fail" end),run_id:$run_id,
+          scenario:$scenario,image_id:$image_id,tool_images:$tool_images,topology_nodes:$nodes,
+          accepted_source_records:$accepted_records,observed_output_records:$observed_records,
+          replay_duplicates:$ledger[0].duplicate_records,source_offsets_committed:true,
+          ledger:"results/ledger.json",remote_path:"results/remote-path.json",findings:$findings,
+          progress:$progress[0]}' \
+        >"${artifact_dir}/results/${scenario}.json"
+    if [[ "$(jq -r '.verdict' "${artifact_dir}/results/${scenario}.json")" != pass ]]; then
+        failure_category=product
+        current_phase="${scenario} product findings"
+        printf '%s recorded %d product finding(s):\n' "${scenario}" \
+            "$(jq '.findings | length' "${artifact_dir}/results/${scenario}.json")" >&2
+        jq -r '.findings[] | "- \(.phase): \(.message)"' "${artifact_dir}/results/${scenario}.json" >&2
         exit 1
     fi
 elif [[ "${scenario}" == "degraded-links" ]]; then
