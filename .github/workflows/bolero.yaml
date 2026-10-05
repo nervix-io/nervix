@@ -66,17 +66,20 @@ jobs:
       - name: Measure Python runner coverage
         run: just coverage-bolero-runner
 
+      - name: Install verified Codecov CLI
+        id: codecov-cli
+        uses: ./.github/actions/setup-codecov
+
       - name: Verify Codecov upload
         uses: codecov/codecov-action@v5
         with:
+          binary: ${{ steps.codecov-cli.outputs.binary }}
           disable_search: true
           fail_ci_if_error: true
           files: target/bolero/python-runner.lcov
           flags: bolero
           use_oidc: true
           use_legacy_upload_endpoint: true
-          use_pypi: true
-          version: "11.3.1"
 
   bolero-random:
     name: bolero-random
@@ -275,8 +278,6 @@ jobs:
           flags: bolero
           use_oidc: true
           use_legacy_upload_endpoint: true
-          use_pypi: true
-          version: "11.3.1"
 
       - name: Publish live Rust source coverage
         id: rust-coverage
@@ -289,14 +290,13 @@ jobs:
       - name: Upload live Rust source coverage to Codecov
         uses: codecov/codecov-action@v5
         with:
+          binary: ${{ steps.codecov-cli.outputs.binary }}
           disable_search: true
           fail_ci_if_error: true
           files: ${{ steps.rust-coverage.outputs.report }}
           flags: bolero-fuzz
           use_oidc: true
           use_legacy_upload_endpoint: true
-          use_pypi: true
-          version: "11.3.1"
 
       - name: Upload live campaign coverage and completion evidence
         if: always()
