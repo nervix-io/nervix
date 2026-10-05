@@ -584,9 +584,13 @@ jobs:
           done < <(find coverage-inputs/native-extras -path '*/ordinary/*/lcov.info' -o -name python.lcov)
           just check-coverage
 
+      - name: Install verified Codecov CLI
+        run: just install-codecov-cli
+
       - name: Upload coverage to Codecov
         uses: codecov/codecov-action@v5
         with:
+          binary: ${{ github.workspace }}/target/codecov/codecovcli
           disable_search: true
           fail_ci_if_error: true
           files: ./lcov-workspace.info

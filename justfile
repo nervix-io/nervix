@@ -32,6 +32,22 @@ run-with-jobs recipe jobs:
 install-cargo-bolero:
     cargo install --locked --version 0.13.4 --no-default-features --features libfuzzer cargo-bolero
 
+# Install the checksum-pinned official Linux x86_64 Codecov CLI used by CI uploads.
+install-codecov-cli:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    codecov_directory="{{ justfile_directory() }}/target/codecov"
+    mkdir -p "$codecov_directory"
+    codecov_download=$(mktemp "$codecov_directory/codecovcli.XXXXXX")
+    trap 'rm -f "$codecov_download"' EXIT
+    curl --fail --location --retry 5 --retry-all-errors --connect-timeout 10 --max-time 120 \
+        --output "$codecov_download" \
+        https://github.com/codecov/codecov-cli/releases/download/v11.3.1/codecovcli_linux
+    printf '%s  %s\n' ca1d64196d2d34771084afe76ea657d581bf628e31d993ff8e52ea09cc88a56d "$codecov_download" \
+        | sha256sum --check
+    chmod 755 "$codecov_download"
+    mv "$codecov_download" "$codecov_directory/codecovcli"
+
 # Server library properties embed the same real console assets as the product.
 bolero-deps: build-web-console
 

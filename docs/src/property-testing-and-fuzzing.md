@@ -323,6 +323,11 @@ properties. Job limits reserve additional time for compilation, artifacts and cl
 cache may seed a campaign but cannot skip a target or replace checked-in regressions. An empty
 selection, timeout, engine failure, sanitizer finding or property failure fails the job.
 
+Both coverage upload jobs run `just install-codecov-cli` to fetch the pinned Linux x86_64
+CLI from its official GitHub release and verify the published SHA-256 before execution.
+The verified binary is passed to the Codecov action; OIDC authentication and fatal upload
+errors apply to both ordinary workspace coverage and the sanitizer runner's Python coverage.
+
 Each fuzz run retains its corpus, crashes, log and metadata with revision, target, domain version,
 toolchain, features, flags, result and an exact-input reproduction command. Retain failure
 inputs before cleanup. `fuzz-replay` stages saved bytes in the target's actual crash
