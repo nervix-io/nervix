@@ -426,6 +426,11 @@ rather than opening before the destination is ready.
 
 ### Interrupted Handoffs
 
+Restart or owner replacement for a stopped WASM domain preserves the complete validated lifecycle
+and guest checkpoint inventory in its passive revision. Ownership preparation performs no guest
+callbacks and does not read the stopped domain clock. `START` restores those saves under the active
+clock generation; stopped time does not authorize discarding valid checkpoints or resetting state.
+
 A preparation written durably at a destination outlives the process that wrote it. The coordinator
 records every destination as an attempted participant before it sends the side-effecting request, so
 a timeout, a cancellation, or a lost response after the destination persisted the request remains

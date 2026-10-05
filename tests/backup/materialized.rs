@@ -53,10 +53,32 @@ async fn when_materialized_workload_is_created(world: &mut ScenarioWorld, relays
     commands.push_str(
         "ON GENERAL ERROR LOG; START; CREATE SUBSCRIPTION summary_subscription TO summaries;",
     );
+    let mut statements = nspl_statements(&commands);
+    let subscription = statements.pop().assured("the workload has a subscription");
+    assert!(subscription.starts_with("CREATE SUBSCRIPTION "));
     let leader = current_leader_node(world).await;
-    let session = crate::execute_nspl_commands_on_node(world, &leader, &commands)
+    for statement in statements {
+        append_cucumber_log_line(&format!("materialized workload command: {statement}"));
+        world.last_command_output = Some(
+            world
+                .cluster()
+                .run_command(&leader, &world.domain, &statement)
+                .await
+                .assured("the public materialized workload command is valid"),
+        );
+    }
+    let leader = current_leader_node(world).await;
+    let mut session = world
+        .cluster()
+        .open_session(&leader, &world.domain)
         .await
-        .assured("the public materialized workload is valid");
+        .assured("the materialized workload subscription session opens");
+    world.last_command_output = Some(
+        session
+            .run_command(&subscription)
+            .await
+            .assured("the materialized workload subscription opens"),
+    );
     world.active_session = Some(session);
     world.active_session_node = Some(leader);
     world.active_session_has_subscription = true;

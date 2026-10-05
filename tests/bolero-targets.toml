@@ -1369,3 +1369,32 @@ random_iterations = 128
 source = "src/runtime/materialized_snapshot.rs"
 test = "runtime::materialized_snapshot::tests::bolero_materialized_archive_columns_preserve_the_exact_schema_and_rows"
 test_target = "lib"
+
+[[target]]
+case_timeout_seconds = 10
+corpus = "src/runtime/__fuzz__/runtime__native_checkpoint_properties__bolero_streamed_lifecycle_preserves_complete_current_values/corpus"
+domain_version = 1
+features = []
+id = "restore-native-lifecycle"
+invariant = "Streaming native lifecycle encoding preserves every current typed branch field including nested arrays, vector kinds and float bits, timestamp and incarnation in order."
+manifest = "Cargo.toml"
+max_input_bytes = 2048
+package = "nervix-server"
+random_iterations = 256
+source = "src/runtime/native_checkpoint_properties.rs"
+test = "runtime::native_checkpoint_properties::bolero_streamed_lifecycle_preserves_complete_current_values"
+test_target = "lib"
+[[target]]
+case_timeout_seconds = 10
+corpus = "src/runtime/__fuzz__/runtime__native_checkpoint_properties__bolero_streamed_kafka_preserves_every_partition_and_offset/corpus"
+domain_version = 1
+features = []
+id = "restore-native-kafka"
+invariant = "Streaming native Kafka encoding preserves the complete ordered current topic, partition and next-offset set, including empty sets and integer boundaries."
+manifest = "Cargo.toml"
+max_input_bytes = 2048
+package = "nervix-server"
+random_iterations = 256
+source = "src/runtime/native_checkpoint_properties.rs"
+test = "runtime::native_checkpoint_properties::bolero_streamed_kafka_preserves_every_partition_and_offset"
+test_target = "lib"

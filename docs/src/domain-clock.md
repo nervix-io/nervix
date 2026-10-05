@@ -257,6 +257,10 @@ shared installation; no failure path substitutes wall time for a paced clock. Pa
 for a stopped domain may retain a generation-bound handle for ownership purposes, but attempts to
 read it still fail as stopped.
 
+Ownership handoff and forced recovery of a passive WASM revision transfer its validated durable
+checkpoint inventory without guest callbacks or clock reads. Guest restoration waits for `START`
+and its active clock generation; an unreadable stopped clock does not invalidate the saved state.
+
 Reads take no lock. A read loads the published installation, validates the handle's generation and
 the installation state against it, projects actual UTC through the source that installation holds,
 and raises the read watermark published with it using one atomic maximum. A concurrent read

@@ -84,6 +84,11 @@ runtime caller can still distinguish a resource limit, invalid emission, and a s
 without classifying a rendered string. Callback and checkpoint acknowledgement decisions stay the
 same; [WASM State And Recovery](./wasm-state.md) owns those boundaries.
 
+Ownership preparation of a stopped WASM domain carries its validated durable checkpoint inventory
+without guest execution. A stopped clock is ordinary passive state, not a missing-checkpoint
+failure or a reason to reset guest state. Guest restore failures are classified when the running
+revision restores the save under the active clock at `START`.
+
 HTTP request-field compilation retains the VM report beneath the emitter's request-field context
 and attaches its safe message for diagnostics; an invalid request program never starts the sink.
 
@@ -330,7 +335,9 @@ A restore's failures are owned where they are decided, in the order the restore 
 restore stream refuses what its frames get wrong with a typed `RestoreUploadFailure`:
 `InvalidStream`, `InvalidStatement`, `SizeMismatch`, `DigestMismatch`, `QuotaExceeded`, or
 `StagingFailed`, and a call without valid credentials ends with `UNAUTHENTICATED`. The control
-plane's `RestoreRefusal` then names an archive the leader could not read, one that does not verify,
+plane's `RestoreRefusal` then names an archive the leader could not read, an unavailable or
+unaddressable retained preparation reservation (`MetadataAdmission`, with the executor's typed
+admission failure beneath it), one that does not verify,
 with the archive format's `ArchiveReadError` beneath it, a domain whose `models.nspl` does not
 parse, with the line and the parser's diagnostic, a statement that creates no model, with its
 number and line, a restore that cannot apply to this cluster, and a domain whose models do not form
@@ -348,6 +355,13 @@ resource, or version, and a resource import, domain model batch, or state instal
 beneath the step. `RestoreStateInstallationError` distinguishes an incomplete installation that
 blocks starting a domain from authority that no longer permits mutation. The runtime store reports
 a stale or competing published generation as `RuntimePersistenceError::RestoreGeneration`.
+Native conversion keeps its codec failure beneath `SnapshotStagingError::Encode` and the restore
+step; cancellation and encoding beyond admitted disk quota discard the temporary artifact while
+retaining its memory and quota until the job actually exits.
+`NativeEncoding` identifies the native state kind and retains the serializer's typed cause.
+Staging `Create`, `Write` and `Read` also retain the underlying I/O cause beneath a semantic
+context. `Window` reports the requested position and length and the artifact's exact length
+without overflowing a diagnostic sum or exposing checkpoint contents.
 `InvalidCheckpointChunks` covers a missing, misordered, truncated or digest-mismatched current
 chunk set or a conflicting publication inventory. `RestoreRead`, `Cancelled`, `Synchronize` and
 storage admission preserve their owning failure boundary. `CheckpointPlacementTooLarge` rejects

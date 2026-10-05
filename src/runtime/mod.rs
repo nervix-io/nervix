@@ -251,6 +251,12 @@ mod materialized_state;
 mod message_error;
 mod message_error_delivery;
 mod message_error_plan;
+mod native_checkpoint_encoding;
+#[cfg(feature = "testing")]
+#[doc(hidden)]
+pub mod native_checkpoint_inspection;
+#[cfg(test)]
+mod native_checkpoint_properties;
 mod node;
 mod node_settings;
 mod observability;
@@ -302,7 +308,7 @@ pub(crate) use backup_state::{
     BackupBranchLifecycleEntry, CapturedDomainState, CapturedMaterializedRelay,
     CapturedRuntimeState, RESTORE_STATE_CHUNK_BYTES, RESTORE_STATE_WORKING_BYTES,
     RestoredRuntimeState, decode_backup_branch_lifecycle, decode_backup_kafka_offsets,
-    encode_restored_branch_lifecycle, encode_restored_kafka_offsets,
+    write_restored_branch_lifecycle, write_restored_kafka_offsets,
 };
 use branch_aggregated_state::{
     BranchAggregatedRuntimeStateSnapshot, ReplicatedBranchAggregatedState,

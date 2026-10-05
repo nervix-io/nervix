@@ -45,12 +45,14 @@ pub use materialized::{
     MaterializedRecordIdentity, MaterializedRelayDescriptor,
 };
 pub use path::SectionPath;
-pub use reader::{SectionReader, SectionVisitor, read_archive};
+pub use reader::{
+    ManifestHeader, SectionReader, SectionVisitor, read_archive, read_manifest_header,
+};
 pub use records::{
     DeclaredResource, DomainRecord, PublishedResourceVersion, ResourceVersionRecord,
     ResourceVersionState, UserRecord, UsersRecord,
 };
-pub use section::{ArchiveRecord, RecordKind, SectionDigester};
+pub use section::{ArchiveRecord, MAX_RECORD_BYTES, RecordKind, SectionDigester};
 pub use state::{
     BranchLifecycleEntry, BranchLifecycleRecord, KafkaOffsetsRecord, KafkaPartitionOffset,
     WasmStateDescriptor,

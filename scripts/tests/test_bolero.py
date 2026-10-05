@@ -176,6 +176,8 @@ class InventoryTests(unittest.TestCase):
             "wasm-protocol-tags",
             "wasm-stored-checkpoints",
             "wasm-stored-checkpoints-malformed",
+            "restore-native-lifecycle",
+            "restore-native-kafka",
         })
         self.assertEqual({target.package for target in inventory.targets}, {
             "nervix-client-wire",
