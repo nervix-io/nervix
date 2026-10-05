@@ -1985,7 +1985,7 @@ impl Runtime {
     ) -> RelayStateTask {
         let RelayStateTaskSpec {
             relay,
-            state,
+            mut state,
             retention:
                 RelayRetention {
                     branch_ttl,
@@ -2054,7 +2054,8 @@ impl Runtime {
                     for (key, _) in branch_instances.expire(now, branch_ttl) {
                         nervix_primitives::task::consume_budget().await;
                         runtime.invalidate_branch_relay_generation(&domain, &key);
-                        if let Err(error) = runtime.delete_materialized_stream_key(&state, &key) {
+                        if let Err(error) = runtime.delete_materialized_stream_key(&mut state, &key)
+                        {
                             warn!(
                                 domain = domain.as_str(),
                                 relay = relay.as_str(),
@@ -2161,7 +2162,7 @@ impl Runtime {
                         nervix_primitives::task::consume_budget().await;
                         runtime.invalidate_branch_relay_generation(&domain, &evicted_key);
                         if let Err(error) =
-                            runtime.delete_materialized_stream_key(&state, &evicted_key)
+                            runtime.delete_materialized_stream_key(&mut state, &evicted_key)
                         {
                             warn!(
                                 domain = domain.as_str(),
@@ -2189,7 +2190,7 @@ impl Runtime {
                 };
                 let records = messages.into_iter().map(|message| message.record);
                 if let Err(error) = runtime
-                    .apply_materialized_stream_records(&state, &branch_key, records)
+                    .apply_materialized_stream_records(&mut state, &branch_key, records)
                     .await
                 {
                     warn!(

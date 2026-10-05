@@ -41,11 +41,11 @@ use crate::{
     MySqlConflictAction, NamePosition, NatsIngestMode, OtelMetricKind, OtelSignal, OutputBranch,
     ParseAsType, PlacementPolicy, PostgresConflictAction, ProcessorInputWhere, ProcessorInputs,
     ProcessorOutputs, PulsarIngestMode, RabbitMqIngestMode, RangeOperator, RedisPubSubIngestMode,
-    RelayBranching, RelayName, Restore, RestoreMode, RestoreScope, RestoreState, RetryPolicy,
-    RouteConstruction, SchemaField, SignalingProtocolName, SignalingStep, SignalingWaitStep,
-    SignalingWireFormat, SqsFifoGroup, SqsIngestMode, Statement, SubscriptionLiteral, TopicName,
-    TransactionInspectionTarget, UnaryOperator, WebsocketsIngestMode, WindowBound,
-    WindowStateLimit, WireSchemaField, ZeroMqIngestMode,
+    RelayBranching, RelayName, Restore, RestoreLifecycle, RestoreMode, RestoreScope, RestoreState,
+    RetryPolicy, RouteConstruction, SchemaField, SignalingProtocolName, SignalingStep,
+    SignalingWaitStep, SignalingWireFormat, SqsFifoGroup, SqsIngestMode, Statement,
+    SubscriptionLiteral, TopicName, TransactionInspectionTarget, UnaryOperator,
+    WebsocketsIngestMode, WindowBound, WindowStateLimit, WireSchemaField, ZeroMqIngestMode,
 };
 
 /// The NSPL release canonical rendering writes.
@@ -969,9 +969,13 @@ impl Restore {
     /// FAIL`.
     pub fn to_canonical_nspl(&self) -> String {
         let source = string_literal(&self.source);
+        let resume = match self.lifecycle {
+            RestoreLifecycle::Stopped => "",
+            RestoreLifecycle::Resume => " RESUME",
+        };
         let mut statement = match &self.scope {
             RestoreScope::Cluster { existing_users } => {
-                let mut statement = format!("RESTORE CLUSTER FROM {source}");
+                let mut statement = format!("RESTORE CLUSTER FROM {source}{resume}");
                 if *existing_users != ExistingUserPolicy::default() {
                     statement.push_str(&format!(" ON EXISTING USER {}", existing_users.as_ref()));
                 }
@@ -982,7 +986,7 @@ impl Restore {
                 if let Some(target) = target {
                     statement.push_str(&format!(" AS {}", target.as_str()));
                 }
-                statement.push_str(&format!(" FROM {source}"));
+                statement.push_str(&format!(" FROM {source}{resume}"));
                 statement
             }
         };

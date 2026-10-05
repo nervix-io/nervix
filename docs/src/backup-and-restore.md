@@ -9,10 +9,10 @@ trusts them.
 
 A normal backup pauses each running domain in turn, waits for its intake and acknowledged work to
 drain, then captures its committed configuration, WASM guest checkpoints, Kafka source offsets,
-and branch lifecycle. It resumes that domain before transferring the captured sections into the
+branch lifecycle, and fresh materialized relay generations. It resumes that domain before transferring the captured sections into the
 archive. Stopped domains need no pause. `WITHOUT PAUSE` captures the latest published state while
 the domain runs and has crash-consistent rather than quiesced semantics; `WITHOUT STATE` captures
-configuration only. Relay contents and materialized state are not included.
+configuration only. Queued relay batches and acknowledgements remain volatile.
 
 A restore recreates what an archive holds: every domain and user of a cluster archive in a fresh
 cluster, whatever its nodes are named, or one domain beside the domains a cluster already has,
@@ -60,6 +60,11 @@ checkpoint contributes no lifecycle state. It seals those checkpoints and the cu
 durably before opening one database snapshot that also
 contains the already durable WASM guest saves. A stopped domain reads its stored checkpoints
 without active task requests.
+Materialized relays capture shared Arrow row views, typed branch keys, per-row watermarks, revision,
+ownership fence and branch generation under their assignment barrier. Capture reads the current
+entries at the cut, including updates since the periodic snapshot; it never waits for that interval.
+An empty relay contributes an explicit empty generation. A live capture obtains the same complete
+relay generation under that barrier, while its domain-wide cut retains live capture semantics.
 The drain uses the shutdown admitted-work view: active intake and generators, active source ACK
 roots, relay and node buffers, relays that admitted a batch while the node read that view, and
 emitter buffers or publishes. Parked `REQUIRED WAIT` messages are exempt. Once every node reports no admitted work, the leader requests a confirming force-flush
@@ -170,8 +175,9 @@ the capture time, the scope, whether resource bytes are included, and the users 
 archive. For each domain it names the revision and Raft log entry the domain was read at, its
 status, cut kind, pace and start count, the size and digest of its models, and each resource version with the
 `root_checksum` and `manifest_checksum` that `DESCRIBE RESOURCE` prints for the same version.
-It also inventories WASM guest saves by processor and branch fingerprint, Kafka positions by
-topic and partition, and branch lifecycle records by processor and branch count. The inspection
+It also reports the latest start point, clock mapping and logical frontier, and inventories WASM guest saves by processor and branch fingerprint, Kafka positions by
+topic and partition, branch lifecycle records by processor and branch count, and materialized relays
+by schema fingerprint, revision, fence, branch generation, row count and bounded Arrow groups. The inspection
 does not print branch-key field values.
 
 ```text
@@ -199,6 +205,7 @@ An archive that fails verification is refused whole, with the section and the ch
 ```nspl
 RESTORE CLUSTER FROM '/var/backups/nervix/cluster.nvxb' ON EXISTING USER SKIP;
 RESTORE DOMAIN payments FROM './payments.nvxb';
+RESTORE DOMAIN payments FROM './payments.nvxb' RESUME;
 RESTORE DOMAIN payments AS payments_copy FROM '/var/backups/nervix/cluster.nvxb';
 RESTORE DOMAIN payments AS payments_copy FROM './payments.nvxb' DRY RUN;
 RESTORE DOMAIN payments FROM './payments.nvxb' WITHOUT SOURCE OFFSETS;
@@ -215,8 +222,11 @@ RESTORE DOMAIN payments FROM './payments.nvxb' WITHOUT SOURCE OFFSETS;
   Every other archived user is created with its archived password hash, so its original password
   authenticates.
 - `DRY RUN` receives and verifies the archive and plans the whole restore, and changes nothing.
+- `RESUME` makes each restored domain running after its complete state set is published on every
+  assigned owner and replica. Its start generation and latest start point stay exactly as archived.
+  Omit it to leave the restored domain stopped. It precedes `ON EXISTING USER` and `DRY RUN`.
 - `WITHOUT STATE` restores the configuration and purges state for the target domain.
-- `WITHOUT SOURCE OFFSETS` restores WASM and branch lifecycle but starts sources without the
+- `WITHOUT SOURCE OFFSETS` restores WASM, branch lifecycle and materialized state but starts sources without the
   archived Kafka positions.
 - A state section whose entity is absent or whose schema fingerprint differs from the published
   schedule is skipped. The restore succeeds and reports a warning naming the skipped state in its
@@ -239,10 +249,11 @@ browser session has no file to read.
 ### What A Restore Recreates
 
 - **Users.** Each archived user, with its password hash exactly as the archive holds it.
-- **Domains.** Each restored domain is created stopped, with its archived pace and placement
-  default, its start count, and the point its latest start began from. `LIST DOMAINS` shows it
-  with its archived pace and the status `STOPPED`. `START` becomes available after the complete
-  state installation succeeds. A restore never starts a domain.
+- **Domains.** Each restored domain is initially created stopped, with its archived pace and placement
+  default, start generation and latest start point. Complete publication releases its installation
+  gate. With `RESUME`, that same consensus effect changes it to running, without a new `START`.
+  `LIST DOMAINS`, `DESCRIBE DOMAIN`, restore reports and dry-run reports expose the status and start
+  generation; `DESCRIBE DOMAIN` also exposes the start point and installed mapping.
 - **Resources.** Each resource the domain declared, and each completed version under its archived
   number, with its checksums, file count, sizes, creation time and creating node as
   `DESCRIBE RESOURCE` showed them in the source cluster. A number the source assigned to an upload
@@ -252,15 +263,28 @@ browser session has no file to read.
 - **Models.** Every model of the domain, bound to exactly the resource versions it was bound to in
   the source cluster. `SHOW CREATE` prints each restored model as it printed it in the source.
 
-A restore stages the archive's compatible branch lifecycle, WASM guest checkpoints, and Kafka
-source positions on every newly assigned owner and replica after its models are scheduled. Each
+A restore stages the archive's compatible branch lifecycle, WASM guest checkpoints, Kafka
+positions and materialized relay checkpoints on every newly assigned owner and replica after its models are scheduled. Each
 node validates the complete staged inventory, synchronizes its generation namespace, then
 atomically selects it through one durably synchronized active-generation pointer. Nodes without assigned checkpoints publish an empty
 set. In-memory state handles are cleared only after that publication. A replicated installation
 gate prevents `START` until every target node has published the complete set; it survives failure,
 lease release and node restart. A source uses its restored next offset when it starts, clamped to
-the partitions its current source assignment contains. The domain remains stopped. Relays and
-materialized state start empty.
+the partitions its current source assignment contains and clamped to their live low and high
+watermarks. Materialized state binds to the exact restored schema fingerprint and archived start
+generation before a branch or generator starts. Its rows, typed keys, watermarks, revision and
+branch generation are preserved. A new assignment establishes its own ownership fence.
+
+For a paced `RESUME`, the archived wall/logical origin and time rate are installed verbatim. The
+mapping projects elapsed downtime; the leader chooses a fresh clock authority for this cluster.
+The archived frontier is inspection metadata, rather than a new clock origin. `TIMESTAMP AT`
+admission follows the projected reached windows. A paced archive without its committed mapping
+cannot resume and is refused before admission. An unpaced resume needs no clock mapping.
+
+A normal `START` after a default stopped restore, or after `STOP`, advances the start generation
+and clears materialized state. It preserves compatible WASM state, source positions and branch
+lifecycle. To establish a new clock at the saved logical frontier instead, leave the domain stopped
+and use `START AT '<frontier>' TIME RATE <rate>` explicitly.
 
 ### Publishing The State Generation
 
@@ -270,6 +294,16 @@ receipt; incomplete chunks have no completed receipt. Guest saves stream directl
 archive on the coordinator and from the sealed upload file on a remote node. Neither path assembles
 a guest save in a second full-size buffer or reserves a file-read chunk inside an already reserved
 full checkpoint.
+Materialized payloads use archive-owned rkyv descriptors and scalar identity records with
+exact-schema Arrow IPC column sections. Planning, including a dry run, verifies their Arrow
+schema, row count and unique typed branch identities. Conversion stages bounded native header,
+identity and column pieces, then concatenates them into a quota-owned file with a 64 KiB buffer.
+That file uses the same streamed publisher as a guest save, including when one relay's container
+exceeds the 32 MiB bulk budget. It never enters encoded metadata installation. Temporary conversion
+pieces and the completed container can briefly occupy twice the container's disk space.
+Backup section openings share Snapshot admission with materialized readers. A capacity-only
+refusal retries within the opening's single 30-second deadline; other failures end the fetch.
+Completed response streams release their transport permits before local verification and decoding.
 
 Publication checks each receipt, checkpoint header and ordered chunk against the complete expected
 inventory. It synchronizes those writes before committing the small pointer containing the exact
@@ -307,13 +341,26 @@ directory.
 
 Local archive readers and received upload readers retain their staged artifact and disk quota through the storage job, including cancellation.
 
-The streamed state-install and publication jobs reserve 2 MiB per node, independent of total guest
+The streamed state-install and publication jobs reserve 2 MiB per node, independent of total guest or materialized
 bytes and checkpoint count. Physical checkpoint placement encodings are limited to 60 KiB, leaving room for revision
 and chunk coordinates within the database key limit. Archive verification, model planning, typed
 lifecycle and offset conversion, database caches, and loading a guest when the domain starts retain
 their own allocation bounds. Encoded lifecycle and offset staging reserves twice the encoded
 payload size plus 2 MiB; it can be refused if that individual conversion does not fit the bulk
 budget. The generation publisher has no aggregate-payload admission limit.
+Materialized capture row views and grouping arrays have an 8 MiB metadata ceiling per relay and
+are charged before capture. Archive identities are at most 1 MiB per group, and Arrow columns at
+most 8 MiB. Typed branch uniqueness conversion has an independent 8 MiB commands reservation;
+native restore row views have an independent 8 MiB relay reservation. Decoded columns are charged
+cumulatively to relay memory through installation; loading refuses further groups when that class
+is full. Row projection and Arrow encoding share one admission and one bounded bulk CPU job,
+so projected columns never wait for a second grant while retaining the first. Typed native
+identities are also converted only after their allocation is charged. Arrow decoding is admitted
+one section at a time on the bulk CPU workers. Native checkpoint readers keep one
+database snapshot and at most one 64 KiB stored chunk across all their section reads. Ordinary materialized sealing also writes bounded pieces to quota-owned disk; cross-node
+generator reads stream the sealed file, and periodic persistence replaces a segmented checkpoint
+only after its chunks are durable. Those paths support a container above the default bulk budget.
+The ownership-handoff metadata boundary remains bounded by its resident-entry admission.
 
 ### Restore Checkpoint Storage Quota And Metrics
 
@@ -383,8 +430,10 @@ completes:
       and UDFs prepare. The batch is not bounded by the statement and source-byte limits of a
       transaction. Before recording this step, admit an installation generation bound to the
       leader tenure, restore execution and mutation lease. Stage compatible branch lifecycle,
-      source offsets and WASM saves on the newly scheduled owners and replicas, then publish the
+      source offsets, WASM saves and materialized generations on the newly scheduled owners and replicas, then publish the
       complete set on every target node. Recording completion releases the replicated start gate.
+      With `RESUME`, that same effect installs the archived clock mapping and makes the domain
+      running; a delayed coordinator cannot republish after activation.
       `WITHOUT STATE` publishes an empty set, and `WITHOUT SOURCE OFFSETS` omits source positions.
 
 A completed restore reports what it recreated, and each step:
@@ -403,6 +452,7 @@ restored the cluster from '/var/backups/nervix/cluster.nvxb': 2 domains, 5 resou
 A dry run reports every step as `planned`, and for each domain the report of its model run: the
 [transaction impact report](transaction-quiescence.md) the transaction planner produces for the
 batch of the domain's models.
+Each domain also reports its planned or applied `status` and archived `start_version`.
 
 A step that fails ends the restore. The steps before it stay applied, and the outcome names the
 step and the reason, followed by the report of every step:
@@ -457,6 +507,7 @@ execution reference ends.
 ```sh
 nervix-cli restore cluster --input cluster.nvxb --on-existing-user skip
 nervix-cli restore domain payments --input payments.nvxb
+nervix-cli restore domain payments --input payments.nvxb --resume
 nervix-cli restore domain payments --as payments_copy --input cluster.nvxb --dry-run
 nervix-cli restore domain payments --input payments.nvxb --without-source-offsets
 nervix-cli restore domain payments --input payments.nvxb --without-state
@@ -470,8 +521,9 @@ nervix-cli restore cluster --input cluster.nvxb --on-existing-user replace --for
 | `--as NEW_NAME` | Restores the domain under `NEW_NAME`. Only for `domain`. |
 | `--on-existing-user fail`, `skip` or `replace` | The user policy of a cluster restore. `fail` when omitted. |
 | `--dry-run` | Verifies the archive and plans the restore, changing nothing. |
+| `--resume` | Makes the complete restored domain running at its archived generation and clock mapping. |
 | `--without-state` | Installs configuration without runtime checkpoints. |
-| `--without-source-offsets` | Installs WASM and branch state, and leaves Kafka source positions unset. |
+| `--without-source-offsets` | Installs WASM, branch and materialized state, and leaves Kafka source positions unset. |
 | `--format text` or `--format json` | How the report is printed. Text is the default. |
 
 While the archive streams, the command shows how much of it was sent on standard error, when
@@ -494,6 +546,8 @@ With `--format json` the report is one JSON document:
       "domain": "payments",
       "resource_versions": 3,
       "models": 9,
+      "status": "STOPPED",
+      "start_version": 2,
       "planned_models": null
     }
   ],
@@ -539,6 +593,13 @@ arrives.
 | `domains/<domain>/state/wasm_processor/<processor>/<branch>/guest.bin` | Raw guest save bytes | With each WASM descriptor |
 | `domains/<domain>/state/kafka_offset/<ingestor>/offsets.rkyv` | Ingestor schema fingerprint and next offsets by topic and partition | Published Kafka domain offsets unless `WITHOUT STATE` |
 | `domains/<domain>/state/branch_lifecycle/<kind>/<processor>/branches.rkyv` | Typed branch keys, incarnations and LRU order | Published branch lifecycle unless `WITHOUT STATE` |
+| `domains/<domain>/state/materialized_relay/<relay>/descriptor.rkyv` | Domain/relay identity, raw schema fingerprint, revision, fence, branch generation, row and group counts | Every captured materialized relay unless `WITHOUT STATE` |
+| `domains/<domain>/state/materialized_relay/<relay>/groups/<group>/identities.rkyv` | Typed branch keys and low/high watermarks for the group's rows | Every nonempty materialized group |
+| `domains/<domain>/state/materialized_relay/<relay>/groups/<group>/columns.arrow` | Exact-schema Arrow IPC columns in identity order | With each identity group |
+
+Materialized group coordinates are zero-based decimal numbers padded to ten digits. A descriptor
+with zero rows has zero groups. The archive reader accepts arbitrary section ordering, verifies
+both sections of every group, and rejects missing, duplicate or inconsistent current groups.
 
 A resource named `.` or `..` appears in a section path as `%2E` or `%2E%2E`.
 
@@ -555,6 +616,8 @@ its format version, each a little-endian 16-bit integer. The rest is an
 | WASM guest state descriptor | 5 | 1 | The saved branch key, schema fingerprint, guest state generation and checkpoint revision |
 | Kafka domain offsets | 6 | 1 | The ingestor schema fingerprint and ordered topic and partition positions, expressed as the next offset to consume |
 | Branch lifecycle | 7 | 1 | The owner kind, schema fingerprint, branch keys, last ingestion times and incarnations in LRU order |
+| Materialized relay descriptor | 8 | 1 | Domain and relay names, schema fingerprint, revision, ownership fence, branch generation, row count and group count |
+| Materialized group identities | 9 | 1 | Ordered row identities: an unbranched identity or typed branch fields, and low/high ingestion watermarks |
 
 The archive format major version is `2`. A reader refuses invalid record magic, an unsupported
 manifest or required configuration record, a first entry other than the manifest, and any section
@@ -584,6 +647,8 @@ secrets. Store it as a secret.
 | State section staging on an owner | Charged to the same node staging quota until fetched or expired |
 | Streamed guest installation and complete generation publication per node | Fixed 2 MiB bulk working-memory reservation; 64 KiB checkpoint chunks |
 | Encoded lifecycle and offset staging per node | Twice the encoded record size plus 2 MiB |
+| Materialized identity group / Arrow group | 1 MiB / 8 MiB |
+| Materialized capture metadata / typed uniqueness metadata / native row views | 8 MiB each, independently admitted |
 | Physical checkpoint placement encoding | 60 KiB, including domain and installation namespace |
 | Unpublished restore checkpoint keys and values per node | 128 GiB by default; configurable with `--restore-staging-max-bytes` |
 

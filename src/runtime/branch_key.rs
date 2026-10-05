@@ -80,7 +80,7 @@ impl BranchKey {
         Ok(Some(key))
     }
 
-    pub(in crate::runtime) fn to_remote_key(key: &Option<Self>) -> Option<Vec<RemoteRuntimeField>> {
+    pub(crate) fn to_remote_key(key: &Option<Self>) -> Option<Vec<RemoteRuntimeField>> {
         key.as_ref().map(|key| {
             key.0
                 .fields

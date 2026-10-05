@@ -1313,7 +1313,7 @@ async fn materialized_relay_snapshot_task_owns_persistence() {
             None,
         )
         .expect("materialized relay state should initialize");
-    let state = assignment
+    let mut state = assignment
         .originator
         .take()
         .expect("branch-local state should grant authoritative access");
@@ -1328,7 +1328,7 @@ async fn materialized_relay_snapshot_task_owns_persistence() {
     )]);
 
     runtime
-        .apply_materialized_stream_records(&state, &None, [record])
+        .apply_materialized_stream_records(&mut state, &None, [record])
         .await
         .expect("the materialized state assignment should remain authoritative");
 

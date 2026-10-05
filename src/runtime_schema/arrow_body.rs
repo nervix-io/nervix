@@ -20,7 +20,9 @@ use arrow_array::{RecordBatch, RecordBatchOptions};
 use arrow_ipc::{reader::StreamReader, writer::StreamWriter};
 use arrow_schema::Schema as ArrowSchema;
 use error_stack::{Report, ResultExt as _};
-use nervix_execution::{BudgetedBuffer, ChargedBytes, CpuClass, Executor, MemoryClass};
+use nervix_execution::{
+    BudgetedBuffer, ChargedBytes, CpuClass, Executor, MemoryClass, Reservation,
+};
 use nervix_primitives::sync::StdArc;
 use thiserror::Error;
 
@@ -145,6 +147,45 @@ impl RuntimeRecordBatch {
             .await
     }
 
+    /// Admit projection and its encoded result together, so neither allocation waits for a
+    /// second grant while retaining the first. The projection and IPC writer run as one bounded
+    /// CPU job; only the encoded allocation survives that job.
+    #[cfg_attr(
+        nervix_lint,
+        nervix::dispatch(reason = "the caller supplies the admitted bounded row projection")
+    )]
+    pub(crate) async fn encode_arrow_snapshot_projection(
+        executor: &Executor,
+        projection_bytes: u64,
+        encoded_estimate: u64,
+        project: impl FnOnce() -> error_stack::Result<Self, super::RuntimeSchemaError> + Send + 'static,
+    ) -> Result<ChargedBytes, Report<ArrowBodyError>> {
+        let limit = executor.limits().snapshot_section_bytes.as_u64();
+        let encoded_bytes = encoded_estimate.min(limit);
+        let bytes = projection_bytes
+            .checked_add(encoded_bytes)
+            .ok_or_else(|| Report::new(ArrowBodyError::Admission))?;
+        let reservation = executor
+            .try_reserve(MemoryClass::Bulk, bytes.max(1))
+            .change_context(ArrowBodyError::Admission)?;
+        executor
+            .run_cpu(CpuClass::Bulk, reservation, move |charge, cancellation| {
+                let (_projection_charge, encoded_charge) = charge
+                    .split(projection_bytes)
+                    .change_context(ArrowBodyError::Admission)?;
+                cancellation
+                    .check()
+                    .change_context(ArrowBodyError::Cancelled)?;
+                let batch = project().map_err(ArrowBodyError::encoding)?;
+                cancellation
+                    .check()
+                    .change_context(ArrowBodyError::Cancelled)?;
+                encode_admitted_body(batch.batch, encoded_charge, limit)
+            })
+            .await
+            .change_context(ArrowBodyError::Execution)?
+    }
+
     async fn encode_body(
         &self,
         executor: &Executor,
@@ -167,13 +208,7 @@ impl RuntimeRecordBatch {
                     cancellation
                         .check()
                         .change_context(ArrowBodyError::Cancelled)?;
-                    let buffer = BudgetedBuffer::with_limit(charge, limit);
-                    let mut writer = StreamWriter::try_new(buffer, batch.schema_ref())
-                        .map_err(ArrowBodyError::encoding)?;
-                    writer.write(&batch).map_err(ArrowBodyError::encoding)?;
-                    writer.finish().map_err(ArrowBodyError::encoding)?;
-                    let buffer = writer.into_inner().map_err(ArrowBodyError::encoding)?;
-                    Ok(ChargedBytes::from_buffer(buffer))
+                    encode_admitted_body(batch, charge, limit)
                 },
             )
             .await
@@ -240,6 +275,22 @@ impl RuntimeRecordBatch {
         let refs = sections.iter().collect::<Vec<_>>();
         Self::concat(&refs).map_err(ArrowBodyError::decoding)
     }
+}
+
+/// The IPC writer shared by ordinary bodies and admitted snapshot projections. Its callers have
+/// already entered a charged CPU job and checked cancellation.
+fn encode_admitted_body(
+    batch: RecordBatch,
+    charge: Reservation,
+    limit: u64,
+) -> Result<ChargedBytes, Report<ArrowBodyError>> {
+    let buffer = BudgetedBuffer::with_limit(charge, limit);
+    let mut writer =
+        StreamWriter::try_new(buffer, batch.schema_ref()).map_err(ArrowBodyError::encoding)?;
+    writer.write(&batch).map_err(ArrowBodyError::encoding)?;
+    writer.finish().map_err(ArrowBodyError::encoding)?;
+    let buffer = writer.into_inner().map_err(ArrowBodyError::encoding)?;
+    Ok(ChargedBytes::from_buffer(buffer))
 }
 
 impl CompiledSchema {
@@ -360,4 +411,32 @@ async fn decode_body(
         )
         .await
         .change_context(ArrowBodyError::Execution)?
+}
+
+#[cfg(test)]
+mod projection_tests {
+    use meticulous::ResultExt as _;
+
+    use super::*;
+
+    #[nervix_primitives::test]
+    async fn snapshot_projection_refuses_before_conversion_when_bulk_memory_is_busy() {
+        let config = nervix_execution::ExecutionConfig::default();
+        let bulk_bytes = config.budgets.bulk.as_u64();
+        let executor = Executor::new(config).assured("the default executor is valid");
+        let _busy = executor
+            .try_reserve(MemoryClass::Bulk, bulk_bytes)
+            .assured("the test holds the bulk budget");
+        let result =
+            RuntimeRecordBatch::encode_arrow_snapshot_projection(&executor, 1024, 1024, || {
+                panic!("a refused projection must not allocate or convert rows")
+            })
+            .await;
+        assert!(matches!(
+            result
+                .expect_err("the occupied budget refuses projection")
+                .current_context(),
+            ArrowBodyError::Admission
+        ));
+    }
 }

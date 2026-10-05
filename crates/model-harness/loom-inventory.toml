@@ -14,6 +14,20 @@
 # changing the owner's ordering means revisiting its qualification.
 
 [[invariant]]
+claim = "A state-assignment drain observes every write completed by an operation admitted under the superseded assignment before returning; ArcSwap internals remain opaque."
+id = "server.state-assignment.drained-publication"
+package = "nervix-server"
+test = "runtime::state_store::loom_models::loom_assignment_drain_observes_every_completed_materialized_publication"
+
+[[qualification]]
+failure = "assignment drain omitted an admitted publication's preceding writes"
+id = "server.state-assignment.relaxed-completion"
+invariant = "server.state-assignment.drained-publication"
+original = ".fetch_sub(1, Ordering::Release)"
+path = "src/runtime/state_store.rs"
+weakened = ".fetch_sub(1, Ordering::Relaxed)"
+
+[[invariant]]
 claim = "The model body and its participants execute instrumented debug frames on their modeled coroutine stacks, while the coordinator only joins the body."
 id = "harness.loom.coroutine-stack"
 package = "nervix-model-harness"

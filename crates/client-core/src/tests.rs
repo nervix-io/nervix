@@ -152,6 +152,7 @@ fn command_reply(disposition: CommandDisposition, message: &str) -> ReplyBody {
 fn domain_list_reply() -> ReplyBody {
     ReplyBody::DomainList(DomainList {
         domains: vec![DomainInfo {
+            start_version: 1,
             domain: domain("orders"),
             status: DomainStatus::Running,
             pace: DomainPace::Unpaced,
@@ -1369,6 +1370,7 @@ async fn observations_keep_only_their_latest_value() {
             domains: names
                 .iter()
                 .map(|name| DomainInfo {
+                    start_version: 1,
                     domain: domain(name),
                     status: DomainStatus::Running,
                     pace: DomainPace::Unpaced,
@@ -1428,6 +1430,7 @@ async fn the_client_reads_the_latest_observations_of_its_exchange() {
             domains: names
                 .iter()
                 .map(|name| DomainInfo {
+                    start_version: 1,
                     domain: domain(name),
                     status: DomainStatus::Stopped,
                     pace: DomainPace::Unpaced,
@@ -2698,7 +2701,7 @@ async fn list_domains_is_served_from_a_domain_list_request() {
     assert!(outcome.succeeded());
     assert_eq!(
         outcome.message,
-        "domains:\norders pace=UNPACED status=RUNNING"
+        "domains:\norders pace=UNPACED status=RUNNING start_version=1"
     );
 }
 

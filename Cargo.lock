@@ -7328,6 +7328,7 @@ dependencies = [
  "arrow-array",
  "arrow-ipc",
  "arrow-schema",
+ "blake3",
  "bolero",
  "bytes",
  "error-stack",

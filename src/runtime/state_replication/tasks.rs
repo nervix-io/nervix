@@ -174,7 +174,11 @@ impl Runtime {
                     let last_persisted = state.last_persisted_lsm();
                     let sealed = state
                         .read()
-                        .seal_after(&executor, Some(last_persisted))
+                        .seal_after(
+                            &executor,
+                            &runtime.inner.snapshot_staging,
+                            Some(last_persisted),
+                        )
                         .await;
                     let sealed = match sealed {
                         Ok(Some(sealed)) => sealed,
@@ -185,23 +189,40 @@ impl Runtime {
                     };
                     let revision = sealed.descriptor.revision;
                     let placement = state.read().placement().clone();
-                    let store = store.clone();
+                    let writer = store.checkpoint_stream_writer();
                     // Publishing a generation is filesystem work with a durability barrier, so it
                     // runs on the storage workers rather than on the async worker this task holds.
                     let reservation = executor
-                        .reserve(nervix_execution::MemoryClass::Bulk, 1)
+                        .reserve(
+                            nervix_execution::MemoryClass::Bulk,
+                            super::super::RESTORE_STATE_WORKING_BYTES,
+                        )
                         .await
                         .map_err(|error| RuntimePersistenceError::EncodeState(error.to_string()))?;
                     executor
                         .run_storage(
                             nervix_execution::StorageClass::Filesystem,
                             reservation,
-                            move |_charge, _cancellation| {
-                                store.publish_sealed_snapshot(
-                                    &placement,
-                                    revision,
-                                    sealed.bytes.as_ref(),
-                                )
+                            move |_charge, cancellation| {
+                                let file = std::fs::File::open(sealed.artifact.path()).map_err(
+                                    |error| RuntimePersistenceError::EncodeState(error.to_string()),
+                                )?;
+                                writer
+                                    .publish_checkpoint_stream(
+                                        &placement,
+                                        super::super::state_store::generation::CheckpointMetadata {
+                                            lsm: revision,
+                                            length: sealed.descriptor.length,
+                                            digest: sealed.descriptor.digest,
+                                        },
+                                        file,
+                                        || {
+                                            cancellation.check().change_context(
+                                                RuntimePersistenceError::RestoreRead,
+                                            )
+                                        },
+                                    )
+                                    .map_err(|error| error.current_context().clone())
                             },
                         )
                         .await
@@ -739,11 +760,7 @@ impl Runtime {
         if !node.materialized_relay {
             return node.schema_fingerprint;
         }
-        let mut hasher = blake3::Hasher::new();
-        hasher.update(b"nervix/materialized-state/start-version");
-        hasher.update(node.schema_fingerprint.as_digest());
-        hasher.update(&start_version.to_be_bytes());
-        SchemaFingerprint::from_digest(*hasher.finalize().as_bytes())
+        node.schema_fingerprint.materialized_at(start_version)
     }
 
     pub(in crate::runtime) fn clear_state_identities(&self, domain: &DomainName) {
@@ -808,13 +825,11 @@ impl Runtime {
             | RuntimeStateKind::WindowProcessor
             | RuntimeStateKind::BranchLru => {
                 let node = DomainNodeRef::node_in(domain.clone(), kind, identifier.clone());
-                let assignment = nervix_primitives::expect_lint!(
-                    nervix::sync_acquisition,
-                    "Typed Ratchet 04 https://app.clickup.com/t/86bc9eqp3: retain the published \
-                     state placement before recurring branch work",
-                    self.inner.state_identities.get(&node)
-                )
-                .and_then(|slot| slot.load_full());
+                let assignment = self
+                    .inner
+                    .state_replication_routing
+                    .assignment_for_entity(&node)
+                    .and_then(|slot| slot.load_full());
                 let Some(assignment) = assignment else {
                     return Err(Report::new(
                         StateIdentityError::SchemaFingerprintUnpublished {

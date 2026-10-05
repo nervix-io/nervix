@@ -301,6 +301,9 @@ which gossip keeps dialling at the addresses the startup lookup produced.
 [Where The Interconnect Resolves](./interconnect.md#where-the-interconnect-resolves) describes
 both. No path writes a resolved address into its configuration, a plan, a Model or persisted state,
 so a service can move to new addresses without an alteration.
+Captured backup-section openings have one 30-second caller deadline that includes retries for
+request-capacity refusal. Pool connection lookups retain their five-second attempt budget; the
+caller deadline and stream ownership are described in [Membership, Consensus, And Bulk Transfer](./interconnect.md#membership-consensus-and-bulk-transfer).
 
 ## Dialling The Answers
 

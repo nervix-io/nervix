@@ -1567,7 +1567,8 @@ other answer is a `CommandOutcome` under the start's execution reference:
   refuses there is answered `RequestFailed` and is not admitted. A restore it admits, or finds
   admitted without its archive, runs to its outcome, which carries the typed `RestoreReport`: the
   mode, the archive's size and digest, the capture time, what the users step did, each restored
-  domain with its counts and, for a dry run, its model run's transaction impact report, and each
+  domain with its counts, required lifecycle status and required archived start generation and,
+  for a dry run, its model run's transaction impact report, and each
   step with its outcome.
 
 A restore that failed at a step is `RequestFailed`, and its report names the step as `Failed`, the
@@ -1579,6 +1580,12 @@ with a definitive command failure naming the incomplete installation. Planning r
 admitting a lifecycle step, and consensus checks the same gate at activation. Failure of the
 restore, release of its mutation lease, and node restart do not release this gate. Only completion
 of the whole installation does.
+With `RESUME`, complete publication, gate release and the transition to `Running` at the archived
+generation and clock mapping precede the successful outcome. A client can immediately inspect
+that lifecycle or attach its clock. A dry run reports the planned lifecycle without activation.
+`DomainInfo` in `DomainList` and `DomainsChanged` carries a required `start_version` beside its
+status and pace. Wire verification rejects missing required lifecycle and generation fields;
+the decoder never invents a default generation.
 
 The call is not bounded by the request deadline, because an archive can take far longer to send
 than a command takes to run; the Rust client bounds each frame by it, and then the wait for the

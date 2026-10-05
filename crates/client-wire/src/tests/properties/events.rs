@@ -65,6 +65,7 @@ pub(super) fn check(bytes: &[u8]) -> BTreeSet<wire::ServerBody> {
             DomainPace::Unpaced
         };
         domains.push(DomainInfo {
+            start_version: values.arbitrary.entropy().any_u64(),
             status: status.clone(),
             domain: values.arbitrary.name(),
             pace,

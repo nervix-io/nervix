@@ -79,6 +79,7 @@ impl Runtime {
                 reason: format!("{error:#}"),
             })
         })?;
+        self.install_state_identities(&revision);
         self.build_passive_execution_from_revision(domain, revision)
             .await
             .map_err(Report::new)
@@ -519,17 +520,15 @@ impl Runtime {
                         .get_mut(&relay_name)
                         .verified("the relay boundary was installed from this domain plan");
                     if node.executes_on(local_node_id) {
-                        let state =
-                            materialized_states
-                                .get(&relay_name)
-                                .cloned()
-                                .ok_or_else(|| RuntimeError::BuildDomainExecution {
-                                    domain: domain.as_str().to_string(),
-                                    reason: format!(
-                                        "missing materialized relay state '{}'",
-                                        relay_name
-                                    ),
-                                })?;
+                        let state = materialized_states.remove(&relay_name).ok_or_else(|| {
+                            RuntimeError::BuildDomainExecution {
+                                domain: domain.as_str().to_string(),
+                                reason: format!(
+                                    "missing materialized relay state '{}'",
+                                    relay_name
+                                ),
+                            }
+                        })?;
                         relay_state_specs.push(RelayStateTaskSpec {
                             relay: relay_name,
                             state,
@@ -870,6 +869,9 @@ impl Runtime {
                         lookups: lookup_runtimes,
                         udfs: udf_executor,
                         relay_branchings,
+                        materialized_stream_reads: self
+                            .materialized_relay_publications(domain, &materialized_stream_specs),
+                        relay_state_epoch: self.relay_state_epoch(domain),
                         materialized_stream_specs,
                         materialized_stream_owner_nodes,
                         codecs,
@@ -1055,6 +1057,9 @@ impl Runtime {
                     lookups,
                     udfs: udf_executor,
                     relay_branchings,
+                    materialized_stream_reads: self
+                        .materialized_relay_publications(domain, &materialized_stream_specs),
+                    relay_state_epoch: self.relay_state_epoch(domain),
                     materialized_stream_specs,
                     materialized_stream_owner_nodes,
                     codecs,

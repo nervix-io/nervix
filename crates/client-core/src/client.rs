@@ -1628,10 +1628,11 @@ fn format_domain_list(domains: &[DomainInfo]) -> String {
     lines.push("domains:".to_string());
     for domain in domains {
         lines.push(format!(
-            "{} pace={} status={}",
+            "{} pace={} status={} start_version={}",
             domain.domain,
             domain.pace.as_ref(),
-            domain.status.as_ref()
+            domain.status.as_ref(),
+            domain.start_version,
         ));
     }
     lines.join("\n")

@@ -1035,6 +1035,11 @@ extra reports and uploads that combined workspace report to Codecov, so library 
 contribute to patch coverage alongside server and client tests. The separate `lcov.info` artifact
 retains the focused server, CLI and web-console view.
 
+The ordinary `coverage` job and the separately flagged `diagnostic-evidence` job upload through the
+verified Codecov CLI to the explicit `https://codecov.io` API origin. OIDC uses that same audience,
+TLS certificates are verified, and `fail_ci_if_error: true` makes an upload failure fail the job.
+Both jobs upload their report artifacts regardless of that verdict.
+
 | Part of the job | Budget | Basis |
 | --- | --- | --- |
 | Work before the scenario binary starts | 14 minutes | The first cold kache 0.28.1 split-job run took 11m37s from job start to the binary, and the next took 10m08s; the ceiling adds 2m23s beyond the slower measurement |

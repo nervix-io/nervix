@@ -1,22 +1,27 @@
-//! The memory-ordering claim of runtime-state assignment, explored by Loom over the production
-//! authority.
+//! The memory-ordering claims of runtime-state assignment, explored by Loom over the production
+//! authority and its admission count.
 //!
 //! Layer: test harness.
 //!
 //! - **Owns.** The admission-fence invariant of a state assignment: an operation admitted under a
 //!   binding that a rebind supersedes either observes the new binding and is refused, or finishes
-//!   before the rebind returns, with everything it did visible to the rebinding side.
-//! - **Depends on.** The production `StateAssignmentAuthority` and the Loom runner of
-//!   `nervix-model-harness`.
-//! - **Must not know.** What a runtime state holds, how it is persisted or replicated, or which
-//!   node owns it.
+//!   before the rebind returns, with everything it did visible to the rebinding side. And the
+//!   drain's publication invariant: a drain that waits out an admitted operation observes every
+//!   write that operation completed.
+//! - **Depends on.** The production `StateAssignmentAuthority` and `StateAdmissions`, and the Loom
+//!   runner of `nervix-model-harness`.
+//! - **Must not know.** What a runtime state holds, how it is persisted or replicated, which node
+//!   owns it, or the internals of its `ArcSwap` publication.
 //!
-//! One thread runs an operation admitted under the first binding and the other rebinds, so the only
-//! synchronization between them is the authority's own. The rebind holds the assignment barrier, a
-//! real lock outside every model that only the rebinding thread takes, and publishes the roles
-//! through a real publication the operation never reads. `just test-loom` runs the model, and
+//! In the admission-fence model, one thread runs an operation admitted under the first binding and
+//! the other rebinds, so the only synchronization between them is the authority's own. The rebind
+//! holds the assignment barrier, a real lock outside every model that only the rebinding thread
+//! takes, and publishes the roles through a real publication the operation never reads. In the
+//! drain model, the operation is admitted before its observer starts, so only the operation's
+//! completion and the drain's read of the count synchronize what it wrote: no join, notification
+//! or lock publishes the witness. `just test-loom` runs both models, and
 //! `just test-loom-qualification` shows that weakening the rebind's read of the admission count,
-//! or the release an operation makes when it finishes, makes it fail.
+//! or the release an operation makes when it finishes, makes them fail.
 
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_model_harness::{
@@ -28,9 +33,10 @@ use nervix_primitives::sync::{
     atomic::{AtomicUsize, Ordering},
 };
 
-use super::{StateAssignmentAuthority, StateCapability, StateReplicationRoles};
+use super::{StateAdmissions, StateAssignmentAuthority, StateCapability, StateReplicationRoles};
 
 const ADMISSION_FENCE: InvariantId = InvariantId::new("runtime.state-assignment.admission-fence");
+const DRAIN: InvariantId = InvariantId::new("server.state-assignment.drained-publication");
 
 /// What the admitted operation writes. Both sides access it with `Relaxed`, so only the authority's
 /// own orderings can publish it.
@@ -66,5 +72,31 @@ fn loom_an_operation_admitted_under_a_superseded_binding_never_outlives_its_rebi
             "an operation admitted under the superseded binding was still running after its \
              superseding rebind returned"
         );
+    });
+}
+
+#[test]
+fn loom_assignment_drain_observes_every_completed_materialized_publication() {
+    explore(DRAIN, || {
+        let admissions = Arc::new(StateAdmissions::default());
+        let payload = Arc::new(AtomicUsize::new(0));
+        let admitted = admissions.admit(1);
+        // The admission predates the observer. Only its production completion and the drain
+        // synchronize the payload: no join, notification or lock publishes the witness.
+        let observer = spawn({
+            let admissions = admissions.clone();
+            let payload = payload.clone();
+            move || {
+                admissions.wait_until_finished(1);
+                assert_eq!(
+                    payload.load(Ordering::Relaxed),
+                    7,
+                    "assignment drain omitted an admitted publication's preceding writes"
+                );
+            }
+        });
+        payload.store(7, Ordering::Relaxed);
+        drop(admitted);
+        observer.join().assured("the qualified observer finishes");
     });
 }

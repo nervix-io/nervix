@@ -275,6 +275,17 @@ impl BranchRuntime {
     }
 
     pub(super) async fn evict(&mut self) {
+        for (relay, state) in &mut self.materialized_states {
+            if let Err(error) = self
+                .runtime
+                .delete_materialized_stream_key(state, &self.key)
+            {
+                warn!(domain = self.domain.as_str(), relay = relay.as_str(),
+                    branch = branch_key_display(&self.key), error = %error,
+                    "materialized assignment changed during branch eviction");
+            }
+        }
+        self.materialized_states.clear();
         for relay in self.relays.values_mut() {
             relay.retire();
         }
@@ -285,12 +296,20 @@ impl BranchRuntime {
     }
 
     pub(super) async fn reconcile_materialized_state_membership(&mut self, relay: &RelayName) {
-        let current_epoch = self
-            .runtime
-            .relay_state_epoch(&self.domain)
-            .load(Ordering::Acquire);
+        let current_epoch = match self.domain_routing() {
+            Ok(routing) => routing.relay_state_epoch.load(Ordering::Acquire),
+            Err(_) => return,
+        };
         if self.relay_state_epoch == Some(current_epoch) {
-            return;
+            if self.materialized_states.contains_key(relay) {
+                return;
+            }
+            if self
+                .domain_routing()
+                .is_ok_and(|routing| !routing.materialized_stream_specs.contains_key(relay))
+            {
+                return;
+            }
         }
         // A schedule publishes its routing before it advances the epoch, so routing read after the
         // epoch is at least as new as the epoch this reconciliation records. The routing the branch
@@ -417,7 +436,7 @@ impl BranchRuntime {
             return;
         }
         self.reconcile_materialized_state_membership(relay).await;
-        let Some(state) = self.materialized_states.get(relay) else {
+        let Some(state) = self.materialized_states.get_mut(relay) else {
             return;
         };
         let messages = match batch.detached().try_into_messages() {
