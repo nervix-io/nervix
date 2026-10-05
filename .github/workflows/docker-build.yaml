@@ -49,24 +49,20 @@ jobs:
       matrix:
         include:
           - image: debian
-            version: trixie
             platform: linux/amd64
             arch: amd64
             llvm: "23"
             runner: blacksmith-4vcpu-ubuntu-2404
           - image: debian
-            version: trixie
             platform: linux/arm64
             arch: arm64
             llvm: "23"
             runner: blacksmith-8vcpu-ubuntu-2404
           # - image: alpine
-          #   version: "3.23"
           #   platform: linux/amd64
           #   arch: amd64
           #   llvm: "21"
           # - image: alpine
-          #   version: "3.23"
           #   platform: linux/arm64
           #   arch: arm64
           #   llvm: "21"
@@ -109,14 +105,13 @@ jobs:
           fi
           if [[ "${{ matrix.image }}" == "debian" ]]; then
             just docker-build-debian \
-              "${{ matrix.version }}" \
               "${{ matrix.llvm }}" \
               "${tag}" \
               "${{ matrix.platform }}" \
               "${push_image}"
           else
             just docker-build-alpine \
-              "${{ matrix.version }}" \
+              "3.23" \
               "${{ matrix.llvm }}" \
               "${tag}" \
               "${{ matrix.platform }}" \
