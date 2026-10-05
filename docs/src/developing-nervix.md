@@ -596,8 +596,15 @@ link, is built normally. The recipe
 that executes Nervix code then runs in the environment `cargo llvm-cov show-env --sh
 --no-rustc-wrapper` describes: every crate is compiled with source coverage instrumentation into
 `target/native-coverage-build` for ordinary mode and `target/native-coverage-build-<mode>` for
-each other mode, and the configured kache wrapper stays in place. Each mode has a separate build
-lock through export. The parts that only compile or target the browser stay uninstrumented;
+each other mode, and the configured kache wrapper stays in place. The `test-deloxide` and
+`test-deloxide-order` lanes instrument only workspace crates: the collector moves the
+instrumentation flags into `scripts/coverage_workspace_wrapper.py`, which Cargo runs beneath kache
+as the workspace compiler wrapper, the scope `cargo llvm-cov` gives the ordinary coverage build.
+Their nodes must meet product deadlines while they compile WASM processors and process Arrow state,
+and instrumented dependencies made that several times slower; the report is the same, because
+export keeps only repository sources. Kache runs a workspace wrapper chain directly, so their
+workspace crates are compiled each run while dependencies come from the cache. Each mode has a
+separate build lock through export. The parts that only compile or target the browser stay uninstrumented;
 `just test-primitives-compile` retains their independent verdict. Miri, mutation testing and
 `just test-loom-qualification` never run under this command. The compile and qualification
 commands run without the collector's profile environment, so altered source cannot contribute to

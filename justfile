@@ -1474,7 +1474,7 @@ coverage-model-runner:
     mkdir -p target/model-coverage
     coverage=(uvx --from coverage==7.11.0 coverage)
     export COVERAGE_FILE="{{ cargo_target_dir }}/model-coverage/python.coverage"
-    NERVIX_NATIVE_COVERAGE_TOOLCHAIN_TESTS=required "${coverage[@]}" run --branch --source=scripts.native_coverage,scripts.model_evidence,scripts.shuttle_checks,scripts.loom_models,scripts.deloxide_lane -m unittest scripts.tests.test_native_coverage scripts.tests.test_model_coverage scripts.tests.test_shuttle_checks scripts.tests.test_loom_models scripts.tests.test_deloxide_lane
+    NERVIX_NATIVE_COVERAGE_TOOLCHAIN_TESTS=required "${coverage[@]}" run --branch --source=scripts.native_coverage,scripts.coverage_workspace_wrapper,scripts.model_evidence,scripts.shuttle_checks,scripts.loom_models,scripts.deloxide_lane -m unittest scripts.tests.test_native_coverage scripts.tests.test_model_coverage scripts.tests.test_shuttle_checks scripts.tests.test_loom_models scripts.tests.test_deloxide_lane
     "${coverage[@]}" lcov -o "{{ cargo_target_dir }}/model-coverage/python.lcov"
     "${coverage[@]}" report
 

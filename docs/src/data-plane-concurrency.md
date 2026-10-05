@@ -1590,9 +1590,11 @@ behind. A consistent-order control must pass, and the recorded deadlock must rep
 class.
 
 Under `just coverage-native-extras test-deloxide` or `test-deloxide-order`, the lane builds in the
-collector's instrumented target, takes the report tool, CLI and shared client binding from the
-target its prerequisites built, starts every test executable through Cargo's configured runner, and
-hands `lane.json` to the collector, which exports nothing unless the lane completed. CI's
+collector's instrumented target, with instrumentation on workspace crates only, so dependencies such
+as wasmtime's compiler keep the speed the product's deadlines assume. It takes the report tool, CLI
+and shared client binding from the target its prerequisites built, starts every test executable
+through Cargo's configured runner, and hands `lane.json` to the collector, which exports nothing
+unless the lane completed. CI's
 `deloxide` job runs each selection this way, then the qualification, and uploads the completion
 records, the diagnostic LCOV reports and every attempt directory whatever the verdict. Diagnostic
 coverage stays out of ordinary coverage and the CRAP gate. The [Integration Test

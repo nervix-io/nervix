@@ -22,7 +22,14 @@ ordinary environment. The instrumented recipe then runs in the environment that
 coverage instrumentation, the configured compiler wrapper stays in place so kache still serves the
 build, and ordinary instrumentation goes to `<target>/native-coverage-build`; other modes use
 `<target>/native-coverage-build-<mode>`, so ordinary builds are not
-invalidated. The finish recipes complete the check outside instrumentation: compile-only checks,
+invalidated. The Deloxide lanes instrument only workspace crates instead: the collector moves the
+instrumentation flags into a workspace compiler wrapper, `coverage_workspace_wrapper.py`, which
+Cargo runs beneath the configured kache for workspace crates alone, as `cargo llvm-cov` itself does
+for the ordinary coverage build. Their dependencies, wasmtime's compiler among them, then run at
+full speed under nodes whose product deadlines the lane must meet, and their reports are the same,
+because export keeps only repository sources. Kache runs a workspace wrapper chain directly, so
+those workspace crates are compiled rather than served from the cache. The finish recipes complete
+the check outside instrumentation: compile-only checks,
 browser builds. Primitive compile checks and Loom weakening qualification run independently.
 When a producer selects a compiler, its prepare recipes install that toolchain before the
 collector resolves the compiler and validates its LLVM tools. Its attempt directory uses the
@@ -100,6 +107,11 @@ ATTEMPT_VARIABLE = "NERVIX_NATIVE_COVERAGE_ATTEMPT"
 # The target directory the prepare recipes built into, which the instrumented recipe reads prepared
 # binaries from.
 PREPARED_TARGET_VARIABLE = "NERVIX_PREPARED_TARGET_DIR"
+# The workspace compiler wrapper of a producer that instruments only workspace crates, and the
+# instrumentation flags it adds, separated as in CARGO_ENCODED_RUSTFLAGS.
+WORKSPACE_WRAPPER = SCRIPT.with_name("coverage_workspace_wrapper.py")
+WORKSPACE_FLAGS_VARIABLE = "NERVIX_NATIVE_COVERAGE_WORKSPACE_RUSTFLAGS"
+ENCODED_FLAG_SEPARATOR = "\x1f"
 EXECUTIONS = "executions.jsonl"
 PROFILES = "profiles"
 MERGED_PROFILE = "merged.profdata"
@@ -168,6 +180,15 @@ SOURCE_POLICY = {
 }
 
 
+class InstrumentedCrates(enum.StrEnum):
+    """Which crates of a producer's build carry source coverage instrumentation."""
+
+    # Every crate, dependencies included, through the build's own compiler flags.
+    EVERY = "every"
+    # Only workspace crates, through a workspace compiler wrapper beneath the configured kache.
+    WORKSPACE = "workspace"
+
+
 @dataclass(frozen=True)
 class Producer:
     """An extra check whose executions are collected, and the recipes the check consists of."""
@@ -181,6 +202,7 @@ class Producer:
     filterable: bool = False
     # Its instrumented recipe is the Deloxide lane, whose complete record export requires.
     diagnostic_lane: bool = False
+    instrumented_crates: InstrumentedCrates = InstrumentedCrates.EVERY
 
     def rerun(self, filter_text: str = "") -> str:
         command = f"just coverage-native-extras {self.name}"
@@ -246,10 +268,13 @@ PRODUCERS: tuple[Producer, ...] = (
         name="test-deadlock-report", mode="ordinary", prepare=(),
         instrumented="test-deadlock-report", finish=(),
     ),
+    # The lanes' nodes must meet product deadlines while they prepare WASM processors and Arrow
+    # state, which instrumented dependencies made several times slower.
     *(
         Producer(
             name=f"test-{mode}", mode=mode, prepare=("tests-deps",),
             instrumented=f"test-{mode}-workloads", finish=(), diagnostic_lane=True,
+            instrumented_crates=InstrumentedCrates.WORKSPACE,
         )
         for mode in ("deloxide", "deloxide-order")
     ),
@@ -616,7 +641,7 @@ def parse_exports(text: str) -> dict[str, str]:
 def compiler_flags(exported: Mapping[str, str]) -> list[str]:
     encoded = exported.get("CARGO_ENCODED_RUSTFLAGS")
     if encoded is not None:
-        return [flag for flag in encoded.split("\x1f") if flag]
+        return [flag for flag in encoded.split(ENCODED_FLAG_SEPARATOR) if flag]
     return exported.get("RUSTFLAGS", "").split()
 
 
@@ -629,6 +654,42 @@ def instruments_coverage(flags: Sequence[str]) -> bool:
     return False
 
 
+# The cfg values `cargo llvm-cov` sets beside the instrumentation, which belong to the crates it
+# instruments.
+COVERAGE_CFGS = frozenset({"coverage", "coverage_nightly"})
+
+
+@dataclass(frozen=True)
+class SeparatedFlags:
+    """A build's compiler flags apart from the instrumentation a workspace wrapper adds instead."""
+
+    build: tuple[str, ...]
+    coverage: tuple[str, ...]
+
+
+def separate_coverage_flags(flags: Sequence[str]) -> SeparatedFlags:
+    build: list[str] = []
+    coverage: list[str] = []
+    index = 0
+    while index < len(flags):
+        flag = flags[index]
+        following = flags[index + 1] if index + 1 < len(flags) else None
+        if flag == "-C" and following == "instrument-coverage":
+            coverage.extend([flag, following])
+            index += 2
+            continue
+        if flag == "--cfg" and following in COVERAGE_CFGS:
+            coverage.extend([flag, following])
+            index += 2
+            continue
+        if flag == "-Cinstrument-coverage" or flag.removeprefix("--cfg=") in COVERAGE_CFGS:
+            coverage.append(flag)
+        else:
+            build.append(flag)
+        index += 1
+    return SeparatedFlags(build=tuple(build), coverage=tuple(coverage))
+
+
 def runner_variable(host: str) -> str:
     return "CARGO_TARGET_" + host.upper().replace("-", "_").replace(".", "_") + "_RUNNER"
 
@@ -636,15 +697,23 @@ def runner_variable(host: str) -> str:
 @dataclass(frozen=True)
 class Instrumentation:
     environment: dict[str, str]
+    # The flags every crate of the build is compiled with.
     flags: tuple[str, ...]
+    crates: InstrumentedCrates = InstrumentedCrates.EVERY
+    # The flags the workspace wrapper adds to workspace crates alone.
+    workspace_flags: tuple[str, ...] = ()
 
     def describe(self, workspace: Workspace) -> dict[str, object]:
-        return {
+        description: dict[str, object] = {
             "target_directory": workspace.display(workspace.build()),
+            "instrumented_crates": str(self.crates),
             "rustflags": list(self.flags),
             "runtime_profiles": f"{PROFILES}/{PROFILE_PATTERN}",
             "build_time_profiles": BUILD_TIME_PROFILE,
         }
+        if self.crates is InstrumentedCrates.WORKSPACE:
+            description["workspace_rustflags"] = list(self.workspace_flags)
+        return description
 
 
 def instrumentation(
@@ -653,6 +722,7 @@ def instrumentation(
     toolchain: Toolchain,
     attempt: Path,
     base: Mapping[str, str],
+    crates: InstrumentedCrates = InstrumentedCrates.EVERY,
 ) -> Instrumentation:
     runner = runner_variable(toolchain.host)
     if runner in base:
@@ -687,7 +757,27 @@ def instrumentation(
     environment[runner] = " ".join(command)
     environment[ATTEMPT_VARIABLE] = str(attempt)
     environment[PREPARED_TARGET_VARIABLE] = str(workspace.target)
-    return Instrumentation(environment=environment, flags=tuple(flags))
+    if crates is InstrumentedCrates.EVERY:
+        return Instrumentation(environment=environment, flags=tuple(flags))
+
+    if "RUSTC_WORKSPACE_WRAPPER" in base:
+        raise RunnerError(
+            "RUSTC_WORKSPACE_WRAPPER is already set; instrumenting only workspace crates composes "
+            "a workspace compiler wrapper of its own"
+        )
+    separated = separate_coverage_flags(flags)
+    if "CARGO_ENCODED_RUSTFLAGS" in exported:
+        environment["CARGO_ENCODED_RUSTFLAGS"] = ENCODED_FLAG_SEPARATOR.join(separated.build)
+    else:
+        environment["RUSTFLAGS"] = " ".join(separated.build)
+    environment["RUSTC_WORKSPACE_WRAPPER"] = str(WORKSPACE_WRAPPER)
+    environment[WORKSPACE_FLAGS_VARIABLE] = ENCODED_FLAG_SEPARATOR.join(separated.coverage)
+    return Instrumentation(
+        environment=environment,
+        flags=separated.build,
+        crates=crates,
+        workspace_flags=separated.coverage,
+    )
 
 
 def aligned(size: int, alignment: int) -> int:
@@ -1346,7 +1436,7 @@ def collect(
 
         stage = enter(Stage.INSTRUMENT)
         instrumented = instrumentation(
-            commands, workspace, toolchain, attempt, environment
+            commands, workspace, toolchain, attempt, environment, producer.instrumented_crates
         )
         if producer.filterable:
             instrumented.environment[MODEL_VARIABLE] = str(attempt / MODEL_REPORT)

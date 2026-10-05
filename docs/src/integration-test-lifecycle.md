@@ -1090,14 +1090,17 @@ signal reaches the lane as a signal rather than as Cargo's status. The scenario 
 lane's tagged scenarios without retries, in two invocations: the restore, client and diagnostic
 scenarios, then the paced-driver scenarios with the diagnostic Rust driver. Each invocation runs
 the inventory's fixed number of scenarios at once, four, rather than one per CPU: a diagnostic
-build pays for its tracked acquisitions on every lock, and under the native coverage collector
-every crate of the build is instrumented, wasmtime's compiler included, where the ordinary
-coverage build instruments only the workspace. A fixed count puts the same load on its nodes
-locally and on CI's 16-vCPU runner. At eight, CI's first instrumented run took five times as long
-as an uninstrumented local run for the WASM restore scenarios, 338 seconds against 64 for one of
-them, and that scenario's restored runtime revision missed the product's readiness deadline: the
-test cluster's 10-second node unavailability timeout plus the 30-second propagation bound. The
-product deadline stays as it is; the lane lowers its own load instead. Each invocation records
+build pays for its tracked acquisitions on every lock, and a fixed count puts the same load on its
+nodes locally and on CI's 16-vCPU runner.
+
+Under the native coverage collector the lane instruments only workspace crates, the scope the
+ordinary coverage build has. When every crate was instrumented, wasmtime's compiler included, CI's
+WASM restore scenarios ran five times as long as an uninstrumented local run, 338 seconds against
+64 for one of them, and its restored runtime revision missed the product's readiness deadline: the
+test cluster's 10-second node unavailability timeout plus the 30-second propagation bound. It
+missed it at four scenarios at once as at eight, because the time went to preparing the restored
+WASM processor, not to waiting for a run slot. The product deadline stays as it is; the lane
+removes the instrumentation the product's own work never needed. Each invocation records
 its evidence in its own directory of the attempt, and the binary's `tests/logs` are copied into the
 attempt after it ends, because the next invocation truncates them.
 

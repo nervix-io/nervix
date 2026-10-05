@@ -1172,7 +1172,9 @@ build and the existing tests, and nothing in it changes behavior.
   instrumentation: `test-typed-ratchet`, `bench-smoke`, `nspl-completion-walk`, the canonical
   `test-shuttle` and `test-loom` runners, each `test-primitives-<mode>` conformance recipe,
   `test-deadlock-evidence-order`, `test-deadlock-report`, and the `test-deloxide` and
-  `test-deloxide-order` lanes, which export only from a complete `lane.json`.
+  `test-deloxide-order` lanes, which export only from a complete `lane.json` and instrument only
+  workspace crates, through a workspace compiler wrapper beneath kache, so their nodes meet the
+  product's deadlines.
   `test-primitives` selects every native conformance mode. CI runs these checks through collection;
   primitive compile/browser checks, replay qualification and Loom weakening qualification retain
   independent verdicts outside its instrumentation. Each run writes `lcov.info`, `completion.json`,
