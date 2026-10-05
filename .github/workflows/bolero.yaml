@@ -41,6 +41,43 @@ env:
   BOLERO_LABELS: ${{ inputs.labels-json || '[]' }}
 
 jobs:
+  codecov-preflight:
+    name: codecov-preflight
+    if: inputs.event-name == 'pull_request' && contains(fromJSON(inputs.labels-json || '[]'), 'fuzz')
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tested-sha || github.sha }}
+
+      - name: Setup uv
+        uses: astral-sh/setup-uv@v6
+
+      - name: Install just
+        uses: taiki-e/install-action@v2
+        with:
+          tool: just@latest
+
+      - name: Measure Python runner coverage
+        run: just coverage-bolero-runner
+
+      - name: Verify Codecov upload
+        uses: codecov/codecov-action@v5
+        with:
+          disable_search: true
+          fail_ci_if_error: true
+          files: target/bolero/python-runner.lcov
+          flags: bolero
+          use_oidc: true
+          use_legacy_upload_endpoint: true
+          use_pypi: true
+          version: "11.3.1"
+
   bolero-random:
     name: bolero-random
     runs-on: blacksmith-8vcpu-ubuntu-2404
@@ -123,6 +160,7 @@ jobs:
   bolero-fuzz:
     name: bolero-fuzz
     if: inputs.event-name == 'pull_request' && contains(fromJSON(inputs.labels-json || '[]'), 'fuzz')
+    needs: codecov-preflight
     runs-on: blacksmith-16vcpu-ubuntu-2404
     # The measured 68-target campaign took 125 minutes after preparation; the
     # 85-target run needs room for cold builds, qualification and report uploads.
@@ -231,6 +269,7 @@ jobs:
           files: target/bolero/python.lcov
           flags: bolero
           use_oidc: true
+          use_legacy_upload_endpoint: true
           use_pypi: true
           version: "11.3.1"
 
@@ -250,6 +289,7 @@ jobs:
           files: ${{ steps.rust-coverage.outputs.report }}
           flags: bolero-fuzz
           use_oidc: true
+          use_legacy_upload_endpoint: true
           use_pypi: true
           version: "11.3.1"
 

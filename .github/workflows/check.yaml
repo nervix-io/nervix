@@ -602,6 +602,7 @@ jobs:
           fail_ci_if_error: true
           files: ./lcov-workspace.info
           use_oidc: true
+          use_legacy_upload_endpoint: true
           use_pypi: true
           version: "11.3.1"
 
