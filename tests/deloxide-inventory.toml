@@ -55,11 +55,13 @@ marker = "deloxide_"
 package = "nervix-server"
 target = "lib"
 
-# The scenario binary runs eight scenarios at once in each scenario invocation, on any machine, so a
-# local run and CI's 16-vCPU runner put the same load on the diagnostic nodes.
+# The scenario binary runs four scenarios at once in each scenario invocation, on any machine, so a
+# local run and CI's 16-vCPU runner put the same load on the diagnostic nodes. Under the native
+# coverage collector every crate is instrumented, wasmtime's compiler included; at eight, a
+# restored WASM revision missed the product's readiness deadline on CI.
 [[invocation]]
 bound_seconds = 2400
-concurrency = 8
+concurrency = 4
 evidence = true
 features = ["testing"]
 id = "scenarios"
@@ -79,7 +81,7 @@ target = "test:scenarios"
 
 [[invocation]]
 bound_seconds = 1200
-concurrency = 8
+concurrency = 4
 driver = "nervix-paced-simulation"
 evidence = true
 features = ["testing"]

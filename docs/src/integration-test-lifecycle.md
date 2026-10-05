@@ -1089,9 +1089,15 @@ before it runs it. The probes and the owner tests are libtest executables, run d
 signal reaches the lane as a signal rather than as Cargo's status. The scenario binary runs the
 lane's tagged scenarios without retries, in two invocations: the restore, client and diagnostic
 scenarios, then the paced-driver scenarios with the diagnostic Rust driver. Each invocation runs
-the inventory's fixed number of scenarios at once, eight, rather than one per CPU: a diagnostic
-build pays for its tracked acquisitions on every lock, and a fixed count puts the same load on its
-nodes locally and on CI's 16-vCPU runner. Each invocation records
+the inventory's fixed number of scenarios at once, four, rather than one per CPU: a diagnostic
+build pays for its tracked acquisitions on every lock, and under the native coverage collector
+every crate of the build is instrumented, wasmtime's compiler included, where the ordinary
+coverage build instruments only the workspace. A fixed count puts the same load on its nodes
+locally and on CI's 16-vCPU runner. At eight, CI's first instrumented run took five times as long
+as an uninstrumented local run for the WASM restore scenarios, 338 seconds against 64 for one of
+them, and that scenario's restored runtime revision missed the product's readiness deadline: the
+test cluster's 10-second node unavailability timeout plus the 30-second propagation bound. The
+product deadline stays as it is; the lane lowers its own load instead. Each invocation records
 its evidence in its own directory of the attempt, and the binary's `tests/logs` are copied into the
 attempt after it ends, because the next invocation truncates them.
 
