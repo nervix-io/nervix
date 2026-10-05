@@ -445,6 +445,12 @@ All paths are relative to the repository root.
 | `src/runtime/window_processor.rs`, `window_accumulator/`, `window_state.rs` | Branch-local windows, their aggregate structures, and their snapshots |
 | `src/runtime/subscription_predicate.rs` | Session subscription filters |
 
+Window checkpoints nest bounded resident Arrow containers from the shared snapshot codec under
+the window's complete-payload admission. Their retained input keys may repeat, and their argument
+rows are unbranched. The relay restore boundary applies one-record-per-concrete-branch validation
+after this shared decoder; that relay invariant does not restrict retained window rows. Relay
+snapshot transfers use quota-owned files independently of the window's resident encoding.
+
 ## Worked Example: `clamp`
 
 This example traces one assignment from its declaration to its execution:

@@ -97,6 +97,7 @@ fn node(name: &str) -> ClusterNodeName {
 
 fn tenant_domains() -> Vec<DomainInfo> {
     vec![DomainInfo {
+        start_version: 1,
         domain: domain("tenant"),
         status: DomainStatus::Running,
         pace: DomainPace::Unpaced,

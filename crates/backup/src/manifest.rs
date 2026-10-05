@@ -90,14 +90,20 @@ pub enum SectionContent {
     ResourceArchive,
     /// An opaque guest save, whose descriptor is an archive-owned record.
     WasmGuestBlob,
+    /// One bounded Arrow IPC stream of materialized relay columns.
+    MaterializedColumns,
 }
 
 impl SectionContent {
     /// The largest section of this content a reader accepts, when its kind has a bound of its own.
     pub(crate) fn length_limit(self) -> Option<u64> {
         match self {
+            Self::Record(RecordKind::MaterializedIdentities) => {
+                Some(crate::materialized::MATERIALIZED_IDENTITIES_BYTES)
+            }
             Self::Record(_) => Some(crate::section::MAX_RECORD_BYTES),
             Self::Nspl | Self::ResourceArchive | Self::WasmGuestBlob => None,
+            Self::MaterializedColumns => Some(crate::materialized::MATERIALIZED_COLUMNS_BYTES),
         }
     }
 }
@@ -293,6 +299,7 @@ impl BackupManifest {
                 SectionContentWire::Nspl => SectionContent::Nspl,
                 SectionContentWire::ResourceArchive => SectionContent::ResourceArchive,
                 SectionContentWire::WasmGuestBlob => SectionContent::WasmGuestBlob,
+                SectionContentWire::MaterializedColumns => SectionContent::MaterializedColumns,
             };
             sections.push(SectionEntry {
                 path,
@@ -330,6 +337,7 @@ impl From<SectionContent> for SectionContentWire {
             SectionContent::Nspl => Self::Nspl,
             SectionContent::ResourceArchive => Self::ResourceArchive,
             SectionContent::WasmGuestBlob => Self::WasmGuestBlob,
+            SectionContent::MaterializedColumns => Self::MaterializedColumns,
         }
     }
 }

@@ -394,33 +394,42 @@ fn domain_text(domain: &DescribedDomain) -> Vec<String> {
             pace_text(&record.pace),
             record.start_version,
         ),
-        format!(
-            "  models: bytes={} blake3={}",
-            domain.models.length, domain.models.digest
-        ),
-        format!("  cut: {}", domain.capture.cut.kind().as_str()),
-        "  resource_versions:".to_string(),
+        format!("  start_point: {:?}", record.start_point),
     ];
+    if let Some(mapping) = &record.clock {
+        lines.push(format!(
+            "  clock: wall_started_at={} logical_start={} time_rate={}",
+            mapping.wall_started_at(),
+            mapping.logical_start(),
+            mapping.time_rate()
+        ));
+    }
+    if let Some(frontier) = record.logical_frontier {
+        lines.push(format!("  logical_frontier: {frontier}"));
+    }
+    lines.push(format!(
+        "  models: bytes={} blake3={}",
+        domain.models.length, domain.models.digest
+    ));
+    lines.push(format!("  cut: {}", domain.capture.cut.kind().as_str()));
     if let nervix_models::BackupCut::Quiesced {
         engaged_at,
         released_at,
         quiesce,
     } = domain.capture.cut
     {
-        lines.insert(
-            3,
-            format!(
-                "  cut_times: engaged_at={} released_at={} buffered_records={} buffered_bytes={} \
-                 dropped_records={} rejected_records={}",
-                engaged_at,
-                released_at,
-                quiesce.buffered_records,
-                quiesce.buffered_bytes,
-                quiesce.dropped_records,
-                quiesce.rejected_records,
-            ),
-        );
+        lines.push(format!(
+            "  cut_times: engaged_at={} released_at={} buffered_records={} buffered_bytes={} \
+             dropped_records={} rejected_records={}",
+            engaged_at,
+            released_at,
+            quiesce.buffered_records,
+            quiesce.buffered_bytes,
+            quiesce.dropped_records,
+            quiesce.rejected_records,
+        ));
     }
+    lines.push("  resource_versions:".to_string());
     if domain.resource_versions.is_empty() {
         lines.push("  - none".to_string());
     }
@@ -458,6 +467,19 @@ fn runtime_state_text(state: &DescribedRuntimeState) -> String {
             offsets.entity,
             offsets.offsets.len(),
             offsets.revision,
+        ),
+        DescribedRuntimeState::Materialized {
+            descriptor, groups, ..
+        } => format!(
+            "  - materialized_relay={} records={} groups={} revision={} fence={} \
+             branch_generation={} schema_fingerprint={}",
+            descriptor.entity,
+            descriptor.record_count,
+            groups.len(),
+            descriptor.revision,
+            descriptor.fence,
+            descriptor.branch_generation,
+            digest_hex(descriptor.schema.as_digest()),
         ),
         DescribedRuntimeState::BranchLifecycle { lifecycle, .. } => format!(
             "  - branch_lifecycle={} branches={} revision={}",
@@ -563,6 +585,9 @@ fn domain_json(domain: &DescribedDomain) -> Value {
         "status": record.status.as_ref(),
         "pace": pace_text(&record.pace),
         "start_version": record.start_version,
+        "start_point": record.start_point,
+        "clock": record.clock,
+        "logical_frontier": record.logical_frontier,
         "models": section_json(&domain.models),
         "resource_versions": versions,
         "runtime_state": state,
@@ -596,6 +621,17 @@ fn runtime_state_json(state: &DescribedRuntimeState) -> Value {
                 "next_offset": offset.next_offset,
             })).collect::<Vec<_>>(),
             "record": section_json(record),
+        }),
+        DescribedRuntimeState::Materialized {
+            descriptor,
+            record,
+            groups,
+        } => json!({
+            "kind": "materialized_relay", "entity": descriptor.entity.as_str(),
+            "schema_fingerprint": digest_hex(descriptor.schema.as_digest()), "revision": descriptor.revision,
+            "fence": descriptor.fence, "branch_generation": descriptor.branch_generation,
+            "record_count": descriptor.record_count, "descriptor": section_json(record),
+            "groups": groups.iter().map(|group| json!({"record_count": group.record_count, "identities": section_json(&group.identities), "columns": section_json(&group.columns)})).collect::<Vec<_>>(),
         }),
         DescribedRuntimeState::BranchLifecycle { lifecycle, record } => json!({
             "kind": "branch_lifecycle",

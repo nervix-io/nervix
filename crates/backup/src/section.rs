@@ -53,6 +53,10 @@ pub enum RecordKind {
     KafkaOffsets = 6,
     #[strum(serialize = "branch lifecycle")]
     BranchLifecycle = 7,
+    #[strum(serialize = "materialized relay descriptor")]
+    MaterializedRelayDescriptor = 8,
+    #[strum(serialize = "materialized record identities")]
+    MaterializedIdentities = 9,
 }
 
 impl RecordKind {
@@ -66,6 +70,8 @@ impl RecordKind {
             Self::WasmStateDescriptor => 5,
             Self::KafkaOffsets => 6,
             Self::BranchLifecycle => 7,
+            Self::MaterializedRelayDescriptor => 8,
+            Self::MaterializedIdentities => 9,
         }
     }
 }

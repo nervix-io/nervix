@@ -118,6 +118,11 @@ impl WireValues<'_> {
                 source: domain,
                 domain: self.arbitrary.name(),
                 models: self.arbitrary.entropy().any_u64(),
+                status: self.arbitrary.entropy().pick([
+                    nervix_models::DomainStatus::Stopped,
+                    nervix_models::DomainStatus::Running,
+                ]),
+                start_version: self.arbitrary.entropy().any_u64(),
                 resource_versions: self.arbitrary.entropy().any_u64(),
                 planned_models: if self.arbitrary.entropy().flag() {
                     Some(impact_report())

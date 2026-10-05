@@ -114,6 +114,8 @@ checks = [
   "runtime::kafka_offset_state::tests::shuttle_checks::shuttle_a_committed_offset_proceeds_while_the_assignment_barrier_is_held",
   "runtime::kafka_offset_state::tests::shuttle_checks::shuttle_a_replica_acknowledgement_racing_the_quorum_wait_is_never_missed",
   "runtime::materialized_state::tests::shuttle_checks::shuttle_an_originator_update_proceeds_while_the_assignment_barrier_is_held",
+  "runtime::materialized_state::tests::shuttle_checks::shuttle_materialized_capture_names_exactly_its_branch_generation",
+  "runtime::materialized_state::tests::shuttle_checks::shuttle_replica_synchronization_preserves_the_restored_materialized_revision",
   "runtime::relay_boundary::branch_presence_shuttle_tests::shuttle_a_replaced_owner_never_publishes_over_its_successor",
   "runtime::relay_boundary::branch_presence_shuttle_tests::shuttle_an_observer_sees_every_owner_step_whole_and_never_an_older_one",
   "runtime::relay_boundary::branch_presence_shuttle_tests::shuttle_capacity_and_expiry_publish_whole_memberships",
@@ -163,7 +165,7 @@ name = "nervix-server"
 
 [[package]]
 checks = [
-  "restore::tests::shuttle_restore_publication_and_handle_clear_cannot_cross_a_successors_start",
+  "restore::tests::shuttle_restore_publication_and_handle_clear_precede_resume_and_fence_delayed_publishers",
   "restore::tests::shuttle_restore_reclamation_holds_the_revision_through_queued_installation",
 ]
 name = "nervix-consensus"

@@ -118,6 +118,11 @@ bound on every live node regardless of domain status, leadership, or placement; 
 does not admit its graph's traffic. Resuming or changing the domain start version builds the
 appropriate running revision rather than treating passive state as an active task graph.
 
+Schedule planning assigns endpoint and Syslog sources from live voter membership, independently
+of the eligible placement set. A cordoned restore coordinator therefore still serves its local
+endpoint intake after `RESUME`, while placed relays and processors execute on eligible nodes.
+Removing a voter recomputes listener assignments from the remaining live voters before publication.
+
 Server endpoint installation replaces that domain's complete set of host-and-path definitions in
 the node's immutable intake table. Source starts bind prepared intake lifetimes to the same table;
 source ending and domain teardown end those lifetimes before withdrawing them. Other domains'
@@ -236,6 +241,12 @@ queued for a different namespace cannot cross into the new installation.
 The replicated installation gate prevents `START` until all nodes finish. A retry of an unfinished
 model step admits a new installation generation bound to its leader tenure, execution and lease;
 a delayed preceding attempt cannot mutate the state or its handles after completion.
+Materialized restore resolves the scheduled Arrow schema once, verifies bounded archive groups,
+and installs the native checkpoint under the scheduled schema fingerprint combined with the
+archived domain start generation. Native loading retains one database snapshot while reading
+bounded sections. A `RESUME` completion changes the domain to running at that same generation
+and mapping only after publication and passive-handle clearing on every target node. The new
+running revision therefore binds generators and branch tasks to installed materialized rows.
 [Backup And Restore](./backup-and-restore.md) owns archive cut modes, state selection, skipped
 sections, and the operator-visible restore guarantees.
 

@@ -89,6 +89,33 @@ impl SectionPath {
         ))
     }
 
+    /// The generation descriptor of one materialized relay.
+    pub fn materialized_descriptor(domain: &DomainName, entity: &ModelName) -> Self {
+        Self(format!(
+            "{}/state/materialized_relay/{}/descriptor.rkyv",
+            domain_directory(domain),
+            segment(entity.as_str())
+        ))
+    }
+
+    /// One bounded group's typed record identities.
+    pub fn materialized_identities(domain: &DomainName, entity: &ModelName, group: u32) -> Self {
+        Self(format!(
+            "{}/state/materialized_relay/{}/groups/{group:010}/identities.rkyv",
+            domain_directory(domain),
+            segment(entity.as_str())
+        ))
+    }
+
+    /// One bounded group's Arrow IPC columns.
+    pub fn materialized_columns(domain: &DomainName, entity: &ModelName, group: u32) -> Self {
+        Self(format!(
+            "{}/state/materialized_relay/{}/groups/{group:010}/columns.arrow",
+            domain_directory(domain),
+            segment(entity.as_str())
+        ))
+    }
+
     /// The raw guest save named by a WASM state descriptor.
     pub fn wasm_guest_blob(
         domain: &DomainName,

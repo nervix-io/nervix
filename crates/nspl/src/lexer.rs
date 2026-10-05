@@ -91,6 +91,7 @@ pub enum Identifier {
     Upload,
     Backup,
     Restore,
+    Resume,
     Existing,
     Dry,
     Run,

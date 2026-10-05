@@ -233,6 +233,10 @@ Operational notes:
 - `STOP` preserves persisted materialized state
 - `START` clears materialized state for the active domain before new execution proceeds
 - after a crash, Nervix restores persisted materialized entries from Fjall
+- a backup captures fresh materialized rows, exact schemas, typed branch keys and watermarks;
+  `RESTORE ... RESUME` installs them on owners and replicas before generators start, retaining
+  the archived domain start generation. A default stopped restore followed by `START` clears them.
+  See [Backup And Restore](backup-and-restore.md#what-a-restore-recreates).
 - per-group TTL metadata is not yet persisted, so crash recovery does not currently perform a startup sweep of stale materialized entries
 
 Materialized state is also the readable snapshot surface for `GENERATOR` nodes. A generator declares exactly one materialized relay with `USING MATERIALIZED STATE <relay>` and reads it through `relay_state.<relay>.<field>`.

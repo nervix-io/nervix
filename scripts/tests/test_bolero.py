@@ -111,6 +111,8 @@ class InventoryTests(unittest.TestCase):
             "nspl-archive-model",
             "backup-record-manifest",
             "backup-runtime-state-records",
+            "backup-materialized-identities",
+            "backup-materialized-columns",
             "client-processor-choice-request",
             "client-ffi-host-columns",
             "branch-membership",

@@ -19,6 +19,7 @@
 //! it; a leader without it waits for the client to send it again.
 
 mod archives;
+mod materialized;
 mod prepare;
 mod runner;
 #[cfg(all(test, feature = "shuttle"))]
@@ -35,9 +36,9 @@ use nervix_backup::DescribedRuntimeState;
 use nervix_consensus::{CommandExecution, RestoreExecution};
 use nervix_models::{
     ClusterSchedule, CommandExecutionReference, DomainName, ModelKind, NodeRef, Restore,
-    RestoreArchive, RestoreMode, RestoreReport, RestoreScope, RestoreState, RestoreStep,
-    RestoreStepOutcome, RestoreStepReport, RestoredDomain, RestoredUsers, SchemaFingerprint,
-    Timestamp, UserName,
+    RestoreArchive, RestoreLifecycle, RestoreMode, RestoreReport, RestoreScope, RestoreState,
+    RestoreStep, RestoreStepOutcome, RestoreStepReport, RestoredDomain, RestoredUsers,
+    SchemaFingerprint, Timestamp, UserName,
 };
 use tracing::info;
 
@@ -159,7 +160,9 @@ impl SessionServiceImpl {
         let plan = self
             .plan_restore(&request.restore, verified, &BTreeSet::new())
             .await?;
-        let impacts = self.plan_model_runs(&plan, user).await?;
+        let impacts = self
+            .plan_model_runs(&plan, user, verified, request.restore.state)
+            .await?;
         let mut domains = Vec::with_capacity(plan.domains.len());
         for (domain, planned_models) in plan.domains.values().zip(impacts) {
             domains.push(RestoredDomain {
@@ -167,6 +170,8 @@ impl SessionServiceImpl {
                 domain: domain.target.clone(),
                 resource_versions: count(domain.versions.len()),
                 models: count(domain.models.len()),
+                status: domain.activation.status.clone(),
+                start_version: domain.activation.start_version,
                 planned_models,
             });
         }
@@ -335,7 +340,8 @@ impl SessionServiceImpl {
         let plan = self
             .plan_restore(restore, verified, &BTreeSet::new())
             .await?;
-        self.plan_model_runs(&plan, user).await?;
+        self.plan_model_runs(&plan, user, verified, restore.state)
+            .await?;
         Ok(plan)
     }
 
@@ -560,6 +566,8 @@ fn restore_report(
             domain: domain.target.clone(),
             resource_versions: count(domain.versions.len()),
             models: count(domain.models.len()),
+            status: domain.activation.status.clone(),
+            start_version: domain.activation.start_version,
             planned_models: None,
         })
         .collect();
@@ -611,6 +619,11 @@ fn restore_state_warnings(
                     }
                     (ModelKind::Ingestor, &offsets.entity, Some(offsets.schema))
                 }
+                DescribedRuntimeState::Materialized { descriptor, .. } => (
+                    ModelKind::Relay,
+                    &descriptor.entity,
+                    Some(descriptor.schema),
+                ),
                 DescribedRuntimeState::BranchLifecycle { lifecycle, .. } => (
                     lifecycle.owner_kind,
                     &lifecycle.entity,
@@ -717,8 +730,12 @@ fn report_counts(report: &RestoreReport) -> String {
 }
 
 fn restore_message(restore: &Restore, report: &RestoreReport) -> String {
+    let lifecycle = match restore.lifecycle {
+        RestoreLifecycle::Stopped => "stopped",
+        RestoreLifecycle::Resume => "running at their archived lifecycle",
+    };
     format!(
-        "restored {} from '{}': {}; restored domains are stopped",
+        "restored {} from '{}': {}; restored domains are {lifecycle}",
         scope_label(restore),
         restore.source,
         report_counts(report)

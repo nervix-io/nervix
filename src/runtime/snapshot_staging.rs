@@ -435,6 +435,7 @@ impl StagedSnapshotWriter {
 
 /// One complete artifact this node assembled, held on disk under the staging quota until it is
 /// dropped, and read back by any number of independent readers.
+#[derive(Debug)]
 pub(crate) struct StagedArtifact {
     file: tempfile::NamedTempFile,
     length: u64,
@@ -510,6 +511,38 @@ struct ArtifactRead {
 }
 
 impl StagedArtifactReader {
+    #[cfg(test)]
+    pub(in crate::runtime) fn remaining(&self) -> u64 {
+        self.remaining
+    }
+
+    /// Read exactly one bounded section, refusing a truncated artifact before allocation.
+    #[cfg(test)]
+    pub(in crate::runtime) async fn read(
+        &mut self,
+        length: u64,
+    ) -> Result<ChargedBytes, Report<SnapshotStagingError>> {
+        if length > self.remaining {
+            return Err(Report::new(SnapshotStagingError::LengthMismatch {
+                actual: self.remaining,
+                declared: length,
+            }));
+        }
+        if length == 0 {
+            return self
+                .executor
+                .charge_owned(MemoryClass::Bulk, Vec::new())
+                .await
+                .change_context(SnapshotStagingError::Admission);
+        }
+        self.next_chunk(length).await?.ok_or_else(|| {
+            Report::new(SnapshotStagingError::LengthMismatch {
+                actual: 0,
+                declared: length,
+            })
+        })
+    }
+
     /// Read the next chunk of at most `limit` bytes, charged to the bulk budget for as long as the
     /// caller holds it. Absent once every byte of the artifact was read.
     pub(crate) async fn next_chunk(
@@ -587,6 +620,12 @@ struct StagedRead {
 }
 
 impl StagedSnapshot {
+    pub(in crate::runtime) fn remaining(&self) -> u64 {
+        self.length
+            .checked_sub(self.offset)
+            .assured("a staged reader stays within its declared length")
+    }
+
     /// Read the next `length` bytes, charged to the bulk budget for as long as the caller holds
     /// them. Reading past the end of the staged snapshot is a truncation, not a short read.
     pub(in crate::runtime) async fn read(
