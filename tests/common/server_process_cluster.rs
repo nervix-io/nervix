@@ -85,6 +85,32 @@ impl ServerProcessCluster {
         nervix_deadlock::EvidenceDirectory::new(self._root.path().join(DEADLOCK_EVIDENCE_DIRECTORY))
     }
 
+    /// Retain evidence and logs before temporary process stores are deleted, including failures.
+    #[cfg(feature = "deloxide")]
+    pub(crate) fn retain_deadlock_diagnostics(&self) -> io::Result<()> {
+        let Some(base) = std::env::var_os(crate::DEADLOCK_EVIDENCE_ENV) else {
+            return Ok(());
+        };
+        let evidence = self.deadlock_evidence();
+        if !evidence.path().is_dir() {
+            return Ok(());
+        }
+        let base = std::path::PathBuf::from(base).join("process-clusters");
+        std::fs::create_dir_all(&base)?;
+        let destination = tempfile::Builder::new()
+            .prefix("cluster-")
+            .tempdir_in(base)?
+            .keep();
+        for entry in std::fs::read_dir(evidence.path())? {
+            let entry = entry?;
+            std::fs::copy(entry.path(), destination.join(entry.file_name()))?;
+        }
+        for (node, process) in &self.nodes {
+            std::fs::write(destination.join(format!("{node}.log")), process.log()?)?;
+        }
+        Ok(())
+    }
+
     /// What one member logged since its current launch.
     #[cfg(feature = "deloxide")]
     pub(crate) fn log(&self, node_id: &str) -> io::Result<String> {

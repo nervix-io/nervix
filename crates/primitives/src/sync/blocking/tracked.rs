@@ -4,8 +4,9 @@
 //! Every acquisition goes through Deloxide's lock, which updates the process-wide wait-for graph
 //! when it has to wait, and every acquisition that has to wait records where it waits in the
 //! detector's registry, as every constructor records where the lock was made, so a finding can name
-//! both. An acquisition first tries the lock and records nothing when it is free at once: only an
-//! acquisition that waits can be part of a cycle.
+//! both. Active-only builds record blocked attempts. Order builds additionally retain bounded
+//! held/requested witnesses and actual guard lifetimes, including immediate acquisitions, through
+//! the primitive diagnostic owner.
 //!
 //! The surface is the part of `parking_lot`'s that keeps its meaning over Deloxide. A lock is never
 //! poisoned, and `Debug` never waits: it tries the lock and prints `<locked>` when it is held, as
@@ -37,7 +38,9 @@ use std::{
 
 use meticulous::OptionExt as _;
 
-use crate::deadlock::{Access, LockKind, detector::require_installed, registry::Registry};
+use crate::deadlock::{
+    Access, LockKind, detector::require_installed, order_history::HeldLease, registry::Registry,
+};
 
 /// Keeps a lock's construction site in the registry for as long as the lock lives.
 struct Registered {
@@ -98,18 +101,24 @@ impl<T> Mutex<T> {
     /// Acquire the lock, waiting for it if another thread holds it.
     #[track_caller]
     pub fn lock(&self) -> MutexGuard<'_, T> {
-        MutexGuard {
-            mutex: self,
-            inner: Some(self.acquire(Location::caller())),
-        }
+        self.acquire(Location::caller())
     }
 
     /// Acquire the lock if no thread holds it.
+    #[track_caller]
     pub fn try_lock(&self) -> Option<MutexGuard<'_, T>> {
+        let at = Location::caller();
+        let registry = Registry::global();
+        registry
+            .history
+            .attempting(registry, self.inner.id(), Access::Exclusive, at);
         let inner = self.inner.try_lock()?;
         Some(MutexGuard {
             mutex: self,
             inner: Some(inner),
+            held: registry
+                .history
+                .acquired(registry, self.inner.id(), Access::Exclusive, at),
         })
     }
 
@@ -123,14 +132,28 @@ impl<T> Mutex<T> {
     }
 
     /// Deloxide's guard, recording where the caller waits when the lock is held.
-    fn acquire(&self, at: &'static Location<'static>) -> deloxide::MutexGuard<'_, T> {
-        if let Some(guard) = self.inner.try_lock() {
-            return guard;
+    fn acquire(&self, at: &'static Location<'static>) -> MutexGuard<'_, T> {
+        let registry = Registry::global();
+        registry
+            .history
+            .attempting(registry, self.inner.id(), Access::Exclusive, at);
+        let inner = match self.inner.try_lock() {
+            Some(inner) => inner,
+            None => {
+                let waiting = registry.waiting(self.inner.id(), Access::Exclusive, at);
+                crate::deadlock::detector::report_self_wait(registry, self.inner.id());
+                let inner = self.inner.lock();
+                drop(waiting);
+                inner
+            }
+        };
+        MutexGuard {
+            mutex: self,
+            inner: Some(inner),
+            held: registry
+                .history
+                .acquired(registry, self.inner.id(), Access::Exclusive, at),
         }
-        let waiting = Registry::global().waiting(self.inner.id(), Access::Exclusive, at);
-        let guard = self.inner.lock();
-        drop(waiting);
-        guard
     }
 }
 
@@ -163,6 +186,7 @@ pub struct MutexGuard<'a, T> {
     /// Absent only while a condition variable waits with the lock released, which no caller of
     /// the guard can observe.
     inner: Option<deloxide::MutexGuard<'a, T>>,
+    held: Option<HeldLease>,
 }
 
 impl<T> MutexGuard<'_, T> {
@@ -172,9 +196,12 @@ impl<T> MutexGuard<'_, T> {
     where
         Released: FnOnce(),
     {
+        drop(self.held.take());
         drop(self.inner.take());
         released();
-        self.inner = Some(self.mutex.acquire(at));
+        let acquired = self.mutex.acquire(at);
+        self.inner = acquired.inner;
+        self.held = acquired.held;
     }
 }
 
@@ -236,39 +263,91 @@ impl<T> RwLock<T> {
     /// Acquire shared access, waiting while a writer holds the lock.
     #[track_caller]
     pub fn read(&self) -> RwLockReadGuard<'_, T> {
+        let at = Location::caller();
+        let registry = Registry::global();
+        registry
+            .history
+            .attempting(registry, self.inner.id(), Access::Shared, at);
         if let Some(inner) = self.inner.try_read() {
-            return RwLockReadGuard { inner };
+            return RwLockReadGuard {
+                inner,
+                _held: registry
+                    .history
+                    .acquired(registry, self.inner.id(), Access::Shared, at),
+            };
         }
         let waiting =
             Registry::global().waiting(self.inner.id(), Access::Shared, Location::caller());
         let inner = self.inner.read();
         drop(waiting);
-        RwLockReadGuard { inner }
+        RwLockReadGuard {
+            inner,
+            _held: registry
+                .history
+                .acquired(registry, self.inner.id(), Access::Shared, at),
+        }
     }
 
     /// Acquire exclusive access, waiting while any thread holds the lock.
     #[track_caller]
     pub fn write(&self) -> RwLockWriteGuard<'_, T> {
+        let at = Location::caller();
+        let registry = Registry::global();
+        registry
+            .history
+            .attempting(registry, self.inner.id(), Access::Exclusive, at);
         if let Some(inner) = self.inner.try_write() {
-            return RwLockWriteGuard { inner };
+            return RwLockWriteGuard {
+                inner,
+                _held: registry
+                    .history
+                    .acquired(registry, self.inner.id(), Access::Exclusive, at),
+            };
         }
         let waiting =
             Registry::global().waiting(self.inner.id(), Access::Exclusive, Location::caller());
         let inner = self.inner.write();
         drop(waiting);
-        RwLockWriteGuard { inner }
+        RwLockWriteGuard {
+            inner,
+            _held: registry
+                .history
+                .acquired(registry, self.inner.id(), Access::Exclusive, at),
+        }
     }
 
     /// Acquire shared access if no writer holds the lock.
+    #[track_caller]
     pub fn try_read(&self) -> Option<RwLockReadGuard<'_, T>> {
+        let at = Location::caller();
+        let registry = Registry::global();
+        registry
+            .history
+            .attempting(registry, self.inner.id(), Access::Shared, at);
         let inner = self.inner.try_read()?;
-        Some(RwLockReadGuard { inner })
+        Some(RwLockReadGuard {
+            inner,
+            _held: registry
+                .history
+                .acquired(registry, self.inner.id(), Access::Shared, at),
+        })
     }
 
     /// Acquire exclusive access if no thread holds the lock.
+    #[track_caller]
     pub fn try_write(&self) -> Option<RwLockWriteGuard<'_, T>> {
+        let at = Location::caller();
+        let registry = Registry::global();
+        registry
+            .history
+            .attempting(registry, self.inner.id(), Access::Exclusive, at);
         let inner = self.inner.try_write()?;
-        Some(RwLockWriteGuard { inner })
+        Some(RwLockWriteGuard {
+            inner,
+            _held: registry
+                .history
+                .acquired(registry, self.inner.id(), Access::Exclusive, at),
+        })
     }
 
     pub fn get_mut(&mut self) -> &mut T {
@@ -307,6 +386,7 @@ impl<T: fmt::Debug> fmt::Debug for RwLock<T> {
 /// Held shared access to a [`RwLock`]'s value; dropping it releases the access.
 pub struct RwLockReadGuard<'a, T> {
     inner: deloxide::RwLockReadGuard<'a, T>,
+    _held: Option<HeldLease>,
 }
 
 impl<T> Deref for RwLockReadGuard<'_, T> {
@@ -332,6 +412,7 @@ impl<T: fmt::Display> fmt::Display for RwLockReadGuard<'_, T> {
 /// Held exclusive access to a [`RwLock`]'s value; dropping it releases the lock.
 pub struct RwLockWriteGuard<'a, T> {
     inner: deloxide::RwLockWriteGuard<'a, T>,
+    _held: Option<HeldLease>,
 }
 
 impl<T> Deref for RwLockWriteGuard<'_, T> {
@@ -414,7 +495,20 @@ impl Condvar {
             .assured("a process runs far fewer than usize::MAX threads");
         guard.unlocked(at, move || {
             while waiters.generation == generation {
-                self.notified.wait(&mut waiters);
+                drop(waiters.held.take());
+                self.notified.wait(
+                    waiters
+                        .inner
+                        .as_mut()
+                        .assured("the state guard holds its mutex outside the vendor wait"),
+                );
+                let registry = Registry::global();
+                waiters.held = registry.history.acquired(
+                    registry,
+                    self.state.inner.id(),
+                    Access::Exclusive,
+                    at,
+                );
             }
         });
     }

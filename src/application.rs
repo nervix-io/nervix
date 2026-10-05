@@ -42,6 +42,7 @@ use background_task::{
 };
 use clap::{CommandFactory, Parser, Subcommand, ValueEnum};
 use clap_complete::{Shell, generate};
+use cli_values::{parse_human_bytes, parse_human_duration, parse_trace_sample_ratio};
 use client_consumers::ClientConsumerRouter;
 use client_producers::ClientProducerRouter;
 use domain_clock::{
@@ -93,8 +94,7 @@ use nervix_interconnect::{
     Transport, TransportIdentity,
 };
 use nervix_models::{
-    ClusterNodeName, DomainName, DomainStatus, DurationTextError, ModelKind, NodeEndpoint,
-    NodeServiceUrl, UserName, parse_duration_text,
+    ClusterNodeName, DomainName, DomainStatus, ModelKind, NodeEndpoint, NodeServiceUrl, UserName,
 };
 use nervix_primitives::{
     collections::DashMap,
@@ -140,6 +140,7 @@ mod admitted_connection;
 mod authentication;
 mod background_task;
 mod backup;
+mod cli_values;
 mod client_consumers;
 mod client_producers;
 mod cluster_status;
@@ -531,6 +532,14 @@ pub struct Args {
         help = "Existing directory a diagnostic node records its deadlock evidence in"
     )]
     pub deadlock_evidence: Option<PathBuf>,
+
+    /// Disable runtime order checking in an order-instrumented diagnostic artifact.
+    #[cfg(feature = "deloxide")]
+    #[clap(
+        long,
+        help = "Check active cycles only; compiled order instrumentation retains its cost"
+    )]
+    pub deadlock_active_only: bool,
     #[command(subcommand)]
     pub subcommand: Option<Command>,
 }
@@ -648,47 +657,6 @@ pub struct Application {
     pub graceful_shutdown_drain: bool,
     #[builder(default = shutdown::DEFAULT_DRAIN_TIMEOUT)]
     pub drain_timeout: Duration,
-}
-
-#[derive(Debug, thiserror::Error)]
-enum CliValueError {
-    #[error("invalid duration: {source}")]
-    Duration { source: DurationTextError },
-    #[error("invalid byte quantity")]
-    Bytes,
-    #[error("invalid trace sample ratio: {source}")]
-    TraceSampleRatio { source: std::num::ParseFloatError },
-    #[error("trace sample ratio must be between 0.0 and 1.0")]
-    TraceSampleRatioRange,
-}
-
-/// Reads a duration option. Clap prints only the outermost context of a rejected value, so that
-/// context carries the reason the text names no duration.
-fn parse_human_duration(input: &str) -> error_stack::Result<Duration, CliValueError> {
-    match parse_duration_text(input) {
-        Ok(duration) => Ok(duration),
-        Err(report) => {
-            let source = report.current_context().clone();
-            Err(report.change_context(CliValueError::Duration { source }))
-        }
-    }
-}
-
-fn parse_human_bytes(input: &str) -> error_stack::Result<ubyte::ByteUnit, CliValueError> {
-    input
-        .parse::<ubyte::ByteUnit>()
-        .map_err(|_| Report::new(CliValueError::Bytes))
-}
-
-fn parse_trace_sample_ratio(input: &str) -> error_stack::Result<f64, CliValueError> {
-    let ratio = input
-        .parse::<f64>()
-        .map_err(|source| Report::new(CliValueError::TraceSampleRatio { source }))?;
-    if (0.0..=1.0).contains(&ratio) {
-        Ok(ratio)
-    } else {
-        Err(Report::new(CliValueError::TraceSampleRatioRange))
-    }
 }
 
 #[cfg(test)]

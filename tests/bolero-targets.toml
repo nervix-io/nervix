@@ -160,7 +160,7 @@ test_target = "lib"
 [[target]]
 case_timeout_seconds = 10
 corpus = "crates/deadlock/src/__fuzz__/tests__bolero_deadlock_evidence_round_trips/corpus"
-domain_version = 1
+domain_version = 2
 features = []
 id = "deadlock-evidence"
 invariant = "Every deadlock evidence a diagnostic process can record, with every finding variant at the edges of its bounds, decodes from its own encoding to the complete original value."
@@ -175,7 +175,7 @@ test_target = "lib"
 [[target]]
 case_timeout_seconds = 10
 corpus = "crates/deadlock/src/__fuzz__/tests__bolero_malformed_deadlock_evidence_is_refused_or_round_trips/corpus"
-domain_version = 1
+domain_version = 2
 features = []
 id = "deadlock-evidence-malformed"
 invariant = "Arbitrary bytes, bare or behind a valid evidence header, are refused with a typed error or decode to evidence within every bound that encodes back to itself."
@@ -190,7 +190,7 @@ test_target = "lib"
 [[target]]
 case_timeout_seconds = 10
 corpus = "crates/deadlock/src/__fuzz__/tests__bolero_deadlock_evidence_outside_its_bounds_is_refused/corpus"
-domain_version = 1
+domain_version = 2
 features = []
 id = "deadlock-evidence-bounds"
 invariant = "A valid evidence encoding that breaks one bound, of findings, cycle threads, omitted threads, identities, lost findings or kept texts, is refused as out of bounds."
@@ -1057,6 +1057,21 @@ test_target = "lib"
 
 [[target]]
 case_timeout_seconds = 10
+corpus = "crates/deadlock/src/__fuzz__/order_tests__bolero_order_normalization_and_dedup_preserve_complete_evidence/corpus"
+domain_version = 1
+features = []
+id = "deadlock-order-normalization"
+invariant = "Cyclic rotation normalizes directed lock instances without losing modes, lifetimes, source context or multiplicity; deduplication retains the complete cycle and counts callbacks."
+manifest = "Cargo.toml"
+max_input_bytes = 4096
+package = "nervix-deadlock"
+random_iterations = 256
+source = "crates/deadlock/src/order_tests.rs"
+test = "order_tests::bolero_order_normalization_and_dedup_preserve_complete_evidence"
+test_target = "lib"
+
+[[target]]
+case_timeout_seconds = 10
 corpus = "crates/nervix-wasm-protocol/src/__fuzz__/properties__bolero_malformed_messages_fail_typed_within_bounds/corpus"
 domain_version = 1
 features = []
@@ -1068,6 +1083,21 @@ package = "nervix-wasm-protocol"
 random_iterations = 256
 source = "crates/nervix-wasm-protocol/src/properties.rs"
 test = "properties::bolero_malformed_messages_fail_typed_within_bounds"
+test_target = "lib"
+
+[[target]]
+case_timeout_seconds = 10
+corpus = "crates/deadlock/src/__fuzz__/order_tests__bolero_order_evidence_outside_its_bounds_is_refused/corpus"
+domain_version = 1
+features = []
+id = "deadlock-order-bounds"
+invariant = "Current order evidence with disconnected, repeated, missing or excessive identities, edges, witnesses, multiplicity or invalid reviews is refused at its owning conversion."
+manifest = "Cargo.toml"
+max_input_bytes = 1024
+package = "nervix-deadlock"
+random_iterations = 256
+source = "crates/deadlock/src/order_tests.rs"
+test = "order_tests::bolero_order_evidence_outside_its_bounds_is_refused"
 test_target = "lib"
 
 [[target]]

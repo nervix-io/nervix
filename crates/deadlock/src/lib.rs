@@ -30,6 +30,8 @@
 mod directory;
 mod error;
 mod evidence;
+mod order_wire;
+mod records;
 mod render;
 #[cfg(feature = "deloxide")]
 mod run;
@@ -37,7 +39,13 @@ mod wire;
 
 pub use directory::EvidenceDirectory;
 pub use error::{DiagnosticError, EvidenceError};
-pub use evidence::{DeadlockEvidence, EvidenceOutOfBounds, MAX_FINDINGS, ProcessRecord};
+pub use evidence::{
+    DeadlockEvidence, EvidenceOutOfBounds, EvidenceScope, MAX_FINDINGS, ProcessRecord,
+};
+pub use records::{
+    EvidenceLossSource, FindingSelection, PotentialTriage, ProofBasis, RecordedFinding,
+    TriageProof, TriageRefusal,
+};
 pub use render::render_finding;
 #[cfg(feature = "deloxide")]
 pub use run::DiagnosticRun;
@@ -52,4 +60,9 @@ pub const ACTIVE_DEADLOCK_EXIT_STATUS: i32 = 3;
 pub const DIAGNOSTIC_FAILURE_EXIT_STATUS: i32 = 4;
 
 #[cfg(test)]
+mod order_tests;
+#[cfg(test)]
 mod tests;
+
+#[cfg(all(test, any(feature = "shuttle", feature = "deloxide")))]
+mod handoff_tests;
