@@ -401,7 +401,14 @@ and invocation argument.
    names its fields.
 4. It passes every remaining row on as output. The rows it exports are set in a filter bitmap
    directly from their indices.
-5. A returned `RuntimeError` fails the whole batch through the node's general error handling.
+5. A returned `RuntimeError` fails the whole batch through the node's general error handling. The
+   host keeps its report beneath a `PlannedGeneralError` that names the program by its clause and
+   the step that failed, and hands back the acknowledgements of every message of the batch with
+   it; the report is rendered only when the error policy reports the failure.
+
+A branch construction program keeps the same split: a row whose branch `SET` recorded an error keeps
+that `SideError` as its own typed outcome, which its route's error handling formats only if it
+reports the row, while a `RuntimeError` fails the whole batch.
 
 ## Implementation Map
 

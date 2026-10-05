@@ -576,8 +576,8 @@ mod tests {
     use nervix_connector::NoIngestHeaders;
     use nervix_models::{
         CodecWireFormat, CreateCodec, CreateSchema, CreateWireSchema, IngestSource, JsonType,
-        MessageErrorOperation, ModelKind, ModelName, ParseAsType, ResolvedCodecWireFormat,
-        RetryPolicy, SchemaField, Timestamp, WireSchemaField,
+        MessageErrorOperation, ModelName, ParseAsType, ResolvedCodecWireFormat, RetryPolicy,
+        SchemaField, Timestamp, WireSchemaField,
     };
     use nervix_primitives::sync::Arc;
     use nonzero_ext::nonzero;
@@ -1148,8 +1148,6 @@ mod tests {
         let grouped_keys = vec![None, None];
         let grouped_outcomes = evaluate_filter_map_on_batch(
             &Executor::default(),
-            ModelKind::Ingestor.as_str(),
-            &named::<ModelName>("header_ingestor"),
             &program,
             FilterMapOutcomeInputs {
                 carrier: &grouped_carrier,

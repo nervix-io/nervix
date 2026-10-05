@@ -200,32 +200,26 @@ pub(super) async fn evaluate_processor_output_events(
         Vec<PendingProcessorOutputBatch>,
         Vec<PendingProcessorOutputMessageError>,
     ),
-    PlannedGeneralError,
+    PlannedGeneralFailure,
 > {
+    let operation = MessageErrorOperation::Set;
     let Some(output_schema) = scope.output_schemas[output_index].clone() else {
-        return Err(PlannedGeneralError {
-            acks: batch.acks.clone(),
-            reason: format!(
-                "{} '{}' evaluated output route '{}' without preparing its relay schema",
-                context.node_kind.as_str(),
-                context.processor.as_str(),
-                output.relay.as_str()
-            ),
+        let error = Report::new(PlannedGeneralError::OutputSchemaUnprepared {
+            relay: output.relay.clone(),
         });
+        return Err(PlannedGeneralFailure::new(error, batch.acks.clone()));
     };
     let Some(program) = output.compiled_program.as_ref() else {
         let projected = batch
             .batch
             .project(output_schema.arrow_schema())
-            .map_err(|error| PlannedGeneralError {
-                acks: batch.acks.clone(),
-                reason: format!(
-                    "{} '{}' failed to project output relay '{}': {}",
-                    context.node_kind.as_str(),
-                    context.processor.as_str(),
-                    output.relay.as_str(),
-                    error
-                ),
+            .map_err(|error| {
+                PlannedGeneralFailure::new(
+                    error.change_context(PlannedGeneralError::ProjectOutput {
+                        relay: output.relay.clone(),
+                    }),
+                    batch.acks.clone(),
+                )
             })?;
         return Ok((
             vec![PendingProcessorOutputBatch {
@@ -244,8 +238,6 @@ pub(super) async fn evaluate_processor_output_events(
             executor: context.branch.runtime.executor(),
             now: scope.execution_now,
         },
-        context.node_kind.as_str(),
-        context.processor,
         program,
         FilterMapBatchInputs {
             carrier: &batch.batch,
@@ -264,17 +256,15 @@ pub(super) async fn evaluate_processor_output_events(
     for (output_row, input_row) in executed.selected_rows.iter().enumerate() {
         if let Some(side_error) = executed.batch.errors().row(output_row).first() {
             let partial_output = captured_partial_output(&executed.batch, output_row);
-            let record = batch
-                .runtime_row(input_row)
-                .map_err(|error| PlannedGeneralError {
-                    acks: batch.acks.clone(),
-                    reason: format!(
-                        "{} '{}' failed to materialize FILTER-MAP error input row: {}",
-                        context.node_kind.as_str(),
-                        context.processor.as_str(),
-                        error
-                    ),
-                })?;
+            let record = batch.runtime_row(input_row).map_err(|error| {
+                PlannedGeneralFailure::new(
+                    error.change_context(PlannedGeneralError::MaterializeErrorInput {
+                        operation,
+                        row: input_row,
+                    }),
+                    batch.acks.clone(),
+                )
+            })?;
             message_errors.push(PendingProcessorOutputMessageError {
                 row: input_row,
                 key: batch.keys[input_row].clone(),
@@ -305,25 +295,17 @@ pub(super) async fn evaluate_processor_output_events(
     } else {
         let output_batch =
             vm_typed_batch_selected_rows_to_runtime_batch(&executed.batch, &success_output_rows)
-                .map_err(|error| PlannedGeneralError {
-                    acks: batch.acks.clone(),
-                    reason: format!(
-                        "{} '{}' failed to materialize successful FILTER-MAP rows: {}",
-                        context.node_kind.as_str(),
-                        context.processor.as_str(),
-                        error
-                    ),
+                .map_err(|error| {
+                    PlannedGeneralFailure::new(
+                        error.change_context(PlannedGeneralError::MaterializeOutput { operation }),
+                        batch.acks.clone(),
+                    )
                 })?;
         if output_batch.schema().as_ref() != output_schema.arrow_schema().as_ref() {
-            return Err(PlannedGeneralError {
-                acks: batch.acks.clone(),
-                reason: format!(
-                    "{} '{}' FILTER-MAP output schema does not match relay '{}'",
-                    context.node_kind.as_str(),
-                    context.processor.as_str(),
-                    output.relay.as_str()
-                ),
+            let error = Report::new(PlannedGeneralError::OutputSchemaMismatch {
+                relay: output.relay.clone(),
             });
+            return Err(PlannedGeneralFailure::new(error, batch.acks.clone()));
         }
         let metadata = batch.metadata.take(&success_input_rows).verified(
             "the program selects rows of this batch, whose metadata has one entry for every row",
@@ -474,7 +456,7 @@ pub(super) async fn dispatch_selected_processor_outputs(
         .await
         {
             Ok(events) => events,
-            Err(error) => {
+            Err(failure) => {
                 context
                     .branch
                     .runtime
@@ -483,8 +465,8 @@ pub(super) async fn dispatch_selected_processor_outputs(
                         context.node_kind,
                         context.processor,
                         context.error_policies,
-                        error.acks.iter(),
-                        error.reason,
+                        failure.acks.iter(),
+                        format!("{:#}", failure.error),
                     );
                 return None;
             }
