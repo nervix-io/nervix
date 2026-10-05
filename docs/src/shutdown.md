@@ -833,6 +833,9 @@ installations and generations ahead of catch-up; without an applied log it retai
 Terminal or superseded applied attempts are reclaimed in bounded deletion batches, including
 chunks without receipts. Terminal teardown cancels the maintenance caller, and its storage job
 checks cancellation between bounded units. A later startup resumes from the remaining keys.
+The same owner reclaims selected-namespace chunks made unreachable by ordinary or replica
+checkpoint replacement, ownership recovery or purge, including after restart. It keeps the
+selected publication and every currently referenced segmented revision.
 Reclamation preserves snapshot readers and never completes an installation or opens its `START`
 gate. See [restore checkpoint storage](backup-and-restore.md#restore-checkpoint-storage-quota-and-metrics)
 for quotas, metrics and physical storage limits.

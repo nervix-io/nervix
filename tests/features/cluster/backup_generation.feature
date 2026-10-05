@@ -4,7 +4,7 @@ Feature: Bounded complete restore generations
   @restore_installation
   Scenario Outline: A complete restore generation with <branches> saves of <save_mib> MiB on <cluster_size> nodes preserves branches and source offsets
     Given Kafka is running
-    And runtime replication is configured with replica count 0 and snapshot interval "10m"
+    And runtime replication is configured with replica count <replicas> and snapshot interval "10m"
     And the production sticky scheduler is configured
     And a <cluster_size> node nervix cluster is started
     And the active domain is "{{domain}}"
@@ -16,7 +16,7 @@ Feature: Bounded complete restore generations
       CREATE RESOURCE wasm_filter;
       UPLOAD RESOURCE wasm_filter VERSION '{{wasm_processor}}';
       """
-    And these NSPL commands are executed on the leader node
+    When these NSPL commands are executed through the client on the leader node
       """
       CREATE SCHEMA metric ( value I32, tenant STRING );
       CREATE SCHEMA result ( tenant STRING OPTIONAL, note STRING OPTIONAL );
@@ -52,7 +52,13 @@ Feature: Bounded complete restore generations
         SET tenant = branch.tenant, note = coalesce(note, "even")
         ON MESSAGE ERROR LOG
         ON GLOBAL ERROR LOG;
+      """
+    When these NSPL commands are executed on the leader node
+      """
       CREATE SUBSCRIPTION filtered_metrics_subscription TO filtered_metrics;
+      """
+    When these NSPL commands are executed through the client on the leader node
+      """
       START;
       """
     When round 1 of Kafka messages for <branches> restore tenants is published to topic "backup_wasm_in_{{test_id}}"
@@ -63,7 +69,7 @@ Feature: Bounded complete restore generations
     When round 2 of Kafka messages for <branches> restore tenants is published to topic "backup_wasm_in_{{test_id}}"
     Then within "30s" the restore subscription receives one isolated even row for each of <branches> tenants
     Then the current leader node is saved as placeholder "leader"
-    When the CLI backs up "domain {{domain}} --timeout 30s" from node "{{leader}}" into "stateful.nvxb" reporting JSON
+    When the CLI backs up "domain {{domain}} --timeout 120s" from node "{{leader}}" into "stateful.nvxb" reporting JSON
     Then the CLI backup succeeded with a JSON report naming domain "{{domain}}"
     And backup archive "stateful.nvxb" is larger than 32 MiB
     Given the active domain is saved as placeholder "source_domain"
@@ -84,12 +90,13 @@ Feature: Bounded complete restore generations
     And the cluster is replaced by a fresh <cluster_size> node cluster whose nodes are named "restored"
     Then the current leader node is saved as placeholder "leader"
     Given the restore coordinator uses remote placement in a multi-node cluster
+    And the cluster's reclaimed restore bytes are saved
     When the CLI restores "domain {{domain}} --as {{domain}}_copy --resume" from "stateful.nvxb" on node "{{leader}}" reporting JSON with memory measurements
     Then the CLI restore succeeded, restoring domain "{{domain}}_copy" with 1 resource versions and 11 models
     And the CLI restore reports domain "{{domain}}_copy" as "RUNNING" at start version 1
     Given the active domain is "{{domain}}_copy"
     When the cluster is restarted
-    And these NSPL commands are executed on the leader node
+    When these NSPL commands are executed on the leader node
       """
       CREATE SUBSCRIPTION filtered_metrics_subscription TO filtered_metrics;
       """
@@ -97,7 +104,7 @@ Feature: Bounded complete restore generations
       """
       key={"tenant":"restore-tenant-0"} payload={"tenant":"restore-tenant-0","value":2}
       """
-    When these NSPL commands are executed on the leader node
+    When these NSPL commands are executed through the client on the leader node
       """
       STOP;
       START;
@@ -133,13 +140,29 @@ Feature: Bounded complete restore generations
     Then within "30s" DESCRIBE DOMAIN section "input_output" metric "messages_total" "sent" relay "raw_metrics" across physical nodes totals <restored_inputs>
     And within "30s" DESCRIBE DOMAIN section "processed" metric "messages_total" "sent" relay "filtered_metrics" across physical nodes totals <branches>
     And within "30s" the restore subscription receives one isolated even row for each of <branches> tenants
-    When the CLI backs up "domain {{domain}} --timeout 30s" from node "{{leader}}" into "restored-state.nvxb" reporting JSON
+    When the CLI backs up "domain {{domain}} --timeout 120s" from node "{{leader}}" into "restored-state.nvxb" reporting JSON
     Then the CLI backup succeeded with a JSON report naming domain "{{domain}}"
     And backup archives "stateful.nvxb" and "restored-state.nvxb" keep all <branches> WASM processor branch incarnations
+    And at least <reclaimed_mib> MiB of replaced restore chunks are reclaimed
+    Given the cluster's reclaimed restore bytes are saved
+    When the CLI restores "domain {{source_domain}} --as {{source_domain}}_purged" from "stateful.nvxb" on node "{{leader}}" reporting JSON
+    Then the CLI restore succeeded, restoring domain "{{source_domain}}_purged" with 1 resource versions and 11 models
+    Given the active domain is "{{source_domain}}_purged"
+    And node "restored-1" has a state-counting WASM fixture with <save_mib> MiB saves in resource directory "wasm_processor"
+    When these NSPL commands are executed through the client on the leader node
+      """
+      UPLOAD RESOURCE wasm_filter VERSION '{{wasm_processor}}';
+      """
+    When these NSPL commands are executed through the client on the leader node
+      """
+      REBIND RESOURCE wasm_filter TO VERSION 2 FOR WASM PROCESSOR filter_even_rows;
+      START;
+      """
+    Then at least <reclaimed_mib> MiB of replaced restore chunks are reclaimed
 
     Examples:
-      | cluster_size | save_mib | branches | restored_inputs |
-      | 1            | 20       | 2        | 4               |
-      | 3            | 20       | 2        | 4               |
-      | 1            | 1        | 40       | 80              |
-      | 3            | 1        | 40       | 80              |
+      | cluster_size | save_mib | branches | restored_inputs | replicas | reclaimed_mib |
+      | 1            | 20       | 2        | 4               | 0        | 40            |
+      | 3            | 20       | 2        | 4               | 0        | 40            |
+      | 1            | 1        | 40       | 80              | 0        | 40            |
+      | 3            | 1        | 40       | 80              | 1        | 80            |

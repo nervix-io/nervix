@@ -176,10 +176,28 @@ pub(super) async fn run_backup(request: BackupRequest) -> Result<(), StackReport
         resources,
         capture,
     };
+    let mut connect_options = request.connect_options;
+    if let Some(timeout) = request.timeout {
+        // The server may spend the entire quiesce budget before it can answer. Leave one
+        // ordinary request budget for command admission, capture and the final reply.
+        let Some(budget) = timeout.checked_add(
+            connect_options
+                .request_timeout
+                .max(connect_options.retry_timeout),
+        ) else {
+            let error = ClientError::BackupArguments {
+                reason: "the backup timeout plus the client request budget is too large",
+            };
+            report_failure(report, format, "INVALID_ARGUMENTS", &error.to_string());
+            return Err(StackReport::new(error));
+        };
+        connect_options.request_timeout = connect_options.request_timeout.max(budget);
+        connect_options.retry_timeout = connect_options.retry_timeout.max(budget);
+    }
     let client = match Client::connect_with_options(
         &request.server,
         Some(request.session_domain),
-        request.connect_options,
+        connect_options,
     )
     .await
     {

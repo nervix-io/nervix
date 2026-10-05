@@ -395,7 +395,7 @@ Feature: Configuration backup into a public archive
       CREATE RESOURCE wasm_filter;
       UPLOAD RESOURCE wasm_filter VERSION '{{wasm_processor}}';
       """
-    And these NSPL commands are executed on the leader node
+    When these NSPL commands are executed through the client on the leader node
       """
       CREATE SCHEMA metric ( value I32, tenant STRING );
       CREATE WIRE JSON SCHEMA metric_wire MODE STRICT ( value integer, tenant string );
@@ -430,7 +430,13 @@ Feature: Configuration backup into a public archive
         SET value = value, tenant = tenant
         ON MESSAGE ERROR LOG
         ON GLOBAL ERROR LOG;
+      """
+    When these NSPL commands are executed on the leader node
+      """
       CREATE SUBSCRIPTION filtered_metrics_subscription TO filtered_metrics;
+      """
+    When these NSPL commands are executed through the client on the leader node
+      """
       START;
       """
     When Kafka message is published to topic "backup_wasm_in_{{test_id}}"
@@ -627,7 +633,7 @@ Feature: Configuration backup into a public archive
       CREATE RESOURCE wasm_filter;
       UPLOAD RESOURCE wasm_filter VERSION '{{wasm_processor}}';
       """
-    And these NSPL commands are executed on the leader node
+    When these NSPL commands are executed through the client on the leader node
       """
       CREATE SCHEMA metric ( value I32, tenant STRING );
       CREATE WIRE JSON SCHEMA metric_wire MODE STRICT ( value integer, tenant string );
@@ -662,7 +668,13 @@ Feature: Configuration backup into a public archive
         SET value = value, tenant = tenant
         ON MESSAGE ERROR LOG
         ON GLOBAL ERROR LOG;
+      """
+    When these NSPL commands are executed on the leader node
+      """
       CREATE SUBSCRIPTION filtered_metrics_subscription TO filtered_metrics;
+      """
+    When these NSPL commands are executed through the client on the leader node
+      """
       START;
       """
     When Kafka message is published to topic "backup_wasm_in_{{test_id}}"
