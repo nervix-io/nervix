@@ -250,6 +250,8 @@ relay. Do not use them to scan across branches.
   and any server-supplied HTTP `Retry-After` as physical. A failed attempt keeps the pending
   batches, their acknowledgements, and the unchanged cadence; never describe a paced domain as
   shortening or lengthening a real retry wait.
+- Size an Iceberg emitter's worst-case latency as `FLUSH EACH` plus `COMMIT EACH`: the commit
+  duration starts when a flush stages rows while none are staged, not when the rows arrived.
 - Every `MAX BATCH SIZE` is chosen as a logical Arrow payload boundary, excluding unused buffer
   capacity and object overhead. Delivery-mode `MAX <n>` appears only on `ACK PARALLEL`, never on
   `NO_ACK`.
@@ -391,7 +393,10 @@ Choose checks relevant to the configured graph:
   restore there needs `ON EXISTING USER SKIP` or `REPLACE`. Run `DRY RUN` first to see the plan and
   each domain's impact report without changing anything.
   Failed unpublished checkpoint data is reclaimed on every node while the failed target's
-  `START` gate stays closed. Size the server's `--restore-staging-max-bytes` or
+  `START` gate stays closed. The same maintenance also reclaims restored chunks made unreachable
+  by resumed checkpoints, module rebinding or entity removal; existing snapshot readers can
+  retain their disk data.
+  Size the server's `--restore-staging-max-bytes` or
   `NERVIX_RESTORE_STAGING_MAX_BYTES` allowance for all concurrent unpublished checkpoints on that
   node; it defaults to `128GiB` and counts keys and values, including incomplete chunks. It is
   separate from archive-file staging and does not bound snapshot retention or filesystem

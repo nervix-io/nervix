@@ -38,7 +38,8 @@ BACKUP CLUSTER TO './cluster-config.nvxb' WITHOUT STATE;
 - `WITHOUT PAUSE` includes published runtime checkpoints without pausing a running domain. Its
   state and configuration need not be from one quiesced cut.
 - `TIMEOUT <duration>` bounds each running domain's quiesce wait. It is valid with the normal
-  quiesced capture.
+  quiesced capture. The CLI's `--timeout` also extends its request and retry deadlines by that
+  duration, leaving the ordinary request budget for command admission, capture and the reply.
 - The path names a file on the client's machine. A leading `~/` refers to the client user's home
   directory.
 
@@ -74,9 +75,10 @@ incarnation the window belongs to, and every linear histogram's pending delayed 
 with no published state on its owner contributes its stored checkpoint, and a stopped domain reads
 stored checkpoints only. An evicted branch contributes nothing.
 The drain uses the shutdown admitted-work view: active intake and generators, active source ACK
-roots, relay and node buffers, and emitter buffers or publishes. Parked `REQUIRED WAIT` messages
-and the rows a window retains until it advances are exempt: their acknowledgements wait for input
-the paused domain does not admit, and the cut captures them as state. Once every node reports no admitted work, the leader requests a confirming force-flush
+roots, relay and node buffers, relays that admitted a batch while the node read that view, and
+emitter buffers or publishes. Parked `REQUIRED WAIT` messages and the rows a window retains until
+it advances are exempt: their acknowledgements wait for input the paused domain does not admit,
+and the cut captures them as state. Once every node reports no admitted work, the leader requests a confirming force-flush
 generation on every node and waits for its obligations to finish before asking owners to capture.
 An unavailable sink keeps its publish and ACK counts outstanding until `TIMEOUT` expires; the
 failed backup reports those counts and resumes the domain.
@@ -366,9 +368,13 @@ is separate from a WASM branch's guest-state lifetime and its checkpoint revisio
 
 Successful publication removes obsolete namespace keys and completed or abandoned receipts through
 bounded deletion batches. A snapshot can retain the data it still reads after that deletion.
-Within the selected namespace, chunks whose checkpoint was replaced by a normal inline write or
-purged remain on disk until a later generation removes that namespace. Reclaiming these unreferenced
-chunks belongs to the staging and checkpoint storage maintenance work.
+Within the selected namespace, whether initial or restored, the same maintenance owner removes
+chunk sets whose selected header is absent, inline, or names another checkpoint revision.
+Segmented replacement and incomplete streamed revisions therefore use the same liveness check.
+Ordinary checkpoints, replica installation,
+handoff, forced recovery, module rebinding and entity or stale-identity purge therefore release
+unreachable restored payloads without requiring another restore generation. Existing snapshot readers retain complete
+values through Fjall's snapshot retention.
 Every node runs restore checkpoint maintenance at startup and then one second after each completed
 sweep, independently of leadership. It borrows one applied consensus revision and then takes the
 same installation barrier as checkpoint writers and publishers. A generation is retained while
@@ -379,7 +385,18 @@ publication is always retained. Terminal, expired, missing and superseded attemp
 reclaimable once the node has applied their generation. Cleanup covers headers, revision indices,
 receipts and chunks, including chunks written before a receipt existed. It uses bounded deletion
 batches and synchronizes completed deletion; cancellation or restart resumes from remaining keys.
-Cursors seek past initial and selected namespaces; deletion also seeks past retained applying or future generations. Readers keep their complete database snapshots. Reclamation never releases the start gate.
+Cursors seek past initial headers, indices and receipts and selected headers/indices; deletion also seeks past retained
+applying or future generations. In the selected chunk namespace, one header check selects each
+placement/revision set, and a cursor skips the whole referenced set. Unreferenced sets use the same
+bounded deletion batches. Checkpoint writers, purges and pointer publication share the installation
+barrier, so the selected view stays authoritative during cleanup. Readers keep their complete
+database snapshots. Reclamation never releases the start gate or changes the selected publication.
+
+A segmented header consists only of its fixed archived root. Maintenance checks the value size
+before copying or decoding that bounded header; a larger valid current value is an inline checkpoint.
+Fjall's ordinary LSM size query can still read and cache the underlying value. Database reads,
+caches, memtables, snapshot retention and compaction are separate allocation owners; the fixed
+2 MiB maintenance reservation bounds its caller-owned buffers rather than total database memory.
 Runtime storage requires its current format marker. A missing or
 invalid marker in nonempty checkpoint storage fails with an instruction to recreate the node state
 directory.
@@ -432,7 +449,7 @@ The public `/metrics` endpoint reports these node-local series after completed s
 | `nervix_restore_staging_bytes` | Current unpublished checkpoint key and value bytes |
 | `nervix_restore_staging_keys` | Current unpublished checkpoint key count |
 | `nervix_restore_staging_limit_bytes` | Configured unpublished checkpoint allowance |
-| `nervix_restore_staging_reclaimed_bytes_total` | Bytes removed by completed sweeps since node start |
+| `nervix_restore_staging_reclaimed_bytes_total` | Unpublished and unreferenced active checkpoint key/value bytes removed by completed sweeps since node start |
 | `nervix_restore_staging_sweeps_total` | Completed sweeps since node start |
 | `nervix_restore_keyspaces_disk_bytes` | SST allocation of shared checkpoint and publication keyspaces |
 

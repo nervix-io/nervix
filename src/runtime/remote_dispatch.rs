@@ -17,6 +17,8 @@
     )
 )]
 
+use error_stack::ResultExt as _;
+
 use super::*;
 
 pub(super) const REMOTE_RELAY_INSTANTIATION_WAIT: Duration = Duration::from_secs(5);
@@ -115,6 +117,32 @@ pub(super) enum RemoteDispatchError {
     Send { target: ClusterNodeName },
     #[error("timed out sending a remote payload to node '{target}'")]
     SendTimeout { target: ClusterNodeName },
+}
+
+/// Why a relay payload another node sent does not decode into a batch of its relay. A variant
+/// that wraps a decoder keeps that decoder's own failure beneath it.
+#[derive(Debug, Error, PartialEq, Eq)]
+pub(crate) enum RemoteRelayDecodeError {
+    #[error("relay payload is missing its admission registration")]
+    MissingAdmission,
+    #[error("failed to decode the relay batch body")]
+    Body,
+    #[error("remote metadata count {metadata} does not match batch row count {rows}")]
+    MetadataCount { metadata: usize, rows: usize },
+    #[error("remote ack count {acks} does not match batch row count {rows}")]
+    AckCount { acks: usize, rows: usize },
+    #[error("subscription fanout payload must not carry remote ack registrations")]
+    SubscriptionAcks,
+    #[error("failed to decode the remote branch key")]
+    BranchKey,
+    #[error("failed to assemble the relay batch")]
+    Batch,
+}
+
+/// The rows a remote relay payload carries, decoded, and the branch they belong to.
+struct DecodedRemoteRows {
+    batch: RuntimeRecordBatch,
+    key: Option<BranchKey>,
 }
 
 #[derive(Debug, Clone)]
@@ -1029,15 +1057,13 @@ impl Runtime {
         transport_admission: RelayAdmission,
         routing: &mut DomainRoutingCache,
     ) -> Result<(), Report<RuntimeError>> {
-        let admission =
-            payload
-                .admission
-                .clone()
-                .ok_or_else(|| RuntimeError::DecodeRemoteRelay {
-                    domain: payload.domain.as_str().to_string(),
-                    relay: payload.relay.as_str().to_string(),
-                    reason: "relay payload is missing its admission registration".to_string(),
-                })?;
+        let Some(admission) = payload.admission.clone() else {
+            return Err(Report::new(RuntimeError::decode_remote_relay(
+                &payload.domain,
+                &payload.relay,
+                Report::new(RemoteRelayDecodeError::MissingAdmission),
+            )));
+        };
         let branch = match BranchKey::from_remote_key(payload.key.clone()) {
             Ok(Some(branch)) => Some(branch.as_str().to_string()),
             Ok(None) | Err(_) => None,
@@ -1188,9 +1214,38 @@ impl Runtime {
             .await
     }
 
+    /// The rows `remote` carries, decoded against `schema` and checked against the metadata and
+    /// acknowledgement sidecars that travel with them, and the branch they belong to.
+    async fn decode_remote_rows(
+        &self,
+        schema: &CompiledSchema,
+        remote: &mut RelayPayload,
+    ) -> error_stack::Result<DecodedRemoteRows, RemoteRelayDecodeError> {
+        let batch = schema
+            .decode_arrow_body(self.executor(), remote.batch_ipc.clone())
+            .await
+            .change_context(RemoteRelayDecodeError::Body)?;
+        let rows = batch.batch().num_rows();
+        if remote.metadata.len() != rows {
+            return Err(Report::new(RemoteRelayDecodeError::MetadataCount {
+                metadata: remote.metadata.len(),
+                rows,
+            }));
+        }
+        if remote.acks.len() != rows {
+            return Err(Report::new(RemoteRelayDecodeError::AckCount {
+                acks: remote.acks.len(),
+                rows,
+            }));
+        }
+        let key = BranchKey::from_remote_key(remote.key.take())
+            .change_context(RemoteRelayDecodeError::BranchKey)?;
+        Ok(DecodedRemoteRows { batch, key })
+    }
+
     async fn handle_remote_stream_payload_with_admission(
         &self,
-        remote: RelayPayload,
+        mut remote: RelayPayload,
         owner_ingress: bool,
         routing: &mut DomainRoutingCache,
         admission: Option<RemoteRelayAdmissionContext<'_>>,
@@ -1204,43 +1259,16 @@ impl Runtime {
                 relay: remote.relay.as_str().to_string(),
             });
         }
-        let decoded_batch = schema
-            .decode_arrow_body(self.executor(), remote.batch_ipc.clone())
-            .await
-            .map_err(|error| RuntimeError::DecodeRemoteRelay {
-                domain: remote.domain.as_str().to_string(),
-                relay: remote.relay.as_str().to_string(),
-                reason: error.to_string(),
-            })?;
-        if remote.metadata.len() != decoded_batch.batch().num_rows() {
-            return Err(RuntimeError::DecodeRemoteRelay {
-                domain: remote.domain.as_str().to_string(),
-                relay: remote.relay.as_str().to_string(),
-                reason: format!(
-                    "remote metadata count {} does not match batch row count {}",
-                    remote.metadata.len(),
-                    decoded_batch.batch().num_rows()
-                ),
-            });
-        }
-        if remote.acks.len() != decoded_batch.batch().num_rows() {
-            return Err(RuntimeError::DecodeRemoteRelay {
-                domain: remote.domain.as_str().to_string(),
-                relay: remote.relay.as_str().to_string(),
-                reason: format!(
-                    "remote ack count {} does not match batch row count {}",
-                    remote.acks.len(),
-                    decoded_batch.batch().num_rows()
-                ),
-            });
-        }
-        let branch_key = BranchKey::from_remote_key(remote.key).map_err(|error| {
-            RuntimeError::DecodeRemoteRelay {
-                domain: remote.domain.as_str().to_string(),
-                relay: remote.relay.as_str().to_string(),
-                reason: format!("{error:#}"),
+        let decoded = match self.decode_remote_rows(&schema, &mut remote).await {
+            Ok(decoded) => decoded,
+            Err(report) => {
+                return Err(RuntimeError::decode_remote_relay(
+                    &remote.domain,
+                    &remote.relay,
+                    report,
+                ));
             }
-        })?;
+        };
         let acks = remote
             .acks
             .into_iter()
@@ -1256,15 +1284,17 @@ impl Runtime {
             .collect::<Vec<_>>();
         let batch = RelayRecordBatch::from_runtime_batch(
             schema,
-            branch_key,
-            decoded_batch,
+            decoded.key,
+            decoded.batch,
             RecordMetadataColumns::from_remote(remote.metadata),
             acks,
         )
-        .map_err(|reason| RuntimeError::DecodeRemoteRelay {
-            domain: remote.domain.as_str().to_string(),
-            relay: remote.relay.as_str().to_string(),
-            reason: reason.to_string(),
+        .map_err(|error| {
+            RuntimeError::decode_remote_relay(
+                &remote.domain,
+                &remote.relay,
+                error.change_context(RemoteRelayDecodeError::Batch),
+            )
         })?;
         let dispatch = async {
             let dispatch = if owner_ingress {
@@ -1288,10 +1318,9 @@ impl Runtime {
             for ack in batch.acks.iter() {
                 ack.no_ack("failed to dispatch remote relay message through local runtime");
             }
-            Err(RuntimeError::DecodeRemoteRelay {
-                domain: remote.domain.as_str().to_string(),
-                relay: remote.relay.as_str().to_string(),
-                reason: "local relay boundary rejected the batch".to_string(),
+            Err(RuntimeError::DispatchRemoteRelay {
+                domain: remote.domain.clone(),
+                relay: remote.relay.clone(),
             })
         };
         if let Some(admission) = admission {
@@ -1312,7 +1341,7 @@ impl Runtime {
 
     async fn handle_remote_subscription_payload_with_admission(
         &self,
-        remote: RelayPayload,
+        mut remote: RelayPayload,
         routing: &mut DomainRoutingCache,
         admission: Option<RemoteRelayAdmissionContext<'_>>,
     ) -> Result<(), RuntimeError> {
@@ -1338,63 +1367,37 @@ impl Runtime {
             };
             (services, schema)
         };
-        let decoded_batch = schema
-            .decode_arrow_body(self.executor(), remote.batch_ipc.clone())
-            .await
-            .map_err(|error| RuntimeError::DecodeRemoteRelay {
-                domain: remote.domain.as_str().to_string(),
-                relay: remote.relay.as_str().to_string(),
-                reason: error.to_string(),
-            })?;
-        if remote.metadata.len() != decoded_batch.batch().num_rows() {
-            return Err(RuntimeError::DecodeRemoteRelay {
-                domain: remote.domain.as_str().to_string(),
-                relay: remote.relay.as_str().to_string(),
-                reason: format!(
-                    "remote metadata count {} does not match batch row count {}",
-                    remote.metadata.len(),
-                    decoded_batch.batch().num_rows()
-                ),
-            });
-        }
-        if remote.acks.len() != decoded_batch.batch().num_rows() {
-            return Err(RuntimeError::DecodeRemoteRelay {
-                domain: remote.domain.as_str().to_string(),
-                relay: remote.relay.as_str().to_string(),
-                reason: format!(
-                    "remote ack count {} does not match batch row count {}",
-                    remote.acks.len(),
-                    decoded_batch.batch().num_rows()
-                ),
-            });
-        }
         if remote.acks.iter().any(Option::is_some) {
-            return Err(RuntimeError::DecodeRemoteRelay {
-                domain: remote.domain.as_str().to_string(),
-                relay: remote.relay.as_str().to_string(),
-                reason: "subscription fanout payload must not carry remote ack registrations"
-                    .to_string(),
-            });
+            return Err(RuntimeError::decode_remote_relay(
+                &remote.domain,
+                &remote.relay,
+                Report::new(RemoteRelayDecodeError::SubscriptionAcks),
+            ));
         }
-        let branch_key = BranchKey::from_remote_key(remote.key).map_err(|error| {
-            RuntimeError::DecodeRemoteRelay {
-                domain: remote.domain.as_str().to_string(),
-                relay: remote.relay.as_str().to_string(),
-                reason: format!("{error:#}"),
+        let decoded = match self.decode_remote_rows(&schema, &mut remote).await {
+            Ok(decoded) => decoded,
+            Err(report) => {
+                return Err(RuntimeError::decode_remote_relay(
+                    &remote.domain,
+                    &remote.relay,
+                    report,
+                ));
             }
-        })?;
+        };
         let ack_count = remote.acks.len();
         let batch = RelayRecordBatch::from_runtime_batch(
             schema,
-            branch_key,
-            decoded_batch,
+            decoded.key,
+            decoded.batch,
             RecordMetadataColumns::from_remote(remote.metadata),
             vec![AckSet::empty(); ack_count],
         )
-        .map_err(|reason| RuntimeError::DecodeRemoteRelay {
-            domain: remote.domain.as_str().to_string(),
-            relay: remote.relay.as_str().to_string(),
-            reason: reason.to_string(),
+        .map_err(|error| {
+            RuntimeError::decode_remote_relay(
+                &remote.domain,
+                &remote.relay,
+                error.change_context(RemoteRelayDecodeError::Batch),
+            )
         })?;
         let dispatch = services.fanout_local_subscriptions(&batch);
         if let Some(admission) = admission {

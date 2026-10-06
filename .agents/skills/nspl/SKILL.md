@@ -246,9 +246,10 @@ activation; a newly effective hard colocation requirement can relocate runtime n
   - an optional result (`TRY_CAST`, JSON extraction, `nullif`, `LOOKUP_HASH_MAP`, `regexp_substr`,
     `regexp_extract`, URL components, list `first`/`last`/`nth`/`sum`/`min`/`max`/`mean`, sample
     window statistics, `CASE` without `ELSE`) reaches a required field only through `coalesce`;
-  - every route whose functions can fail has an `ON MESSAGE ERROR` policy, and expressions that can
-    fail stay out of deduplication keys, reorderer `BY`, `CORRELATE WHERE`, inferencer `INPUTS`,
-    and `BRANCHED BY ... SET`, which have no error route;
+  - every route whose functions can fail has an `ON MESSAGE ERROR` policy, which also receives a
+    failed ingestor `BRANCHED BY ... SET`, and expressions that can fail stay out of deduplication
+    keys, reorderer `BY`, `CORRELATE WHERE`, inferencer `INPUTS`, and a reingestor's
+    `BRANCHED BY ... SET`, which have no error route;
   - `IN` sets hold non-null constants of the operand's exact type, and string positions count from
     1 while `nth`, `slice`, and JSON path indexes count from 0;
   - datetime units, parts, `date_bin` widths, zones, formats, and disambiguations are literals, a

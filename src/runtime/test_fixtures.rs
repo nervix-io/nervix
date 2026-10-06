@@ -131,8 +131,7 @@ pub(super) async fn execute_filter_map_for_test(
     metadata: Option<&super::IngestFilterMapMetadata>,
     now: Timestamp,
 ) -> Result<Option<RuntimeRow>, String> {
-    super::filter_map::execute_filter_map_on_record(
-        &named::<ModelName>("test_filter_map"),
+    let outcome = super::filter_map::execute_filter_map_on_record(
         program,
         record,
         branch_key,
@@ -141,7 +140,14 @@ pub(super) async fn execute_filter_map_for_test(
         now,
     )
     .await
-    .map_err(|error| error.to_string())
+    .map_err(|error| format!("{error:#}"))?;
+    match outcome {
+        super::SingleRecordFilterMapOutcome::Filtered => Ok(None),
+        super::SingleRecordFilterMapOutcome::Output(record) => Ok(Some(record)),
+        super::SingleRecordFilterMapOutcome::MessageError { error, .. } => {
+            Err(format!("FILTER-MAP message error: {}", error.message))
+        }
+    }
 }
 
 pub(super) fn expression(raw: &str) -> nervix_models::Expression {

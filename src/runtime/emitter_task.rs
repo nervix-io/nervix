@@ -1716,7 +1716,6 @@ impl EmitterBatchContext<'_> {
                 let evaluated = ordering_group
                     .evaluate(
                         self.runtime.executor(),
-                        self.emitter,
                         &batch,
                         execution_now,
                         &materialized_values,
@@ -1724,9 +1723,11 @@ impl EmitterBatchContext<'_> {
                     .await;
                 match evaluated {
                     Ok(groups) => Some(groups),
-                    Err(error) => {
-                        let error = error.current_context();
-                        self.report_general_error(error.acks.iter(), error.reason.clone());
+                    Err(failure) => {
+                        self.report_general_error(
+                            failure.acks.iter(),
+                            format!("{:#}", failure.error),
+                        );
                         return None;
                     }
                 }
@@ -1772,8 +1773,8 @@ impl EmitterBatchContext<'_> {
         .await;
         let plan = match planned {
             Ok(plan) => plan,
-            Err(error) => {
-                self.report_general_error(error.acks.iter(), error.reason);
+            Err(failure) => {
+                self.report_general_error(failure.acks.iter(), format!("{:#}", failure.error));
                 return None;
             }
         };
@@ -1853,9 +1854,8 @@ impl EmitterBatchContext<'_> {
             .await;
         let prepared = match prepared {
             Ok(prepared) => prepared,
-            Err(error) => {
-                let failure = error.current_context();
-                self.report_general_error(failure.acks.iter(), failure.reason.clone());
+            Err(failure) => {
+                self.report_general_error(failure.acks.iter(), format!("{:#}", failure.error));
                 return None;
             }
         };
@@ -1934,10 +1934,14 @@ impl EmitterBatchContext<'_> {
         .await
         {
             Ok(plan) => plan,
-            Err(error) => {
+            Err(failure) => {
                 self.report_general_error(
-                    error.acks.iter(),
-                    format!("input relay '{}': {}", input_relay.as_str(), error.reason),
+                    failure.acks.iter(),
+                    format!(
+                        "input relay '{}': {:#}",
+                        input_relay.as_str(),
+                        failure.error
+                    ),
                 );
                 return None;
             }

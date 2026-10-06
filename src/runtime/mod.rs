@@ -274,6 +274,7 @@ mod relay_interaction;
 pub mod relay_interaction_benchmark;
 mod relay_processor_node;
 mod relay_subscription;
+mod relay_transit;
 mod remote_dispatch;
 mod reorderer;
 mod resources;
@@ -436,7 +437,7 @@ use ingest_metadata::{
 };
 pub(in crate::runtime) use ingestor_quiesce::{
     BufferedIngestMetadata, BufferedIngestPayload, IngestorQuiesceCause, IngestorQuiesceControl,
-    IngestorQuiesceIntake,
+    IngestorQuiesceIntake, MemoryPressurePause,
 };
 use ingestor_quiesce::{
     DEFAULT_KAFKA_PARTITION_WATCH_INTERVAL, IngestorReadiness, RuntimeReconnectStatus,
@@ -506,8 +507,9 @@ use processors::{
     CompiledInferencerInputProgram, CompiledReordererProgram, CompiledWindowAggregateProgram,
     CorrelatorBranchState, CorrelatorPendingMessage, FilterMapPlan, InferencerFlushContext,
     InferencerOutputBuffer, IngestorRouteTemplate, JunctionFlushContext, PlannedGeneralError,
-    PlannedGeneralResult, PlannedMessageError, ProcessorCompileError, ProcessorLiveStateError,
-    ProcessorMaterializedError, ProcessorPlanRevision, PublishedProcessorPlan, RelayProcessorNode,
+    PlannedGeneralFailure, PlannedGeneralResult, PlannedMessageError, PlannedSidecar,
+    ProcessorCompileError, ProcessorLiveStateError, ProcessorMaterializedError,
+    ProcessorPlanRevision, ProgramName, PublishedProcessorPlan, RelayProcessorNode,
     RelayProcessorOperationNode, RelayProcessorOperationTemplate, RelayProcessorOutputNode,
     RelayProcessorOutputTemplate, RelayProcessorOutputsNode, RelayProcessorOutputsTemplate,
     RelayProcessorRelayTemplate, RelayProcessorTemplate, ReorderKeyPart, ReordererOutputBuffer,
@@ -532,7 +534,13 @@ use relay_interaction::{
     RelayInteraction, RelayInteractionCommand, RelayInteractionError, RelayInteractionEvent,
     RelayInteractionInput,
 };
-use remote_dispatch::{REMOTE_ACK_ALIVE_INTERVAL, RemoteDispatchRegistry, RemoteDispatcher};
+use relay_transit::{
+    RelayAdmissions, RelayOwnerAdmission, RelayOwnerBatchCompletion, RelayRoutedAdmission,
+    RelayTransit,
+};
+use remote_dispatch::{
+    REMOTE_ACK_ALIVE_INTERVAL, RemoteDispatchRegistry, RemoteDispatcher, RemoteRelayDecodeError,
+};
 use reorderer::{ReordererFlushContext, flush_branch_reorderer_output, reorder_key_part};
 use schedule_apply::ScheduleApplication;
 use scheduled_node::{

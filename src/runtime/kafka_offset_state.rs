@@ -746,6 +746,93 @@ mod tests {
         }
     }
 
+    /// The memory-ordering claim of a Kafka offset snapshot, explored by Loom over the production
+    /// offset state.
+    ///
+    /// Layer: test harness.
+    ///
+    /// - **Owns.** The invariant that a snapshot stamped with a commit's revision encodes that
+    ///   commit's offset.
+    /// - **Depends on.** The production offset state and its revision, and the Loom runner of
+    ///   `nervix-model-harness`.
+    /// - **Must not know.** Brokers, consumer groups, replicas, or how a snapshot is stored.
+    ///
+    /// One thread commits an offset of a recorded partition, which never takes the assignment
+    /// barrier, while the main thread captures a snapshot under it, so the only synchronization
+    /// between them is the offset slot and the revision. `just test-loom-qualification` shows that
+    /// weakening the revision's advance makes the model fail.
+    #[cfg(feature = "loom")]
+    mod loom_models {
+        use meticulous::{OptionExt as _, ResultExt as _};
+        use nervix_model_harness::{
+            InvariantId,
+            loom::{explore, spawn},
+        };
+        use nervix_models::ClusterNodeName;
+        use nervix_primitives::sync::Arc;
+
+        use super::{
+            super::{KafkaOffsetTable, ReplicatedKafkaOffsetState},
+            KafkaOffsetPosition, StateReplicationRoles, offset_placement,
+        };
+
+        const SNAPSHOT_REVISION: InvariantId =
+            InvariantId::new("runtime.kafka-offset-state.snapshot-revision");
+
+        const TOPIC: &str = "events";
+
+        fn position(offset: i64) -> KafkaOffsetPosition {
+            KafkaOffsetPosition {
+                topic: TOPIC.to_string(),
+                partition: 0,
+                offset,
+            }
+        }
+
+        #[test]
+        fn loom_a_snapshot_carrying_a_commits_revision_carries_its_offset() {
+            explore(SNAPSHOT_REVISION, || {
+                let node = ClusterNodeName::parse("node-1")
+                    .assured("the test node name satisfies the cluster-node grammar");
+                let state = Arc::new(
+                    ReplicatedKafkaOffsetState::new(offset_placement(), None)
+                        .assured("the empty Kafka offset state is valid"),
+                );
+                let mut assignment = ReplicatedKafkaOffsetState::bind(
+                    &state,
+                    StateReplicationRoles::new(Some(node.clone()), Vec::new(), 0),
+                    Some(&node),
+                );
+                let originator = assignment
+                    .originator
+                    .take()
+                    .assured("node-1 is assigned as the owner");
+                originator
+                    .apply_committed_offset(&position(1))
+                    .assured("the owner assignment is current");
+                let read = originator.read().clone();
+                let committing = spawn(move || {
+                    originator
+                        .apply_committed_offset(&position(2))
+                        .assured("the owner assignment is current")
+                });
+                let snapshot = read
+                    .latest_snapshot()
+                    .assured("the recorded offsets encode");
+                let revision = committing
+                    .join()
+                    .assured("the committing side only commits one offset");
+                let encoded = KafkaOffsetTable::decode(&snapshot.payload)
+                    .assured("a snapshot of this state decodes")
+                    .next_offset(TOPIC, 0);
+                assert!(
+                    snapshot.lsm < revision || encoded == Some(2),
+                    "a snapshot carried the revision of a commit without its offset"
+                );
+            });
+        }
+    }
+
     #[cfg(feature = "shuttle")]
     mod shuttle_checks {
         use nervix_model_harness::shuttle::check_interleavings;

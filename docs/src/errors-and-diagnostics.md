@@ -363,6 +363,11 @@ failure remains a storage failure beneath the admitted restore step and leaves i
 gate closed. Node-local maintenance logs admission, cancellation or storage failure and retries
 on its next sweep without changing the command outcome or gate. Metrics are updated only for a
 completed sweep, so a partial cancelled deletion cannot claim a completed reclamation count.
+Maintenance treats an absent or inline selected header, or another selected checkpoint revision,
+as ordinary chunk unreachability. Malformed chunk coordinates or bounded checkpoint headers keep
+their typed storage errors. Bounded deletion may already have committed earlier batches before
+cancellation or a later error; restart or the next successful sweep resumes from remaining keys.
+Completed reclamation counts include unreachable active chunks as well as unpublished staging.
 Staging or publication failure leaves the durable start gate in place, including a failure after
 the complete generation's pointer became durable but before runtime handles were cleared. Exact
 publication retry completes durability and bounded cleanup under the same authority and inventory. The steps before it stay
@@ -654,6 +659,26 @@ formatted diagnostic for every row or batch when the variant already names the f
 belongs at the policy or public reporting boundary. This keeps error construction from changing
 the processing cadence and avoids putting source payloads in reports.
 
+A planned batch that fails as a whole, rather than one message at a time, returns a
+`PlannedGeneralError` report together with the acknowledgements of every message the batch held.
+The error names the step that failed: preparing lookup inputs or the input batch, executing the
+program, materializing an error input row or the successful rows, building the output batch, a row
+sidecar whose count differs from the batch, a row selected outside the input, an output relay whose
+schema was not prepared or does not match, an ordering group column that is missing or not
+`STRING`, or the HTTP requests of the batch. It names the program by its clause, such as
+`FILTER WHERE`, `FILTER-MAP` or branch construction, and the failure the step returned, such as the
+VM's `RuntimeError` or a `RuntimeSchemaError`, stays beneath it. The node's general or internal
+error policy renders the whole chain when it reports the failure and resolves the
+acknowledgements. That report already names the node, so the planned failure does not repeat it.
+
+Branch construction keeps the outcome of each row as a typed value. A row whose branch `SET`
+recorded an error holds that `SideError`, and a row the program did not select says so; neither
+builds a report or a message until the row is reported. An ingestor route reports such a row
+through its `ON MESSAGE ERROR` policy with the `evaluation` code and the `set` operation. A
+reingestor route fails its whole batch with a `PlannedGeneralError` naming the input row, with the
+row's failure beneath it. On either kind of route, a branch field that cannot be read or is null,
+and a program that writes no branch field, fail the whole batch.
+
 ## Cross-Node And Public Boundaries
 
 The interconnect validates and bounds the wire request before its operation handler runs. A
@@ -666,7 +691,14 @@ boundary for an already classified failure; it is not used to recover a new clas
 replication, a replica's branch checkpoint listing included, and materialized-snapshot description
 use this envelope, and local errors retain the remote class alongside their target and placement. A
 listing that arrives but names a branch key that does not decode is a failure of its own, distinct
-from a failed request. [Cluster Interconnect](./interconnect.md)
+from a failed request. A relay payload that does not decode is `RuntimeError::DecodeRemoteRelay`,
+naming the domain and relay, and its `RemoteRelayDecodeError` says what the payload got wrong: no
+admission registration, a body that is not one Arrow section of the relay's schema, metadata or
+acknowledgement sidecars whose row count differs from the body's, acknowledgement registrations on
+a subscription fan-out, a branch key that does not decode, or rows that do not assemble into a relay
+batch. The Arrow body, `BranchKeyError` or relay batch failure stays beneath it. A decoded batch the
+local relay boundary refuses is the separate `RuntimeError::DispatchRemoteRelay`.
+[Cluster Interconnect](./interconnect.md)
 defines the exchange forms, limits, deadlines, and relay acknowledgement boundaries. A record
 acknowledgement lost between two nodes becomes an ordinary negative acknowledgement: the node that
 forwarded it fails it once the receiver has reported nothing about it for fifteen seconds, with a
@@ -890,11 +922,15 @@ and any use of `humantime::Duration`, whose text conversion reads through the sa
 `DurationTextError` describes only the reason, `humantime`'s own for malformed text or
 `it is longer than a duration can be`, so each owner keeps its diagnostic around it: the setting,
 the text it could not read, then that reason. An owner with a typed error of its own, such as the
-command line, an ingestor's start, the activation, entrypoint, runtime and emitter plans, and the
-WebSockets signaling compiler, also keeps the `DurationTextError` beneath it. A node given such a
-value on its command line or in an environment variable names the option and the reason and exits
-with status 2 before it starts. A dropped result with no stated recovery class does not establish
-that it was handled.
+command line, an ingestor's start, the activation, entrypoint, runtime and emitter plans, the
+WebSockets signaling compiler, and the benchmark settings, also keeps the `DurationTextError`
+beneath it. The benchmark settings name the parameter and the value it could not use in
+`SettingsError::InvalidParameter`, with the parser's own error, a `ByteSizeError`, or a
+`ParameterValueError` beneath it: a value that is not a scalar or not a string, one beyond the
+template integer range, or a flush interval that would need a run longer than any benchmark can
+measure. A node given such a value on its command line or in an environment variable names the
+option and the reason and exits with status 2 before it starts. A dropped result with no stated
+recovery class does not establish that it was handled.
 
 The former `result_string_errors` debt measure is now a zero-tolerance rule:
 `just validate-typed-errors`, run by `just validate`, rejects `Result<_, String>` in product code

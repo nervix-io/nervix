@@ -82,11 +82,22 @@ pub enum RuntimeError {
         node_unavailability_timeout: Duration,
         readiness_propagation_bound: Duration,
     },
-    #[error("failed to decode remote relay '{relay}' in domain '{domain}': {reason}")]
+    /// A relay payload another node sent did not decode into a batch of its relay. The report
+    /// names what the payload got wrong and keeps the decoder's own failure beneath it.
+    #[error("failed to decode remote relay '{relay}' in domain '{domain}': {report:#}")]
     DecodeRemoteRelay {
-        domain: String,
-        relay: String,
-        reason: String,
+        domain: DomainName,
+        relay: RelayName,
+        report: Report<RemoteRelayDecodeError>,
+    },
+    /// The local boundary of a relay refused a batch another node sent, after it was decoded.
+    #[error(
+        "failed to dispatch remote relay '{relay}' in domain '{domain}': the local relay boundary \
+         rejected the batch"
+    )]
+    DispatchRemoteRelay {
+        domain: DomainName,
+        relay: RelayName,
     },
 }
 
@@ -97,6 +108,18 @@ impl RuntimeError {
     ) -> Self {
         Self::EntrypointBinding {
             domain: domain.clone(),
+            report,
+        }
+    }
+
+    pub(super) fn decode_remote_relay(
+        domain: &DomainName,
+        relay: &RelayName,
+        report: Report<RemoteRelayDecodeError>,
+    ) -> Self {
+        Self::DecodeRemoteRelay {
+            domain: domain.clone(),
+            relay: relay.clone(),
             report,
         }
     }

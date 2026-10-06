@@ -311,6 +311,13 @@ impl BranchRuntime {
                 return;
             }
         }
+        // A schedule publishes its routing before it advances the epoch, so routing read after the
+        // epoch is at least as new as the epoch this reconciliation records. The routing the branch
+        // read for an earlier batch may predate it.
+        self.refresh_domain_routing().discarded(
+            "a domain whose routing is not resolved has no materialized relays to reconcile, \
+             which reading the routing below reports",
+        );
         let (desired_relays, relay_schema) = match self.domain_routing() {
             Ok(routing) => {
                 let desired_relays = routing
@@ -2320,6 +2327,63 @@ mod tests {
         runtime_ack::{AckOutcome, AckRootTracker, AckSet},
         runtime_schema::{RuntimeValue, test_runtime_row},
     };
+    /// A branch that read its routing before a schedule made a relay materialized here, and that
+    /// reconciles its materialized relays after the schedule published that routing and advanced
+    /// the relay-state epoch, reconciles against the routing published with that epoch. The epoch
+    /// it records then stands for the membership it computed.
+    #[nervix_primitives::test]
+    async fn materialized_membership_is_reconciled_against_the_routing_its_epoch_follows() {
+        let runtime = Runtime::default();
+        let domain = domain("default");
+        install_unpaced_test_domain(&runtime, &domain);
+        let template = junction_branch_template("wait_for_customer", "orders");
+        let mut branch = template
+            .instantiate(&runtime, &domain, None, 1)
+            .await
+            .assured("a junction branch instantiates on the test domain")
+            .into_inner();
+        branch
+            .refresh_domain_routing()
+            .assured("the test domain publishes its routing");
+        let profiles = named::<RelayName>("profiles");
+        let state_schema = test_schema(&[("status", ParseAsType::String)]);
+        let routing = runtime
+            .inner
+            .domain_routings
+            .get(&domain)
+            .verified("the test domain publishes its routing")
+            .clone();
+        routing.store(StdArc::new(DomainRoutingSnapshot {
+            materialized_stream_specs: [(
+                profiles.clone(),
+                RuntimeMaterializedRelaySpec::new(
+                    state_schema.arrow_schema(),
+                    VmSchemaSensitivity::default(),
+                    ResolvedBranching::unbranched(),
+                ),
+            )]
+            .into_iter()
+            .collect(),
+            ..DomainRoutingSnapshot::default()
+        }));
+        runtime.bump_relay_state_epoch(&domain);
+
+        branch
+            .reconcile_materialized_state_membership(&profiles)
+            .await;
+
+        let published = routing.load_full();
+        let reconciled_against_published = match branch.routing_snapshot.as_ref() {
+            Some(snapshot) => StdArc::ptr_eq(snapshot, &published),
+            None => false,
+        };
+        assert!(
+            reconciled_against_published,
+            "the branch reconciled its materialized relays against routing older than the \
+             relay-state epoch it read"
+        );
+    }
+
     #[nervix_primitives::test]
     async fn pending_materialized_batches_remain_visible_in_entity_drain_status() {
         let runtime = Runtime::default();

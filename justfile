@@ -419,10 +419,14 @@ test-primitives-compile:
 # consistent-order controls must end cleanly with evidence that records no finding; and the
 # start-up, quiet-output and recording-failure cases end as their contract says. A child that never
 # ends is killed by its probe's watchdog and fails it. The diagnostic node smoke then runs the
-# `@deadlock_diagnostics`, `@restore_installation` and `@client_ingestor_alter_drain` scenarios,
-# without retries, in a scenario binary built for the mode: in-process nodes, real diagnostic
-# server processes on one and three nodes, buffered client alterations, interrupted restore
-# installation and stale publication after leadership transfer. Each
+# `@deadlock_diagnostics`, `@restore_installation`, `@client_ingestor_alter_drain`,
+# `@deadlock_reports`, `@memory_pressure_pause`, `@client_io_03_consumer_restore` and
+# `@client_io_03_generation` scenarios, without retries, in a scenario binary built for the mode:
+# in-process nodes, real
+# diagnostic server processes on one and three nodes, buffered client alterations, interrupted
+# restore installation and stale publication after leadership transfer, the memory-pressure pause
+# of starting and running ingestors, and Rust client consumers restored after a session restart and
+# closed by a domain restart. Each
 # contract-change scenario also runs the diagnostic Rust paced driver; the Python application's
 # locks remain outside the detector while its diagnostic nodes are tracked. Each
 # invocation's output stays under target/deloxide/test-deloxide, and the scenario binary's own
@@ -492,7 +496,7 @@ test-deloxide-selection selection budget_seconds: tests-deps
     within_budget scenarios \
         cargo test --features {{ quote("testing " + selection) }} --test scenarios -- \
             --input 'tests/features/**/*.feature' \
-            --tags '@deadlock_diagnostics or @restore_installation or @client_ingestor_alter_drain or @deadlock_reports' \
+            --tags '@deadlock_diagnostics or @restore_installation or @client_ingestor_alter_drain or @deadlock_reports or @memory_pressure_pause or @client_io_03_consumer_restore or @client_io_03_generation' \
             --retry 0
     summary="$(grep -E '^[0-9]+ scenarios? \(' "${logs}/scenarios.log" | tail -n 1 || true)"
     if [[ ! "${summary}" =~ ^([1-9][0-9]*)\ scenarios?\ \(([0-9]+)\ passed\)$ ]] \
@@ -577,7 +581,8 @@ test-shuttle-replay-check:
 # whole run fails when a registered invariant is missing, ignored or incomplete, or when a model is
 # unregistered. A non-empty `filter` runs the models whose test name or invariant contains it and
 # fails when it selects none. A failed model leaves its Loom checkpoint, output and metadata under
-# target/loom-failures for `test-loom-replay`.
+# target/loom-failures for `test-loom-replay`. The server's models need the web console its library
+# embeds.
 test-loom filter="": build-web-console (test-loom-models filter)
 
 [private]
@@ -601,14 +606,15 @@ coverage-loom-runner:
 
 # Replay a failure `test-loom` recorded: Loom resumes from the checkpoint of the failed execution,
 # with location tracking and tracing enabled, so that execution runs first.
-test-loom-replay failure:
+test-loom-replay failure: build-web-console
     python3 -m scripts.loom_models --target-dir {{ quote(cargo_target_dir) }} replay {{ quote(failure) }}
 
 # Show that each qualified Loom model detects its ordering or stack capacity fault. Every weakening is
 # applied to a copy of the working tree, the model must fail with its registered message, and the
-# checkpoint of that failure must replay it.
-test-loom-qualification: build-web-console
-    python3 -m scripts.loom_models --target-dir {{ quote(cargo_target_dir) }} qualify
+# checkpoint of that failure must replay it. `shard`, NUMBER/COUNT, qualifies one part of the
+# distinct weakenings, so CI can split their rebuilds across jobs; the default qualifies them all.
+test-loom-qualification shard="1/1": build-web-console
+    python3 -m scripts.loom_models --target-dir {{ quote(cargo_target_dir) }} qualify --shard {{ quote(shard) }}
 
 # Run the Turmoil suite: the primitive boundary's simulated-host checks, the execution and library
 # simulation checks, then every interconnect scenario over its committed regression seeds. Tokio's
