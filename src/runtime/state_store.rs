@@ -35,7 +35,13 @@ pub(super) mod generation;
 mod maintenance;
 
 #[cfg(test)]
+mod identity_properties;
+#[cfg(test)]
 mod key_properties;
+#[cfg(test)]
+mod snapshot_properties;
+#[cfg(test)]
+mod store_properties;
 #[cfg(test)]
 mod wasm_properties;
 

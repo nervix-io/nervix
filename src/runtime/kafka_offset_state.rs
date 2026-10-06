@@ -644,6 +644,163 @@ pub(in crate::runtime) fn restore_offset_payload(
         .map_err(Report::new)
 }
 
+/// What one Kafka offset table records, read out of its slots: every topic's partitions with
+/// their next offsets, and every topic's schedule, each in key order.
+#[cfg(test)]
+#[derive(Debug, PartialEq, Eq)]
+struct KafkaOffsetView {
+    offsets: BTreeMap<String, BTreeMap<i32, i64>>,
+    schedules: BTreeMap<String, KafkaScheduleView>,
+}
+
+/// One topic's recorded schedule with its assignments in partition order.
+#[cfg(test)]
+#[derive(Debug, PartialEq, Eq)]
+struct KafkaScheduleView {
+    instances: NonZeroU64,
+    rebalance_epoch: u64,
+    observed_partitions: Vec<i32>,
+    assignments: BTreeMap<i32, u64>,
+}
+
+#[cfg(test)]
+impl KafkaOffsetTable {
+    fn view(&self) -> KafkaOffsetView {
+        let mut offsets = BTreeMap::new();
+        for (topic, partitions) in &self.topics {
+            let mut positions = BTreeMap::new();
+            for (partition, slot) in partitions {
+                positions.insert(*partition, slot.load(Ordering::SeqCst));
+            }
+            offsets.insert(topic.clone(), positions);
+        }
+        let mut schedules = BTreeMap::new();
+        for (topic, schedule) in &self.schedules {
+            let assignments = schedule.assignments.iter().map(|(p, i)| (*p, *i)).collect();
+            schedules.insert(
+                topic.clone(),
+                KafkaScheduleView {
+                    instances: schedule.instances,
+                    rebalance_epoch: schedule.rebalance_epoch,
+                    observed_partitions: schedule.observed_partitions.clone(),
+                    assignments,
+                },
+            );
+        }
+        KafkaOffsetView { offsets, schedules }
+    }
+
+    /// Up to three recorded partitions of up to three topics at any offset, and up to three topic
+    /// schedules with their observed partitions in the sorted order a rebalance records them.
+    fn generated(arbitrary: &mut nervix_arbitrary::Arbitrary<'_>) -> Self {
+        let mut positions = Vec::new();
+        for _ in 0..arbitrary.entropy().count(3) {
+            let topic = arbitrary.string();
+            for _ in 0..arbitrary.entropy().count(3) {
+                positions.push(KafkaOffsetPosition {
+                    topic: topic.clone(),
+                    partition: generated_partition(arbitrary),
+                    offset: arbitrary.entropy().any_i64(),
+                });
+            }
+        }
+        let mut schedules = HashMap::default();
+        for _ in 0..arbitrary.entropy().count(3) {
+            let mut observed = std::collections::BTreeSet::new();
+            for _ in 0..arbitrary.entropy().count(3) {
+                observed.insert(generated_partition(arbitrary));
+            }
+            let mut assignments = HashMap::default();
+            for partition in &observed {
+                assignments.insert(*partition, arbitrary.entropy().any_u64());
+            }
+            schedules.insert(
+                arbitrary.string(),
+                KafkaTopicSchedulingState {
+                    instances: arbitrary.positive_u64(),
+                    rebalance_epoch: arbitrary.entropy().any_u64(),
+                    observed_partitions: observed.into_iter().collect(),
+                    assignments,
+                },
+            );
+        }
+        Self::from_offsets(positions, schedules)
+    }
+}
+
+/// A Kafka partition number, landing on zero and the extremes as often as elsewhere.
+#[cfg(test)]
+fn generated_partition(arbitrary: &mut nervix_arbitrary::Arbitrary<'_>) -> i32 {
+    use meticulous::ResultExt as _;
+
+    match arbitrary.entropy().byte() % 4 {
+        0 => 0,
+        1 => i32::MIN,
+        2 => i32::MAX,
+        _ => {
+            let bits = u32::try_from(arbitrary.entropy().up_to(u64::from(u32::MAX)))
+                .verified("the draw ends at u32::MAX");
+            bits.cast_signed()
+        }
+    }
+}
+
+/// A generated offset table stores through `stored`, the checkpoint envelope a node keeps it in,
+/// and restores every partition offset and topic schedule. Its archive form keeps the offsets
+/// alone, and restoring that archive records exactly those offsets with no schedule, which START
+/// recomputes.
+#[cfg(test)]
+pub(in crate::runtime) fn assert_generated_offsets_survive(
+    arbitrary: &mut nervix_arbitrary::Arbitrary<'_>,
+    stored: impl FnOnce(Vec<u8>) -> Vec<u8>,
+) {
+    use meticulous::ResultExt as _;
+
+    let table = KafkaOffsetTable::generated(arbitrary);
+    let payload = table
+        .encode()
+        .assured("a bounded generated offset table encodes");
+    let restored = KafkaOffsetTable::decode(&stored(payload.clone()))
+        .assured("a stored offset table decodes from its own encoding");
+    assert_eq!(restored.view(), table.view());
+
+    let positions =
+        backup_offset_positions(&payload).assured("a stored offset table yields its positions");
+    let restored_payload = restore_offset_payload(positions.clone())
+        .assured("archived positions encode as an offset table");
+    let restored = KafkaOffsetTable::decode(&restored_payload)
+        .assured("a restored offset table decodes from its own encoding");
+    let view = restored.view();
+    assert!(view.schedules.is_empty());
+    let mut expected = BTreeMap::new();
+    for (topic, partition, offset) in positions {
+        let partitions: &mut BTreeMap<i32, i64> = expected.entry(topic).or_default();
+        partitions.insert(partition, offset);
+    }
+    assert_eq!(view.offsets, expected);
+    assert_eq!(expected, table.view().offsets);
+}
+
+/// Arbitrary bytes read as a stored offset table either fail with the typed decode failure or
+/// restore a table that stores back unchanged.
+#[cfg(test)]
+pub(in crate::runtime) fn assert_offset_payload_decodes_typed(payload: &[u8]) {
+    use meticulous::ResultExt as _;
+
+    match KafkaOffsetTable::decode(payload) {
+        Ok(table) => {
+            let encoded = table.encode().assured("a decoded offset table encodes");
+            let again =
+                KafkaOffsetTable::decode(&encoded).assured("a re-encoded offset table decodes");
+            assert_eq!(again.view(), table.view());
+        }
+        Err(error) => assert!(
+            matches!(error, RuntimePersistenceError::DecodeState(_)),
+            "{error:?}"
+        ),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use ahash::HashMap;

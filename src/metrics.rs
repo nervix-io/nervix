@@ -2423,6 +2423,145 @@ pub struct RuntimeMetricsSnapshot {
     histograms: Vec<MetricHistogramSnapshot>,
 }
 
+#[cfg(test)]
+impl RuntimeMetricsSnapshot {
+    /// Up to three counter and three histogram series with any key text, any elapsed time and
+    /// moving averages of any bit pattern, and any recorded buckets, for generated storage
+    /// properties.
+    pub(crate) fn generated(arbitrary: &mut nervix_arbitrary::Arbitrary<'_>) -> Self {
+        let counters = arbitrary.records(|arbitrary| MetricCounterSnapshot {
+            key: MetricSnapshotKey::generated(arbitrary),
+            elapsed_seconds: generated_f64(arbitrary),
+            started_at_wall_nanos: generated_nanos(arbitrary),
+            domain_started_at_nanos: generated_nanos(arbitrary),
+            domain_last_at_nanos: generated_nanos(arbitrary),
+            rolling: if arbitrary.entropy().flag() {
+                Some(RollingRatesSnapshot::generated(arbitrary))
+            } else {
+                None
+            },
+            value: arbitrary.entropy().any_u64(),
+        });
+        let histograms = arbitrary.records(|arbitrary| MetricHistogramSnapshot {
+            key: MetricSnapshotKey::generated(arbitrary),
+            elapsed_seconds: generated_f64(arbitrary),
+            started_at_wall_nanos: generated_nanos(arbitrary),
+            domain_started_at_nanos: generated_nanos(arbitrary),
+            domain_last_at_nanos: generated_nanos(arbitrary),
+            rolling_rates: if arbitrary.entropy().flag() {
+                Some(RollingRatesSnapshot::generated(arbitrary))
+            } else {
+                None
+            },
+            rolling_histograms: if arbitrary.entropy().flag() {
+                Some(RollingHistogramsSnapshot::generated(arbitrary))
+            } else {
+                None
+            },
+            bucket_counts: arbitrary.records(|arbitrary| arbitrary.entropy().any_u64()),
+            count: arbitrary.entropy().any_u64(),
+            sum: generated_f64(arbitrary),
+        });
+        Self {
+            counters,
+            histograms,
+        }
+    }
+}
+
+/// A float of any bit pattern.
+#[cfg(test)]
+fn generated_f64(arbitrary: &mut nervix_arbitrary::Arbitrary<'_>) -> f64 {
+    f64::from_bits(arbitrary.entropy().any_u64())
+}
+
+/// A float of any bit pattern, or none.
+#[cfg(test)]
+fn generated_optional_f64(arbitrary: &mut nervix_arbitrary::Arbitrary<'_>) -> Option<f64> {
+    if arbitrary.entropy().flag() {
+        Some(generated_f64(arbitrary))
+    } else {
+        None
+    }
+}
+
+/// A Unix-nanosecond instant, or none.
+#[cfg(test)]
+fn generated_nanos(arbitrary: &mut nervix_arbitrary::Arbitrary<'_>) -> Option<i64> {
+    if arbitrary.entropy().flag() {
+        Some(arbitrary.entropy().any_i64())
+    } else {
+        None
+    }
+}
+
+#[cfg(test)]
+impl MetricSnapshotKey {
+    fn generated(arbitrary: &mut nervix_arbitrary::Arbitrary<'_>) -> Self {
+        Self {
+            domain: arbitrary.string(),
+            target_kind: arbitrary.string(),
+            target: arbitrary.string(),
+            physical_node_id: arbitrary.optional_cluster_node(),
+            relay: arbitrary.string(),
+            peer_kind: arbitrary.string(),
+            peer: arbitrary.string(),
+            direction: arbitrary.string(),
+            metric: arbitrary.string(),
+        }
+    }
+}
+
+#[cfg(test)]
+impl RollingRatesSnapshot {
+    fn generated(arbitrary: &mut nervix_arbitrary::Arbitrary<'_>) -> Self {
+        let wall = |arbitrary: &mut nervix_arbitrary::Arbitrary<'_>| WallEmaSnapshot {
+            value: generated_optional_f64(arbitrary),
+            last_elapsed_seconds: generated_optional_f64(arbitrary),
+            last_at_wall_nanos: generated_nanos(arbitrary),
+        };
+        let domain = |arbitrary: &mut nervix_arbitrary::Arbitrary<'_>| DomainEmaSnapshot {
+            value: generated_optional_f64(arbitrary),
+            last_at_nanos: generated_nanos(arbitrary),
+        };
+        Self {
+            wall_1m: wall(arbitrary),
+            wall_15m: wall(arbitrary),
+            domain_1m: domain(arbitrary),
+            domain_15m: domain(arbitrary),
+        }
+    }
+}
+
+#[cfg(test)]
+impl RollingHistogramsSnapshot {
+    fn generated(arbitrary: &mut nervix_arbitrary::Arbitrary<'_>) -> Self {
+        let buckets = |arbitrary: &mut nervix_arbitrary::Arbitrary<'_>| {
+            arbitrary.records(|arbitrary| RollingHistogramBucketSnapshot {
+                start_at_nanos: arbitrary.entropy().any_i64(),
+                values: arbitrary.records(|arbitrary| HdrRecordedValueSnapshot {
+                    value: arbitrary.entropy().any_u64(),
+                    count: arbitrary.entropy().any_u64(),
+                }),
+            })
+        };
+        Self {
+            wall_1m: WallRollingHistogramSnapshot {
+                buckets: buckets(arbitrary),
+            },
+            wall_15m: WallRollingHistogramSnapshot {
+                buckets: buckets(arbitrary),
+            },
+            domain_1m: DomainRollingHistogramSnapshot {
+                buckets: buckets(arbitrary),
+            },
+            domain_15m: DomainRollingHistogramSnapshot {
+                buckets: buckets(arbitrary),
+            },
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Archive, RkyvSerialize, RkyvDeserialize)]
 struct MetricSnapshotKey {
     domain: String,

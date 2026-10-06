@@ -95,6 +95,89 @@ pub(super) fn decode_branch_lru_snapshot(
         .collect()
 }
 
+/// A branch key's remote form as archived bytes, which tell apart what value equality does not:
+/// NaN payloads, signed zeros and datetime offsets.
+#[cfg(test)]
+fn key_bits(key: &Option<BranchKey>) -> Vec<u8> {
+    use meticulous::ResultExt as _;
+
+    rkyv::to_bytes::<rkyv::rancor::Error>(&BranchKey::to_remote_key(key))
+        .assured("a remote branch key archives")
+        .to_vec()
+}
+
+/// Asserts that `restored` holds exactly the entries of `expected`, in order, with bit-exact keys.
+#[cfg(test)]
+fn assert_same_entries(
+    restored: &[BranchInstanceSnapshotEntry<Option<BranchKey>>],
+    expected: &[BranchInstanceSnapshotEntry<Option<BranchKey>>],
+) {
+    assert_eq!(restored.len(), expected.len());
+    for (restored, expected) in restored.iter().zip(expected) {
+        assert_eq!(key_bits(&restored.key), key_bits(&expected.key));
+        assert_eq!(restored.last_ingestion, expected.last_ingestion);
+        assert_eq!(restored.incarnation, expected.incarnation);
+    }
+}
+
+/// A generated lifecycle snapshot stores through `stored`, the checkpoint envelope a node keeps it
+/// in, and restores every branch's typed key, last activity and incarnation in order. Its archive
+/// form, the remote key beside the same activity and incarnation, restores the same snapshot.
+#[cfg(test)]
+pub(in crate::runtime) fn assert_generated_lifecycle_survives(
+    arbitrary: &mut nervix_arbitrary::Arbitrary<'_>,
+    stored: impl FnOnce(Vec<u8>) -> Vec<u8>,
+) {
+    use meticulous::ResultExt as _;
+
+    let entries = arbitrary.records(|arbitrary| BranchInstanceSnapshotEntry {
+        key: BranchKey::generated_scope(arbitrary),
+        last_ingestion: arbitrary.timestamp(),
+        incarnation: arbitrary.positive_u64().get(),
+    });
+    let payload =
+        encode_branch_lru_snapshot(&entries).assured("a bounded generated lifecycle encodes");
+    let restored = decode_branch_lru_snapshot(&stored(payload.clone()))
+        .assured("a stored lifecycle decodes from its own encoding");
+    assert_same_entries(&restored, &entries);
+
+    let entity = nervix_models::ModelName::parse("lifecycle")
+        .assured("the fixed entity name follows the name rule");
+    let archived = super::backup_state::decode_backup_branch_lifecycle(&payload, &entity)
+        .assured("a stored lifecycle converts to its archive form");
+    let restored_payload = super::backup_state::encode_restored_branch_lifecycle(archived, &entity)
+        .assured("an archived lifecycle converts back");
+    let restored = decode_branch_lru_snapshot(&restored_payload)
+        .assured("a restored lifecycle decodes from its own encoding");
+    assert_same_entries(&restored, &entries);
+}
+
+/// Arbitrary bytes read as a stored lifecycle either fail with the snapshot's typed decode, key or
+/// incarnation failure, or restore entries that store back unchanged.
+#[cfg(test)]
+pub(in crate::runtime) fn assert_lifecycle_payload_decodes_typed(payload: &[u8]) {
+    use meticulous::ResultExt as _;
+
+    match decode_branch_lru_snapshot(payload) {
+        Ok(entries) => {
+            let encoded =
+                encode_branch_lru_snapshot(&entries).assured("a decoded lifecycle encodes");
+            let again =
+                decode_branch_lru_snapshot(&encoded).assured("a re-encoded lifecycle decodes");
+            assert_same_entries(&again, &entries);
+        }
+        Err(report) => assert!(
+            matches!(
+                report.current_context(),
+                BranchLruSnapshotError::Decode
+                    | BranchLruSnapshotError::BranchKey { .. }
+                    | BranchLruSnapshotError::Incarnation { .. }
+            ),
+            "{report:?}"
+        ),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
