@@ -266,6 +266,158 @@ jobs:
             target/native-coverage/test-deadlock-*/**/export.log
           if-no-files-found: warn
 
+  # The Deloxide diagnostic lane, only for a pull request labeled `deloxide`: every workload
+  # tests/deloxide-inventory.toml registers, in each selection's own build under the native
+  # coverage collector, then the qualification of the lane's supervision on deliberately failing
+  # processes. The selections share no compilation, so they run side by side. Diagnostic coverage
+  # stays in this job's artifact, apart from ordinary coverage and the CRAP gate.
+  deloxide:
+    name: deloxide (${{ matrix.selection }})
+    if: contains(github.event.pull_request.labels.*.name, 'deloxide')
+    runs-on: blacksmith-16vcpu-ubuntu-2404
+    # Setup, then at most the lane's bound, the qualification's bound and the reserve the uploads
+    # and the kache report keep after them.
+    timeout-minutes: 120
+    strategy:
+      # Each selection's verdict and evidence stand on their own.
+      fail-fast: false
+      matrix:
+        selection: [deloxide, deloxide-order]
+    permissions:
+      contents: read
+    env:
+      NO_COLOR: "1"
+      CARGO_TERM_COLOR: never
+      RUST_LOG_STYLE: never
+      SELECTION: ${{ matrix.selection }}
+    steps:
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@1.99
+        with:
+          targets: wasm32-unknown-unknown
+
+      - name: Install cargo tools
+        uses: taiki-e/install-action@v2
+        with:
+          tool: just@latest,toml-cli,cargo-llvm-cov,trunk,wild-linker
+
+      - name: Install Latest LLVM
+        run: |
+          wget https://apt.llvm.org/llvm.sh
+          chmod +x llvm.sh
+          sudo ./llvm.sh 23
+
+      - name: Configure cargo
+        run: |
+          tee <<EOF > ~/.cargo/config.toml
+          [target.x86_64-unknown-linux-gnu]
+          ar = "llvm-ar-23"
+          linker = "${GITHUB_WORKSPACE}/scripts/ci_linker.sh"
+          EOF
+
+      - name: Setup Go environment
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.22"
+
+      - name: Install TinyGo
+        run: |
+          set -euo pipefail
+          arch="$(dpkg --print-architecture)"
+          case "${arch}" in
+            amd64|arm64) ;;
+            *) echo "unsupported TinyGo CI architecture: ${arch}" >&2; exit 1 ;;
+          esac
+          curl --retry 3 --retry-delay 2 --retry-max-time 120 --connect-timeout 20 --max-time 120 -fsSLo /tmp/tinygo.deb "https://github.com/tinygo-org/tinygo/releases/download/v${TINYGO_VERSION}/tinygo_${TINYGO_VERSION}_${arch}.deb"
+          sudo dpkg -i /tmp/tinygo.deb
+          tinygo version
+
+      - name: Install apt deps
+        run: |
+          sudo apt update
+          sudo apt install -y \
+            libcurl4-openssl-dev \
+            protobuf-compiler
+
+      - name: Setup flatc
+        uses: Nugine/setup-flatc@v1
+        with:
+          version: "25.12.19"
+
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+
+      - name: Configure kache daemon remote
+        env:
+          KACHE_S3_BUCKET: ${{ vars.KACHE_BUCKET }}
+          KACHE_S3_REGION: ${{ vars.KACHE_BUCKET_REGION }}
+          KACHE_S3_ENDPOINT: ${{ vars.KACHE_BUCKET_ENDPOINT }}
+          KACHE_S3_ACCESS_KEY: ${{ secrets.KACHE_BUCKET_ACCESS_KEY_ID }}
+          KACHE_S3_SECRET_KEY: ${{ secrets.KACHE_BUCKET_SECRET_ACCESS_KEY }}
+        run: |
+          config="${RUNNER_TEMP}/kache-${GITHUB_JOB}-${SELECTION}.toml"
+          bash scripts/configure_kache_remote.sh "${config}"
+          echo "KACHE_CONFIG=${config}" >> "${GITHUB_ENV}"
+
+      - name: Setup kache
+        uses: kunobi-ninja/kache-action@v1
+        with:
+          version: ${{ env.KACHE_VERSION }}
+          github-cache: "false"
+          sync: "false"
+          cache-executables: "true"
+          max-size: "1TiB"
+          manifest-key: ${{ github.job }}-${{ matrix.selection }}-${{ runner.os }}-${{ runner.arch }}
+          pr-comment: "false"
+          s3-bucket: ${{ vars.KACHE_BUCKET }}
+          s3-prefix: "artifacts"
+          s3-region: ${{ vars.KACHE_BUCKET_REGION }}
+          s3-endpoint: ${{ vars.KACHE_BUCKET_ENDPOINT }}
+          s3-access-key-id: ${{ secrets.KACHE_BUCKET_ACCESS_KEY_ID }}
+          s3-secret-access-key: ${{ secrets.KACHE_BUCKET_SECRET_ACCESS_KEY }}
+
+      # The bound covers the prerequisites, the diagnostic builds and workloads inside the
+      # inventory's budget, and the coverage export. At its end the collector and the lane each
+      # record their attempt as interrupted and end every process they started.
+      - name: Diagnostic lane
+        run: |
+          just toolchains-install
+          timeout --signal=TERM --kill-after=60 95m just coverage-native-extras "test-${SELECTION}"
+
+      - name: Supervision qualification
+        run: timeout --signal=TERM --kill-after=60 10m just test-deloxide-qualification "${SELECTION}"
+
+      # Every attempt's record, logs, evidence and finding descriptions, whatever its verdict: a
+      # failed lane is investigated and replayed from what it kept. The raw profiles stay here.
+      - name: Upload diagnostic lane evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: deloxide-${{ matrix.selection }}
+          path: |
+            target/native-coverage/test-${{ matrix.selection }}/**/completion.json
+            target/native-coverage/test-${{ matrix.selection }}/**/lcov.info
+            target/native-coverage/test-${{ matrix.selection }}/**/executions.jsonl
+            target/native-coverage/test-${{ matrix.selection }}/**/export.log
+            target/native-coverage/test-${{ matrix.selection }}/**/lane.json
+            target/native-coverage-build-${{ matrix.selection }}/test-deloxide/
+            target/deloxide/test-deloxide/
+          if-no-files-found: warn
+
+      - name: Publish kache report
+        if: always()
+        run: python3 scripts/publish_kache_report.py "${RUNNER_TEMP}/kache-report"
+
+      - name: Upload kache report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: kache-${{ github.job }}-${{ matrix.selection }}-${{ runner.os }}-${{ runner.arch }}
+          path: ${{ runner.temp }}/kache-report
+          if-no-files-found: warn
+
   tests:
     name: tests
     runs-on: blacksmith-16vcpu-ubuntu-2404

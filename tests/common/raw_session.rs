@@ -60,8 +60,10 @@ use tonic::{
 
 use super::cluster::{dev_tls_ca_pem, test_basic_authorization};
 
-/// How long a session waits for the reply to a request it just sent.
-const REPLY_TIMEOUT: Duration = Duration::from_secs(120);
+/// How long a session waits for the reply to a request it just sent. A wait ends as soon as the
+/// reply arrives, so the bound is generous: a START that compiles a WASM processor on every node of a
+/// coverage-instrumented diagnostic build, on a loaded machine, has taken more than two minutes.
+const REPLY_TIMEOUT: Duration = Duration::from_secs(300);
 
 /// A row a subscription delivered, as a client displays it.
 #[derive(Debug, Clone)]
@@ -599,6 +601,17 @@ fn subscription_outcome(
 /// Whether a command completed.
 pub(crate) fn outcome_succeeded(outcome: &CommandOutcome) -> bool {
     matches!(outcome.disposition, CommandDisposition::Completed { .. })
+}
+
+/// Whether the leader that admitted the command lost leadership before its outcome was known: the
+/// same execution reference, sent again to the current leader, learns it.
+pub(crate) fn outcome_unknown(outcome: &CommandOutcome) -> bool {
+    matches!(outcome.disposition, CommandDisposition::OutcomeUnknown(_))
+}
+
+/// Whether the node that received the command is not the leader.
+pub(crate) fn outcome_not_leader(outcome: &CommandOutcome) -> bool {
+    matches!(outcome.disposition, CommandDisposition::NotLeader(_))
 }
 
 /// The questions scenarios ask of a wire outcome, spelled the way the native client spells them.
