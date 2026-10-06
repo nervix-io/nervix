@@ -52,7 +52,11 @@ The VM compiler, batch constructors, runtime, and `FunctionInjector` return `err
 reports with their semantic `CompileError` or `RuntimeError` context. A compile error retains a
 typed code, its existing stable code spelling through `code()`, the operation span, and a safe
 message. Registry validation adds the owning model and route while retaining the VM report.
-Runtime plan binding likewise adds its operation above the original VM report. Roto UDF setup
+Runtime plan binding likewise adds its operation above the original VM report: a
+`RuntimeVmCompileError` names the program and its node, such as a filter, a FILTER-MAP route, an
+output branch construction or a generator output, and its caller names the domain above that. A
+lowering, `LOOKUP_HASH_MAP` or materialized-state binding failure stays beneath the same program
+context instead of being rendered into its text. Roto UDF setup
 returns `UdfError` reports; its injected calls return VM runtime reports, retaining an underlying
 Arrow failure when one caused the call to fail. Jaq compilation, evaluation, and format conversion
 return their own typed reports to the codec or signaling caller. These reports are batch or setup
@@ -733,8 +737,8 @@ bodies are encoded and decoded on, their whole capacity.
 
 Admission can refuse. A class whose wait queue is full refuses the execution with
 `RuntimeError::ExecutionNotAdmitted`, and a job that panics on its worker returns
-`RuntimeError::ExecutionPanicked`. Both are batch errors, which a processor's general error policy
-handles like any other.
+`RuntimeError::ExecutionPanicked`. Both are batch errors, which reach the node's error policy as
+the report of the planned step that ran the program, like any other batch failure.
 
 An inline execution never yields and has no cancellation point: it runs every instruction over
 its batch to completion, and the batch's size and the limits above bound that work. An admitted

@@ -194,7 +194,10 @@ impl InterconnectRelayPayloadLane {
                         result,
                     } = completed;
                     if let Err(error) = result {
-                        warn!(error = %error, "failed to process remote relay payload");
+                        warn!(
+                            error = %format_args!("{error:#}"),
+                            "failed to process remote relay payload"
+                        );
                     }
                     let next = queued
                         .get_mut(&channel)

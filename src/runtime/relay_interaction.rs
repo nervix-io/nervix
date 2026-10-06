@@ -31,6 +31,7 @@
 use std::{future::pending, task::Poll};
 
 use ahash::{HashSet, HashSetExt};
+use error_stack::Report;
 use futures_util::{StreamExt as _, stream::FuturesUnordered};
 use indexmap::IndexMap;
 use meticulous::OptionExt as _;
@@ -46,33 +47,43 @@ use super::{
 };
 use crate::runtime_ack::AckSet;
 
+/// Why a relay interaction could not be built from its declared inputs, or could not go on
+/// delivering the input it already accepted. The consumer that owns the interaction names itself
+/// when it reports the failure.
 #[derive(Debug, Error)]
 pub(super) enum RelayInteractionError {
     #[error("relay interaction requires at least one input")]
     NoInputs,
     #[error("relay interaction input relay '{relay}' is declared more than once")]
     DuplicateInput { relay: RelayName },
-    #[error("failed to concatenate collected input from relay '{relay}': {reason}")]
-    Concatenate {
-        relay: RelayName,
-        reason: String,
-        acks: AckSet,
-    },
-    #[error("failed to wait for collected relay input: {reason}")]
-    CollectionTiming { reason: String, acks: AckSet },
-    #[error("failed to resolve the relay consumer's own wake deadline: {reason}")]
-    WakeTiming { reason: String, acks: AckSet },
+    #[error("failed to collect input from relay '{relay}'")]
+    CollectInput { relay: RelayName },
+    #[error("failed to wait for collected relay input")]
+    CollectionTiming,
+    #[error("failed to resolve the relay consumer's own wake deadline")]
+    WakeTiming,
 }
 
 impl RelayInteractionError {
-    pub(super) fn acks(&self) -> Option<&AckSet> {
+    /// Whether the consumer could not resolve a deadline of its own, rather than one the
+    /// interaction collects input for.
+    pub(super) const fn is_wake_timing(&self) -> bool {
         match self {
-            Self::Concatenate { acks, .. }
-            | Self::CollectionTiming { acks, .. }
-            | Self::WakeTiming { acks, .. } => Some(acks),
-            Self::NoInputs | Self::DuplicateInput { .. } => None,
+            Self::WakeTiming => true,
+            Self::NoInputs
+            | Self::DuplicateInput { .. }
+            | Self::CollectInput { .. }
+            | Self::CollectionTiming => false,
         }
     }
+}
+
+/// A relay interaction that failed after it accepted input, together with the acknowledgements of
+/// every batch it still held. Its consumer resolves them under its own error policy.
+#[derive(Debug)]
+pub(super) struct RelayInteractionFailure {
+    pub(super) error: Report<RelayInteractionError>,
+    pub(super) acks: AckSet,
 }
 
 /// Commands classify whether already accepted relay input must be handled before the command.
@@ -175,10 +186,38 @@ enum RelayInputCollectionMode {
     },
 }
 
+/// Why collecting the input of one relay failed. The interaction names the relay above it.
+#[derive(Debug, Error)]
+enum RelayInputCollectionError {
+    #[error("could not read the domain clock while collecting input")]
+    CollectClock,
+    #[error("could not read the domain clock while releasing input")]
+    ReleaseClock,
+    #[error("could not inspect a collected-input deadline")]
+    InspectDeadline,
+    #[error("failed to concatenate collected input")]
+    Concatenate,
+}
+
+/// A collection failure, together with the acknowledgements of the input the collection held.
 #[derive(Debug)]
-struct RelayInputCollectionError {
-    reason: String,
+struct RelayInputCollectionFailure {
+    error: Report<RelayInputCollectionError>,
     acks: AckSet,
+}
+
+impl RelayInputCollectionFailure {
+    /// The same failure as one of the interaction, beneath the relay whose input it collected.
+    fn into_interaction_failure(self, relay: &RelayName) -> RelayInteractionFailure {
+        RelayInteractionFailure {
+            error: self
+                .error
+                .change_context(RelayInteractionError::CollectInput {
+                    relay: relay.clone(),
+                }),
+            acks: self.acks,
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -208,7 +247,7 @@ impl RelayInputCollection {
     fn push(
         &mut self,
         batch: RelayRecordBatch,
-    ) -> Result<Option<RelayRecordBatch>, RelayInputCollectionError> {
+    ) -> Result<Option<RelayRecordBatch>, RelayInputCollectionFailure> {
         let (policy, domain_clock) = match &self.mode {
             RelayInputCollectionMode::Immediate => return Ok(Some(batch)),
             RelayInputCollectionMode::Collect {
@@ -216,12 +255,15 @@ impl RelayInputCollection {
                 domain_clock,
             } => (*policy, domain_clock),
         };
-        let snapshot = domain_clock
-            .snapshot()
-            .map_err(|error| RelayInputCollectionError {
-                reason: format!("could not read the domain clock while collecting input: {error}"),
-                acks: batch.merged_acks(),
-            })?;
+        let snapshot = match domain_clock.snapshot() {
+            Ok(snapshot) => snapshot,
+            Err(error) => {
+                return Err(RelayInputCollectionFailure {
+                    error: error.change_context(RelayInputCollectionError::CollectClock),
+                    acks: batch.merged_acks(),
+                });
+            }
+        };
         let key = batch.key.clone();
         let collection = self
             .pending
@@ -253,25 +295,31 @@ impl RelayInputCollection {
             .collect()
     }
 
-    fn take_due(&mut self) -> Result<Option<RelayRecordBatch>, RelayInputCollectionError> {
+    fn take_due(&mut self) -> Result<Option<RelayRecordBatch>, RelayInputCollectionFailure> {
         let domain_clock = match &self.mode {
             RelayInputCollectionMode::Immediate => return Ok(None),
             RelayInputCollectionMode::Collect { domain_clock, .. } => domain_clock.clone(),
         };
-        let snapshot = domain_clock
-            .snapshot()
-            .map_err(|error| RelayInputCollectionError {
-                reason: format!("could not read the domain clock while releasing input: {error}"),
-                acks: self.pending_acks(),
-            })?;
+        let snapshot = match domain_clock.snapshot() {
+            Ok(snapshot) => snapshot,
+            Err(error) => {
+                return Err(RelayInputCollectionFailure {
+                    error: error.change_context(RelayInputCollectionError::ReleaseClock),
+                    acks: self.pending_acks(),
+                });
+            }
+        };
         let mut due_key = None;
         for (key, collection) in &self.pending {
-            let is_due = collection
-                .is_due(&domain_clock, &snapshot)
-                .map_err(|error| RelayInputCollectionError {
-                    reason: format!("could not inspect a collected-input deadline: {error}"),
-                    acks: self.pending_acks(),
-                })?;
+            let is_due = match collection.is_due(&domain_clock, &snapshot) {
+                Ok(is_due) => is_due,
+                Err(error) => {
+                    return Err(RelayInputCollectionFailure {
+                        error: error.change_context(RelayInputCollectionError::InspectDeadline),
+                        acks: self.pending_acks(),
+                    });
+                }
+            };
             if is_due {
                 due_key = Some(key.clone());
                 break;
@@ -284,7 +332,7 @@ impl RelayInputCollection {
         self.take(&key).map(Some)
     }
 
-    fn take_any(&mut self) -> Result<Option<RelayRecordBatch>, RelayInputCollectionError> {
+    fn take_any(&mut self) -> Result<Option<RelayRecordBatch>, RelayInputCollectionFailure> {
         let Some((key, _)) = self.pending.first() else {
             return Ok(None);
         };
@@ -295,7 +343,7 @@ impl RelayInputCollection {
     fn take(
         &mut self,
         key: &Option<BranchKey>,
-    ) -> Result<RelayRecordBatch, RelayInputCollectionError> {
+    ) -> Result<RelayRecordBatch, RelayInputCollectionFailure> {
         let mut collection = self
             .pending
             .shift_remove(key)
@@ -307,14 +355,20 @@ impl RelayInputCollection {
         if let Some(counters) = &self.quiesce_counters {
             counters.withdraw_admitted(collection.pending_len());
         }
-        RelayRecordBatch::concat_preserving(collection.take_pending()).map_err(|error| {
-            let error = *error;
-            let acks = AckSet::merged(error.preserved.iter().map(RelayRecordBatch::merged_acks));
-            RelayInputCollectionError {
-                reason: error.error.to_string(),
-                acks,
+        match RelayRecordBatch::concat_preserving(collection.take_pending()) {
+            Ok(batch) => Ok(batch),
+            Err(failure) => {
+                let failure = *failure;
+                let acks =
+                    AckSet::merged(failure.preserved.iter().map(RelayRecordBatch::merged_acks));
+                Err(RelayInputCollectionFailure {
+                    error: failure
+                        .error
+                        .change_context(RelayInputCollectionError::Concatenate),
+                    acks,
+                })
             }
-        })
+        }
     }
 
     fn pending_acks(&self) -> AckSet {
@@ -370,15 +424,17 @@ impl RelayInteractionInputs {
     fn new(
         inputs: Vec<RelayInteractionInput>,
         quiesce_counters: Option<Arc<NodeQuiesceCounters>>,
-    ) -> Result<Self, RelayInteractionError> {
+    ) -> error_stack::Result<Self, RelayInteractionError> {
         if inputs.is_empty() {
-            return Err(RelayInteractionError::NoInputs);
+            return Err(Report::new(RelayInteractionError::NoInputs));
         }
         let mut declared = HashSet::new();
         let mut sources = Vec::with_capacity(inputs.len());
         for input in inputs {
             if !declared.insert(input.relay.clone()) {
-                return Err(RelayInteractionError::DuplicateInput { relay: input.relay });
+                return Err(Report::new(RelayInteractionError::DuplicateInput {
+                    relay: input.relay,
+                }));
             }
             sources.push(RelayInteractionSource {
                 relay: input.relay,
@@ -483,17 +539,16 @@ impl RelayInteractionInputs {
         &mut self,
         source: usize,
         batch: RelayRecordBatch,
-    ) -> Result<Option<(RelayName, RelayRecordBatch)>, RelayInteractionError> {
+    ) -> Result<Option<(RelayName, RelayRecordBatch)>, RelayInteractionFailure> {
         let relay = self.sources[source].relay.clone();
-        self.sources[source]
-            .collection
-            .push(batch)
-            .map(|batch| batch.map(|batch| (relay.clone(), batch)))
-            .map_err(|error| RelayInteractionError::Concatenate {
-                relay,
-                reason: error.reason,
-                acks: error.acks,
-            })
+        let collected = match self.sources[source].collection.push(batch) {
+            Ok(collected) => collected,
+            Err(failure) => return Err(failure.into_interaction_failure(&relay)),
+        };
+        let Some(batch) = collected else {
+            return Ok(None);
+        };
+        Ok(Some((relay, batch)))
     }
 
     fn collection_deadlines(&self) -> Vec<(DomainClock, BranchBufferDeadline)> {
@@ -512,19 +567,16 @@ impl RelayInteractionInputs {
         &mut self,
         mut take: impl FnMut(
             &mut RelayInputCollection,
-        ) -> Result<Option<RelayRecordBatch>, RelayInputCollectionError>,
-    ) -> Result<Option<(RelayName, RelayRecordBatch)>, RelayInteractionError> {
+        ) -> Result<Option<RelayRecordBatch>, RelayInputCollectionFailure>,
+    ) -> Result<Option<(RelayName, RelayRecordBatch)>, RelayInteractionFailure> {
         let source_count = self.sources.len();
         for offset in 0..source_count {
             let index = (self.collection_cursor + offset) % source_count;
             let relay = self.sources[index].relay.clone();
-            let batch = take(&mut self.sources[index].collection).map_err(|error| {
-                RelayInteractionError::Concatenate {
-                    relay: relay.clone(),
-                    reason: error.reason,
-                    acks: error.acks,
-                }
-            })?;
+            let batch = match take(&mut self.sources[index].collection) {
+                Ok(batch) => batch,
+                Err(failure) => return Err(failure.into_interaction_failure(&relay)),
+            };
             if let Some(batch) = batch {
                 self.collection_cursor = (index + 1) % source_count;
                 return Ok(Some((relay, batch)));
@@ -578,7 +630,7 @@ impl RelayInteraction<NoRelayInteractionCommand> {
         shutdown_rx: watch::Receiver<bool>,
         force_flush: Option<DomainForceFlushParticipant>,
         quiesce_counters: Option<Arc<NodeQuiesceCounters>>,
-    ) -> Result<Self, RelayInteractionError> {
+    ) -> error_stack::Result<Self, RelayInteractionError> {
         Self::build(inputs, shutdown_rx, force_flush, quiesce_counters, None)
     }
 }
@@ -590,7 +642,7 @@ impl<C: RelayInteractionCommand> RelayInteraction<C> {
         force_flush: Option<DomainForceFlushParticipant>,
         quiesce_counters: Option<Arc<NodeQuiesceCounters>>,
         commands: mpsc::Receiver<C>,
-    ) -> Result<Self, RelayInteractionError> {
+    ) -> error_stack::Result<Self, RelayInteractionError> {
         Self::build(
             inputs,
             shutdown_rx,
@@ -606,7 +658,7 @@ impl<C: RelayInteractionCommand> RelayInteraction<C> {
         force_flush: Option<DomainForceFlushParticipant>,
         quiesce_counters: Option<Arc<NodeQuiesceCounters>>,
         commands: Option<mpsc::Receiver<C>>,
-    ) -> Result<Self, RelayInteractionError> {
+    ) -> error_stack::Result<Self, RelayInteractionError> {
         let (drain_shutdown_tx, drain_shutdown_rx) = watch::channel(false);
         Ok(Self {
             inputs: RelayInteractionInputs::new(inputs, quiesce_counters.clone())?,
@@ -643,7 +695,7 @@ impl<C: RelayInteractionCommand> RelayInteraction<C> {
     pub(super) async fn next(
         &mut self,
         wake: RuntimeWake,
-    ) -> Result<RelayInteractionWork<C>, RelayInteractionError> {
+    ) -> Result<RelayInteractionWork<C>, RelayInteractionFailure> {
         self.next_with_input(wake, true).await
     }
 
@@ -656,7 +708,7 @@ impl<C: RelayInteractionCommand> RelayInteraction<C> {
         &mut self,
         wake: RuntimeWake,
         receive_input: bool,
-    ) -> Result<RelayInteractionWork<C>, RelayInteractionError> {
+    ) -> Result<RelayInteractionWork<C>, RelayInteractionFailure> {
         if self.drain.is_none() {
             self.suppress_shutdown = false;
             self.terminal_drain = false;
@@ -691,7 +743,7 @@ impl<C: RelayInteractionCommand> RelayInteraction<C> {
                 continue;
             }
 
-            if let Some(completion) = self.force_flush_changed()? {
+            if let Some(completion) = self.force_flush_changed() {
                 self.begin_drain(DrainFinish::ForceFlush(completion), receive_input);
                 continue;
             }
@@ -705,8 +757,8 @@ impl<C: RelayInteractionCommand> RelayInteraction<C> {
                 Ok(true) => return Ok(self.work(RelayInteractionEvent::Wake)),
                 Ok(false) => {}
                 Err(error) => {
-                    return Err(RelayInteractionError::WakeTiming {
-                        reason: error.to_string(),
+                    return Err(RelayInteractionFailure {
+                        error: error.change_context(RelayInteractionError::WakeTiming),
                         acks: self.inputs.pending_acks(),
                     });
                 }
@@ -763,16 +815,16 @@ impl<C: RelayInteractionCommand> RelayInteraction<C> {
                     true,
                 ),
                 Selected::Wake(Ok(())) => return Ok(self.work(RelayInteractionEvent::Wake)),
-                Selected::Wake(Err(reason)) => {
-                    return Err(RelayInteractionError::WakeTiming {
-                        reason: reason.to_string(),
+                Selected::Wake(Err(error)) => {
+                    return Err(RelayInteractionFailure {
+                        error: error.change_context(RelayInteractionError::WakeTiming),
                         acks: self.inputs.pending_acks(),
                     });
                 }
                 Selected::CollectionDue(Ok(())) => {}
-                Selected::CollectionDue(Err(reason)) => {
-                    return Err(RelayInteractionError::CollectionTiming {
-                        reason: reason.to_string(),
+                Selected::CollectionDue(Err(error)) => {
+                    return Err(RelayInteractionFailure {
+                        error: error.change_context(RelayInteractionError::CollectionTiming),
                         acks: self.inputs.pending_acks(),
                     });
                 }
@@ -822,20 +874,18 @@ impl<C: RelayInteractionCommand> RelayInteraction<C> {
         }
     }
 
-    fn force_flush_changed(
-        &mut self,
-    ) -> Result<Option<DomainForceFlushCompletion>, RelayInteractionError> {
+    fn force_flush_changed(&mut self) -> Option<DomainForceFlushCompletion> {
         let Some(force_flush) = &mut self.force_flush else {
-            return Ok(None);
+            return None;
         };
         match force_flush.pending_completion() {
-            Ok(completion) => Ok(completion),
+            Ok(completion) => completion,
             Err(()) => {
                 self.begin_drain(
                     DrainFinish::Stop(RelayInteractionStop::ForceFlushClosed),
                     true,
                 );
-                Ok(None)
+                None
             }
         }
     }
@@ -859,7 +909,9 @@ impl<C: RelayInteractionCommand> RelayInteraction<C> {
         }
     }
 
-    async fn next_drain_work(&mut self) -> Result<RelayInteractionWork<C>, RelayInteractionError> {
+    async fn next_drain_work(
+        &mut self,
+    ) -> Result<RelayInteractionWork<C>, RelayInteractionFailure> {
         loop {
             nervix_primitives::task::consume_budget().await;
             let ready = {
@@ -968,8 +1020,10 @@ mod tests {
     use super::*;
     use crate::{
         runtime::{
-            BranchKey, NodeQuiesceCounters, RelayBroadcast, RelayRecordBatch, RelayRuntimeFanIn,
-            RuntimeInputCollectPolicy, domain, force_flush::DomainForceFlush, test_domain_clock,
+            BranchKey, DomainClockAccessError, DomainClockLifecycle, NodeQuiesceCounters,
+            RelayBroadcast, RelayRecordBatch, RelayRuntimeFanIn, RuntimeInputCollectPolicy, domain,
+            force_flush::DomainForceFlush, test_domain_clock, test_domain_clock_authority,
+            unpaced_domain_state,
         },
         runtime_ack::{AckOutcome, AckSet},
         runtime_schema::{CompiledSchema, RuntimeValue, compile_schema, test_runtime_row},
@@ -2261,16 +2315,37 @@ mod tests {
                 .expect("interaction must build");
         force_flush.request();
 
-        let error = match interaction.next(RuntimeWake::never()).await {
+        let failure = match interaction.next(RuntimeWake::never()).await {
             Ok(_) => panic!("incompatible collected schemas must fail concatenation"),
-            Err(error) => error,
+            Err(failure) => failure,
         };
-        assert!(matches!(error, RelayInteractionError::Concatenate { .. }));
-        let reason = error.to_string();
-        error
-            .acks()
-            .expect("concatenation error must retain ACK ownership")
-            .no_ack(reason.clone());
+        let RelayInteractionError::CollectInput { relay } = failure.error.current_context() else {
+            panic!(
+                "a failed collection must name its relay, got {:?}",
+                failure.error.current_context()
+            );
+        };
+        assert_eq!(relay.as_str(), "events");
+        assert!(matches!(
+            failure.error.downcast_ref::<RelayInputCollectionError>(),
+            Some(RelayInputCollectionError::Concatenate)
+        ));
+        assert!(
+            failure
+                .error
+                .downcast_ref::<crate::runtime::relay_batch::RelayRecordBatchError>()
+                .is_some(),
+            "the relay batch failure must stay beneath the collection"
+        );
+        let reason = format!("{:#}", failure.error);
+        assert!(
+            reason.starts_with(
+                "failed to collect input from relay 'events': failed to concatenate collected \
+                 input: "
+            ),
+            "unexpected relay interaction failure: {reason}"
+        );
+        failure.acks.no_ack(reason.clone());
         assert_eq!(
             first_completion.wait().await,
             AckOutcome::NoAck(reason.clone())
@@ -2304,19 +2379,21 @@ mod tests {
                 .is_none()
         );
 
-        let error = match collection.push(alternate_batch(second_acks)) {
+        let failure = match collection.push(alternate_batch(second_acks)) {
             Ok(_) => panic!("size-triggered incompatible schemas must fail concatenation"),
-            Err(error) => error,
+            Err(failure) => failure,
         };
-        error.acks.no_ack(error.reason.clone());
+        assert!(matches!(
+            failure.error.current_context(),
+            RelayInputCollectionError::Concatenate
+        ));
+        let reason = format!("{:#}", failure.error);
+        failure.acks.no_ack(reason.clone());
         assert_eq!(
             first_completion.wait().await,
-            AckOutcome::NoAck(error.reason.clone())
+            AckOutcome::NoAck(reason.clone())
         );
-        assert_eq!(
-            second_completion.wait().await,
-            AckOutcome::NoAck(error.reason)
-        );
+        assert_eq!(second_completion.wait().await, AckOutcome::NoAck(reason));
     }
 
     #[test]
@@ -2326,15 +2403,164 @@ mod tests {
             Ok(_) => panic!("empty interaction must fail"),
             Err(error) => error,
         };
-        assert!(matches!(&no_inputs, RelayInteractionError::NoInputs));
-        assert!(no_inputs.acks().is_none());
+        assert!(matches!(
+            no_inputs.current_context(),
+            RelayInteractionError::NoInputs
+        ));
 
         let (first, _first_broadcast) = source("same", 1, None);
         let (second, _second_broadcast) = source("same", 1, None);
         let (_shutdown_tx, shutdown_rx) = nervix_primitives::sync::watch::channel(false);
+        let duplicate = match RelayInteraction::new(vec![first, second], shutdown_rx, None, None) {
+            Ok(_) => panic!("an interaction must refuse a relay declared twice"),
+            Err(error) => error,
+        };
+        assert_eq!(
+            duplicate.to_string(),
+            "relay interaction input relay 'same' is declared more than once"
+        );
+    }
+
+    /// A clock lifecycle whose installation a test stops, so every clock bound from it fails to
+    /// read the domain time from then on.
+    fn stoppable_clock() -> DomainClockLifecycle {
+        let domain = domain("relay_interaction");
+        let lifecycle = DomainClockLifecycle::new(domain.clone());
+        lifecycle.synchronize(
+            &unpaced_domain_state(domain.as_str()),
+            &test_domain_clock_authority(),
+        );
+        lifecycle
+    }
+
+    /// The generation the unpaced fixture installs.
+    const STOPPED_GENERATION: u64 = 0;
+
+    #[nervix_primitives::test]
+    async fn an_interaction_whose_collection_clock_stopped_fails_naming_its_relay() {
+        let lifecycle = stoppable_clock();
+        let relay = RelayName::parse("events").expect("valid relay");
+        let broadcast =
+            RelayBroadcast::with_capacity(NonZeroUsize::new(1).expect("nonzero test capacity"));
+        let input = RelayInteractionInput::collecting(
+            relay,
+            RelayRuntimeFanIn::new(broadcast.new_receiver()),
+            RuntimeInputCollectPolicy {
+                interval: std::time::Duration::from_secs(60),
+                max_batch_size: None,
+            },
+            lifecycle
+                .bind()
+                .expect("the fixture installs an unpaced domain clock"),
+        );
+        let (_shutdown_tx, shutdown_rx) = nervix_primitives::sync::watch::channel(false);
+        let mut interaction = RelayInteraction::<NoRelayInteractionCommand>::new(
+            vec![input],
+            shutdown_rx,
+            None,
+            None,
+        )
+        .expect("interaction must build");
+        lifecycle.stop(STOPPED_GENERATION);
+
+        let failure = match interaction.next(RuntimeWake::never()).await {
+            Ok(_) => panic!("a collection whose clock stopped cannot release its input"),
+            Err(failure) => failure,
+        };
+        let reason = format!("{:#}", failure.error);
+        assert_eq!(
+            reason,
+            "failed to collect input from relay 'events': could not read the domain clock while \
+             releasing input: domain 'relay_interaction' clock generation 0 is stopped"
+        );
+        assert!(!failure.error.current_context().is_wake_timing());
+    }
+
+    #[nervix_primitives::test]
+    async fn collected_input_whose_clock_stopped_fails_with_every_held_ack() {
+        let lifecycle = stoppable_clock();
+        let mut collection = RelayInputCollection::new(
+            RelayInputCollectionMode::Collect {
+                policy: RuntimeInputCollectPolicy {
+                    interval: std::time::Duration::from_secs(60),
+                    max_batch_size: None,
+                },
+                domain_clock: lifecycle
+                    .bind()
+                    .expect("the fixture installs an unpaced domain clock"),
+            },
+            None,
+        );
+        let (acks, completion) = AckSet::root();
+        let collected = collection
+            .push(batch_with(1, None, acks))
+            .expect("a running clock collects the batch");
+        assert!(collected.is_none(), "the batch waits for its interval");
+        lifecycle.stop(STOPPED_GENERATION);
+
+        let (refused_acks, refused_completion) = AckSet::root();
+        let refused = match collection.push(batch_with(2, None, refused_acks)) {
+            Ok(_) => panic!("a collection whose clock stopped cannot hold another batch"),
+            Err(failure) => failure,
+        };
         assert!(matches!(
-            RelayInteraction::new(vec![first, second], shutdown_rx, None, None),
-            Err(RelayInteractionError::DuplicateInput { .. })
+            refused.error.current_context(),
+            RelayInputCollectionError::CollectClock
         ));
+        let refused_reason = format!("{:#}", refused.error);
+        refused.acks.no_ack(refused_reason.clone());
+        assert_eq!(
+            refused_completion.wait().await,
+            AckOutcome::NoAck(refused_reason)
+        );
+
+        let failure = match collection.take_due() {
+            Ok(_) => panic!("a collection whose clock stopped cannot release its input"),
+            Err(failure) => failure,
+        };
+        assert!(matches!(
+            failure.error.current_context(),
+            RelayInputCollectionError::ReleaseClock
+        ));
+        assert!(failure.error.contains::<DomainClockAccessError>());
+        let reason = format!("{:#}", failure.error);
+        failure.acks.no_ack(reason.clone());
+        assert_eq!(completion.wait().await, AckOutcome::NoAck(reason));
+    }
+
+    #[nervix_primitives::test]
+    async fn a_wake_its_clock_cannot_resolve_fails_as_wake_timing() {
+        let lifecycle = stoppable_clock();
+        let clock = lifecycle
+            .bind()
+            .expect("the fixture installs an unpaced domain clock");
+        let now = clock
+            .snapshot()
+            .expect("a running clock reads the domain time")
+            .now();
+        let due_at = now
+            .checked_add(std::time::Duration::from_secs(60))
+            .expect("one minute after now is a timestamp");
+        let wake = RuntimeWake::never().with_buffer(
+            &clock,
+            BranchBufferDeadline::Logical(clock.deadline_at(due_at)),
+        );
+        let (input, _broadcast) = source("events", 1, None);
+        let (_shutdown_tx, shutdown_rx) = nervix_primitives::sync::watch::channel(false);
+        let mut interaction = RelayInteraction::<NoRelayInteractionCommand>::new(
+            vec![input],
+            shutdown_rx,
+            None,
+            None,
+        )
+        .expect("interaction must build");
+        lifecycle.stop(STOPPED_GENERATION);
+
+        let failure = match interaction.next(wake).await {
+            Ok(_) => panic!("a wake whose clock stopped cannot be resolved"),
+            Err(failure) => failure,
+        };
+        assert!(failure.error.current_context().is_wake_timing());
+        assert!(failure.error.contains::<DomainClockAccessError>());
     }
 }
