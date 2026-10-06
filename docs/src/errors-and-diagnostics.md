@@ -73,6 +73,13 @@ conversion. A codec or runtime caller retains that report under its operation co
 errors remain typed values in the batch outcome and are formatted only when a message error is
 reported; this conversion does not turn them into report allocations per row.
 
+Binding a lowered program on a node returns a `RuntimeVmCompileError` report that names the
+program and its node: a filter, a FILTER-MAP route, an output branch construction, a WASM output
+construction or its refused `INVOKE`, and a generator output. The lowering, `LOOKUP_HASH_MAP`,
+materialized-state binding or VM compile failure stays beneath it. The binding names no domain;
+its caller adds that context above it, as the processor plan, the entrypoint binding, and an
+emitter's or generator's start do.
+
 The WASM FlatBuffers decoder reports protocol failures with their verified payload cause. It checks
 the complete header length before reading the identifier; a truncated header returns the typed
 length or identifier error even when its size prefix matches the received bytes. The Rust
@@ -527,7 +534,9 @@ against the node's schemas, lookups, state and UDFs, and a route or input the no
 The last carries the runtime planning failure beneath it, such as a relay without its registry or
 an unparseable flush or collection cadence, rather than restating it. Runtime installation adds
 domain context to either report, and an ingestor that fails to start while its domain execution is
-built records that report as its transient error.
+built records that report as its transient error. A program that does not compile keeps the
+runtime binding's `RuntimeVmCompileError` beneath the binding context, and the domain's binding
+failure renders the whole chain, ending with the VM's own `CompileError`.
 
 Starting an ingestor on a node returns an `IngestorStartError` report. An ingestor already running,
 a domain execution or codec the node has not instantiated, and a binding failure beneath the
@@ -549,6 +558,28 @@ attributes, and invalid Iceberg commit settings. Each report names the emitter a
 predicate, its relay. The decision fails before a new emitter plan or remote consumer edge is
 published. Binding a valid plan against installed schemas and UDFs may still fail during startup;
 opening an external sink may fail independently and follows the emitter's retry policy.
+
+Starting an emitter on a node returns an `EmitterStartError` report. `EmitterStartError::Start`
+names the emitter and its domain, and the step that failed stays beneath it: an input relay the
+node has no schema or resolved branching for, a client whose configuration does not resolve, a
+codec the node has not instantiated or that cannot hold a batch, a route, HTTP request fields,
+ordering group or `FROM WHERE` that does not compile, with the compile failure beneath it, and an
+invalid sink client configuration or input collection policy. Starting a generator returns a
+`GeneratorError` report the same way: `GeneratorError::Start` names the generator and its domain
+above an output relay the node has not instantiated, an output program that does not compile, a
+cadence the domain clock cannot bind, an invalid output flush policy, or a source relay without a
+dispatch gate. A runtime caller that still returns `RuntimeError` keeps either report whole in
+`RuntimeError::EmitterStart` or `RuntimeError::GeneratorStart`, whose message is the report's
+chain, such as `failed to start emitter 'audit' in domain 'edge': the route program did not
+compile: FILTER-MAP compile failed for 'audit': ...`.
+
+Stopping an emitter's task to swap it fails as a `ScheduledEmitterStopFailure`, which keeps the
+task running beside a `ScheduledEmitterStopError` report: the task was unavailable, did not accept
+its stop command in time, dropped its answer, did not drain before its deadline, or answered that
+its drain failed, with the task's own failure beneath. The swap installs the retained task again
+and fails with `RuntimeError::BuildDomainExecution`, whose reason is the failure's description:
+the task's own description of its drain failure when it answered that its drain failed, and
+otherwise the stop error itself. A later stop can still end the retained task.
 
 Node startup validates execution memory limits before admitting any work. A Commands budget must
 hold both the bounded resident replication window and one bounded normalized command-state write;
@@ -679,6 +710,69 @@ reingestor route fails its whole batch with a `PlannedGeneralError` naming the i
 row's failure beneath it. On either kind of route, a branch field that cannot be read or is null,
 and a program that writes no branch field, fail the whole batch.
 
+A failure that ends a node's work as a whole, rather than one message of it, reaches the node's
+policy as a typed `error_stack::Report`. An ingestor and an emitter apply their `ON GENERAL ERROR`
+policy to such a failure, and so does a WASM processor whose guest instance cannot be created,
+whose input cannot be encoded for its guest, or whose guest callback fails. Every other processor
+failure, every reingestor failure and a branch dispatch task that fails are internal errors, which
+always fail the acknowledgements of the work. The policy renders the report's whole chain once.
+The runtime event and every negative acknowledgement carry that chain after the node's kind, its
+name, the policy's class and its domain, such as
+`junction 'enrich' internal error in domain 'orders': ...`, and the log entry records the chain
+beside the node and domain fields. No owner formats a reason string for the policy, and the context
+an owner adds does not repeat the node's name. Two contexts keep naming their node because they are
+also reported without the policy: a WASM instance's lifecycle failure, which a coordinated or
+guest-requested state reset reports on its own, and an ingest group's failure to hand a batch to a
+branch entrypoint, which the group's flush also returns to its caller. A branch whose domain
+routing can no longer be read fails the acknowledgements it was handed with that routing failure
+directly, without a policy or a runtime event.
+Each failure reports its owner's typed context above the cause it kept:
+
+- `RouteOutputError`, which every node that buffers route output shares, for holding a route's
+  output under its flush policy and releasing it: a domain clock that cannot be read while output
+  is buffered or released, a flush deadline that cannot be started, inspected or waited for, a
+  route without a flush policy, buffered output that does not concatenate, a relay without a
+  branched entrypoint on the node, and a relay that refused the forwarded output. A clock that
+  cannot be read while output is released fails the output of every route the node holds, as one
+  report.
+- `RelayProcessorError` for a relay processor's input and its own operation: collected input that
+  cannot be inspected or concatenated, an unprepared `FROM WHERE` or `FILTER WHERE` program, an
+  execution time that cannot be read, a `DEDUPLICATE ON` or reorderer `BY` key whose input cannot
+  be built or whose expressions fail, an input batch that does not decode into messages, and output
+  buffers that do not match the routes.
+- `CorrelatorError`, `WindowProcessorError` and `InferencerOutputError` for the steps of a
+  correlator, a window processor and an inferencer, and `WasmInstanceError` and `WasmOutputError`
+  for a WASM processor's instance and the output its guest emitted. The VM, Arrow, ONNX or relay
+  batch failure stays beneath. A WASM output route's FILTER-MAP reports the `PlannedGeneralError`
+  step a planned batch reports, and the callback whose output did not forward is named by its kind.
+- `ProcessorBranchTaskError`, `BranchEntrypointError` and `ReingestorError` for the concrete branch
+  work of a processor, a branched entrypoint and a reingestor: the domain time of accepted input
+  that cannot be read, a branch that cannot be instantiated, and a branch task that is gone or
+  whose dispatch task failed.
+- `EmitterRuntimeError` for an emitter's own processing: a publish batch whose rows stopped
+  agreeing, a source filter that failed for its named input relay, and a batch whose publish failed
+  but which cannot be split into the messages its message-error policy decides, which keeps the
+  emitter's description of the publish failure.
+
+The relay interaction a node consumes its inputs through fails with a `RelayInteractionFailure`:
+a `RelayInteractionError` report together with the acknowledgements of every batch the interaction
+still held. A failure to collect names the relay, with the domain clock, deadline or concatenation
+failure beneath it, and a deadline the interaction cannot resolve is its own variant. The consumer
+reports the failure under its own policy. An emitter whose own wake deadline cannot be resolved
+keeps its buffered work and records the failure as its transient error instead, because no
+wall-clock fallback exists for a logical cadence.
+
+A branch runtime, processor branch, generator, reingestor, emitter or relay task that stops because
+it cannot bind or read its domain clock or routing snapshot, or cannot wait for one of its
+deadlines, reports a runtime event that names the task and its domain and renders the whole chain
+of the failure, so a stale clock generation or an unrepresentable deadline beneath the clock
+failure stays visible.
+
+A batch container that cannot be produced keeps its `BatchContainerError` report in the packing
+outcome until the emitter builds the message error of each member. That message error is a fixed
+public outcome, so only the report's typed reason selects its code and message: the evaluation
+failure beneath the reason can quote the payload it evaluated, and is not rendered.
+
 ## Cross-Node And Public Boundaries
 
 The interconnect validates and bounds the wire request before its operation handler runs. A
@@ -698,12 +792,15 @@ the sender reports its drain-support phase abandoned and still clears the cordon
 have set; see [Topology Cases](./shutdown.md#topology-cases). A
 listing that arrives but names a branch key that does not decode is a failure of its own, distinct
 from a failed request. A relay payload that does not decode is `RuntimeError::DecodeRemoteRelay`,
-naming the domain and relay, and its `RemoteRelayDecodeError` says what the payload got wrong: no
-admission registration, a body that is not one Arrow section of the relay's schema, metadata or
-acknowledgement sidecars whose row count differs from the body's, acknowledgement registrations on
-a subscription fan-out, a branch key that does not decode, or rows that do not assemble into a relay
-batch. The Arrow body, `BranchKeyError` or relay batch failure stays beneath it. A decoded batch the
-local relay boundary refuses is the separate `RuntimeError::DispatchRemoteRelay`.
+naming the domain and relay, with the `RemoteRelayDecodeError` that says what the payload got wrong
+beneath it: no admission registration, a body that is not one Arrow section of the relay's schema,
+metadata or acknowledgement sidecars whose row count differs from the body's, acknowledgement
+registrations on a subscription fan-out, a branch key that does not decode, or rows that do not
+assemble into a relay batch. The Arrow body, `BranchKeyError` or relay batch failure stays beneath
+that. A decoded batch the local relay boundary refuses is the separate
+`RuntimeError::DispatchRemoteRelay`. Remote payload handling returns these as `error-stack`
+reports: the receiver logs the whole chain, and a payload it refused before admitting it is
+answered with the chain rendered as the reason.
 [Cluster Interconnect](./interconnect.md)
 defines the exchange forms, limits, deadlines, and relay acknowledgement boundaries. A record
 acknowledgement lost between two nodes becomes an ordinary negative acknowledgement: the node that

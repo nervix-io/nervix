@@ -10,6 +10,15 @@ use indexmap::IndexMap;
 
 use super::*;
 
+/// Every way a reingestor fails to accept the input its relay interaction delivered. The
+/// reingestor names itself when it reports the failure, and the acknowledgements of the input fail
+/// with it.
+#[derive(Debug, thiserror::Error)]
+pub(super) enum ReingestorError {
+    #[error("could not read the domain time of accepted input")]
+    AcceptedInputClock,
+}
+
 /// Where the task of one reingestor input reads its relay's batches from.
 pub(super) enum ReingestorInputConsumer {
     /// A consumer the relay boundary builder of a new execution registered for the input.
@@ -517,7 +526,7 @@ impl Runtime {
                         reingestor,
                         error_policies,
                         batch.acks.iter(),
-                        error.to_string(),
+                        &error,
                     );
                     return;
                 }
@@ -553,7 +562,7 @@ impl Runtime {
                         reingestor,
                         error_policies,
                         failure.acks.iter(),
-                        format!("{:#}", failure.error),
+                        &failure.error,
                     );
                     return;
                 }
@@ -605,8 +614,7 @@ impl Runtime {
                     reingestor,
                     error_policies,
                     batch_acks.iter(),
-                    "reingestor output batch ack count does not match selected row count"
-                        .to_string(),
+                    &Report::new(ProcessorOutputError::SelectedRowAcks),
                 );
                 return;
             }
@@ -621,7 +629,7 @@ impl Runtime {
                         reingestor,
                         error_policies,
                         error_acks.iter(),
-                        format!("{error:#}"),
+                        &error,
                     );
                     return;
                 }
@@ -658,22 +666,19 @@ impl Runtime {
         let flush_snapshot = match domain_clock.snapshot() {
             Ok(snapshot) => snapshot,
             Err(error) => {
-                for batches in batches_by_output {
-                    for batch in batches {
-                        self.handle_internal_processor_error_for_acks(
-                            domain,
-                            ModelKind::Reingestor,
-                            reingestor,
-                            error_policies,
-                            batch.acks.iter(),
-                            format!(
-                                "reingestor '{}' could not read the domain clock while buffering \
-                                 output: {error}",
-                                reingestor.as_str(),
-                            ),
-                        );
-                    }
-                }
+                // The clock failed for every route at once, so the output all of them built fails
+                // as one.
+                self.handle_internal_processor_error_for_acks(
+                    domain,
+                    ModelKind::Reingestor,
+                    reingestor,
+                    error_policies,
+                    batches_by_output
+                        .iter()
+                        .flatten()
+                        .flat_map(|batch| batch.acks.iter()),
+                    &error.change_context(RouteOutputError::BufferClock),
+                );
                 return;
             }
         };
@@ -688,10 +693,9 @@ impl Runtime {
                         reingestor,
                         error_policies,
                         batch.acks.iter(),
-                        format!(
-                            "missing reingestor branched entrypoint for relay '{}'",
-                            relay.as_str()
-                        ),
+                        &Report::new(RouteOutputError::MissingEntrypoint {
+                            relay: relay.clone(),
+                        }),
                     );
                 }
                 continue;
@@ -723,12 +727,9 @@ impl Runtime {
                             reingestor,
                             error_policies,
                             batch_acks.iter(),
-                            format!(
-                                "reingestor '{}' could not start output '{}' flush deadline: \
-                                 {error}",
-                                reingestor.as_str(),
-                                relay.as_str(),
-                            ),
+                            &error.change_context(RouteOutputError::StartFlushDeadline {
+                                relay: relay.clone(),
+                            }),
                         );
                     }
                 }
@@ -766,13 +767,9 @@ impl Runtime {
                     reingestor,
                     error_policies,
                     pending_acks.iter(),
-                    format!(
-                        "reingestor '{}' failed to concat buffered output batches for relay '{}': \
-                         {}",
-                        reingestor.as_str(),
-                        output_relay.as_str(),
-                        error
-                    ),
+                    &error.change_context(RouteOutputError::Concatenate {
+                        relay: output_relay.clone(),
+                    }),
                 );
                 return;
             }
@@ -784,10 +781,9 @@ impl Runtime {
                 reingestor,
                 error_policies,
                 forwarded.acks.iter(),
-                format!(
-                    "missing reingestor branched entrypoint for relay '{}'",
-                    output_relay.as_str()
-                ),
+                &Report::new(RouteOutputError::MissingEntrypoint {
+                    relay: output_relay.clone(),
+                }),
             );
             return;
         };
@@ -805,12 +801,9 @@ impl Runtime {
                 reingestor,
                 error_policies,
                 batch.acks.iter(),
-                format!(
-                    "reingestor '{}' failed to forward buffered batch to branch entrypoint for \
-                     relay '{}'",
-                    reingestor.as_str(),
-                    output_relay.as_str()
-                ),
+                &Report::new(RouteOutputError::Forward {
+                    relay: output_relay.clone(),
+                }),
             );
         }
     }
@@ -826,33 +819,22 @@ impl Runtime {
             ReingestorOutputFlush::Due => match context.domain_clock.snapshot() {
                 Ok(snapshot) => Some(snapshot),
                 Err(error) => {
-                    let keys = output_buffers.keys();
-                    for key in keys {
+                    // The clock failed for every route at once, so the output all of them hold
+                    // fails as one.
+                    let mut acks = Vec::new();
+                    for key in output_buffers.keys() {
                         nervix_primitives::task::consume_budget().await;
-                        let relay = &routes
-                            .get(key.output_index)
-                            .verified("the buffer key came from this reingestor's route list")
-                            .route
-                            .relay;
                         let pending = output_buffers.take(&key);
-                        let acks = pending
-                            .iter()
-                            .flat_map(|batch| batch.acks.iter().cloned())
-                            .collect::<Vec<_>>();
-                        self.handle_internal_processor_error_for_acks(
-                            context.domain,
-                            ModelKind::Reingestor,
-                            context.reingestor,
-                            context.error_policies,
-                            acks.iter(),
-                            format!(
-                                "reingestor '{}' could not read the domain clock while releasing \
-                                 output '{}': {error}",
-                                context.reingestor.as_str(),
-                                relay.as_str(),
-                            ),
-                        );
+                        acks.extend(pending.iter().flat_map(|batch| batch.acks.iter().cloned()));
                     }
+                    self.handle_internal_processor_error_for_acks(
+                        context.domain,
+                        ModelKind::Reingestor,
+                        context.reingestor,
+                        context.error_policies,
+                        acks.iter(),
+                        &error.change_context(RouteOutputError::ReleaseClock),
+                    );
                     return;
                 }
             },
@@ -885,12 +867,9 @@ impl Runtime {
                             context.reingestor,
                             context.error_policies,
                             acks.iter(),
-                            format!(
-                                "reingestor '{}' could not inspect output '{}' flush deadline: \
-                                 {error}",
-                                context.reingestor.as_str(),
-                                relay.as_str(),
-                            ),
+                            &error.change_context(RouteOutputError::InspectFlushDeadline {
+                                relay: relay.clone(),
+                            }),
                         );
                         continue;
                     }
@@ -946,7 +925,7 @@ impl Runtime {
                     reingestor,
                     error_policies,
                     failure.acks.iter(),
-                    format!("{:#}", failure.error),
+                    &failure.error,
                 );
                 return None;
             }
@@ -1007,7 +986,7 @@ impl Runtime {
                 Err(error) => {
                     runtime.events().report_error(format!(
                         "reingestor '{}' in domain '{}' could not bind its routing snapshot: \
-                         {error}",
+                         {error:#}",
                         task_reingestor.as_str(),
                         task_domain.as_str(),
                     ));
@@ -1019,7 +998,7 @@ impl Runtime {
                 Ok(clock) => clock,
                 Err(error) => {
                     runtime.events().report_error(format!(
-                        "reingestor '{}' in domain '{}' could not bind its clock: {error}",
+                        "reingestor '{}' in domain '{}' could not bind its clock: {error:#}",
                         task_reingestor.as_str(),
                         task_domain.as_str(),
                     ));
@@ -1066,7 +1045,7 @@ impl Runtime {
                         if let Err(error) = result {
                             runtime.events().report_error(format!(
                                 "reingestor '{}' in domain '{}' could not wait for an output \
-                                 flush deadline: {error}",
+                                 flush deadline: {error:#}",
                                 task_reingestor.as_str(),
                                 task_domain.as_str(),
                             ));
@@ -1086,18 +1065,14 @@ impl Runtime {
                 };
                 let work = match work {
                     Ok(work) => work,
-                    Err(error) => {
-                        let reason = format!(
-                            "reingestor '{}' relay interaction failed: {error}",
-                            task_reingestor.as_str()
-                        );
+                    Err(failure) => {
                         runtime.handle_internal_processor_error_for_acks(
                             &task_domain,
                             ModelKind::Reingestor,
                             &task_reingestor,
                             &task_error_policies,
-                            error.acks(),
-                            reason,
+                            [&failure.acks],
+                            &failure.error,
                         );
                         continue;
                     }
@@ -1146,19 +1121,13 @@ impl Runtime {
                         let accepted_at = match domain_clock.snapshot() {
                             Ok(snapshot) => snapshot.now(),
                             Err(error) => {
-                                let reason = format!(
-                                    "reingestor '{}' in domain '{}' could not read the domain \
-                                     time of accepted input: {error}",
-                                    task_reingestor.as_str(),
-                                    task_domain.as_str(),
-                                );
                                 runtime.handle_internal_processor_error_for_acks(
                                     &task_domain,
                                     ModelKind::Reingestor,
                                     ModelName::from(&task_reingestor),
                                     &task_error_policies,
                                     batch.acks.iter(),
-                                    reason,
+                                    &error.change_context(ReingestorError::AcceptedInputClock),
                                 );
                                 continue;
                             }
@@ -1194,11 +1163,7 @@ impl Runtime {
                                     &task_reingestor,
                                     &task_error_policies,
                                     dependency_error_acks.iter(),
-                                    format!(
-                                        "reingestor '{}' failed to resolve materialized \
-                                         dependencies: {error}",
-                                        task_reingestor.as_str()
-                                    ),
+                                    &error,
                                 );
                                 continue;
                             }

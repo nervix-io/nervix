@@ -356,7 +356,6 @@ fn eager_binding_prepares_every_processor_family_before_publication() {
     template.processors = processors;
 
     bind_processor_template_programs(
-        &named("test_domain"),
         &mut template,
         &relay_schemas,
         &relay_branchings,
@@ -451,7 +450,6 @@ fn eager_binding_prepares_every_processor_family_before_publication() {
 
 #[test]
 fn eager_binding_classifies_incomplete_published_inputs() {
-    let domain = named::<DomainName>("test_domain");
     let input = named::<RelayName>("incoming");
     let output = named::<RelayName>("outgoing");
     let mut template = junction_branch_template("route_events", "incoming");
@@ -479,7 +477,6 @@ fn eager_binding_classifies_incomplete_published_inputs() {
         .collect();
 
     let missing_input_schema = bind_processor_template_programs(
-        &domain,
         &mut template.clone(),
         &HashMap::default(),
         &relay_branchings,
@@ -494,7 +491,6 @@ fn eager_binding_classifies_incomplete_published_inputs() {
     ));
 
     let missing_branching = bind_processor_template_programs(
-        &domain,
         &mut template.clone(),
         &relay_schemas,
         &HashMap::default(),
@@ -517,7 +513,6 @@ fn eager_binding_classifies_incomplete_published_inputs() {
         .input_relays
         .push(secondary.clone());
     let missing_secondary_schema = bind_processor_template_programs(
-        &domain,
         &mut secondary_template.clone(),
         &relay_schemas,
         &relay_branchings,
@@ -540,7 +535,6 @@ fn eager_binding_classifies_incomplete_published_inputs() {
             .clone(),
     );
     let missing_secondary_branching = bind_processor_template_programs(
-        &domain,
         &mut secondary_template,
         &secondary_schemas,
         &relay_branchings,
@@ -580,7 +574,6 @@ fn eager_binding_classifies_incomplete_published_inputs() {
     let missing = named::<RelayName>("missing");
 
     let missing_left_relay = bind_processor_template_programs(
-        &domain,
         &mut correlator_template(Vec::new(), vec![input.clone()]),
         &relay_schemas,
         &relay_branchings,
@@ -595,7 +588,6 @@ fn eager_binding_classifies_incomplete_published_inputs() {
     ));
 
     let missing_right_relay = bind_processor_template_programs(
-        &domain,
         &mut correlator_template(vec![input.clone()], Vec::new()),
         &relay_schemas,
         &relay_branchings,
@@ -610,7 +602,6 @@ fn eager_binding_classifies_incomplete_published_inputs() {
     ));
 
     let missing_left_schema = bind_processor_template_programs(
-        &domain,
         &mut correlator_template(vec![missing.clone()], vec![input.clone()]),
         &relay_schemas,
         &relay_branchings,
@@ -625,7 +616,6 @@ fn eager_binding_classifies_incomplete_published_inputs() {
     ));
 
     let missing_right_schema = bind_processor_template_programs(
-        &domain,
         &mut correlator_template(vec![input.clone()], vec![missing.clone()]),
         &relay_schemas,
         &relay_branchings,
@@ -640,7 +630,6 @@ fn eager_binding_classifies_incomplete_published_inputs() {
     ));
 
     let missing_output_schema = bind_processor_template_programs(
-        &domain,
         &mut template.clone(),
         &relay_schemas,
         &relay_branchings,
@@ -661,7 +650,6 @@ fn eager_binding_classifies_incomplete_published_inputs() {
         .input_relays
         .clear();
     let missing_input = bind_processor_template_programs(
-        &domain,
         &mut template,
         &relay_schemas,
         &relay_branchings,

@@ -312,8 +312,8 @@ use branch_aggregated_state::{
 };
 use branch_buffering::{
     BranchBufferDeadline, BranchBufferTimer, BranchBufferTimingError, BranchBufferTimingResult,
-    RuntimeFlushPolicy, RuntimeInputCollectPolicy, RuntimeInputCollector, RuntimeWake,
-    wait_for_branch_buffer_deadlines,
+    RouteOutputError, RuntimeFlushPolicy, RuntimeInputCollectPolicy, RuntimeInputCollector,
+    RuntimeWake, wait_for_branch_buffer_deadlines,
 };
 use branch_key::branch_key_display;
 use branch_lifecycle_state::{BranchLifecycleCheckpoint, ReplicatedBranchLifecycle};
@@ -338,10 +338,10 @@ pub(crate) use client_ingestor::{
     ClientSubmissionId, OpenedClientProducer,
 };
 use correlator::{
-    CorrelatorMatchedBatch, CorrelatorOutputCompileContext, CorrelatorOutputContext,
-    CorrelatorSide, CorrelatorTimeoutContext, compile_correlator_where_program,
-    correlate_incoming_message, enqueue_correlator_output, evaluate_correlator_output_batch,
-    handle_correlator_timeout_action,
+    CorrelatorError, CorrelatorMatchedBatch, CorrelatorOutputCompileContext,
+    CorrelatorOutputContext, CorrelatorSide, CorrelatorTimeoutContext,
+    compile_correlator_where_program, correlate_incoming_message, enqueue_correlator_output,
+    evaluate_correlator_output_batch, handle_correlator_timeout_action,
 };
 use deduplicator::{
     CompiledDeduplicatorKeyProgram, DeduplicatorKey, DeduplicatorKeyspace,
@@ -382,8 +382,8 @@ use emitter_retry::{
 };
 use emitter_sinks::EmitterSinkStarter;
 use emitter_supervision::{
-    EmitterRetryKind, EmitterRetryStatus, EmitterTaskCommand, ScheduledEmitterTask,
-    clear_emitter_stop_signal,
+    EmitterRetryKind, EmitterRetryStatus, EmitterStartError, EmitterTaskCommand,
+    ScheduledEmitterTask, clear_emitter_stop_signal,
 };
 use emitter_task::{
     EmitterRuntimeError, EmitterRuntimeResult, EmitterSinkContext, emitter_error_message,
@@ -417,7 +417,7 @@ use force_flush::{
     DomainForceFlush, DomainForceFlushCompletion, DomainForceFlushParticipant,
     IngestorAckRootTrackers,
 };
-use generator::GeneratorTaskSpec;
+use generator::{GeneratorError, GeneratorTaskSpec};
 use http_request_fields::{
     AcceptedHttpRequests, AdmittedHttpRequests, CompiledHttpRequestFields, HttpRequestFields,
     HttpRequestInput, HttpRequestSchemas, SourceRecords,
@@ -494,9 +494,9 @@ pub(in crate::runtime) use processor_branch_task::{
 };
 use processor_output::{
     PendingProcessorOutputBatch, PendingProcessorOutputMessageError, ProcessorMaterializedState,
-    ProcessorOutputBatchScope, ProcessorOutputDispatchContext, dispatch_processor_output,
-    dispatch_processor_outputs, flush_all_processor_outputs, flush_due_processor_outputs,
-    pending_output_batches_by_key,
+    ProcessorOutputBatchScope, ProcessorOutputDispatchContext, ProcessorOutputError,
+    dispatch_processor_output, dispatch_processor_outputs, flush_all_processor_outputs,
+    flush_due_processor_outputs, pending_output_batches_by_key,
 };
 use processor_template::{
     MaterializedDependencyResolution, ProcessorInputFilterKind, ProcessorTemplateError,
@@ -531,16 +531,14 @@ pub(in crate::runtime) use relay_channel::{
     OwnedRelayDispatchPermit, RelayDispatchGate, RelayDispatchGateLease, RelayTryRecv,
 };
 use relay_interaction::{
-    RelayInteraction, RelayInteractionCommand, RelayInteractionError, RelayInteractionEvent,
-    RelayInteractionInput,
+    RelayInteraction, RelayInteractionCommand, RelayInteractionEvent, RelayInteractionInput,
 };
+use relay_processor_node::RelayProcessorError;
 use relay_transit::{
     RelayAdmissions, RelayOwnerAdmission, RelayOwnerBatchCompletion, RelayRoutedAdmission,
     RelayTransit,
 };
-use remote_dispatch::{
-    REMOTE_ACK_ALIVE_INTERVAL, RemoteDispatchRegistry, RemoteDispatcher, RemoteRelayDecodeError,
-};
+use remote_dispatch::{REMOTE_ACK_ALIVE_INTERVAL, RemoteDispatchRegistry, RemoteDispatcher};
 use reorderer::{ReordererFlushContext, flush_branch_reorderer_output, reorder_key_part};
 use schedule_apply::ScheduleApplication;
 use scheduled_node::{
@@ -594,10 +592,10 @@ pub(in crate::runtime) use vm_compile::{
 };
 use vm_compile::{
     CompiledMessageErrorSite, CompiledMessageErrorSites, GeneratorSetProgramSchemas,
-    OutputNamespaceInput, RouteProgram, RuntimeCompileTarget, RuntimeFilterScope, RuntimeVmSchema,
-    RuntimeVmSchemaPair, bind_ingestor_filter_map_program, bind_output_branch_program,
-    bind_processor_output_filter_map_program, bind_scoped_filter_program,
-    collect_expression_field_paths, compile_emitter_filter_map_part,
+    OutputNamespaceInput, RouteProgram, RuntimeFilterScope, RuntimeVmCompileError,
+    RuntimeVmCompileResult, RuntimeVmSchema, RuntimeVmSchemaPair, bind_ingestor_filter_map_program,
+    bind_output_branch_program, bind_processor_output_filter_map_program,
+    bind_scoped_filter_program, collect_expression_field_paths, compile_emitter_filter_map_part,
     compile_finalized_output_filter_program, compile_generator_set_program,
     compile_message_error_set_program, compile_processor_output_filter_map_program,
     compile_reorderer_program, compile_scoped_filter_program,
@@ -621,7 +619,9 @@ use wasm_guest_state_reset::{
     PendingGuestWasmStateResets, WasmGuestStateResetContext, WasmGuestStateResetFence,
     refuse_fenced_wasm_branch_input, request_wasm_guest_state_reset,
 };
-use wasm_output::{WasmMaterializedOutput, WasmOutputContext, dispatch_wasm_output_envelopes};
+use wasm_output::{
+    WasmCallbackOutput, WasmMaterializedOutput, WasmOutputContext, dispatch_wasm_output_envelopes,
+};
 pub(crate) use wasm_processor::WasmInstanceError;
 use wasm_processor::{
     WasmBranchModule, WasmLiveInstance, WasmModuleFile, flush_branch_wasm_processor,

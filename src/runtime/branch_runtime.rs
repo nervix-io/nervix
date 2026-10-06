@@ -24,6 +24,23 @@ use super::*;
 
 pub(super) const BRANCH_INSTANCE_EXPIRATION_SCAN_INTERVAL: Duration = Duration::from_secs(30);
 
+/// Every way a branched entrypoint fails to take one input into the concrete branch it belongs to,
+/// before the input's routes buffer it. The ingestor or reingestor names itself when it reports
+/// the failure, and the acknowledgements of the input fail with it.
+#[derive(Debug, thiserror::Error)]
+pub(super) enum BranchEntrypointError {
+    #[error("could not read the domain time of accepted input")]
+    AcceptedInputClock,
+    #[error("failed to instantiate branch '{}'", branch_key_display(.branch))]
+    Instantiate { branch: Option<BranchKey> },
+    #[error("the dispatch task of branch '{}' failed", branch_key_display(.branch))]
+    DispatchTask { branch: Option<BranchKey> },
+    #[error("failed to prepare the route input")]
+    PrepareRouteInput,
+    #[error("failed to prepare an output branch batch")]
+    PrepareBranchBatch,
+}
+
 #[cfg_attr(
     nervix_lint,
     nervix::context(
@@ -574,7 +591,7 @@ impl BranchRuntime {
         );
         self.metrics.source_dirty.mark();
         if self.dispatch_stream(&root_relay, &batch).await.is_err() {
-            let reason = "branched root relay dispatch failed".to_string();
+            let error = Report::new(RouteOutputError::Forward { relay: root_relay });
             if self.source_kind == ModelKind::Ingestor {
                 self.runtime.handle_general_error_for_acks(
                     &self.domain,
@@ -582,7 +599,7 @@ impl BranchRuntime {
                     &self.source,
                     &self.error_policies,
                     batch.acks.iter(),
-                    reason,
+                    &error,
                 );
             } else {
                 self.runtime.handle_internal_processor_error_for_acks(
@@ -591,7 +608,7 @@ impl BranchRuntime {
                     &self.source,
                     &self.error_policies,
                     batch.acks.iter(),
-                    reason,
+                    &error,
                 );
             }
             return;
@@ -648,11 +665,7 @@ impl BranchRuntime {
                     &processor.processor,
                     &processor.error_policies,
                     batch.acks.iter(),
-                    format!(
-                        "{} '{}' could not read domain execution time: {error}",
-                        processor.kind.as_str(),
-                        processor.processor.as_str(),
-                    ),
+                    &error.change_context(RelayProcessorError::ExecutionTime),
                 );
                 self.processors.insert(processor_id.clone(), processor);
                 return;
@@ -779,7 +792,12 @@ impl BranchRuntime {
 }
 
 impl IngestorRouteTask {
-    pub(super) fn handle_general_error(&self, acks: &[AckSet], reason: String) {
+    /// Routes a failure of the route this task buffers through the entrypoint's own error policy.
+    pub(super) fn handle_general_error<C: error_stack::Context>(
+        &self,
+        acks: &[AckSet],
+        error: &Report<C>,
+    ) {
         if self.template.branch.source_kind == ModelKind::Ingestor {
             self.runtime_handle.handle_general_error_for_acks(
                 &self.domain,
@@ -787,7 +805,7 @@ impl IngestorRouteTask {
                 &self.ingestor,
                 &self.template.branch.error_policies,
                 acks.iter(),
-                reason,
+                error,
             );
         } else {
             self.runtime_handle
@@ -797,7 +815,7 @@ impl IngestorRouteTask {
                     &self.ingestor,
                     &self.template.branch.error_policies,
                     acks.iter(),
-                    reason,
+                    error,
                 );
         }
     }
@@ -817,12 +835,9 @@ impl IngestorRouteTask {
             Err(failure) => {
                 self.handle_general_error(
                     &failure.preserved,
-                    format!(
-                        "{} '{}' failed to prepare route input: {}",
-                        self.template.branch.source_kind.as_str(),
-                        self.ingestor.as_str(),
-                        failure.error
-                    ),
+                    &failure
+                        .error
+                        .change_context(BranchEntrypointError::PrepareRouteInput),
                 );
                 return Vec::new();
             }
@@ -834,12 +849,9 @@ impl IngestorRouteTask {
                 Ok(batch) => prepared.push(batch),
                 Err(failure) => self.handle_general_error(
                     &failure.preserved,
-                    format!(
-                        "{} '{}' failed to prepare output branch batch: {}",
-                        self.template.branch.source_kind.as_str(),
-                        self.ingestor.as_str(),
-                        failure.error
-                    ),
+                    &failure
+                        .error
+                        .change_context(BranchEntrypointError::PrepareBranchBatch),
                 ),
             }
         }
@@ -861,12 +873,9 @@ impl IngestorRouteTask {
             Err(error) => {
                 self.handle_general_error(
                     &acks,
-                    format!(
-                        "{} '{}' failed to concatenate output route batch: {}",
-                        self.template.branch.source_kind.as_str(),
-                        self.ingestor.as_str(),
-                        error
-                    ),
+                    &error.change_context(RouteOutputError::Concatenate {
+                        relay: self.template.branch.root_relay.clone(),
+                    }),
                 );
                 return;
             }
@@ -875,12 +884,9 @@ impl IngestorRouteTask {
             let batch = error.0;
             self.handle_general_error(
                 &batch.acks,
-                format!(
-                    "{} '{}' failed to forward prepared batch for relay '{}'",
-                    self.template.branch.source_kind.as_str(),
-                    self.ingestor.as_str(),
-                    self.template.branch.root_relay.as_str()
-                ),
+                &Report::new(RouteOutputError::Forward {
+                    relay: self.template.branch.root_relay.clone(),
+                }),
             );
         }
     }
@@ -900,12 +906,7 @@ impl IngestorRouteTask {
                     Err(error) => {
                         self.handle_general_error(
                             &batch.acks,
-                            format!(
-                                "{} '{}' could not read the domain clock while starting an output \
-                                 flush: {error}",
-                                self.template.branch.source_kind.as_str(),
-                                self.ingestor.as_str(),
-                            ),
+                            &error.change_context(RouteOutputError::BufferClock),
                         );
                         continue;
                     }
@@ -916,11 +917,9 @@ impl IngestorRouteTask {
                 {
                     self.handle_general_error(
                         &batch.acks,
-                        format!(
-                            "{} '{}' could not start an output flush deadline: {error}",
-                            self.template.branch.source_kind.as_str(),
-                            self.ingestor.as_str(),
-                        ),
+                        &error.change_context(RouteOutputError::StartFlushDeadline {
+                            relay: self.template.branch.root_relay.clone(),
+                        }),
                     );
                     continue;
                 }
@@ -1048,7 +1047,7 @@ impl IngestorRouteTask {
             Ok(clock) => clock,
             Err(error) => {
                 self.runtime_handle.events().report_error(format!(
-                    "{} '{}' in domain '{}' could not bind its route flush clock: {error}",
+                    "{} '{}' in domain '{}' could not bind its route flush clock: {error:#}",
                     self.template.branch.source_kind.as_str(),
                     self.ingestor.as_str(),
                     self.domain.as_str(),
@@ -1099,24 +1098,17 @@ impl IngestorRouteTask {
                         let acks = self.pending_acks();
                         self.handle_general_error(
                             &acks,
-                            format!(
-                                "{} '{}' could not wait for an output flush deadline: {error}",
-                                self.template.branch.source_kind.as_str(),
-                                self.ingestor.as_str(),
-                            ),
+                            &error.change_context(RouteOutputError::WaitFlushDeadline),
                         );
                         self.flush_all().await;
                         break;
                     }
                     if let Err(error) = self.flush_due(&domain_clock).await {
                         let acks = self.pending_acks();
+                        let relay = self.template.branch.root_relay.clone();
                         self.handle_general_error(
                             &acks,
-                            format!(
-                                "{} '{}' could not inspect an output flush deadline: {error}",
-                                self.template.branch.source_kind.as_str(),
-                                self.ingestor.as_str(),
-                            ),
+                            &error.change_context(RouteOutputError::InspectFlushDeadline { relay }),
                         );
                         self.flush_all().await;
                         break;
@@ -1231,22 +1223,14 @@ impl BranchExecutionRuntime {
         let accepted_at = match domain_clock.snapshot() {
             Ok(snapshot) => snapshot.now(),
             Err(error) => {
-                let reason = format!(
-                    "branch runtime for '{}' in domain '{}' could not read the domain time of \
-                     accepted input: {error}",
-                    ingestor.as_str(),
-                    domain.as_str(),
+                Self::report_dispatch_error(
+                    runtime_handle,
+                    domain,
+                    ingestor,
+                    template,
+                    inputs.iter().flat_map(|message| message.acks.iter()),
+                    &error.change_context(BranchEntrypointError::AcceptedInputClock),
                 );
-                for message in inputs {
-                    Self::report_dispatch_error(
-                        runtime_handle,
-                        domain,
-                        ingestor,
-                        template,
-                        message.acks.iter(),
-                        reason.clone(),
-                    );
-                }
                 return;
             }
         };
@@ -1277,10 +1261,9 @@ impl BranchExecutionRuntime {
                             ingestor,
                             template,
                             message.acks.iter(),
-                            format!(
-                                "failed to instantiate branch '{}': {error:#}",
-                                branch_key_display(&key),
-                            ),
+                            &error.change_context(BranchEntrypointError::Instantiate {
+                                branch: key.clone(),
+                            }),
                         );
                         continue;
                     }
@@ -1401,13 +1384,13 @@ impl BranchExecutionRuntime {
     ///
     /// Ingestors own a general error policy for their own intake, while every other branch
     /// entrypoint reports through the internal processor policy.
-    fn report_dispatch_error<'a>(
+    fn report_dispatch_error<'a, C: error_stack::Context>(
         runtime_handle: &Runtime,
         domain: &DomainName,
         ingestor: &IngestorName,
         template: &BranchInstanceTemplate,
         acks: impl IntoIterator<Item = &'a AckSet>,
-        reason: String,
+        error: &Report<C>,
     ) {
         if template.source_kind == ModelKind::Ingestor {
             runtime_handle.handle_general_error_for_acks(
@@ -1416,7 +1399,7 @@ impl BranchExecutionRuntime {
                 ingestor,
                 &template.error_policies,
                 acks,
-                reason,
+                error,
             );
         } else {
             runtime_handle.handle_internal_processor_error_for_acks(
@@ -1425,7 +1408,7 @@ impl BranchExecutionRuntime {
                 ingestor,
                 &template.error_policies,
                 acks,
-                reason,
+                error,
             );
         }
     }
@@ -1449,11 +1432,9 @@ impl BranchExecutionRuntime {
                     ingestor,
                     &template.error_policies,
                     completion.acks.iter(),
-                    format!(
-                        "branch '{}' dispatch task failed: {}",
-                        branch_key_display(&completion.key),
-                        error
-                    ),
+                    &Report::new(error).change_context(BranchEntrypointError::DispatchTask {
+                        branch: completion.key.clone(),
+                    }),
                 );
             }
         }
@@ -1554,7 +1535,7 @@ impl BranchExecutionRuntime {
                 Err(error) => {
                     runtime_handle.events().report_error(format!(
                         "branch runtime for ingestor '{}' in domain '{}' could not bind its \
-                         clock: {error}",
+                         clock: {error:#}",
                         ingestor.as_str(),
                         domain.as_str(),
                     ));
@@ -1605,7 +1586,7 @@ impl BranchExecutionRuntime {
                 Ok(snapshot) => snapshot,
                 Err(error) => {
                     runtime_handle.events().report_error(format!(
-                        "branch runtime for ingestor '{}' in domain '{}' lost its clock: {error}",
+                        "branch runtime for ingestor '{}' in domain '{}' lost its clock: {error:#}",
                         ingestor.as_str(),
                         domain.as_str(),
                     ));
@@ -1637,7 +1618,7 @@ impl BranchExecutionRuntime {
                     Err(error) => {
                         runtime_handle.events().report_error(format!(
                             "branch runtime for ingestor '{}' in domain '{}' lost its clock: \
-                             {error}",
+                             {error:#}",
                             ingestor.as_str(),
                             domain.as_str(),
                         ));
@@ -1843,7 +1824,7 @@ impl BranchExecutionRuntime {
                         if let Err(error) = result {
                             runtime_handle.events().report_error(format!(
                                 "branch runtime for ingestor '{}' in domain '{}' could not wait \
-                                 for a branch deadline: {error}",
+                                 for a branch deadline: {error:#}",
                                 ingestor.as_str(),
                                 domain.as_str(),
                             ));

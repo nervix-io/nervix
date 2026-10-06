@@ -660,20 +660,25 @@ impl Runtime {
         }
     }
 
+    /// Applies a node's `ON GENERAL ERROR` policy to a failure that ended work holding `acks`.
+    ///
+    /// The policy names the node and its domain, so `error` begins at the failure itself. Its
+    /// whole chain is rendered here, once: the runtime event and every negative acknowledgement
+    /// carry it after the node's name, and the log records it beside the node's fields.
     #[cfg_attr(
         nervix_lint,
         nervix::dispatch(
             reason = "the caller supplies typed error conversion and the planned route iterator"
         )
     )]
-    pub(in crate::runtime) fn handle_general_error_for_acks<'a>(
+    pub(in crate::runtime) fn handle_general_error_for_acks<'a, C: error_stack::Context>(
         &self,
         domain: &DomainName,
         node_kind: ModelKind,
         node: impl Into<ModelName>,
         policies: &ErrorPolicies,
         acks: impl IntoIterator<Item = &'a AckSet>,
-        reason: String,
+        error: &Report<C>,
     ) {
         let node = node.into();
         match policies.general {
@@ -683,13 +688,15 @@ impl Runtime {
                 }
             }
             GeneralErrorPolicy::Log => {
-                self.inner.events.report_error(format!(
+                let reason = format!("{error:#}");
+                let report = format!(
                     "{} '{}' general error in domain '{}': {}",
                     node_kind.as_str(),
                     node.as_str(),
                     domain.as_str(),
                     reason
-                ));
+                );
+                self.inner.events.report_error(report.clone());
                 warn!(
                     domain = domain.as_str(),
                     node_kind = node_kind.as_str(),
@@ -698,35 +705,46 @@ impl Runtime {
                     "runtime node handled general error"
                 );
                 for ack in acks {
-                    ack.no_ack(reason.clone());
+                    ack.no_ack(report.clone());
                 }
             }
         }
     }
 
+    /// Reports a failure inside a node's own processing that ended work holding `acks`, and fails
+    /// every one of them. No policy can recover this work, so it is never acknowledged.
+    ///
+    /// The report names the node and its domain, so `error` begins at the failure itself. Its
+    /// whole chain is rendered here, once: the runtime event and every negative acknowledgement
+    /// carry it after the node's name, and the log records it beside the node's fields.
     #[cfg_attr(
         nervix_lint,
         nervix::dispatch(
             reason = "the caller supplies typed error conversion and the planned route iterator"
         )
     )]
-    pub(in crate::runtime) fn handle_internal_processor_error_for_acks<'a>(
+    pub(in crate::runtime) fn handle_internal_processor_error_for_acks<
+        'a,
+        C: error_stack::Context,
+    >(
         &self,
         domain: &DomainName,
         node_kind: ModelKind,
         node: impl Into<ModelName>,
         _policies: &ErrorPolicies,
         acks: impl IntoIterator<Item = &'a AckSet>,
-        reason: String,
+        error: &Report<C>,
     ) {
         let node = node.into();
-        self.inner.events.report_error(format!(
+        let reason = format!("{error:#}");
+        let report = format!(
             "{} '{}' internal error in domain '{}': {}",
             node_kind.as_str(),
             node.as_str(),
             domain.as_str(),
             reason
-        ));
+        );
+        self.inner.events.report_error(report.clone());
         warn!(
             domain = domain.as_str(),
             node_kind = node_kind.as_str(),
@@ -735,7 +753,7 @@ impl Runtime {
             "runtime processor handled internal error"
         );
         for ack in acks {
-            ack.no_ack(reason.clone());
+            ack.no_ack(report.clone());
         }
     }
 
@@ -1065,9 +1083,83 @@ mod tests {
 
     use super::*;
     use crate::{
-        runtime_ack::AckSet,
+        runtime_ack::{AckOutcome, AckSet},
         runtime_schema::{RuntimeValue, test_runtime_row},
     };
+
+    /// A node's policy is handed the failure's report and renders its whole chain once: the event
+    /// and every negative acknowledgement carry it after the node's kind, name and domain, and a
+    /// general error the policy ignores is acknowledged without an event.
+    #[nervix_primitives::test]
+    async fn node_error_policies_render_the_report_they_are_given_once() {
+        let runtime = Runtime::default();
+        let mut events = runtime.subscribe_events();
+        let domain = domain("orders");
+        let failure = || {
+            Report::new(super::super::relay_batch::RelayRecordBatchError::EmptyMessages)
+                .change_context(RouteOutputError::Concatenate {
+                    relay: named("totals"),
+                })
+        };
+        let chain = "failed to concatenate buffered output for relay 'totals': a relay batch must \
+                     contain at least one message";
+
+        let (ignored_acks, ignored_completion) = AckSet::root();
+        runtime.handle_general_error_for_acks(
+            &domain,
+            ModelKind::Ingestor,
+            named::<ModelName>("intake"),
+            &ErrorPolicies {
+                message: MessageErrorPolicy::Log,
+                general: GeneralErrorPolicy::Ignore,
+            },
+            [&ignored_acks],
+            &failure(),
+        );
+        assert_eq!(ignored_completion.wait().await, AckOutcome::Ack);
+
+        let (internal_acks, internal_completion) = AckSet::root();
+        runtime.handle_internal_processor_error_for_acks(
+            &domain,
+            ModelKind::Junction,
+            named::<ModelName>("route_totals"),
+            &ErrorPolicies::handled_by_log(),
+            [&internal_acks],
+            &failure(),
+        );
+        let internal_report =
+            format!("junction 'route_totals' internal error in domain 'orders': {chain}");
+        // Events arrive in the order they were reported, so the ignored error reported none.
+        let RuntimeEvent::Error(message) = events
+            .recv()
+            .await
+            .expect("an internal error is reported to the node's observers");
+        assert_eq!(message, internal_report);
+        assert_eq!(
+            internal_completion.wait().await,
+            AckOutcome::NoAck(internal_report)
+        );
+
+        let (logged_acks, logged_completion) = AckSet::root();
+        runtime.handle_general_error_for_acks(
+            &domain,
+            ModelKind::Ingestor,
+            named::<ModelName>("intake"),
+            &ErrorPolicies::handled_by_log(),
+            [&logged_acks],
+            &failure(),
+        );
+        let logged_report = format!("ingestor 'intake' general error in domain 'orders': {chain}");
+        let RuntimeEvent::Error(message) = events
+            .recv()
+            .await
+            .expect("a logged general error is reported to the node's observers");
+        assert_eq!(message, logged_report);
+        assert_eq!(
+            logged_completion.wait().await,
+            AckOutcome::NoAck(logged_report)
+        );
+    }
 
     fn lowered_set(source: &str) -> nervix_vm::program::SpannedNode<nervix_vm::program::Program> {
         lower_route_construction(

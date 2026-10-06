@@ -598,11 +598,11 @@ A delivery proceeds as follows:
 6. The application lane validates the exact schema, metadata, branch, and record-acknowledgement
    count, then resolves the configured concrete runtime branch. Work for one channel remains ordered,
    while other channels continue independently. A payload that fails this validation never reaches
-   the branch. The receiver keeps the failure as `RuntimeError::DecodeRemoteRelay`, whose typed
-   `RemoteRelayDecodeError` names what the payload got wrong with the decoder's own failure
-   beneath it, and answers the payload's admission registration negatively with that report
-   rendered as the reason. A payload that carries no admission registration is refused the same
-   way, with no registration to answer.
+   the branch. The receiver keeps the failure as a report of `RuntimeError::DecodeRemoteRelay`
+   with the typed `RemoteRelayDecodeError` beneath it, which names what the payload got wrong and
+   keeps the decoder's own failure beneath that, and answers the payload's admission registration
+   negatively with the whole chain rendered as the reason. A payload that carries no admission
+   registration is refused the same way, with no registration to answer.
 7. When the concrete runtime branch accepts the batch, the receiver sends a terminal admission
    outcome over the reserved management capacity. The sender can then release the channel for the
    next batch.

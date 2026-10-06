@@ -86,6 +86,14 @@ pub(crate) enum WasmInstanceError {
         acks: usize,
         metadata: usize,
     },
+    #[error("failed to concatenate the pending input batches")]
+    ConcatenateInput,
+    #[error("the processor has no output destinations")]
+    NoOutputs,
+    #[error("the processor has no input relays")]
+    NoInputs,
+    #[error("the branch instance is unavailable")]
+    InstanceUnavailable,
 }
 
 /// The stage of a WASM processor branch instance's lifecycle at which a failure happened.
@@ -177,7 +185,11 @@ impl WasmInstanceError {
             | Self::ReadModule { .. }
             | Self::CompileModule { .. }
             | Self::EncodeInput
-            | Self::InputRowCount { .. } => None,
+            | Self::InputRowCount { .. }
+            | Self::ConcatenateInput
+            | Self::NoOutputs
+            | Self::NoInputs
+            | Self::InstanceUnavailable => None,
         }
     }
 }
@@ -380,20 +392,14 @@ pub(super) async fn flush_branch_wasm_processor(
     let forwarded = match RelayRecordBatch::concat(grouped_batches.clone()) {
         Ok(forwarded) => forwarded,
         Err(error) => {
-            for batch in grouped_batches {
-                branch.runtime.handle_internal_processor_error_for_acks(
-                    &branch.domain,
-                    node_kind,
-                    processor,
-                    error_policies,
-                    batch.acks.iter(),
-                    format!(
-                        "wasm processor '{}' failed to concat arrow batches: {}",
-                        processor.as_str(),
-                        error
-                    ),
-                );
-            }
+            branch.runtime.handle_internal_processor_error_for_acks(
+                &branch.domain,
+                node_kind,
+                processor,
+                error_policies,
+                grouped_batches.iter().flat_map(|batch| batch.acks.iter()),
+                &error.change_context(WasmInstanceError::ConcatenateInput),
+            );
             return;
         }
     };
@@ -405,10 +411,7 @@ pub(super) async fn flush_branch_wasm_processor(
             processor,
             error_policies,
             forwarded.acks.iter(),
-            format!(
-                "wasm processor '{}' has no output destinations",
-                processor.as_str()
-            ),
+            &Report::new(WasmInstanceError::NoOutputs),
         );
         return;
     }
@@ -419,10 +422,7 @@ pub(super) async fn flush_branch_wasm_processor(
             processor,
             error_policies,
             forwarded.acks.iter(),
-            format!(
-                "wasm processor '{}' has no input relays",
-                processor.as_str()
-            ),
+            &Report::new(WasmInstanceError::NoInputs),
         );
         return;
     };
@@ -435,7 +435,7 @@ pub(super) async fn flush_branch_wasm_processor(
                 processor,
                 error_policies,
                 forwarded.acks.iter(),
-                error.to_string(),
+                &error,
             );
             return;
         }
@@ -451,7 +451,7 @@ pub(super) async fn flush_branch_wasm_processor(
                     processor,
                     error_policies,
                     forwarded.acks.iter(),
-                    error.to_string(),
+                    &error,
                 );
                 return;
             }
@@ -484,7 +484,7 @@ pub(super) async fn flush_branch_wasm_processor(
             processor,
             error_policies,
             forwarded.acks.iter(),
-            format!("{error:#}"),
+            &error,
         );
         return;
     }
@@ -495,10 +495,7 @@ pub(super) async fn flush_branch_wasm_processor(
             processor,
             error_policies,
             forwarded.acks.iter(),
-            format!(
-                "wasm processor '{}' instance is unavailable",
-                processor.as_str()
-            ),
+            &Report::new(WasmInstanceError::InstanceUnavailable),
         );
         return;
     }
@@ -515,7 +512,7 @@ pub(super) async fn flush_branch_wasm_processor(
                     processor,
                     error_policies,
                     forwarded.acks.iter(),
-                    format!("{error:#}"),
+                    &error,
                 );
                 return;
             }
@@ -568,7 +565,7 @@ pub(super) async fn flush_branch_wasm_processor(
                             "the is_none check above returned unless this branch holds an instance",
                         )
                         .module,
-                    dispatch_error: "failed to forward message",
+                    callback: WasmCallbackOutput::Process,
                     execution_now,
                 },
                 outputs,
@@ -583,7 +580,7 @@ pub(super) async fn flush_branch_wasm_processor(
                     processor,
                     error_policies,
                     holds.acks(),
-                    format!("{error:#}"),
+                    &error,
                 );
             }
         }

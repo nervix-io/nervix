@@ -1933,7 +1933,7 @@ impl Runtime {
                             Ok(now) => now,
                             Err(error) => {
                                 runtime.events().report_error(format!(
-                                    "relay '{}' in domain '{}' lost its clock: {error}",
+                                    "relay '{}' in domain '{}' lost its clock: {error:#}",
                                     relay.as_str(),
                                     domain.as_str(),
                                 ));
@@ -2021,7 +2021,8 @@ impl Runtime {
                 Ok(clock) => clock,
                 Err(error) => {
                     runtime.events().report_error(format!(
-                        "materialized relay '{}' in domain '{}' could not bind its clock: {error}",
+                        "materialized relay '{}' in domain '{}' could not bind its clock: \
+                         {error:#}",
                         relay.as_str(),
                         domain.as_str()
                     ));
@@ -2044,7 +2045,7 @@ impl Runtime {
                         Ok(now) => now,
                         Err(error) => {
                             runtime.events().report_error(format!(
-                                "materialized relay '{}' in domain '{}' lost its clock: {error}",
+                                "materialized relay '{}' in domain '{}' lost its clock: {error:#}",
                                 relay.as_str(),
                                 domain.as_str(),
                             ));
@@ -2094,19 +2095,18 @@ impl Runtime {
                 }
                 let work = match interaction.next(wake).await {
                     Ok(work) => work,
-                    Err(error) => {
-                        if let Some(acks) = error.acks() {
-                            acks.no_ack(format!(
-                                "state task for relay '{}' failed to collect input: {error}",
-                                relay.as_str()
-                            ));
-                        }
+                    Err(failure) => {
+                        let reason = format!("{:#}", failure.error);
                         warn!(
                             domain = domain.as_str(),
                             relay = relay.as_str(),
-                            error = %error,
+                            error = %reason,
                             "materialized relay interaction failed"
                         );
+                        failure.acks.no_ack(format!(
+                            "state task for relay '{}' failed: {reason}",
+                            relay.as_str()
+                        ));
                         continue;
                     }
                 };

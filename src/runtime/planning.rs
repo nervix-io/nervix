@@ -638,7 +638,6 @@ pub(in crate::runtime) fn materialize_processor_instance_template(
 }
 
 fn bind_processor_template_programs(
-    domain: &DomainName,
     template: &mut BranchInstanceTemplate,
     relay_schemas: &HashMap<RelayName, Arc<CompiledSchema>>,
     relay_branchings: &HashMap<RelayName, ResolvedBranching>,
@@ -722,10 +721,7 @@ fn bind_processor_template_programs(
             };
             if let Some(expression) = processor.from_where.get(input_relay)
                 && let Some(program) = compile_scoped_filter_program(
-                    RuntimeCompileTarget {
-                        domain,
-                        identifier: &processor.processor,
-                    },
+                    &processor.processor,
                     Some(expression),
                     RuntimeVmSchema {
                         schema: input_schema.arrow_schema(),
@@ -743,10 +739,7 @@ fn bind_processor_template_programs(
             }
             if let Some(expression) = processor.filter_where.as_ref()
                 && let Some(program) = compile_scoped_filter_program(
-                    RuntimeCompileTarget {
-                        domain,
-                        identifier: &processor.processor,
-                    },
+                    &processor.processor,
                     Some(expression),
                     RuntimeVmSchema {
                         schema: input_schema.arrow_schema(),
@@ -793,7 +786,6 @@ fn bind_processor_template_programs(
                 );
                 bind_transforming_output_programs(
                     TransformingOutputProgramBinding {
-                        domain,
                         kind: processor.kind,
                         processor: &processor.processor,
                         input_relays: &processor.input_relays,
@@ -823,7 +815,6 @@ fn bind_processor_template_programs(
                 );
                 bind_transforming_output_programs(
                     TransformingOutputProgramBinding {
-                        domain,
                         kind: processor.kind,
                         processor: &processor.processor,
                         input_relays: &processor.input_relays,
@@ -838,7 +829,6 @@ fn bind_processor_template_programs(
             RelayProcessorOperationTemplate::Junction { output_routes } => {
                 bind_transforming_output_programs(
                     TransformingOutputProgramBinding {
-                        domain,
                         kind: processor.kind,
                         processor: &processor.processor,
                         input_relays: &processor.input_relays,
@@ -861,7 +851,6 @@ fn bind_processor_template_programs(
                             })
                         })?;
                     output.compiled_program = compile_finalized_output_filter_program(
-                        domain,
                         &processor.processor,
                         output.construction.where_clause.as_ref(),
                         output_schema.arrow_schema(),
@@ -879,7 +868,6 @@ fn bind_processor_template_programs(
                 let tensors = InferencerFilterMapTensors { output_schema };
                 bind_transforming_output_programs(
                     TransformingOutputProgramBinding {
-                        domain,
                         kind: processor.kind,
                         processor: &processor.processor,
                         input_relays: &processor.input_relays,
@@ -902,14 +890,13 @@ fn bind_processor_template_programs(
                             })
                         })?;
                     output.compiled_program = compile_wasm_output_filter_map_program(
-                        domain,
                         &processor.processor,
                         &output.construction,
                         output_schema.arrow_schema(),
                         output_schema.vm_sensitivity(),
                         output_context(),
                     )
-                    .map_err(|error| Report::new(compilation_error()).attach_printable(error))?;
+                    .change_context_lazy(compilation_error)?;
                 }
             }
             RelayProcessorOperationTemplate::Correlator {
@@ -993,7 +980,6 @@ fn bind_processor_template_programs(
 
 #[derive(Clone, Copy)]
 struct TransformingOutputProgramBinding<'a> {
-    domain: &'a DomainName,
     kind: ModelKind,
     processor: &'a ModelName,
     input_relays: &'a [RelayName],
@@ -1023,10 +1009,7 @@ fn bind_transforming_output_programs<'a>(
             None => binding.input_schema.arrow_schema(),
         };
         output.compiled_program = compile_processor_output_filter_map_program(
-            RuntimeCompileTarget {
-                domain: binding.domain,
-                identifier: binding.processor,
-            },
+            binding.processor,
             binding.input_relays,
             &output.output_relay,
             &output.construction,
@@ -1039,12 +1022,9 @@ fn bind_transforming_output_programs<'a>(
             inferencer_tensors,
             context(),
         )
-        .map_err(|error| {
-            Report::new(PlanningError::ProcessorProgramCompilation {
-                kind: binding.kind,
-                node: binding.processor.clone(),
-            })
-            .attach_printable(error)
+        .change_context_lazy(|| PlanningError::ProcessorProgramCompilation {
+            kind: binding.kind,
+            node: binding.processor.clone(),
         })?;
     }
     Ok(())
@@ -1095,7 +1075,6 @@ pub(in crate::runtime) async fn bind_published_processor_plans(
         let mut template =
             materialize_processor_instance_template(spec, relay_schemas, relay_services, udfs)?;
         bind_processor_template_programs(
-            domain,
             &mut template,
             relay_schemas,
             relay_branchings,

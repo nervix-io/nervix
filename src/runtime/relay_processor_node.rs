@@ -2,6 +2,33 @@ use error_stack::{Report, ResultExt as _};
 
 use super::*;
 
+/// Every way a relay processor fails to take one input batch through its own operation before the
+/// batch reaches its output routes. The processor names itself when it reports the failure, and
+/// the acknowledgements of the input fail with it.
+#[derive(Debug, thiserror::Error)]
+pub(super) enum RelayProcessorError {
+    #[error("failed to concatenate collected input from relay '{relay}'")]
+    ConcatenateInput { relay: RelayName },
+    #[error("could not inspect collected input from relay '{relay}'")]
+    InspectCollectedInput { relay: RelayName },
+    #[error("the {} program is not prepared", .filter.label())]
+    MissingInputFilter { filter: ProcessorInputFilterKind },
+    #[error("could not read the domain execution time")]
+    ExecutionTime,
+    #[error("the {} program is not prepared", .projection.clause())]
+    MissingKeyProgram { projection: KeyProjectionKind },
+    #[error("failed to build the {} input batch", .projection.clause())]
+    KeyInput { projection: KeyProjectionKind },
+    #[error("failed to evaluate the {} expressions", .projection.clause())]
+    EvaluateKey { projection: KeyProjectionKind },
+    #[error("failed to build the deduplicated output batch")]
+    DeduplicatedBatch,
+    #[error("failed to decode the input batch into messages")]
+    DecodeInput,
+    #[error("{buffers} output buffers do not match {routes} output routes")]
+    OutputBufferCount { buffers: usize, routes: usize },
+}
+
 struct ProcessorInputExpressionContext<'a> {
     materialized_state: &'a HashMap<String, RuntimeValue>,
     execution_now: Timestamp,
@@ -164,12 +191,9 @@ impl RelayProcessorNode {
                     &self.processor,
                     &self.error_policies,
                     acks.iter(),
-                    format!(
-                        "{} '{}' failed to concatenate collected input from relay '{}': {error}",
-                        self.kind.as_str(),
-                        self.processor.as_str(),
-                        incoming_relay.as_str(),
-                    ),
+                    &error.change_context(RelayProcessorError::ConcatenateInput {
+                        relay: incoming_relay.clone(),
+                    }),
                 );
                 None
             }
@@ -220,13 +244,9 @@ impl RelayProcessorNode {
                             &self.processor,
                             &self.error_policies,
                             [&acks],
-                            format!(
-                                "{} '{}' could not inspect collected input from relay '{}': \
-                                 {error}",
-                                self.kind.as_str(),
-                                self.processor.as_str(),
-                                relay.as_str(),
-                            ),
+                            &error.change_context(RelayProcessorError::InspectCollectedInput {
+                                relay: relay.clone(),
+                            }),
                         );
                     }
                 }
@@ -322,7 +342,7 @@ impl RelayProcessorNode {
                 &self.processor,
                 &self.error_policies,
                 batch.acks.iter(),
-                format!("{} has no prepared program", kind.label()),
+                &Report::new(RelayProcessorError::MissingInputFilter { filter: kind }),
             );
             return None;
         };
@@ -348,7 +368,7 @@ impl RelayProcessorNode {
                     &self.processor,
                     &self.error_policies,
                     failure.acks.iter(),
-                    format!("{:#}", failure.error),
+                    &failure.error,
                 );
                 return None;
             }
@@ -383,7 +403,7 @@ impl RelayProcessorNode {
                         &self.processor,
                         &self.error_policies,
                         batch.acks.iter(),
-                        error.to_string(),
+                        &error,
                     );
                     return;
                 }
@@ -398,11 +418,7 @@ impl RelayProcessorNode {
                         &self.processor,
                         &self.error_policies,
                         batch.acks.iter(),
-                        format!(
-                            "{} '{}' could not read domain execution time: {error}",
-                            self.kind.as_str(),
-                            self.processor.as_str(),
-                        ),
+                        &error.change_context(RelayProcessorError::ExecutionTime),
                     );
                     return;
                 }
@@ -431,7 +447,7 @@ impl RelayProcessorNode {
                         &self.processor,
                         &self.error_policies,
                         batch.acks.iter(),
-                        format!("{} '{}' {error:#}", self.kind.as_str(), self.processor),
+                        &error,
                     );
                     return;
                 }
@@ -465,7 +481,9 @@ impl RelayProcessorNode {
                             &self.processor,
                             &self.error_policies,
                             batch.acks.iter(),
-                            "deduplicator has no prepared key program".to_string(),
+                            &Report::new(RelayProcessorError::MissingKeyProgram {
+                                projection: KeyProjectionKind::Deduplicator,
+                            }),
                         );
                         return;
                     };
@@ -492,12 +510,9 @@ impl RelayProcessorNode {
                                 &self.processor,
                                 &self.error_policies,
                                 batch.acks.iter(),
-                                format!(
-                                    "deduplicator '{}' failed to build DEDUPLICATE ON input \
-                                     batch: {}",
-                                    self.processor.as_str(),
-                                    error
-                                ),
+                                &error.change_context(RelayProcessorError::KeyInput {
+                                    projection: KeyProjectionKind::Deduplicator,
+                                }),
                             );
                             return;
                         }
@@ -521,12 +536,9 @@ impl RelayProcessorNode {
                                 &self.processor,
                                 &self.error_policies,
                                 batch.acks.iter(),
-                                format!(
-                                    "deduplicator '{}' failed to evaluate DEDUPLICATE ON \
-                                     expressions: {}",
-                                    self.processor.as_str(),
-                                    error
-                                ),
+                                &error.change_context(RelayProcessorError::EvaluateKey {
+                                    projection: KeyProjectionKind::Deduplicator,
+                                }),
                             );
                             return;
                         }
@@ -578,11 +590,9 @@ impl RelayProcessorNode {
                                 &self.processor,
                                 &self.error_policies,
                                 failure.preserved.iter(),
-                                format!(
-                                    "deduplicator '{}' failed to build output batch: {}",
-                                    self.processor.as_str(),
-                                    failure.error
-                                ),
+                                &failure
+                                    .error
+                                    .change_context(RelayProcessorError::DeduplicatedBatch),
                             );
                             return;
                         }
@@ -636,11 +646,9 @@ impl RelayProcessorNode {
                                 &self.processor,
                                 &self.error_policies,
                                 batch.acks.iter(),
-                                format!(
-                                    "window processor '{}' failed to decode arrow batch: {}",
-                                    self.processor.as_str(),
-                                    failure.error
-                                ),
+                                &failure
+                                    .error
+                                    .change_context(RelayProcessorError::DecodeInput),
                             );
                             return;
                         }
@@ -817,7 +825,9 @@ impl RelayProcessorNode {
                             &self.processor,
                             &self.error_policies,
                             batch.acks.iter(),
-                            "reorderer has no prepared ordering program".to_string(),
+                            &Report::new(RelayProcessorError::MissingKeyProgram {
+                                projection: KeyProjectionKind::Reorderer,
+                            }),
                         );
                         return;
                     };
@@ -844,11 +854,9 @@ impl RelayProcessorNode {
                                 &self.processor,
                                 &self.error_policies,
                                 batch.acks.iter(),
-                                format!(
-                                    "reorderer '{}' failed to build BY input batch: {}",
-                                    self.processor.as_str(),
-                                    error
-                                ),
+                                &error.change_context(RelayProcessorError::KeyInput {
+                                    projection: KeyProjectionKind::Reorderer,
+                                }),
                             );
                             return;
                         }
@@ -872,11 +880,9 @@ impl RelayProcessorNode {
                                 &self.processor,
                                 &self.error_policies,
                                 batch.acks.iter(),
-                                format!(
-                                    "reorderer '{}' failed to evaluate BY expressions: {}",
-                                    self.processor.as_str(),
-                                    error
-                                ),
+                                &error.change_context(RelayProcessorError::EvaluateKey {
+                                    projection: KeyProjectionKind::Reorderer,
+                                }),
                             );
                             return;
                         }
@@ -888,10 +894,10 @@ impl RelayProcessorNode {
                             &self.processor,
                             &self.error_policies,
                             batch.acks.iter(),
-                            format!(
-                                "reorderer '{}' output buffer count does not match its routes",
-                                self.processor.as_str()
-                            ),
+                            &Report::new(RelayProcessorError::OutputBufferCount {
+                                buffers: output_buffers.len(),
+                                routes: output_routes.routes.len(),
+                            }),
                         );
                         return;
                     }
@@ -926,11 +932,7 @@ impl RelayProcessorNode {
                                 &self.processor,
                                 &self.error_policies,
                                 batch.acks.iter(),
-                                format!(
-                                    "reorderer '{}' could not read the domain clock while \
-                                     buffering output: {error}",
-                                    self.processor.as_str(),
-                                ),
+                                &error.change_context(RouteOutputError::BufferClock),
                             );
                             return;
                         }
@@ -955,11 +957,9 @@ impl RelayProcessorNode {
                                     &self.processor,
                                     &self.error_policies,
                                     output_buffer.acks(),
-                                    format!(
-                                        "reorderer '{}' output '{}' has no flush policy",
-                                        self.processor.as_str(),
-                                        output.relay.as_str()
-                                    ),
+                                    &Report::new(RouteOutputError::MissingFlushPolicy {
+                                        relay: output.relay.clone(),
+                                    }),
                                 );
                                 output_buffer.clear();
                             }
@@ -970,12 +970,9 @@ impl RelayProcessorNode {
                                     &self.processor,
                                     &self.error_policies,
                                     output_buffer.acks(),
-                                    format!(
-                                        "reorderer '{}' could not start output '{}' flush \
-                                         deadline: {error}",
-                                        self.processor.as_str(),
-                                        output.relay.as_str(),
-                                    ),
+                                    &error.change_context(RouteOutputError::StartFlushDeadline {
+                                        relay: output.relay.clone(),
+                                    }),
                                 );
                                 output_buffer.clear();
                                 output.clear_flush_timer();
@@ -1022,11 +1019,9 @@ impl RelayProcessorNode {
                             &self.processor,
                             &self.error_policies,
                             batch.acks.iter(),
-                            format!(
-                                "correlator '{}' received unexpected relay '{}'",
-                                self.processor.as_str(),
-                                incoming_relay.as_str()
-                            ),
+                            &Report::new(CorrelatorError::UnexpectedRelay {
+                                relay: incoming_relay.clone(),
+                            }),
                         );
                         return;
                     };
@@ -1037,7 +1032,7 @@ impl RelayProcessorNode {
                             &self.processor,
                             &self.error_policies,
                             batch.acks.iter(),
-                            "correlator has no prepared match program".to_string(),
+                            &Report::new(CorrelatorError::MissingMatchProgram),
                         );
                         return;
                     };
@@ -1052,11 +1047,9 @@ impl RelayProcessorNode {
                                 &self.processor,
                                 &self.error_policies,
                                 batch.acks.iter(),
-                                format!(
-                                    "correlator '{}' failed to decode arrow batch: {}",
-                                    self.processor.as_str(),
-                                    failure.error
-                                ),
+                                &failure
+                                    .error
+                                    .change_context(RelayProcessorError::DecodeInput),
                             );
                             return;
                         }
@@ -1077,7 +1070,6 @@ impl RelayProcessorNode {
                                 executor: branch.runtime.executor(),
                                 now: execution_now,
                             },
-                            &self.processor,
                             where_program,
                             side,
                             *match_policy,
@@ -1088,14 +1080,14 @@ impl RelayProcessorNode {
                         {
                             Ok(Some(pair)) => correlations.push(pair),
                             Ok(None) => {}
-                            Err((reason, acks)) => {
+                            Err(failure) => {
                                 branch.runtime.handle_internal_processor_error_for_acks(
                                     &branch.domain,
                                     self.kind,
                                     &self.processor,
                                     &self.error_policies,
-                                    acks.iter(),
-                                    reason,
+                                    failure.acks.iter(),
+                                    &failure.error,
                                 );
                             }
                         }
@@ -1115,10 +1107,10 @@ impl RelayProcessorNode {
                             correlations.iter().flat_map(|(left, right)| {
                                 [&left.message.acks, &right.message.acks]
                             }),
-                            format!(
-                                "correlator '{}' output programs do not match its destinations",
-                                self.processor.as_str()
-                            ),
+                            &Report::new(CorrelatorError::OutputProgramCount {
+                                programs: compiled_output_programs.len(),
+                                routes: output_routes.routes.len(),
+                            }),
                         );
                         return;
                     }
@@ -1136,10 +1128,7 @@ impl RelayProcessorNode {
                             correlations.iter().flat_map(|(left, right)| {
                                 [&left.message.acks, &right.message.acks]
                             }),
-                            format!(
-                                "correlator '{}' output program is unavailable",
-                                self.processor.as_str()
-                            ),
+                            &Report::new(CorrelatorError::OutputProgramUnavailable),
                         );
                         return;
                     };
@@ -1157,11 +1146,7 @@ impl RelayProcessorNode {
                                 correlations.iter().flat_map(|(left, right)| {
                                     [&left.message.acks, &right.message.acks]
                                 }),
-                                format!(
-                                    "correlator '{}' failed to build matched Arrow batches: \
-                                     {error:#}",
-                                    self.processor.as_str()
-                                ),
+                                &error.change_context(CorrelatorError::MatchedBatch),
                             );
                             return;
                         }
@@ -1193,18 +1178,14 @@ impl RelayProcessorNode {
                         .await
                         {
                             Ok(outcomes) => outcomes,
-                            Err((error, acks)) => {
+                            Err(failure) => {
                                 branch.runtime.handle_internal_processor_error_for_acks(
                                     &branch.domain,
                                     self.kind,
                                     &self.processor,
                                     &self.error_policies,
-                                    acks.iter(),
-                                    format!(
-                                        "correlator '{}' failed to evaluate batched output: \
-                                         {error}",
-                                        self.processor.as_str()
-                                    ),
+                                    failure.acks.iter(),
+                                    &failure.error,
                                 );
                                 continue;
                             }
@@ -1288,10 +1269,10 @@ impl RelayProcessorNode {
                             &self.processor,
                             &self.error_policies,
                             batch.acks.iter(),
-                            format!(
-                                "inferencer '{}' output buffer count does not match its routes",
-                                self.processor.as_str()
-                            ),
+                            &Report::new(RelayProcessorError::OutputBufferCount {
+                                buffers: output_buffers.len(),
+                                routes: output_routes.routes.len(),
+                            }),
                         );
                         return;
                     }
@@ -1305,11 +1286,7 @@ impl RelayProcessorNode {
                                 &self.processor,
                                 &self.error_policies,
                                 batch.acks.iter(),
-                                format!(
-                                    "inferencer '{}' could not read the domain clock while \
-                                     buffering output: {error}",
-                                    self.processor.as_str(),
-                                ),
+                                &error.change_context(RouteOutputError::BufferClock),
                             );
                             return;
                         }
@@ -1337,11 +1314,9 @@ impl RelayProcessorNode {
                                         .pending
                                         .iter()
                                         .flat_map(|batch| batch.acks.iter()),
-                                    format!(
-                                        "inferencer '{}' output '{}' has no flush policy",
-                                        self.processor.as_str(),
-                                        output.relay.as_str()
-                                    ),
+                                    &Report::new(RouteOutputError::MissingFlushPolicy {
+                                        relay: output.relay.clone(),
+                                    }),
                                 );
                                 output_buffer.clear();
                             }
@@ -1355,12 +1330,9 @@ impl RelayProcessorNode {
                                         .pending
                                         .iter()
                                         .flat_map(|batch| batch.acks.iter()),
-                                    format!(
-                                        "inferencer '{}' could not start output '{}' flush \
-                                         deadline: {error}",
-                                        self.processor.as_str(),
-                                        output.relay.as_str(),
-                                    ),
+                                    &error.change_context(RouteOutputError::StartFlushDeadline {
+                                        relay: output.relay.clone(),
+                                    }),
                                 );
                                 output_buffer.clear();
                                 output.clear_flush_timer();
@@ -1530,12 +1502,9 @@ impl RelayProcessorNode {
                                     &self.processor,
                                     &self.error_policies,
                                     output_buffer.acks(),
-                                    format!(
-                                        "reorderer '{}' could not inspect output '{}' flush \
-                                         deadline: {error}",
-                                        self.processor.as_str(),
-                                        output_routes.routes[output_index].relay.as_str(),
-                                    ),
+                                    &error.change_context(RouteOutputError::InspectFlushDeadline {
+                                        relay: output_routes.routes[output_index].relay.clone(),
+                                    }),
                                 );
                                 output_routes.routes[output_index].clear_flush_timer();
                                 continue;
@@ -1643,12 +1612,9 @@ impl RelayProcessorNode {
                                         .pending
                                         .iter()
                                         .flat_map(|batch| batch.acks.iter()),
-                                    format!(
-                                        "inferencer '{}' could not inspect output '{}' flush \
-                                         deadline: {error}",
-                                        self.processor.as_str(),
-                                        output_routes.routes[output_index].relay.as_str(),
-                                    ),
+                                    &error.change_context(RouteOutputError::InspectFlushDeadline {
+                                        relay: output_routes.routes[output_index].relay.clone(),
+                                    }),
                                 );
                             }
                         }
@@ -1765,7 +1731,7 @@ impl RelayProcessorNode {
                                                  and only a completed callback ends it",
                                             )
                                             .module,
-                                        dispatch_error: "failed to forward timeout output",
+                                        callback: WasmCallbackOutput::Timeout,
                                         execution_now: now,
                                     },
                                     outputs,
@@ -1780,7 +1746,7 @@ impl RelayProcessorNode {
                                         &self.processor,
                                         &self.error_policies,
                                         holds.acks(),
-                                        format!("{error:#}"),
+                                        &error,
                                     );
                                 }
                             }
@@ -1926,7 +1892,7 @@ impl RelayProcessorNode {
                                      instance",
                                 )
                                 .module,
-                            dispatch_error: "failed to forward quiesce flush output",
+                            callback: WasmCallbackOutput::QuiesceFlush,
                             execution_now,
                         },
                         outputs,
@@ -1941,7 +1907,7 @@ impl RelayProcessorNode {
                             &self.processor,
                             &self.error_policies,
                             holds.acks(),
-                            format!("{error:#}"),
+                            &error,
                         );
                     }
                 }
@@ -1997,7 +1963,7 @@ impl RelayProcessorNode {
                         &self.processor,
                         &self.error_policies,
                         state.entries.iter().map(|entry| &entry.message.acks),
-                        format!("{error:#}"),
+                        &error,
                     );
                     state.clear(plan);
                     replicated_state.generations.mark_live_dirty();
@@ -2144,5 +2110,146 @@ impl RelayProcessorNode {
             }
         }
         Ok(false)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use nervix_models::{
+        CorrelationTimeoutAction, CorrelationTimeoutPolicy, CorrelatorMatchPolicy, ParseAsType,
+    };
+
+    use super::*;
+    use crate::{
+        runtime::RuntimeEvent,
+        runtime_ack::{AckOutcome, AckSet},
+        runtime_schema::{RuntimeValue, test_runtime_row},
+    };
+
+    /// Hands one batch from relay `incoming` to a branch whose one processor, `node`, `shape`
+    /// configures, and returns the runtime event the processor reported together with the outcome
+    /// of the batch's acknowledgements.
+    async fn report_of_one_batch(
+        shape: impl FnOnce(&mut RelayProcessorTemplate),
+    ) -> (String, AckOutcome) {
+        let runtime = Runtime::default();
+        let domain = domain("default");
+        install_unpaced_test_domain(&runtime, &domain);
+        let node = named::<ModelName>("node");
+        let incoming = named::<RelayName>("incoming");
+        let mut template = junction_branch_template(node.as_str(), incoming.as_str());
+        let processor = template
+            .processors
+            .get_mut(&node)
+            .assured("the fixture declares its one processor");
+        shape(processor);
+        let mut branch = template
+            .instantiate(&runtime, &domain, None, 1)
+            .await
+            .assured("the branch instantiates on the test domain")
+            .into_inner();
+        branch
+            .refresh_domain_routing()
+            .assured("the test domain publishes its routing");
+        let mut events = runtime.subscribe_events();
+        let (acks, completion) = AckSet::root();
+        let batch = RelayRecordBatch::single(
+            test_schema(&[("value", ParseAsType::I64)]),
+            None,
+            test_runtime_row([("value".to_string(), RuntimeValue::I64(1))]),
+            acks,
+        )
+        .assured("one test row forms a relay batch");
+
+        branch
+            .execute_processor_input(&node, &incoming, batch)
+            .await;
+
+        let RuntimeEvent::Error(message) = events
+            .recv()
+            .await
+            .assured("the processor reports the failure to the node's observers");
+        (message, completion.wait().await)
+    }
+
+    fn correlator(left: &str, right: &str) -> RelayProcessorOperationTemplate {
+        RelayProcessorOperationTemplate::Correlator {
+            output_routes: RelayProcessorOutputsTemplate { routes: Vec::new() },
+            left_relays: vec![named(left)],
+            right_relays: vec![named(right)],
+            correlate_where: expression("left.value = right.value"),
+            match_policy: CorrelatorMatchPolicy::Latest,
+            max_time: Duration::from_secs(60),
+            timeout_policy: CorrelationTimeoutPolicy {
+                left: CorrelationTimeoutAction::Drop,
+                right: CorrelationTimeoutAction::Drop,
+            },
+            compiled_where_program: None,
+            compiled_output_programs: Vec::new(),
+        }
+    }
+
+    #[nervix_primitives::test]
+    async fn an_input_filter_without_its_program_fails_the_batch_as_an_internal_error() {
+        let (message, outcome) = report_of_one_batch(|processor| {
+            processor
+                .from_where
+                .insert(named("incoming"), expression("input.value > 0"));
+        })
+        .await;
+
+        let expected = "junction 'node' internal error in domain 'default': the FROM WHERE \
+                        program is not prepared";
+        assert_eq!(message, expected);
+        assert_eq!(outcome, AckOutcome::NoAck(expected.to_string()));
+    }
+
+    #[nervix_primitives::test]
+    async fn a_reorderer_without_its_by_program_fails_the_batch_as_an_internal_error() {
+        let (message, outcome) = report_of_one_batch(|processor| {
+            processor.kind = ModelKind::Reorderer;
+            processor.operation = RelayProcessorOperationTemplate::Reorderer {
+                output_routes: RelayProcessorOutputsTemplate { routes: Vec::new() },
+                order_by: Vec::new(),
+                max_time: Duration::from_secs(60),
+                compiled_program: None,
+            };
+        })
+        .await;
+
+        let expected =
+            "reorderer 'node' internal error in domain 'default': the BY program is not prepared";
+        assert_eq!(message, expected);
+        assert_eq!(outcome, AckOutcome::NoAck(expected.to_string()));
+    }
+
+    #[nervix_primitives::test]
+    async fn a_correlator_input_from_neither_side_fails_the_batch_as_an_internal_error() {
+        let (message, outcome) = report_of_one_batch(|processor| {
+            processor.kind = ModelKind::Correlator;
+            processor.operation = correlator("left_profiles", "right_profiles");
+        })
+        .await;
+
+        let expected = "correlator 'node' internal error in domain 'default': received input from \
+                        relay 'incoming', which is on neither of its sides";
+        assert_eq!(message, expected);
+        assert_eq!(outcome, AckOutcome::NoAck(expected.to_string()));
+    }
+
+    #[nervix_primitives::test]
+    async fn a_correlator_without_its_match_program_fails_the_batch_as_an_internal_error() {
+        let (message, outcome) = report_of_one_batch(|processor| {
+            processor.kind = ModelKind::Correlator;
+            processor.operation = correlator("incoming", "right_profiles");
+        })
+        .await;
+
+        let expected = "correlator 'node' internal error in domain 'default': the CORRELATE WHERE \
+                        program is not prepared";
+        assert_eq!(message, expected);
+        assert_eq!(outcome, AckOutcome::NoAck(expected.to_string()));
     }
 }

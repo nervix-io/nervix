@@ -594,7 +594,7 @@ pub(super) fn validate_wasm_test_outputs(
     output_schema: &Arc<super::CompiledSchema>,
     ack_map: &super::WasmAckMap,
     outputs: Vec<WasmEnvelope>,
-) -> Result<Vec<WasmMaterializedOutput>, WasmOutputError> {
+) -> error_stack::Result<Vec<WasmMaterializedOutput>, WasmOutputError> {
     validate_wasm_test_output_groups(
         input_schema,
         vec![("output", Arc::clone(output_schema))],
@@ -608,7 +608,7 @@ pub(super) fn validate_wasm_test_output_groups(
     schemas: Vec<(&str, Arc<super::CompiledSchema>)>,
     ack_map: &super::WasmAckMap,
     outputs: Vec<WasmEnvelope>,
-) -> Result<Vec<WasmMaterializedOutput>, WasmOutputError> {
+) -> error_stack::Result<Vec<WasmMaterializedOutput>, WasmOutputError> {
     let output_schemas = schemas
         .into_iter()
         .map(|(relay, schema)| (named::<RelayName>(relay), schema))
@@ -713,14 +713,13 @@ pub(super) fn wasm_guest_stream(schema: StdArc<ArrowSchema>, batches: &[RecordBa
 /// Lowers `construction` as an ingestor's plan does and binds it as the ingestor's start does, for
 /// tests whose subject is the bound route program.
 pub(super) fn bind_ingestor_route_for_test(
-    domain: &DomainName,
     identifier: &ModelName,
     metadata_kind: IngestMetadataKind,
     allow_header_reads: bool,
     construction: &RouteConstruction,
     schemas: RuntimeVmSchemaPair,
     context: RuntimeVmCompileContext<'_>,
-) -> Result<CompiledProgramWithMaterializedInterest, RuntimeError> {
+) -> RuntimeVmCompileResult<CompiledProgramWithMaterializedInterest> {
     let lowered = LoweredConstruction::transforming(
         construction,
         schemas.input.as_ref(),
@@ -728,7 +727,7 @@ pub(super) fn bind_ingestor_route_for_test(
     )
     .assured("the fixture route lowers against its schemas");
     bind_ingestor_filter_map_program(
-        RuntimeCompileTarget { domain, identifier },
+        identifier,
         metadata_kind,
         allow_header_reads,
         &lowered,
