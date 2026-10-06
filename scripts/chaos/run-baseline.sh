@@ -11,6 +11,8 @@ source "${script_dir}/tool-images.sh"
 source "${script_dir}/docker-event-recording.sh"
 # shellcheck source=require-jq.sh
 source "${script_dir}/require-jq.sh"
+# shellcheck source=image-identity.sh
+source "${script_dir}/image-identity.sh"
 
 usage() {
     cat <<EOF
@@ -336,6 +338,7 @@ load_replay_settings() {
     local tool
     for tool in kafka kcat probe pumba nettools; do
         replay_tool_image_ids["${tool}"]="$(jq -r --arg tool "${tool}" '.tool_images[$tool].image_id' "${manifest}")"
+        replay_tool_references["${tool}"]="$(jq -r --arg tool "${tool}" '.tool_images[$tool].reference' "${manifest}")"
     done
     local setting value
     while IFS=$'\t' read -r setting value; do
@@ -351,6 +354,9 @@ replay_repo_digests=""
 replay_load_interval_ms=""
 replay_of=null
 declare -A replay_tool_image_ids=()
+declare -A replay_tool_references=()
+# How a replay found its recorded Nervix image: by its image ID or through a repository digest.
+replay_image_match=""
 if [[ -n "${replay_dir}" ]]; then
     [[ "${scenario}" == mixed-instability ]] || setup_error 'only mixed-instability runs can be replayed'
     for option in "${given_options[@]}"; do
@@ -1395,8 +1401,12 @@ select_run_network() {
 
 generate_tls() {
     local tls_dir="${artifact_dir}/tls"
+    # A subject attribute holds at most 64 characters and a run ID up to 96, so the CA names its run
+    # by a digest of the run ID.
+    local run_digest
+    run_digest="$(printf '%s' "${run_id}" | openssl dgst -sha256 -r | cut -c1-16)"
     run_bounded 30 openssl req -x509 -newkey rsa:2048 -sha256 -nodes -days 2 \
-        -subj "/CN=Nervix Chaos CA ${run_id}" \
+        -subj "/CN=Nervix Chaos CA ${run_digest}" \
         -keyout "${tls_dir}/ca-key.pem" \
         -out "${tls_dir}/ca.pem" \
         >"${artifact_dir}/diagnostics/openssl-ca.txt" 2>&1
@@ -1631,10 +1641,12 @@ traffic_metrics_ready() {
 }
 
 # A replay starts exactly the Nervix image its run recorded: by that image ID when it is local, or
-# pulled through a recorded repository digest that resolves to the same ID.
+# through a recorded repository digest, pulled when it is not local. The image ID is the store's own
+# name, so a run recorded on a worker whose image store is of another kind is found by its digest.
 resolve_recorded_image() {
     if image_id="$(run_bounded 30 docker image inspect --format '{{.Id}}' "${replay_image_id}" 2>/dev/null)" \
         && [[ "${image_id}" == "${replay_image_id}" ]]; then
+        replay_image_match='image ID'
         return 0
     fi
     local candidates=()
@@ -1645,10 +1657,13 @@ resolve_recorded_image() {
     local candidate
     for candidate in ${candidates[@]+"${candidates[@]}"}; do
         [[ -n "${candidate}" ]] || continue
-        printf 'the recorded image is not local; attempting bounded pull: %s\n' "${candidate}"
-        if run_bounded 180 docker pull "${candidate}" >>"${artifact_dir}/image-pull.txt" 2>&1 \
-            && image_id="$(run_bounded 30 docker image inspect --format '{{.Id}}' "${candidate}" 2>/dev/null)" \
-            && [[ "${image_id}" == "${replay_image_id}" ]]; then
+        if ! run_bounded 30 docker image inspect "${candidate}" >/dev/null 2>&1; then
+            printf 'the recorded image is not local; attempting bounded pull: %s\n' "${candidate}"
+            run_bounded 180 docker pull "${candidate}" >>"${artifact_dir}/image-pull.txt" 2>&1 || continue
+        fi
+        if chaos_image_carries_digest "${candidate}" "${candidate}" \
+            && image_id="$(run_bounded 30 docker image inspect --format '{{.Id}}' "${candidate}" 2>/dev/null)"; then
+            replay_image_match="repository digest ${candidate}"
             return 0
         fi
     done
@@ -1677,9 +1692,14 @@ fi
 if [[ "${scenario}" == partition-recovery || "${scenario}" == degraded-links || "${scenario}" == former-owner-restart || "${fault}" == *-partition || "${scenario}" == mixed-instability ]]; then
     resolve_tool_image nettools "${CHAOS_NETTOOLS_IMAGE}"
 fi
+# A recorded tool image is the one its recorded image ID names in a store of the recording kind, or
+# the one its recorded reference pins by repository digest in a store of the other kind.
 for tool in "${!replay_tool_image_ids[@]}"; do
-    [[ "${tool_image_ids[${tool}]:-}" == "${replay_tool_image_ids[${tool}]}" ]] \
-        || setup_error "the recorded ${tool} image resolved to ${tool_image_ids[${tool}]:-nothing}, not the recorded ${replay_tool_image_ids[${tool}]}"
+    if [[ "${tool_image_ids[${tool}]:-}" == "${replay_tool_image_ids[${tool}]}" ]]; then
+        continue
+    fi
+    chaos_image_carries_digest "${replay_tool_references[${tool}]}" "${replay_tool_references[${tool}]}" \
+        || setup_error "the recorded ${tool} image resolved to ${tool_image_ids[${tool}]:-nothing}, not the recorded ${replay_tool_image_ids[${tool}]}, and does not carry the digest of ${replay_tool_references[${tool}]}"
 done
 
 if [[ -n "${replay_dir}" ]]; then
@@ -1699,8 +1719,9 @@ image_digest="$(run_bounded 30 docker image inspect \
     --format '{{join .RepoDigests ","}}' "${image_id}" 2>/dev/null || true)"
 # The dollars in this jq filter are jq variables, not shell expansion.
 # shellcheck disable=SC2016
-update_manifest '.resolved_image_id = $image_id | .resolved_repo_digests = $digests' \
-    --arg image_id "${image_id}" --arg digests "${image_digest}"
+update_manifest '.resolved_image_id = $image_id | .resolved_repo_digests = $digests
+    | if $replay_match == "" then . else .replay_image_match = $replay_match end' \
+    --arg image_id "${image_id}" --arg digests "${image_digest}" --arg replay_match "${replay_image_match}"
 export NERVIX_IMAGE="${image_id}"
 run_bounded 30 docker run --rm --entrypoint /bin/sh "${image_id}" -eu -c \
     'test -x /usr/local/bin/nervix-server; test -x /usr/local/bin/nervix-cli' \

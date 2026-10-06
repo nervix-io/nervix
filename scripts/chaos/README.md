@@ -963,10 +963,15 @@ to 3 second election window and 10-second node unavailability timeout, and the m
 as Compose renders them.
 
 `just chaos replay <run-directory>` reconstructs a mixed-instability experiment from what its run
-directory recorded. The replay starts the recorded Nervix image by its image ID, pulling it through a
-recorded repository digest only when that resolves to the same ID, and the tool images by their
-recorded digest references, whose image IDs must match the recorded ones, rather than the pins checked
-in now. It copies the recorded plan, input fixture and NSPL graph, each of which must still match the
+directory recorded. The replay starts the recorded Nervix image by its image ID when the host holds it,
+and otherwise through a recorded repository digest, which it pulls within a bound when it is not
+local. It starts the tool images by their recorded digest references rather than the pins checked in
+now, and each must have its recorded image ID or carry the repository digest its reference pins. An
+image ID is the image store's own name for an image: the config digest in Docker's classic store and
+the manifest or index digest in the containerd store. A run recorded on a worker whose store is of
+the other kind, such as a CI worker, is therefore found through the repository digest, which names
+the same content in every store, and the replay's manifest records which of the two matched under
+`replay_image_match`. It copies the recorded plan, input fixture and NSPL graph, each of which must still match the
 digest the manifest records, deploys the recorded node settings and load interval and refuses to
 start when Compose renders anything else, and applies the recorded limits. It runs in a new Compose
 project with a new run identifier, network, TLS material and volumes, and resolves every logical node

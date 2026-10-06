@@ -722,6 +722,19 @@ fi
 "${chaos_dir}/cleanup.sh" --run-id "${cleanup_run_id}" --evidence "${tmp_dir}/evidence-none" --quiet
 [[ ! -e "${tmp_dir}/evidence-none" ]] || fail 'cleanup recorded evidence for a run that left nothing'
 
+# A replay recognizes a recorded image through the repository digest its reference pins, which names
+# the same content in an image store of either kind, and never through a tag or another digest.
+# shellcheck source=../image-identity.sh
+source "${chaos_dir}/image-identity.sh"
+chaos_image_carries_digest "${chaos_probe_image}" "${chaos_probe_image}" \
+    || fail 'the probe image does not carry the repository digest its pinned reference names'
+if chaos_image_carries_digest "${chaos_probe_image}" "${chaos_probe_image%@*}@sha256:$(printf '0%.0s' {1..64})"; then
+    fail 'an image was taken to carry a digest it was never pulled by'
+fi
+if chaos_image_carries_digest "${chaos_probe_image}" docker.io/library/alpine:3.22.6; then
+    fail 'a tag was taken for a repository digest'
+fi
+
 cleanup_run_id="pause-injector-failure-$$-${RANDOM}"
 cleanup_container="$(docker run --detach --rm \
     --label "io.nervix.chaos.run=${cleanup_run_id}" \
