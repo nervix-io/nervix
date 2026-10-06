@@ -549,8 +549,6 @@ use relay_transit::{
     RelayTransit,
 };
 use remote_ack_owner::RemoteDispatchRegistry;
-#[cfg(test)]
-use remote_dispatch::RemoteRelayDecodeError;
 use remote_dispatch::{REMOTE_ACK_ALIVE_INTERVAL, RemoteDispatcher};
 use reorderer::{ReordererFlushContext, flush_branch_reorderer_output, reorder_key_part};
 use schedule_apply::ScheduleApplication;
