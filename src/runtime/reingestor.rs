@@ -301,20 +301,16 @@ impl Runtime {
             Vec<PendingProcessorOutputBatch>,
             Vec<PendingProcessorOutputMessageError>,
         ),
-        PlannedGeneralError,
+        PlannedGeneralFailure,
     > {
         let ReingestorDispatchContext { reingestor, .. } = context;
+        let operation = MessageErrorOperation::Set;
         let program = &output.program;
         let Some(output_schema) = scope.output_schemas[output_index].clone() else {
-            return Err(PlannedGeneralError {
-                acks: batch.acks.clone(),
-                reason: format!(
-                    "reingestor '{}' evaluated output route '{}' without preparing its relay \
-                     schema",
-                    reingestor.as_str(),
-                    output.relay.as_str()
-                ),
+            let error = Report::new(PlannedGeneralError::OutputSchemaUnprepared {
+                relay: output.relay.clone(),
             });
+            return Err(PlannedGeneralFailure::new(error, batch.acks.clone()));
         };
         let execution_now = scope.execution_now;
         let executed = execute_filter_map_program_on_batch(
@@ -322,8 +318,6 @@ impl Runtime {
                 executor: self.executor(),
                 now: execution_now,
             },
-            "reingestor",
-            reingestor,
             program,
             FilterMapBatchInputs {
                 carrier: &batch.batch,
@@ -342,16 +336,15 @@ impl Runtime {
         for (output_row, input_row) in executed.selected_rows.iter().enumerate() {
             if let Some(side_error) = executed.batch.errors().row(output_row).first() {
                 let partial_output = captured_partial_output(&executed.batch, output_row);
-                let record = batch
-                    .runtime_row(input_row)
-                    .map_err(|error| PlannedGeneralError {
-                        acks: batch.acks.clone(),
-                        reason: format!(
-                            "reingestor '{}' failed to materialize FILTER-MAP error input row: {}",
-                            reingestor.as_str(),
-                            error
-                        ),
-                    })?;
+                let record = batch.runtime_row(input_row).map_err(|error| {
+                    PlannedGeneralFailure::new(
+                        error.change_context(PlannedGeneralError::MaterializeErrorInput {
+                            operation,
+                            row: input_row,
+                        }),
+                        batch.acks.clone(),
+                    )
+                })?;
                 errors.push(PendingProcessorOutputMessageError {
                     row: input_row,
                     key: batch.keys[input_row].clone(),
@@ -383,36 +376,28 @@ impl Runtime {
                 &executed.batch,
                 &success_output_rows,
             )
-            .map_err(|error| PlannedGeneralError {
-                acks: batch.acks.clone(),
-                reason: format!(
-                    "reingestor '{}' failed to materialize successful FILTER-MAP rows: {}",
-                    reingestor.as_str(),
-                    error
-                ),
+            .map_err(|error| {
+                PlannedGeneralFailure::new(
+                    error.change_context(PlannedGeneralError::MaterializeOutput { operation }),
+                    batch.acks.clone(),
+                )
             })?;
             if output_batch.schema().as_ref() != output_schema.arrow_schema().as_ref() {
-                return Err(PlannedGeneralError {
-                    acks: batch.acks.clone(),
-                    reason: format!(
-                        "reingestor '{}' FILTER-MAP output schema does not match relay '{}'",
-                        reingestor.as_str(),
-                        output.relay.as_str()
-                    ),
+                let error = Report::new(PlannedGeneralError::OutputSchemaMismatch {
+                    relay: output.relay.clone(),
                 });
+                return Err(PlannedGeneralFailure::new(error, batch.acks.clone()));
             }
             let metadata = batch.metadata.take(&success_input_rows).verified(
                 "the program selects rows of this batch, whose metadata has one entry for every \
                  row",
             );
-            let input_batch =
-                batch
-                    .batch
-                    .take(&success_input_rows)
-                    .map_err(|reason| PlannedGeneralError {
-                        acks: batch.acks.clone(),
-                        reason: reason.to_string(),
-                    })?;
+            let input_batch = batch.batch.take(&success_input_rows).map_err(|error| {
+                PlannedGeneralFailure::new(
+                    error.change_context(PlannedGeneralError::SelectBranchInputs),
+                    batch.acks.clone(),
+                )
+            })?;
             let input_keys = success_input_rows
                 .iter()
                 .map(|row| batch.keys[*row].clone())
@@ -420,29 +405,36 @@ impl Runtime {
             let keys = match &output.branch {
                 BoundRouteBranch::Unbranched => vec![None; output_batch.batch().num_rows()],
                 BoundRouteBranch::Preserved => input_keys,
-                BoundRouteBranch::Constructed(branch_program) => evaluate_output_branch_program(
-                    ProgramRun {
-                        executor: self.executor(),
-                        now: execution_now,
-                    },
-                    reingestor,
-                    branch_program,
-                    &input_batch,
-                    &output_batch,
-                    &input_keys,
-                    &scope.side_inputs,
-                )
-                .await
-                .map_err(|error| PlannedGeneralError {
-                    acks: batch.acks.clone(),
-                    reason: error.to_string(),
-                })?
-                .into_iter()
-                .collect::<Result<Vec<_>, _>>()
-                .map_err(|error| PlannedGeneralError {
-                    acks: batch.acks.clone(),
-                    reason: error.to_string(),
-                })?,
+                BoundRouteBranch::Constructed(branch_program) => {
+                    let outcomes = evaluate_output_branch_program(
+                        ProgramRun {
+                            executor: self.executor(),
+                            now: execution_now,
+                        },
+                        branch_program,
+                        &input_batch,
+                        &output_batch,
+                        &input_keys,
+                        &scope.side_inputs,
+                    )
+                    .await
+                    .map_err(|error| PlannedGeneralFailure::new(error, batch.acks.clone()))?;
+                    // A row whose branch cannot be constructed fails the reingestor's whole
+                    // batch, which its error policy then reports.
+                    let mut keys = Vec::with_capacity(outcomes.len());
+                    for (input_row, outcome) in success_input_rows.iter().zip(outcomes) {
+                        match outcome {
+                            Ok(key) => keys.push(Some(key)),
+                            Err(error) => {
+                                let error = Report::new(error).change_context(
+                                    PlannedGeneralError::BranchRow { row: *input_row },
+                                );
+                                return Err(PlannedGeneralFailure::new(error, batch.acks.clone()));
+                            }
+                        }
+                    }
+                    keys
+                }
             };
             pending_output_batches_by_key(
                 output_index,
@@ -451,9 +443,11 @@ impl Runtime {
                 output_batch,
                 &metadata,
             )
-            .map_err(|reason| PlannedGeneralError {
-                acks: batch.acks.clone(),
-                reason: format!("{reason:#}"),
+            .map_err(|error| {
+                PlannedGeneralFailure::new(
+                    error.change_context(PlannedGeneralError::GroupByBranch),
+                    batch.acks.clone(),
+                )
             })?
         };
 
@@ -552,14 +546,14 @@ impl Runtime {
                 .await
             {
                 Ok(events) => events,
-                Err(error) => {
+                Err(failure) => {
                     self.handle_internal_processor_error_for_acks(
                         domain,
                         ModelKind::Reingestor,
                         reingestor,
                         error_policies,
-                        error.acks.iter(),
-                        error.reason,
+                        failure.acks.iter(),
+                        format!("{:#}", failure.error),
                     );
                     return;
                 }
@@ -945,14 +939,14 @@ impl Runtime {
         .await
         {
             Ok(plan) => plan,
-            Err(error) => {
+            Err(failure) => {
                 self.handle_internal_processor_error_for_acks(
                     domain,
                     ModelKind::Reingestor,
                     reingestor,
                     error_policies,
-                    error.acks.iter(),
-                    error.reason,
+                    failure.acks.iter(),
+                    format!("{:#}", failure.error),
                 );
                 return None;
             }

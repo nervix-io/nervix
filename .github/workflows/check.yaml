@@ -627,7 +627,7 @@ jobs:
 
   coverage:
     name: coverage
-    needs: [tests, scenarios, extra-tests, shuttle]
+    needs: [tests, scenarios, extra-tests]
     runs-on: ubuntu-latest
     timeout-minutes: 20
     permissions:
@@ -667,12 +667,6 @@ jobs:
         with:
           name: coverage-native-extras
           path: coverage-inputs/native-extras
-
-      - name: Download Shuttle coverage evidence
-        uses: actions/download-artifact@v4
-        with:
-          name: coverage-shuttle
-          path: coverage-inputs/shuttle
 
       - name: Merge coverage
         run: |
@@ -722,9 +716,11 @@ jobs:
   # The cross-language client probes: C, C++, Python, Java and Ruby over the shared Rust binding,
   # and independent Go and TypeScript implementations on Node.js and Bun. They need toolchains the
   # suite job does not install and run a feature of their own, so they are a job of their own
-  # beside the suite rather than minutes added to its critical path.
+  # beside the suite rather than minutes added to its critical path. They run only for a pull
+  # request labeled `client-conformance`.
   client-conformance:
     name: client-conformance
+    if: contains(github.event.pull_request.labels.*.name, 'client-conformance')
     runs-on: blacksmith-8vcpu-ubuntu-2404
     # The suite budget below is derived from this limit: builds before the scenarios, then at most
     # the budget, then the reserve the harness keeps for its own cleanup and the log upload.
@@ -873,7 +869,7 @@ jobs:
           if-no-files-found: ignore
 
   # The checks that answer for the workspace rather than for the scenario suite: undefined
-  # behaviour, mutation coverage, benchmark bodies, modeled concurrency and completion
+  # behaviour, mutation coverage, benchmark bodies, primitive boundary conformance and completion
   # reachability. None of them reads the suite's result, so they run beside it instead of queueing
   # behind it, and a slow one no longer pushes the suite's job toward its own timeout. The checks
   # that execute Nervix code natively in ordinary mode run instrumented and publish their source
@@ -881,7 +877,7 @@ jobs:
   extra-tests:
     name: extra-tests
     # Half the suite job's cores saves capacity. Budget cold ordinary instrumentation,
-    # compiler checks and modeled primitive and Loom builds.
+    # compiler checks and modeled primitive builds.
     runs-on: blacksmith-8vcpu-ubuntu-2404
     timeout-minutes: 120
     permissions:
@@ -1028,18 +1024,12 @@ jobs:
       - name: Benchmark smoke tests
         run: just coverage-native-extras bench-smoke
 
-      # The primitive boundary's native conformance collected separately in every execution mode,
-      # then every registered Loom model of a production owner explored to exhaustion. The proof
-      # that each model fails under the ordering weakening it exists to detect runs in the
-      # loom-qualification job.
+      # The primitive boundary's native conformance collected separately in every execution mode.
       - name: Primitive boundary conformance
         run: just coverage-native-extras test-primitives
 
       - name: Primitive boundary compile and browser checks
         run: just test-primitives-compile
-
-      - name: Loom memory-ordering models
-        run: just coverage-native-extras test-loom
 
       # The walk saturates every core, and its failures are about completion reachability rather
       # than about any one test.
@@ -1059,7 +1049,6 @@ jobs:
             target/native-coverage/**/lcov.info
             target/native-coverage/**/executions.jsonl
             target/native-coverage/**/export.log
-            target/native-coverage/**/models.json
             target/typed-ratchet/python.lcov
             target/model-coverage/python.lcov
             target/primitive-boundary/python.lcov
@@ -1080,155 +1069,12 @@ jobs:
           path: ${{ runner.temp }}/kache-report
           if-no-files-found: warn
 
-      # A failed Loom model is only reproducible from the checkpoint of the execution that failed;
-      # this job is the only witness of it.
-      - name: Upload Loom failure evidence
-        if: failure()
-        uses: actions/upload-artifact@v4
-        with:
-          name: loom-failures
-          path: target/native-coverage-build-loom/loom-failures
-          if-no-files-found: ignore
-
-  # The proof that each Loom model fails under the ordering weakening it exists to detect. Jobs of
-  # their own because every qualification that weakens the server rebuilds the server library in
-  # Loom's test mode with its one weakening applied, which outlasts the other extra tests; the
-  # shards split those rebuilds.
-  loom-qualification:
-    name: loom-qualification (${{ matrix.shard }} of ${{ strategy.job-total }})
-    strategy:
-      fail-fast: false
-      matrix:
-        shard: [1, 2]
-    runs-on: blacksmith-8vcpu-ubuntu-2404
-    timeout-minutes: 120
-    permissions:
-      contents: read
-    env:
-      NO_COLOR: "1"
-      CARGO_TERM_COLOR: never
-      RUST_LOG_STYLE: never
-    steps:
-      - name: Setup Rust
-        uses: dtolnay/rust-toolchain@1.99
-        with:
-          targets: wasm32-unknown-unknown
-
-      - name: Install cargo tools
-        uses: taiki-e/install-action@v2
-        with:
-          tool: just@latest,toml-cli,trunk,wild-linker
-
-      - name: Install Latest LLVM
-        run: |
-          wget https://apt.llvm.org/llvm.sh
-          chmod +x llvm.sh
-          sudo ./llvm.sh 23
-
-      - name: Configure cargo
-        run: |
-          tee <<EOF > ~/.cargo/config.toml
-          [target.x86_64-unknown-linux-gnu]
-          ar = "llvm-ar-23"
-          linker = "${GITHUB_WORKSPACE}/scripts/ci_linker.sh"
-          EOF
-
-      - name: Setup Go environment
-        uses: actions/setup-go@v5
-        with:
-          go-version: "1.22"
-
-      - name: Install TinyGo
-        run: |
-          set -euo pipefail
-          arch="$(dpkg --print-architecture)"
-          case "${arch}" in
-            amd64|arm64) ;;
-            *) echo "unsupported TinyGo CI architecture: ${arch}" >&2; exit 1 ;;
-          esac
-          curl -fsSLo /tmp/tinygo.deb "https://github.com/tinygo-org/tinygo/releases/download/v${TINYGO_VERSION}/tinygo_${TINYGO_VERSION}_${arch}.deb"
-          sudo dpkg -i /tmp/tinygo.deb
-          tinygo version
-
-      - name: Install apt deps
-        run: |
-          sudo apt update
-          sudo apt install -y \
-            libcurl4-openssl-dev \
-            protobuf-compiler
-
-      - name: Setup flatc
-        uses: Nugine/setup-flatc@v1
-        with:
-          version: "25.12.19"
-
-      - name: Checkout
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 2
-
-      - name: Configure kache daemon remote
-        env:
-          KACHE_S3_BUCKET: ${{ vars.KACHE_BUCKET }}
-          KACHE_S3_REGION: ${{ vars.KACHE_BUCKET_REGION }}
-          KACHE_S3_ENDPOINT: ${{ vars.KACHE_BUCKET_ENDPOINT }}
-          KACHE_S3_ACCESS_KEY: ${{ secrets.KACHE_BUCKET_ACCESS_KEY_ID }}
-          KACHE_S3_SECRET_KEY: ${{ secrets.KACHE_BUCKET_SECRET_ACCESS_KEY }}
-        run: |
-          config="${RUNNER_TEMP}/kache-${GITHUB_JOB}.toml"
-          bash scripts/configure_kache_remote.sh "${config}"
-          echo "KACHE_CONFIG=${config}" >> "${GITHUB_ENV}"
-
-      - name: Setup kache
-        uses: kunobi-ninja/kache-action@v1
-        with:
-          version: ${{ env.KACHE_VERSION }}
-          github-cache: "false"
-          sync: "false"
-          cache-executables: "true"
-          max-size: "1TiB"
-          manifest-key: ${{ github.job }}-${{ matrix.shard }}-${{ runner.os }}-${{ runner.arch }}
-          pr-comment: "false"
-          s3-bucket: ${{ vars.KACHE_BUCKET }}
-          s3-prefix: "artifacts"
-          s3-region: ${{ vars.KACHE_BUCKET_REGION }}
-          s3-endpoint: ${{ vars.KACHE_BUCKET_ENDPOINT }}
-          s3-access-key-id: ${{ secrets.KACHE_BUCKET_ACCESS_KEY_ID }}
-          s3-secret-access-key: ${{ secrets.KACHE_BUCKET_SECRET_ACCESS_KEY }}
-
-      - name: Loom ordering qualification
-        run: |
-          just toolchains-install
-          just test-loom-qualification ${{ matrix.shard }}/${{ strategy.job-total }}
-
-      - name: Publish kache report
-        if: always()
-        run: python3 scripts/publish_kache_report.py "${RUNNER_TEMP}/kache-report"
-
-      - name: Upload kache report
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: kache-${{ github.job }}-${{ matrix.shard }}-${{ runner.os }}-${{ runner.arch }}
-          path: ${{ runner.temp }}/kache-report
-          if-no-files-found: warn
-
-      # A failed qualification is only reproducible from its weakened run; this job is the only
-      # witness of it.
-      - name: Upload Loom qualification evidence
-        if: failure()
-        uses: actions/upload-artifact@v4
-        with:
-          name: loom-qualification-failures-${{ matrix.shard }}
-          path: |
-            target/loom-qualification/*/*.log
-            target/loom-qualification/*/*.json
-          if-no-files-found: ignore
-
   # Shuttle's in-process scheduling checks and uncontrolled-nondeterminism rechecks run
-  # in their own coverage collection job beside the other extra tests.
+  # in their own coverage collection job beside the other extra tests, and only for a pull
+  # request labeled `shuttle`.
   shuttle:
     name: shuttle
+    if: contains(github.event.pull_request.labels.*.name, 'shuttle')
     runs-on: blacksmith-8vcpu-ubuntu-2404
     timeout-minutes: 120
     permissions:
@@ -1370,13 +1216,280 @@ jobs:
           path: target/native-coverage-build-shuttle/shuttle-failures
           if-no-files-found: ignore
 
+  # Loom's memory-ordering models run in their own coverage collection job beside the other extra
+  # tests, and only for a pull request labeled `loom`.
+  loom:
+    name: loom
+    if: contains(github.event.pull_request.labels.*.name, 'loom')
+    runs-on: blacksmith-8vcpu-ubuntu-2404
+    # The models took 10 to 11 minutes on a warm cache. The limit leaves room for a cold
+    # instrumented build and for the models the inventory adds.
+    timeout-minutes: 60
+    permissions:
+      contents: read
+    env:
+      NO_COLOR: "1"
+      CARGO_TERM_COLOR: never
+      RUST_LOG_STYLE: never
+    steps:
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@1.99
+        with:
+          targets: wasm32-unknown-unknown
+
+      - name: Install cargo tools
+        uses: taiki-e/install-action@v2
+        with:
+          tool: just@latest,toml-cli,trunk,wild-linker,cargo-llvm-cov
+
+      - name: Install Latest LLVM
+        run: |
+          wget https://apt.llvm.org/llvm.sh
+          chmod +x llvm.sh
+          sudo ./llvm.sh 23
+
+      - name: Configure cargo
+        run: |
+          tee <<EOF > ~/.cargo/config.toml
+          [target.x86_64-unknown-linux-gnu]
+          ar = "llvm-ar-23"
+          linker = "${GITHUB_WORKSPACE}/scripts/ci_linker.sh"
+          EOF
+
+      - name: Install apt deps
+        run: |
+          sudo apt update
+          sudo apt install -y \
+            libcurl4-openssl-dev \
+            protobuf-compiler
+
+      - name: Setup flatc
+        uses: Nugine/setup-flatc@v1
+        with:
+          version: "25.12.19"
+
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+
+      - name: Configure kache daemon remote
+        env:
+          KACHE_S3_BUCKET: ${{ vars.KACHE_BUCKET }}
+          KACHE_S3_REGION: ${{ vars.KACHE_BUCKET_REGION }}
+          KACHE_S3_ENDPOINT: ${{ vars.KACHE_BUCKET_ENDPOINT }}
+          KACHE_S3_ACCESS_KEY: ${{ secrets.KACHE_BUCKET_ACCESS_KEY_ID }}
+          KACHE_S3_SECRET_KEY: ${{ secrets.KACHE_BUCKET_SECRET_ACCESS_KEY }}
+        run: |
+          config="${RUNNER_TEMP}/kache-${GITHUB_JOB}.toml"
+          bash scripts/configure_kache_remote.sh "${config}"
+          echo "KACHE_CONFIG=${config}" >> "${GITHUB_ENV}"
+
+      - name: Setup kache
+        uses: kunobi-ninja/kache-action@v1
+        with:
+          version: ${{ env.KACHE_VERSION }}
+          github-cache: "false"
+          sync: "false"
+          cache-executables: "true"
+          max-size: "1TiB"
+          manifest-key: ${{ github.job }}-${{ runner.os }}-${{ runner.arch }}
+          pr-comment: "false"
+          s3-bucket: ${{ vars.KACHE_BUCKET }}
+          s3-prefix: "artifacts"
+          s3-region: ${{ vars.KACHE_BUCKET_REGION }}
+          s3-endpoint: ${{ vars.KACHE_BUCKET_ENDPOINT }}
+          s3-access-key-id: ${{ secrets.KACHE_BUCKET_ACCESS_KEY_ID }}
+          s3-secret-access-key: ${{ secrets.KACHE_BUCKET_SECRET_ACCESS_KEY }}
+
+      # Every registered Loom model of a production owner explored to exhaustion. The proof that
+      # each model fails under the ordering weakening it exists to detect runs in the
+      # loom-qualification jobs.
+      - name: Loom memory-ordering models
+        run: |
+          just toolchains-install
+          just coverage-native-extras test-loom
+
+      - name: Upload Loom coverage
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-loom
+          path: |
+            target/native-coverage/**/completion.json
+            target/native-coverage/**/lcov.info
+            target/native-coverage/**/executions.jsonl
+            target/native-coverage/**/export.log
+            target/native-coverage/**/models.json
+          if-no-files-found: warn
+
+      - name: Publish kache report
+        if: always()
+        run: python3 scripts/publish_kache_report.py "${RUNNER_TEMP}/kache-report"
+
+      - name: Upload kache report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: kache-${{ github.job }}-${{ runner.os }}-${{ runner.arch }}
+          path: ${{ runner.temp }}/kache-report
+          if-no-files-found: warn
+
+      # A failed Loom model is only reproducible from the checkpoint of the execution that failed;
+      # this job is the only witness of it.
+      - name: Upload Loom failure evidence
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: loom-failures
+          path: target/native-coverage-build-loom/loom-failures
+          if-no-files-found: ignore
+
+  # The proof that each Loom model fails under the ordering weakening it exists to detect. Jobs of
+  # their own because every qualification that weakens the server rebuilds the server library in
+  # Loom's test mode with its one weakening applied, which outlasts the other extra tests; the
+  # shards split those rebuilds. Like the `loom` job, they run only for a pull request labeled
+  # `loom`.
+  loom-qualification:
+    name: loom-qualification (${{ matrix.shard }} of ${{ strategy.job-total }})
+    if: contains(github.event.pull_request.labels.*.name, 'loom')
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2]
+    runs-on: blacksmith-8vcpu-ubuntu-2404
+    timeout-minutes: 120
+    permissions:
+      contents: read
+    env:
+      NO_COLOR: "1"
+      CARGO_TERM_COLOR: never
+      RUST_LOG_STYLE: never
+    steps:
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@1.99
+        with:
+          targets: wasm32-unknown-unknown
+
+      - name: Install cargo tools
+        uses: taiki-e/install-action@v2
+        with:
+          tool: just@latest,toml-cli,trunk,wild-linker
+
+      - name: Install Latest LLVM
+        run: |
+          wget https://apt.llvm.org/llvm.sh
+          chmod +x llvm.sh
+          sudo ./llvm.sh 23
+
+      - name: Configure cargo
+        run: |
+          tee <<EOF > ~/.cargo/config.toml
+          [target.x86_64-unknown-linux-gnu]
+          ar = "llvm-ar-23"
+          linker = "${GITHUB_WORKSPACE}/scripts/ci_linker.sh"
+          EOF
+
+      - name: Setup Go environment
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.22"
+
+      - name: Install TinyGo
+        run: |
+          set -euo pipefail
+          arch="$(dpkg --print-architecture)"
+          case "${arch}" in
+            amd64|arm64) ;;
+            *) echo "unsupported TinyGo CI architecture: ${arch}" >&2; exit 1 ;;
+          esac
+          curl -fsSLo /tmp/tinygo.deb "https://github.com/tinygo-org/tinygo/releases/download/v${TINYGO_VERSION}/tinygo_${TINYGO_VERSION}_${arch}.deb"
+          sudo dpkg -i /tmp/tinygo.deb
+          tinygo version
+
+      - name: Install apt deps
+        run: |
+          sudo apt update
+          sudo apt install -y \
+            libcurl4-openssl-dev \
+            protobuf-compiler
+
+      - name: Setup flatc
+        uses: Nugine/setup-flatc@v1
+        with:
+          version: "25.12.19"
+
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+
+      - name: Configure kache daemon remote
+        env:
+          KACHE_S3_BUCKET: ${{ vars.KACHE_BUCKET }}
+          KACHE_S3_REGION: ${{ vars.KACHE_BUCKET_REGION }}
+          KACHE_S3_ENDPOINT: ${{ vars.KACHE_BUCKET_ENDPOINT }}
+          KACHE_S3_ACCESS_KEY: ${{ secrets.KACHE_BUCKET_ACCESS_KEY_ID }}
+          KACHE_S3_SECRET_KEY: ${{ secrets.KACHE_BUCKET_SECRET_ACCESS_KEY }}
+        run: |
+          config="${RUNNER_TEMP}/kache-${GITHUB_JOB}.toml"
+          bash scripts/configure_kache_remote.sh "${config}"
+          echo "KACHE_CONFIG=${config}" >> "${GITHUB_ENV}"
+
+      - name: Setup kache
+        uses: kunobi-ninja/kache-action@v1
+        with:
+          version: ${{ env.KACHE_VERSION }}
+          github-cache: "false"
+          sync: "false"
+          cache-executables: "true"
+          max-size: "1TiB"
+          manifest-key: ${{ github.job }}-${{ matrix.shard }}-${{ runner.os }}-${{ runner.arch }}
+          pr-comment: "false"
+          s3-bucket: ${{ vars.KACHE_BUCKET }}
+          s3-prefix: "artifacts"
+          s3-region: ${{ vars.KACHE_BUCKET_REGION }}
+          s3-endpoint: ${{ vars.KACHE_BUCKET_ENDPOINT }}
+          s3-access-key-id: ${{ secrets.KACHE_BUCKET_ACCESS_KEY_ID }}
+          s3-secret-access-key: ${{ secrets.KACHE_BUCKET_SECRET_ACCESS_KEY }}
+
+      - name: Loom ordering qualification
+        run: |
+          just toolchains-install
+          just test-loom-qualification ${{ matrix.shard }}/${{ strategy.job-total }}
+
+      - name: Publish kache report
+        if: always()
+        run: python3 scripts/publish_kache_report.py "${RUNNER_TEMP}/kache-report"
+
+      - name: Upload kache report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: kache-${{ github.job }}-${{ matrix.shard }}-${{ runner.os }}-${{ runner.arch }}
+          path: ${{ runner.temp }}/kache-report
+          if-no-files-found: warn
+
+      # A failed qualification is only reproducible from its weakened run; this job is the only
+      # witness of it.
+      - name: Upload Loom qualification evidence
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: loom-qualification-failures-${{ matrix.shard }}
+          path: |
+            target/loom-qualification/*/*.log
+            target/loom-qualification/*/*.json
+          if-no-files-found: ignore
+
   # Turmoil's seeded network simulations of the interconnect: every scenario over its committed
   # regression seeds, then a fresh-process replay of an injected failure. A job of its own beside
   # the default suite and the Shuttle checks, because its build enables the `turmoil` feature and
   # `tokio_unstable` and so shares no compilation with either, and because a failed scenario's
-  # record is this job's artifact.
+  # record is this job's artifact. It runs only for a pull request labeled `turmoil`.
   turmoil:
     name: turmoil
+    if: contains(github.event.pull_request.labels.*.name, 'turmoil')
     runs-on: blacksmith-4vcpu-ubuntu-2404
     # The emergency guard around the build, the tests and the upload. The tests end themselves
     # first: every run has its own real-time bound, and `just test-turmoil` gives all of them

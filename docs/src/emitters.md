@@ -1667,7 +1667,10 @@ The REST catalog is the authority for namespace and table metadata. Nervix does 
 Iceberg uses two explicit boundaries. `FLUSH` collects typed in-memory batches and writes them to
 local Arrow IPC files under the runtime temporary-file root. `COMMIT EACH <duration> MAX SIZE
 <bytes>` reads the staged Arrow IPC batches, concatenates them into one Arrow batch, appends that
-batch to the Iceberg table, and commits the catalog update. Both durations are domain-logical, so a
+batch to the Iceberg table, and commits the catalog update. The commit duration starts when a flush
+stages rows while none are staged, and rows later flushes stage join that commit without moving it,
+so a row waits at most `FLUSH EACH` in memory and then at most `COMMIT EACH` after it is staged.
+Staged files that reach `MAX SIZE` are committed at once. Both durations are domain-logical, so a
 paced domain's `TIME RATE` moves the flush and commit boundaries together; the maximum batch and
 commit sizes, the catalog retry backoff, and a drain remain independent of domain pace. The
 temporary-file root defaults to `/tmp` and can be changed with `--temp-dir` or `NERVIX_TEMP_DIR`.

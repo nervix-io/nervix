@@ -171,17 +171,22 @@ The sections below name the kind and message of every failure. A failed message 
 the failed operation, and the message then takes its context's error handling:
 
 - A failure in route construction (`INHERIT`, `SET`, route `WHERE`, and `INVOKE`), in an ingestor's
-  `FILTER WHERE`, in a generator route, and in an emitter's `FROM ... WHERE`, route, or `VALUES`
-  hands the message to the route's `ON MESSAGE ERROR` policy; an ingestor `FILTER WHERE` failure
-  goes to the policy of every route. `SET` runs before route `WHERE`, so a `SET` failure is
-  reported even for a message that `WHERE` would drop.
+  `FILTER WHERE` or `BRANCHED BY ... SET`, in a generator route, and in an emitter's
+  `FROM ... WHERE`, route, or `VALUES` hands the message to the route's `ON MESSAGE ERROR` policy;
+  an ingestor `FILTER WHERE` failure goes to the policy of every route. `SET` runs before route
+  `WHERE`, so a `SET` failure is reported even for a message that `WHERE` would drop. A failed
+  branch `SET` reports the `set` operation and the message `branch SET failed with`, the kind, the
+  reason and the operation's range, and the error route reads the route's finalized output as
+  `partial_output`.
 - A failure in a processor's `FROM ... WHERE` or `FILTER WHERE`, or in the argument of a window
   aggregate, is logged, and the message is not acknowledged.
 - A failure in a session subscription's `WHERE` skips the record, and the session is told how many
   records the filter skipped.
 - Deduplication keys, reorderer `BY` expressions, `CORRELATE WHERE` conditions, inferencer `INPUTS`
-  mappings, and `BRANCHED BY ... SET` have no message-error route. Keep expressions that can fail
-  out of them, or guard them with a conditional, `TRY_CAST`, or `TRY_JSON_VALUE`.
+  mappings, and a reingestor's `BRANCHED BY ... SET` have no message-error route. A reingestor whose
+  branch construction fails for one message fails every message of that batch: the failure is
+  logged, and none of them is acknowledged. Keep expressions that can fail out of them, or guard
+  them with a conditional, `TRY_CAST`, or `TRY_JSON_VALUE`.
 
 In an `ON MESSAGE ERROR SEND TO ... SET`, a function failure has the `error` scope below. Every
 failure an expression reports has the code `evaluation`; the kind appears in the message, which
