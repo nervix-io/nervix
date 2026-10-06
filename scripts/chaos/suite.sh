@@ -8,6 +8,8 @@ set -euo pipefail
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 suites_file="${script_dir}/suites.json"
 report_program="${script_dir}/suite-report.jq"
+# shellcheck source=require-jq.sh
+source "${script_dir}/require-jq.sh"
 # A run's teardown after its own --timeout is bounded on its own and fits this reserve, the
 # runner's teardown_reserve_seconds; a shard's step budget keeps it for the last run.
 teardown_reserve_minutes=15
@@ -452,6 +454,8 @@ run_suite() {
         command -v "${command_name}" >/dev/null 2>&1 \
             || suite_error "required command is unavailable: ${command_name}"
     done
+    # Listing, planning, reporting and cleanup read the suite records with any jq; the runs need 1.8.
+    chaos_jq_supported || suite_error "the chaos scripts need jq 1.8 or later, not $(chaos_jq_found)"
 
     mkdir -p "${artifact_root}"
     artifact_root="$(cd "${artifact_root}" && pwd)"

@@ -5,6 +5,13 @@ script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 chaos_dir="$(cd "${script_dir}/.." && pwd)"
 # shellcheck source=../tool-images.sh
 source "${chaos_dir}/tool-images.sh"
+# shellcheck source=../require-jq.sh
+source "${chaos_dir}/require-jq.sh"
+
+if ! chaos_jq_supported; then
+    printf 'self-test failed: the chaos scripts need jq 1.8 or later, not %s\n' "$(chaos_jq_found)" >&2
+    exit 1
+fi
 
 "${script_dir}/role-wait-self-test.sh"
 

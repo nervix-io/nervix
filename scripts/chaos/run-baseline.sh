@@ -9,6 +9,8 @@ fixture_generator="${script_dir}/fixtures/generate-baseline.jq"
 source "${script_dir}/tool-images.sh"
 # shellcheck source=docker-event-recording.sh
 source "${script_dir}/docker-event-recording.sh"
+# shellcheck source=require-jq.sh
+source "${script_dir}/require-jq.sh"
 
 usage() {
     cat <<EOF
@@ -256,6 +258,7 @@ for command_name in docker jq openssl timeout awk sed grep sort wc date; do
     command -v "${command_name}" >/dev/null 2>&1 \
         || setup_error "required command is unavailable: ${command_name}"
 done
+chaos_jq_supported || setup_error "the chaos scripts need jq 1.8 or later, not $(chaos_jq_found)"
 
 sha256_of() {
     openssl dgst -sha256 -r "$1" | awk '{ print $1 }'

@@ -64,7 +64,7 @@ done
 # The copy runs beside stand-ins and its own definitions.
 bundle="${tmp_dir}/bundle"
 mkdir -p "${bundle}/tests" "${bundle}/bin"
-cp "${chaos_dir}/suite.sh" "${chaos_dir}/suite-report.jq" "${bundle}/"
+cp "${chaos_dir}/suite.sh" "${chaos_dir}/suite-report.jq" "${chaos_dir}/require-jq.sh" "${bundle}/"
 printf '#!/usr/bin/env bash\nexit 0\n' >"${bundle}/tests/suite-self-test.sh"
 
 cat >"${bundle}/bin/docker" <<EOF
@@ -397,6 +397,30 @@ expect_json "${tmp_dir}/runs/unchecked-1/suite.json" '.status == "failed" and .s
     and .error.category == "controller" and all(.entries[]; .status == "not-started")' \
     'a failed suite self-check did not stop the suite as a controller failure'
 [[ ! -e "${tmp_dir}/runs/unchecked-1/stub-calls.txt" ]] || fail 'the suite ran an entry after its self-check failed'
+
+# The runs need jq 1.8: an older or unrecognized jq is refused, and a suite stops before any run.
+real_jq="$(command -v jq)"
+for case in 'jq-1.7.1 1' 'jq-1.8.0 0' 'jq-1.8.1 0' 'jq-1.10.2 0' 'jq-2.0 0' 'jq-1.8.1-dirty 0' 'unknown 1'; do
+    reported="${case% *}"
+    expected="${case#* }"
+    stub_dir="${tmp_dir}/jq-${reported}"
+    mkdir -p "${stub_dir}"
+    # The dollars in this stand-in are its own arguments, expanded when it runs.
+    # shellcheck disable=SC2016
+    printf '#!/usr/bin/env bash\nif [[ "$1" == --version ]]; then printf "%%s\\n" %q; exit 0; fi\nexec %q "$@"\n' \
+        "${reported}" "${real_jq}" >"${stub_dir}/jq"
+    chmod +x "${stub_dir}/jq"
+    status=0
+    PATH="${stub_dir}:${PATH}" bash -c 'source "$1"; chaos_jq_supported' check "${chaos_dir}/require-jq.sh" || status=$?
+    [[ "${status}" -eq "${expected}" ]] || fail "jq reporting ${reported} was judged ${status}, expected ${expected}"
+done
+status=0
+PATH="${tmp_dir}/jq-jq-1.7.1:${bundle}/bin:${PATH}" "${bundle}/suite.sh" green --image nervix:local \
+    --artifacts "${tmp_dir}/runs" --suite-id old-jq-1 >"${tmp_dir}/old-jq.txt" 2>&1 || status=$?
+[[ "${status}" -eq 2 ]] || fail "a suite under jq 1.7.1 returned ${status}, expected 2"
+grep -Fq 'the chaos scripts need jq 1.8 or later, not jq-1.7.1' "${tmp_dir}/old-jq.txt" \
+    || fail 'a suite under jq 1.7.1 did not name the jq it refused'
+[[ ! -e "${tmp_dir}/runs/old-jq-1" ]] || fail 'a suite under jq 1.7.1 created its directory'
 
 # An image that is neither local nor pullable stops the suite before any run.
 status=0

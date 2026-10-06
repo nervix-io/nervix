@@ -1240,7 +1240,10 @@ voter was unreachable using 110 to 145% of a CPU until the links healed. [Cluste
 leader spinning more than one CPU while a voter is unreachable](https://app.clickup.com/t/86bcdkcm8)
 owns that.
 
-The host needs Bash, Docker with Compose, GNU `timeout`, OpenSSL, and jq. Kafka administration,
+The host needs Bash, Docker with Compose, GNU `timeout`, OpenSSL, and jq 1.8 or later. The
+verifiers use jq 1.8's grammar, which jq 1.7 refuses to compile, so `just chaos run`,
+`just chaos replay`, a suite run and `just chaos self-test` stop at once with a setup error naming
+an older jq; listing, planning, reporting and cleaning up a suite work with jq 1.7. Kafka administration,
 traffic, listener probes, metrics probes, and Nervix administration run in prebuilt containers.
 The baseline provisions its Kafka topics explicitly, installs the checked-in NSPL graph with the
 image's packaged `nervix-cli`, and reconstructs the accepted-input ledger from Kafka itself. It then
@@ -1397,9 +1400,11 @@ digest, so every shard runs the same image, and reads the shards and their budge
 worker. The repository's Blacksmith workers cannot qualify: their kernel offers none of the
 queueing disciplines Pumba installs, so every run there stops in its network preflight or in the
 network healing exercise of its verifier self-check. The job loads the `sch_prio`, `sch_sfq` and
-`sch_netem` modules and fails when the kernel cannot provide one, installs `just` and `toml`,
-removes every Rust toolchain directory from the `PATH` the suite runs with and fails if `cargo`,
-`rustc` or `rustup` is still reachable, pulls the image and logs out of the registry, and runs
+`sch_netem` modules and fails when the kernel cannot provide one, installs `just` and `toml`, and
+installs jq 1.8.1 from its release, checked against the release's SHA-256, because the worker
+carries Ubuntu's jq 1.7. It removes every Rust toolchain directory from the `PATH` the suite runs
+with and fails if `cargo`, `rustc` or `rustup` is still reachable, pulls the image and logs out of
+the registry, and runs
 `just chaos suite <suite> --shard <n> --image <digest> --artifacts <dir> --suite-id ci-<run>-<attempt>-<suite>-<n>`.
 The suite step ends at the shard's step budget and the job at its job budget. A cancellation sends
 the step SIGINT, then SIGTERM, then SIGKILL within about ten seconds, which can cut a run's exit trap

@@ -118,6 +118,9 @@ jobs:
       CHAOS_IMAGE: ${{ needs.plan.outputs.image }}
       CHAOS_SHARD: ${{ matrix.shard.shard }}
       CHAOS_SUITE_ID: ci-${{ github.run_id }}-${{ github.run_attempt }}-${{ inputs.suite }}-${{ matrix.shard.shard }}
+      # The chaos scripts need jq 1.8; the worker's own jq is Ubuntu's 1.7.
+      CHAOS_JQ_URL: https://github.com/jqlang/jq/releases/download/jq-1.8.1/jq-linux-amd64
+      CHAOS_JQ_SHA256: 020468de7539ce70ef1bceaf7cde2e8c4f2ca6c3afb84642aabc5c97d9fc2a0d
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -129,13 +132,18 @@ jobs:
         with:
           tool: just@latest,toml-cli
 
-      # The suite runs with just and toml on a PATH that holds no Rust toolchain, which shows that
-      # the external command builds nothing.
-      - name: Prepare a PATH without a Rust toolchain
+      # The suite runs with just, toml and the pinned jq on a PATH that holds no Rust toolchain,
+      # which shows that the external command builds nothing.
+      - name: Prepare the controller's tools on a PATH without a Rust toolchain
         run: |
           tools="${RUNNER_TEMP}/chaos-tools"
           mkdir -p "${tools}"
           install -m 0755 "$(command -v just)" "$(command -v toml)" "${tools}/"
+          curl --fail --silent --show-error --location --retry 3 --max-time 120 \
+            --output "${tools}/jq" "${CHAOS_JQ_URL}"
+          echo "${CHAOS_JQ_SHA256}  ${tools}/jq" | sha256sum --check --strict
+          chmod 0755 "${tools}/jq"
+          "${tools}/jq" --version
           chaos_path="${tools}"
           IFS=: read -ra entries <<<"${PATH}"
           for entry in "${entries[@]}"; do
@@ -191,7 +199,11 @@ jobs:
       - name: Remove the suite's Docker resources
         if: always()
         timeout-minutes: 8
-        run: just chaos suite cleanup "${RUNNER_TEMP}/chaos/${CHAOS_SUITE_ID}"
+        run: |
+          if [[ -n "${CHAOS_PATH:-}" ]]; then
+            export PATH="${CHAOS_PATH}"
+          fi
+          just chaos suite cleanup "${RUNNER_TEMP}/chaos/${CHAOS_SUITE_ID}"
 
       - name: Publish the shard summary
         if: always()
