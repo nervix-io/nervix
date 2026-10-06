@@ -736,6 +736,14 @@ impl CommandExecutionRecords {
     ) -> io::Result<Self> {
         let entries: Records<CommandExecutionReference, CommandExecution> =
             Records::load(b'e', keyspace)?;
+        Self::from_entries(entries, retry_fence)
+    }
+
+    /// The executions `entries` holds under `retry_fence`, with the indexes derived from them.
+    fn from_entries(
+        entries: Records<CommandExecutionReference, CommandExecution>,
+        retry_fence: Option<Timestamp>,
+    ) -> io::Result<Self> {
         let mut applying = OrdSet::new();
         let mut finished = OrdSet::new();
         let mut expired = OrdSet::new();
