@@ -1490,12 +1490,15 @@ fn deserialize_value(bytes: &[u8]) -> Result<Model, Report<RegistryError>> {
     let archive = bytes
         .strip_prefix(MODEL_ARCHIVE_HEADER)
         .ok_or_else(|| Report::new(RegistryError::InvalidModelArchive))?;
-    rkyv::from_bytes::<Model, rkyv::rancor::Error>(archive)
+    // A value read back from an on-disk table is a slice of its block at whatever offset the block
+    // placed it, so the archive is copied to the alignment its root requires before validation.
+    let mut aligned = rkyv::util::AlignedVec::<16>::with_capacity(archive.len());
+    aligned.extend_from_slice(archive);
+    rkyv::from_bytes::<Model, rkyv::rancor::Error>(&aligned)
         .change_context(RegistryError::DeserializeValue)
 }
 
-// The header identifies the current persisted Model shape before archive decoding. Its length
-// preserves rkyv's alignment when the archive is restored.
+// The header identifies the current persisted Model shape before archive decoding.
 const MODEL_ARCHIVE_HEADER: &[u8; 16] = b"NERVIX MODEL U64";
 
 #[cfg(test)]
@@ -1783,6 +1786,40 @@ mod tests {
             .verified("the model store contains a current schema archive")
             .verified("the BYTES schema was stored under its own name");
         assert_eq!(loaded, schema);
+        fs::remove_dir_all(path).assured("the test registry path is disposable");
+    }
+
+    /// A flush moves stored Models into an on-disk table, which hands each value back as a slice of
+    /// its block at whatever byte offset the block placed it. A restarted node reads every Model it
+    /// stored from there.
+    #[test]
+    fn models_reload_after_their_keyspace_is_flushed_to_disk() {
+        let path = temp_db_path();
+        let domain = named::<DomainName>("flushed_domain");
+        let stored = {
+            let registry = Registry::open(&path).assured("a new test path holds an empty registry");
+            registry
+                .apply_batch(&domain, full_graph_batch())
+                .assured("the complete fixture graph validates");
+            let stored = registry
+                .storage
+                .list_all_models()
+                .verified("the memtable holds the Models this registry just stored");
+            registry
+                .storage
+                .index
+                .rotate_memtable_and_wait()
+                .assured("the test keyspace flushes its memtable into an on-disk table");
+            stored
+        };
+
+        let reopened = Registry::open(&path)
+            .verified("the registry just closed after storing a valid graph in its table");
+        let reloaded = reopened
+            .storage
+            .list_all_models()
+            .verified("the reopened registry already listed these Models while opening");
+        assert_eq!(reloaded, stored);
         fs::remove_dir_all(path).assured("the test registry path is disposable");
     }
 

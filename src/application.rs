@@ -2915,12 +2915,18 @@ impl Application {
         interconnect.shutdown().await;
 
         let executor = runtime.executor().clone();
+        #[cfg(feature = "testing")]
+        let stopping_fault_injection = fault_injection.clone();
+        #[cfg(feature = "testing")]
+        let stopping_node = consensus.proposer().local_node_id().clone();
         let database_owner_outcome = ApplicationStartup::close_stores(&executor, move || {
             drop(service);
             drop(runtime);
             drop(consensus);
             drop(cluster);
             drop(interconnect);
+            #[cfg(feature = "testing")]
+            stopping_fault_injection.flush_node_database_if_armed(&stopping_node, &db);
             drop(db);
         })
         .await;
