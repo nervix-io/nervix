@@ -65,6 +65,16 @@ enum StartupConsensusFault {
     Armed,
 }
 
+/// Whether a node moves what its node database holds in memory into on-disk tables as it stops.
+///
+/// A scenario arms the move before a node stops and reads afterwards whether the stopping node
+/// performed it, so a restart that proves nothing because the move never happened cannot pass.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum NodeDatabaseFlush {
+    Armed,
+    Flushed,
+}
+
 /// One cloneable handle for every fault and override a server test can inject.
 ///
 /// Every clone points at the same state, so a Cucumber world can arm a seam after handing the
@@ -104,6 +114,9 @@ struct FaultInjectionState {
     /// Consensus storage failures armed as each named node builds its storage, before it answers
     /// any Raft traffic.
     startup_consensus_faults: DashMap<ClusterNodeName, StartupConsensusFault, RandomState>,
+    /// Nodes armed to move their node database into on-disk tables as they stop, and whether
+    /// they did.
+    node_database_flushes: DashMap<ClusterNodeName, NodeDatabaseFlush, RandomState>,
     executions: DashMap<ClusterNodeName, NodeExecution, RandomState>,
     failed_health_responders: DashMap<ClusterNodeName, (), RandomState>,
     failed_health_links: DashMap<HealthResponsePauseKey, (), RandomState>,
@@ -358,6 +371,7 @@ impl Default for FaultInjection {
                 failed_https_listener_installations: DashMap::default(),
                 consensus_probes: DashMap::default(),
                 startup_consensus_faults: DashMap::default(),
+                node_database_flushes: DashMap::default(),
                 executions: DashMap::default(),
                 failed_health_responders: DashMap::default(),
                 failed_health_links: DashMap::default(),
@@ -793,6 +807,57 @@ impl FaultInjection {
             .as_ref()
             .verified("the harness started this node before observing its storage failure");
         !state.test_probe.storage_fault().is_armed()
+    }
+
+    /// Arm `node` to move everything its node database holds in memory into on-disk tables the next
+    /// time it stops, once every owner of that database has stopped. A long-running node reaches the
+    /// same layout when journal rotation flushes its memtables, so the next start reads every record
+    /// back from a table rather than from the journal.
+    pub fn flush_node_database_on_stop(&self, node: ClusterNodeName) {
+        self.inner
+            .node_database_flushes
+            .insert(node, NodeDatabaseFlush::Armed);
+    }
+
+    /// Whether `node` moved its node database into on-disk tables when it last stopped while armed.
+    pub fn node_database_flushed(&self, node: &ClusterNodeName) -> bool {
+        let flush = self.inner.node_database_flushes.get(node);
+        matches!(flush.as_deref(), Some(NodeDatabaseFlush::Flushed))
+    }
+
+    /// Called by a stopping node with its node database once every owner of the database has
+    /// stopped. An armed node moves every keyspace's memtable into an on-disk table and records
+    /// that it did; a failure leaves the node armed, which the scenario reports.
+    pub(crate) fn flush_node_database_if_armed(
+        &self,
+        node: &ClusterNodeName,
+        database: &fjall::Database,
+    ) {
+        let armed = self.inner.node_database_flushes.get(node);
+        let Some(NodeDatabaseFlush::Armed) = armed.as_deref() else {
+            return;
+        };
+        drop(armed);
+        for name in database.list_keyspace_names() {
+            if let Err(error) = Self::flush_keyspace(database, &name) {
+                tracing::error!(
+                    node = %node,
+                    keyspace = %&*name,
+                    error = %error,
+                    "failed to move a node database keyspace into an on-disk table"
+                );
+                return;
+            }
+        }
+        self.inner
+            .node_database_flushes
+            .insert(node.clone(), NodeDatabaseFlush::Flushed);
+    }
+
+    /// Moves the memtable of the keyspace `name` into an on-disk table and waits until it is there.
+    fn flush_keyspace(database: &fjall::Database, name: &str) -> Result<(), fjall::Error> {
+        let keyspace = database.keyspace(name, fjall::KeyspaceCreateOptions::default)?;
+        keyspace.rotate_memtable_and_wait()
     }
 
     pub fn fail_emitter(&self, emitter: &str) {

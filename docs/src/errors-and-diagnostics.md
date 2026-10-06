@@ -133,9 +133,11 @@ failure when the pinned file is decoded. Neither failure silently selects anothe
 The vocabulary's `ArchivedCountError` reports a fixed-width archived count that the receiving
 target's `usize` cannot represent. Archive decoding retains it beneath the owning storage or
 transport failure. Registry Model records validate their current frame signature and report
-`RegistryError::InvalidModelArchive` with a recreation instruction for an unrecognized shape.
-Consensus validates its complete current keyspace namespace and state encoding and reports
-`StorageFailure::InvalidState` with a recreation instruction. Window snapshot decoding reports
+`RegistryError::InvalidModelArchive` with a recreation instruction for an unrecognized shape. A
+record's key holds its domain, Model kind and name exactly as a commit encodes them; a key spelling
+a name another way or holding bytes after its encoding is `RegistryError::DecodeKey`, so no stored
+record is read as another Model. Consensus validates its complete current keyspace namespace and
+state encoding and reports `StorageFailure::InvalidState` with a recreation instruction. Window snapshot decoding reports
 `WindowSnapshotIssue::Header` with a recreation instruction for an invalid current frame signature.
 These boundaries reject unrecognized data before its counts can be reinterpreted; none clamps,
 truncates, or supplies a replacement value. See [Archived Counts](./typed-states.md#archived-counts).
