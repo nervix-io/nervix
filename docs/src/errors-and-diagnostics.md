@@ -329,6 +329,21 @@ archive as `NX_ERROR_PROTOCOL`, and a write failure as `NX_ERROR_INVALID_ARGUMEN
 execution reference so a host can run the backup again. No diagnostic of a backup includes archive
 contents, password hashes, or resource bytes.
 
+The web console owns its own typed download and restore failures. A download failure names the
+server's refusal, a transport failure, a stalled or interrupted stream, a missing leader or a
+redirect loop, frames out of order or undecodable, an archive that differs from the backup's
+summary, or an archive the browser could not save; it retries a transport failure, a stall, an
+interrupted stream and `ReadFailed` from the first byte, and reports the rest as the reason the
+completed backup's archive was not downloaded, never as a failure of the backup. A restore stream
+failure names an archive file the browser could not read or that is empty, a transport failure, a
+stall, a missing reply, a reply that does not decode or answers another request or reference, or a
+restore whose outcome stayed unknown through its repetitions, which the dialog reports naming the
+execution reference. A refusal of the stream is shown as `restore refused (<failure>): <message>`,
+and the restore's own outcome as the dispatcher renders any command's. The console WebSocket
+transport closes a call whose client broke its framing with the codec's close code, a second
+download request with `1008`, an answer that does not fit a frame with `1011`, and every call when
+the node stops with `1001`.
+
 A captured-section opening refused only for Snapshot request capacity retains its inventory and
 retries within one 30-second opening deadline. The typed capacity classification determines this
 retry; other request failures end the fetch. Deadline expiry remains a capture failure, and an

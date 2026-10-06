@@ -23,6 +23,7 @@ use crate::common::{
 };
 
 mod branch_state;
+mod console;
 mod fidelity;
 mod materialized;
 pub(crate) mod restore;
