@@ -15,17 +15,16 @@ use nervix_models::{
     DescribeDeduplicator, DescribeDomain, DescribeEmitter, DescribeEndpoint, DescribeIngestor,
     DescribeJunction, DescribeLookup, DescribePlacement, DescribeReingestor, DescribeRelay,
     DescribeReorderer, DescribeResource, DescribeTransaction, DescribeUdf, DescribeWasmProcessor,
-    DescribeWindowProcessor, DomainConfig, DomainPace, DomainStartPoint, DomainTimeRate, DrainNode,
-    DropModel, DropNode, EmitterPublishingMode, ExistingUserPolicy, FieldName, InspectionFormat,
-    LookupQuery, ModelKind, ModelName, NodeRef, PlacementPolicy, RebindResource,
-    RebindResourceMembers, RebindResourceSelection, RelayBranching, RelayName, Relocation,
-    RelocationMember, RelocationPreferenceOverride, RelocationPreferenceStrategy,
-    RelocationSelection, ResetWasmBranchField, ResetWasmState, ResetWasmStateScope, Restore,
-    RestoreLifecycle, RestoreMode, RestoreScope, RestoreState, ShowClusterStatus, ShowCreate,
-    ShowIngestors, ShowPlacements, ShowRelayMaterializedState, ShowTransactions, ShowUdfs,
-    StartDomain, Statement, StopDomain, SubscriptionBinding, SubscriptionLiteral, Timestamp,
-    TransactionInspectionRequest, TransactionInspectionTarget, TransactionOperationNumber,
-    UncordonNode, UploadResource,
+    DescribeWindowProcessor, DomainConfig, DomainPace, DomainTimeRate, DrainNode, DropModel,
+    DropNode, EmitterPublishingMode, ExistingUserPolicy, FieldName, InspectionFormat, LookupQuery,
+    ModelKind, ModelName, NodeRef, PlacementPolicy, RebindResource, RebindResourceMembers,
+    RebindResourceSelection, RelayBranching, RelayName, Relocation, RelocationMember,
+    RelocationPreferenceOverride, RelocationPreferenceStrategy, RelocationSelection,
+    ResetWasmBranchField, ResetWasmState, ResetWasmStateScope, Restore, RestoreLifecycle,
+    RestoreMode, RestoreScope, RestoreState, ShowClusterStatus, ShowCreate, ShowIngestors,
+    ShowPlacements, ShowRelayMaterializedState, ShowTransactions, ShowUdfs, StartDomain, Statement,
+    StopDomain, SubscriptionBinding, SubscriptionLiteral, TransactionInspectionRequest,
+    TransactionInspectionTarget, TransactionOperationNumber, UncordonNode, UploadResource,
 };
 use strum::IntoEnumIterator as _;
 
@@ -374,16 +373,7 @@ impl Arbitrary<'_> {
                 })
             }
             StatementVariant::StartDomain => {
-                let start = match self.entropy.byte() % 3 {
-                    0 => DomainStartPoint::Resume,
-                    1 => DomainStartPoint::Now {
-                        time_rate: self.time_rate(),
-                    },
-                    _ => DomainStartPoint::At {
-                        timestamp: Timestamp::from_unix_nanos(self.entropy.any_i64()),
-                        time_rate: self.time_rate(),
-                    },
-                };
+                let start = self.start_point();
                 Statement::StartDomain(StartDomain { start })
             }
             StatementVariant::StopDomain => Statement::StopDomain(StopDomain),
@@ -653,7 +643,7 @@ impl Arbitrary<'_> {
         operations
     }
 
-    fn placement_policy(&mut self) -> PlacementPolicy {
+    pub(crate) fn placement_policy(&mut self) -> PlacementPolicy {
         self.entropy.pick([
             PlacementPolicy::RequireColocation,
             PlacementPolicy::PreferColocation,
@@ -664,7 +654,7 @@ impl Arbitrary<'_> {
 
     /// A positive finite time rate: any bit pattern that is one, and the values around one that a
     /// simulation typically runs at.
-    fn time_rate(&mut self) -> DomainTimeRate {
+    pub(crate) fn time_rate(&mut self) -> DomainTimeRate {
         let candidate = match self.entropy.byte() % 6 {
             0 => 1.0,
             1 => 0.5,

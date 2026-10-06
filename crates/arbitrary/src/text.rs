@@ -6,7 +6,7 @@ use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_models::{
     BranchName, BuiltinFunctionName, ChannelName, ClientName, ClusterNodeName, CodecName,
     CollectionName, ConsumerGroupName, CorrelatorName, DeduplicatorName, DomainClockPeriod,
-    DomainClockSkew, DomainName, EmitterName, EndpointName, FieldName, GeneratorName,
+    DomainClockSkew, DomainName, DotPolicy, EmitterName, EndpointName, FieldName, GeneratorName,
     InferencerName, IngestorName, JunctionName, LookupName, ModelName, PlacementName,
     PulsarSubscriptionName, QueueGroupName, QueueName, ReingestorName, RelayName, ReordererName,
     RequestedResourceVersion, ResourceName, SchemaName, SignalingProtocolName, SubjectName,
@@ -22,6 +22,29 @@ const NAME_BYTES: u64 = 128;
 
 /// The characters a generated name continues with after its keyword-proof head.
 const NAME_TAIL: &[u8] = b"abcdefghijklmnopqrstuvwxyz0123456789_";
+
+/// Every character the name rule admits once a name is parsed, apart from a dot, which only some
+/// kinds of name admit.
+const RULE_CHARACTERS: &[u8] = b"abcdefghijklmnopqrstuvwxyz0123456789-_~";
+
+/// Whole names that meet the separators, prefixes and path segments a stored key or a resource
+/// directory writes them between: dot-only segments, a staging directory's spelling, and names
+/// that are nothing but a delimiter or a digit. Those holding a dot are skipped for a kind of name
+/// that refuses one.
+const DELIMITER_NAMES: [&str; 12] = [
+    ".",
+    "..",
+    "...",
+    ".1.staging",
+    ".staging",
+    "a.",
+    ".a",
+    "-",
+    "~",
+    "_",
+    "0",
+    "9-",
+];
 
 /// Every keyword NSPL reads, statement and expression keywords alike, spelled as a name spells it:
 /// in lower case. `nervix-nspl` checks this list against the one lexer's keyword set, so a keyword
@@ -396,12 +419,17 @@ pub trait GeneratedName: FromStr<Err: Debug> {
     /// the vocabulary holds them, and so does the vocabulary domain. Every such list holds at most
     /// a handful of words.
     const REFUSED_IN_NSPL: &'static [&'static str] = &[];
+
+    /// Whether this kind of name may hold a dot, as the vocabulary declares it.
+    const DOTS: DotPolicy;
 }
 
 /// Declares name kinds NSPL writes in every spelling a generated name takes, keywords included.
 macro_rules! spelled_like_any_word {
     ($($name:ident),+ $(,)?) => {
-        $(impl GeneratedName for $name {})+
+        $(impl GeneratedName for $name {
+            const DOTS: DotPolicy = $name::DOTS;
+        })+
     };
 }
 
@@ -451,6 +479,7 @@ spelled_like_any_word!(
 /// relay, so it refuses them as a relay's name.
 impl GeneratedName for RelayName {
     const REFUSED_IN_NSPL: &'static [&'static str] = &RESERVED_RELAY_WORDS;
+    const DOTS: DotPolicy = RelayName::DOTS;
 }
 
 /// Pieces a generated string is assembled from. Beside plain text they hold every character the
@@ -574,6 +603,56 @@ impl Arbitrary<'_> {
             );
             let chosen = usize::try_from(chosen).verified("an index below the table length");
             text.push(char::from(NAME_TAIL[chosen]));
+        }
+        text
+    }
+
+    /// A name of kind `N` drawn from the whole name rule rather than only the identifiers NSPL
+    /// writes bare: besides any name [`Self::name`] builds, 1 through 128 bytes of lower-case
+    /// letters, digits, `-`, `_` and `~`, with a `.` where `N` admits one, or a whole name made of
+    /// delimiters. Stored keys and resource directories hold a name as its text, so these are the
+    /// spellings that meet their separators and path segments.
+    ///
+    /// Either spelling is a choice among eight and never the first, so a name read from bytes that
+    /// ran out is still a single letter.
+    pub fn rule_name<N: GeneratedName>(&mut self) -> N {
+        let text = match self.entropy.byte() % 8 {
+            0..=3 => self.name_text(),
+            4 => self.delimiter_name_text(N::DOTS),
+            _ => self.rule_name_text(N::DOTS),
+        };
+        N::from_str(&text).assured("a generated name holds only name characters within the bound")
+    }
+
+    /// One of the whole names made of delimiters, with any dot replaced by an underscore for a
+    /// kind of name that refuses one.
+    fn delimiter_name_text(&mut self, dots: DotPolicy) -> String {
+        let name = self.entropy.pick(DELIMITER_NAMES);
+        match dots {
+            DotPolicy::Allowed => name.to_string(),
+            DotPolicy::Rejected => name.replace('.', "_"),
+        }
+    }
+
+    /// Name text of 1 through 128 characters, each drawn from the name rule's characters and, when
+    /// `dots` admits one, a dot.
+    fn rule_name_text(&mut self, dots: DotPolicy) -> String {
+        let characters = u64::try_from(RULE_CHARACTERS.len()).assured("a small table fits in u64");
+        let last = match dots {
+            DotPolicy::Allowed => characters,
+            DotPolicy::Rejected => characters
+                .checked_sub(1)
+                .assured("the rule's characters are not empty"),
+        };
+        let length = self.entropy.boundary_biased(1..=NAME_BYTES);
+        let mut text = String::new();
+        for _ in 0..length {
+            let chosen = self.entropy.up_to(last);
+            let chosen = usize::try_from(chosen).verified("an index at most the table length");
+            match RULE_CHARACTERS.get(chosen) {
+                Some(character) => text.push(char::from(*character)),
+                None => text.push('.'),
+            }
         }
         text
     }
