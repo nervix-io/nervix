@@ -1119,8 +1119,13 @@ it runs and how long it may take.
 The lane starts after its prerequisites, `just tests-deps`, and builds each invocation with Cargo
 before it runs it. The probes and the owner tests are libtest executables, run directly so that a
 signal reaches the lane as a signal rather than as Cargo's status. The scenario binary runs the
-lane's tagged scenarios without retries, in two invocations: the restore, client and diagnostic
-scenarios, then the paced-driver scenarios with the diagnostic Rust driver. Each invocation runs
+lane's tagged scenarios without retries, in two inventory invocations: the restore, client and
+diagnostic scenarios, then the paced-driver scenarios with the diagnostic Rust driver. Active mode
+runs each invocation as one process. Order mode starts a fresh process for each tagged feature in
+the first invocation; the materialized restore feature runs each scenario separately and its six
+large examples each have their own process, selected by the inventory's `order_tags`. The lane
+checks every chunk's Cucumber summary against its registered examples, retains its logs and
+evidence separately, and stops on the first failed chunk. Each process runs
 the inventory's fixed number of scenarios at once, four, rather than one per CPU: a diagnostic
 build pays for its tracked acquisitions on every lock, and a fixed count puts the same load on its
 nodes locally and on CI's 16-vCPU runner.
@@ -1157,8 +1162,9 @@ verdict.
 | Supervision qualification | 10 minutes, `timeout` in the step | A small probe build and up to seven bounded cases; only the untracked wait runs to its bound, 15 seconds, and the others end in milliseconds. It took 43 and 49 seconds in the first passing run |
 | Uploads and the kache report | The rest of the 120-minute job limit | Attempt directories, completion records and LCOV reports, uploaded after either step's verdict. In the first passing run the uploads took 5 and 6 seconds and kache's post step 3m02s and 2m50s, and the whole jobs took 28 and 35 minutes |
 
-The measurements come from the first CI run in which both selections passed, on 2026-10-06, with
-the lane instrumenting workspace crates only and running four scenarios at once.
+The measurements come from the first CI run in which both selections passed, on 2026-10-06, before
+the four remote ACK examples joined the inventory and before order mode separated scenario
+processes. They describe the earlier 49-run workload, not a bound for the current 53-run selection.
 
 When a step's `timeout` expires it sends `SIGTERM` to the step's process group. The collector
 records its attempt as interrupted and forwards the signal to the lane, which ends the process it is

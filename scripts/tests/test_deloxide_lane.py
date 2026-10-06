@@ -18,6 +18,7 @@ import textwrap
 import time
 import unittest
 from collections.abc import Callable, Mapping, Sequence
+from dataclasses import replace
 from pathlib import Path
 
 from scripts import deloxide_lane
@@ -207,6 +208,7 @@ class ScriptedProcesses(Processes):
             "scenarios": ["deadlock-2-1.rkyv", "process-clusters/cluster-a/deadlock-3-1.rkyv"],
         }
         self.scenario_summary = "2 scenarios (2 passed)"
+        self.scenario_summaries: dict[str, str] = {}
 
     def executable(self, name: str) -> Path:
         return self.root / "bin" / name
@@ -239,11 +241,15 @@ class ScriptedProcesses(Processes):
             launch.log.write_text(libtest(outcomes))
         elif launch.name.startswith("owner-tests-"):
             launch.log.write_text(libtest({"store::tests::deloxide_store": "ok"}, filtered=2))
-        elif launch.name == "scenarios":
-            launch.log.write_text(f"[Summary]\n1 feature\n{self.scenario_summary}\n4 steps (4 passed)\n")
+        elif launch.name == "scenarios" or launch.name.startswith("scenarios-"):
+            summary = self.scenario_summaries.get(launch.name, self.scenario_summary)
+            launch.log.write_text(f"[Summary]\n1 feature\n{summary}\n4 steps (4 passed)\n")
         directory = launch.environment.get(deloxide_lane.EVIDENCE_VARIABLE)
         if directory is not None:
-            for name in self.evidence.get(launch.name, []):
+            evidence = self.evidence.get(launch.name, [])
+            if launch.name.startswith("scenarios-"):
+                evidence = self.evidence.get("scenarios", [])
+            for name in evidence:
                 path = Path(directory) / name
                 path.parent.mkdir(parents=True, exist_ok=True)
                 path.write_bytes(b"evidence")
@@ -377,6 +383,36 @@ class InventoryTests(unittest.TestCase):
                 self.assertEqual(deloxide_lane.scenario_problems(invocation, registered, discovered), [])
                 self.assertGreater(sum(scenario.runs for scenario in discovered), 0)
 
+    def test_order_scenarios_have_fresh_feature_and_large_example_processes(self) -> None:
+        inventory = deloxide_lane.load_inventory(REPOSITORY)
+        invocation = inventory.invocations["scenarios"]
+        registered = inventory.workloads_of("scenarios", "deloxide-order")
+        active = deloxide_lane.scenario_chunks(REPOSITORY, invocation, registered, "deloxide")
+        self.assertEqual(len(active), 1)
+        self.assertEqual(active[0].expected, sum(workload.examples or 0 for workload in registered))
+        order = deloxide_lane.scenario_chunks(REPOSITORY, invocation, registered, "deloxide-order")
+        self.assertEqual(sum(chunk.expected for chunk in order), active[0].expected)
+        self.assertEqual(len({chunk.name for chunk in order}), len(order))
+        self.assertEqual(
+            {chunk.example_tag for chunk in order if chunk.example_tag is not None},
+            {
+                "@order_resume_fanout_single", "@order_resume_fanout_cluster",
+                "@order_resume_tenants_single", "@order_resume_tenants_cluster",
+                "@order_materialized_fanout", "@order_materialized_tenants",
+            },
+        )
+        self.assertTrue(all(chunk.expected == 1 for chunk in order if chunk.example_tag))
+        remote = [chunk for chunk in order if chunk.inputs == ("tests/features/runtime/remote_ack_owners.feature",)]
+        self.assertEqual(len(remote), 1)
+        self.assertEqual(remote[0].expected, 2)
+        bad = [
+            replace(workload, order_tags=("@missing_example", *workload.order_tags[1:]))
+            if workload.id == "scenario.materialized-bulk-generations" else workload
+            for workload in registered
+        ]
+        with self.assertRaisesRegex(LaneError, "order tag @missing_example must select exactly one example"):
+            deloxide_lane.scenario_chunks(REPOSITORY, invocation, bad, "deloxide-order")
+
     def test_the_fixture_inventory_parses(self) -> None:
         inventory = deloxide_lane.parse_inventory(INVENTORY)
         probes = inventory.invocations["probes"]
@@ -391,6 +427,11 @@ class InventoryTests(unittest.TestCase):
         self.assertEqual([workload.id for workload in inventory.workloads_of("probes", "deloxide")], ["probe.cycle"])
         with self.assertRaisesRegex(LaneError, "no selection `loom`; the inventory selects deloxide, deloxide-order"):
             inventory.selection("loom")
+        bad_tags = INVENTORY.replace(
+            'id = "scenario.nodes"', 'id = "scenario.nodes"\n    order_tags = ["@single"]', 1
+        )
+        with self.assertRaisesRegex(LaneError, "order_tags.*one per run"):
+            deloxide_lane.parse_inventory(bad_tags)
 
     def test_every_malformed_entry_is_refused_naming_it(self) -> None:
         def edited(old: str, new: str) -> str:
@@ -783,6 +824,50 @@ class LaneTests(unittest.TestCase):
     def setUp(self) -> None:
         self.fixture = Fixture(self)
 
+    def test_order_example_processes_account_for_every_run_and_keep_separate_evidence(self) -> None:
+        extra = textwrap.dedent("""
+            [[workload]]
+            coverage = "Large restore examples."
+            examples = 2
+            feature = "features/lane.feature"
+            id = "scenario.large"
+            invariant = "Each restore example ends cleanly."
+            invocation = "scenarios"
+            order_tags = ["@large_first", "@large_second"]
+            scenario = "Large restore on <kind>"
+            selections = ["deloxide", "deloxide-order"]
+
+        """)
+        fixture = Fixture(self, INVENTORY.replace("[[owner]]\n", extra + "[[owner]]\n", 1))
+        (fixture.root / "features/lane.feature").write_text(FEATURE + textwrap.dedent("""
+              Scenario Outline: Large restore on <kind>
+                Given a step
+                @large_first
+                Examples:
+                  | kind |
+                  | a    |
+                @large_second
+                Examples:
+                  | kind |
+                  | b    |
+        """))
+        processes = ScriptedProcesses(fixture.root, "deloxide-order")
+        processes.scenario_summaries = {
+            "scenarios-1": "1 scenario (1 passed)",
+            "scenarios-2": "1 scenario (1 passed)",
+        }
+        lane = fixture.lane(processes, "deloxide-order")
+        self.assertEqual(quietly(lane.execute), 0)
+        content = record(lane)
+        self.assertEqual([workload["id"] for workload in content["workloads"][-2:]], ["scenario.nodes", "scenario.large"])
+        self.assertEqual(content["counts"], {"discovered": 7, "selected": 7, "executed": 7, "completed": 7})
+        chunks = [launch for launch in processes.launches if re.fullmatch(r"scenarios-[0-9]+", launch.name)]
+        self.assertEqual([launch.name for launch in chunks], ["scenarios-0", "scenarios-1", "scenarios-2"])
+        self.assertIn("--name", chunks[0].argv)
+        self.assertIn("@large_first", chunks[1].argv)
+        self.assertIn("@large_second", chunks[2].argv)
+        self.assertEqual(len({launch.environment[deloxide_lane.EVIDENCE_VARIABLE] for launch in chunks}), 3)
+
     def test_a_complete_run_accounts_for_every_workload_and_qualifies_every_observation(self) -> None:
         processes = ScriptedProcesses(self.fixture.root, "deloxide-order")
         step_summary = self.fixture.root / "step-summary.md"
@@ -811,7 +896,7 @@ class LaneTests(unittest.TestCase):
         self.assertEqual(deloxide_lane.read_complete(lane.record.path, "deloxide-order"), content)
 
         launches = {launch.name: launch for launch in processes.launches}
-        self.assertEqual(list(launches), ["probes-build", "probes", "owner-tests-build", "owner-tests-owner.store", "scenarios-build", "scenarios"])
+        self.assertEqual(list(launches), ["probes-build", "probes", "owner-tests-build", "owner-tests-owner.store", "scenarios-build", "scenarios-0"])
         build = launches["probes-build"]
         self.assertEqual(build.argv[:5], ("cargo", "test", "--no-run", "--package", "nervix-deadlock"))
         self.assertIn("deloxide-order", build.argv)
@@ -825,12 +910,13 @@ class LaneTests(unittest.TestCase):
         owner = launches["owner-tests-owner.store"]
         self.assertEqual(owner.argv[1:], ("store::tests::deloxide_store", "--exact", "--test-threads=1"))
         self.assertEqual(owner.environment[deloxide_lane.EVIDENCE_VARIABLE], str(lane.attempt / "evidence/owner-tests/owner.store"))
-        scenarios = launches["scenarios"]
-        self.assertEqual(scenarios.argv[1:], ("--input", "features/**/*.feature", "--tags", "@lane", "--retry", "0", "--concurrency", "4"))
+        scenarios = launches["scenarios-0"]
+        self.assertEqual(scenarios.argv[1:], ("--input", "features/lane.feature", "--tags", "@lane", "--retry", "0", "--concurrency", "4"))
         self.assertEqual(scenarios.environment[deloxide_lane.SUITE_BUDGET_VARIABLE], "110s")
+        self.assertEqual(scenarios.environment[deloxide_lane.EVIDENCE_VARIABLE], str(lane.attempt / "evidence/scenarios/scenarios-0"))
         self.assertEqual(scenarios.environment[deloxide_lane.REPORT_TOOL_VARIABLE], str(self.fixture.target / "debug/nervix-deadlock-report"))
         recorded = [launch for launch in content["launches"] if launch["stage"] == "run"]
-        self.assertEqual([launch["name"] for launch in recorded], ["probes", "owner-tests-owner.store", "scenarios"])
+        self.assertEqual([launch["name"] for launch in recorded], ["probes", "owner-tests-owner.store", "scenarios-0"])
         self.assertEqual(recorded[0]["accounting"]["outcomes"]["workload"], "ignored")
         self.assertEqual(recorded[2]["accounting"]["scenarios"], {"total": 2, "passed": 2})
 
@@ -941,7 +1027,7 @@ class LaneTests(unittest.TestCase):
         processes.scenario_summary = "1 scenario (1 passed)"
         status, content = self.run_failing(processes)
         self.assertEqual(content["failure"]["class"], "incomplete")
-        self.assertIn("the tags select 2 scenario runs, and Cucumber reported {'total': 1, 'passed': 1}", content["failure"]["detail"])
+        self.assertIn("selected 2 scenario runs, and Cucumber reported {'total': 1, 'passed': 1}", content["failure"]["detail"])
 
     def test_missing_partial_and_nonqualifying_evidence_fail_the_lane(self) -> None:
         cases: dict[str, tuple[Callable[[ScriptedProcesses], None], str, int]] = {
@@ -1258,6 +1344,14 @@ class CommandLineTests(unittest.TestCase):
         self.assertEqual(status, 0)
         self.assertEqual(json.loads(report.read_text())["verdict"], "complete")
         self.assertEqual(self.main("run", "loom"), 1)
+
+    def test_order_run_records_fresh_scenario_process_and_its_evidence(self) -> None:
+        self.assertEqual(self.main("run", "deloxide-order", selection="deloxide-order"), 0)
+        launches = self.processes[-1].launches
+        scenario = next(launch for launch in launches if launch.name == "scenarios-0")
+        self.assertIn("features/lane.feature", scenario.argv)
+        self.assertIn("@lane", scenario.argv)
+        self.assertTrue(scenario.environment[deloxide_lane.EVIDENCE_VARIABLE].endswith("/scenarios-0"))
 
     def test_replay_runs_a_launch_of_a_record(self) -> None:
         self.assertEqual(self.main("run", "deloxide"), 0)

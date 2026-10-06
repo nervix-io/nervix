@@ -1610,8 +1610,11 @@ longer holds or holds ignored, a discovered probe, owner test or tagged scenario
 registered, a scenario whose example runs changed, and an invocation that selects nothing. It
 reports how many workloads it discovered, selected, executed and saw complete. Global detector
 configurations never share a process: each probe workload is a disposable child, each owner test
-installs its detector in a fresh process, the scenario binary installs once in `main`, and every
-diagnostic server and paced driver process installs its own. The two selections are separate
+installs its detector in a fresh process, and each scenario binary process installs once in `main`.
+Active detection runs its tagged scenarios together; order analysis starts a fresh process per
+feature, and gives the six large materialized restore examples their own processes. Their
+`order_tags` in the inventory select and account for each example. Every diagnostic server and
+paced driver process installs its own detector. The two selections are separate
 builds in separate target directories, apart from ordinary, fuzz, Loom, Shuttle and Turmoil builds.
 
 Every process the lane starts runs in a session of its own. A process that outlives its bound

@@ -430,6 +430,12 @@ feature = "tests/features/cluster/backup_materialized.feature"
 id = "scenario.materialized-bulk-generations"
 invariant = "Materialized generations larger than the bulk budget resume on every assigned owner and replica."
 invocation = "scenarios"
+order_tags = [
+  "@order_resume_fanout_single",
+  "@order_resume_fanout_cluster",
+  "@order_resume_tenants_single",
+  "@order_resume_tenants_cluster",
+]
 scenario = "Materialized generations larger than the bulk budget resume on every assigned owner and replica"
 selections = ["deloxide", "deloxide-order"]
 
@@ -440,6 +446,7 @@ feature = "tests/features/cluster/backup_materialized.feature"
 id = "scenario.materialized-delayed-coordinator"
 invariant = "A delayed coordinator cannot replace a resumed materialized generation larger than the bulk budget."
 invocation = "scenarios"
+order_tags = ["@order_materialized_fanout", "@order_materialized_tenants"]
 scenario = "A delayed coordinator cannot replace a resumed materialized generation larger than the bulk budget"
 selections = ["deloxide", "deloxide-order"]
 
