@@ -2120,6 +2120,7 @@ mod tests {
     use nervix_models::{
         CorrelationTimeoutAction, CorrelationTimeoutPolicy, CorrelatorMatchPolicy, ParseAsType,
     };
+    use nervix_primitives::sync::broadcast;
 
     use super::*;
     use crate::{
@@ -2128,50 +2129,135 @@ mod tests {
         runtime_schema::{RuntimeValue, test_runtime_row},
     };
 
-    /// Hands one batch from relay `incoming` to a branch whose one processor, `node`, `shape`
-    /// configures, and returns the runtime event the processor reported together with the outcome
-    /// of the batch's acknowledgements.
-    async fn report_of_one_batch(
-        shape: impl FnOnce(&mut RelayProcessorTemplate),
-    ) -> (String, AckOutcome) {
-        let runtime = Runtime::default();
-        let domain = domain("default");
-        install_unpaced_test_domain(&runtime, &domain);
-        let node = named::<ModelName>("node");
-        let incoming = named::<RelayName>("incoming");
-        let mut template = junction_branch_template(node.as_str(), incoming.as_str());
-        let processor = template
-            .processors
-            .get_mut(&node)
-            .assured("the fixture declares its one processor");
-        shape(processor);
-        let mut branch = template
-            .instantiate(&runtime, &domain, None, 1)
-            .await
-            .assured("the branch instantiates on the test domain")
-            .into_inner();
-        branch
-            .refresh_domain_routing()
-            .assured("the test domain publishes its routing");
-        let mut events = runtime.subscribe_events();
-        let (acks, completion) = AckSet::root();
-        let batch = RelayRecordBatch::single(
+    /// A branch of the test domain whose one processor, `node`, reads relay `incoming` as a test
+    /// shapes it, with the runtime's events subscribed before the branch runs anything.
+    struct OneProcessorBranch {
+        runtime: Runtime,
+        domain: DomainName,
+        branch: BranchRuntime,
+        events: broadcast::Receiver<RuntimeEvent>,
+    }
+
+    impl OneProcessorBranch {
+        async fn new(shape: impl FnOnce(&mut RelayProcessorTemplate)) -> Self {
+            let runtime = Runtime::default();
+            let domain = domain("default");
+            install_unpaced_test_domain(&runtime, &domain);
+            let node = named::<ModelName>("node");
+            let mut template = junction_branch_template(node.as_str(), "incoming");
+            let processor = template
+                .processors
+                .get_mut(&node)
+                .assured("the fixture declares its one processor");
+            shape(processor);
+            let mut branch = template
+                .instantiate(&runtime, &domain, None, 1)
+                .await
+                .assured("the branch instantiates on the test domain")
+                .into_inner();
+            branch
+                .refresh_domain_routing()
+                .assured("the test domain publishes its routing");
+            let events = runtime.subscribe_events();
+            Self {
+                runtime,
+                domain,
+                branch,
+                events,
+            }
+        }
+
+        /// Publishes `schemas` as the relay schemas of the test domain's routing.
+        fn route_schemas(&self, schemas: Vec<(&str, Arc<CompiledSchema>)>) {
+            let routing = self
+                .runtime
+                .inner
+                .domain_routings
+                .get(&self.domain)
+                .assured("the test domain publishes its routing")
+                .clone();
+            let relay_schemas = schemas
+                .into_iter()
+                .map(|(relay, schema)| (named::<RelayName>(relay), schema))
+                .collect();
+            routing.store(StdArc::new(DomainRoutingSnapshot {
+                relay_schemas,
+                ..DomainRoutingSnapshot::default()
+            }));
+        }
+
+        /// Stops the generation of the domain clock the branch was bound to.
+        fn stop_clock(&self) {
+            self.runtime
+                .domain_clock_lifecycle(&self.domain)
+                .assured("the test domain installs its clock")
+                .stop(0);
+        }
+
+        async fn hand(&mut self, batch: RelayRecordBatch) {
+            self.branch
+                .execute_processor_input(&named("node"), &named("incoming"), batch)
+                .await;
+        }
+
+        async fn reported(&mut self) -> String {
+            let RuntimeEvent::Error(message) = self
+                .events
+                .recv()
+                .await
+                .assured("the processor reports the failure to the node's observers");
+            message
+        }
+    }
+
+    fn value_batch(acks: AckSet) -> RelayRecordBatch {
+        RelayRecordBatch::single(
             test_schema(&[("value", ParseAsType::I64)]),
             None,
             test_runtime_row([("value".to_string(), RuntimeValue::I64(1))]),
             acks,
         )
-        .assured("one test row forms a relay batch");
+        .assured("one test row forms a relay batch")
+    }
 
-        branch
-            .execute_processor_input(&node, &incoming, batch)
-            .await;
+    fn text_batch(acks: AckSet) -> RelayRecordBatch {
+        RelayRecordBatch::single(
+            test_schema(&[("value", ParseAsType::String)]),
+            None,
+            test_runtime_row([("value".to_string(), RuntimeValue::String("one".to_string()))]),
+            acks,
+        )
+        .assured("one test row forms a relay batch")
+    }
 
-        let RuntimeEvent::Error(message) = events
-            .recv()
-            .await
-            .assured("the processor reports the failure to the node's observers");
-        (message, completion.wait().await)
+    /// Hands one batch to a branch whose one processor `shape` configures, and returns the runtime
+    /// event the processor reported together with the outcome of the batch's acknowledgements.
+    async fn report_of_one_batch(
+        shape: impl FnOnce(&mut RelayProcessorTemplate),
+    ) -> (String, AckOutcome) {
+        let mut node = OneProcessorBranch::new(shape).await;
+        let (acks, completion) = AckSet::root();
+        node.hand(value_batch(acks)).await;
+        (node.reported().await, completion.wait().await)
+    }
+
+    /// A route that passes its input unchanged to `relay`, without a program or a flush policy.
+    fn pass_through_route(relay: &str) -> RelayProcessorOutputTemplate {
+        RelayProcessorOutputTemplate {
+            output_relay: named(relay),
+            construction: nervix_models::RouteConstruction::default(),
+            flush_policy: None,
+            message_error_policy: MessageErrorPolicy::Log,
+            compiled_program: None,
+        }
+    }
+
+    fn junction_to(relay: &str) -> RelayProcessorOperationTemplate {
+        RelayProcessorOperationTemplate::Junction {
+            output_routes: RelayProcessorOutputsTemplate {
+                routes: vec![pass_through_route(relay)],
+            },
+        }
     }
 
     fn correlator(left: &str, right: &str) -> RelayProcessorOperationTemplate {
@@ -2251,5 +2337,175 @@ mod tests {
                         program is not prepared";
         assert_eq!(message, expected);
         assert_eq!(outcome, AckOutcome::NoAck(expected.to_string()));
+    }
+
+    #[nervix_primitives::test]
+    async fn a_processor_whose_domain_clock_stopped_fails_the_batch_as_an_internal_error() {
+        let mut node = OneProcessorBranch::new(|_| {}).await;
+        node.stop_clock();
+        let (acks, completion) = AckSet::root();
+
+        node.hand(value_batch(acks)).await;
+
+        let expected = "junction 'node' internal error in domain 'default': could not read the \
+                        domain execution time: domain 'default' clock generation 0 is stopped";
+        assert_eq!(node.reported().await, expected);
+        assert_eq!(
+            completion.wait().await,
+            AckOutcome::NoAck(expected.to_string())
+        );
+    }
+
+    #[nervix_primitives::test]
+    async fn a_route_to_a_relay_without_a_schema_fails_the_batch_as_an_internal_error() {
+        let (message, outcome) = report_of_one_batch(|processor| {
+            processor.operation = junction_to("outgoing");
+        })
+        .await;
+
+        let expected = "junction 'node' internal error in domain 'default': stream 'outgoing' \
+                        schema is not instantiated in domain 'default'";
+        assert_eq!(message, expected);
+        assert_eq!(outcome, AckOutcome::NoAck(expected.to_string()));
+    }
+
+    #[nervix_primitives::test]
+    async fn a_route_whose_relay_needs_a_field_the_input_lacks_fails_the_batch() {
+        let mut node = OneProcessorBranch::new(|processor| {
+            processor.operation = junction_to("outgoing");
+        })
+        .await;
+        node.route_schemas(vec![(
+            "outgoing",
+            test_schema(&[("value", ParseAsType::I64), ("note", ParseAsType::String)]),
+        )]);
+        let (acks, completion) = AckSet::root();
+
+        node.hand(value_batch(acks)).await;
+
+        let message = node.reported().await;
+        assert!(
+            message.starts_with(
+                "junction 'node' internal error in domain 'default': failed to project output \
+                 relay 'outgoing': "
+            ),
+            "{message}"
+        );
+        assert_eq!(completion.wait().await, AckOutcome::NoAck(message));
+    }
+
+    #[nervix_primitives::test]
+    async fn a_route_its_branch_cannot_deliver_to_fails_the_batch_as_an_internal_error() {
+        let mut node = OneProcessorBranch::new(|processor| {
+            processor.operation = junction_to("outgoing");
+        })
+        .await;
+        node.route_schemas(vec![(
+            "outgoing",
+            test_schema(&[("value", ParseAsType::I64)]),
+        )]);
+        let (acks, completion) = AckSet::root();
+
+        node.hand(value_batch(acks)).await;
+
+        let expected = "junction 'node' internal error in domain 'default': failed to forward \
+                        output to relay 'outgoing'";
+        assert_eq!(node.reported().await, expected);
+        assert_eq!(
+            completion.wait().await,
+            AckOutcome::NoAck(expected.to_string())
+        );
+    }
+
+    #[nervix_primitives::test]
+    async fn collected_input_that_does_not_concatenate_fails_as_one_internal_error() {
+        let mut node = OneProcessorBranch::new(|processor| {
+            processor.input_collect_policies.insert(
+                named("incoming"),
+                RuntimeInputCollectPolicy {
+                    interval: Duration::from_secs(60),
+                    max_batch_size: None,
+                },
+            );
+        })
+        .await;
+        let (first, first_completion) = AckSet::root();
+        let (second, second_completion) = AckSet::root();
+        node.hand(value_batch(first)).await;
+        node.hand(text_batch(second)).await;
+
+        node.branch
+            .flush_processor_collected_inputs(&named("node"))
+            .await;
+
+        let message = node.reported().await;
+        assert!(
+            message.starts_with(
+                "junction 'node' internal error in domain 'default': failed to concatenate \
+                 collected input from relay 'incoming': "
+            ),
+            "{message}"
+        );
+        assert_eq!(
+            first_completion.wait().await,
+            AckOutcome::NoAck(message.clone())
+        );
+        assert_eq!(second_completion.wait().await, AckOutcome::NoAck(message));
+    }
+
+    #[nervix_primitives::test]
+    async fn a_correlator_timeout_its_branch_cannot_deliver_fails_as_an_internal_error() {
+        let value_schema = test_schema(&[("value", ParseAsType::I64)]);
+        let where_program = compile_correlator_where_program(
+            &named("node"),
+            &expression("left.value = right.value"),
+            &[named("incoming")],
+            value_schema.arrow_schema(),
+            &[named("right_profiles")],
+            value_schema.arrow_schema(),
+            None,
+        )
+        .assured("the fixture's CORRELATE WHERE compiles");
+        let mut node = OneProcessorBranch::new(|processor| {
+            processor.kind = ModelKind::Correlator;
+            // A correlator's timeout relay is one of its output routes, as the registry plans it.
+            processor.operation = RelayProcessorOperationTemplate::Correlator {
+                output_routes: RelayProcessorOutputsTemplate {
+                    routes: vec![pass_through_route("expired")],
+                },
+                left_relays: vec![named("incoming")],
+                right_relays: vec![named("right_profiles")],
+                correlate_where: expression("left.value = right.value"),
+                match_policy: CorrelatorMatchPolicy::Latest,
+                max_time: Duration::ZERO,
+                timeout_policy: CorrelationTimeoutPolicy {
+                    left: CorrelationTimeoutAction::SendTo {
+                        relay: named("expired"),
+                    },
+                    right: CorrelationTimeoutAction::Drop,
+                },
+                compiled_where_program: Some(where_program),
+                compiled_output_programs: Vec::new(),
+            };
+        })
+        .await;
+        node.route_schemas(vec![("expired", value_schema)]);
+        let (acks, completion) = AckSet::root();
+        node.hand(value_batch(acks)).await;
+        let snapshot = node
+            .branch
+            .domain_clock
+            .snapshot()
+            .assured("the test domain's clock is running");
+
+        node.branch.tick(&snapshot).await;
+
+        let expected = "correlator 'node' internal error in domain 'default': failed to forward \
+                        the timeout message to relay 'expired'";
+        assert_eq!(node.reported().await, expected);
+        assert_eq!(
+            completion.wait().await,
+            AckOutcome::NoAck(expected.to_string())
+        );
     }
 }

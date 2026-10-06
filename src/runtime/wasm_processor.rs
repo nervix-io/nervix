@@ -1449,4 +1449,20 @@ mod tests {
             "the module of a processor no longer assigned to the node must be dropped"
         );
     }
+
+    /// A processor's own failures to bring input to its guest say nothing about the saved state
+    /// its guest would restore, so none of them is a verdict on that state.
+    #[test]
+    fn a_processor_failure_outside_its_guest_is_no_verdict_on_saved_state() {
+        let failures = [
+            WasmInstanceError::EncodeInput,
+            WasmInstanceError::ConcatenateInput,
+            WasmInstanceError::NoOutputs,
+            WasmInstanceError::NoInputs,
+            WasmInstanceError::InstanceUnavailable,
+        ];
+        for failure in failures {
+            assert_eq!(failure.saved_state_rejection(), None, "{failure}");
+        }
+    }
 }

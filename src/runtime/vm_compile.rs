@@ -2190,4 +2190,47 @@ mod tests {
             "the frontend's refusal must stay beneath the construction: {rendered}"
         );
     }
+
+    #[test]
+    fn a_route_that_sets_a_field_its_relay_lacks_is_an_invalid_construction() {
+        let schema = test_schema(&[("value", ParseAsType::I64)]).arrow_schema();
+        let available_materialized_streams = HashMap::default();
+        let available_lookups = HashMap::default();
+        let branching = ResolvedBranching::unbranched();
+
+        let error = compile_processor_output_filter_map_program(
+            &named("enrich"),
+            &[named("source")],
+            &named("mapped"),
+            &construction("SET missing = 1"),
+            RuntimeVmSchemaPair {
+                input: schema.clone(),
+                input_sensitivity: VmSchemaSensitivity::default(),
+                output: schema,
+                output_sensitivity: VmSchemaSensitivity::default(),
+            },
+            None,
+            RuntimeVmCompileContext {
+                available_materialized_streams: &available_materialized_streams,
+                available_lookups: &available_lookups,
+                current_branching: &branching,
+                udfs: None,
+            },
+        )
+        .expect_err("a route cannot set a field its relay does not have");
+
+        assert!(matches!(
+            error.current_context(),
+            RuntimeVmCompileError::InvalidOutputConstruction { node } if node.as_str() == "enrich"
+        ));
+        let rendered = format!("{error:#}");
+        assert!(
+            rendered.starts_with("output construction for 'enrich' is invalid: "),
+            "{rendered}"
+        );
+        assert!(
+            rendered.contains("SET targets unknown output field 'missing'"),
+            "the frontend's refusal must stay beneath the construction: {rendered}"
+        );
+    }
 }

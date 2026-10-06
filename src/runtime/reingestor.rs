@@ -1219,8 +1219,11 @@ mod tests {
 
     use super::*;
     use crate::{
-        runtime::branch_runtime::{
-            BranchExecutionDispatchContext, BranchExecutionRuntime, IngestorRouteTask,
+        runtime::{
+            RuntimeEvent,
+            branch_runtime::{
+                BranchExecutionDispatchContext, BranchExecutionRuntime, IngestorRouteTask,
+            },
         },
         runtime_ack::{AckOutcome, AckSet},
         runtime_schema::{RuntimeValue, test_runtime_row},
@@ -1964,5 +1967,132 @@ mod tests {
             0,
             "reingestor output gauge must be cleared when the task exits"
         );
+    }
+
+    /// A reingestor route whose relay has no branched entrypoint on this node fails the input that
+    /// built its output, as one internal error naming the relay.
+    #[nervix_primitives::test]
+    async fn reingestor_output_without_an_entrypoint_fails_its_input_as_an_internal_error() {
+        let runtime = Runtime::default();
+        let domain = domain("default");
+        let input_relay = named::<RelayName>("orders");
+        let output_relay = named::<RelayName>("tenant_orders");
+        let schema = test_schema(&[
+            ("tenant", ParseAsType::String),
+            ("user_id", ParseAsType::U32),
+        ]);
+        let (execution_shutdown, _) = watch::channel(false);
+        runtime.install_domain_execution(
+            &domain,
+            DomainExecution {
+                revision: test_execution_revision(&domain, Vec::new()),
+                start_version: 0,
+                domain_clock: test_domain_clock(&domain),
+                shutdown: execution_shutdown,
+                routing: runtime.stage_domain_routing(
+                    &domain,
+                    DomainRoutingSnapshot {
+                        relay_schemas: [
+                            (input_relay.clone(), schema.clone()),
+                            (output_relay.clone(), schema.clone()),
+                        ]
+                        .into_iter()
+                        .collect(),
+                        relay_branchings: [
+                            (input_relay.clone(), ResolvedBranching::unbranched()),
+                            (output_relay.clone(), ResolvedBranching::unbranched()),
+                        ]
+                        .into_iter()
+                        .collect(),
+                        ..DomainRoutingSnapshot::default()
+                    },
+                ),
+                branched_entrypoints: HashMap::default(),
+                endpoint_routes: HashMap::default(),
+                node_tasks: HashMap::default(),
+                emitter_tasks: HashMap::default(),
+                generator_tasks: HashMap::default(),
+                reingestor_tasks: HashMap::default(),
+                placement_tasks: HashMap::default(),
+                relay_state_tasks: HashMap::default(),
+                relay_owner_tasks: HashMap::default(),
+                tasks: Vec::new(),
+            },
+        );
+        let (shutdown_tx, _) = watch::channel(false);
+        let broadcast = RelayBroadcast::with_capacity(nonzero_capacity(4));
+        let fan_in = RelayRuntimeFanIn::new(broadcast.new_receiver());
+        let plan = EntrypointTestDomain {
+            relays: &["orders", "tenant_orders"],
+            fields: &[
+                ("tenant", ParseAsType::String),
+                ("user_id", ParseAsType::U32),
+            ],
+            branch_fields: &[],
+        }
+        .plan_reingestor(
+            &domain,
+            CreateReingestor {
+                name: named("tenant_partition"),
+                from: ProcessorInputs::single(input_relay.clone()),
+                output_routes: with_inherit_all(ProcessorOutputs::single(output_relay.clone()))
+                    .with_flush_policy(FlushPolicy::Immediate)
+                    .with_branch(OutputBranch::Unbranched),
+                mode: AckMode::Attached,
+                filter_where: None,
+                materialized_state: Vec::new(),
+            },
+        );
+        let routing = runtime
+            .domain_routing(&domain)
+            .expect("the test domain routing is installed")
+            .load_full();
+        let input = ExecutionBuildDeps::from_routing(&domain, &routing)
+            .bind_reingestor_input(&plan, &plan.inputs[0])
+            .expect("the planned reingestor input binds");
+        let mut events = runtime.subscribe_events();
+        // No branched entrypoint is installed for the route's relay on this node.
+        let task =
+            runtime.spawn_reingestor_task(&domain, &shutdown_tx, HashMap::default(), input, fan_in);
+        let (acks, completion) = AckSet::root();
+        let batch = RelayRecordBatch::single(
+            schema,
+            None,
+            test_runtime_row([
+                (
+                    "tenant".to_string(),
+                    RuntimeValue::String("acme".to_string()),
+                ),
+                ("user_id".to_string(), RuntimeValue::U32(1)),
+            ]),
+            acks.attached(),
+        )
+        .expect("input batch should build");
+        broadcast
+            .broadcast(batch)
+            .await
+            .expect("the input should broadcast");
+        acks.ack_success();
+
+        let RuntimeEvent::Error(message) = timeout(Duration::from_secs(10), events.recv())
+            .await
+            .expect("the reingestor reports the failure within its test deadline")
+            .expect("the runtime keeps publishing its events");
+        let expected = "reingestor 'tenant_partition' internal error in domain 'default': relay \
+                        'tenant_orders' has no branched entrypoint on this node";
+        assert_eq!(message, expected);
+        assert_eq!(
+            timeout(Duration::from_secs(10), completion.wait())
+                .await
+                .expect("the failed input's acknowledgements resolve"),
+            AckOutcome::NoAck(expected.to_string())
+        );
+        shutdown_tx
+            .send(true)
+            .expect("reingestor shutdown receiver should remain open");
+        timeout(Duration::from_secs(10), task)
+            .await
+            .expect("reingestor should stop after its shutdown")
+            .expect("reingestor task should not panic");
     }
 }
