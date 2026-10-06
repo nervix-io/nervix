@@ -530,6 +530,16 @@ drain can reach zero while their branch tasks remain paused.
 
 ## Restoring A Backup
 
+Before admission, restore verification measures the manifest and obtains a separate retained
+`restore_metadata` reservation for archive descriptions, parsing, planning copies and native
+conversion scratch. The default per-node ceiling is 2 GiB; raw resources and guest saves stay on
+disk. The verified description, parsed Models and reservation share one owner that encoding jobs
+retain until they finish, including cancellation. Parsing and the pure restore planner run on
+admitted bulk CPU workers. Native checkpoints stream into quota-owned files and use the same
+bounded installation path as guest saves. The ordinary bulk budget stays at 32 MiB, with fixed
+2 MiB conversion I/O and installation jobs. [Backup And Restore](backup-and-restore.md#restoring)
+owns the preparation estimate and its allocation limits.
+
 A restore is a persistent administrative command whose progress is replicated state; the operator
 view is in [Backup And Restore](./backup-and-restore.md#restoring). The leader admits a restore
 under its execution reference only after the archive verified and the whole restore planned, and

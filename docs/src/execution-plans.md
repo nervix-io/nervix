@@ -133,6 +133,10 @@ of the eligible placement set. A cordoned restore coordinator therefore still se
 endpoint intake after `RESUME`, while placed relays and processors execute on eligible nodes.
 Removing a voter recomputes listener assignments from the remaining live voters before publication.
 
+WASM ownership preparation follows the installed revision's execution mode. A passive revision
+retains and transfers the validated checkpoint inventory without instantiating guests or reading
+its stopped clock. Guest restoration is deferred until `START` installs a running revision.
+
 Server endpoint installation replaces that domain's complete set of host-and-path definitions in
 the node's immutable intake table. Source starts bind prepared intake lifetimes to the same table;
 source ending and domain teardown end those lifetimes before withdrawing them. Other domains'
