@@ -564,6 +564,21 @@ test_target = "lib"
 
 [[target]]
 case_timeout_seconds = 10
+corpus = "crates/interconnect/src/__fuzz__/node_drain__wire_properties__bolero_stopping_node_drain_messages_round_trip/corpus"
+domain_version = 1
+features = []
+id = "stopping-node-drain-wire"
+invariant = "Every current stopping-node drain action and every answer, with its complete report, survives the production typed-request payload encoder and decoder."
+manifest = "Cargo.toml"
+max_input_bytes = 128
+package = "nervix-interconnect"
+random_iterations = 256
+source = "crates/interconnect/src/node_drain.rs"
+test = "node_drain::wire_properties::bolero_stopping_node_drain_messages_round_trip"
+test_target = "lib"
+
+[[target]]
+case_timeout_seconds = 10
 corpus = "src/runtime/state_store/__fuzz__/runtime__state_store__backup__tests__bolero_restore_staging_and_publication_records_round_trip/corpus"
 domain_version = 1
 features = []
@@ -1316,7 +1331,7 @@ corpus = "src/runtime/state_store/__fuzz__/runtime__state_store__wasm_properties
 domain_version = 1
 features = []
 id = "wasm-stored-checkpoints"
-invariant = "Stored checkpoint variants preserve complete bytes, revision, length and digest; keys preserve complete typed placement and exact branch text while reset identity stays scoped to its selected branch."
+invariant = "Stored checkpoint variants preserve complete bytes, revision, length and digest with fixed-size segmented headers; keys preserve complete typed placement and exact branch text, chunk-set projection preserves placement and revision with a cursor beyond every offset, and reset identity stays scoped to its selected branch."
 manifest = "Cargo.toml"
 max_input_bytes = 2048
 package = "nervix-server"

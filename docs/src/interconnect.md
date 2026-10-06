@@ -325,6 +325,19 @@ Each receiver lease is a distinct in-memory instance even when an identical requ
 after release. Its deadline task may remove only that exact instance. An earlier deadline can
 therefore neither release nor erase a replacement lease occupying the same logical operation key.
 
+A stopping node moves its own scheduled work with one typed commands-pool request to the current
+leader, `stopping_node_drain`. It names no node and carries one of two actions: drain, which cordons
+the sender and moves its scheduled work through planned ownership handoffs, and release, which
+clears the cordon that drain set. The leader acts for the node the authenticated connection belongs
+to, so the certificate that admitted the connection is the whole authorization: a node can drain
+and uncordon only itself, and no user credential takes part. The answer is completed or failed, each
+with the leader's account of the action for the stopping node's log, or not the leader, from a node
+that changed nothing and leaves the sender to ask the leader it observes next. The leader runs the
+action in a service task of its own, so a drain that has begun finishes, and releases what it holds,
+even when the sender's deadline, which is what remains of its drain timeout, abandons the request
+first.
+[Topology Cases](./shutdown.md#topology-cases) owns when a node sends it.
+
 ## Wire Contract And Payloads
 
 All nodes in a running cluster use one current wire contract. A fixed fingerprint covers the set of

@@ -3,9 +3,10 @@
 //! Layer: engines and infrastructure.
 //!
 //! - **Owns.** The REST catalog and object-store clients one Iceberg table is loaded and committed
-//!   through, the local Arrow IPC staging of every mapped batch, the `COMMIT EACH` cadence and
-//!   maximum commit size that release the staged files, the Parquet data files one commit writes,
-//!   and the acknowledgements it retains until that commit succeeds.
+//!   through, the local Arrow IPC staging of every mapped batch, what the staged files wait for —
+//!   the `COMMIT EACH` cadence the host measures from their staging, or the maximum commit size
+//!   that makes them due at once — the Parquet data files one commit writes, and the
+//!   acknowledgements it retains until that commit succeeds.
 //! - **Depends on.** The connector contract, the bounded executor its host hands it, vocabulary
 //!   values, Arrow arrays, `error-stack`, Tokio, `nervix-dns`, Reqwest, OpenDAL, and the `iceberg`
 //!   crates.
@@ -59,8 +60,8 @@ use iceberg_catalog_rest::{RestCatalog, RestCatalogBuilder};
 use meticulous::OptionExt as _;
 use nervix_connector::{
     MappedSinkCarrier, MappedSinkRows, PerRecordOutcome, RowSink, SinkAcknowledgementServices,
-    SinkAcknowledgements, SinkCommitReport, SinkDeadline, SinkHost, SinkLifecycle,
-    SinkPublishError, SinkPublishResult, SinkRecordPosition, SinkStartError, SinkStartResult,
+    SinkAcknowledgements, SinkCommitReport, SinkHost, SinkLifecycle, SinkPublishError,
+    SinkPublishResult, SinkRecordPosition, SinkStagedCommit, SinkStartError, SinkStartResult,
     physical_time::actual_utc_now,
 };
 use nervix_dns::DnsResolver;
@@ -79,12 +80,23 @@ const ICEBERG: &str = "iceberg";
 /// ambiguous catalog result recognizes its own work instead of appending it twice.
 const ICEBERG_APPEND_ID_PROPERTY: &str = "nervix.emitter.append-id";
 
-/// When staged data is published: the domain duration between commits, and the staged size that
-/// commits before that duration elapses.
+/// When staged data is published: the domain duration that passes after it is staged, and the
+/// staged size that commits it before that duration elapses.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct IcebergCommitPolicy {
     pub interval: Duration,
     pub max_size: u64,
+}
+
+impl IcebergCommitPolicy {
+    /// What `staged_bytes` of staged files wait for: this policy's cadence, or nothing once they
+    /// reach the maximum commit size.
+    fn staged_commit(self, staged_bytes: u64) -> SinkStagedCommit {
+        if staged_bytes >= self.max_size {
+            return SinkStagedCommit::SizeReached;
+        }
+        SinkStagedCommit::Cadence(self.interval)
+    }
 }
 
 /// What one Iceberg emitter stages and commits through, from its typed sink plan.
@@ -126,42 +138,6 @@ pub struct IcebergSink {
     staged_batches: Vec<IcebergStagedBatch>,
     staged_rows: u64,
     staged_bytes: u64,
-    commit_deadline: IcebergCommitDeadline,
-}
-
-/// The domain time by which the staged batches must be published.
-///
-/// The deadline is armed when the first batch is staged and left alone afterwards, so a later
-/// batch joining the same staged set neither moves the commit nor waits for a second cadence.
-/// Reaching the declared maximum commit size brings it to the staging time itself, which is when
-/// the commit became due.
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
-struct IcebergCommitDeadline {
-    due_at: Option<Timestamp>,
-}
-
-impl IcebergCommitDeadline {
-    fn arm(&mut self, policy: IcebergCommitPolicy, staged_at: Timestamp, staged_bytes: u64) {
-        if self.due_at.is_none() {
-            // Saturation is the meaning here: a commit deadline past the nanosecond range is past
-            // any domain time this emitter will reach.
-            let due_at = staged_at
-                .checked_add(policy.interval)
-                .unwrap_or_else(|_| Timestamp::from_unix_nanos(i64::MAX));
-            self.due_at = Some(due_at);
-        }
-        if staged_bytes >= policy.max_size {
-            self.due_at = Some(staged_at);
-        }
-    }
-
-    fn due_at(self) -> Option<Timestamp> {
-        self.due_at
-    }
-
-    fn clear(&mut self) {
-        self.due_at = None;
-    }
 }
 
 /// One mapped batch written to local Arrow IPC, with the acknowledgements its commit resolves.
@@ -382,7 +358,6 @@ impl IcebergSink {
             staged_batches: Vec::new(),
             staged_rows: 0,
             staged_bytes: 0,
-            commit_deadline: IcebergCommitDeadline::default(),
         })
     }
 
@@ -721,8 +696,11 @@ impl SinkLifecycle for IcebergSink {
         true
     }
 
-    fn commit_deadline(&self) -> Option<SinkDeadline> {
-        self.commit_deadline.due_at().map(SinkDeadline::Domain)
+    fn staged_commit(&self) -> Option<SinkStagedCommit> {
+        if self.staged_batches.is_empty() {
+            return None;
+        }
+        Some(self.commit_policy.staged_commit(self.staged_bytes))
     }
 
     fn pending_acks(&self) -> Option<SinkAcknowledgements> {
@@ -750,7 +728,6 @@ impl SinkLifecycle for IcebergSink {
     )]
     async fn commit(&mut self) -> SinkPublishResult<Option<SinkCommitReport>> {
         if self.staged_batches.is_empty() {
-            self.commit_deadline.clear();
             return Ok(None);
         }
         if self.commit_state.prepared().is_none() {
@@ -800,7 +777,6 @@ impl SinkLifecycle for IcebergSink {
         }
         self.staged_rows = 0;
         self.staged_bytes = 0;
-        self.commit_deadline.clear();
         for acknowledgements in acknowledgements {
             acknowledgements.acknowledge();
         }
@@ -855,8 +831,6 @@ impl IcebergSink {
             .staged_bytes
             .checked_add(staged_bytes)
             .assured("both counts total bytes this sink already staged on disk");
-        self.commit_deadline
-            .arm(self.commit_policy, carrier.occurred_at, self.staged_bytes);
         for row in carrier.selected_rows {
             outcome.deliver(SinkRecordPosition {
                 batch_index: carrier.batch_index,
@@ -1528,32 +1502,15 @@ mod tests {
     }
 
     #[test]
-    fn iceberg_commit_deadline_holds_its_first_cadence_until_the_maximum_size() {
+    fn iceberg_staged_files_wait_for_the_commit_cadence_until_the_maximum_size() {
         let policy = commit_policy(100, 1_024);
-        let mut deadline = IcebergCommitDeadline::default();
+        let cadence = SinkStagedCommit::Cadence(Duration::from_millis(100));
 
-        deadline.arm(policy, Timestamp::from_unix_nanos(1_000), 16);
-        assert_eq!(
-            deadline.due_at(),
-            Some(Timestamp::from_unix_nanos(100_001_000))
-        );
-
-        // A later batch joins the same staged set without moving the cadence it already started.
-        deadline.arm(policy, Timestamp::from_unix_nanos(50_000_000), 32);
-        assert_eq!(
-            deadline.due_at(),
-            Some(Timestamp::from_unix_nanos(100_001_000))
-        );
-
-        // Reaching the declared maximum makes the commit due as of that staging time.
-        deadline.arm(policy, Timestamp::from_unix_nanos(60_000_000), 1_024);
-        assert_eq!(
-            deadline.due_at(),
-            Some(Timestamp::from_unix_nanos(60_000_000))
-        );
-
-        deadline.clear();
-        assert_eq!(deadline.due_at(), None);
+        assert_eq!(policy.staged_commit(16), cadence);
+        assert_eq!(policy.staged_commit(1_023), cadence);
+        // Reaching the declared maximum makes the commit due without waiting for the cadence.
+        assert_eq!(policy.staged_commit(1_024), SinkStagedCommit::SizeReached);
+        assert_eq!(policy.staged_commit(4_096), SinkStagedCommit::SizeReached);
     }
 
     #[test]

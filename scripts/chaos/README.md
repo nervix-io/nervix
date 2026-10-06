@@ -143,9 +143,14 @@ digest-pinned Pumba 1.2.1 container against the exact labeled Compose container 
 the local `/var/run/docker.sock` to the Pumba container. The same stopped container is started
 through Docker to preserve its image and named volume.
 
-Each stop must produce Docker exit code zero and completed shutdown-phase logs. The independent
-observer must see the listener outage and restoration; the source broker must advance while the
-node is stopped. In a three-node run, the survivors must agree on a caught-up leader and the sink
+Each stop must produce Docker exit code zero and completed shutdown-phase logs. In a three-node run
+the other two nodes are settled, uncordoned voters when each stop begins, so every stopped node has
+a live replacement: its log must report `shutdown drain-support phase finished outcome=Completed`,
+which shows that it handed its scheduled work to the others through the leader before it exited,
+the leader itself included. A drain that was refused, failed or never answered fails the run as a
+product finding, because the stopped node's work would then fail over as after a crash. A one-node
+run has no replacement, and its drain completes in place. The independent observer must see the
+listener outage and restoration; the source broker must advance while the node is stopped. In a three-node run, the survivors must agree on a caught-up leader and the sink
 must progress before the stopped node returns. Before the next stop, the controller requires
 restored listeners on every node, agreed public leader and membership, caught-up applied Raft
 indexes, settled ingestor and emitter state, and output progress. At the end it stops the producer,
@@ -348,7 +353,10 @@ runner checks both in every node's Docker inspection; every other scenario runs 
 of 10,000 and 1,000. The runner selects the observed follower that owns execution, acknowledges a
 `CREATE RESOURCE` control canary, and stops that follower with a digest-pinned Pumba
 `stop --time 60` whose dry run must select exactly its container. The stop must exit with status 0
-after every shutdown phase. The follower's own consensus metrics before the stop and its
+after every shutdown phase, and because both survivors are live replacements, the follower's
+drain-support phase must complete: it hands its work to the survivors through the leader before it
+exits. A drain that does not complete is a product finding, which fails the run after the catch-up
+checks. The follower's own consensus metrics before the stop and its
 `raft transition: state=Shutdown` log line record the last log index it held, and the survivor
 leader's `nervix_consensus_log_last_index` once the survivors agree on a leader bounds it from above.
 

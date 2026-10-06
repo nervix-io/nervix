@@ -293,7 +293,6 @@ fn test_session_service(
             client_consumers,
             interconnect,
             service_tasks: super::service_tasks::ServiceTasks::default(),
-            configured_basic_auth: None,
             auth_rate_limiter: SessionServiceImpl::new_auth_rate_limiter(),
             failed_auth_rate_limit_keys: DashMap::with_hasher(RandomState::new()),
             transaction_idle_timeout: DEFAULT_TRANSACTION_IDLE_TIMEOUT,

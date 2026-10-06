@@ -30,6 +30,7 @@ pub mod backup;
 mod connection;
 mod entropy;
 mod identity;
+mod node_drain;
 mod observation;
 mod operation;
 mod peer_resolver;
@@ -50,6 +51,9 @@ pub use connection::{
 };
 pub use entropy::TransportEntropy;
 pub use identity::{TlsConfigBundle, TransportIdentity};
+pub use node_drain::{
+    StoppingNodeDrainAction, StoppingNodeDrainRequest, StoppingNodeDrainResponse,
+};
 pub use observation::{
     ConnectionDirection, ConnectionFailureReason, RelayAdmissionOutcome, RequestOutcome,
     StreamResetReason, TransferDirection, TransportCounters, TransportSnapshot,
