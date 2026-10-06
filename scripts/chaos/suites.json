@@ -21,6 +21,13 @@
           "shard": 1,
           "budget_minutes": 25,
           "run": ["partition-recovery", "--case", "follower"]
+        },
+        {
+          "id": "deliberate-memory-limit",
+          "shard": 1,
+          "budget_minutes": 20,
+          "note": "Temporary qualification entry: an impossible memory limit must fail the job as a product failure whose run directory replays",
+          "run": ["mixed-instability", "--seed", "42", "--duration", "3m", "--coverage", "kill:leader", "--max-memory-bytes", "1048576"]
         }
       ]
     },
