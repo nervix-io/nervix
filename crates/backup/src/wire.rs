@@ -75,6 +75,9 @@ pub(crate) enum SectionContentWire {
     ResourceArchive,
     WasmGuestBlob,
     MaterializedColumns,
+    DeduplicatorKeys,
+    WindowInputRows,
+    WindowArgumentColumns,
 }
 
 #[derive(Debug, Clone, PartialEq, Archive, Serialize, Deserialize)]

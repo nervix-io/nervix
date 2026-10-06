@@ -1070,12 +1070,11 @@ impl Runtime {
                 };
                 let had_old_task = old_task.is_some();
                 if let Some(old_task) = old_task
-                    && let Err(error) = old_task.stop(self.domain_drain_timeout()).await
+                    && let Err(failure) = old_task.stop(self.domain_drain_timeout()).await
                 {
-                    let reason = error.reason().to_string();
-                    if let Some(old_task) = error.into_task()
-                        && let Some(mut execution) = self.inner.executions.get_mut(domain)
-                    {
+                    let reason = failure.reason();
+                    let old_task = failure.into_task();
+                    if let Some(mut execution) = self.inner.executions.get_mut(domain) {
                         execution.emitter_tasks.insert(entity.clone(), old_task);
                     }
                     return Err(RuntimeError::BuildDomainExecution {
@@ -1133,10 +1132,12 @@ impl Runtime {
                                 ))
                             })
                             .collect::<Result<Vec<_>, RuntimeError>>()?;
-                        let deps = self.emitter_task_deps(
-                            ExecutionBuildDeps::from_routing(domain, &execution),
-                            &desired_emitter,
-                        )?;
+                        let deps = self
+                            .emitter_task_deps(
+                                ExecutionBuildDeps::from_routing(domain, &execution),
+                                &desired_emitter,
+                            )
+                            .map_err(|report| RuntimeError::EmitterStart { report })?;
                         Some(EmitterSpawnInputs {
                             shutdown: execution.shutdown.clone(),
                             codecs: execution.codecs.clone(),
@@ -1146,16 +1147,18 @@ impl Runtime {
                     }
                 };
                 if let Some(spawn) = spawn {
-                    let task = self.spawn_emitter_task(
-                        EmitterTaskBuildDeps {
-                            domain,
-                            shutdown_tx: &spawn.shutdown,
-                            codecs: &spawn.codecs,
-                            deps: spawn.deps,
-                        },
-                        desired_emitter.as_ref().clone(),
-                        spawn.inputs,
-                    )?;
+                    let task = self
+                        .spawn_emitter_task(
+                            EmitterTaskBuildDeps {
+                                domain,
+                                shutdown_tx: &spawn.shutdown,
+                                codecs: &spawn.codecs,
+                                deps: spawn.deps,
+                            },
+                            desired_emitter.as_ref().clone(),
+                            spawn.inputs,
+                        )
+                        .map_err(|report| RuntimeError::EmitterStart { report })?;
                     self.inner
                         .executions
                         .get_mut(domain)
@@ -1339,15 +1342,12 @@ impl Runtime {
                             &execution.relay_services,
                             &execution.udfs,
                         )
-                        .map_err(|report| {
-                            RuntimeError::BuildDomainExecution {
-                                domain: domain.as_str().to_string(),
-                                reason: format!("generator binding failed: {report:#}"),
-                            }
-                        })?;
+                        .map_err(|report| RuntimeError::GeneratorStart { report })?;
                         (execution.shutdown.clone(), spec)
                     };
-                    let task = self.spawn_generator_task(domain, &shutdown, spec)?;
+                    let task = self
+                        .spawn_generator_task(domain, &shutdown, spec)
+                        .map_err(|report| RuntimeError::GeneratorStart { report })?;
                     self.inner
                         .executions
                         .get_mut(domain)

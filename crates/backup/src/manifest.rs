@@ -92,6 +92,12 @@ pub enum SectionContent {
     WasmGuestBlob,
     /// One bounded Arrow IPC stream of materialized relay columns.
     MaterializedColumns,
+    /// One bounded Arrow IPC group of a deduplicator's typed keys and the time each was seen.
+    DeduplicatorKeys,
+    /// One bounded Arrow IPC group of a window's retained input rows.
+    WindowInputRows,
+    /// The aggregate argument columns of the same retained window rows.
+    WindowArgumentColumns,
 }
 
 impl SectionContent {
@@ -104,6 +110,9 @@ impl SectionContent {
             Self::Record(_) => Some(crate::section::MAX_RECORD_BYTES),
             Self::Nspl | Self::ResourceArchive | Self::WasmGuestBlob => None,
             Self::MaterializedColumns => Some(crate::materialized::MATERIALIZED_COLUMNS_BYTES),
+            Self::DeduplicatorKeys | Self::WindowInputRows | Self::WindowArgumentColumns => {
+                Some(crate::branch_state::BRANCH_STATE_GROUP_BYTES)
+            }
         }
     }
 }
@@ -300,6 +309,9 @@ impl BackupManifest {
                 SectionContentWire::ResourceArchive => SectionContent::ResourceArchive,
                 SectionContentWire::WasmGuestBlob => SectionContent::WasmGuestBlob,
                 SectionContentWire::MaterializedColumns => SectionContent::MaterializedColumns,
+                SectionContentWire::DeduplicatorKeys => SectionContent::DeduplicatorKeys,
+                SectionContentWire::WindowInputRows => SectionContent::WindowInputRows,
+                SectionContentWire::WindowArgumentColumns => SectionContent::WindowArgumentColumns,
             };
             sections.push(SectionEntry {
                 path,
@@ -338,6 +350,9 @@ impl From<SectionContent> for SectionContentWire {
             SectionContent::ResourceArchive => Self::ResourceArchive,
             SectionContent::WasmGuestBlob => Self::WasmGuestBlob,
             SectionContent::MaterializedColumns => Self::MaterializedColumns,
+            SectionContent::DeduplicatorKeys => Self::DeduplicatorKeys,
+            SectionContent::WindowInputRows => Self::WindowInputRows,
+            SectionContent::WindowArgumentColumns => Self::WindowArgumentColumns,
         }
     }
 }

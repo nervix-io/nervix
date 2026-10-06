@@ -1,3 +1,4 @@
+@backup_wait
 Feature: Bounded multi-domain backup waits and exact recovery
 
   Scenario Outline: A second-domain quiesce expiry returns its failure and resumes both domains
@@ -119,6 +120,31 @@ Feature: Bounded multi-domain backup waits and exact recovery
     Then the CLI backup failed with JSON error code "BACKUP_REFUSED"
     And the CLI backup failure mentions "conflicts by content"
     And backup archive "changed.nvxb" does not exist
+
+    Examples:
+      | cluster_size |
+      | 1            |
+      | 3            |
+
+  Scenario Outline: A bounded native wait recovers the original multi-domain backup
+    Given a <cluster_size> node nervix cluster is started
+    And the active domain is saved as placeholder "backup_base"
+    And the active domain is "{{backup_base}}_a"
+    When these NSPL commands are executed on the leader node
+      """
+      CREATE UNPACED DOMAIN {{backup_base}}_a;
+      START;
+      CREATE UNPACED DOMAIN {{backup_base}}_b;
+      """
+    Given the active domain is "{{backup_base}}_b"
+    When these NSPL commands are executed on the leader node
+      """
+      START;
+      """
+    Given the backup cut for domain "{{backup_base}}_a" will pause after draining
+    And the backup cut for domain "{{backup_base}}_b" will pause after draining
+    When a bounded native backup wait is recovered under its original reference
+    Then backup archive "native-recovered.nvxb" retains both native recovery cuts
 
     Examples:
       | cluster_size |

@@ -2,8 +2,9 @@
 //!
 //! Layer: data plane.
 //!
-//! - **Owns.** Branch-local collected batches, the typed deadline of a buffered branch, and the
-//!   wake a relay consumer asks for while it holds deadlines in more than one clock coordinate.
+//! - **Owns.** Branch-local collected batches, the typed deadline of a buffered branch, the wake
+//!   a relay consumer asks for while it holds deadlines in more than one clock coordinate, and
+//!   the failures of holding a route's output under its flush policy and releasing it.
 //! - **Depends on.** Bound domain clocks, physical deadline capabilities and relay batches.
 //! - **Must not know.** Graph planning, connector retries, source-group idle collection or sinks.
 
@@ -15,6 +16,7 @@ use meticulous::OptionExt as _;
 #[cfg(test)]
 use meticulous::ResultExt as _;
 use nervix_connector::physical_time::{PhysicalDeadline, PhysicalDeadlineCapability};
+use nervix_models::RelayName;
 use nervix_primitives::sync::CancellationToken;
 use thiserror::Error;
 
@@ -66,6 +68,32 @@ pub(super) enum BranchBufferTimingError {
 }
 
 pub(super) type BranchBufferTimingResult<T> = Result<T, Report<BranchBufferTimingError>>;
+
+/// Why a node could not hold one route's output under the route's flush policy, or could not
+/// release it to the route's relay. Every node that buffers route output reports these the same
+/// way: the node names itself when it reports the failure, and the acknowledgements of the output
+/// it held fail with it.
+#[derive(Debug, Error)]
+pub(super) enum RouteOutputError {
+    #[error("could not read the domain clock while buffering output")]
+    BufferClock,
+    #[error("could not read the domain clock while releasing output")]
+    ReleaseClock,
+    #[error("could not start the output flush deadline for relay '{relay}'")]
+    StartFlushDeadline { relay: RelayName },
+    #[error("could not inspect the output flush deadline for relay '{relay}'")]
+    InspectFlushDeadline { relay: RelayName },
+    #[error("could not wait for an output flush deadline")]
+    WaitFlushDeadline,
+    #[error("the output route to relay '{relay}' has no flush policy")]
+    MissingFlushPolicy { relay: RelayName },
+    #[error("failed to concatenate buffered output for relay '{relay}'")]
+    Concatenate { relay: RelayName },
+    #[error("relay '{relay}' has no branched entrypoint on this node")]
+    MissingEntrypoint { relay: RelayName },
+    #[error("failed to forward output to relay '{relay}'")]
+    Forward { relay: RelayName },
+}
 
 /// The deadline for one non-empty branch buffer.
 ///

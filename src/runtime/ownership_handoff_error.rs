@@ -41,6 +41,15 @@ pub(crate) enum OwnershipHandoffError {
         kind: ModelKind,
         identifier: ModelName,
     },
+    #[error(
+        "{} '{}' has not restored the branches its lifecycle checkpoint names yet",
+        .kind.as_str(),
+        .identifier.as_str()
+    )]
+    BranchesUnrestored {
+        kind: ModelKind,
+        identifier: ModelName,
+    },
     #[error(transparent)]
     Persistence(#[from] RuntimePersistenceError),
 }

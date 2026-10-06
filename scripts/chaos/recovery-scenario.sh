@@ -63,17 +63,23 @@ recovery_node_started() {
     recovery_stopped_ids=("${remaining[@]}")
 }
 
-# Starts continuous producer traffic and the listener observer, then waits for source and sink
-# progress and for the public cross-node path before any fault.
+# Generates the run's baseline fixture, then starts traffic from it.
 recovery_traffic_startup() {
     local case_dir="$1"
-    phase "${scenario} traffic startup"
-    mkdir -p "${case_dir}/initial"
-    : >"${recovery_findings_ledger}"
     jq -nc --arg run_id "${run_id}" --argjson count "${record_count}" \
         -f "${fixture_generator}" >"${artifact_dir}/fixtures/input.ndjson"
     [[ "$(wc -l <"${artifact_dir}/fixtures/input.ndjson")" -eq "${record_count}" ]] \
         || recovery_fail controller 'fixture generation was incomplete'
+    recovery_traffic_start "${case_dir}"
+}
+
+# Starts continuous producer traffic from the run's fixture and the listener observer, then waits
+# for source and sink progress and for the public cross-node path before any fault.
+recovery_traffic_start() {
+    local case_dir="$1"
+    phase "${scenario} traffic startup"
+    mkdir -p "${case_dir}/initial"
+    : >"${recovery_findings_ledger}"
     compose up --detach --no-deps load observer
     wait_for 'independent load, observer and broker' 30 check_support_containers
     wait_for 'source traffic started' 30 topic_progressed chaos_input 0

@@ -193,6 +193,17 @@ jq '.[0].Config.Env = [
 ] | .[0].State.Paused = false' "${inspection_before}" >"${pause_before}"
 jq '.[0].State.Paused = true' "${pause_before}" >"${pause_active}"
 cp "${pause_before}" "${pause_resumed}"
+# These fixtures run the pause deployment, so the verifier checks them against its settings.
+pause_deployment=(CHAOS_RAFT_HEARTBEAT_INTERVAL CHAOS_RAFT_ELECTION_TIMEOUT_MIN
+    CHAOS_RAFT_ELECTION_TIMEOUT_MAX CHAOS_NODE_UNAVAILABILITY_TIMEOUT)
+declare -A deployed_liveness=()
+for setting in "${pause_deployment[@]}"; do
+    if [[ -n "${!setting+set}" ]]; then
+        deployed_liveness["${setting}"]="${!setting}"
+    fi
+done
+export CHAOS_RAFT_HEARTBEAT_INTERVAL=250ms CHAOS_RAFT_ELECTION_TIMEOUT_MIN=10s \
+    CHAOS_RAFT_ELECTION_TIMEOUT_MAX=12s CHAOS_NODE_UNAVAILABILITY_TIMEOUT=15s
 printf '%s\n' \
     "$(jq -nc --arg id "${test_container_id}" '{Type:"container",Action:"pause",Actor:{ID:$id},timeNano:1800000000000000000}')" \
     "$(jq -nc --arg id "${test_container_id}" '{Type:"container",Action:"unpause",Actor:{ID:$id},timeNano:1800000006000000000}')" \
@@ -250,6 +261,22 @@ jq '.[0].Config.Env |= map(select(. != "NERVIX_NODE_UNAVAILABILITY_TIMEOUT=15s")
     "${pause_before}" >"${tmp_dir}/pause-wrong-threshold.json"
 expect_pause_failure 'wrong configured threshold' before "${test_run_id}" "${test_project}" nervix-1 \
     "${test_image_id}" "${tmp_dir}/pause-wrong-threshold.json" "${tmp_dir}/pause-wrong-threshold.json"
+# A run that passes no liveness settings deploys the Compose defaults, and its pauses are judged
+# against those defaults instead of the pause deployment's.
+unset "${pause_deployment[@]}"
+jq '.[0].Config.Env = [
+    "NERVIX_RAFT_HEARTBEAT_INTERVAL=250ms",
+    "NERVIX_RAFT_ELECTION_TIMEOUT_MIN=1500ms",
+    "NERVIX_RAFT_ELECTION_TIMEOUT_MAX=3000ms",
+    "NERVIX_NODE_UNAVAILABILITY_TIMEOUT=10s"
+]' "${pause_before}" >"${tmp_dir}/pause-default-deployment.json"
+"${pause_verifier}" before "${test_run_id}" "${test_project}" nervix-1 \
+    "${test_image_id}" "${tmp_dir}/pause-default-deployment.json" "${tmp_dir}/pause-default-deployment.json"
+expect_pause_failure 'settings other than the deployed ones' before "${test_run_id}" "${test_project}" \
+    nervix-1 "${test_image_id}" "${pause_before}" "${pause_before}"
+for setting in "${!deployed_liveness[@]}"; do
+    export "${setting}=${deployed_liveness[${setting}]}"
+done
 
 expected="${tmp_dir}/expected.ndjson"
 observed="${tmp_dir}/observed.ndjson"
@@ -576,8 +603,11 @@ CHAOS_KCAT_IMAGE="${chaos_kcat_image}" \
 CHAOS_PROBE_IMAGE="${chaos_probe_image}" \
 CHAOS_SCRIPT_DIR="${chaos_dir}" \
 CHAOS_LOAD_FILE="${expected}" \
+CHAOS_LOAD_INTERVAL_MS="750" \
 CHAOS_STATE_LOAD_FILE="${expected}" \
+CHAOS_STATE_LOAD_INTERVAL_MS="1000" \
 CHAOS_PACED_LOAD_FILE="${expected}" \
+CHAOS_PACED_LOAD_INTERVAL_MS="250" \
 CHAOS_TRAFFIC_DIR="${tmp_dir}" \
 CHAOS_NODE_COUNT="3" \
 CHAOS_SUBNET="10.213.7.0/24" \
@@ -602,8 +632,11 @@ jq -e --arg image "${placeholder_image}" \
     and ([.services | to_entries[] | select(.key | test("^nervix-[123]$")) | .value]
          | all(.labels["io.nervix.chaos.run"] == "self-test"))
     and .services.load.labels["io.nervix.chaos.role"] == "load"
+    and .services.load.environment.CHAOS_LOAD_INTERVAL_MS == "750"
     and .services["state-load"].labels["io.nervix.chaos.role"] == "load"
+    and .services["state-load"].environment.CHAOS_LOAD_INTERVAL_MS == "1000"
     and .services["paced-load"].labels["io.nervix.chaos.role"] == "load"
+    and .services["paced-load"].environment.CHAOS_LOAD_INTERVAL_MS == "250"
     and .services.observer.labels["io.nervix.chaos.role"] == "observer"
     and .services["clock-observer"].labels["io.nervix.chaos.role"] == "observer"
     and .services["clock-observer"].image == $image
@@ -749,3 +782,5 @@ printf 'chaos harness self-test passed\n'
 "${script_dir}/docker-events-self-test.sh"
 "${script_dir}/recovery-self-test.sh"
 "${script_dir}/stateful-self-test.sh"
+"${script_dir}/load-self-test.sh"
+"${script_dir}/mixed-self-test.sh"

@@ -1340,7 +1340,6 @@ impl Runtime {
             let error = Report::new(IngestGroupError::DomainNotRunning {
                 domain: domain.clone(),
             });
-            let reason = error.to_string();
             for group in &groups {
                 self.handle_general_error_for_acks(
                     domain,
@@ -1348,7 +1347,7 @@ impl Runtime {
                     ingestor,
                     &ErrorPolicies::handled_by_log(),
                     group.messages.iter().map(|message| &message.acks),
-                    reason.clone(),
+                    &error,
                 );
             }
             return Err(error);
@@ -1366,14 +1365,13 @@ impl Runtime {
                     domain: domain.clone(),
                     relay: relay.clone(),
                 });
-                let reason = error.to_string();
                 self.handle_general_error_for_acks(
                     domain,
                     ModelKind::Ingestor,
                     ingestor,
                     &ErrorPolicies::handled_by_log(),
                     acks.iter(),
-                    reason,
+                    &error,
                 );
                 first_error.get_or_insert(error);
                 continue;
@@ -1384,14 +1382,13 @@ impl Runtime {
                     let error = error.change_context(IngestGroupError::RelayBatch {
                         relay: relay.clone(),
                     });
-                    let reason = error.to_string();
                     self.handle_general_error_for_acks(
                         domain,
                         ModelKind::Ingestor,
                         ingestor,
                         &ErrorPolicies::handled_by_log(),
                         acks.iter(),
-                        reason,
+                        &error,
                     );
                     first_error.get_or_insert(error);
                     continue;
@@ -1402,14 +1399,13 @@ impl Runtime {
                     ingestor: ingestor.clone(),
                     relay: relay.clone(),
                 });
-                let reason = error.to_string();
                 self.handle_general_error_for_acks(
                     domain,
                     ModelKind::Ingestor,
                     ingestor,
                     &ErrorPolicies::handled_by_log(),
                     batch.acks.iter(),
-                    reason,
+                    &error,
                 );
                 first_error.get_or_insert(error);
                 continue;
@@ -1420,14 +1416,13 @@ impl Runtime {
                     ingestor: ingestor.clone(),
                     relay: relay.clone(),
                 });
-                let reason = error.to_string();
                 self.handle_general_error_for_acks(
                     domain,
                     ModelKind::Ingestor,
                     ingestor,
                     &ErrorPolicies::handled_by_log(),
                     batch.acks.iter(),
-                    reason,
+                    &error,
                 );
                 first_error.get_or_insert(error);
             }

@@ -22,6 +22,7 @@ use crate::common::{
     raw_session::{TestDownload, TestDownloadEnd, download_backup},
 };
 
+mod branch_state;
 mod fidelity;
 mod materialized;
 pub(crate) mod restore;

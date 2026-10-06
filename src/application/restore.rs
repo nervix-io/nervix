@@ -19,6 +19,7 @@
 //! it; a leader without it waits for the client to send it again.
 
 mod archives;
+mod branch_state;
 mod materialized;
 mod prepare;
 mod runner;
@@ -63,7 +64,10 @@ use super::{
     session_service::SessionServiceImpl,
     subscription::SessionSubscriptions,
 };
-use crate::{registry::RestorePlan, runtime::StagedArtifact};
+use crate::{
+    registry::{RestorePlan, WindowStateSkip},
+    runtime::StagedArtifact,
+};
 
 /// The archives this node's restores read, as the server stages them.
 pub(in crate::application) type ServerRestoreArchives = RestoreArchives<VerifiedArchive>;
@@ -595,6 +599,12 @@ fn restore_state_warnings(
     }
     let mut warnings = Vec::new();
     for domain in plan.domains.values() {
+        let mut lifecycles = Vec::new();
+        for archived in archive.states_for(&domain.source) {
+            if let DescribedRuntimeState::BranchLifecycle { lifecycle, .. } = archived {
+                lifecycles.push(lifecycle);
+            }
+        }
         for skipped in archive.skipped_state_for(&domain.source) {
             if state == RestoreState::WithoutSourceOffsets
                 && skipped.path.as_str().contains("/state/kafka_offset/")
@@ -629,11 +639,32 @@ fn restore_state_warnings(
                     &lifecycle.entity,
                     Some(lifecycle.schema),
                 ),
+                DescribedRuntimeState::Deduplicator { descriptor, .. } => (
+                    ModelKind::Deduplicator,
+                    &descriptor.entity,
+                    Some(descriptor.schema),
+                ),
+                DescribedRuntimeState::Window { descriptor, .. } => (
+                    ModelKind::WindowProcessor,
+                    &descriptor.entity,
+                    Some(descriptor.schema),
+                ),
             };
             let node = schedule
                 .domain(&domain.target)
                 .and_then(|scheduled| scheduled.nodes.get(&NodeRef::new(kind, entity.clone())));
-            let reason = state_skip_reason(schema, node.map(|node| node.schema_fingerprint));
+            let mut reason = state_skip_reason(schema, node.map(|node| node.schema_fingerprint));
+            if let DescribedRuntimeState::Window { descriptor, .. } = archived
+                && let Some(window) = domain.branch_state_schemas.window(&descriptor.entity)
+                && let Some(skip) = window.skip_of(descriptor, lifecycles.iter().copied())
+            {
+                // A window's schema fingerprint covers its model, so a changed model also fails
+                // the generic schema check; the model is the more precise reason to report.
+                let model_changed = skip == WindowStateSkip::ModelChanged;
+                if model_changed || reason.is_none() {
+                    reason = Some(skip.reason());
+                }
+            }
             if let Some(reason) = reason {
                 warnings.push(CommandDiagnostic::unlocated(format!(
                     "warning: skipped {} state '{}' in domain '{}': {reason}",

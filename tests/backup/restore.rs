@@ -190,6 +190,16 @@ fn given_restored_materialized_checkpoint_fails(world: &mut ScenarioWorld, domai
         .fail_restored_materialized_checkpoint(scenario_domain(world, &domain));
 }
 
+#[given(
+    expr = "restoring domain {string} fails before installing its first deduplicator or window \
+            checkpoint"
+)]
+fn given_restored_branch_state_checkpoint_fails(world: &mut ScenarioWorld, domain: String) {
+    world
+        .fault_injection
+        .fail_restored_branch_state_checkpoint(scenario_domain(world, &domain));
+}
+
 #[then(expr = "client {string} observes resumed clock progress beyond backup {string}'s frontier")]
 fn then_resumed_clock_projects_downtime(world: &mut ScenarioWorld, client: String, file: String) {
     let archive = nervix_backup::describe_archive(
@@ -334,25 +344,47 @@ fn then_restored_checkpoints_match(world: &mut ScenarioWorld, before: String, af
     );
 }
 
+/// The bytes of every section an archive holds under one of `directories` of its domains' state.
+fn state_sections(path: &Path, directories: &[&str]) -> BTreeMap<String, Vec<u8>> {
+    let mut entries = BTreeMap::new();
+    for (section, bytes) in copy_of_archive(path).sections {
+        let mut selected = false;
+        for directory in directories {
+            if section.contains(&format!("/state/{directory}/")) {
+                selected = true;
+            }
+        }
+        if selected {
+            entries.insert(section, bytes);
+        }
+    }
+    assert!(
+        !entries.is_empty(),
+        "sections under {directories:?} are visible"
+    );
+    entries
+}
+
 #[then(expr = "backup archives {string} and {string} have identical materialized generations")]
 fn then_restored_materialized_generations_match(
     world: &mut ScenarioWorld,
     before: String,
     after: String,
 ) {
-    fn generations(path: &Path) -> BTreeMap<String, Vec<u8>> {
-        let entries = copy_of_archive(path)
-            .sections
-            .into_iter()
-            .filter(|(path, _)| path.contains("/state/materialized_relay/"))
-            .collect::<BTreeMap<_, _>>();
-        assert!(!entries.is_empty(), "materialized sections are visible");
-        entries
-    }
     assert_eq!(
-        generations(&archive_path(world, &before)),
-        generations(&archive_path(world, &after)),
+        state_sections(&archive_path(world, &before), &["materialized_relay"]),
+        state_sections(&archive_path(world, &after), &["materialized_relay"]),
         "a stale installer cannot replace the active materialized generation"
+    );
+}
+
+#[then(expr = "backup archives {string} and {string} have identical deduplicator and window state")]
+fn then_restored_branch_states_match(world: &mut ScenarioWorld, before: String, after: String) {
+    let directories = ["deduplicator", "window_processor"];
+    assert_eq!(
+        state_sections(&archive_path(world, &before), &directories),
+        state_sections(&archive_path(world, &after), &directories),
+        "a stale installer cannot replace the active deduplicator keys or windows"
     );
 }
 
@@ -946,6 +978,39 @@ fn then_cli_restore_warns_about_state_schema(world: &mut ScenarioWorld) {
             .is_some_and(|message| message.contains("archived schema fingerprint does not match"))),
         "the restore reports the skipped state: {report}"
     );
+}
+
+/// The warnings a successful restore the CLI ran reported.
+fn restore_warnings(world: &ScenarioWorld) -> Vec<String> {
+    let report = succeeded_restore(world);
+    let warnings = report["warnings"]
+        .as_array()
+        .unwrap_or_else(|| panic!("the restore report lists warnings: {report}"));
+    warnings
+        .iter()
+        .map(|warning| {
+            warning
+                .as_str()
+                .unwrap_or_else(|| panic!("a warning is text: {report}"))
+                .to_string()
+        })
+        .collect()
+}
+
+#[then(expr = "the CLI restore warns {string}")]
+fn then_cli_restore_warns(world: &mut ScenarioWorld, expected: String) {
+    let expected = expand_placeholders(world, &expected);
+    let warnings = restore_warnings(world);
+    assert!(
+        warnings.iter().any(|warning| warning.contains(&expected)),
+        "no restore warning contains {expected:?}: {warnings:?}"
+    );
+}
+
+#[then(expr = "the CLI restore reports no warnings")]
+fn then_cli_restore_reports_no_warnings(world: &mut ScenarioWorld) {
+    let warnings = restore_warnings(world);
+    assert!(warnings.is_empty(), "the restore warned: {warnings:?}");
 }
 
 #[then(
@@ -1577,6 +1642,43 @@ fn given_archive_with_unsupported_kafka_state(
     assert!(
         !replaced.is_empty(),
         "the archive contains Kafka domain offsets"
+    );
+    write_archive(&copy, &replaced, &archive_path(world, &target));
+}
+
+#[given(
+    expr = "backup archive {string} is copied to {string} with the archived branch incarnations \
+            of window processor {string} advanced"
+)]
+fn given_archive_with_advanced_window_incarnations(
+    world: &mut ScenarioWorld,
+    source: String,
+    target: String,
+    processor: String,
+) {
+    let copy = copy_of_archive(&archive_path(world, &source));
+    let suffix = format!("/state/branch_lifecycle/window_processor/{processor}/branches.rkyv");
+    let mut replaced = BTreeMap::new();
+    for (path, bytes) in &copy.sections {
+        if !path.ends_with(&suffix) {
+            continue;
+        }
+        let mut lifecycle = BranchLifecycleRecord::decode(path, bytes)
+            .expect("the archived branch lifecycle decodes");
+        for branch in &mut lifecycle.branches {
+            branch.incarnation = branch
+                .incarnation
+                .checked_add(1)
+                .expect("an archived incarnation is below the largest u64");
+        }
+        replaced.insert(
+            path.clone(),
+            lifecycle.encode().expect("the advanced lifecycle encodes"),
+        );
+    }
+    assert!(
+        !replaced.is_empty(),
+        "the archive holds the branch lifecycle of window processor '{processor}'"
     );
     write_archive(&copy, &replaced, &archive_path(world, &target));
 }

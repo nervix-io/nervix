@@ -1,4 +1,62 @@
+use error_stack::ResultExt as _;
+
 use super::*;
+
+/// Every way an inferencer fails to run the input one output route buffered through its model.
+/// The inferencer names itself when it reports the failure, and the acknowledgements of the input
+/// fail with it.
+#[derive(Debug, thiserror::Error)]
+pub(super) enum InferencerOutputError {
+    #[error("failed to concatenate the buffered input batches")]
+    ConcatenateInput,
+    #[error("the resource store is not attached")]
+    ResourceStoreDetached,
+    #[error("failed to resolve resource '{resource}@{version}' file '{file}'")]
+    ResolveFile {
+        resource: ResourceName,
+        version: u64,
+        file: String,
+    },
+    #[error("failed to load resource '{resource}@{version}' file '{file}'")]
+    LoadModel {
+        resource: ResourceName,
+        version: u64,
+        file: String,
+    },
+    #[error("failed to decode the input batch into messages")]
+    DecodeInput,
+    #[error("the ONNX session was not loaded")]
+    SessionUnavailable,
+    #[error("failed to build the INPUTS batch")]
+    InputsBatch,
+    #[error("INPUTS execution failed")]
+    InputsExecution,
+    #[error("INPUTS produced {rows} rows for {messages} messages")]
+    InputsRowCount { rows: usize, messages: usize },
+    #[error("failed to read the INPUTS output")]
+    InputsOutput,
+    #[error("ONNX execution failed for resource '{resource}@{version}' file '{file}'")]
+    Execute {
+        resource: ResourceName,
+        version: u64,
+        file: String,
+    },
+    #[error(
+        "returned {columns} output columns for {declarations} declarations or a column with an \
+         invalid row count for {messages} input messages"
+    )]
+    OutputColumns {
+        columns: usize,
+        declarations: usize,
+        messages: usize,
+    },
+    #[error("failed to build output tensor column '{field}'")]
+    OutputTensorColumn { field: String },
+    #[error("failed to build the output tensor batch")]
+    OutputTensorBatch,
+    #[error("failed to build the output batch")]
+    OutputBatch,
+}
 
 pub(super) async fn flush_branch_inferencer_output(
     context: InferencerFlushContext<'_>,
@@ -39,11 +97,7 @@ pub(super) async fn flush_branch_inferencer_output(
                 processor,
                 error_policies,
                 pending_acks.iter(),
-                format!(
-                    "inferencer '{}' failed to concatenate buffered input batches for output: {}",
-                    processor.as_str(),
-                    error
-                ),
+                &error.change_context(InferencerOutputError::ConcatenateInput),
             );
             return;
         }
@@ -59,7 +113,7 @@ pub(super) async fn flush_branch_inferencer_output(
                 processor,
                 error_policies,
                 forwarded.acks.iter(),
-                "resource store is not attached".to_string(),
+                &Report::new(InferencerOutputError::ResourceStoreDetached),
             );
             return;
         };
@@ -74,7 +128,11 @@ pub(super) async fn flush_branch_inferencer_output(
                     processor,
                     error_policies,
                     forwarded.acks.iter(),
-                    error.to_string(),
+                    &error.change_context(InferencerOutputError::ResolveFile {
+                        resource: resource.clone(),
+                        version: resource_version,
+                        file: file.to_owned(),
+                    }),
                 );
                 return;
             }
@@ -88,13 +146,11 @@ pub(super) async fn flush_branch_inferencer_output(
                     processor,
                     error_policies,
                     forwarded.acks.iter(),
-                    format!(
-                        "inferencer '{}' failed to load resource '{}@{}' file '{}': {error:#}",
-                        processor.as_str(),
-                        resource.as_str(),
-                        resource_version,
-                        file,
-                    ),
+                    &error.change_context(InferencerOutputError::LoadModel {
+                        resource: resource.clone(),
+                        version: resource_version,
+                        file: file.to_owned(),
+                    }),
                 );
                 return;
             }
@@ -115,11 +171,9 @@ pub(super) async fn flush_branch_inferencer_output(
                 processor,
                 error_policies,
                 batch.acks.iter(),
-                format!(
-                    "inferencer '{}' failed to decode arrow batch: {}",
-                    processor.as_str(),
-                    failure.error
-                ),
+                &failure
+                    .error
+                    .change_context(InferencerOutputError::DecodeInput),
             );
             return;
         }
@@ -140,10 +194,7 @@ pub(super) async fn flush_branch_inferencer_output(
             processor,
             error_policies,
             messages.iter().map(|message| &message.acks),
-            format!(
-                "inferencer '{}' ONNX session was not loaded",
-                processor.as_str()
-            ),
+            &Report::new(InferencerOutputError::SessionUnavailable),
         );
         return;
     };
@@ -171,7 +222,7 @@ pub(super) async fn flush_branch_inferencer_output(
                 processor,
                 error_policies,
                 messages.iter().map(|message| &message.acks),
-                format!("inferencer '{}' INPUTS batch failed: {error}", processor),
+                &error.change_context(InferencerOutputError::InputsBatch),
             );
             return;
         }
@@ -195,10 +246,7 @@ pub(super) async fn flush_branch_inferencer_output(
                 processor,
                 error_policies,
                 messages.iter().map(|message| &message.acks),
-                format!(
-                    "inferencer '{}' INPUTS execution failed: {error}",
-                    processor
-                ),
+                &error.change_context(InferencerOutputError::InputsExecution),
             );
             return;
         }
@@ -212,12 +260,10 @@ pub(super) async fn flush_branch_inferencer_output(
                 processor,
                 error_policies,
                 messages.iter().map(|message| &message.acks),
-                format!(
-                    "inferencer '{}' INPUTS produced {} rows for {} messages",
-                    processor,
-                    batch.batch().num_rows(),
-                    messages.len()
-                ),
+                &Report::new(InferencerOutputError::InputsRowCount {
+                    rows: batch.batch().num_rows(),
+                    messages: messages.len(),
+                }),
             );
             return;
         }
@@ -228,7 +274,7 @@ pub(super) async fn flush_branch_inferencer_output(
                 processor,
                 error_policies,
                 messages.iter().map(|message| &message.acks),
-                format!("inferencer '{}' INPUTS output failed: {error}", processor),
+                &error.change_context(InferencerOutputError::InputsOutput),
             );
             return;
         }
@@ -251,14 +297,11 @@ pub(super) async fn flush_branch_inferencer_output(
                 processor,
                 error_policies,
                 messages.iter().map(|message| &message.acks),
-                format!(
-                    "inferencer '{}' failed ONNX execution for resource '{}@{}' file '{}': \
-                     {error:#}",
-                    processor.as_str(),
-                    resource.as_str(),
-                    resource_version,
-                    file,
-                ),
+                &error.change_context(InferencerOutputError::Execute {
+                    resource: resource.clone(),
+                    version: resource_version,
+                    file: file.to_owned(),
+                }),
             );
             return;
         }
@@ -274,41 +317,16 @@ pub(super) async fn flush_branch_inferencer_output(
             processor,
             error_policies,
             messages.iter().map(|message| &message.acks),
-            format!(
-                "inferencer '{}' returned {} output columns for {} declarations or a column with \
-                 an invalid row count for {} input messages",
-                processor.as_str(),
-                output_columns.len(),
-                output_schema.len(),
-                messages.len()
-            ),
+            &Report::new(InferencerOutputError::OutputColumns {
+                columns: output_columns.len(),
+                declarations: output_schema.len(),
+                messages: messages.len(),
+            }),
         );
         return;
     }
     let inferencer_tensors = InferencerFilterMapTensors { output_schema };
-    let tensor_schema = inferencer_tensors.output_arrow_schema();
-    let tensor_batch_result = (|| {
-        let columns = tensor_schema
-            .fields()
-            .iter()
-            .map(|field| {
-                let column_index = tensor_schema
-                    .index_of(field.name())
-                    .map_err(|error| error.to_string())?;
-                runtime_values_input_column(
-                    output_columns[column_index].iter().map(Some),
-                    messages.len(),
-                    field,
-                )
-                .map(|column| column.to_array_ref())
-                .map_err(|error| error.to_string())
-            })
-            .collect::<Result<Vec<_>, _>>()?;
-        let batch = RecordBatch::try_new(tensor_schema.clone(), columns)
-            .map_err(|error| error.to_string())?;
-        RuntimeRecordBatch::from_record_batch(tensor_schema, batch)
-            .map_err(|error| error.to_string())
-    })();
+    let tensor_batch_result = inferencer_tensors.output_batch(&output_columns, messages.len());
     let tensor_batch = match tensor_batch_result {
         Ok(batch) => batch,
         Err(error) => {
@@ -318,11 +336,7 @@ pub(super) async fn flush_branch_inferencer_output(
                 processor,
                 error_policies,
                 messages.iter().map(|message| &message.acks),
-                format!(
-                    "inferencer '{}' failed to build output tensor columns: {}",
-                    processor.as_str(),
-                    error
-                ),
+                &error,
             );
             return;
         }
@@ -350,11 +364,7 @@ pub(super) async fn flush_branch_inferencer_output(
                 processor,
                 error_policies,
                 messages.iter().map(|message| &message.acks),
-                format!(
-                    "inferencer '{}' failed to build output batch: {}",
-                    processor.as_str(),
-                    error
-                ),
+                &error.change_context(InferencerOutputError::OutputBatch),
             );
             return;
         }
@@ -378,5 +388,34 @@ pub(super) async fn flush_branch_inferencer_output(
         for ack in acks {
             ack.ack_success();
         }
+    }
+}
+
+impl InferencerFilterMapTensors<'_> {
+    /// The columns the model returned, as one batch of the output tensor schema with one row for
+    /// every input message.
+    fn output_batch(
+        &self,
+        output_columns: &[Vec<RuntimeValue>],
+        rows: usize,
+    ) -> error_stack::Result<RuntimeRecordBatch, InferencerOutputError> {
+        let tensor_schema = self.output_arrow_schema();
+        let mut columns = Vec::with_capacity(tensor_schema.fields().len());
+        for field in tensor_schema.fields() {
+            let column_failure = || InferencerOutputError::OutputTensorColumn {
+                field: field.name().clone(),
+            };
+            let column_index = tensor_schema
+                .index_of(field.name())
+                .change_context_lazy(column_failure)?;
+            let values = output_columns[column_index].iter().map(Some);
+            let column = runtime_values_input_column(values, rows, field)
+                .change_context_lazy(column_failure)?;
+            columns.push(column.to_array_ref());
+        }
+        let batch = RecordBatch::try_new(tensor_schema.clone(), columns)
+            .change_context(InferencerOutputError::OutputTensorBatch)?;
+        RuntimeRecordBatch::from_record_batch(tensor_schema, batch)
+            .change_context(InferencerOutputError::OutputTensorBatch)
     }
 }

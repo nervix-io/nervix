@@ -19,6 +19,8 @@ pub(super) enum ProcessorOutputError {
     },
     #[error("failed to select the pending output rows of one branch")]
     TakeBranchRows,
+    #[error("an output batch holds fewer acknowledgements than the rows it selected")]
+    SelectedRowAcks,
 }
 
 pub(super) struct ProcessorOutputDispatchContext<'a> {
@@ -79,15 +81,11 @@ impl ProcessorMaterializedState<'_> {
             MaterializedDependencyResolution::Ready(values) => Ok(values),
             MaterializedDependencyResolution::Skip => Err(Report::new(
                 ProcessorMaterializedError::EvictedRequiredSkip {
-                    node_kind: context.node_kind,
-                    processor: context.processor.clone(),
                     branch: branch_key.clone(),
                 },
             )),
             MaterializedDependencyResolution::Wait => Err(Report::new(
                 ProcessorMaterializedError::EvictedRequiredWait {
-                    node_kind: context.node_kind,
-                    processor: context.processor.clone(),
                     branch: branch_key.clone(),
                 },
             )),
@@ -352,6 +350,9 @@ pub(super) async fn dispatch_selected_processor_outputs(
     let routing = match context.branch.routing_snapshot.as_ref().cloned() {
         Some(routing) => routing,
         None => {
+            let error = Report::new(DomainRoutingError::SnapshotNotResolved {
+                domain: context.branch.domain.clone(),
+            });
             context
                 .branch
                 .runtime
@@ -361,10 +362,7 @@ pub(super) async fn dispatch_selected_processor_outputs(
                     context.processor,
                     context.error_policies,
                     batch.acks.iter(),
-                    format!(
-                        "domain '{}' routing was not resolved for this batch",
-                        context.branch.domain.as_str()
-                    ),
+                    &error,
                 );
             return None;
         }
@@ -400,7 +398,7 @@ pub(super) async fn dispatch_selected_processor_outputs(
                         context.processor,
                         context.error_policies,
                         batch.acks.iter(),
-                        error.to_string(),
+                        &error,
                     );
                 return None;
             }
@@ -416,7 +414,7 @@ pub(super) async fn dispatch_selected_processor_outputs(
         .await
     {
         Ok(side_inputs) => side_inputs,
-        Err(reason) => {
+        Err(error) => {
             context
                 .branch
                 .runtime
@@ -426,7 +424,7 @@ pub(super) async fn dispatch_selected_processor_outputs(
                     context.processor,
                     context.error_policies,
                     batch.acks.iter(),
-                    format!("{reason:#}"),
+                    &error,
                 );
             return None;
         }
@@ -466,7 +464,7 @@ pub(super) async fn dispatch_selected_processor_outputs(
                         context.processor,
                         context.error_policies,
                         failure.acks.iter(),
-                        format!("{:#}", failure.error),
+                        &failure.error,
                     );
                 return None;
             }
@@ -521,8 +519,7 @@ pub(super) async fn dispatch_selected_processor_outputs(
                     context.processor,
                     context.error_policies,
                     batch_acks.iter(),
-                    "processor output batch ack count does not match selected row count"
-                        .to_string(),
+                    &Report::new(ProcessorOutputError::SelectedRowAcks),
                 );
             return None;
         }
@@ -540,7 +537,7 @@ pub(super) async fn dispatch_selected_processor_outputs(
                         context.processor,
                         context.error_policies,
                         error_acks.iter(),
-                        format!("{error:#}"),
+                        &error,
                     );
                 return None;
             }
@@ -593,11 +590,7 @@ pub(super) async fn dispatch_selected_processor_outputs(
                     context.processor,
                     context.error_policies,
                     acks.iter(),
-                    format!(
-                        "{} '{}' could not read the domain clock while buffering output: {error}",
-                        context.node_kind.as_str(),
-                        context.processor.as_str(),
-                    ),
+                    &error.change_context(RouteOutputError::BufferClock),
                 );
             return None;
         }
@@ -628,13 +621,9 @@ pub(super) async fn dispatch_selected_processor_outputs(
                             context.processor,
                             context.error_policies,
                             acks.iter(),
-                            format!(
-                                "{} '{}' could not start an output flush deadline for relay '{}': \
-                                 {error}",
-                                context.node_kind.as_str(),
-                                context.processor.as_str(),
-                                relay.as_str(),
-                            ),
+                            &error.change_context(RouteOutputError::StartFlushDeadline {
+                                relay: relay.clone(),
+                            }),
                         );
                     return None;
                 }
@@ -665,13 +654,9 @@ pub(super) async fn dispatch_selected_processor_outputs(
                         context.processor,
                         context.error_policies,
                         pending_acks.iter(),
-                        format!(
-                            "{} '{}' failed to concat output batches for relay '{}': {}",
-                            context.node_kind.as_str(),
-                            context.processor.as_str(),
-                            relay.as_str(),
-                            error
-                        ),
+                        &error.change_context(RouteOutputError::Concatenate {
+                            relay: relay.clone(),
+                        }),
                     );
                 return None;
             }
@@ -693,12 +678,9 @@ pub(super) async fn dispatch_selected_processor_outputs(
                     context.processor,
                     context.error_policies,
                     forwarded.acks.iter(),
-                    format!(
-                        "{} '{}' failed to forward message to relay '{}'",
-                        context.node_kind.as_str(),
-                        context.processor.as_str(),
-                        relay.as_str()
-                    ),
+                    &Report::new(RouteOutputError::Forward {
+                        relay: relay.clone(),
+                    }),
                 );
             return None;
         }
@@ -738,30 +720,24 @@ async fn flush_processor_outputs(
         ProcessorOutputFlush::Due => match domain_clock.snapshot() {
             Ok(snapshot) => Some(snapshot),
             Err(error) => {
+                // The clock failed for every route at once, so the output all of them hold fails
+                // as one.
+                let mut acks = Vec::new();
                 for output in &mut outputs.routes {
                     let pending = output.take_pending();
-                    let acks = pending
-                        .iter()
-                        .flat_map(|batch| batch.acks.iter().cloned())
-                        .collect::<Vec<_>>();
-                    context
-                        .branch
-                        .runtime
-                        .handle_internal_processor_error_for_acks(
-                            &context.branch.domain,
-                            context.node_kind,
-                            context.processor,
-                            context.error_policies,
-                            acks.iter(),
-                            format!(
-                                "{} '{}' could not read the domain clock while releasing output \
-                                 for relay '{}': {error}",
-                                context.node_kind.as_str(),
-                                context.processor.as_str(),
-                                output.relay.as_str(),
-                            ),
-                        );
+                    acks.extend(pending.iter().flat_map(|batch| batch.acks.iter().cloned()));
                 }
+                context
+                    .branch
+                    .runtime
+                    .handle_internal_processor_error_for_acks(
+                        &context.branch.domain,
+                        context.node_kind,
+                        context.processor,
+                        context.error_policies,
+                        acks.iter(),
+                        &error.change_context(RouteOutputError::ReleaseClock),
+                    );
                 return;
             }
         },
@@ -790,13 +766,9 @@ async fn flush_processor_outputs(
                                 context.processor,
                                 context.error_policies,
                                 acks.iter(),
-                                format!(
-                                    "{} '{}' could not inspect the output flush deadline for \
-                                     relay '{}': {error}",
-                                    context.node_kind.as_str(),
-                                    context.processor.as_str(),
-                                    output.relay.as_str(),
-                                ),
+                                &error.change_context(RouteOutputError::InspectFlushDeadline {
+                                    relay: output.relay.clone(),
+                                }),
                             );
                         continue;
                     }
@@ -823,13 +795,9 @@ async fn flush_processor_outputs(
                         context.processor,
                         context.error_policies,
                         pending_acks.iter(),
-                        format!(
-                            "{} '{}' failed to concat buffered output batches for relay '{}': {}",
-                            context.node_kind.as_str(),
-                            context.processor.as_str(),
-                            output.relay.as_str(),
-                            error
-                        ),
+                        &error.change_context(RouteOutputError::Concatenate {
+                            relay: output.relay.clone(),
+                        }),
                     );
                 continue;
             }
@@ -853,12 +821,9 @@ async fn flush_processor_outputs(
                     context.processor,
                     context.error_policies,
                     forwarded.acks.iter(),
-                    format!(
-                        "{} '{}' failed to forward buffered output to relay '{}'",
-                        context.node_kind.as_str(),
-                        context.processor.as_str(),
-                        output.relay.as_str()
-                    ),
+                    &Report::new(RouteOutputError::Forward {
+                        relay: output.relay.clone(),
+                    }),
                 );
         }
     }

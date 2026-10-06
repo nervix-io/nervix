@@ -82,10 +82,10 @@ pub(super) enum PackedOutcome {
         exceeded: PayloadLimitExceeded,
     },
     /// The container of the candidate these rows formed could not be produced, so they fail
-    /// together.
+    /// together. The report keeps the evaluation or writer failure beneath the reason.
     ContainerFailed {
         rows: Vec<SinkRecordPosition>,
-        error: BatchContainerError,
+        error: Report<BatchContainerError>,
     },
 }
 
@@ -197,9 +197,7 @@ impl BufferedBatchPacking {
                     .iter()
                     .map(|prepared| &prepared.member)
                     .collect::<Vec<_>>();
-                let encoded = codec
-                    .encode_batch_within(&references, policy.max_size)
-                    .map_err(|error| *error.current_context())?;
+                let encoded = codec.encode_batch_within(&references, policy.max_size)?;
                 match encoded {
                     BoundedBatchEncoding::Encoded(payload) => Ok(CandidateEncoding::Fits(payload)),
                     BoundedBatchEncoding::Oversize(exceeded) => {

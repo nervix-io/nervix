@@ -181,7 +181,8 @@ the existing authority and installation barriers; conversion adds no lock to rec
 The backup coordinator waits for each node's admitted-work counters to reach zero, then orders one
 confirming force-flush generation across the cluster. The generation's obligations use the same
 atomic counters as shutdown; a parked `REQUIRED WAIT` batch stays visible separately and cannot
-hold the cut open.
+hold the cut open. Rows a window retains park their shares too, and the cut captures them as
+window state.
 | Metric series handles | Each relay, node, ingestor, emitter, or concrete branch resolves its label set, internal series, and Prometheus child when its owning task or branch is created. | Recording uses the retained series directly. Counters update atomically; a histogram records through its already-resolved per-series accumulator without a registry lookup, key construction, or map guard. A node input folds a whole batch's delivery latencies in one kernel pass over the batch's high-watermark column before recording, so each latency series locks its accumulator and reads the wall clock once per batch rather than once per row, and its Prometheus child takes the batch in one flush. Whether a series was ever observed is an atomic flag set under that lock and read without it. Registration and removal stay on lifecycle paths. |
 | MQTT broker packet limit | Each MQTT sink's event-loop task stores the Maximum Packet Size of every `CONNACK` its client receives, or the broker's silence about one, as one atomic scalar. A reconnect replaces it. | A publish loads the scalar once per record to reject a packet the broker would refuse before handing it to the client. The value stands alone, so relaxed ordering is its whole contract, and a record published before the first `CONNACK` is measured only against the protocol's largest packet. |
 
@@ -367,8 +368,11 @@ branch task's final publication. The published generation is empty, so a later a
 same branch key cannot inherit the evicted window or its sketch panes. After the final checkpoint,
 the owner releases the evicted branch's in-memory publication. A branch that appears without a
 restored lifecycle entry also publishes an empty initial window, even if a previous lifetime of its
-key left a checkpoint behind. Stopping a branch for an ownership handoff follows the normal
-finalization path and publishes its retained window instead.
+key left a checkpoint behind. A processor task therefore installs every branch its lifecycle names
+before it dequeues any input, and a restore the bulk executor refuses installs none of them and is
+attempted again; see [Restoring Processor Branches](./shutdown.md#restoring-processor-branches).
+Stopping a branch for an ownership handoff follows the normal finalization path and publishes its
+retained window instead.
 The branch lifecycle and window checkpoint carry the same incarnation, assigned when the concrete
 branch appears. A restore whose incarnations differ begins with empty window state and marks it
 for publication, so a delayed checkpoint from the preceding lifetime cannot restore its panes.
@@ -622,7 +626,9 @@ pending count, and each completion resolves one share with a compare-and-swap. A
 encodes either a typed tracking state with its active-share count or the completed state; its
 reserved raw representation stays inside the encoding's owner. That state records whether shares
 still count against ownership handoff; a message parked on materialized `REQUIRED WAIT` does not
-keep a handoff blocked.
+keep a handoff blocked, and neither does a row a window retains until the window steps past it.
+Both owners hold one park guard per retained message and drop it before they acknowledge, so the
+acknowledgement removes the share the holder owns.
 Remote ACK progress publishes a monotonic sequence with the root's parked handoff state. An
 upstream remote share follows that state, and its root publishes the resulting transition farther
 upstream. A delayed progress event cannot reactivate a newer parked state. Terminal ACK resolution
@@ -1529,31 +1535,117 @@ checks, the run selection, pending-callback limit, revision and declared coverag
 copies separate from files a live recorder replaces. The operator's workload is not ended merely
 because an unreviewed historical cycle exists.
 
-**Verification.** `just test-deloxide` and `just test-deloxide-order` run in separate selections and
-fresh retained attempt directories below `target/deloxide/test-deloxide`. After prerequisites,
-diagnostic compilation and execution share the default forty-minute budget. Every active workload
-runs in a disposable subprocess and must record its typed active cycle and exit `3`. Order probes add
-successful serial inversion, mixed modes and recursive read multiplicity, reused construction
-sites in separate lifetimes, read-only/consistent-order controls, runtime-disabled instrumentation,
-context/retention overload and failed/blocked output. The commands also run one-/three-node
-`@deadlock_diagnostics`, `@restore_installation`, `@client_ingestor_alter_drain`,
-`@memory_pressure_pause`, `@client_io_03_consumer_restore`, `@client_io_03_generation` and the local
-`@deadlock_reports` workflow without retries. The commands also run `@paced_simulation_reopen` on
-one and three nodes: the Rust driver uses the selected diagnostic capability, while Python runs
-against diagnostic nodes with its ordinary shared binding. Python locks and condition variables
-remain outside the detector. Zero probes or incomplete scenario accounting fail. After successful process outcomes,
-every retained scenario/child-process observation must qualify; missing evidence or an unreviewed,
-active, lost or incomplete finding fails the command. Probe output/artifacts and diagnostic
-scenario evidence are retained per attempt with its revision. Format equality, malformed/bounds
-rejection and normalized-cycle/dedup invariants are registered Bolero properties using the same
-assertion in ordinary and sanitizer execution.
+**The diagnostic lane.** `just test-deloxide` and `just test-deloxide-order` run the lane of each
+selection, and CI's `deloxide` job runs both side by side for every pull request labeled
+`deloxide`, the label each change the Deloxide rule applies to carries.
+`tests/deloxide-inventory.toml` is the lane's bounded inventory. It registers every workload a
+selection runs, each with a stable identity, the invariant it owns, the selections that must run it
+and the coverage it declares: the disposable-process probes of `nervix-deadlock`, the diagnostic
+owner tests of the server library, and the tagged scenarios with the number of example runs each
+must make. It also bounds the lane: one real-time budget for a selection's diagnostic compilation
+and execution after its prerequisites, a bound for every invocation, a stop grace period, the
+reserve the scenario binary keeps for its own teardown inside its invocation's bound, and how many
+scenarios run at once, which is the same on every machine.
 
-A fresh state-store test process starts its detector before constructing store or executor locks
-and runs the current generation regressions: cancellation before and after pointer publication, snapshot
+For each invocation the lane builds the selection's executable, lists what the build holds or reads
+the tagged scenarios from the feature files, and refuses a registered workload that the build no
+longer holds or holds ignored, a discovered probe, owner test or tagged scenario that is not
+registered, a scenario whose example runs changed, and an invocation that selects nothing. It
+reports how many workloads it discovered, selected, executed and saw complete. Global detector
+configurations never share a process: each probe workload is a disposable child, each owner test
+installs its detector in a fresh process, the scenario binary installs once in `main`, and every
+diagnostic server and paced driver process installs its own. The two selections are separate
+builds in separate target directories, apart from ordinary, fuzz, Loom, Shuttle and Turmoil builds.
+
+Every process the lane starts runs in a session of its own. A process that outlives its bound
+receives `SIGTERM` and, after the stop grace period, `SIGKILL` with its whole group. The lane is a
+child subreaper, so a process that left its group is found too, and anything still running after an
+invocation ends is killed and fails the lane. The lane names each ending:
+
+| Ending | Lane class | Lane status |
+| --- | --- | --- |
+| A process reported an active cycle, or a failed invocation's evidence records one | `active-deadlock` | `3` |
+| Recording or output failed, findings or context were lost, or the recording budget expired | `diagnostic-failure` | `4` |
+| A process outlived its bound, or the lane's budget expired | `timed-out`, `budget-expired` | `124` |
+| A signal ended a process | `signaled` | `1` |
+| A test or step failed | `failed` | `1` |
+| A process was left running | `leftover-processes` | `1` |
+| A registered workload did not run or ran ignored, or the scenario count differs | `incomplete` | `1` |
+| Evidence is missing, partly written or does not qualify | `evidence-missing`, `evidence-partial`, `evidence-unqualified` | `1` |
+| The inventory, a build or a prerequisite is wrong | `inventory`, `build-failed`, `prerequisite-missing` | `1` |
+
+A failed invocation's evidence is qualified before the lane reports it, so a node that deadlocked
+inside a scenario is reported as the active cycle it recorded rather than as the step it failed.
+After each invocation that records evidence, every process observation must be present, completely
+written and qualify. `nervix-deadlock-report qualify` prints one `evidence summary:` line of counts
+per file, and the lane reports repeated deliveries of a retained potential cycle apart from findings
+lost to overload. The first failure ends the lane.
+
+A potential cycle fails the lane. The lane qualifies only the current run's whole-process evidence,
+and it keeps no ledger that approves a recurring cycle: lock identities are run-local, and a source
+line never stands in for a lock instance. A correction removes the order from the exercised
+workload, and the lane is its regression. A reviewed infeasibility proof qualifies the retained
+evidence of the run it reviews, for the owner's investigation and record; it never qualifies a
+later run.
+
+Each run keeps a fresh attempt directory below `<build target>/test-deloxide/<selection>/`, which no
+later run reuses or removes: every log, the probes' artifacts, every process's evidence, the
+description of every finding with its source sites, and `lane.json`. The record holds the revision
+and whether the tree was modified, the toolchain, Cargo and Deloxide's locked version and source, the
+inventory's digest, the selection, the features of every build and the bounds, and for every launch
+its exact command, working directory, environment additions, bound, ending, duration, discovery and
+accounting, with the qualification of every evidence file. `just test-deloxide-replay <lane.json>
+<launch>` runs one recorded launch again, exactly, in a fresh attempt. OS schedules and stress timing
+are not recorded, so a replay can take another interleaving; deterministic reproduction belongs to
+Shuttle and Loom.
+
+`just test-deloxide-qualification` proves the supervision on the probe binary's real processes,
+through the lane's own launch, evidence and classification code. A two-thread deadlock, an evidence
+directory that cannot be written, an untracked wait that never ends, an aborted process and, in the
+order selection, an unreviewed serial inversion and retention overload must each fail the lane with
+its own class and status, keep their output and the evidence they could write, and leave no process
+behind. A consistent-order control must pass, and the recorded deadlock must replay to the same
+class.
+
+Under `just coverage-native-extras test-deloxide` or `test-deloxide-order`, the lane builds in the
+collector's instrumented target, with instrumentation on workspace crates only, so dependencies such
+as wasmtime's compiler keep the speed the product's deadlines assume. It takes the report tool, CLI
+and shared client binding from the target its prerequisites built, starts every test executable
+through Cargo's configured runner, and hands `lane.json` to the collector, which exports nothing
+unless the lane completed. CI's
+`deloxide` job runs each selection this way, then the qualification, and uploads the completion
+records, the diagnostic LCOV reports and every attempt directory whatever the verdict. Diagnostic
+coverage stays out of ordinary coverage and the CRAP gate. The [Integration Test
+Lifecycle](./integration-test-lifecycle.md#diagnostic-lane) chapter owns the job's bounds and
+reserves.
+
+**Applicability.** `[[owner]]` records in the same inventory cover every source file in which the
+compiler finds a tracked blocking acquisition in a diagnostic configuration. Each names the
+registered workloads whose processes reach its tracked locks, the path the lane does not reach and
+why, or both. `just validate-deloxide-applicability`, part of `just validate` and CI's `checks`
+job, reads the acquisition catalog `just ratchet` writes and fails on an owner without a record and
+on a record whose file no longer acquires a tracked lock. The catalog is the compiler's resolution
+of the Deloxide adapters' operations, not a search for lock names. A record is a reviewed
+declaration: the lane's coverage report is evidence about it, not a proof of ownership. Format
+equality, malformed and out-of-bounds rejection, normalized-cycle deduplication and the summary's
+counts are registered Bolero properties with the same assertion in ordinary and sanitizer execution.
+
+The native backup-wait workloads reach the client's pending-reply locks during multi-domain
+capture, bounded wait expiry and recovery under the same execution reference. They run on one-
+and three-node clusters in both selections and name the client request and exchange owners in
+the inventory. The detector observes their blocking reply-registration and cancellation locks.
+Async command and reconnect mutexes, physical deadlines and network scheduling remain outside
+its observation; the public scenarios and client-session regressions assert their wait, expiry,
+leader-change and recovery outcomes directly. The bounded native-client case runs inside the
+diagnostic harness and reaches expiry and recovery with tracked client locks. The CLI scenarios
+exercise diagnostic nodes around ordinary subprocesses, whose own locks remain untracked.
+
+The lane's state-store owner test starts its detector in a fresh process before constructing store
+or executor locks and runs the current generation regressions: cancellation before and after pointer publication, snapshot
 readers, queued checkpoint writers, corrupt and incomplete chunks, exact retry after reopen,
 stale authority, bounded cleanup across 600 checkpoints and a 40 MiB guest save admitted with a
-2 MiB reservation. Its evidence is retained beside the probe and scenario evidence. The commands
-also exercise quota refusal and exact staging retry, partial chunks without receipts across
+2 MiB reservation. Its evidence is retained beside the probe and scenario evidence. The lane
+also exercises quota refusal and exact staging retry, partial chunks without receipts across
 reopen, reclamation with applying and future generations retained, published and initial state
 preservation, snapshot readers across deletion, and interrupted bounded reclamation resumed after
 restart. Active-generation owner checks also exercise ordinary and same-revision inline writes,
@@ -1593,10 +1685,12 @@ client consumer's state and parked-read locks in the scenario process as a consu
 after a session restart and closed by a domain restart.
 
 Shuttle checks the production handoff's delivery/refusal and close races, including counter drain,
-through the registered replay-capable harness. The queue internals and OS wakeups are opaque; the
-relaxed refusal counter publishes no other location. `OnceLock` publishes the installation port;
-no new independent cross-location atomic protocol is introduced. Existing primitive Loom
-conformance remains separate. Deloxide models no async or network scheduling. Tokio locks,
+through the registered replay-capable harness, in the Shuttle build where no detector is installed.
+The queue internals and OS wakeups are opaque; the relaxed refusal counter publishes no other
+location. `OnceLock` publishes the installation port; no new independent cross-location atomic
+protocol is introduced. Existing primitive Loom conformance remains separate. The lane's supervisor
+runs outside every diagnostic process: it adds no synchronization to a process it observes and
+reads only the processes' exits and the evidence files they wrote. Deloxide models no async or network scheduling. Tokio locks,
 channels, `Notify`, DashMap shards, dependency locks, atomic protocols, missing notifications and
 cross-node waits remain outside its detection claims and retain Shuttle/Loom/Turmoil/Chaos checks.
 No diagnostic check proves safety for an untracked path or an order the workload did not take.
@@ -1816,7 +1910,7 @@ A family of names means each member runs independently through the recipe.
 | Checkpoint replication (`src/runtime/kafka_offset_state.rs`, `src/runtime/state_replication/checkpoint_announcement_shuttle_tests.rs`) | `shuttle_a_replica_acknowledgement_racing_the_quorum_wait_is_never_missed` races a Kafka offset commit's replica quorum wait against its replica's acknowledgement: the wait registers before it reads, so it completes without its deadline, which a Shuttle timeout only reaches when a check triggers it. `shuttle_an_offer_racing_the_end_of_an_announcement_is_always_announced` races a second offer against the announcer of the first finding its replica caught up: the second revision is always announced and acknowledged. `shuttle_a_retired_replication_ends_its_announcer` ends an announcer whose replicated state goes away while its replica never acknowledges. `shuttle_an_announcement_racing_the_replica_wait_is_never_missed` races an owner's announcement against the replica task's synchronization and wait: an announcement that lands before the wait is kept as its permit. `shuttle_checkpoint_announcement_close_cancels_pending_dispatch` exercises the production task owner with close racing the first poll and close after dispatch starts: both cancel a dispatch that never becomes ready and release its retained announcer. |
 | Resolved state replication (`src/runtime/state_replication/routing_shuttle_tests.rs`) | `shuttle_state_replacement_and_retirement_fence_frames_in_flight` exercises the production routing owner: a frame can complete only on its selected lifetime, never change a successor, and cannot enter a route after retirement. ArcSwap internals remain opaque; this check covers owner use and scheduling, with no new Nervix-owned memory-ordering claim. |
 | Replica catch-up announcements (`src/runtime/branch_lifecycle_state_shuttle_tests.rs`) | `shuttle_an_announced_branch_racing_the_replica_round_is_never_missed` races an owner's announcement of a branch checkpoint against the replica task taking the pending announcements and waiting for the next: the task takes it whether it lands before the take, between the take and the wait, or during the wait. `shuttle_announcements_of_one_branch_keep_the_newest_pending` delivers two announcements of one branch in either order while the task takes them: an older one never replaces a newer one still pending. |
-| Backup capture, restore publication and reclamation (`src/runtime/backup_capture_fence.rs`, `crates/consensus/src/restore.rs`, `materialized_state.rs`) | `shuttle_backup_cut_includes_pre_cut_branch_publication` includes every registered publication before a cut. `shuttle_restore_publication_and_handle_clear_precede_resume_and_fence_delayed_publishers` drives the applied-state authority guard against a successor generation and RESUME, requiring complete publication and cleared handles before activation. `shuttle_materialized_capture_names_exactly_its_branch_generation` races capture with an update and eviction. `shuttle_replica_synchronization_preserves_the_restored_materialized_revision` races delayed and current owner snapshots. `shuttle_restore_reclamation_holds_the_revision_through_queued_installation` races the reclamation guard with a successor generation and queued installer, requiring the borrowed revision to stay fixed through deletion and preserving the current installation. They register in the shared Shuttle inventory and use its exploration, nondeterminism and replay contract. |
+| Backup capture, restore publication and reclamation (`src/runtime/backup_capture_fence.rs`, `src/runtime/branch_state_capture_shuttle_tests.rs`, `crates/consensus/src/restore.rs`, `materialized_state.rs`) | `shuttle_backup_cut_includes_pre_cut_branch_publication` includes every registered publication before a cut. `shuttle_a_forced_deduplicator_publication_holds_every_key_acknowledged_before_the_cut` and `shuttle_a_forced_window_publication_holds_every_step_acknowledged_before_the_cut` race a branch task's admissions or window steps against the cut's checkpoint request over the branch task's own command and input channels: once the task answers, the keyspace or window the capture reads holds every change acknowledged before the cut asked. Restored deduplicator and window checkpoints install through the same staged publisher and domain handle clear as the other kinds, so the restore checks below hold their installation order too. `shuttle_restore_publication_and_handle_clear_precede_resume_and_fence_delayed_publishers` drives the applied-state authority guard against a successor generation and RESUME, requiring complete publication and cleared handles before activation. `shuttle_materialized_capture_names_exactly_its_branch_generation` races capture with an update and eviction. `shuttle_replica_synchronization_preserves_the_restored_materialized_revision` races delayed and current owner snapshots. `shuttle_restore_reclamation_holds_the_revision_through_queued_installation` races the reclamation guard with a successor generation and queued installer, requiring the borrowed revision to stay fixed through deletion and preserving the current installation. They register in the shared Shuttle inventory and use its exploration, nondeterminism and replay contract. |
 | Domain clock (`src/runtime/domain_clock.rs`) | `shuttle_lifecycle_tests::concurrent_reads_of_one_installed_generation_never_decrease` checks the nondecreasing watermark; `a_clock_bound_to_a_replaced_generation_is_refused_by_revalidation` rejects a superseded generation; `readers_never_observe_an_installation_older_than_one_they_observed` prevents publication regression. `shuttle_delivery_sends_state_before_ticks_without_regressing_progress` explores the production observer and attachment delivery order across accepted ticks, same-generation unassignment and reassignment, and a generation change. `shuttle_an_attach_waiting_for_the_first_installation_observes_its_domains` races an attach's wait and lookup against the node's first installation of the committed domains and requires the lookup to find the domain and its clock. `a_logical_waiter_wakes_when_its_generation_stops`, `a_logical_waiter_wakes_when_its_generation_is_replaced`, `a_logical_waiter_wakes_when_its_domain_is_removed`, and `a_logical_waiter_wakes_when_a_replacement_mapping_reaches_its_deadline` cover each lifecycle wakeup. |
 
 The checks of WASM checkpoint holds and the durability barrier use the same runner and replay

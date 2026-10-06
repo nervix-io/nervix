@@ -346,6 +346,18 @@ struct TransactionCommitPlanRecordStep {
     inputs: DomainPlanningInputs,
 }
 
+impl crate::records::StoredUnder<String> for TransactionCommitPlanRecordHeader {
+    fn is_stored_under(&self, transaction_id: &String) -> bool {
+        self.preview.transaction_id == *transaction_id
+    }
+}
+
+impl crate::records::StoredUnder<TransactionCommitPlanStepKey> for TransactionCommitPlanRecordStep {
+    fn is_stored_under(&self, _: &TransactionCommitPlanStepKey) -> bool {
+        true
+    }
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct TransactionCommitPlanRecords {
     headers: Records<String, TransactionCommitPlanRecordHeader>,
@@ -358,6 +370,11 @@ impl TransactionCommitPlanRecords {
             headers: Records::load(COMMIT_PLAN_HEADER_TAG, keyspace)?,
             steps: Records::load(COMMIT_PLAN_STEP_TAG, keyspace)?,
         })
+    }
+
+    /// How many keyed records the commit plans store.
+    pub(crate) fn stored_records(&self) -> Option<usize> {
+        self.headers.len().checked_add(self.steps.len())
     }
 
     pub(crate) fn write_changes(

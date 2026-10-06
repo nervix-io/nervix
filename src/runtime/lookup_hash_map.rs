@@ -682,10 +682,7 @@ mod tests {
             ],
         }));
         let program = compile_processor_output_filter_map_program(
-            RuntimeCompileTarget {
-                domain: &domain("default"),
-                identifier: &named("project_titles"),
-            },
+            &named("project_titles"),
             &[named("incoming_logs")],
             &named("projected_titles"),
             &construction(
@@ -714,10 +711,7 @@ mod tests {
         assert_eq!(program.lookup_hash_maps.len(), 2);
 
         let binary_key = compile_processor_output_filter_map_program(
-            RuntimeCompileTarget {
-                domain: &domain("default"),
-                identifier: &named("project_titles"),
-            },
+            &named("project_titles"),
             &[named("incoming_logs")],
             &named("projected_titles"),
             &construction(

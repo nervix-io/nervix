@@ -212,7 +212,7 @@ impl StateMachineData {
             runtime_revision,
             command_retry_fence,
         } = metadata;
-        Ok(Self {
+        let state = Self {
             last_applied_log_id,
             last_membership,
             runtime_revision,
@@ -241,7 +241,42 @@ impl StateMachineData {
                 sm,
                 command_retry_fence,
             )?,
-        })
+        };
+        state.resources.check_recovered()?;
+        // Every family above read only the keys under its own tag, so a record under any other
+        // key would otherwise be left in place unread. The metadata record is the one other key.
+        let stored = sm.len().map_err(io::Error::other)?;
+        let Some(recovered) = state.stored_records() else {
+            return Err(io::Error::other(StorageFailure::InvalidState));
+        };
+        if recovered.checked_add(1) != Some(stored) {
+            return Err(io::Error::other(StorageFailure::InvalidState));
+        }
+        Ok(state)
+    }
+
+    /// How many keyed records this revision stores, besides its metadata.
+    fn stored_records(&self) -> Option<usize> {
+        let families = [
+            self.schedule.domains.len(),
+            self.domains.len(),
+            self.domain_clock_authorities.len(),
+            self.users.len(),
+            self.resources.stored_records()?,
+            self.cordoned_node_ids.len(),
+            self.node_admission_fences.len(),
+            self.domain_mutations.len(),
+            self.domain_restore_installations.len(),
+            self.transactions.len(),
+            self.transaction_commit_plans.stored_records()?,
+            self.transaction_reports.stored_records()?,
+            self.command_executions.stored_records(),
+        ];
+        let mut records = 0_usize;
+        for family in families {
+            records = records.checked_add(family)?;
+        }
+        Some(records)
     }
 
     /// Apply one committed entry: its log position, the membership it carries and its command.
@@ -1061,6 +1096,30 @@ impl StoreInner {
         index.to_be_bytes().to_vec()
     }
 
+    /// The entry a stored log record holds. An append stores every entry under its own index, so
+    /// a record under another index, or one whose membership no configuration can hold, is a
+    /// record no append wrote.
+    fn decode_log_entry(key: &[u8], value: &[u8]) -> io::Result<EntryOf<TypeConfig>> {
+        let index = Self::log_index(key)?;
+        let record: EntryRecord = storage_decode(value)?;
+        let entry = record
+            .into_entry()
+            .map_err(|_| io::Error::other(StorageFailure::InvalidState))?;
+        if entry.log_id.index != index {
+            return Err(io::Error::other(StorageFailure::InvalidState));
+        }
+        Ok(entry)
+    }
+
+    /// The log index a stored log key names. A log key is exactly the index's eight big-endian
+    /// bytes, so any other length is a key no append wrote.
+    fn log_index(key: &[u8]) -> io::Result<u64> {
+        let index: [u8; 8] = key
+            .try_into()
+            .map_err(|_| io::Error::other(StorageFailure::InvalidState))?;
+        Ok(u64::from_be_bytes(index))
+    }
+
     fn log_bounds<R: RangeBounds<u64>>(range: R) -> (Bound<Vec<u8>>, Bound<Vec<u8>>) {
         let convert = |bound: Bound<&u64>| match bound {
             Bound::Included(index) => Bound::Included(Self::log_key(*index)),
@@ -1101,10 +1160,7 @@ impl StoreInner {
                 }
                 bytes = next_bytes;
             }
-            let record: EntryRecord = storage_decode(&value)?;
-            let entry = record
-                .into_entry()
-                .map_err(|_| io::Error::other(StorageFailure::InvalidState))?;
+            let entry = Self::decode_log_entry(&key, &value)?;
             if let LogReadLimit::Bounded { .. } = limit {
                 continuation = Some(Bound::Excluded(key.to_vec()));
             }
@@ -1408,11 +1464,7 @@ impl FjallStore {
                 let mut boundary = None;
                 for item in inner.logs.range(bounds).rev() {
                     let (key, value) = item.into_inner().map_err(io::Error::other)?;
-                    let index: [u8; 8] = key
-                        .as_ref()
-                        .try_into()
-                        .map_err(|_| io::Error::other(StorageFailure::InvalidState))?;
-                    let index = u64::from_be_bytes(index);
+                    let index = StoreInner::log_index(&key)?;
                     let length = u64::try_from(value.len()).map_err(io::Error::other)?;
                     if kept_entries >= entries_retained || kept_bytes >= bytes_retained {
                         boundary = Some(index);
@@ -1681,11 +1733,8 @@ impl RaftLogStorage<TypeConfig> for FjallStore {
                 let last_purged_log_id = inner.read_optional_log_id(KEY_LAST_PURGED)?;
                 let last_log_id = match inner.logs.iter().next_back() {
                     Some(item) => {
-                        let (_, value) = item.into_inner().map_err(io::Error::other)?;
-                        let record: EntryRecord = storage_decode(&value)?;
-                        let entry = record
-                            .into_entry()
-                            .map_err(|_| io::Error::other(StorageFailure::InvalidState))?;
+                        let (key, value) = item.into_inner().map_err(io::Error::other)?;
+                        let entry = StoreInner::decode_log_entry(&key, &value)?;
                         Some(entry.log_id)
                     }
                     None => last_purged_log_id.clone(),
@@ -1920,5 +1969,11 @@ impl RaftSnapshotBuilder<TypeConfig> for FjallStore {
     }
 }
 
+#[cfg(test)]
+mod generators;
+#[cfg(test)]
+mod properties;
+#[cfg(test)]
+mod raft_properties;
 #[cfg(test)]
 mod tests;

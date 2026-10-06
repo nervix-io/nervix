@@ -32,6 +32,27 @@ pub(super) enum ProcessorBranchTaskError {
     ReadLruSnapshot,
     #[error("failed to decode the persisted processor branch LRU snapshot")]
     DecodeLruSnapshot,
+    #[error(
+        "could not read the domain time of accepted input for branch '{}'",
+        branch_key_display(.branch)
+    )]
+    AcceptedInputClock { branch: Option<BranchKey> },
+    #[error("the task of branch '{}' is unavailable", branch_key_display(.branch))]
+    Unavailable { branch: Option<BranchKey> },
+    #[error("the processor has not restored its branches")]
+    RestorePending,
+    #[error("the branch lifecycle the handed-over processor branches belong to is unavailable")]
+    HandedOffLifecycleUnavailable,
+    #[error(
+        "handed-over processor branch '{}' began at lifecycle revision {incarnation}, after the \
+         lifecycle revision {lsm} it belongs to",
+        branch_key_display(.branch)
+    )]
+    HandedOffLifetimeAfterLifecycle {
+        branch: Option<BranchKey>,
+        incarnation: u64,
+        lsm: u64,
+    },
 }
 
 pub(super) const PROCESSOR_BRANCH_TASK_SHUTDOWN_GRACE: Duration = Duration::from_secs(2);
@@ -227,7 +248,7 @@ pub(super) async fn run_processor_node_runtime(
         Ok(clock) => clock,
         Err(error) => {
             runtime_handle.events().report_error(format!(
-                "processor '{}' in domain '{}' could not bind its clock: {error}",
+                "processor '{}' in domain '{}' could not bind its clock: {error:#}",
                 processor.as_str(),
                 domain.as_str(),
             ));
@@ -247,110 +268,11 @@ pub(super) async fn run_processor_node_runtime(
     runtime_handle.register_branch_lifecycle_metrics(&domain, template.branch.as_ref());
     let mut instances = BranchInstanceRegistry::<Option<BranchKey>, ProcessorBranchTask>::new();
     let mut last_persisted_lru_lsm = 0;
-    if restored_handoffs.is_empty() {
-        last_persisted_lru_lsm = match restore_processor_branch_lru_snapshot(
-            &runtime_handle,
-            &domain,
-            &template,
-            &mut instances,
-        )
-        .await
-        {
-            Ok(lsm) => lsm,
-            Err(error) => {
-                warn!(
-                    domain = domain.as_str(),
-                    processor = processor.as_str(),
-                    error = %format_args!("{error:#}"),
-                    "failed to restore processor branch lru snapshot"
-                );
-                0
-            }
-        };
-    } else {
-        let placement = match branch_lru_placement(&runtime_handle, &domain, &template) {
-            Ok(placement) => placement,
-            Err(error) => {
-                warn!(error = %format_args!("{error:#}"), "failed to place handed-off branch lifecycle");
-                return;
-            }
-        };
-        let transferred_lru = match runtime_handle.take_restorable_branch_lru_snapshot(&placement) {
-            Ok(Some(snapshot)) => snapshot,
-            Ok(None) => {
-                warn!(
-                    processor = processor.as_str(),
-                    "handed-off branch lifecycle is unavailable"
-                );
-                return;
-            }
-            Err(error) => {
-                warn!(error = %format_args!("{error:#}"), "failed to read handed-off branch lifecycle");
-                return;
-            }
-        };
-        if restored_handoffs
-            .iter()
-            .any(|handoff| handoff.incarnation > transferred_lru.lsm)
-        {
-            warn!(
-                processor = processor.as_str(),
-                "handed-off branch lifetime exceeds its lifecycle revision"
-            );
-            return;
-        }
-        instances.set_version(transferred_lru.lsm);
-        for handoff in restored_handoffs {
-            nervix_primitives::task::consume_budget().await;
-            let key = handoff.key.clone();
-            match nervix_primitives::expect_lint!(
-                nervix::lifecycle_call,
-                "the missing or replacement concrete branch installs one retained task under its \
-                 branch key and incarnation",
-                spawn_processor_branch_task(
-                    ProcessorRuntimeContext::new(runtime_handle.clone(), domain.clone()),
-                    &template,
-                    key.clone(),
-                    handoff.pending_materialized,
-                    ProcessorBranchLifetime::Restored,
-                    handoff.incarnation,
-                )
-            )
-            .await
-            {
-                Ok(entry) => {
-                    nervix_primitives::expect_lint!(
-                        nervix::lifecycle_call,
-                        "the concrete branch creation transition registers its one metric identity",
-                        runtime_handle.observe_branch_instance_created(
-                            &domain,
-                            template.branch.as_ref(),
-                            &key,
-                        )
-                    );
-                    instances.insert_restored(key, handoff.restored_at, handoff.incarnation, entry);
-                }
-                Err(error) => {
-                    warn!(
-                        domain = domain.as_str(),
-                        processor = processor.as_str(),
-                        error = %format_args!("{error:#}"),
-                        "failed to restore handed-off processor branch"
-                    );
-                }
-            }
-        }
-    }
-    if let Some(max_instances) = template.branch_max_instances {
-        evict_processor_branch_instances_to_capacity(
-            &runtime_handle,
-            &domain,
-            &template,
-            max_instances,
-            &mut instances,
-        )
-        .await;
-    }
+    // The task restores its branches before it takes any input. Until one attempt installs every
+    // branch, its input stays queued in its relays, so no record starts a new lifetime for a branch
+    // the restore would resume.
+    let restore_context = ProcessorRuntimeContext::new(runtime_handle.clone(), domain.clone());
+    let mut pending_restore = Some(PendingProcessorBranchRestore::new(restored_handoffs));
     let quiesce_counters = nervix_primitives::expect_lint!(
         nervix::lifecycle_call,
         "task startup installs and retains the exact node quiesce counters before processing input",
@@ -389,7 +311,7 @@ pub(super) async fn run_processor_node_runtime(
             Ok(snapshot) => snapshot,
             Err(error) => {
                 runtime_handle.events().report_error(format!(
-                    "processor '{}' in domain '{}' lost its clock: {error}",
+                    "processor '{}' in domain '{}' lost its clock: {error:#}",
                     processor.as_str(),
                     domain.as_str(),
                 ));
@@ -398,7 +320,48 @@ pub(super) async fn run_processor_node_runtime(
         };
         let now = snapshot.now();
         let mut did_scheduled_work = false;
-        if !ownership_frozen && Instant::now() >= next_expiration_scan {
+        if let Some(restore) = pending_restore.as_mut()
+            && Instant::now() >= restore.retry_at()
+        {
+            let attempt = nervix_primitives::expect_lint!(
+                nervix::lifecycle_call,
+                "the processor task installs the branch lifetimes it restores before it accepts \
+                 input, and a failed attempt retries only after its backoff",
+                restore.attempt(
+                    &restore_context,
+                    &template,
+                    &mut instances,
+                    &mut last_persisted_lru_lsm,
+                )
+            )
+            .await;
+            match attempt {
+                Ok(()) => {
+                    pending_restore = None;
+                    if let Some(max_instances) = template.branch_max_instances {
+                        evict_processor_branch_instances_to_capacity(
+                            &runtime_handle,
+                            &domain,
+                            &template,
+                            max_instances,
+                            &mut instances,
+                        )
+                        .await;
+                    }
+                }
+                Err(error) => {
+                    warn!(
+                        domain = domain.as_str(),
+                        processor = processor.as_str(),
+                        error = %format_args!("{error:#}"),
+                        "failed to restore processor branches; their input waits for the next attempt"
+                    );
+                }
+            }
+            did_scheduled_work = true;
+        }
+        if pending_restore.is_none() && !ownership_frozen && Instant::now() >= next_expiration_scan
+        {
             if let Some(branch_ttl) = template.branch_ttl {
                 expire_processor_branch_instances(
                     &runtime_handle,
@@ -413,7 +376,10 @@ pub(super) async fn run_processor_node_runtime(
             next_expiration_scan = Instant::now() + expiration_scan_interval;
             did_scheduled_work = true;
         }
-        if Instant::now() >= next_lru_snapshot && prepared_reset.is_none() {
+        if pending_restore.is_none()
+            && Instant::now() >= next_lru_snapshot
+            && prepared_reset.is_none()
+        {
             if let Err(error) = nervix_primitives::expect_lint!(
                 nervix::lifecycle_call,
                 "explicit checkpoint cadence or terminal teardown captures one branch lifecycle \
@@ -443,7 +409,10 @@ pub(super) async fn run_processor_node_runtime(
         let maintenance_timeout = if ownership_frozen {
             OWNERSHIP_HANDOFF_FREEZE_RECHECK_INTERVAL
         } else {
-            let next_maintenance = next_expiration_scan.min(next_lru_snapshot);
+            let next_maintenance = match pending_restore.as_ref() {
+                Some(restore) => restore.retry_at(),
+                None => next_expiration_scan.min(next_lru_snapshot),
+            };
             next_maintenance
                 .checked_duration_since(Instant::now())
                 .unwrap_or(Duration::ZERO)
@@ -453,26 +422,27 @@ pub(super) async fn run_processor_node_runtime(
             Err(error) => {
                 runtime_handle.events().report_error(format!(
                     "processor '{}' in domain '{}' could not schedule its next maintenance scan: \
-                     {error}",
+                     {error:#}",
                     processor.as_str(),
                     domain.as_str(),
                 ));
                 break;
             }
         };
-        let work = match interaction.next(wake).await {
+        // A pending restore keeps new input in the relays; only a drain still delivers it.
+        let work = match interaction
+            .next_with_input(wake, pending_restore.is_none())
+            .await
+        {
             Ok(work) => work,
-            Err(error) => {
+            Err(failure) => {
                 runtime_handle.handle_internal_processor_error_for_acks(
                     &domain,
                     template.source_kind,
                     &processor,
                     &template.error_policies,
-                    error.acks(),
-                    format!(
-                        "processor '{}' relay interaction failed: {error}",
-                        processor.as_str()
-                    ),
+                    [&failure.acks],
+                    &failure.error,
                 );
                 continue;
             }
@@ -483,6 +453,20 @@ pub(super) async fn run_processor_node_runtime(
                 let work = work.verified(
                     "a batch event always carries the quiesce work the interaction recorded for it",
                 );
+                if pending_restore.is_some() {
+                    // A drain delivers input the restore has not caught up with. Processing it
+                    // would start a new lifetime for a branch the restore resumes.
+                    runtime_handle.handle_internal_processor_error_for_acks(
+                        &domain,
+                        template.source_kind,
+                        &processor,
+                        &template.error_policies,
+                        batch.acks.iter(),
+                        &Report::new(ProcessorBranchTaskError::RestorePending),
+                    );
+                    drop(work);
+                    continue;
+                }
                 let branch = batch.key.as_ref().map(BranchKey::fingerprint);
                 if reset_fence
                     .as_ref()
@@ -510,6 +494,41 @@ pub(super) async fn run_processor_node_runtime(
             }
             RelayInteractionEvent::Wake => {}
             RelayInteractionEvent::Command(command) => match command {
+                // The branches the processor has not restored exist only in its lifecycle, so it
+                // cannot checkpoint them or reset their guest state yet.
+                ProcessorNodeCommand::Checkpoint { response } if pending_restore.is_some() => {
+                    response
+                        .send(Err(Report::new(
+                            OwnershipHandoffError::BranchesUnrestored {
+                                kind: template.source_kind,
+                                identifier: ModelName::from(&processor),
+                            },
+                        )))
+                        .means_peer_left("processor lifecycle checkpoint requester");
+                }
+                ProcessorNodeCommand::PrepareWasmStateReset { response, .. }
+                    if pending_restore.is_some() =>
+                {
+                    response
+                        .send(Err(Report::new(
+                            WasmStateResetRuntimeError::BranchesUnrestored {
+                                processor: ModelName::from(&processor),
+                            },
+                        )))
+                        .means_peer_left("WASM state reset preparation requester");
+                }
+                ProcessorNodeCommand::ApplyWasmStateReset { reset, response }
+                    if pending_restore.is_some()
+                        && reset.phase() == nervix_models::WasmStateResetPhase::Publishing =>
+                {
+                    response
+                        .send(Err(Report::new(
+                            WasmStateResetRuntimeError::BranchesUnrestored {
+                                processor: ModelName::from(&processor),
+                            },
+                        )))
+                        .means_peer_left("WASM state reset schedule application requester");
+                }
                 ProcessorNodeCommand::Checkpoint { response } => {
                     let result = nervix_primitives::expect_lint!(
                         nervix::lifecycle_call,
@@ -629,19 +648,25 @@ pub(super) async fn run_processor_node_runtime(
         );
     }
     if let Some(response) = handoff_response {
-        let handoffs = nervix_primitives::expect_lint!(
-            nervix::lifecycle_call,
-            "the ownership transfer transition captures and detaches its retained branch \
-             generations",
-            handoff_all_processor_branch_instances(
-                &runtime_handle,
-                &domain,
-                &processor,
-                template.branch.as_ref(),
-                &mut instances,
-            )
-        )
-        .await;
+        let handoffs = match pending_restore {
+            // The successor restores the branches this task never installed.
+            Some(restore) => restore.into_handoffs(),
+            None => {
+                nervix_primitives::expect_lint!(
+                    nervix::lifecycle_call,
+                    "the ownership transfer transition captures and detaches its retained branch \
+                     generations",
+                    handoff_all_processor_branch_instances(
+                        &runtime_handle,
+                        &domain,
+                        &processor,
+                        template.branch.as_ref(),
+                        &mut instances,
+                    )
+                )
+                .await
+            }
+        };
         response
             .send(handoffs)
             .means_peer_left("processor handoff requester");
@@ -1135,12 +1160,9 @@ pub(super) async fn dispatch_processor_node_input(
                 &template.source,
                 &template.error_policies,
                 batch.acks.iter(),
-                format!(
-                    "processor '{}' could not read the domain time of accepted input for branch \
-                     '{}': {error}",
-                    template.source.as_str(),
-                    branch_key_display(&key),
-                ),
+                &error.change_context(ProcessorBranchTaskError::AcceptedInputClock {
+                    branch: key.clone(),
+                }),
             );
             return;
         }
@@ -1175,7 +1197,7 @@ pub(super) async fn dispatch_processor_node_input(
                     &template.source,
                     &template.error_policies,
                     batch.acks.iter(),
-                    format!("{error:#}"),
+                    &error,
                 );
                 return;
             }
@@ -1240,10 +1262,9 @@ pub(super) async fn dispatch_processor_node_input(
             &template.source,
             &template.error_policies,
             input.batch.acks.iter(),
-            format!(
-                "processor branch task '{}' is unavailable",
-                branch_key_display(&key)
-            ),
+            &Report::new(ProcessorBranchTaskError::Unavailable {
+                branch: key.clone(),
+            }),
         );
         if let Some(entry) = instances.remove(&key) {
             nervix_primitives::expect_lint!(
@@ -1290,87 +1311,142 @@ pub(super) async fn spawn_processor_branch_task(
     lifetime: ProcessorBranchLifetime,
     incarnation: u64,
 ) -> error_stack::Result<ProcessorBranchTask, ProcessorBranchTaskError> {
-    let published_template = if matches!(lifetime, ProcessorBranchLifetime::Appeared) {
-        context
-            .runtime_handle
-            .domain_routing_cache(&context.domain)
-            .and_then(|mut routing| {
-                routing
-                    .load()
-                    .processor_plans
-                    .get(&NodeRef::new(template.source_kind, &template.source))
-                    .map(|plan| plan.template.clone())
-            })
-    } else {
-        None
-    };
-    let template = published_template.unwrap_or_else(|| StdArc::new(template.clone()));
-    let branch_key = key.clone();
-    let mut branch = template
-        .instantiate(&context.runtime_handle, &context.domain, key, incarnation)
-        .await
-        .change_context(ProcessorBranchTaskError::Instantiate {
-            branch: branch_key.clone(),
-        })?
-        .into_inner();
-    if template.source_kind == ModelKind::WindowProcessor
-        && let ProcessorBranchLifetime::Appeared = lifetime
-    {
-        let processor = ModelName::from(&template.source);
-        if let Some(node) = branch.processors.get_mut(&processor) {
-            node.reset_window_state();
+    let branch =
+        PreparedProcessorBranch::prepare(context, template, key, lifetime, incarnation).await?;
+    Ok(branch.start(pending_materialized))
+}
+
+/// A concrete processor branch built from its plan and not started yet.
+///
+/// Building a branch opens its retained state and can fail; starting it cannot. A restore builds
+/// every branch it installs before it starts any, so a failed attempt leaves nothing running.
+pub(super) struct PreparedProcessorBranch {
+    context: ProcessorRuntimeContext,
+    source_kind: ModelKind,
+    source: RelayName,
+    branch: BranchRuntime,
+    incarnation: u64,
+}
+
+impl PreparedProcessorBranch {
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            lifecycle,
+            reason = "one concrete processor branch opens its retained state and binds its clock"
+        )
+    )]
+    pub(super) async fn prepare(
+        context: ProcessorRuntimeContext,
+        template: &BranchInstanceTemplate,
+        key: Option<BranchKey>,
+        lifetime: ProcessorBranchLifetime,
+        incarnation: u64,
+    ) -> error_stack::Result<Self, ProcessorBranchTaskError> {
+        let published_template = if matches!(lifetime, ProcessorBranchLifetime::Appeared) {
+            context
+                .runtime_handle
+                .domain_routing_cache(&context.domain)
+                .and_then(|mut routing| {
+                    routing
+                        .load()
+                        .processor_plans
+                        .get(&NodeRef::new(template.source_kind, &template.source))
+                        .map(|plan| plan.template.clone())
+                })
+        } else {
+            None
+        };
+        let template = published_template.unwrap_or_else(|| StdArc::new(template.clone()));
+        let branch_key = key.clone();
+        let mut branch = template
+            .instantiate(&context.runtime_handle, &context.domain, key, incarnation)
+            .await
+            .change_context(ProcessorBranchTaskError::Instantiate {
+                branch: branch_key.clone(),
+            })?
+            .into_inner();
+        if template.source_kind == ModelKind::WindowProcessor
+            && let ProcessorBranchLifetime::Appeared = lifetime
+        {
+            let processor = ModelName::from(&template.source);
+            if let Some(node) = branch.processors.get_mut(&processor) {
+                node.reset_window_state();
+            }
+            branch
+                .snapshot_processor_live_state(&processor)
+                .change_context_lazy(|| ProcessorBranchTaskError::InitializeWindow {
+                    branch: branch_key,
+                })?;
         }
-        branch
-            .snapshot_processor_live_state(&processor)
-            .change_context_lazy(|| ProcessorBranchTaskError::InitializeWindow {
-                branch: branch_key,
-            })?;
-    }
-    if let Some(processor) = branch
-        .processors
-        .get_mut(&ModelName::from(&template.source))
-    {
-        processor.pending_materialized = pending_materialized;
-    }
-    let (input_tx, input_rx) = mpsc::channel(1);
-    let (command_tx, command_rx) = mpsc::channel(1);
-    let processor = template.source.clone();
-    let (snapshot_shutdown_tx, _) = watch::channel(false);
-    let spawned = match branch.processors.get(&ModelName::from(&processor)) {
-        Some(processor) => {
-            processor.spawn_snapshot_task(&context.runtime_handle, &snapshot_shutdown_tx)
-        }
-        None => SpawnedSnapshotTask {
-            task: None,
-            requests: None,
-        },
-    };
-    let snapshot_task = ProcessorSnapshotTask {
-        shutdown_tx: snapshot_shutdown_tx,
-        task: spawned.task,
-        requests: spawned.requests,
-    };
-    let quiesce_counters = context.runtime_handle.node_quiesce_counters(
-        &context.domain,
-        NodeRef::new(template.source_kind, &processor),
-    );
-    let task = nervix_primitives::task::spawn(run_processor_branch_task(
-        context,
-        ProcessorBranchRunIdentity {
-            processor: ModelName::from(&processor),
+        Ok(Self {
+            context,
+            source_kind: template.source_kind,
+            source: template.source.clone(),
+            branch,
             incarnation,
-        },
-        branch,
-        input_rx,
-        command_rx,
-        quiesce_counters,
-        snapshot_task,
-    ));
-    Ok(ProcessorBranchTask {
-        input: input_tx,
-        commands: command_tx,
-        task: nervix_primitives::sync::blocking::Mutex::new(Some(AbortOnDropHandle::new(task))),
-    })
+        })
+    }
+
+    /// Start the branch's task with the input still pending for it.
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            lifecycle,
+            reason = "one concrete processor branch installs its task handles"
+        )
+    )]
+    pub(super) fn start(
+        self,
+        pending_materialized: VecDeque<PendingMaterializedBatch>,
+    ) -> ProcessorBranchTask {
+        let Self {
+            context,
+            source_kind,
+            source,
+            mut branch,
+            incarnation,
+        } = self;
+        let processor = ModelName::from(&source);
+        if let Some(node) = branch.processors.get_mut(&processor) {
+            node.pending_materialized = pending_materialized;
+        }
+        let (input_tx, input_rx) = mpsc::channel(1);
+        let (command_tx, command_rx) = mpsc::channel(1);
+        let (snapshot_shutdown_tx, _) = watch::channel(false);
+        let spawned = match branch.processors.get(&processor) {
+            Some(node) => node.spawn_snapshot_task(&context.runtime_handle, &snapshot_shutdown_tx),
+            None => SpawnedSnapshotTask {
+                task: None,
+                requests: None,
+            },
+        };
+        let snapshot_task = ProcessorSnapshotTask {
+            shutdown_tx: snapshot_shutdown_tx,
+            task: spawned.task,
+            requests: spawned.requests,
+        };
+        let quiesce_counters = context
+            .runtime_handle
+            .node_quiesce_counters(&context.domain, NodeRef::new(source_kind, &processor));
+        let task = nervix_primitives::task::spawn(run_processor_branch_task(
+            context,
+            ProcessorBranchRunIdentity {
+                processor,
+                incarnation,
+            },
+            branch,
+            input_rx,
+            command_rx,
+            quiesce_counters,
+            snapshot_task,
+        ));
+        ProcessorBranchTask {
+            input: input_tx,
+            commands: command_tx,
+            task: nervix_primitives::sync::blocking::Mutex::new(Some(AbortOnDropHandle::new(task))),
+        }
+    }
 }
 
 pub(super) async fn stop_processor_snapshot_task(
@@ -1469,7 +1545,7 @@ async fn run_processor_branch_task(
             Ok(snapshot) => snapshot,
             Err(error) => {
                 runtime_handle.events().report_error(format!(
-                    "processor branch '{}' in domain '{}' lost its clock: {error}",
+                    "processor branch '{}' in domain '{}' lost its clock: {error:#}",
                     processor.as_str(),
                     domain.as_str(),
                 ));
@@ -1483,7 +1559,7 @@ async fn run_processor_branch_task(
             Err(error) => {
                 runtime_handle.events().report_error(format!(
                     "processor branch '{}' in domain '{}' could not inspect a buffer deadline: \
-                     {error}",
+                     {error:#}",
                     processor.as_str(),
                     domain.as_str(),
                 ));
@@ -1550,7 +1626,7 @@ async fn run_processor_branch_task(
                                 Err(error) => {
                                     runtime_handle.events().report_error(format!(
                                         "processor branch '{}' in domain '{}' lost its clock: \
-                                         {error}",
+                                         {error:#}",
                                         processor.as_str(),
                                         domain.as_str(),
                                     ));
@@ -1622,7 +1698,7 @@ async fn run_processor_branch_task(
                     Ok(snapshot) => snapshot,
                     Err(error) => {
                         runtime_handle.events().report_error(format!(
-                            "processor branch '{}' in domain '{}' lost its clock: {error}",
+                            "processor branch '{}' in domain '{}' lost its clock: {error:#}",
                             processor.as_str(),
                             domain.as_str(),
                         ));
@@ -1650,7 +1726,7 @@ async fn run_processor_branch_task(
                 if let Err(error) = result {
                     runtime_handle.events().report_error(format!(
                         "processor branch '{}' in domain '{}' could not wait for a buffer \
-                         deadline: {error}",
+                         deadline: {error:#}",
                         processor.as_str(),
                         domain.as_str(),
                     ));
@@ -1664,7 +1740,7 @@ async fn run_processor_branch_task(
                 if let Err(error) = result {
                     runtime_handle.events().report_error(format!(
                         "processor branch '{}' in domain '{}' could not wait for a branch \
-                         deadline: {error}",
+                         deadline: {error:#}",
                         processor.as_str(),
                         domain.as_str(),
                     ));
@@ -1694,7 +1770,7 @@ async fn run_processor_branch_task(
             Err(error) => {
                 runtime_handle.events().report_error(format!(
                     "processor branch '{}' in domain '{}' stopped without its clock and cannot \
-                     publish its accepted output: {error}",
+                     publish its accepted output: {error:#}",
                     processor.as_str(),
                     domain.as_str(),
                 ));
@@ -2008,51 +2084,9 @@ pub(super) async fn shutdown_all_processor_branch_instances(
     }
 }
 
-pub(super) async fn restore_processor_branch_lru_snapshot(
-    runtime: &Runtime,
-    domain: &DomainName,
-    template: &BranchInstanceTemplate,
-    instances: &mut BranchInstanceRegistry<Option<BranchKey>, ProcessorBranchTask>,
-) -> error_stack::Result<u64, ProcessorBranchTaskError> {
-    let placement = branch_lru_placement(runtime, domain, template)
-        .change_context(ProcessorBranchTaskError::ReadLruSnapshot)?;
-    let snapshot = runtime
-        .take_restorable_branch_lru_snapshot(&placement)
-        .change_context(ProcessorBranchTaskError::ReadLruSnapshot)?;
-    let Some(snapshot) = snapshot else {
-        return Ok(0);
-    };
-    let restored = decode_branch_lru_snapshot(&snapshot.payload)
-        .change_context(ProcessorBranchTaskError::DecodeLruSnapshot)?;
-    for restored_entry in restored {
-        nervix_primitives::task::consume_budget().await;
-        let key = restored_entry.key;
-        let last_ingestion = restored_entry.last_ingestion;
-        let incarnation = restored_entry.incarnation;
-        let entry = nervix_primitives::expect_lint!(
-            nervix::lifecycle_call,
-            "the missing or replacement concrete branch installs one retained task under its \
-             branch key and incarnation",
-            spawn_processor_branch_task(
-                ProcessorRuntimeContext::new(runtime.clone(), domain.clone()),
-                template,
-                key.clone(),
-                VecDeque::new(),
-                ProcessorBranchLifetime::Restored,
-                incarnation,
-            )
-        )
-        .await?;
-        nervix_primitives::expect_lint!(
-            nervix::lifecycle_call,
-            "the concrete branch creation transition registers its one metric identity",
-            runtime.observe_branch_instance_created(domain, template.branch.as_ref(), &key)
-        );
-        instances.insert_restored(key, last_ingestion, incarnation, entry);
-    }
-    instances.set_version(snapshot.lsm);
-    Ok(snapshot.lsm)
-}
+#[cfg(test)]
+#[path = "processor_branch_dispatch_tests.rs"]
+mod dispatch_tests;
 
 #[cfg(test)]
 mod tests {
@@ -2655,6 +2689,7 @@ mod tests {
         let domain = domain("default");
         install_unpaced_test_domain(&runtime, &domain);
         let processor = named::<ModelName>("route_orders");
+        publish_state_identity(&runtime, &domain, ModelKind::Junction, processor.clone());
         let orders = named::<RelayName>("orders");
         let returns = named::<RelayName>("returns");
         let mut template = junction_branch_template(processor.as_str(), orders.as_str());

@@ -243,3 +243,48 @@ pub(super) fn decode_branch_aggregated_snapshot(
     rkyv::from_bytes::<BranchAggregatedRuntimeStateSnapshot, rkyv::rancor::Error>(payload)
         .map_err(|error| RuntimePersistenceError::DecodeState(error.to_string()))
 }
+
+/// A generated metrics snapshot stores through `stored`, the checkpoint envelope a node keeps it
+/// in, and restores a snapshot that encodes to exactly the stored bytes. The snapshot holds plain
+/// numbers, text and lists, so equal encodings are equal values, floats compared by their bits.
+#[cfg(test)]
+pub(in crate::runtime) fn assert_generated_metrics_survive(
+    arbitrary: &mut nervix_arbitrary::Arbitrary<'_>,
+    stored: impl FnOnce(Vec<u8>) -> Vec<u8>,
+) {
+    use meticulous::ResultExt as _;
+
+    let snapshot = BranchAggregatedRuntimeStateSnapshot {
+        metrics: RuntimeMetricsSnapshot::generated(arbitrary),
+    };
+    let payload = encode_branch_aggregated_snapshot(&snapshot)
+        .assured("a bounded generated metrics snapshot encodes");
+    let restored = decode_branch_aggregated_snapshot(&stored(payload.clone()))
+        .assured("a stored metrics snapshot decodes from its own encoding");
+    let restored =
+        encode_branch_aggregated_snapshot(&restored).assured("a decoded metrics snapshot encodes");
+    assert_eq!(restored, payload);
+}
+
+/// Arbitrary bytes read as a stored metrics snapshot either fail with the typed decode failure or
+/// restore a snapshot that stores back unchanged.
+#[cfg(test)]
+pub(in crate::runtime) fn assert_metrics_payload_decodes_typed(payload: &[u8]) {
+    use meticulous::ResultExt as _;
+
+    match decode_branch_aggregated_snapshot(payload) {
+        Ok(snapshot) => {
+            let encoded = encode_branch_aggregated_snapshot(&snapshot)
+                .assured("a decoded metrics snapshot encodes");
+            let again = decode_branch_aggregated_snapshot(&encoded)
+                .assured("a re-encoded metrics snapshot decodes");
+            let again = encode_branch_aggregated_snapshot(&again)
+                .assured("a decoded metrics snapshot encodes");
+            assert_eq!(again, encoded);
+        }
+        Err(error) => assert!(
+            matches!(error, RuntimePersistenceError::DecodeState(_)),
+            "{error:?}"
+        ),
+    }
+}
