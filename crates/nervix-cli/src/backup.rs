@@ -27,8 +27,8 @@ use nervix_backup::{
 };
 use nervix_client_core::{BackupArchiveSummary, Client, CommandOutcome, ConnectOptions};
 use nervix_models::{
-    Backup, BackupCapture, BackupResources, BackupScope, DescribeBackup, DomainName, DomainPace,
-    InspectionFormat,
+    Backup, BackupCapture, BackupResources, BackupScope, CommandExecutionReference, DescribeBackup,
+    DomainName, DomainPace, InspectionFormat,
 };
 use nervix_nspl::client_statement::{ClientStatement, parse_client_statements};
 use serde_json::{Value, json};
@@ -65,6 +65,7 @@ pub(super) struct BackupRequest {
     pub(super) without_state: bool,
     pub(super) without_pause: bool,
     pub(super) timeout: Option<Duration>,
+    pub(super) execution_reference: Option<CommandExecutionReference>,
     pub(super) format: CliReportFormat,
 }
 
@@ -144,7 +145,13 @@ pub(super) async fn run_backup(request: BackupRequest) -> Result<(), StackReport
             let error = ClientError::BackupArguments {
                 reason: "a cluster backup covers every domain and names none",
             };
-            report_failure(report, format, "INVALID_ARGUMENTS", &error.to_string());
+            report_failure(
+                report,
+                format,
+                "INVALID_ARGUMENTS",
+                &error.to_string(),
+                None,
+            );
             return Err(StackReport::new(error));
         }
         (CliBackupScope::Domain, domain) => BackupScope::Domain(domain),
@@ -153,7 +160,13 @@ pub(super) async fn run_backup(request: BackupRequest) -> Result<(), StackReport
         let error = ClientError::BackupArguments {
             reason: "the archive's path must be valid UTF-8",
         };
-        report_failure(report, format, "INVALID_ARGUMENTS", &error.to_string());
+        report_failure(
+            report,
+            format,
+            "INVALID_ARGUMENTS",
+            &error.to_string(),
+            None,
+        );
         return Err(StackReport::new(error));
     };
     let resources = if request.without_resources {
@@ -176,48 +189,57 @@ pub(super) async fn run_backup(request: BackupRequest) -> Result<(), StackReport
         resources,
         capture,
     };
-    let mut connect_options = request.connect_options;
-    if let Some(timeout) = request.timeout {
-        // The server may spend the entire quiesce budget before it can answer. Leave one
-        // ordinary request budget for command admission, capture and the final reply.
-        let Some(budget) = timeout.checked_add(
-            connect_options
-                .request_timeout
-                .max(connect_options.retry_timeout),
-        ) else {
-            let error = ClientError::BackupArguments {
-                reason: "the backup timeout plus the client request budget is too large",
-            };
-            report_failure(report, format, "INVALID_ARGUMENTS", &error.to_string());
-            return Err(StackReport::new(error));
-        };
-        connect_options.request_timeout = connect_options.request_timeout.max(budget);
-        connect_options.retry_timeout = connect_options.retry_timeout.max(budget);
-    }
     let client = match Client::connect_with_options(
         &request.server,
         Some(request.session_domain),
-        connect_options,
+        request.connect_options,
     )
     .await
     {
         Ok(client) => client,
         Err(error) => {
-            report_failure(report, format, "CONNECTION_FAILED", &error.to_string());
+            report_failure(
+                report,
+                format,
+                "CONNECTION_FAILED",
+                &error.to_string(),
+                None,
+            );
             return Err(StackReport::new(ClientError::from(error)));
         }
     };
-    let outcome = match client.execute(backup.to_canonical_nspl()).await {
+    let execution = match request.execution_reference {
+        Some(reference) => {
+            client
+                .prepare_backup_with_reference(&backup, &reference)
+                .await
+        }
+        None => client.prepare_execution(backup.to_canonical_nspl()).await,
+    };
+    let outcome = match client.execute_prepared(&execution).await {
         Ok(outcome) => outcome,
         Err(error) => {
-            report_failure(report, format, "BACKUP_FAILED", &error_chain(&error));
+            let reference = match &error {
+                nervix_client_core::ClientError::UncertainCommand { reference, .. }
+                | nervix_client_core::ClientError::BackupDownload { reference, .. } => {
+                    Some(reference)
+                }
+                _ => None,
+            };
+            report_failure(
+                report,
+                format,
+                "BACKUP_FAILED",
+                &error_chain(&error),
+                reference,
+            );
             return Err(StackReport::new(ClientError::from(error)));
         }
     };
     let summary = match (outcome.succeeded(), outcome.backup.as_deref()) {
         (true, Some(summary)) => summary.clone(),
         (true, None) | (false, _) => {
-            report_failure(report, format, "BACKUP_REFUSED", &outcome.message);
+            report_failure(report, format, "BACKUP_REFUSED", &outcome.message, None);
             return Err(StackReport::new(ClientError::BackupFailed {
                 message: outcome.message,
             }));
@@ -228,7 +250,7 @@ pub(super) async fn run_backup(request: BackupRequest) -> Result<(), StackReport
         ArchiveOutput::Stdout { .. } => "-".to_string(),
     };
     if let Err(error) = output.deliver() {
-        report_failure(report, format, "WRITE_FAILED", &format!("{error:#}"));
+        report_failure(report, format, "WRITE_FAILED", &format!("{error:#}"), None);
         return Err(error);
     }
     match format {
@@ -252,11 +274,28 @@ fn error_chain(error: &nervix_client_core::ClientError) -> String {
     message
 }
 
-fn report_failure(report: ReportStream, format: CliReportFormat, code: &str, message: &str) {
+fn report_failure(
+    report: ReportStream,
+    format: CliReportFormat,
+    code: &str,
+    message: &str,
+    reference: Option<&CommandExecutionReference>,
+) {
     match format {
-        CliReportFormat::Text => report.print(&format!("error: {message}")),
+        CliReportFormat::Text => {
+            report.print(&format!("error: {message}"));
+            if let Some(reference) = reference {
+                report.print(&format!(
+                    "recover using --execution-reference {reference} with the same domain and \
+                     capture options"
+                ));
+            }
+        }
         CliReportFormat::Json => {
-            let document = json!({ "error": { "code": code, "message": message } });
+            let mut document = json!({ "error": { "code": code, "message": message } });
+            if let Some(reference) = reference {
+                document["error"]["execution_reference"] = json!(reference.as_str());
+            }
             report.print(&document.to_string());
         }
     }

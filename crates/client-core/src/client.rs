@@ -150,6 +150,13 @@ enum LocalStatement {
 }
 
 impl StatementRoute {
+    fn wait_timeout(&self, connector: &GrpcConnector) -> Duration {
+        match self {
+            Self::Backup(_) => connector.backup_wait_timeout(),
+            _ => connector.retry_timeout(),
+        }
+    }
+
     fn is_subscription(&self) -> bool {
         matches!(self, Self::Subscribe { .. } | Self::Unsubscribe(_))
     }
@@ -257,6 +264,7 @@ impl Client {
             ("connect_timeout", options.connect_timeout),
             ("request_timeout", options.request_timeout),
             ("retry_timeout", options.retry_timeout),
+            ("backup_wait_timeout", options.backup_wait_timeout),
         ] {
             if value < Duration::from_millis(1) || value > MAX_DEADLINE {
                 return Err(ClientError::InvalidDeadline { field });
@@ -382,7 +390,7 @@ impl Client {
     pub async fn execute(&self, query: impl Into<String>) -> Result<CommandOutcome, ClientError> {
         let query = query.into();
         let route = Self::route(&query);
-        let deadline = Instant::now() + self.inner.connector.retry_timeout();
+        let deadline = Instant::now() + route.wait_timeout(&self.inner.connector);
         if route.is_subscription() {
             let execution = self.prepare_execution_with_route(query, route).await;
             return self.execute_prepared_after_lock(&execution, deadline).await;
@@ -401,6 +409,23 @@ impl Client {
         let query = query.into();
         let route = Self::route(&query);
         self.prepare_execution_with_route(query, route).await
+    }
+
+    /// Recovers a BACKUP under its existing durable reference. Keep the original selected domain,
+    /// scope, resource inclusion and capture options; the local destination may change.
+    pub async fn prepare_backup_with_reference(
+        &self,
+        backup: &Backup,
+        reference: &CommandExecutionReference,
+    ) -> ExecutionHandle {
+        let mut execution = self
+            .prepare_execution_with_route(
+                backup.to_canonical_nspl(),
+                StatementRoute::Backup(backup.clone()),
+            )
+            .await;
+        execution.reference = reference.clone();
+        execution
     }
 
     fn route(query: &str) -> StatementRoute {
@@ -435,7 +460,7 @@ impl Client {
         &self,
         execution: &ExecutionHandle,
     ) -> Result<CommandOutcome, ClientError> {
-        let deadline = Instant::now() + self.inner.connector.retry_timeout();
+        let deadline = Instant::now() + execution.route.wait_timeout(&self.inner.connector);
         if execution.route.is_subscription() {
             return self.execute_prepared_after_lock(execution, deadline).await;
         }
@@ -612,7 +637,7 @@ impl Client {
     }
 
     pub async fn list_domains(&self) -> Result<Vec<DomainInfo>, ClientError> {
-        let body = self.request(ClientRequest::ListDomains, None).await?;
+        let body = self.request(ClientRequest::ListDomains, None, None).await?;
         match body {
             ReplyBody::DomainList(list) => Ok(list.domains),
             other => Err(ClientError::unexpected_reply(
@@ -638,7 +663,7 @@ impl Client {
                         target: target.clone(),
                         operation,
                     });
-                    let body = match self.request(request, None).await {
+                    let body = match self.request(request, None, None).await {
                         Ok(body) => body,
                         Err(error) if error.retryable_session_failure() => {
                             match self.recover_session(RecoveryMode::IfClosed).await? {
@@ -753,7 +778,7 @@ impl Client {
                     return Err(ClientError::NoActiveDomain);
                 };
                 let request = ClientRequest::AttachDomainClock(AttachDomainClockRequest { domain });
-                match self.request(request, None).await? {
+                match self.request(request, None, None).await? {
                     ReplyBody::DomainClockAttach(outcome) => Ok(CommandOutcome::from(outcome)),
                     other => Err(ClientError::unexpected_reply(
                         RequestKind::AttachDomainClock,
@@ -766,7 +791,7 @@ impl Client {
                     return Err(ClientError::NoActiveDomain);
                 };
                 let request = ClientRequest::DetachDomainClock(DetachDomainClockRequest { domain });
-                match self.request(request, None).await? {
+                match self.request(request, None, None).await? {
                     ReplyBody::DomainClockDetach(outcome) => Ok(CommandOutcome::from(outcome)),
                     other => Err(ClientError::unexpected_reply(
                         RequestKind::DetachDomainClock,
@@ -869,7 +894,11 @@ impl Client {
                     expected_transaction_position: execution.expectation.position,
                     expected_preview: execution.expectation.preview.clone(),
                 });
-                match self.request(request, None).await? {
+                let wait = match &execution.route {
+                    StatementRoute::Backup(_) => Some(self.inner.connector.backup_wait_timeout()),
+                    _ => None,
+                };
+                match self.request(request, None, wait).await? {
                     ReplyBody::Command(outcome) => {
                         if outcome.execution_reference != execution.reference {
                             return Err(ClientError::ExecutionReferenceMismatch {
@@ -923,7 +952,7 @@ impl Client {
             statement,
             subscription_type: attempt.contract.subscription_type,
         });
-        let response = self.request(request, Some(exchange)).await;
+        let response = self.request(request, Some(exchange), None).await;
         let outcome = match response {
             Ok(ReplyBody::Subscribe(outcome)) => outcome,
             Ok(other) => {
@@ -975,7 +1004,7 @@ impl Client {
         let request = ClientRequest::Unsubscribe(UnsubscribeRequest {
             subscription: attempt.name.clone(),
         });
-        let response = self.request(request, Some(exchange)).await;
+        let response = self.request(request, Some(exchange), None).await;
         match response {
             Ok(ReplyBody::Unsubscribe(outcome)) => {
                 let outcome = CommandOutcome::from(outcome);
@@ -1017,7 +1046,7 @@ impl Client {
             let request = ClientRequest::AttachTransaction(AttachTransactionRequest {
                 transaction_id: transaction_id.to_string(),
             });
-            let body = match self.request(request, None).await {
+            let body = match self.request(request, None, None).await {
                 Ok(body) => body,
                 Err(error) if error.retryable_session_failure() => {
                     match Box::pin(self.recover_session(RecoveryMode::TransportOnlyIfClosed))
@@ -1079,6 +1108,7 @@ impl Client {
         &self,
         request: ClientRequest,
         captured: Option<Arc<ExchangeRequests>>,
+        timeout: Option<Duration>,
     ) -> Result<ReplyBody, ClientError> {
         let kind = RequestKind::from(&request);
         let read_only = matches!(
@@ -1092,8 +1122,9 @@ impl Client {
                 Some(exchange) => exchange.clone(),
                 None => self.inner.exchange.lock().await.requests(),
             };
-            let sent =
-                nervix_primitives::time::timeout(self.inner.connector.request_timeout(), async {
+            let sent = nervix_primitives::time::timeout(
+                timeout.unwrap_or(self.inner.connector.request_timeout()),
+                async {
                     // Register before sending so a prompt reply always finds its waiter.
                     let Some(mut registered) = exchange.register() else {
                         return Err(exchange.pending.lock().failure());
@@ -1121,7 +1152,8 @@ impl Client {
                             error => Err(error),
                         },
                     }
-                });
+                },
+            );
             let sent = if read_only {
                 nervix_primitives::time::timeout_at(deadline, sent)
                     .await
@@ -1383,7 +1415,7 @@ impl Client {
             nervix_primitives::time::timeout(self.inner.connector.retry_timeout(), async {
                 for _ in 0..Self::MAX_LEADER_ROUTING_ATTEMPTS {
                     nervix_primitives::task::consume_budget().await;
-                    match self.request(request.clone(), None).await {
+                    match self.request(request.clone(), None, None).await {
                         Ok(body) => return Ok(body),
                         Err(error) if error.retryable_session_failure() => {
                             match self.recover_session(RecoveryMode::IfClosed).await? {
@@ -1436,7 +1468,10 @@ impl Client {
         let request = request
             .with_page(page_size, continuation)
             .map_err(|_| ClientError::InvalidCompletionPageSize { size: page_size })?;
-        match self.request(ClientRequest::Suggest(request), None).await? {
+        match self
+            .request(ClientRequest::Suggest(request), None, None)
+            .await?
+        {
             ReplyBody::Suggest(outcome) => Ok(AutocompleteOutcome {
                 status: outcome.status,
                 continuation: outcome.continuation,
@@ -1456,7 +1491,7 @@ impl Client {
         request: nervix_client_wire::ChoiceLookupRequest,
     ) -> error_stack::Result<nervix_client_wire::ChoiceOutcome, ClientError> {
         match self
-            .request(ClientRequest::Choice(request), None)
+            .request(ClientRequest::Choice(request), None, None)
             .await
             .map_err(error_stack::Report::new)?
         {

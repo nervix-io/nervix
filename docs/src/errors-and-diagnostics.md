@@ -318,6 +318,13 @@ archive as `NX_ERROR_PROTOCOL`, and a write failure as `NX_ERROR_INVALID_ARGUMEN
 execution reference so a host can run the backup again. No diagnostic of a backup includes archive
 contents, password hashes, or resource bytes.
 
+The native backup command wait is bounded independently of each domain's quiesce budget and the
+archive's per-frame stall bound. An exhausted command wait reports `ClientError::UncertainCommand`
+with the durable reference. The CLI's JSON `BACKUP_FAILED` report includes
+`error.execution_reference` for that uncertainty and for `ClientError::BackupDownload`; its text
+report names `--execution-reference` as the recovery option. Reusing that reference preserves the
+server's conflict, expiry and retention authority.
+
 A captured-section opening refused only for Snapshot request capacity retains its inventory and
 retries within one 30-second opening deadline. The typed capacity classification determines this
 retry; other request failures end the fetch. Deadline expiry remains a capture failure, and an

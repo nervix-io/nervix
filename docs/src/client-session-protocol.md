@@ -1515,6 +1515,17 @@ recorded outcome. If leadership moves while a backup runs, the new leader resume
 command and assembles an archive of its own, and the archive the former leader assembled is never
 offered again.
 
+Each running domain has its own quiesce timeout; the serial capture does not imply a total
+command timeout. Native clients bound the overall backup command wait with
+`ConnectOptions::backup_wait_timeout` (ten minutes by default, one millisecond through 24 hours),
+including every reply, redirect and reconnect. An exhausted wait returns `UncertainCommand` with
+the original reference and leaves admitted work recoverable. A new wait attempt retains that
+reference and its original selected domain, scope, resource inclusion and capture options; the
+client's local output path is excluded from the server's semantic request binding. A changed
+capture request conflicts, and an expired reference cannot admit a replacement execution.
+Waiting again does not extend server retry validity or the archive's retention. Downloading
+begins only after the summary arrives and has separate per-frame stall bounds.
+
 The node reads the archive only as fast as the client takes frames, at most four frames ahead of
 it, so a slow client holds back reads instead of growing what the node buffers for it. The call is
 not bounded by the request deadline, because a transfer can take far longer than a command; the

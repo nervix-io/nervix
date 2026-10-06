@@ -37,8 +37,8 @@ BACKUP CLUSTER TO './cluster-config.nvxb' WITHOUT STATE;
 - `WITHOUT PAUSE` includes published runtime checkpoints without pausing a running domain. Its
   state and configuration need not be from one quiesced cut.
 - `TIMEOUT <duration>` bounds each running domain's quiesce wait. It is valid with the normal
-  quiesced capture. The CLI's `--timeout` also extends its request and retry deadlines by that
-  duration, leaving the ordinary request budget for command admission, capture and the reply.
+  quiesced capture. Domains are captured in sequence and each receives its own budget. The
+  command's total wait includes all cuts, admission and archive assembly.
 - The path names a file on the client's machine. A leading `~/` refers to the client user's home
   directory.
 
@@ -113,6 +113,8 @@ nervix-cli backup cluster --output cluster.nvxb --format json
 | `--without-state` | Captures configuration only. |
 | `--without-pause` | Captures published runtime state without quiescing a running domain. |
 | `--timeout DURATION` | Bounds the normal quiesced capture of each running domain. |
+| `--backup-wait-timeout DURATION` | Bounds the overall command wait across all cuts, redirects and reconnects. Defaults to `10m`; also applies to NSPL through `--command` and the REPL. |
+| `--execution-reference REFERENCE` | Recovers the same backup under its durable reference, with the original selected domain, scope, resources and capture options. The output destination may change. |
 | `--format text` or `--format json` | How the report is printed. Text is the default. |
 
 When the archive goes to standard output, the report goes to standard error, so standard output
@@ -138,6 +140,33 @@ A failure prints `{"error": {"code": "...", "message": "..."}}` instead. The cod
 `INVALID_ARGUMENTS`, `CONNECTION_FAILED`, `BACKUP_FAILED` for a failure between client and
 server, `BACKUP_REFUSED` for a backup the server refused, and `WRITE_FAILED` for an archive that
 could not be written to standard output.
+
+### Waiting And Recovering
+
+The native client uses one bounded overall command wait for `BACKUP`, ten minutes by default.
+`--backup-wait-timeout` sets it independently of each domain's `--timeout`, without counting or
+predicting domains. Native wait options accept durations from one millisecond through 24 hours.
+Redirects and reconnects share the same deadline and execution reference. Ordinary request and
+retry deadlines remain separate; an archive download begins after the command completes and
+bounds each frame's wait with the ordinary request timeout.
+
+When the command wait expires, admission may already have happened. The CLI exits unsuccessfully
+and reports the durable reference. A JSON `BACKUP_FAILED` report includes
+`error.execution_reference` for an uncertain command or failed archive download. Recover promptly
+with the same selected `--domain`, scope, resource inclusion and capture options:
+
+```sh
+nervix-cli --domain payments backup cluster --output cluster.nvxb --timeout 30s --backup-wait-timeout 4m --format json
+nervix-cli --domain payments backup cluster --output recovered.nvxb --timeout 30s --backup-wait-timeout 10m --execution-reference 0192d4e4-7b36-7c3e-9f00-5b2d8c3a1e44
+```
+
+Use the reference returned by the first command. Recovery waits for the applying command or
+returns its recorded outcome, then downloads the retained archive. `--output -` may also be used
+for recovery. Changing capture inputs conflicts with the bound request. A fresh reference starts
+a separate backup. Expiration of the client wait ends only that waiter; it does not cancel the
+admitted command or extend the server's retry validity or archive retention. A longer wait can
+therefore recover a terminal outcome whose archive is already unavailable, especially when the
+server has a shorter retry validity. Such a download is reported as a failure with its reference.
 
 ## Downloading The Archive
 

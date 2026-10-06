@@ -310,6 +310,13 @@ current representation, qualification policy and coverage limits.
 
 ## Validation And Failure Boundaries
 
+Native connection options validate every timeout at setup: one millisecond through 24 hours.
+The backup command wait has its own required duration, distinct from an optional per-domain
+quiesce override and the ordinary request and retry bounds. Backup execution identity projects
+the typed scope, resource inclusion and capture options together with the selected domain; the
+local output destination remains a client download concern. Recovery may change that destination
+while the server continues to validate the original semantic request and execution reference.
+
 The registry rejects unresolved or contradictory contracts before a graph becomes active. It
 resolves branch names, schemas, fields, and sensitivity as one branch state. Scheduling supplies
 the required runtime-state identity. Runtime owners enforce transitions that depend on concurrent

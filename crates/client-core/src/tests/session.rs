@@ -989,6 +989,201 @@ async fn an_unanswered_command_ends_with_a_reusable_uncertain_identity() {
 }
 
 #[nervix_primitives::test]
+async fn backup_waits_beyond_ordinary_request_and_retry_deadlines() {
+    for prepared in [false, true] {
+        nervix_primitives::task::consume_budget().await;
+        let mut server = TestServer::start().await;
+        let options = ConnectOptions {
+            request_timeout: Duration::from_millis(50),
+            retry_timeout: Duration::from_millis(50),
+            backup_wait_timeout: Duration::from_secs(2),
+            ..ConnectOptions::default()
+        };
+        let client = Client::connect_with_options(
+            format!("http://{}", server.address),
+            Some(domain("tenant")),
+            options,
+        )
+        .await
+        .assured("the backup client connects");
+        let mut exchange = server.next_exchange().await;
+        let task = nervix_primitives::task::spawn(async move {
+            let query = "BACKUP CLUSTER TO 'cluster.nvxb' TIMEOUT 1s;";
+            if prepared {
+                let execution = client.prepare_execution(query).await;
+                client.execute_prepared(&execution).await
+            } else {
+                client.execute(query).await
+            }
+        });
+        let request = exchange.next_request().await;
+        let ClientRequest::Command(command) = request.request else {
+            panic!("a backup is a command");
+        };
+        // Inject a slow command after observing admission, beyond both ordinary deadlines.
+        nervix_primitives::time::sleep(Duration::from_millis(150)).await;
+        exchange
+            .reply(
+                request.request_id,
+                command_outcome(
+                    &command.execution_reference,
+                    CommandDisposition::Failed,
+                    "a domain cut failed",
+                ),
+                &limits(),
+            )
+            .await;
+        let outcome = within_deadline(task)
+            .await
+            .assured("the waiter finishes")
+            .assured("the backup receives its terminal outcome");
+        assert_eq!(outcome.disposition, CommandDisposition::Failed);
+        assert_eq!(
+            outcome.execution_reference,
+            Some(command.execution_reference)
+        );
+    }
+}
+
+#[nervix_primitives::test]
+async fn backup_reconnects_with_the_same_reference_within_its_wait_budget() {
+    let mut server = TestServer::start().await;
+    let client = Client::connect_with_options(
+        format!("http://{}", server.address),
+        Some(domain("tenant")),
+        ConnectOptions {
+            request_timeout: Duration::from_millis(50),
+            retry_timeout: Duration::from_millis(50),
+            backup_wait_timeout: Duration::from_secs(2),
+            ..ConnectOptions::default()
+        },
+    )
+    .await
+    .assured("the backup client connects");
+    let mut exchange = server.next_exchange().await;
+    let task = nervix_primitives::task::spawn(async move {
+        client.execute("BACKUP CLUSTER TO 'cluster.nvxb';").await
+    });
+    let first = exchange.next_request().await;
+    let ClientRequest::Command(first_command) = first.request else {
+        panic!("a backup is a command");
+    };
+    drop(exchange);
+    let mut recovered_exchange = server.next_exchange().await;
+    let recovered = recovered_exchange.next_request().await;
+    let ClientRequest::Command(command) = recovered.request else {
+        panic!("the backup is retried");
+    };
+    assert_eq!(command.query, first_command.query);
+    assert_eq!(command.domain, first_command.domain);
+    assert_eq!(
+        command.execution_reference,
+        first_command.execution_reference
+    );
+    nervix_primitives::time::sleep(Duration::from_millis(150)).await;
+    recovered_exchange
+        .reply(
+            recovered.request_id,
+            command_outcome(
+                &command.execution_reference,
+                CommandDisposition::Failed,
+                "a recovered terminal failure",
+            ),
+            &limits(),
+        )
+        .await;
+    let outcome = within_deadline(task)
+        .await
+        .assured("the waiter finishes")
+        .assured("the backup survives the session loss");
+    assert_eq!(outcome.disposition, CommandDisposition::Failed);
+}
+
+#[nervix_primitives::test]
+async fn backup_wait_expiry_preserves_the_reference_for_explicit_recovery() {
+    let mut server = TestServer::start().await;
+    let client = Client::connect_with_options(
+        format!("http://{}", server.address),
+        Some(domain("tenant")),
+        ConnectOptions {
+            request_timeout: Duration::from_secs(3),
+            retry_timeout: Duration::from_secs(3),
+            backup_wait_timeout: Duration::from_millis(150),
+            ..ConnectOptions::default()
+        },
+    )
+    .await
+    .assured("the backup client connects");
+    let mut exchange = server.next_exchange().await;
+    let execution = client
+        .prepare_execution("BACKUP CLUSTER TO 'cluster.nvxb';")
+        .await;
+    let expected = execution.reference().clone();
+    let command_client = client.clone();
+    let task =
+        nervix_primitives::task::spawn(
+            async move { command_client.execute_prepared(&execution).await },
+        );
+    let request = exchange.next_request().await;
+    let ClientRequest::Command(command) = request.request else {
+        panic!("a backup is a command");
+    };
+    assert_eq!(command.execution_reference, expected);
+    let result = nervix_primitives::time::timeout(Duration::from_secs(1), task)
+        .await
+        .assured("the backup wait ends before either ordinary deadline")
+        .assured("the waiter finishes");
+    let Err(ClientError::UncertainCommand { reference, source }) = result else {
+        panic!("an unanswered backup reports its uncertain reference");
+    };
+    assert_eq!(reference, expected);
+    assert!(matches!(*source, ClientError::RetryDeadline));
+    let backup = nervix_models::Backup {
+        scope: nervix_models::BackupScope::Cluster,
+        destination: "recovered.nvxb".to_string(),
+        resources: nervix_models::BackupResources::Included,
+        capture: nervix_models::BackupCapture::default(),
+    };
+    let mut recovery_server = TestServer::start().await;
+    let recovery_client = recovery_server.connect().await;
+    recovery_client.set_domain(Some(domain("tenant"))).await;
+    let mut exchange = recovery_server.next_exchange().await;
+    let recovered = recovery_client
+        .prepare_backup_with_reference(&backup, &reference)
+        .await;
+    assert_eq!(recovered.reference(), &expected);
+    assert_eq!(recovered.domain(), Some(&domain("tenant")));
+    let task = nervix_primitives::task::spawn(async move {
+        recovery_client.execute_prepared(&recovered).await
+    });
+    let request = exchange.next_request().await;
+    let ClientRequest::Command(command) = request.request else {
+        panic!("the same backup is recovered");
+    };
+    assert_eq!(command.execution_reference, expected);
+    assert!(command.query.contains("recovered.nvxb"));
+    exchange
+        .reply(
+            request.request_id,
+            command_outcome(
+                &expected,
+                CommandDisposition::ExecutionReferenceExpired,
+                "the reference expired",
+            ),
+            &limits(),
+        )
+        .await;
+    let outcome = within_deadline(task)
+        .await
+        .assured("the recovery finishes")
+        .assured("the server's refusal is an outcome");
+    assert_eq!(
+        outcome.disposition,
+        CommandDisposition::ExecutionReferenceExpired
+    );
+}
+
+#[nervix_primitives::test]
 async fn replies_reach_their_requests_in_whatever_order_they_arrive() {
     let mut server = TestServer::start().await;
     let client = server.connect().await;

@@ -374,7 +374,7 @@ connection delivers it.
 | A source | Fails its connection or its resume | The ingestor host, on the source's retry policy or, for a `NO_ACK` source, its reconnect cadence |
 | A sink | Fails its start, its reopening or its publish | The emitter host, on its backoff and retry policy |
 | A Redis command pool | Fails the physical connection the pool was opening | The emitter that borrows from the pool, on its retry policy |
-| A native session | Fails the connection attempt as `ClientError::ConnectServer` | The session's bounded reconnect policy until its retry deadline |
+| A native session | Fails the connection attempt as `ClientError::ConnectServer` | The session's bounded reconnect policy until its command wait ends; `BACKUP` uses `backup_wait_timeout` |
 
 A shutdown or quiesce that arrives while a source is resuming cancels the resume, together with
 every lookup, dial and handshake in it, as [Stopping Intake](./shutdown.md#stopping-intake)
