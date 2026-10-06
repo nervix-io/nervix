@@ -269,7 +269,7 @@ impl MessageErrorRouteTask {
                         &delivery.source_acks,
                         format!(
                             "message-error route for '{}' in domain '{}' could not read its flush \
-                             clock: {error}",
+                             clock: {error:#}",
                             self.route.node.identifier.as_str(),
                             self.route.domain.as_str(),
                         ),
@@ -283,7 +283,7 @@ impl MessageErrorRouteTask {
                     &delivery.source_acks,
                     format!(
                         "message-error route for '{}' in domain '{}' could not start its flush \
-                         deadline: {error}",
+                         deadline: {error:#}",
                         self.route.node.identifier.as_str(),
                         self.route.domain.as_str(),
                     ),
@@ -411,7 +411,7 @@ impl MessageErrorRouteTask {
             Err(error) => {
                 self.runtime.events().report_error(format!(
                     "message-error route for '{}' in domain '{}' could not bind its flush clock: \
-                     {error}",
+                     {error:#}",
                     self.route.node.identifier.as_str(),
                     self.route.domain.as_str(),
                 ));
@@ -449,7 +449,7 @@ impl MessageErrorRouteTask {
                             &[acks],
                             format!(
                                 "message-error route for '{}' in domain '{}' could not wait for \
-                                 its flush deadline: {error}",
+                                 its flush deadline: {error:#}",
                                 self.route.node.identifier.as_str(),
                                 self.route.domain.as_str(),
                             ),
@@ -463,7 +463,7 @@ impl MessageErrorRouteTask {
                             &[acks],
                             format!(
                                 "message-error route for '{}' in domain '{}' could not inspect \
-                                 its flush deadline: {error}",
+                                 its flush deadline: {error:#}",
                                 self.route.node.identifier.as_str(),
                                 self.route.domain.as_str(),
                             ),
@@ -622,6 +622,8 @@ impl Runtime {
 
 #[cfg(test)]
 mod tests {
+    use nervix_primitives::time::timeout;
+
     use super::*;
 
     fn named<N>(raw: &str) -> N
@@ -781,6 +783,66 @@ mod tests {
             .stop(Duration::from_secs(1))
             .await
             .expect("relay owner stops");
+    }
+
+    #[nervix_primitives::test]
+    async fn runtime_report_chain_error_route_clock_wait() {
+        use futures_util::FutureExt as _;
+
+        let (mut task, owner_task) = test_task(
+            RuntimeFlushPolicy::Each {
+                interval: Duration::from_secs(3600),
+                max_batch_size: u64::MAX,
+            },
+            RelayBoundaryFanout::direct_with_capacity(NonZeroUsize::MIN),
+        );
+        let runtime = task.runtime.clone();
+        let mut events = runtime.subscribe_events();
+        let clock = runtime
+            .bind_domain_clock(&task.route.domain)
+            .assured("the fixture installs its clock before accepting a delivery");
+        let (delivery, completion) = test_delivery();
+        task.accept(delivery, &clock).await;
+        let (_input_tx, input) = mpsc::channel(1);
+        let (_shutdown_tx, shutdown) = watch::channel(false);
+        let force_flush = runtime.force_flush_participant(
+            &task.route.domain,
+            runtime.node_quiesce_counters(&task.route.domain, task.route.node.clone()),
+        );
+        let mut running = Box::pin(task.run(input, shutdown, force_flush));
+        assert!(running.as_mut().now_or_never().is_none());
+        runtime
+            .domain_clock_lifecycle(&domain("test"))
+            .assured("the fixture keeps the flush coordinator while withdrawing its clock")
+            .mark_missing();
+        let Err(stopped) = clock.snapshot() else {
+            panic!("withdrawing the clock publication ends the bound clock");
+        };
+        running.await;
+        let expected = format!(
+            "message-error route for 'notifications' in domain 'test' could not wait for its \
+             flush deadline: the domain clock could not reach a branch-buffer deadline: domain \
+             'test' clock became unavailable while waiting for a logical deadline: {stopped:#}"
+        );
+        assert_eq!(completion.wait().await, AckOutcome::NoAck(expected.clone()));
+        let observed = timeout(Duration::from_secs(1), async {
+            loop {
+                let RuntimeEvent::Error(message) = events
+                    .recv()
+                    .await
+                    .assured("the runtime retains its event bus while the route is observed");
+                if message.starts_with("message-error route for 'notifications'") {
+                    break message;
+                }
+            }
+        })
+        .await
+        .assured("the route failure is queued before its observation deadline");
+        assert_eq!(observed, expected);
+        owner_task
+            .stop(Duration::from_secs(1))
+            .await
+            .assured("the relay owner ends after its domain clock is withdrawn");
     }
 
     #[nervix_primitives::test]

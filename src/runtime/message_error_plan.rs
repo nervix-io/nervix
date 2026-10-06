@@ -216,6 +216,15 @@ mod tests {
             error.current_context(),
             MessageErrorHandlingError::FlushPolicy { .. }
         ));
+        let MessageErrorHandlingError::FlushPolicy { source, .. } = error.current_context() else {
+            panic!("the invalid cadence is classified as a flush policy failure");
+        };
+        assert_eq!(
+            format!("{error:#}"),
+            format!(
+                "failed to parse the message-error flush policy for junction 'compute': {source}",
+            )
+        );
 
         let mut invalid_set = spec(Some(FlushPolicy::Immediate));
         invalid_set.program = lowered_set(

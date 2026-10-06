@@ -36,6 +36,38 @@ fn schema() -> SchemaFingerprint {
     SchemaFingerprint::from_digest([7; 32])
 }
 
+#[nervix_primitives::test]
+async fn runtime_report_chain_checkpoint_notification_log() {
+    use crate::runtime::report_observer::ReportLogObserver;
+
+    let runtime = Runtime::default();
+    let mut remote = placement(
+        RuntimeState::BranchLru { schema: schema() },
+        ModelKind::Deduplicator,
+        "dedup_orders",
+        None,
+    )
+    .to_remote();
+    remote.branch_key = Some(Vec::new());
+    let mut logs = ReportLogObserver::new();
+    logs.observe(async {
+        runtime.handle_state_checkpoint_available(
+            &named("node-1"),
+            nervix_interconnect::StateCheckpointAvailable {
+                placement: remote,
+                lsm: REVISION,
+            },
+        );
+    })
+    .await;
+    assert_eq!(
+        logs.next("ignored invalid runtime state checkpoint notification")
+            .fields["error"],
+        "runtime state placement for branch_lru state of deduplicator 'dedup_orders' in domain \
+         'default' carries an invalid branch key: a concrete branch key names at least one field"
+    );
+}
+
 fn held_by(replication: &CheckpointReplication, replica: &ClusterNodeName) -> Option<u64> {
     replication.with_progress(|progress| progress.held(replica))
 }

@@ -602,6 +602,10 @@ Feature: Domain clock contract regressions
       """
       leaves the signed Unix-nanosecond range
       """
+    And the last server error contains
+      """
+      timestamp arithmetic leaves the signed Unix-nanosecond range
+      """
 
     Examples:
       | cluster_size | outside_timestamp              |

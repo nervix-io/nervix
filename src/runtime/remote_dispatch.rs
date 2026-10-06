@@ -877,7 +877,7 @@ impl RemoteDispatcher {
                         warn!(
                             domain = domain.as_str(),
                             relay = relay.as_str(),
-                            error = %error,
+                            error = %format_args!("{error:#}"),
                             "failed to serialize remote subscription batch"
                         );
                         return;
@@ -907,7 +907,7 @@ impl RemoteDispatcher {
                     target_node = %node_id,
                     domain = domain.as_str(),
                     relay = relay.as_str(),
-                    error = %error,
+                    error = %format_args!("{error:#}"),
                     "failed to dispatch remote subscription payload"
                 );
             }
@@ -1141,7 +1141,7 @@ impl Runtime {
             warn!(
                 target_node = %admission.registrar,
                 admission_id = admission.ack_id,
-                error = %error,
+                error = %format_args!("{error:#}"),
                 "failed to return relay admission response"
             );
         }
@@ -1569,7 +1569,7 @@ impl Runtime {
                                 domain = domain.as_str(),
                                 ack_id = ack.ack_id,
                                 target_node = %ack.registrar,
-                                error = %error,
+                                error = %format_args!("{error:#}"),
                                 "failed to return remote ack alive"
                             );
                         }
@@ -1594,7 +1594,7 @@ impl Runtime {
                                         domain = domain.as_str(),
                                         ack_id = ack.ack_id,
                                         target_node = %ack.registrar,
-                                        error = %error,
+                                        error = %format_args!("{error:#}"),
                                         "failed to forward remote ack alive"
                                     );
                                 }
@@ -1628,7 +1628,7 @@ impl Runtime {
                                         domain = domain.as_str(),
                                         ack_id = ack.ack_id,
                                         target_node = %ack.registrar,
-                                        error = %error,
+                                        error = %format_args!("{error:#}"),
                                         "failed to return remote ack resolution"
                                     );
                                 }
@@ -1764,6 +1764,41 @@ mod tests {
 
     /// Scheduler-independent hang guard for event-driven unit-test observations.
     const ASYNC_EVENT_FAILSAFE: Duration = Duration::from_secs(30);
+
+    #[nervix_primitives::test(start_paused = true)]
+    async fn runtime_report_chain_remote_admission_response_log() {
+        use crate::runtime::report_observer::ReportLogObserver;
+
+        let runtime = Runtime::default();
+        let local = named::<ClusterNodeName>("node-1");
+        attach_loopback_cluster(&runtime, &local).await;
+        runtime
+            .inner
+            .remote_dispatcher
+            .load_full()
+            .assured("the loopback cluster installs its dispatcher")
+            .interconnect
+            .shutdown()
+            .await;
+        let admission = RemoteAckRegistration {
+            ack_id: 7,
+            registrar: ClusterNodeIdentity::new(
+                named("node-2"),
+                nervix_models::ClusterNodeIncarnation::new(1),
+            ),
+        };
+        let mut logs = ReportLogObserver::new();
+        logs.observe(
+            runtime.send_remote_relay_admission_outcome(&admission, RemoteAckOutcome::Ack),
+        )
+        .await;
+        let record = logs.next("failed to return relay admission response");
+        assert_eq!(record.fields["admission_id"], "7");
+        assert_eq!(
+            record.fields["error"],
+            "failed to send a remote payload to node 'node-2': transport is shutting down"
+        );
+    }
 
     struct DropNotice(Option<oneshot::Sender<()>>);
 

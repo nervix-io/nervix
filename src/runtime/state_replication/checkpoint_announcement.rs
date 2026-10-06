@@ -131,7 +131,7 @@ impl Runtime {
                 {
                     warn!(
                         destination = %replica,
-                        error = %error,
+                        error = %format_args!("{error:#}"),
                         "failed to announce runtime state checkpoint"
                     );
                 }
@@ -191,7 +191,7 @@ impl Runtime {
             Ok(placement) => placement,
             Err(error) => {
                 warn!(
-                    error = %error,
+                    error = %format_args!("{error:#}"),
                     "ignored invalid runtime state checkpoint notification"
                 );
                 return;

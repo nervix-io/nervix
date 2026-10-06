@@ -1610,7 +1610,7 @@ async fn run_processor_branch_task(
                                     .await
                             }
                             Err(error) => Err(OwnershipHandoffError::checkpoint(format!(
-                                "processor branch '{}' in domain '{}' lost its clock: {error}",
+                                "processor branch '{}' in domain '{}' lost its clock: {error:#}",
                                 processor.as_str(),
                                 domain.as_str(),
                             ))),

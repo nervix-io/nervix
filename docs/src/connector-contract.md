@@ -920,6 +920,13 @@ Syslog `max_message_size` or `addr` value that does not parse therefore reads as
 followed by the parser's error, both at the source's start and in the Syslog sink's configuration
 diagnostic.
 
+Paced-source resume and poll status, source suspend and close events, and cadence failures render
+the full report supplied by their owner. Kafka partition-watch failures similarly name the ingestor
+and domain before the full inspection report, both during its initial inspection and subsequent
+polls. A stopped clock or timestamp arithmetic failure therefore remains visible beneath the
+cadence context. Rendering keeps the source's existing readiness, retry and acknowledgement
+decisions and includes only the non-sensitive details the typed errors own.
+
 For OTEL, each selected row's conversion report becomes that row's existing invalid-record
 outcome, with its signal key as the affected field. Postgres, MySQL, and ClickHouse inspect the
 typed insert error before deciding whether to isolate a rejected row or fail the whole attempt.

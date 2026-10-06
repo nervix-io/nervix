@@ -1291,7 +1291,7 @@ impl RelayBoundaryServices {
             Ok(bytes) => bytes,
             Err(error) => {
                 for ack in batch.acks.iter() {
-                    ack.no_ack(error.to_string());
+                    ack.no_ack(format!("{error:#}"));
                 }
                 return Err(Box::new(batch.clone()));
             }
@@ -1325,7 +1325,7 @@ impl RelayBoundaryServices {
             )
             .await;
         if let Err(error) = admission_result {
-            let reason = error.to_string();
+            let reason = format!("{error:#}");
             for registration in remote_acks.iter().flatten() {
                 dispatcher.clear_pending_ack(registration);
             }
@@ -1450,12 +1450,12 @@ impl RelayBoundaryServices {
                             .any(|consumer| consumer.mode == AckMode::Attached)
                         {
                             for ack in batch.acks.iter() {
-                                ack.no_ack(error.to_string());
+                                ack.no_ack(format!("{error:#}"));
                             }
                             return Err(Box::new(batch.clone()));
                         }
                         warn!(
-                            error = %error,
+                            error = %format_args!("{error:#}"),
                             "failed to serialize detached remote relay batch"
                         );
                         return Ok(());
@@ -1498,7 +1498,7 @@ impl RelayBoundaryServices {
                     dispatcher.admit_pending_acks(&remote_acks);
                 }
                 (AckMode::Attached, Err(error)) => {
-                    let reason = error.to_string();
+                    let reason = format!("{error:#}");
                     for (ack_set, remote_ack) in remote_batch.acks.iter().zip(remote_acks.iter()) {
                         if let Some(remote_ack) = remote_ack {
                             dispatcher.clear_pending_ack(remote_ack);
@@ -1509,7 +1509,7 @@ impl RelayBoundaryServices {
                 }
                 (AckMode::Detached, Err(error)) => {
                     warn!(
-                        error = %error,
+                        error = %format_args!("{error:#}"),
                         target_node = %consumer.node_id,
                         "detached remote delivery failed"
                     );
@@ -1727,7 +1727,7 @@ impl Runtime {
             Ok(now) => now,
             Err(error) => {
                 let reason = format!(
-                    "relay '{}' in domain '{}' could not read domain time: {error}",
+                    "relay '{}' in domain '{}' could not read domain time: {error:#}",
                     relay.as_str(),
                     domain.as_str(),
                 );
@@ -2060,7 +2060,7 @@ impl Runtime {
                             warn!(
                                 domain = domain.as_str(),
                                 relay = relay.as_str(),
-                                error = %error,
+                                error = %format_args!("{error:#}"),
                                 "materialized relay assignment changed during branch expiration"
                             );
                             break 'state_task;
@@ -2086,7 +2086,7 @@ impl Runtime {
                             warn!(
                                 domain = domain.as_str(),
                                 relay = relay.as_str(),
-                                error = %error,
+                                error = %format_args!("{error:#}"),
                                 "materialized relay state task could not schedule its next scan"
                             );
                             break 'state_task;
@@ -2140,7 +2140,7 @@ impl Runtime {
                     Ok(now) => now,
                     Err(error) => {
                         let reason = format!(
-                            "materialized relay '{}' in domain '{}' lost its clock: {error}",
+                            "materialized relay '{}' in domain '{}' lost its clock: {error:#}",
                             relay.as_str(),
                             domain.as_str(),
                         );
@@ -2167,7 +2167,7 @@ impl Runtime {
                             warn!(
                                 domain = domain.as_str(),
                                 relay = relay.as_str(),
-                                error = %error,
+                                error = %format_args!("{error:#}"),
                                 "materialized relay assignment changed during branch eviction"
                             );
                             break 'state_task;
@@ -2182,7 +2182,7 @@ impl Runtime {
                             domain = domain.as_str(),
                             relay = relay.as_str(),
                             branch = branch_key_display(&branch_key),
-                            error = %error,
+                            error = %format_args!("{error:#}"),
                             "failed to decode scheduled materialized relay batch"
                         );
                         continue;
@@ -2196,7 +2196,7 @@ impl Runtime {
                     warn!(
                         domain = domain.as_str(),
                         relay = relay.as_str(),
-                        error = %error,
+                        error = %format_args!("{error:#}"),
                         "materialized relay assignment changed while applying a batch"
                     );
                     break 'state_task;

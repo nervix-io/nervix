@@ -605,7 +605,7 @@ impl Runtime {
                 )
                 .await
             {
-                warn!(destination = %source, error = %error, "failed to acknowledge replicated runtime state checkpoint");
+                warn!(destination = %source, error = %format_args!("{error:#}"), "failed to acknowledge replicated runtime state checkpoint");
             }
         }));
     }

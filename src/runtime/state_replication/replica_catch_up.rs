@@ -191,7 +191,7 @@ impl Runtime {
                 Ok(named) => named,
                 Err(error) => {
                     warn!(
-                        error = %error,
+                        error = %format_args!("{error:#}"),
                         "failed to decode replicated branch lifecycle checkpoint"
                     );
                     return;
@@ -237,7 +237,7 @@ impl Runtime {
         let fetched = match owner.checkpoint_after(branch_lru, after_lsm).await {
             Ok(fetched) => fetched,
             Err(error) => {
-                warn!(error = %error, "failed to sync replicated branch lifecycle state");
+                warn!(error = %format_args!("{error:#}"), "failed to sync replicated branch lifecycle state");
                 return;
             }
         };
@@ -257,7 +257,7 @@ impl Runtime {
                 .acknowledge_durable_state_replica(owner.node(), branch_lru, held.lsm())
                 .await
             {
-                warn!(error = %error, "failed to acknowledge replicated branch lifecycle checkpoint");
+                warn!(error = %format_args!("{error:#}"), "failed to acknowledge replicated branch lifecycle checkpoint");
             }
             return;
         };
@@ -265,7 +265,7 @@ impl Runtime {
             .install_replica_branch_lifecycle(owner.node(), branch_lru, snapshot, lifecycle)
             .await
         {
-            warn!(error = %error, "failed to install replicated branch lifecycle checkpoint");
+            warn!(error = %format_args!("{error:#}"), "failed to install replicated branch lifecycle checkpoint");
             return;
         }
         let Some(current) = lifecycle.latest() else {
@@ -275,7 +275,7 @@ impl Runtime {
             Ok(current) => current,
             Err(error) => {
                 warn!(
-                    error = %error,
+                    error = %format_args!("{error:#}"),
                     "failed to decode replicated branch lifecycle checkpoint"
                 );
                 return;
@@ -305,7 +305,7 @@ impl Runtime {
             {
                 Ok(listing) => listing,
                 Err(error) => {
-                    warn!(error = %error, "failed to read the owner's branch checkpoint catalog");
+                    warn!(error = %format_args!("{error:#}"), "failed to read the owner's branch checkpoint catalog");
                     return;
                 }
             };
@@ -351,7 +351,7 @@ impl Runtime {
                 match held {
                     Ok(held) => held,
                     Err(error) => {
-                        warn!(error = %error, "failed to read replicated branch state progress");
+                        warn!(error = %format_args!("{error:#}"), "failed to read replicated branch state progress");
                         return StepOutcome::Failed(None);
                     }
                 }
@@ -364,7 +364,7 @@ impl Runtime {
                     .acknowledge_durable_state_replica(owner.node(), &placement, lsm)
                     .await
             {
-                warn!(error = %error, "failed to acknowledge replicated branch state checkpoint");
+                warn!(error = %format_args!("{error:#}"), "failed to acknowledge replicated branch state checkpoint");
                 return StepOutcome::Failed(Some(held));
             }
             return StepOutcome::Settled(held);
@@ -373,7 +373,7 @@ impl Runtime {
             Ok(Some(snapshot)) => snapshot,
             Ok(None) => return StepOutcome::Settled(held),
             Err(error) => {
-                warn!(error = %error, "failed to sync replicated branch state");
+                warn!(error = %format_args!("{error:#}"), "failed to sync replicated branch state");
                 return StepOutcome::Failed(Some(held));
             }
         };
@@ -383,7 +383,7 @@ impl Runtime {
         {
             Ok(installed) => StepOutcome::Settled(installed),
             Err(error) => {
-                warn!(error = %error, "failed to install replicated branch state checkpoint");
+                warn!(error = %format_args!("{error:#}"), "failed to install replicated branch state checkpoint");
                 StepOutcome::Failed(Some(held))
             }
         }
