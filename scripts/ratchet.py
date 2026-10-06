@@ -329,7 +329,8 @@ def generic_arguments(code: str, open_index: int) -> list[str] | None:
 
 
 _USE_ITEM = re.compile(r"\b(?:use|extern\s+crate)\b")
-_AS_CAST = re.compile(r"\bas\b")
+# Attribute assignments such as rkyv's `as = ArchivedRoot` select a representation, not a cast.
+_AS_CAST = re.compile(r"\bas\b(?!\s*=)")
 
 
 def count_as_casts(files: Sequence[RustFile]) -> list[Site]:

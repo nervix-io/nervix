@@ -742,6 +742,10 @@ fn execution_families(families: &mut Families, executor: &nervix_execution::Exec
             budget: executor.bulk_memory,
         },
         MemoryClassSample {
+            class: "restore_metadata",
+            budget: executor.restore_metadata_memory,
+        },
+        MemoryClassSample {
             class: "credentials",
             budget: executor.credentials_memory,
         },

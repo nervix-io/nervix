@@ -176,9 +176,10 @@ mid-drain, and clears that cordon afterwards. It records whether the node was **
 before it started, and clears only a cordon it set itself.
 
 An operator cordon therefore survives shutdown and restart. A node cordoned by an operator, stopped,
-and started again comes back cordoned. When the node never reached the point of requesting its
-drain — because the leader was unreachable, or the drain timeout or shutdown deadline passed first —
-nothing was cordoned and nothing is cleared.
+and started again comes back cordoned. When the node never requested its drain, because the drain
+timeout or shutdown deadline passed before it observed a leader, nothing was cordoned and nothing is
+cleared. A request the leader may have received counts as requested, even when its answer never
+arrived, so the node still clears the cordon that request may have set.
 
 ## Stopping Intake
 
@@ -442,6 +443,11 @@ rather than opening before the destination is ready.
 
 ### Interrupted Handoffs
 
+Restart or owner replacement for a stopped WASM domain preserves the complete validated lifecycle
+and guest checkpoint inventory in its passive revision. Ownership preparation performs no guest
+callbacks and does not read the stopped domain clock. `START` restores those saves under the active
+clock generation; stopped time does not authorize discarding valid checkpoints or resetting state.
+
 A preparation written durably at a destination outlives the process that wrote it. The coordinator
 records every destination as an attempted participant before it sends the side-effecting request, so
 a timeout, a cancellation, or a lost response after the destination persisted the request remains
@@ -501,7 +507,7 @@ state; see [Forced Recovery](./wasm-state.md#forced-recovery).
 | Case | Behavior |
 | --- | --- |
 | Single node | No replacement exists. Nothing is cordoned, no ownership moves, and all admitted work drains in place before the process exits. |
-| Follower with a reachable leader | The node asks the leader to drain it, then completes what remains in place. |
+| Follower with a reachable leader | The node asks the leader, over the cluster interconnect, to drain it, then completes what remains in place. |
 | Leader | The leader drains itself in process. Leadership is not transferred first; the cluster elects a new leader after it stops. |
 | Last schedulable node | Same as a single node: no replacement candidate exists, so everything completes in place, including source offset commits. |
 | Only peer is itself terminating | A terminating incarnation is not a placement candidate, so the node takes the no-replacement path and completes its work in place. |
@@ -510,10 +516,20 @@ state; see [Forced Recovery](./wasm-state.md#forced-recovery).
 
 The no-replacement path is explicit in the log: `no live schedulable replacement node remains;
 admitted work completes in place`.
-When a follower contacts the leader's session service to request or clear a drain, a named leader
-endpoint resolves through the follower node's loaded resolver, described in
-[Name Resolution](./name-resolution.md). DNS and connection attempts remain within the existing
-drain and shutdown deadlines.
+
+A follower requests its drain, and then the release of the cordon that drain set, with the
+`stopping_node_drain` request over the
+[cluster interconnect](./interconnect.md#peer-identity-and-authentication). The request names no
+node: the leader acts for the node whose certificate authenticated the connection, so a node can
+drain only itself, and no user credential takes part. A follower started without
+`--init-default-user-password`, as every node but the bootstrap node is in the documented
+[Docker deployments](./installation-docker.md), therefore drains through the leader like any other.
+A node that receives the request without leading changes nothing and says so, and the follower asks
+the leader it observes next, within the same drain timeout. The leader runs the drain in a task of
+its own, so a drain that has begun finishes, and releases the gates it engaged, even when the
+follower's drain timeout ends its wait first. The interconnect resolves the leader's advertised
+endpoint through the follower's loaded resolver, described in [Name Resolution](./name-resolution.md),
+within the drain and shutdown deadlines.
 
 ## Connector Contracts
 
@@ -879,10 +895,15 @@ The phase records are the primary signal:
 | `warn` | `shutdown deadline expired; abandoning graceful shutdown` |
 
 Drain decisions and failures are logged beside them: `preserving operator cordon across graceful
-shutdown`, `no live schedulable replacement node remains; admitted work completes in place`,
-`timed out reaching the leader before requesting a graceful shutdown drain`, `drained local node
-before graceful shutdown`, and the two drain-timeout records above. Each phase record carries its
-outcome, so `outcome=Completed` distinguishes a finished phase from an abandoned or forced one.
+shutdown`, `no live schedulable replacement node remains; admitted work completes in place`, `timed
+out reaching the leader before requesting a graceful shutdown drain`, `drained local node before
+graceful shutdown`, `failed to drain local node before graceful shutdown`, `the leader did not
+answer the graceful shutdown drain of the local node`, `timed out moving scheduled work off the
+local node before graceful shutdown`, `cleared shutdown drain cordon before graceful shutdown`, and
+the two drain-timeout records above. The drain and cordon records name the `leader` that acted,
+which is the node itself when it leads, and carry the leader's account of each moved unit as
+`message`. Each phase record carries its outcome, so `outcome=Completed` distinguishes a finished
+phase from an abandoned or forced one.
 
 Existing metric families move during shutdown without naming it. Interconnect stream resets count
 `reason="shutdown"`. The ingestor quiesce families change as intake stops, but they carry no cause
@@ -916,9 +937,19 @@ Start from the outcome on each phase record.
   records are expected and do not hold the drain.
 - **`local graph drain timed out before confirming that no admitted work is still moving`.** A peer
   is still publishing into this node's relays. Drain or stop the upstream node first.
-- **`timed out reaching the leader before requesting a graceful shutdown drain`.** The cluster had
-  no reachable leader. The node still completed its local drain; its scheduled work is reassigned by
-  failover once it is gone.
+- **`timed out reaching the leader before requesting a graceful shutdown drain`.** The node observed
+  no leader before its drain timeout. It still completed its local drain; its scheduled work is
+  reassigned by failover once it is gone.
+- **`failed to drain local node before graceful shutdown`.** The leader moved only part of the
+  node's work. Its `message` names each unit and why its move failed; those units fail over once the
+  node is gone.
+- **`the leader did not answer the graceful shutdown drain of the local node`.** The request did not
+  come back from the `leader` the record names, and `error` says why, such as a leader that left the
+  cluster or a connection that could not be opened. The leader may still have moved some of the
+  node's work; whatever it did not move fails over once the node is gone.
+- **`timed out moving scheduled work off the local node before graceful shutdown`.** The drain timeout
+  or the shutdown deadline ended the wait for the leader's answer. A leader on another node still
+  finishes the moves it began; whatever is not moved fails over once the node is gone.
 - **Work reappears after a restart.** That is redelivery, not duplication of committed work: the
   drain ended before those records were acknowledged, so their source offered them again.
 

@@ -27,7 +27,9 @@ The container toolkit supplies the host driver; CUDA and cuDNN are supplied by t
 ## Run Three Nodes With Docker
 
 Choose the image and initial password. The password environment variable is expanded by the shell
-and passed only to the bootstrap node:
+and passed only to the bootstrap node, which creates the default user with it. The other nodes need
+no password: they read that user from the cluster, and a node that stops gracefully asks the leader
+to drain it under its node certificate.
 
 ```bash
 export NERVIX_IMAGE=ghcr.io/nervix-io/nervix:debian-latest

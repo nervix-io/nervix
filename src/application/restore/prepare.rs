@@ -10,9 +10,12 @@
 //!   decision layer's restore and transaction planners.
 //! - **Must not know.** How a plan is applied, or which transport carried the stream.
 
+mod metadata;
+mod native;
+
 use std::{
     collections::{BTreeMap, BTreeSet},
-    io::{self, BufReader, Read, Seek, SeekFrom},
+    io::{self, BufReader, Read},
     path::Path,
 };
 
@@ -25,7 +28,9 @@ use nervix_backup::{
     ArchiveContents, ArchiveReadError, DescribedRuntimeState, DescribedSection,
     read_archive_contents,
 };
-use nervix_execution::{Cancellation, ChargedBytes, Executor, MemoryClass, StorageClass};
+use nervix_execution::{
+    Cancellation, ChargedBytes, CpuClass, Executor, MemoryClass, Reservation, StorageClass,
+};
 use nervix_models::{
     CreateStatement, DomainName, Model, RequestedResourceVersion, ResourceUpload,
     ResourceUploadState, ResourceUploads, ResourceUploadsError, Restore, RestoreArchive,
@@ -55,6 +60,8 @@ use crate::{
 pub(in crate::application) enum RestoreRefusal {
     #[error("the archive could not be read on this node")]
     Unreadable,
+    #[error("the archive metadata exceeds the node's available restore preparation budget")]
+    MetadataAdmission,
     #[error("the archive is not a valid backup archive")]
     InvalidArchive,
     #[error("the models of domain '{domain}' do not parse at line {line}")]
@@ -98,8 +105,13 @@ pub(in crate::application) enum ArchiveSectionReadError {
 /// An archive a restore stream staged and verified, with each domain's models parsed.
 pub(in crate::application) struct VerifiedArchive {
     artifact: Arc<StagedArtifact>,
+    data: Arc<VerifiedArchiveData>,
+}
+
+struct VerifiedArchiveData {
     contents: ArchiveContents,
     models: BTreeMap<DomainName, Vec<Model<RequestedResourceVersion>>>,
+    _reservation: Reservation,
 }
 
 impl VerifiedArchive {
@@ -108,6 +120,7 @@ impl VerifiedArchive {
         domain: &DomainName,
     ) -> &[DescribedRuntimeState] {
         match self
+            .data
             .contents
             .description
             .domains
@@ -124,6 +137,7 @@ impl VerifiedArchive {
         domain: &DomainName,
     ) -> &[nervix_backup::SkippedStateSection] {
         match self
+            .data
             .contents
             .description
             .domains
@@ -133,53 +147,6 @@ impl VerifiedArchive {
             Some(described) => described.skipped_state.as_slice(),
             None => &[],
         }
-    }
-
-    /// Reads one bounded window for a remote installation. Local installation reads the file
-    /// directly inside its admitted storage job; neither path assembles a guest blob in memory.
-    pub(in crate::application) async fn read_guest_chunk(
-        &self,
-        runtime: &Runtime,
-        section: &DescribedSection,
-        offset: u64,
-    ) -> Result<ChargedBytes, Report<RestoreRefusal>> {
-        let remaining = section
-            .length
-            .checked_sub(offset)
-            .ok_or_else(|| Report::new(RestoreRefusal::Unreadable))?;
-        let length = remaining.min(
-            u64::try_from(crate::runtime::RESTORE_STATE_CHUNK_BYTES).verified("chunk size fits"),
-        );
-        let position = section
-            .offset
-            .checked_add(offset)
-            .ok_or_else(|| Report::new(RestoreRefusal::Unreadable))?;
-        let executor = runtime.executor().clone();
-        let artifact = self.artifact.clone();
-        let working_bytes = length
-            .checked_mul(2)
-            .ok_or_else(|| Report::new(RestoreRefusal::Unreadable))?;
-        let reservation = executor
-            .reserve(MemoryClass::Bulk, working_bytes.max(1))
-            .await
-            .change_context(RestoreRefusal::Unreadable)?;
-        executor
-            .run_storage(
-                StorageClass::Filesystem,
-                reservation,
-                move |charge, cancellation| -> io::Result<ChargedBytes> {
-                    cancellation.check().map_err(io::Error::other)?;
-                    let mut file = std::fs::File::open(artifact.path())?;
-                    file.seek(SeekFrom::Start(position))?;
-                    let capacity = usize::try_from(length).map_err(io::Error::other)?;
-                    let mut bytes = vec![0; capacity];
-                    file.read_exact(&mut bytes)?;
-                    Ok(ChargedBytes::from_owned(bytes, charge))
-                },
-            )
-            .await
-            .change_context(RestoreRefusal::Unreadable)?
-            .change_context(RestoreRefusal::Unreadable)
     }
 
     /// Reads `section` whole into memory charged to the bulk budget, refusing a section longer
@@ -200,12 +167,22 @@ impl VerifiedArchive {
             .change_context(ArchiveSectionReadError::Admission)?;
         let capacity = usize::try_from(section.length)
             .map_err(|_| Report::new(ArchiveSectionReadError::TooLong { limit }))?;
+        let chunk_bytes = u64::try_from(crate::runtime::RESTORE_STATE_CHUNK_BYTES)
+            .verified("one bounded chunk fits 64 bits");
         let mut bytes = Vec::with_capacity(capacity);
         let mut offset = 0_u64;
         while offset < section.length {
             nervix_primitives::task::consume_budget().await;
-            let chunk = self
-                .read_guest_chunk(runtime, section, offset)
+            let position = section
+                .offset
+                .checked_add(offset)
+                .ok_or_else(|| Report::new(ArchiveSectionReadError::Read))?;
+            let remaining = section
+                .length
+                .checked_sub(offset)
+                .verified("the loop reads only while the offset is below the section length");
+            let length = remaining.min(chunk_bytes);
+            let chunk = StagedArtifact::read_window(self.artifact(), position, length)
                 .await
                 .change_context(ArchiveSectionReadError::Read)?;
             bytes.extend_from_slice(&chunk);
@@ -219,7 +196,7 @@ impl VerifiedArchive {
 
     /// When the backup that wrote the archive read its contents.
     pub(in crate::application) fn captured_at(&self) -> Timestamp {
-        self.contents.description.manifest.captured_at
+        self.data.contents.description.manifest.captured_at
     }
 
     /// The staged archive file, which holds every section at the offset its description names.
@@ -234,7 +211,7 @@ impl VerifiedArchive {
 
     /// The NSPL of the archived domain `domain`, as the archive holds it.
     pub(in crate::application) fn models_text(&self, domain: &DomainName) -> &str {
-        match self.contents.models.get(domain) {
+        match self.data.contents.models.get(domain) {
             Some(text) => text.as_str(),
             None => "",
         }
@@ -347,41 +324,45 @@ impl SessionServiceImpl {
         let executor = self.inner.runtime.executor().clone();
         let artifact = Arc::new(artifact);
         let reader_artifact = artifact.clone();
-        let reservation = executor
-            .reserve(
-                MemoryClass::Bulk,
-                executor.limits().bulk_chunk_bytes.as_u64(),
-            )
-            .await
-            .change_context(RestoreRefusal::Unreadable)?;
+        let reservation = metadata::reserve_metadata(&executor, artifact.clone()).await?;
         let read = executor
             .run_storage(
                 StorageClass::Filesystem,
                 reservation,
-                move |_charge, cancellation| {
-                    let file = match std::fs::File::open(reader_artifact.path()) {
-                        Ok(file) => file,
-                        Err(error) => {
-                            return Err(Report::new(error).change_context(ArchiveReadError::Read));
-                        }
-                    };
-                    read_archive_contents(CancellableRead {
+                move |charge, cancellation| {
+                    let file = std::fs::File::open(reader_artifact.path())
+                        .map_err(Report::new)
+                        .change_context(ArchiveReadError::Read)?;
+                    let contents = read_archive_contents(CancellableRead {
                         inner: BufReader::new(file),
                         cancellation,
-                    })
+                    })?;
+                    Ok::<_, Report<ArchiveReadError>>((contents, charge))
                 },
             )
             .await
             .change_context(RestoreRefusal::Unreadable)?;
-        let contents = read.change_context(RestoreRefusal::InvalidArchive)?;
-        let mut models = BTreeMap::new();
-        for (domain, text) in &contents.models {
-            models.insert(domain.clone(), parse_models(domain, text)?);
-        }
+        let (contents, reservation) = read.change_context(RestoreRefusal::InvalidArchive)?;
+        let data = executor
+            .run_cpu(CpuClass::Bulk, reservation, move |charge, cancellation| {
+                let mut models = BTreeMap::new();
+                for (domain, text) in &contents.models {
+                    cancellation
+                        .check()
+                        .change_context(RestoreRefusal::Unreadable)?;
+                    models.insert(domain.clone(), parse_models(domain, text)?);
+                }
+                Ok::<_, Report<RestoreRefusal>>(VerifiedArchiveData {
+                    contents,
+                    models,
+                    _reservation: charge,
+                })
+            })
+            .await
+            .change_context(RestoreRefusal::Unreadable)??;
         Ok(VerifiedArchive {
             artifact,
-            contents,
-            models,
+            data: Arc::new(data),
         })
     }
 
@@ -407,19 +388,33 @@ impl SessionServiceImpl {
             .await
             .into_keys()
             .collect();
-        RestorePlan::new(
-            restore,
-            ArchiveToRestore {
-                description: &archive.contents.description,
-                models: &archive.models,
-            },
-            &ExistingState {
-                users: &users,
-                domains: &domains,
-                recorded,
-            },
-        )
-        .change_context(RestoreRefusal::Plan)
+        let data = archive.data.clone();
+        let restore = restore.clone();
+        let recorded = recorded.clone();
+        let executor = self.inner.runtime.executor();
+        let charge = executor
+            .reserve(MemoryClass::Bulk, 1)
+            .await
+            .change_context(RestoreRefusal::MetadataAdmission)?;
+        executor
+            .run_cpu(CpuClass::Bulk, charge, move |_charge, cancellation| {
+                cancellation.check().change_context(RestoreRefusal::Plan)?;
+                RestorePlan::new(
+                    &restore,
+                    ArchiveToRestore {
+                        description: &data.contents.description,
+                        models: &data.models,
+                    },
+                    &ExistingState {
+                        users: &users,
+                        domains: &domains,
+                        recorded: &recorded,
+                    },
+                )
+                .change_context(RestoreRefusal::Plan)
+            })
+            .await
+            .change_context(RestoreRefusal::Plan)?
     }
 
     /// Plans every domain's model run with the transaction planner, against the domain as the

@@ -51,7 +51,7 @@ port and a time budget, and receives addresses or a typed failure.
 | Owner | What it owns about name resolution |
 | --- | --- |
 | `nervix-dns` | The resolver, its policy and bounds, its failures, its client-library hooks, and the connection budget and ordered address attempts |
-| The server, as composition root | Loading the node's resolver once at startup from the node's DNS options, and handing clones to the runtime, the interconnect, and the node's own client sessions |
+| The server, as composition root | Loading the node's resolver once at startup from the node's DNS options, and handing clones to the runtime, the interconnect, and the node's own trace exporter |
 | `nervix-interconnect` | When and where a peer endpoint is resolved, the TLS and HTTP/2 identity of the connection, and peer failure classification |
 | `nervix-connector` | The shared HTTP client configuration that installs the resolver on the Reqwest clients of HTTP polling, Prometheus, Sentry and OTEL HTTP |
 | Each connector crate | Installing the resolver its typed plan carries at its driver's hook, or resolving and dialling itself; its TLS, framing, protocol handshake, and the error it reports |
@@ -77,9 +77,8 @@ or hosts file takes effect when the node next starts.
 
 Clones of the resolver share its configuration, hosts snapshot, answer cache and concurrency bound.
 The node hands one clone to the runtime, which passes it into the typed plan of every source and
-sink that resolves through it, one to the interconnect, and one to each client session the node
-opens to the leader's session service while it shuts down, and one to its own OTLP trace
-exporter when enabled. Nothing about the resolver is process-wide: it lives in no static, its
+sink that resolves through it, one to the interconnect, and one to its own OTLP trace exporter
+when enabled. Nothing about the resolver is process-wide: it lives in no static, its
 name-server connections and background tasks run on the runtime that built it, and they end when
 its last clone is dropped. A runtime that shuts down with a lookup in flight is not held open by
 that lookup.
@@ -90,8 +89,8 @@ source or sink that needs the resolver fails to start there with the reason
 
 A native session client loads its resolver once per client, before its first connection, from the
 host's files or from the configuration its caller names, and reuses it for the first connection,
-seeds, redirects and reconnects. An owner that already holds a resolver, such as a node opening a
-session to the leader, hands its own over instead, and the CLI passes its DNS options through. The
+seeds, redirects and reconnects. An owner that already holds a resolver hands its own over
+instead, and the CLI passes its DNS options through. The
 shared C binding always loads the host's `/etc/resolv.conf` and `/etc/hosts`.
 
 ## Node Trace Export
@@ -293,7 +292,6 @@ name again for every new connection it opens.
 | Redis Pub/Sub sources | The connector resolves and dials a dedicated stream, then hands it to Redis's `PubSub::new` | Thirty seconds shared with the attempts, TLS, Redis setup and `SUBSCRIBE` | [DNS for Redis](./connector-contract.md#dns-for-redis) |
 | MQTT sources and sinks | The connector's socket connector, installed with `MqttOptions::set_socket_connector`, for every connection the driver's event loop opens | The driver's five-second connect timeout | [DNS for MQTT](./connector-contract.md#dns-for-mqtt) |
 | Native CLI and SDK sessions | The client's resolver, as Hyper's resolver service under Tonic 0.13's connector, for the first connection, seeds, redirects and reconnects | The session's connect timeout, ten seconds by default, which encloses the lookup, the attempts and TLS | [Leader Discovery, Redirect, And Reconnect](./client-session-protocol.md#leader-discovery-redirect-and-reconnect) |
-| A node's session to the leader's session service while it shuts down | The same session client, given the node's resolver | The session's ten-second connect timeout, within the drain and shutdown deadlines | [Topology Cases](./shutdown.md#topology-cases) |
 
 Two interconnect uses are resolved once, when the node starts: the address that identifies the
 node in gossip, which is the first answer for its own advertised endpoint, and its bootstrap seeds,
@@ -377,7 +375,6 @@ connection delivers it.
 | A sink | Fails its start, its reopening or its publish | The emitter host, on its backoff and retry policy |
 | A Redis command pool | Fails the physical connection the pool was opening | The emitter that borrows from the pool, on its retry policy |
 | A native session | Fails the connection attempt as `ClientError::ConnectServer` | The session's bounded reconnect policy until its retry deadline |
-| A node's session to the leader while it shuts down | Logs the failure at `warn` and gives the request up: the node drains without the leader's help, or leaves clearing its cordon abandoned | Nothing; shutdown continues within its own deadlines |
 
 A shutdown or quiesce that arrives while a source is resuming cancels the resume, together with
 every lookup, dial and handshake in it, as [Stopping Intake](./shutdown.md#stopping-intake)

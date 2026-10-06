@@ -148,6 +148,14 @@ updated together. A previously stored shape that cannot supply required identity
 clearly and must be recreated; it is not defaulted into the current state. Tests construct the
 current shape and assert its behavior.
 
+## Archive Preparation Admission
+
+Archive preparation reads the first physical tar header into the backup crate's `ManifestHeader`.
+That type carries the regular manifest entry's validated identity and bounded encoded length.
+Restore uses its length to admit manifest decoding before allocating owned archive values. The
+full archive reader uses the same boundary and then verifies the manifest and every section; see
+[Backup And Restore](./backup-and-restore.md).
+
 ## Archived Counts
 
 Native `usize` and `NonZeroUsize` counts use the vocabulary's `CountAsU64` archive adapter. Every
