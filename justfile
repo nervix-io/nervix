@@ -4,6 +4,9 @@ set lists
 
 export RUSTUP_AUTO_INSTALL := "0"
 
+# CI builds do not need incremental compilation artifacts.
+export CARGO_INCREMENTAL := if env("CI", []) != [] { "0" } else { env("CARGO_INCREMENTAL", []) }
+
 rust_toolchain_version := shell("toml get -r rust-toolchain.toml toolchain.channel")
 rustflags := env('RUSTFLAGS', '')
 build_mode := "debug"
