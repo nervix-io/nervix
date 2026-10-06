@@ -343,6 +343,56 @@ scenario = "A complete restore generation with <branches> saves of <save_mib> Mi
 selections = ["deloxide", "deloxide-order"]
 
 [[workload]]
+coverage = "Capture, archive and restore of deduplicator keys and half-filled window rows, and their per-branch continuation."
+examples = 2
+feature = "tests/features/cluster/backup_branch_state.feature"
+id = "scenario.branch-state-resume"
+invariant = "Deduplicator keys and half-filled windows captured at a quiesced cut continue per branch after RESUME on one node and on three nodes with a replica."
+invocation = "scenarios"
+scenario = "Deduplicator keys and half-filled windows captured at a quiesced cut continue per branch after RESUME"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
+coverage = "Re-export of stopped restores, interrupted installation of deduplicator and window state, and WITHOUT STATE restores."
+examples = 2
+feature = "tests/features/cluster/backup_branch_state.feature"
+id = "scenario.branch-state-reexport"
+invariant = "A stopped restore re-exports identical deduplicator and window sections, an interrupted installation keeps START gated, and WITHOUT STATE installs neither, on one and three nodes."
+invocation = "scenarios"
+scenario = "A stopped restore re-exports identical deduplicator and window sections, an interrupted installation keeps START gated, and WITHOUT STATE installs neither"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
+coverage = "The applied-state authority guard for resumed deduplicator and window state across a leadership transfer."
+examples = 1
+feature = "tests/features/cluster/backup_branch_state.feature"
+id = "scenario.branch-state-stale-coordinator"
+invariant = "A delayed restore coordinator cannot replace deduplicator keys and windows a new leader resumed."
+invocation = "scenarios"
+scenario = "A delayed coordinator cannot replace resumed deduplicator keys and windows"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
+coverage = "Restore of window state against a changed window model or branch incarnation."
+examples = 2
+feature = "tests/features/cluster/backup_branch_state.feature"
+id = "scenario.branch-state-model-change"
+invariant = "A changed window model or branch incarnation starts an empty window with a restore warning on one and three nodes."
+invocation = "scenarios"
+scenario = "A changed window model or branch incarnation starts an empty window with a restore warning"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
+coverage = "Streamed restore of native lifecycle and Kafka metadata above the bulk budget, its interrupted attempt and exact replay."
+examples = 2
+feature = "tests/features/cluster/backup_metadata.feature"
+id = "scenario.native-metadata-restore"
+invariant = "Native lifecycle and Kafka metadata above the bulk budget restore exactly on one and three nodes, and an exact replay recovers the completed restore."
+invocation = "scenarios"
+scenario = "Native lifecycle and Kafka metadata above the bulk budget on <cluster_size> nodes restore exactly"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
 coverage = "Materialized relay capture, restore and generator resumption through restart."
 examples = 2
 feature = "tests/features/cluster/backup_materialized.feature"
