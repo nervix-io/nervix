@@ -1,0 +1,102 @@
+BEGIN;
+
+CREATE SCHEMA chaos_paced_input (
+  event_id STRING,
+  branch_name STRING,
+  sequence I64
+);
+
+CREATE WIRE JSON SCHEMA chaos_paced_wire MODE STRICT (
+  event_id STRING,
+  branch_name STRING,
+  sequence INTEGER
+);
+
+CREATE CODEC chaos_paced_json
+  FROM WIRE JSON SCHEMA chaos_paced_wire
+  TO SCHEMA chaos_paced_input;
+
+CREATE SCHEMA chaos_paced_record (
+  event_id STRING,
+  branch_name STRING,
+  sequence I64,
+  received_at DATETIME
+);
+
+CREATE SCHEMA chaos_paced_branch_key (
+  branch_name STRING
+);
+
+CREATE BRANCH chaos_paced_branch SCHEMA chaos_paced_branch_key TTL 5m MAX INSTANCES 16 EVICT LRU;
+
+CREATE RELAY chaos_paced_records SCHEMA chaos_paced_record BRANCHED BY chaos_paced_branch CAPACITY 1;
+
+CREATE CLIENT chaos_paced_kafka
+  TYPE KAFKA
+  CONFIG {
+    'bootstrap.servers' = 'broker:9092',
+    'auto.offset.reset' = 'earliest'
+  };
+
+CREATE INGESTOR chaos_paced_ingestor
+  FROM KAFKA chaos_paced_kafka TOPIC chaos_paced_input OFFSET BY CONSUMER GROUP chaos_paced MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s ON QUIESCE SUSPEND
+  DECODE USING chaos_paced_json
+  TIMESTAMP NOW
+  TO chaos_paced_records
+    INHERIT ALL
+    SET received_at = now()
+    BRANCHED BY chaos_paced_branch SET branch_name = message.branch_name
+    FLUSH IMMEDIATE
+    ON MESSAGE ERROR LOG
+  ON GENERAL ERROR LOG;
+
+CREATE SCHEMA chaos_paced_window (
+  branch_name STRING,
+  records I64,
+  first_sequence I64,
+  last_sequence I64,
+  opened_at DATETIME,
+  closed_at DATETIME
+);
+
+CREATE WIRE JSON SCHEMA chaos_paced_window_wire MODE STRICT (
+  branch_name STRING,
+  records INTEGER,
+  first_sequence INTEGER,
+  last_sequence INTEGER,
+  opened_at STRING,
+  closed_at STRING
+);
+
+CREATE CODEC chaos_paced_window_json
+  FROM WIRE JSON SCHEMA chaos_paced_window_wire
+  TO SCHEMA chaos_paced_window
+  ENCODE opened_at AS RFC3339, closed_at AS RFC3339;
+
+CREATE RELAY chaos_paced_windows SCHEMA chaos_paced_window BRANCHED BY chaos_paced_branch CAPACITY 1;
+
+CREATE DETACHED WINDOW PROCESSOR chaos_paced_window_processor
+  FROM chaos_paced_records
+  WIDTH 8s DURATION
+  STEP 8s DURATION
+  BRANCHED BY chaos_paced_branch
+  TO chaos_paced_windows
+    SET branch_name = first(input.branch_name),
+        records = count(input.sequence),
+        first_sequence = min(input.sequence),
+        last_sequence = max(input.sequence),
+        opened_at = min(input.received_at),
+        closed_at = now()
+    ON MESSAGE ERROR LOG;
+
+CREATE ATTACHED EMITTER chaos_paced_emitter
+  FROM chaos_paced_windows
+  TO KAFKA chaos_paced_kafka TOPIC chaos_paced_output
+    MODE ACK PARALLEL MAX 16 ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s
+    ENCODE USING chaos_paced_window_json
+  INHERIT ALL
+  FLUSH IMMEDIATE
+  ON MESSAGE ERROR LOG
+  ON GENERAL ERROR LOG;
+
+COMMIT;

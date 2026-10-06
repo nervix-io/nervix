@@ -510,6 +510,267 @@ samples, and node-1 first heard of node-3 through node-2's gossip, so the grace 
 it. [Cluster Chaos 39: Keep a restarted voter's work when gossip hears of it before observing it
 live](https://app.clickup.com/t/86bcd4hzv) owns the product fix.
 
+Run branch-local state through a durability milestone and one fault:
+
+```bash
+just chaos run stateful --image nervix:debian
+just chaos run stateful --image nervix:debian --nodes 1
+just chaos run stateful --image nervix:debian --fault owner-crash
+just chaos run stateful --image nervix:debian --fault owner-pause
+just chaos run stateful --image nervix:debian --fault owner-partition
+just chaos run stateful --image nervix:debian --fault cluster-restart
+just chaos run stateful --image nervix:debian --nodes 1 --fault cluster-restart
+```
+
+The stateful graph of `fixtures/stateful.nspl` runs in the baseline domain beside the baseline path,
+which keeps its own traffic, verdicts and exact ledger. A separate prebuilt kcat container produces
+`fixtures/generate-stateful.jq` records to `chaos_state_input`, one record a second, and one kcat
+call per record, so a record reaches the broker before the next is read. Two concrete branches,
+`alpha` and `beta`, interleave strictly by sequence, and every record carries its branch index. An
+`ACK PARALLEL` ingestor with its own consumer group feeds four processors, each with its own
+attached Kafka emitter and output topic:
+
+- the deduplicator `chaos_dedup` keys on a deduplication key. Every fourth record of a branch
+  repeats the key of a record 3, 23 or 79 positions back, and both branches name keys after the
+  same indexes, so equal keys of different branches must never deduplicate each other;
+- the detached window processor `chaos_window` aggregates 12 rows of a branch. It reports the
+  smallest and largest index, the sum of the sequences, and the sum of 4 to the power of each index
+  modulo 24, whose base-4 digits tell which rows the window held and how often;
+- the junction `chaos_enrich` reads the branch's row of the materialized relay `chaos_profiles`,
+  which a second ingestor fills from `chaos_profile_input`, with a `DEFAULT` that names no branch;
+- the WASM processor `chaos_counter` runs `fixtures/wasm/processors/branch-counter.wat`. Each
+  branch's guest counts the rows it has processed, saves that count as its state, and emits every
+  row with all of its input fields and the count after it.
+
+The WASM guest is a prebuilt module in WebAssembly text, which the packaged server loads directly,
+so a run needs no guest toolchain and compiles nothing. The run uploads exactly that file with the
+packaged CLI's `UPLOAD RESOURCE` and records its SHA-256 and size under `fixtures.wasm` in
+`manifest.json` and in the result. `just chaos-wasm-fixture` regenerates it from the current guest
+ABI. The `nervix-wasm` package's `chaos_branch_counter` test, part of `just test`, fails while the
+checked-in module differs from what the generator writes, and drives that module through the host
+to prove its per-branch counts and its restore from saved state.
+
+The deployment sets two ordinary state options: `NERVIX_STATE_SNAPSHOT_INTERVAL=1s`, and on three
+nodes `NERVIX_REPLICA_COUNT=1`, so the loss of an owner promotes a replica of each processor's state
+instead of resetting it. A pause fault also deploys the pause scenario's 10–12 second election window
+and 15-second unavailability timeout. On three nodes the stateful entities move with one
+acknowledged `RELOCATE` onto the observed follower that the faults target, and both stateful
+ingestors onto another node, so a fault on the state owner leaves the Kafka consumers in place.
+
+A run first loads profile version 1 for both branches and requires `SHOW RELAY chaos_profiles
+MATERIALIZED STATE` to show it before any record is produced, and publishes version 2 after 40
+records. At 80 records the runner asks the load to hold, and it holds before its 101st record, when
+each branch has two rows in an open window. The milestone requires the stateful consumer group to be
+committed through all 100 records, the profile group through its end, every stateful output to stay
+unchanged, `DESCRIBE WASM PROCESSOR chaos_counter FORMAT JSON` to report both branch checkpoints
+committed at their latest revision and confirmed by every assigned replica, and the materialized
+relay to show version 2 for both branches. It then holds the drained state for five configured
+snapshot intervals, read from the nodes' Docker inspection, and requires the outputs to stay
+unchanged throughout. `stateful/milestone.json` keeps that evidence. The image exposes no
+publication milestone of deduplicator, window or materialized relay state, so their durability
+verdicts rest on this drained and held boundary rather than on an observed publication, and the
+result says so.
+
+The load then resumes for four more records, holds again, and version 3 is published. The runner reads
+the fault's boundaries, which takes several broker round trips, while the load holds, and releases it
+as the fault begins, so the window rows open at the milestone are still open when the fault strikes.
+Records are classified by sequence: before the milestone, the volatile interval from the milestone until the
+end of the fault's recovery, and after recovery. `--fault` selects the fault:
+
+- `none` holds no fault and allows no deviation at all;
+- `owner-crash` SIGKILLs the state owner with Pumba, requires the survivors to settle and the
+  stateful work to move off it while it is down, holds the outage for `--outage-seconds` (default
+  8), and starts the same container from its image and volume;
+- `owner-pause` pauses the state owner for `--outage-seconds` (default 45, between 16 and 99) and
+  requires the failover to happen while it is paused;
+- `owner-partition` isolates the state owner with peer-side netem and iptables rules, verified as in
+  `partition-recovery`, for at least `--outage-seconds` (default 45);
+- `cluster-restart` SIGKILLs every node and starts each from its own volume.
+
+Each fault proves its effect through Pumba's report, Docker inspection and the run's live Docker event
+recording, and the node lifecycle events from the fault through recovery must be exactly the planned
+ones. Recovery requires a settled, connected cluster, an owner for every stateful entity and
+advancing stateful output. The run continues until each branch has seen the duplicates that refer 79
+positions back to keys durable at the milestone and at least 48 records after recovery, then stops
+the load and waits for the stateful group to commit through the final boundary.
+
+`verify-state-evidence.sh` judges each processor against the accepted-input ledger that the runner
+reconstructs from `chaos_state_input`, with three distinct expectations:
+
+- identical replays of a record after a fault are replay duplicates, counted separately; before a
+  fault, or in a run without one, a replay is a violation;
+- state the milestone made durable must survive: a later duplicate of a key first seen before the
+  milestone must be dropped, the two rows each branch held open at the milestone must be aggregated
+  exactly once in a window that closes after the fault, a record after the milestone must carry at
+  least profile version 2, and every guest count must reach at least its branch index, because
+  every acknowledged input is reflected in the checkpoint the guest restores;
+- the volatile interval permits what periodic checkpoints and replayed acknowledgements allow: a
+  duplicate of a key first seen there may pass, a window row from it may be lost or aggregated
+  twice, its profile version may be lost back to version 2, and a guest may count a replayed record
+  again, by at most the number of records that interval holds.
+
+Every verdict also requires the records' own content and branch, the first occurrence of every key
+of each branch, every record in the enriched and counted outputs, windows of 12 rows of one branch
+with the sums they report, guest counts that equal the branch index before the fault and advance by
+one per record after recovery, and never the profile default or another branch's profile. Before a
+fault every window is 12 consecutive rows. A durability verdict that its fault did not exercise,
+such as a run that ended before a duplicate of a milestone key arrived after recovery, fails as
+missing evidence. Each processor's verdict is kept in `stateful/verdict-*.json`; a failing one is a
+product finding, and the run continues to the baseline ledger before it exits nonzero.
+`results/stateful-progress.json` records the deployment, the boundaries, the milestone, the timings
+and every verdict.
+
+Run a paced domain's clock and logical deadlines through faults of every voter:
+
+```bash
+just chaos run domain-time --image nervix:debian
+just chaos run domain-time --image nervix:debian --nodes 1
+just chaos run domain-time --image nervix:debian --fault voter-crash
+just chaos run domain-time --image nervix:debian --fault voter-pause
+just chaos run domain-time --image nervix:debian --fault voter-partition
+just chaos run domain-time --image nervix:debian --fault voter-stop
+just chaos run domain-time --image nervix:debian --fault cluster-restart
+just chaos run domain-time --image nervix:debian --nodes 1 --fault cluster-restart
+```
+
+The runner creates the paced domain `chaos_paced` with `PERIOD 1s SKEW 1s`, installs
+`fixtures/paced.nspl` and starts it with `START AT NOW TIME RATE 4.0`, so logical time runs four times
+faster than physical time. A separate kcat container produces two interleaved branches every 250 ms
+to `chaos_paced_input`; the ingestor stamps each record with `TIMESTAMP NOW` and `received_at =
+now()`, and a detached window of `WIDTH 8s DURATION` closes on that logical clock and records when it
+opened and closed. One independent observer per node, a container of the supplied image, follows
+the domain's clock with the packaged CLI's `domain-clock` through that node's session route and stamps
+every line with the host's clock. An observer whose follow ends attaches again.
+
+`--fault` selects the faults. A voter fault runs one round per voter, in node order. Before each
+round the paced graph moves with one acknowledged `RELOCATE` onto another node, or onto the voter
+itself for a graceful stop, and the cluster must be settled and connected:
+
+- `voter-crash` SIGKILLs the voter and starts it again after `--outage-seconds` (default 8);
+- `voter-pause` pauses it for `--outage-seconds` (default 30) under the pause deployment;
+- `voter-partition` isolates it with peer-side rules for at least `--outage-seconds` (default 30);
+- `voter-stop` stops it gracefully with a 60-second grace, requires a completed shutdown whose
+  drain-support phase completed, so the voter handed the paced graph to another node through the
+  leader before it exited, and starts it again after `--outage-seconds` (default 8). A drain that
+  does not complete is a product finding;
+- `cluster-restart` SIGKILLs every node and starts each from its own volume;
+- `none` observes the healthy domain without a fault.
+
+While a fault holds away from the graph, its windows must keep closing; after each round the cluster
+must settle, every observer must tick again, and windows must close again. `verify-clock-evidence.sh`
+then judges what the observers recorded. Every attach and every state report after a reconnection must
+carry the first report's generation and mapping; no `START` follows the first, so the generation
+never changes. Every tick must lie on the mapping's period grid, with its boundary at
+`logical origin + (id - 1) * period`, in that generation and no later than the serving node's own
+logical time. Tick ids must increase within each attachment. A tick stall longer than two physical seconds on an observer whose
+node stayed up must fall inside a fault and end within 60 physical seconds, the authority bound the
+result records beside the deployed `NERVIX_NODE_UNAVAILABILITY_TIMEOUT`. From the start of each fault
+until recovery, a sampler in one administration container reads every node's own `SHOW CLUSTER
+STATUS` several times a second. Once a surviving node no longer counts the faulted voter available,
+because its interconnect entry reads `unavailable` or has left the list, another voter must take the
+clock over within ten physical seconds. A node becomes unavailable only after its health probes have
+failed continuously for the deployed unavailability timeout; a gossip warning alone does not end its
+availability, so a short fault may end before any replacement. No public command, metric or
+info-level log names the clock authority, so a rotation covers every voter: the round whose fault
+stalls the ticks on every surviving observer is the one that removed the authority, and a rotation
+without such a round fails as missing evidence. Every paced window must close no earlier than eight
+logical seconds after it opened, which also shows that a graceful stop never emitted a partial window;
+away from a relocation or an outage of its own node, no more than eight logical seconds late. It must
+hold rows of one branch, and windows must keep closing on their logical deadlines while an authority
+stall withholds ticks. A stall caused by a graceful stop or a cluster restart is exempt, because that
+round also takes the graph's own node down, so its windows wait for the graph rather than the clock.
+The physical bounds of failover and shutdown therefore stay physical while windows follow logical
+time. `domain-time/` keeps each round's fault evidence, the observers'
+transcripts, the window output with Kafka timestamps and both verdicts, and
+`results/domain-time-progress.json` summarizes them, with each round's availability samples under
+its own directory.
+
+### Stateful and domain-time qualification on the selected worker
+
+The worker was the one of the restart qualification above: Ubuntu 26.04.1, Linux 7.0.0-34-generic,
+Docker 29.8.1 with Compose 5.5.1, 24 CPUs and 66.7 GB of memory, shared with other workloads. Two
+official AMD64 images were used: the earlier
+`ghcr.io/nervix-io/nervix@sha256:0b39e7ab59ccbf22c8b6293c715affda49948d48c8ef4dc6d73ef89b6867677b`,
+built from main `0913fddf`, and the image of this change,
+`ghcr.io/nervix-io/nervix@sha256:56ef9ee5108dbc28c6569268431c434167152b3b70f5cb4451c41c36161fa2bc`,
+built on main `9b75a6cb`, which includes the node-authenticated drain. Up to five runs shared the
+worker at once. Every stateful run uploaded the 7,261-byte guest with SHA-256
+`f8ecaf481938bac803d44aa2ec914f92f34ebfd6a7fa8c2bc5ee38ab7d75377d`.
+
+On the newer image, three-node `stateful` passed with `owner-crash`, `owner-pause`,
+`owner-partition` and `cluster-restart`, and `stateful` passed without a fault on one and three
+nodes. node-3 owned the stateful entities with one replica, and node-1 ran both stateful ingestors.
+Every run held the load at the 100-record milestone and again at 104 records while it read the
+fault's boundaries, so each fault began with the source committed through record 104 and the
+milestone's window rows still open. The work left the crashed, paused and isolated owner after
+17.0, 22.1 and 42.4 seconds, and stateful output advanced again 56.0, 63.5 and 118.9 seconds after
+the fault began, and 51.7 seconds after the cluster restart. In every fault run the deduplicator
+dropped every later duplicate of a milestone key, the four window rows open at the milestone were
+aggregated exactly once, every record after recovery carried profile version 3, and every guest
+count equaled its branch index. No record was replayed and no row of the volatile interval was
+lost. The runs without a fault matched every output exactly. On the earlier image the same three
+owner faults and the run without a fault passed too.
+
+Earlier runs read the fault's boundaries while the load kept running. On the loaded worker that
+took about half a minute, and in three runs on the newer image the windows open at the milestone
+closed before the fault began. Their window verdicts failed as unverified rather than passing, and
+the second hold now keeps those rows open until the fault.
+
+Three of the seven three-node `cluster-restart` runs, two on the earlier image and one on the
+newer, lost the state of every processor. In each the leader moved every stateful entity off node-3
+about half a second after it resumed leadership, inside the ten-second whole-cluster grace and
+before its gossip had heard from either peer; [Cluster Chaos 39: Keep a restarted voter's work when
+gossip hears of it before observing it live](https://app.clickup.com/t/86bcd4hzv) owns that. It
+promoted its own replicas of the deduplicator and the WASM processor but published every recovery
+with recreated state, because it had not yet installed the domain's schedule; [Cluster Chaos 50:
+Keep a promoted replica's state when forced recovery is prepared before the destination installs
+its schedule](https://app.clickup.com/t/86bcdg8uu) owns that. The verdicts failed as they should:
+six later duplicates of milestone keys passed in each run, every record after recovery carried the
+profile default, the guest counts started again from zero, and on the earlier image the open window
+rows were lost as well.
+
+One-node `cluster-restart` lost the four window rows open at the milestone in four of the five runs
+whose fault met them open, two on each image. On start the window processor took its branch
+lifecycle snapshot, then failed to restore it with `domain 'chaos_baseline' is not instantiated`,
+so both branches began new windows. [Cluster Chaos 43: Restore a restarted window owner's open
+windows instead of discarding its branch lifecycle snapshot](https://app.clickup.com/t/86bcdg30p)
+owns the fix. In each of those runs the deduplicator, the materialized relay and the WASM guest
+kept their state. The three-node owner in `cc08-s3-restart` logged the same warning for one branch,
+yet its rows survived.
+
+On the earlier image three-node `domain-time` passed every fault and the run without one. In each
+rotation the third round, nervix-3, removed the authority. When that voter crashed, the survivors'
+ticks stalled 8.5 and 8.6 seconds and resumed as it returned, 8.9 seconds after the kill. During a
+30.9-second pause they stalled 17.0 seconds and resumed 4.4 seconds before the survivors' status
+reported nervix-3 unavailable, 21.5 seconds into the pause. Isolated, it stopped their ticks 3.1 and
+6.6 seconds into the isolation; both resumed 15.0 seconds in, 0.3 seconds after the survivors
+reported it unavailable. A graceful stop of the authority stalled them 9.5 seconds, until shortly
+after the voter returned. Throughout each of these stalls the paced windows kept closing on their
+logical deadlines, 7 to 16 of them per stall. A whole-cluster restart stalled every observer 10.1 to
+10.6 seconds and changed neither the generation nor the mapping. Every tick of every run lay on the
+period grid of the first generation. Away from moves and outages, windows closed at most 404 logical
+milliseconds after their eight-second width, and never before it.
+
+On the newer image `voter-stop` and `voter-pause` passed as well. Every graceful stop completed its
+drain. A graceful stop of the authority still stalled the survivors' ticks 9.7 seconds, until 0.4
+seconds after they reported nervix-3 unavailable: the drain hands the graph over but not the clock
+authority, which [Cluster Chaos 51: Hand a paced domain's clock authority to another voter during a
+graceful stop](https://app.clickup.com/t/86bcdh3cz) proposes to change. The paused authority
+stalled them 17.5 seconds, again resolved before the survivors reported it unavailable.
+
+The first three-node `voter-stop` run failed on a verdict defect that has since been corrected. Its
+image predates the node-authenticated drain of [Cluster Chaos 40: Drain a stopping follower through
+the leader without a user password](https://app.clickup.com/t/86bcd8q49), so node-3's drain request
+was refused as unauthenticated and its paced graph failed over only 11.5 seconds after the stop. The
+windows verdict blamed the clock for the windows that graph could not close. A stall whose round
+takes the graph's own node down is now exempt, and the drain verdict now reports such a refused drain
+as a product finding instead. The rerun, in which every drain completed, passed.
+
+One-node `domain-time` passed without a fault and across a whole-cluster restart. The scenarios
+delivered before still passed on the earlier image: `baseline` on one and three nodes,
+`follower-crash`, and one-node `cluster-restart`. Three-node `baseline` passed on the newer image
+too.
+
 The controller resolves the supplied reference to its immutable local image ID before Compose
 starts. If the reference is not local, it performs one bounded pull and then resolves the result.
 The Compose file has no build directives. Every Nervix node and every disposable administration
