@@ -161,10 +161,9 @@ the driver's error, where `DnsLookupError::find_in` recovers it as the report's 
 ## Hickory DNS 06 acceptance
 
 Native sessions reuse one Hickory resolver across the first connection, seeds, redirects, and
-reconnects. A node that opens a peer session for shutdown drain passes its own loaded resolver.
-OTEL gRPC installs that same node resolver under Tonic's lazy channel; constructing the channel
-does not open a socket or ask DNS. Tonic keeps the configured URI for HTTP/2 authority and TLS
-verification, while its connection deadline includes lookup and ordered address attempts.
+reconnects. OTEL gRPC installs the node resolver under Tonic's lazy channel; constructing the
+channel does not open a socket or ask DNS. Tonic keeps the configured URI for HTTP/2 authority and
+TLS verification, while its connection deadline includes lookup and ordered address attempts.
 
 | Acceptance item | Evidence |
 | --- | --- |

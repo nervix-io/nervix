@@ -658,10 +658,12 @@ until the shutdown deadline.
 
 Graceful shutdown records whether that stable node name was already cordoned before it invokes the
 drain. Its cleanup clears the drain cordon only when shutdown began with an uncordoned node, and it
-runs after a successful, failed, or timed-out drain attempt. A pre-existing operator cordon therefore
-remains set across shutdown and restart. When the drain timeout or the shutdown deadline passes, or
-the leader cannot be reached, before the node requests its drain, nothing was cordoned and no
-cleanup runs.
+runs after a successful, failed, timed-out, or unanswered drain attempt. A pre-existing operator
+cordon therefore remains set across shutdown and restart. When the drain timeout or the shutdown
+deadline passes before the node observes a leader to request its drain from, nothing was cordoned
+and no cleanup runs. A follower requests both the drain and the cleanup from the leader over the
+cluster interconnect, authenticated by its node certificate rather than by a user credential; see
+[Topology Cases](./shutdown.md#topology-cases).
 
 A graceful-shutdown drain has two parts that share one drain timeout, and the drain also ends when
 the shutdown deadline passes first. When another live, schedulable Raft voter exists, the node

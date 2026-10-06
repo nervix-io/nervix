@@ -6485,7 +6485,12 @@ async fn await_covered_log_purge(
 async fn when_leadership_is_transferred_to_node(world: &mut ScenarioWorld, to_node_id: String) {
     let to_node_id = expand_placeholders(world, &to_node_id);
     let leader = running_leader_node(world).await;
-    world.cluster().transfer_leadership(&leader, &to_node_id);
+    // A leader asked to hand leadership to itself stops its heartbeats as any transferring leader
+    // does, and then the first follower whose election timeout passes takes over. A node that
+    // already leads therefore keeps leading without a transfer.
+    if leader != to_node_id {
+        world.cluster().transfer_leadership(&leader, &to_node_id);
+    }
     world
         .cluster()
         .wait_for_leader(&to_node_id, Some(&to_node_id))
@@ -8187,6 +8192,18 @@ async fn given_graceful_shutdown_drain_is_enabled(world: &mut ScenarioWorld) {
         "graceful shutdown drain must be configured before cluster startup"
     );
     world.cluster_config.graceful_shutdown_drain = true;
+}
+
+#[given("only the bootstrap node is given the default user's password")]
+async fn given_only_the_bootstrap_node_is_given_the_default_user_password(
+    world: &mut ScenarioWorld,
+) {
+    assert!(
+        world.cluster.is_none(),
+        "the default user's password must be configured before cluster startup"
+    );
+    world.cluster_config.default_user_password =
+        crate::common::cluster::DefaultUserPasswordSeed::BootstrapNodeOnly;
 }
 
 #[given(expr = "client grpc transport is configured with mode {string}")]
