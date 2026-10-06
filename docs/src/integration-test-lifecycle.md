@@ -1063,6 +1063,12 @@ advisory and never change the build verdict; the complexity check is independent
 and workflow summary identify the exact comparison and the `coverage-merged` artifact retains the
 reports and `target/patch-coverage.md`.
 Each ordinary coverage input also retains its absolute checkout path as `coverage-source-root.txt`.
+The scenario collector also starts coverage in each published Python paced driver using the shared
+`scripts/paced_simulation_coverage` startup hook and configuration. It combines those completed
+process reports into `target/paced-simulation/python.lcov`. CI merges this scenario report with the
+deterministic Python open-policy report from the extra checks, alongside ordinary Rust coverage.
+The STOP/START generation-following outline also carries `@paced_simulation_reopen`, so both full
+Deloxide selections reach its Rust and Python drivers on one-node and three-node clusters.
 The advisory reporter reads these origins explicitly when matching LCOV sources from Blacksmith
 to files on its GitHub-hosted runner.
 

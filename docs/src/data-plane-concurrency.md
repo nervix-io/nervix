@@ -1532,7 +1532,8 @@ context/retention overload and failed/blocked output. The commands also run one-
 `@memory_pressure_pause`, `@client_io_03_consumer_restore`, `@client_io_03_generation` and the local
 `@deadlock_reports` workflow without retries. The `@restarted_voter_observation` workload reaches
 whole-cluster restart and automatic scheduling with one relayed voter heartbeat; its test-only
-watch channels and concurrent fault map remain untracked. The commands also run `@paced_simulation_reopen` on
+watch channels and concurrent fault map remain untracked. The commands also run `@paced_simulation_reopen`,
+including explicit producer opens following a later START generation, on
 one and three nodes: the Rust driver uses the selected diagnostic capability, while Python runs
 against diagnostic nodes with its ordinary shared binding. Python locks and condition variables
 remain outside the detector. Zero probes or incomplete scenario accounting fail. After successful process outcomes,

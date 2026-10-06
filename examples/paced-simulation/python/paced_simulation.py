@@ -30,6 +30,7 @@ import sys
 import threading
 import time
 from datetime import datetime, timezone
+from enum import Enum
 
 # ---- The shared binding -------------------------------------------------------------------------
 
@@ -97,6 +98,7 @@ REFUSALS = {
     11: "in transaction",
 }
 REFUSAL_ENDPOINT_UNAVAILABLE = 5
+REFUSAL_DOMAIN_STOPPED = 2
 # Why a submission was not admitted, as nx_submission_refusal numbers it.
 SUBMISSION_REFUSALS = {
     1: "invalid_batch",
@@ -1103,7 +1105,12 @@ OPEN_RETRY_BUDGET = 30.0
 OPEN_RETRY_DELAY = 0.2
 
 
-def open_endpoint(open_call, endpoint, role):
+class OpenIntent(Enum):
+    CURRENT_GENERATION = "current generation"
+    FOLLOWING_START = "following START"
+
+
+def open_endpoint(open_call, endpoint, role, intent=OpenIntent.CURRENT_GENERATION):
     """Opens a producer or a consumer of `endpoint`, asking again while the endpoint is not
     running on its node yet."""
     deadline = time.monotonic() + OPEN_RETRY_BUDGET
@@ -1117,7 +1124,11 @@ def open_endpoint(open_call, endpoint, role):
                 raise ConfigurationError(
                     f"cannot open a {role} on {endpoint}: {failure.message}"
                 ) from failure
-            if failure.refusal == REFUSAL_ENDPOINT_UNAVAILABLE and time.monotonic() < deadline:
+            retryable = failure.refusal == REFUSAL_ENDPOINT_UNAVAILABLE or (
+                intent == OpenIntent.FOLLOWING_START
+                and failure.refusal == REFUSAL_DOMAIN_STOPPED
+            )
+            if retryable and time.monotonic() < deadline:
                 time.sleep(OPEN_RETRY_DELAY)
                 continue
             raise ConfigurationError(
@@ -1141,7 +1152,7 @@ def open_consumer(session, domain, emitter, declared):
         NX.nx_fields_free(expected)
 
 
-def open_producer(session, settings):
+def open_producer(session, settings, intent=OpenIntent.CURRENT_GENERATION):
     expected = fields(READING_FIELDS)
     try:
         domain_text, domain_len = text(settings.domain)
@@ -1152,6 +1163,7 @@ def open_producer(session, settings):
                 settings.credit_batches, settings.credit_bytes, None, out),
             f"ingestor '{settings.ingestor}' of domain '{settings.domain}'",
             "producer",
+            intent,
         )
     finally:
         NX.nx_fields_free(expected)
@@ -1530,8 +1542,8 @@ class Run:
                 )
             self.clock.wait_change(changes, self.stopped, timeout=remaining)
 
-    def open_producer(self):
-        return self.install_producer(Producer(open_producer(self.session, self.settings)))
+    def open_producer(self, intent=OpenIntent.CURRENT_GENERATION):
+        return self.install_producer(Producer(open_producer(self.session, self.settings, intent)))
 
     def install_producer(self, producer):
         self.producer = producer
@@ -1807,7 +1819,7 @@ class Run:
             pace, _ = self.clock.current()
         target = pace[1]
         self.close_producer()
-        opened = self.open_producer()
+        opened = self.open_producer(OpenIntent.FOLLOWING_START)
         deadline = time.monotonic() + INSTALL_BUDGET
         while True:
             clock = self.clock.paced(opened)

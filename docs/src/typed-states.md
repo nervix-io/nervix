@@ -479,6 +479,11 @@ which values remain legitimate zeros, empty content, Arrow masked lanes, and pri
 
 ## Recurring Task Observations
 
+The paced simulation applications represent endpoint-open intent as `CurrentGeneration` or
+`FollowingStart`. Only the latter permits a bounded retry of `DomainStopped` after observing a
+later paced generation; initial and contract-change opens retain the stopped-domain refusal.
+The opened producer's generation and its paced clock still own permission to plan readings.
+
 Healthy connector status is absence of a failure; a failure contains its safe error and an optional
 retry in one publication. Domain-clock publication carries lifecycle pause, generation and start
 point beside the installation. Entity assignment absence invalidates a retained checkpoint reader;
