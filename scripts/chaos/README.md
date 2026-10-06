@@ -1379,10 +1379,10 @@ entry or an image that is neither local nor pullable, and 128 plus the signal's 
 ended it.
 
 A run executes in the background and leads a session of its own, so an interrupt, termination or
-hangup reaches the suite at once and never reaches the run beside it, even when a terminal signals
-the suite's whole process group. The suite passes one TERM to the run, whose own exit trap then
-heals, captures and cleans up as on any exit, records it as interrupted, and starts no later entry.
-The suite's console reaches its caller through a tee that ignores a terminal's interrupts and
+hangup reaches the suite at once and reaches the run only through the suite, even when a terminal
+signals the suite's whole process group. The suite passes one TERM to the run, whose own exit trap
+then heals, captures and cleans up as on any exit, records it as interrupted, and starts no later
+entry. The suite's console reaches its caller through a tee that ignores a terminal's interrupts and
 hangups and goes on writing `suite.log` when the caller stops reading, so the suite outlives its
 console and still records every verdict.
 
@@ -1417,14 +1417,14 @@ A manual run of the `Chaos` workflow names the suite and an immutable image,
 `REPOSITORY@sha256:DIGEST`, and builds nothing. The workflow's plan job resolves the image to its
 digest, so every shard runs the same image, and reads the shards and their budgets from
 `just chaos suite shards`. Each shard then runs on its own GitHub-hosted `ubuntu-24.04` Docker
-worker. The repository's Blacksmith workers cannot qualify: their kernel offers none of the
-queueing disciplines Pumba installs, so every run there stops in its network preflight or in the
-network healing exercise of its verifier self-check. The job loads the `sch_prio`, `sch_sfq` and
-`sch_netem` modules and fails when the kernel cannot provide one, installs `just` and `toml`, and
-installs jq 1.8.1 from its release, checked against the release's SHA-256, because the worker
-carries Ubuntu's jq 1.7. It removes every Rust toolchain directory from the `PATH` the suite runs
-with and fails if `cargo`, `rustc` or `rustup` is still reachable, pulls the image and logs out of
-the registry, and runs
+worker. The repository's Blacksmith workers cannot qualify: their kernel offers none of the queueing
+disciplines Pumba installs, so every run there stops in its network preflight or in the network
+healing exercise of its verifier self-check. The job loads the `sch_prio`, `sch_sfq` and `sch_netem`
+modules and fails when the kernel cannot provide one, installs `just` and `toml`, and installs jq
+1.8.1 from its release, checked against the release's SHA-256, because the worker carries Ubuntu's
+jq 1.7. It removes every Rust toolchain directory from the `PATH` the suite runs with and fails if
+`cargo`, `rustc` or `rustup` is still reachable, pulls the image and logs out of the registry, and
+runs
 `just chaos suite <suite> --shard <n> --image <digest> --artifacts <dir> --suite-id ci-<run>-<attempt>-<suite>-<n>`.
 The suite step ends at the shard's step budget and the job at its job budget. When the step is
 cancelled or reaches its budget, the runner sends SIGINT to the step's process, `just`, which does
@@ -1433,12 +1433,12 @@ not pass it on, then SIGTERM 7.5 seconds later, which `just` passes to the suite
 step's output. The suite and its run outlive the step, so the job always runs
 `just chaos suite cleanup` next: it waits up to five minutes for the controller to finish its run's
 exit work and record it, kills whatever still executes, and captures and removes what any run left
-behind as a second witness. It then
-publishes the shard summary and uploads two artifacts for 14 days: `chaos-verdict-<suite>-<n>-<run>-<attempt>`
-with `suite.json` and `summary.md`, and `chaos-<suite>-<n>-<run>-<attempt>` with the whole suite
-directory. The run attempt is part of each name, so a rerun never replaces the artifacts of the
-attempt it repeats. The verdict job publishes `just chaos suite report` over every shard's verdict
-and fails when a shard did not pass or recorded no verdict.
+behind as a second witness. It then publishes the shard summary and uploads two artifacts for 14
+days: `chaos-verdict-<suite>-<n>-<run>-<attempt>` with `suite.json` and `summary.md`, and
+`chaos-<suite>-<n>-<run>-<attempt>` with the whole suite directory. The run attempt is part of each
+name, so a rerun never replaces the artifacts of the attempt it repeats. The verdict job publishes
+`just chaos suite report` over every shard's verdict and fails when a shard did not pass or recorded
+no verdict.
 
 To investigate a CI failure, download the shard's evidence artifact and read its `summary.md`: each
 failed entry names its category, phase, reproducer, finding and run directory. A reproducer pins the
