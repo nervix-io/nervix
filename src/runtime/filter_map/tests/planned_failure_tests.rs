@@ -15,10 +15,7 @@ fn quotient_branch_program(schema: &Arc<CompiledSchema>) -> CompiledBranchProgra
         sensitivity: VmSchemaSensitivity::default(),
     };
     bind_output_branch_program(
-        RuntimeCompileTarget {
-            domain: &domain("default"),
-            identifier: &named("bucket_source"),
-        },
+        &named("bucket_source"),
         &lowered,
         vm_schema(schema),
         vm_schema(schema),

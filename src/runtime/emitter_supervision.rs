@@ -16,6 +16,8 @@
     )
 )]
 
+use error_stack::ResultExt as _;
+
 use super::*;
 
 pub(super) type EmitterReconfigureResult<T> = Result<T, Report<EmitterReconfigureError>>;
@@ -93,10 +95,63 @@ pub(super) struct ScheduledEmitterTask {
     pub(super) task: JoinHandle<()>,
 }
 
+/// Why a scheduled emitter task did not stop. A drain the task itself failed keeps the task's own
+/// report beneath [`ScheduledEmitterStopError::Drain`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
+pub(super) enum ScheduledEmitterStopError {
+    #[error("scheduled emitter task is unavailable for stopping")]
+    Unavailable,
+    #[error("scheduled emitter task timed out accepting its stop command")]
+    AcceptTimeout,
+    #[error("scheduled emitter task dropped its stop response")]
+    ResponseDropped,
+    #[error("scheduled emitter task timed out draining")]
+    DrainTimeout,
+    #[error("scheduled emitter task failed to drain")]
+    Drain,
+}
+
+/// A stop that failed, together with the task it leaves running, which a later stop can still end.
 #[derive(Debug)]
-pub(super) struct ScheduledEmitterStopError {
-    pub(super) reason: String,
-    pub(super) task: Option<ScheduledEmitterTask>,
+pub(super) struct ScheduledEmitterStopFailure {
+    error: Report<ScheduledEmitterStopError>,
+    task: ScheduledEmitterTask,
+}
+
+/// Every way starting an emitter on this node fails, from binding its plan to the node's relays,
+/// codecs and clients to compiling the programs its task runs. Each step reports its own variant
+/// beneath [`EmitterStartError::Start`], which names the emitter and its domain.
+#[derive(Debug, Error)]
+pub(crate) enum EmitterStartError {
+    #[error("failed to start emitter '{emitter}' in domain '{domain}'")]
+    Start {
+        domain: DomainName,
+        emitter: EmitterName,
+    },
+    #[error("the emitter has no input relay")]
+    NoInputRelay,
+    #[error("input relay '{relay}' has no schema on this node")]
+    MissingInputSchema { relay: RelayName },
+    #[error("input relay '{relay}' has no resolved branching on this node")]
+    MissingInputBranching { relay: RelayName },
+    #[error("failed to resolve client '{client}'")]
+    ResolveClient { client: ClientName },
+    #[error("codec '{codec}' is not instantiated on this node")]
+    MissingCodec { codec: CodecName },
+    #[error("cannot publish batches through codec '{codec}'")]
+    BatchCodec { codec: CodecName },
+    #[error("the route program did not compile")]
+    Route,
+    #[error("the HTTP request fields did not compile")]
+    HttpRequests,
+    #[error("the ordering group did not compile")]
+    OrderingGroup,
+    #[error("the FROM WHERE of input relay '{relay}' did not compile")]
+    SourceFilter { relay: RelayName },
+    #[error("the sink's client configuration is invalid")]
+    ClientConfig,
+    #[error("the input collection policy is invalid")]
+    CollectPolicy,
 }
 
 pub(super) fn clear_emitter_stop_signal(
@@ -113,19 +168,18 @@ pub(super) fn clear_emitter_stop_signal(
     });
 }
 
-impl ScheduledEmitterStopError {
-    pub(super) fn recoverable(reason: impl Into<String>, task: ScheduledEmitterTask) -> Self {
-        Self {
-            reason: reason.into(),
-            task: Some(task),
-        }
+impl ScheduledEmitterStopFailure {
+    fn new(error: Report<ScheduledEmitterStopError>, task: ScheduledEmitterTask) -> Self {
+        Self { error, task }
     }
 
-    pub(super) fn reason(&self) -> &str {
-        &self.reason
+    /// Why the stop failed, as the emitter's diagnostics describe it: the task's own description of
+    /// a failed drain, or the stop's own reason.
+    pub(super) fn reason(&self) -> String {
+        emitter_task::emitter_error_message(&self.error)
     }
 
-    pub(super) fn into_task(self) -> Option<ScheduledEmitterTask> {
+    pub(super) fn into_task(self) -> ScheduledEmitterTask {
         self.task
     }
 }
@@ -155,21 +209,21 @@ impl ScheduledEmitterTask {
     pub(super) async fn stop(
         mut self,
         drain_timeout: Duration,
-    ) -> Result<(), ScheduledEmitterStopError> {
+    ) -> Result<(), ScheduledEmitterStopFailure> {
         let (response, receiver) = oneshot::channel();
         let deadline = Instant::now() + drain_timeout;
         let command = EmitterTaskCommand::Stop { deadline, response };
         match nervix_primitives::time::timeout_at(deadline, self.commands.send(command)).await {
             Ok(Ok(())) => {}
             Ok(Err(_)) => {
-                return Err(ScheduledEmitterStopError::recoverable(
-                    "scheduled emitter task is unavailable for stopping",
+                return Err(ScheduledEmitterStopFailure::new(
+                    Report::new(ScheduledEmitterStopError::Unavailable),
                     self,
                 ));
             }
             Err(_) => {
-                return Err(ScheduledEmitterStopError::recoverable(
-                    "scheduled emitter task timed out accepting its stop command",
+                return Err(ScheduledEmitterStopFailure::new(
+                    Report::new(ScheduledEmitterStopError::AcceptTimeout),
                     self,
                 ));
             }
@@ -181,23 +235,23 @@ impl ScheduledEmitterTask {
             Ok(Ok(response)) => response,
             Ok(Err(_)) => {
                 clear_emitter_stop_signal(&self.stop_signal, deadline);
-                return Err(ScheduledEmitterStopError::recoverable(
-                    "scheduled emitter task dropped its stop response",
+                return Err(ScheduledEmitterStopFailure::new(
+                    Report::new(ScheduledEmitterStopError::ResponseDropped),
                     self,
                 ));
             }
             Err(_) => {
                 clear_emitter_stop_signal(&self.stop_signal, deadline);
-                return Err(ScheduledEmitterStopError::recoverable(
-                    "scheduled emitter task timed out draining",
+                return Err(ScheduledEmitterStopFailure::new(
+                    Report::new(ScheduledEmitterStopError::DrainTimeout),
                     self,
                 ));
             }
         };
         if let Err(error) = response {
             clear_emitter_stop_signal(&self.stop_signal, deadline);
-            return Err(ScheduledEmitterStopError::recoverable(
-                emitter_task::emitter_error_message(&error),
+            return Err(ScheduledEmitterStopFailure::new(
+                error.change_context(ScheduledEmitterStopError::Drain),
                 self,
             ));
         }
@@ -225,30 +279,25 @@ impl Runtime {
         &self,
         deps: ExecutionBuildDeps<'_>,
         emitter: &EmitterExecutionPlan,
-    ) -> Result<EmitterTaskDeps, RuntimeError> {
+    ) -> error_stack::Result<EmitterTaskDeps, EmitterStartError> {
+        let failure = |error: EmitterStartError| {
+            Report::new(error).change_context(EmitterStartError::Start {
+                domain: deps.domain.clone(),
+                emitter: emitter.name.clone(),
+            })
+        };
         let Some(input_relay) = emitter.inputs.first().map(|input| &input.relay) else {
-            return Err(RuntimeError::BuildDomainExecution {
-                domain: deps.domain.as_str().to_string(),
-                reason: format!("emitter '{}' has no input relay", emitter.name.as_str()),
-            });
+            return Err(failure(EmitterStartError::NoInputRelay));
         };
         let Some(input_schema) = deps.relay_schemas.get(input_relay).cloned() else {
-            return Err(RuntimeError::BuildDomainExecution {
-                domain: deps.domain.as_str().to_string(),
-                reason: format!(
-                    "missing emitter input relay schema '{}'",
-                    input_relay.as_str()
-                ),
-            });
+            return Err(failure(EmitterStartError::MissingInputSchema {
+                relay: input_relay.clone(),
+            }));
         };
         let Some(input_branching) = deps.relay_branchings.get(input_relay).cloned() else {
-            return Err(RuntimeError::BuildDomainExecution {
-                domain: deps.domain.as_str().to_string(),
-                reason: format!(
-                    "missing emitter input relay branching '{}'",
-                    input_relay.as_str()
-                ),
-            });
+            return Err(failure(EmitterStartError::MissingInputBranching {
+                relay: input_relay.clone(),
+            }));
         };
         Ok(EmitterTaskDeps {
             input_schema,
@@ -353,20 +402,23 @@ impl Runtime {
         build: EmitterTaskBuildDeps<'_>,
         emitter: EmitterExecutionPlan,
         inputs: Vec<(RelayName, RelayRuntimeFanIn)>,
-    ) -> Result<ScheduledEmitterTask, RuntimeError> {
+    ) -> error_stack::Result<ScheduledEmitterTask, EmitterStartError> {
         let domain = build.domain;
-        let plan = emitter.sink.clone().resolve_clients(|client| {
+        let start = EmitterStartError::Start {
+            domain: domain.clone(),
+            emitter: emitter.name.clone(),
+        };
+        let resolved = emitter.sink.clone().resolve_clients(|client| {
             self.resolve_client_config(domain, client.config.mount.as_ref(), &client.config.entries)
-                .map_err(|error| RuntimeError::BuildDomainExecution {
-                    domain: domain.as_str().to_string(),
-                    reason: format!(
-                        "failed to resolve client '{}' for emitter '{}': {error}",
-                        client.name.as_str(),
-                        emitter.name.as_str()
-                    ),
+                .change_context_lazy(|| EmitterStartError::ResolveClient {
+                    client: client.name.clone(),
                 })
-        })?;
-        emitter_task::EmitterTask::spawn(self, build, emitter, plan, inputs)
+        });
+        let plan = match resolved {
+            Ok(plan) => plan,
+            Err(error) => return Err(error.change_context(start)),
+        };
+        emitter_task::EmitterTask::spawn(self, build, emitter, plan, inputs).change_context(start)
     }
 }
 
@@ -412,12 +464,136 @@ impl Drop for EmitterTaskRegistration {
 mod tests {
     use std::time::Duration;
 
+    use nervix_models::{
+        AckMode, CreateEmitter, CreateRelay, DomainSchedule, EmitSink, EmitterPublishingMode,
+        ErrorPolicies, ProcessorInputs, RelayBranching, RetryPolicy,
+    };
     use nervix_primitives::{
-        sync::{mpsc, watch},
+        sync::{mpsc, oneshot, watch},
         time::Instant,
     };
+    use nonzero_ext::nonzero;
 
     use super::*;
+    use crate::emitter_execution_plan::EmitterExecutionPlans;
+
+    /// The execution plan of one ZeroMQ emitter that reads relay `events` through a Syslog codec,
+    /// as a domain's installed schedule decides it.
+    fn zero_mq_emitter_plan() -> EmitterExecutionPlan {
+        let emitter = CreateEmitter {
+            name: named("audit"),
+            from: ProcessorInputs::new(vec![named("events")], Vec::new()),
+            body: nervix_models::EmitterBody::Codec {
+                codec: named("event_codec"),
+            },
+            sink: Box::new(EmitSink::ZeroMq {
+                client: named("sink"),
+            }),
+            batch: None,
+            flush_policy: FlushPolicy::Immediate,
+            error_policies: ErrorPolicies::handled_by_log(),
+            publishing_mode: EmitterPublishingMode::NoAck {
+                retry_policy: RetryPolicy {
+                    backoff: "250ms".to_string(),
+                    max_backoff: "30s".to_string(),
+                },
+            },
+            mode: AckMode::Attached,
+            construction: nervix_models::RouteConstruction::default(),
+            materialized_state: Vec::new(),
+        };
+        let schedule = DomainSchedule::new(
+            domain("edge"),
+            vec![
+                scheduled_model(nervix_models::Model::Schema(nervix_models::CreateSchema {
+                    name: named("event"),
+                    fields: vec![nervix_models::SchemaField {
+                        name: named("seq"),
+                        ty: nervix_models::ParseAsType::I64,
+                        optional: false,
+                        sensitive: false,
+                    }],
+                })),
+                scheduled_model(nervix_models::Model::Codec(nervix_models::CreateCodec {
+                    name: named("event_codec"),
+                    wire_format: nervix_models::CodecWireFormat::Syslog,
+                    schema: named("event"),
+                    encoding_rules: Vec::new(),
+                })),
+                scheduled_model(nervix_models::Model::ClientZeroMq(
+                    nervix_models::CreateClientZeroMq {
+                        name: named("sink"),
+                        mount: None,
+                        config: Vec::new(),
+                    },
+                )),
+                scheduled_model(nervix_models::Model::Relay(CreateRelay {
+                    name: named("events"),
+                    schema: named("event"),
+                    buffer: nonzero!(2usize),
+                    branching: RelayBranching::unbranched(),
+                    materialized_state: None,
+                })),
+                scheduled_model(nervix_models::Model::Emitter(emitter)),
+            ],
+            Vec::new(),
+        );
+        let activation =
+            DomainActivationPlan::from_scheduled_nodes(&domain("edge"), &schedule.nodes)
+                .assured("the fixture schedule declares its schema, codec and relay");
+        let plans = EmitterExecutionPlans::from_scheduled_nodes(&schedule.nodes, &activation)
+            .assured("the fixture emitter has its client, codec and input relay");
+        plans
+            .emitter(&named("audit"))
+            .assured("the fixture schedule holds the emitter")
+            .as_ref()
+            .clone()
+    }
+
+    #[test]
+    fn an_emitter_that_cannot_bind_its_input_names_itself_its_domain_and_the_relay() {
+        let runtime = Runtime::default();
+        let plan = zero_mq_emitter_plan();
+        let relay_schemas = HashMap::default();
+        let relay_branchings = HashMap::default();
+        let materialized_relay_specs = HashMap::default();
+        let lookups = HashMap::default();
+
+        let error = runtime
+            .emitter_task_deps(
+                ExecutionBuildDeps {
+                    domain: &domain("edge"),
+                    relay_schemas: &relay_schemas,
+                    relay_branchings: &relay_branchings,
+                    materialized_relay_specs: &materialized_relay_specs,
+                    lookups: &lookups,
+                    udfs: None,
+                },
+                &plan,
+            )
+            .err()
+            .assured("an input relay this node has no schema for cannot start the emitter");
+
+        assert!(matches!(
+            error.downcast_ref::<EmitterStartError>(),
+            Some(EmitterStartError::Start { emitter, .. }) if emitter.as_str() == "audit"
+        ));
+        let names_the_failed_step = error.frames().any(|frame| {
+            matches!(
+                frame.downcast_ref::<EmitterStartError>(),
+                Some(EmitterStartError::MissingInputSchema { relay }) if relay.as_str() == "events"
+            )
+        });
+        assert!(
+            names_the_failed_step,
+            "the failed step must stay beneath the start context: {error:#}"
+        );
+        assert_eq!(
+            RuntimeError::EmitterStart { report: error }.to_string(),
+            "failed to start emitter 'audit' in domain 'edge': input relay 'events' has no schema \
+             on this node"
+        );
+    }
 
     #[nervix_primitives::test]
     async fn scheduled_emitter_stop_keeps_a_failed_drain_task_available_for_retry() {
@@ -458,9 +634,7 @@ mod tests {
             .await
             .expect_err("a failed transport drain must fail the emitter stop");
         assert_eq!(failed.reason(), "transport drain failed");
-        let scheduled = failed
-            .into_task()
-            .expect("a failed drain must leave the old emitter task available");
+        let scheduled = failed.into_task();
 
         scheduled
             .stop(grace)
@@ -493,12 +667,7 @@ mod tests {
             "scheduled emitter task dropped its stop response"
         );
         assert!(
-            failed
-                .into_task()
-                .expect("the failed stop must return its task")
-                .stop_signal
-                .borrow()
-                .is_none(),
+            failed.into_task().stop_signal.borrow().is_none(),
             "a dropped response must not leave the retained emitter interrupted"
         );
     }
@@ -532,9 +701,7 @@ mod tests {
             error.reason(),
             "emitter final flush failed: broker unavailable"
         );
-        let mut retained = error
-            .into_task()
-            .expect("a failed drain must retain the scheduled task");
+        let mut retained = error.into_task();
         let _ = (&mut retained.task).await;
         assert!(finished.load(Ordering::Acquire));
     }
@@ -576,9 +743,7 @@ mod tests {
             error.reason(),
             "scheduled emitter task dropped its stop response"
         );
-        let mut retained = error
-            .into_task()
-            .expect("a dropped response must leave the task recoverable");
+        let mut retained = error.into_task();
         assert!(!dropped.load(Ordering::Acquire));
         retained.task.abort();
         let _ = (&mut retained.task).await;
@@ -619,12 +784,113 @@ mod tests {
             .expect_err("a missing stop response must time out");
 
         assert_eq!(error.reason(), "scheduled emitter task timed out draining");
-        let mut retained = error
-            .into_task()
-            .expect("a timed-out drain must leave the task recoverable");
+        let mut retained = error.into_task();
         assert!(!dropped.load(Ordering::Acquire));
         retained.task.abort();
         let _ = (&mut retained.task).await;
         assert!(dropped.load(Ordering::Acquire));
+    }
+
+    #[test]
+    fn an_emitter_without_an_input_relay_or_its_branching_names_the_step_that_failed() {
+        let runtime = Runtime::default();
+        let edge = domain("edge");
+        let relay_schemas = HashMap::from_iter([(
+            named::<RelayName>("events"),
+            test_schema(&[("value", ParseAsType::I64)]),
+        )]);
+        let relay_branchings = HashMap::default();
+        let materialized_relay_specs = HashMap::default();
+        let lookups = HashMap::default();
+        let mut without_inputs = zero_mq_emitter_plan();
+        without_inputs.inputs.clear();
+
+        let no_input = runtime
+            .emitter_task_deps(
+                ExecutionBuildDeps {
+                    domain: &edge,
+                    relay_schemas: &relay_schemas,
+                    relay_branchings: &relay_branchings,
+                    materialized_relay_specs: &materialized_relay_specs,
+                    lookups: &lookups,
+                    udfs: None,
+                },
+                &without_inputs,
+            )
+            .err()
+            .assured("an emitter without an input relay cannot start");
+        assert_eq!(
+            RuntimeError::EmitterStart { report: no_input }.to_string(),
+            "failed to start emitter 'audit' in domain 'edge': the emitter has no input relay"
+        );
+
+        let no_branching = runtime
+            .emitter_task_deps(
+                ExecutionBuildDeps {
+                    domain: &edge,
+                    relay_schemas: &relay_schemas,
+                    relay_branchings: &relay_branchings,
+                    materialized_relay_specs: &materialized_relay_specs,
+                    lookups: &lookups,
+                    udfs: None,
+                },
+                &zero_mq_emitter_plan(),
+            )
+            .err()
+            .assured("an input relay without resolved branching cannot start the emitter");
+        assert_eq!(
+            RuntimeError::EmitterStart {
+                report: no_branching
+            }
+            .to_string(),
+            "failed to start emitter 'audit' in domain 'edge': input relay 'events' has no \
+             resolved branching on this node"
+        );
+    }
+
+    #[nervix_primitives::test]
+    async fn a_stop_its_task_cannot_take_retains_the_task_and_says_why() {
+        let (commands, command_rx) = mpsc::channel(1);
+        drop(command_rx);
+        let (stop_signal, _) = watch::channel(None);
+        let closed = ScheduledEmitterTask {
+            commands,
+            stop_signal,
+            task: nervix_primitives::task::spawn(std::future::pending::<()>()),
+        };
+        let unavailable = closed
+            .stop(Duration::from_secs(1))
+            .await
+            .expect_err("a task whose commands closed cannot take its stop");
+        assert_eq!(
+            unavailable.reason(),
+            "scheduled emitter task is unavailable for stopping"
+        );
+        unavailable.into_task().task.abort();
+
+        let (commands, _command_rx) = mpsc::channel(1);
+        let (queued_response, _queued_receiver) = oneshot::channel();
+        commands
+            .send(EmitterTaskCommand::Stop {
+                deadline: Instant::now(),
+                response: queued_response,
+            })
+            .await
+            .expect("the command queue holds one command");
+        let (stop_signal, _) = watch::channel(None);
+        let busy = ScheduledEmitterTask {
+            commands,
+            stop_signal,
+            task: nervix_primitives::task::spawn(std::future::pending::<()>()),
+        };
+        let unaccepted = busy
+            .stop(Duration::from_millis(5))
+            .await
+            .expect_err("a task whose command queue stays full cannot take its stop");
+        assert_eq!(
+            unaccepted.reason(),
+            "scheduled emitter task timed out accepting its stop command"
+        );
+        unaccepted.into_task().task.abort();
     }
 }
