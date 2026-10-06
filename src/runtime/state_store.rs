@@ -722,6 +722,8 @@ pub(crate) enum RuntimePersistenceError {
     WriteValue,
     #[error("failed to encode runtime state: {0}")]
     EncodeState(String),
+    #[error("failed to encode a native {} checkpoint", .state.as_str())]
+    NativeEncoding { state: RuntimeStateKind },
     #[error("failed to decode runtime state: {0}")]
     DecodeState(String),
     #[error(

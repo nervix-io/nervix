@@ -25,10 +25,10 @@ use super::KafkaDomainOffsetDescribe;
 #[cfg(test)]
 use super::observability::kafka_domain_offset_describe_from_schedule;
 use super::{
-    PersistedRuntimeStateEntry, RuntimePersistenceError, RuntimeStateOperationError,
-    RuntimeStatePlacement, StateAssignmentAuthority, StateAssignmentToken, StateAuthorityError,
-    StateCapability, StateReplicationRoles, lsm_sequence::LsmSequence,
-    state_replication::StateReplicationError,
+    PersistedRuntimeStateEntry, RuntimePersistenceError, RuntimeStateKind,
+    RuntimeStateOperationError, RuntimeStatePlacement, StateAssignmentAuthority,
+    StateAssignmentToken, StateAuthorityError, StateCapability, StateReplicationRoles,
+    lsm_sequence::LsmSequence, state_replication::StateReplicationError,
 };
 
 /// How long a committed or replaced offset waits for the replicas the offsets are assigned to hold
@@ -628,20 +628,57 @@ pub(in crate::runtime) fn backup_offset_positions(
     Ok(offsets)
 }
 
-pub(in crate::runtime) fn restore_offset_payload(
-    offsets: Vec<(String, i32, i64)>,
-) -> error_stack::Result<Vec<u8>, RuntimePersistenceError> {
-    let positions = offsets
-        .into_iter()
-        .map(|(topic, partition, offset)| KafkaOffsetPosition {
-            topic,
-            partition,
-            offset,
+/// A serialization view of the current archived offset root. Restore carries positions only;
+/// topic scheduling is established by the restored execution plan.
+#[derive(Archive, RkyvSerialize)]
+#[rkyv(as = ArchivedKafkaOffsetSnapshot)]
+#[rkyv(serialize_bounds(__S: rkyv::ser::Writer + rkyv::ser::Allocator, __S::Error: rkyv::rancor::Source))]
+struct StreamingKafkaOffsetSnapshot<
+    'a,
+    I: ExactSizeIterator<Item = KafkaOffsetEntrySnapshot> + Clone,
+> {
+    #[rkyv(with = super::native_checkpoint_encoding::IteratorAsVec<super::native_checkpoint_encoding::CancellableEntry<'a, KafkaOffsetEntrySnapshot>>, omit_bounds)]
+    offsets: super::native_checkpoint_encoding::CancellableIterator<'a, I>,
+    schedules: Vec<KafkaTopicSchedulingSnapshot>,
+}
+
+pub(in crate::runtime) fn write_offset_payload(
+    offsets: impl ExactSizeIterator<Item = (String, i32, i64)> + Clone,
+    writer: &mut dyn std::io::Write,
+    cancellation: &nervix_execution::Cancellation,
+) -> error_stack::Result<(), RuntimePersistenceError> {
+    let capacity = super::native_checkpoint_encoding::scratch_bytes::<KafkaOffsetEntrySnapshot>(
+        offsets.len(),
+        0,
+    )
+    .ok_or_else(|| {
+        Report::new(RuntimePersistenceError::NativeEncoding {
+            state: RuntimeStateKind::KafkaOffset,
         })
-        .collect();
-    KafkaOffsetTable::from_offsets(positions, HashMap::default())
-        .encode()
-        .map_err(Report::new)
+    })?;
+    let mut scratch = vec![std::mem::MaybeUninit::uninit(); capacity];
+    let snapshot = StreamingKafkaOffsetSnapshot {
+        offsets: super::native_checkpoint_encoding::CancellableIterator {
+            cancellation,
+            entries: offsets.map(|(topic, partition, next_offset)| KafkaOffsetEntrySnapshot {
+                topic,
+                partition,
+                next_offset,
+            }),
+        },
+        schedules: Vec::new(),
+    };
+    rkyv::api::low::to_bytes_in_with_alloc::<_, _, rkyv::rancor::Error>(
+        &snapshot,
+        rkyv::ser::writer::IoWriter::new(writer),
+        rkyv::ser::allocator::SubAllocator::new(&mut scratch),
+    )
+    .map(|_| ())
+    .map_err(|error| {
+        Report::new(error).change_context(RuntimePersistenceError::NativeEncoding {
+            state: RuntimeStateKind::KafkaOffset,
+        })
+    })
 }
 
 /// What one Kafka offset table records, read out of its slots: every topic's partitions with
@@ -746,9 +783,7 @@ fn generated_partition(arbitrary: &mut nervix_arbitrary::Arbitrary<'_>) -> i32 {
 }
 
 /// A generated offset table stores through `stored`, the checkpoint envelope a node keeps it in,
-/// and restores every partition offset and topic schedule. Its archive form keeps the offsets
-/// alone, and restoring that archive records exactly those offsets with no schedule, which START
-/// recomputes.
+/// and restores every partition offset and topic schedule.
 #[cfg(test)]
 pub(in crate::runtime) fn assert_generated_offsets_survive(
     arbitrary: &mut nervix_arbitrary::Arbitrary<'_>,
@@ -760,25 +795,9 @@ pub(in crate::runtime) fn assert_generated_offsets_survive(
     let payload = table
         .encode()
         .assured("a bounded generated offset table encodes");
-    let restored = KafkaOffsetTable::decode(&stored(payload.clone()))
+    let restored = KafkaOffsetTable::decode(&stored(payload))
         .assured("a stored offset table decodes from its own encoding");
     assert_eq!(restored.view(), table.view());
-
-    let positions =
-        backup_offset_positions(&payload).assured("a stored offset table yields its positions");
-    let restored_payload = restore_offset_payload(positions.clone())
-        .assured("archived positions encode as an offset table");
-    let restored = KafkaOffsetTable::decode(&restored_payload)
-        .assured("a restored offset table decodes from its own encoding");
-    let view = restored.view();
-    assert!(view.schedules.is_empty());
-    let mut expected = BTreeMap::new();
-    for (topic, partition, offset) in positions {
-        let partitions: &mut BTreeMap<i32, i64> = expected.entry(topic).or_default();
-        partitions.insert(partition, offset);
-    }
-    assert_eq!(view.offsets, expected);
-    assert_eq!(expected, table.view().offsets);
 }
 
 /// Arbitrary bytes read as a stored offset table either fail with the typed decode failure or

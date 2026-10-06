@@ -139,12 +139,15 @@ writer.
 | Ingestor quiesce decision | Each ingestor publishes the declared and pending modes, active causes, source support, and derived intake decision as one value. Concurrent lifecycle changes derive their replacement from the current publication. | Polling and per-message intake make one load to decide whether to dispatch, suspend, skip, buffer, drop, or reject. A source host retains its last observed publication across dispatch awaits; its change wait registers before comparing that publication with the current one, so an engagement or release in the gap wakes it. The retained-payload lock is reached only after the published decision selects buffering. |
 | Backup state snapshot | Branch lifecycle publications, Kafka offset commits and WASM checkpoints register on a per-domain atomic generation before changing their published state. After the domain is paused and drained, the owner closes that generation with a Release RMW and waits with Acquire loads for registered publishers to leave. It then serializes Kafka positions and branch lifecycle into the runtime state store and opens one database snapshot for those records and durable WASM saves. The closing RMW is in the release sequence that a publisher entering the next generation acquires. | A publisher that entered before the cut completes into the captured view; a publisher that enters after it waits for the next generation. An older periodic storage write cannot replace a newer forced publication. The backup reads the database snapshot off the record path and stages owned section bytes. A live backup does not close the generation and reports its weaker cut explicitly. The server's Shuttle and Loom checks drive this production fence. |
 
-| Restore state publication | The control plane stages checkpoints under a replicated authority, then admits one fixed-size storage job, validates a complete generation namespace and durably publishes its active pointer. It holds the consensus applied-state read guard through authority validation, synchronous storage mutation and runtime-handle clearing. The state store reuses its existing latest-snapshot installation mutex for staging, pointer publication and bounded cleanup. Checkpoint jobs retain their selected namespace and validate it under that barrier; entity replacement and purge also select the active namespace while holding the barrier. | A newer applied generation and the release of the start gate require the state-machine write guard. Every node therefore replaces a whole state set before `START` is available, and stale coordinators cannot mutate a running restored domain. The store retains authority and inventory for exact retry and monotonic rejection. Database readers select pointer, header and chunk values from one snapshot, which retains its complete set across bounded deletion of obsolete namespaces. These are stopped-domain cold paths; record paths add no lock. |
+| Restore state publication | The control plane stages checkpoints under a replicated authority, then admits one fixed-size storage job, validates a complete generation namespace and durably publishes its active pointer. It holds the consensus applied-state read guard through authority validation, synchronous storage mutation and runtime-handle clearing. The state store reuses its existing latest-snapshot installation mutex for staging, pointer publication and bounded cleanup. Checkpoint jobs retain their selected namespace and validate it under that barrier; entity replacement and purge also select the active namespace while holding the barrier. | A newer applied generation and the release of the start gate require the state-machine write guard. Every node therefore replaces a whole state set before `START` is available, and stale coordinators cannot mutate a running restored domain. The store retains authority and inventory for exact retry and monotonic rejection. Database readers select pointer, header and chunk values from one snapshot, which retains its complete set across bounded deletion of obsolete namespaces and unreferenced active chunk sets. Publication runs on stopped-domain lifecycle paths. The admitted maintenance loop also follows running checkpoint replacement and purge under the installation barrier; record delivery adds no lock. |
 
 Restore storage qualification includes the store's cancellation, corruption, snapshot, queued
-writer and many-key cleanup regressions in `just test-deloxide`, plus the public one-node and
-three-node `@restore_installation` workloads for large saves, many checkpoints, durable publication
-failure, restart and delayed coordinators. Deloxide tracks the installation barrier and other
+writer, active chunk liveness and many-key cleanup regressions in `just test-deloxide` and
+`just test-deloxide-order`, plus the public one-node and three-node `@restore_installation`
+workloads for large saves, many checkpoints, native lifecycle and Kafka records above the default
+32 MiB bulk budget, active chunk replacement and purge, durable publication failure, restart and
+delayed coordinators. The many-checkpoint three-node case includes one replica per state; its
+one-MiB saves fit the replication operation's limit. Deloxide tracks the installation barrier and other
 boundary blocking locks; Fjall's internal locks, async authority ordering and memory ordering keep
 their separate ordinary, Shuttle, Loom and Turmoil checks. Measurements and diagnostic artifacts
 are delivered to the owning task.
@@ -166,6 +169,14 @@ ordering in the capture epoch, assignment protocol or relay revision changed. Ex
 models continue to qualify their ordering; new Shuttle checks qualify branch membership capture,
 replica revision races and publication before activation. Paused generators release their
 admitted-work guard after flushing and reacquire it before producing more output.
+
+Native restore conversion retains the immutable verified-description owner and its preparation
+reservation while an admitted storage job streams the current checkpoint encoding into a
+quota-owned file. The job owns the disk permit until its file closes or becomes a completed
+artifact, including cancellation. Entry serialization and 64 KiB writes check cancellation
+between bounded units. Each bounded artifact read also retains its file and quota in the storage
+job until it exits. Local and remote installation retain their exact file source and use
+the existing authority and installation barriers; conversion adds no lock to record paths.
 
 The backup coordinator waits for each node's admitted-work counters to reach zero, then orders one
 confirming force-flush generation across the cluster. The generation's obligations use the same
@@ -1545,7 +1556,15 @@ stale authority, bounded cleanup across 600 checkpoints and a 40 MiB guest save 
 also exercise quota refusal and exact staging retry, partial chunks without receipts across
 reopen, reclamation with applying and future generations retained, published and initial state
 preservation, snapshot readers across deletion, and interrupted bounded reclamation resumed after
-restart. The node-local sweeper takes the applied consensus read guard before the checkpoint
+restart. Active-generation owner checks also exercise ordinary and same-revision inline writes,
+replica installation, handoff, forced recovery, entity and stale-identity purge, queued writers,
+exact publication retries, referenced-revision cursors and cancelled active deletion across restart.
+Current-shape storage fixtures also qualify segmented replacement and incomplete unpublished
+revisions in both initial and restored namespaces, with retained readers and reopen.
+Retained readers keep complete deleted payloads; SST observations distinguish logical deletion
+from snapshot release and explicit compaction. Header copies stay bounded, while Fjall's value
+size queries and database caches retain their separate allocation owner. The node-local sweeper
+takes the applied consensus read guard before the checkpoint
 installation barrier, matching staging and publication; both remain held through bounded deletion.
 The public quota scenarios retain active staging through completed sweeps and prove failed
 targets remain gated after reclamation and restart on one and three nodes. The selected
@@ -1557,7 +1576,14 @@ failed drains or full-hold engagement, and the restore installation workloads. T
 the blocking applied-state authority guard through staging failure, complete publication, runtime
 handle clearing and a delayed coordinator across leadership transfer and a successor's START.
 The large-generation scenarios cover two 20 MiB saves and forty 1 MiB saves on one and three nodes,
-failure after durable publication, cluster restart, branch isolation and saved source offsets.
+failure after durable publication, cluster restart, branch isolation, saved source offsets and
+positive reclamation after resumed checkpoints and the state purge from module rebinding.
+The three-node many-save case retains one replica per state and observes reclamation of both
+owner and replica chunks.
+Restore workload setup sends durable mutations and activation through the Rust client, which
+recovers the same execution reference when leadership moves; the raw subscription session keeps
+its own row stream. Large-generation and staging archive captures use a two-minute command budget
+so positive capture waits accommodate concurrent diagnostic workloads.
 The three-node copy restore cordons its coordinator before planning, so every guest save uses the
 remote chunk transfer and the receiver's quota-owned completed file.
 Those restore scenarios also run in the ordinary public suite. The memory-pressure scenarios take

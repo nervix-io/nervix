@@ -21,6 +21,107 @@ Feature: Graceful shutdown
       raft.cordoned_nodes: node-2
       """
 
+  Scenario: A follower started without the default user's password hands its work to another node before it stops
+    Given graceful shutdown drain is enabled
+    And drain timeout is configured as "30s"
+    And runtime replication is configured with replica count 0 and snapshot interval "10m"
+    And the production sticky scheduler is configured
+    And only the bootstrap node is given the default user's password
+    And a 3 node nervix cluster is started
+    And the leader node is configured with these NSPL commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
+    When leadership is transferred to node "node-1"
+    And these NSPL commands are executed on the leader node
+      """
+      CREATE SCHEMA transaction ( tenant STRING, transaction_id STRING, amount I64 );
+      CREATE WIRE JSON SCHEMA transaction_wire MODE STRICT (
+        tenant string,
+        transaction_id string,
+        amount integer
+      );
+      CREATE CODEC transaction_codec
+        FROM WIRE JSON SCHEMA transaction_wire
+        TO SCHEMA transaction;
+      CREATE SCHEMA tenant_branch ( tenant STRING );
+      CREATE BRANCH by_tenant SCHEMA tenant_branch TTL 5m;
+      CREATE RELAY inbound SCHEMA transaction BRANCHED BY by_tenant;
+      CREATE RELAY deduped SCHEMA transaction BRANCHED BY by_tenant;
+      CREATE VHOST edge follower-drain-{{test_id}}.example.com;
+      CREATE ENDPOINT ingress ON edge PATH '/follower-drain' TYPE HTTP;
+      CREATE INGESTOR source_txns
+        FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL
+        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING transaction_codec
+        TO inbound INHERIT ALL BRANCHED BY by_tenant
+        SET tenant = message.tenant
+        FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+      CREATE DEDUPLICATOR dedup_txns FROM inbound
+        DEDUPLICATE ON input.transaction_id MAX TIME 10m
+        BRANCHED BY by_tenant
+        TO deduped INHERIT ALL FLUSH IMMEDIATE ON MESSAGE ERROR LOG;
+      START;
+      """
+    And these NSPL commands are executed on the leader node
+      """
+      CREATE SUBSCRIPTION deduped_seen TO deduped;
+      """
+    Then node "node-1" eventually accepts http traffic for host "follower-drain-{{test_id}}.example.com" path "/follower-drain"
+      """
+      {"tenant":"acme","transaction_id":"txn-warmup","amount":1}
+      """
+    And within "20s" the relay subscription receives a payload
+      """
+      "transaction_id":"txn-warmup"
+      """
+    When these NSPL commands are executed on the active session
+      """
+      RELOCATE DEDUPLICATOR dedup_txns ONTO NODE node-2 IGNORE PREFERENCES;
+      """
+    And these NSPL commands are executed on the active session
+      """
+      SHOW CLUSTER STATUS;
+      """
+    Then the last command output contains
+      """
+      - domain={{domain}} kind=deduplicator name=dedup_txns owner=node-2
+      """
+    When http payload is posted to node "node-1" with host "follower-drain-{{test_id}}.example.com" path "/follower-drain"
+      """
+      {"tenant":"acme","transaction_id":"txn-1","amount":10}
+      """
+    Then within "10s" the relay subscription receives a payload
+      """
+      {"amount":10,"tenant":"acme","transaction_id":"txn-1"}
+      """
+    When node "node-2" is gracefully stopped
+    And these NSPL commands are executed on the active session
+      """
+      SHOW CLUSTER STATUS;
+      """
+    Then the last command output contains
+      """
+      raft.cordoned_nodes: (none)
+      """
+    And the last cluster status owner for scheduled "deduplicator" "dedup_txns" is saved as placeholder "drain_destination"
+    And the last command output contains
+      """
+      - domain={{domain}} kind=deduplicator name=dedup_txns owner={{drain_destination}} replicas=- transition_from=node-2 state_recovery=complete
+      """
+    When http payload is posted to node "node-1" with host "follower-drain-{{test_id}}.example.com" path "/follower-drain"
+      """
+      {"tenant":"acme","transaction_id":"txn-1","amount":10}
+      """
+    Then the relay subscription does not receive a payload within "5s"
+    When http payload is posted to node "node-1" with host "follower-drain-{{test_id}}.example.com" path "/follower-drain"
+      """
+      {"tenant":"acme","transaction_id":"txn-2","amount":11}
+      """
+    Then within "15s" the relay subscription receives a payload
+      """
+      {"amount":11,"tenant":"acme","transaction_id":"txn-2"}
+      """
+
   Scenario: Placement excludes a terminating process and admits its next incarnation
     Given graceful shutdown drain is enabled
     And drain timeout is configured as "30s"

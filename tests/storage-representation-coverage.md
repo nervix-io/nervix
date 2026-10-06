@@ -19,7 +19,7 @@ contain synthetic data and describe the current shapes.
 | Malformed runtime-state keys | `runtime-state-keys-malformed` | Damaged or arbitrary keys fail with the store's typed failure, or decode to a placement whose own key is exactly the stored key |
 | Handoff preparations, forced-recovery preparations and completions | `runtime-state-identity-records` | Every coordination identity, operation, node, incarnation, entity and fingerprint, and every checkpoint with its placement compared by archived bits; two transitions share a key exactly when they name the same handoff or recovered entity |
 | Malformed identity records | `runtime-state-identity-records-malformed` | Arbitrary bytes fail with the typed decode failure, or decode to a record whose placements convert back and which stores back unchanged |
-| Kafka offset, branch lifecycle, deduplicator and branch-aggregated metrics snapshots in the inline checkpoint envelope | `runtime-state-snapshots` | Each owner's complete oracle: offsets with their schedules and backup positions, lifecycle keys with activity and incarnations, keyspace parts bit for bit in arrival order, and every metrics series |
+| Kafka offset, branch lifecycle, deduplicator and branch-aggregated metrics snapshots in the inline checkpoint envelope | `runtime-state-snapshots` | Each owner's complete oracle: offsets with their topic schedules, lifecycle keys with activity and incarnations, keyspace parts bit for bit in arrival order, and every metrics series |
 | Malformed snapshot payloads | `runtime-state-snapshots-malformed` | Each kind's typed decode failure, or a value that stores back to the same payload |
 | Inline and chunked checkpoints in the runtime-state store | `runtime-state-store-checkpoints` | The exact payload at its revision through the latest-snapshot read and the streaming reader, before and after the database reopens, at, beside and between the chunk boundaries |
 | Sealed window processor state | `runtime-window-snapshots` | Every retained row's sequence, ingestion time, branch bits and input and argument values, the next sequence, the branch lifetime and every aggregate's typed state; another branch lifetime restores nothing |
@@ -28,9 +28,10 @@ contain synthetic data and describe the current shapes.
 
 The earlier storage targets remain the owners of their codecs: `registry-archived-models` for the
 registry's Model archive, `consensus-archived-counts` and `runtime-window-archived-counts` for
-archived counts, `restore-installation-storage` for staged restore records, and the WASM targets
-listed in the [WASM representation coverage map](./wasm-representation-coverage.md) for guest
-checkpoints.
+archived counts, `restore-installation-storage` for staged restore records,
+`restore-native-lifecycle` and `restore-native-kafka` for the lifecycle and Kafka offsets a restore
+writes, and the WASM targets listed in the
+[WASM representation coverage map](./wasm-representation-coverage.md) for guest checkpoints.
 
 ## Contract Boundaries
 

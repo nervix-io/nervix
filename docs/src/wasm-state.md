@@ -78,6 +78,11 @@ the same installation authority. The installation and publication jobs reserve 2
 of total guest bytes and checkpoint count; loading a saved guest at START still materializes its
 bytes under the WASM host's own limits. Snapshot readers retain one complete selected generation,
 and queued checkpoint writers cannot cross an installation namespace.
+The every-node checkpoint maintenance owner also reclaims restored chunks after ordinary,
+replica, handoff or recovery checkpoints replace their selected header, or after state purge.
+It retains the exact revision a selected segmented header names, and preexisting snapshot readers
+keep complete saves across deletion. [Backup And Restore](./backup-and-restore.md) owns the sweep's
+bounded buffers, accounting, cancellation and separate database allocation limits.
 The replicated start gate remains closed until every node completes publication, even if the
 restore fails or its mutation lease is released. Authority binds leader tenure, execution, lease
 and installation generation; stale local and remote requests cannot republish or clear handles. A
@@ -101,8 +106,12 @@ never has an unbranched instance.
 
 The committed schedule gives each processor one owner and zero or more replicas. The owner runs
 every branch's instance and is the only node that checkpoints guest state. A replica holds durable
-copies of the owner's checkpoints. Any other node runs a guest only to prove it can restore a
-checkpoint while an ownership move prepares that node as the new owner. The control plane and the
+copies of the owner's checkpoints. An ownership move for an active domain runs a guest at the
+destination to prove it can restore a checkpoint. A passive revision for a stopped domain carries
+the complete validated checkpoint inventory and preserves its guest saves without executing guest
+callbacks or reading domain time. The guest validates the save when `START` installs the running
+revision. A stopped clock is not a missing-checkpoint outcome and cannot justify a state reset.
+The control plane and the
 inspection name a concrete branch by its fingerprint, a fixed-size digest of the canonical
 branch-key text, never by its field values.
 

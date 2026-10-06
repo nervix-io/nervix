@@ -20,8 +20,8 @@ use thiserror::Error;
 use super::prepare::VerifiedArchive;
 use crate::{
     runtime::{
-        Runtime, StagedArtifact, materialized_columns_frame, materialized_container_header,
-        materialized_identity_section,
+        RESTORE_STATE_CHUNK_BYTES, Runtime, StagedArtifact, materialized_columns_frame,
+        materialized_container_header, materialized_identity_section,
     },
     runtime_schema::{ArrowBodyError, RuntimeRecordBatch},
 };
@@ -68,8 +68,13 @@ async fn read_section(
     let mut offset = 0_u64;
     while offset < section.length {
         nervix_primitives::task::consume_budget().await;
-        let chunk = archive
-            .read_guest_chunk(runtime, section, offset)
+        let position = section
+            .offset
+            .checked_add(offset)
+            .ok_or_else(|| Report::new(MaterializedRestoreError::SectionLength))?;
+        let length = (section.length - offset)
+            .min(u64::try_from(RESTORE_STATE_CHUNK_BYTES).verified("one bounded chunk fits"));
+        let chunk = StagedArtifact::read_window(archive.artifact(), position, length)
             .await
             .change_context(MaterializedRestoreError::Storage)?;
         bytes.extend_from_slice(&chunk);

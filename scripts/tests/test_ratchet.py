@@ -127,7 +127,7 @@ class RatchetGateTests(unittest.TestCase):
 
 class CountTests(unittest.TestCase):
 
-    def test_as_casts_ignore_comments_literals_imports_and_unit_tests(self) -> None:
+    def test_as_casts_ignore_comments_literals_imports_attributes_and_unit_tests(self) -> None:
         with TemporaryDirectory() as directory:
             root = Path(directory)
             write_repository(
@@ -135,6 +135,12 @@ class CountTests(unittest.TestCase):
                 {
                     "src/lib.rs": """
 use std::sync::Arc as StdArc;
+
+#[rkyv(as = ArchivedSnapshot)]
+struct SnapshotView;
+
+#[rkyv(as=ArchivedOffsets)]
+struct OffsetView;
 
 /// Widens a counter, such as a backlog depth.
 fn width(x: u64) -> u32 {

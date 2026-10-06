@@ -44,7 +44,7 @@ use nervix_vm::program::FunctionName;
 use tracing::{debug, warn};
 
 use super::{
-    authentication::{AuthRateLimiter, BasicAuthCredentials},
+    authentication::AuthRateLimiter,
     backup::{CaptureSectionKey, CapturedSectionStage, ServerRetainedBackups},
     client_consumers::ClientConsumerRouter,
     client_producers::ClientProducerRouter,
@@ -175,7 +175,6 @@ pub(in crate::application) struct SessionServiceInner {
     /// Routes each client emitter consumer to its current execution owner.
     pub(in crate::application) client_consumers: ClientConsumerRouter,
     pub(in crate::application) service_tasks: ServiceTasks,
-    pub(in crate::application) configured_basic_auth: Option<BasicAuthCredentials>,
     pub(in crate::application) auth_rate_limiter: AuthRateLimiter,
     pub(in crate::application) failed_auth_rate_limit_keys: DashMap<String, (), RandomState>,
     pub(in crate::application) transaction_idle_timeout: Duration,

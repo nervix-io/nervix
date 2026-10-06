@@ -84,6 +84,11 @@ runtime caller can still distinguish a resource limit, invalid emission, and a s
 without classifying a rendered string. Callback and checkpoint acknowledgement decisions stay the
 same; [WASM State And Recovery](./wasm-state.md) owns those boundaries.
 
+Ownership preparation of a stopped WASM domain carries its validated durable checkpoint inventory
+without guest execution. A stopped clock is ordinary passive state, not a missing-checkpoint
+failure or a reason to reset guest state. Guest restore failures are classified when the running
+revision restores the save under the active clock at `START`.
+
 HTTP request-field compilation retains the VM report beneath the emitter's request-field context
 and attaches its safe message for diagnostics; an invalid request program never starts the sink.
 
@@ -131,8 +136,8 @@ transport failure. Registry Model records validate their current frame signature
 `RegistryError::InvalidModelArchive` with a recreation instruction for an unrecognized shape. A
 record's key holds its domain, Model kind and name exactly as a commit encodes them; a key spelling
 a name another way or holding bytes after its encoding is `RegistryError::DecodeKey`, so no stored
-record is read as another Model. Consensus validates its complete current keyspace namespace and state encoding and reports
-`StorageFailure::InvalidState` with a recreation instruction. Window snapshot decoding reports
+record is read as another Model. Consensus validates its complete current keyspace namespace and
+state encoding and reports `StorageFailure::InvalidState` with a recreation instruction. Window snapshot decoding reports
 `WindowSnapshotIssue::Header` with a recreation instruction for an invalid current frame signature.
 These boundaries reject unrecognized data before its counts can be reinterpreted; none clamps,
 truncates, or supplies a replacement value. See [Archived Counts](./typed-states.md#archived-counts).
@@ -336,7 +341,9 @@ A restore's failures are owned where they are decided, in the order the restore 
 restore stream refuses what its frames get wrong with a typed `RestoreUploadFailure`:
 `InvalidStream`, `InvalidStatement`, `SizeMismatch`, `DigestMismatch`, `QuotaExceeded`, or
 `StagingFailed`, and a call without valid credentials ends with `UNAUTHENTICATED`. The control
-plane's `RestoreRefusal` then names an archive the leader could not read, one that does not verify,
+plane's `RestoreRefusal` then names an archive the leader could not read, an unavailable or
+unaddressable retained preparation reservation (`MetadataAdmission`, with the executor's typed
+admission failure beneath it), one that does not verify,
 with the archive format's `ArchiveReadError` beneath it, a domain whose `models.nspl` does not
 parse, with the line and the parser's diagnostic, a statement that creates no model, with its
 number and line, a restore that cannot apply to this cluster, and a domain whose models do not form
@@ -354,6 +361,13 @@ resource, or version, and a resource import, domain model batch, or state instal
 beneath the step. `RestoreStateInstallationError` distinguishes an incomplete installation that
 blocks starting a domain from authority that no longer permits mutation. The runtime store reports
 a stale or competing published generation as `RuntimePersistenceError::RestoreGeneration`.
+Native conversion keeps its codec failure beneath `SnapshotStagingError::Encode` and the restore
+step; cancellation and encoding beyond admitted disk quota discard the temporary artifact while
+retaining its memory and quota until the job actually exits.
+`NativeEncoding` identifies the native state kind and retains the serializer's typed cause.
+Staging `Create`, `Write` and `Read` also retain the underlying I/O cause beneath a semantic
+context. `Window` reports the requested position and length and the artifact's exact length
+without overflowing a diagnostic sum or exposing checkpoint contents.
 `InvalidCheckpointChunks` covers a missing, misordered, truncated or digest-mismatched current
 chunk set or a conflicting publication inventory. `RestoreRead`, `Cancelled`, `Synchronize` and
 storage admission preserve their owning failure boundary. `CheckpointPlacementTooLarge` rejects
@@ -365,6 +379,11 @@ failure remains a storage failure beneath the admitted restore step and leaves i
 gate closed. Node-local maintenance logs admission, cancellation or storage failure and retries
 on its next sweep without changing the command outcome or gate. Metrics are updated only for a
 completed sweep, so a partial cancelled deletion cannot claim a completed reclamation count.
+Maintenance treats an absent or inline selected header, or another selected checkpoint revision,
+as ordinary chunk unreachability. Malformed chunk coordinates or bounded checkpoint headers keep
+their typed storage errors. Bounded deletion may already have committed earlier batches before
+cancellation or a later error; restart or the next successful sweep resumes from remaining keys.
+Completed reclamation counts include unreachable active chunks as well as unpublished staging.
 Staging or publication failure leaves the durable start gate in place, including a failure after
 the complete generation's pointer became durable but before runtime handles were cleared. Exact
 publication retry completes durability and bounded cleanup under the same authority and inventory. The steps before it stay
@@ -686,7 +705,13 @@ can use class and subject for routing, retry, and recovery without parsing text.
 failure carries the answering node's opaque operator description. That text is an explicit wire
 boundary for an already classified failure; it is not used to recover a new class. Runtime-state
 replication, a replica's branch checkpoint listing included, and materialized-snapshot description
-use this envelope, and local errors retain the remote class alongside their target and placement. A
+use this envelope, and local errors retain the remote class alongside their target and placement.
+A stopping node's `stopping_node_drain` request answers with outcomes of its own instead, because
+its only subject is the authenticated sender: completed or failed, each with the leader's report for
+the sender's log, or not the leader, which changed nothing and sends the sender to the leader it
+observes next. When that request fails in transport, the drain counts as requested but unanswered:
+the sender reports its drain-support phase abandoned and still clears the cordon the request may
+have set; see [Topology Cases](./shutdown.md#topology-cases). A
 listing that arrives but names a branch key that does not decode is a failure of its own, distinct
 from a failed request. A relay payload that does not decode is `RuntimeError::DecodeRemoteRelay`,
 naming the domain and relay, and its `RemoteRelayDecodeError` says what the payload got wrong: no
