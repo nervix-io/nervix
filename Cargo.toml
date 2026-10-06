@@ -123,8 +123,7 @@ nervix-backup = { workspace = true }
 nervix-bounded-write = { workspace = true }
 nervix-branch-instances = { workspace = true }
 nervix-checkpoint-replication = { workspace = true }
-nervix-client-core = { workspace = true }
-nervix-client-wire = { workspace = true }
+nervix-client-wire = { workspace = true, features = ["grpc"] }
 nervix-columnar-json = { workspace = true }
 nervix-connector = { workspace = true }
 nervix-connector-clickhouse = { workspace = true }

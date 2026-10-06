@@ -6,12 +6,21 @@
 //! - **Depends on.** Typed branch identities, timestamps, and the state codec.
 //! - **Must not know.** NSPL parsing, graph scheduling, connector protocols, or record payloads.
 
+use std::{io::Write, mem::MaybeUninit};
+
 use error_stack::{Report, ResultExt as _};
-use nervix_models::{RemoteRuntimeField, Timestamp};
+use meticulous::ResultExt as _;
+use nervix_execution::Cancellation;
+use nervix_models::{RemoteRuntimeElementValue, RemoteRuntimeField, RemoteRuntimeValue, Timestamp};
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 use thiserror::Error;
 
-use super::{BranchInstanceSnapshotEntry, BranchKey};
+use super::{
+    BackupBranchLifecycleEntry, BranchInstanceSnapshotEntry, BranchKey,
+    native_checkpoint_encoding::{
+        CancellableEntry, CancellableIterator, IteratorAsVec, scratch_bytes,
+    },
+};
 
 #[derive(Debug, Clone, Archive, RkyvSerialize, RkyvDeserialize)]
 struct BranchLruSnapshotEntry {
@@ -23,6 +32,97 @@ struct BranchLruSnapshotEntry {
 #[derive(Debug, Clone, Archive, RkyvSerialize, RkyvDeserialize)]
 struct BranchLruSnapshot {
     entries: Vec<BranchLruSnapshotEntry>,
+}
+
+/// A serialization view of the current archived lifecycle root.
+#[derive(Archive, RkyvSerialize)]
+#[rkyv(as = ArchivedBranchLruSnapshot)]
+#[rkyv(serialize_bounds(__S: rkyv::ser::Writer + rkyv::ser::Allocator, __S::Error: rkyv::rancor::Source))]
+struct StreamingBranchLruSnapshot<'a, I: ExactSizeIterator<Item = BranchLruSnapshotEntry> + Clone> {
+    #[rkyv(with = IteratorAsVec<CancellableEntry<'a, BranchLruSnapshotEntry>>, omit_bounds)]
+    entries: CancellableIterator<'a, I>,
+}
+
+/// Writes the current native shape without retaining converted entries or encoded output.
+/// The caller holds the archive's preparation charge, including these bounded resolver and
+/// per-entry conversion allocations, for the complete storage job.
+pub(super) fn write_branch_lru_snapshot(
+    entries: impl ExactSizeIterator<Item = BackupBranchLifecycleEntry> + Clone,
+    writer: &mut dyn Write,
+    cancellation: &Cancellation,
+) -> error_stack::Result<(), BranchLruSnapshotError> {
+    let encode_error = || BranchLruSnapshotError::Encode {
+        entries: entries.len(),
+    };
+    let mut nested = 0;
+    for (index, entry) in entries.clone().enumerate() {
+        cancellation.check().change_context_lazy(encode_error)?;
+        if entry.incarnation == 0 {
+            return Err(Report::new(BranchLruSnapshotError::Incarnation {
+                entry: index,
+            }));
+        }
+        let key = BranchKey::from_remote_key(entry.key)
+            .change_context(BranchLruSnapshotError::BranchKey { entry: index })?;
+        let fields = BranchKey::to_remote_key(&key);
+        nested = nested.max(
+            field_scratch(fields.as_deref().unwrap_or(&[]))
+                .ok_or_else(|| Report::new(encode_error()))?,
+        );
+    }
+    let capacity = scratch_bytes::<BranchLruSnapshotEntry>(entries.len(), nested)
+        .ok_or_else(|| Report::new(encode_error()))?;
+    let mut scratch = vec![MaybeUninit::uninit(); capacity];
+    let snapshot = StreamingBranchLruSnapshot {
+        entries: CancellableIterator {
+            cancellation,
+            entries: entries.clone().map(|entry| {
+                // The immutable input was validated above; both serializer passes reconstruct exactly
+                // that entry. Typed normalization preserves the ordinary checkpoint's field ordering.
+                let key = BranchKey::from_remote_key(entry.key).verified(
+                    "every entry of this immutable lifecycle was validated before serialization",
+                );
+                BranchLruSnapshotEntry {
+                    key: BranchKey::to_remote_key(&key),
+                    last_ingestion_unix_nanos: entry.last_ingestion.unix_nanos(),
+                    incarnation: entry.incarnation,
+                }
+            }),
+        },
+    };
+    rkyv::api::low::to_bytes_in_with_alloc::<_, _, rkyv::rancor::Error>(
+        &snapshot,
+        rkyv::ser::writer::IoWriter::new(writer),
+        rkyv::ser::allocator::SubAllocator::new(&mut scratch),
+    )
+    .map(|_| ())
+    .map_err(|error| Report::new(error).change_context(encode_error()))
+}
+
+fn field_scratch(fields: &[RemoteRuntimeField]) -> Option<usize> {
+    let mut bytes = fields
+        .len()
+        .checked_mul(std::mem::size_of::<<RemoteRuntimeField as Archive>::Resolver>())?;
+    for field in fields {
+        if let RemoteRuntimeValue::Array(values) | RemoteRuntimeValue::Vec(values) = &field.value {
+            bytes = bytes.checked_add(element_scratch(values)?)?;
+        }
+    }
+    Some(bytes)
+}
+
+fn element_scratch(values: &[RemoteRuntimeElementValue]) -> Option<usize> {
+    let mut bytes = values.len().checked_mul(std::mem::size_of::<
+        <RemoteRuntimeElementValue as Archive>::Resolver,
+    >())?;
+    for value in values {
+        if let RemoteRuntimeElementValue::Array(values) | RemoteRuntimeElementValue::Vec(values) =
+            value
+        {
+            bytes = bytes.checked_add(element_scratch(values)?)?;
+        }
+    }
+    Some(bytes)
 }
 
 #[derive(Debug, Error)]

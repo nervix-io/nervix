@@ -257,6 +257,10 @@ shared installation; no failure path substitutes wall time for a paced clock. Pa
 for a stopped domain may retain a generation-bound handle for ownership purposes, but attempts to
 read it still fail as stopped.
 
+Ownership handoff and forced recovery of a passive WASM revision transfer its validated durable
+checkpoint inventory without guest callbacks or clock reads. Guest restoration waits for `START`
+and its active clock generation; an unreadable stopped clock does not invalidate the saved state.
+
 Reads take no lock. A read loads the published installation, validates the handle's generation and
 the installation state against it, projects actual UTC through the source that installation holds,
 and raises the read watermark published with it using one atomic maximum. A concurrent read
@@ -375,7 +379,9 @@ same guest-state lifetime replacement without changing the domain clock mapping.
 Generated records use the snapshot assigned to their generating operation. Buffered emitter
 batches and their retries retain the snapshot from acceptance, while external observation fields
 whose contract is actual UTC obtain that value at the shared source-host intake boundary or their
-connector boundary.
+connector boundary. An Iceberg emitter's `COMMIT EACH` is not measured from that retained snapshot:
+the host reads a fresh snapshot at the first cadence check after a flush stages rows and arms the
+commit's logical deadline from it, and a retry or drain forces the commit without a clock read.
 
 An HTTP emitter's prepared method, target, headers, and optional body retain the execution
 snapshot of the admitted record through retries and an entity-pause drain. Changing the emitter

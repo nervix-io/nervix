@@ -36,7 +36,7 @@ use std::{
 
 use admitted_connection::AdmittingListener;
 use ahash::{HashMap, HashMapExt, HashSet, RandomState};
-use authentication::{BasicAuthCredentials, DEFAULT_USER, user_credentials};
+use authentication::{DEFAULT_USER, user_credentials};
 use background_task::{
     await_background_task_shutdown, join_public_listeners, request_shutdown_on_completion,
 };
@@ -161,7 +161,6 @@ mod model_validation;
 mod observability_http;
 mod observation;
 mod ownership_handoff;
-mod peer_grpc;
 mod relocation;
 mod resource;
 mod restore;
@@ -737,13 +736,6 @@ impl Application {
         let cluster_bootstrap_host = self.cluster_bootstrap_host.clone();
         let default_user = self.default_user.clone();
         let init_default_user_password = self.init_default_user_password.clone();
-        let configured_basic_auth =
-            init_default_user_password
-                .as_ref()
-                .map(|password| BasicAuthCredentials {
-                    username: default_user.clone(),
-                    password: password.clone(),
-                });
         let node_unavailability_timeout = self.node_unavailability_timeout;
         let raft_heartbeat_interval = self.raft_heartbeat_interval;
         let raft_election_timeout_min = self.raft_election_timeout_min;
@@ -1852,7 +1844,6 @@ impl Application {
                     consensus.proposer().local_node_id().clone(),
                 ),
                 service_tasks: ServiceTasks::default(),
-                configured_basic_auth,
                 auth_rate_limiter: SessionServiceImpl::new_auth_rate_limiter(),
                 failed_auth_rate_limit_keys: DashMap::with_hasher(RandomState::new()),
                 transaction_idle_timeout,
@@ -2081,6 +2072,7 @@ impl Application {
 
         service.register_wasm_state_reset_service(shutdown.clone())?;
         service.register_wasm_state_recovery_interconnect_handler()?;
+        service.register_stopping_node_drain_handler()?;
         service.register_wasm_state_recovery_coordinator(shutdown.clone());
 
         let entity_drain_service = service.clone();

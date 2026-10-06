@@ -6485,7 +6485,12 @@ async fn await_covered_log_purge(
 async fn when_leadership_is_transferred_to_node(world: &mut ScenarioWorld, to_node_id: String) {
     let to_node_id = expand_placeholders(world, &to_node_id);
     let leader = running_leader_node(world).await;
-    world.cluster().transfer_leadership(&leader, &to_node_id);
+    // A leader asked to hand leadership to itself stops its heartbeats as any transferring leader
+    // does, and then the first follower whose election timeout passes takes over. A node that
+    // already leads therefore keeps leading without a transfer.
+    if leader != to_node_id {
+        world.cluster().transfer_leadership(&leader, &to_node_id);
+    }
     world
         .cluster()
         .wait_for_leader(&to_node_id, Some(&to_node_id))
@@ -8187,6 +8192,18 @@ async fn given_graceful_shutdown_drain_is_enabled(world: &mut ScenarioWorld) {
         "graceful shutdown drain must be configured before cluster startup"
     );
     world.cluster_config.graceful_shutdown_drain = true;
+}
+
+#[given("only the bootstrap node is given the default user's password")]
+async fn given_only_the_bootstrap_node_is_given_the_default_user_password(
+    world: &mut ScenarioWorld,
+) {
+    assert!(
+        world.cluster.is_none(),
+        "the default user's password must be configured before cluster startup"
+    );
+    world.cluster_config.default_user_password =
+        crate::common::cluster::DefaultUserPasswordSeed::BootstrapNodeOnly;
 }
 
 #[given(expr = "client grpc transport is configured with mode {string}")]
@@ -12189,6 +12206,70 @@ async fn execute_nspl_commands_on_node(
             .open_session(node_id, &world.domain)
             .await
             .map_err(|error| error.to_string());
+    }
+
+    let statements = nervix_nspl::client_statement::parse_client_statement_sources(commands)
+        .ok()
+        .filter(|statements| {
+            let mut saw_subscription = false;
+            let server_follows_subscription = statements.iter().any(|statement| {
+                if matches!(
+                    statement.statement,
+                    nervix_nspl::client_statement::ClientStatement::CreateSubscription(_)
+                ) {
+                    saw_subscription = true;
+                    false
+                } else {
+                    saw_subscription
+                        && matches!(
+                            statement.statement,
+                            nervix_nspl::client_statement::ClientStatement::Server(_)
+                        )
+                }
+            });
+            server_follows_subscription
+                && statements.iter().all(|statement| {
+                    matches!(
+                        statement.statement,
+                        nervix_nspl::client_statement::ClientStatement::Server(_)
+                            | nervix_nspl::client_statement::ClientStatement::CreateSubscription(_)
+                    )
+                })
+        });
+    if let Some(statements) = statements {
+        let mut session = None;
+        for statement in statements {
+            let command = statement.source(commands);
+            append_cucumber_log_line(&format!("nspl command with subscription: {command}"));
+            let output = match statement.statement {
+                nervix_nspl::client_statement::ClientStatement::Server(_) => world
+                    .cluster()
+                    .run_command(node_id, &world.domain, command)
+                    .await
+                    .map_err(|error| error.to_string())?,
+                nervix_nspl::client_statement::ClientStatement::CreateSubscription(_) => {
+                    if session.is_none() {
+                        session = Some(
+                            world
+                                .cluster()
+                                .open_session(node_id, &world.domain)
+                                .await
+                                .map_err(|error| error.to_string())?,
+                        );
+                    }
+                    session
+                        .as_mut()
+                        .expect("subscription session is open")
+                        .run_command(command)
+                        .await
+                        .map_err(|error| error.to_string())?
+                }
+                _ => unreachable!("subscription graph statements were classified above"),
+            };
+            world.last_command_output = Some(output);
+        }
+        record_mqtt_ingestors(world, commands);
+        return Ok(session.expect("subscription graph contains a subscription"));
     }
 
     let mut session = world
@@ -26412,21 +26493,68 @@ async fn then_within_duration_iceberg_table_contains_row(
 ) {
     let duration = parse_duration_text(&duration).expect("step duration must be a valid duration");
     let table = expand_placeholders(world, &table);
-    let domain = world.domain.clone();
     let expected = expand_placeholders(world, docstring(step));
     let expected = serde_json::from_str::<serde_json::Value>(&expected)
         .expect("Iceberg expected row must be valid JSON");
+    await_iceberg_table_row(world, &table, &expected, duration).await;
+}
+
+/// Measures when a published row reached the table rather than asserting that it had not yet: the
+/// publishing step records its instant before the row leaves the harness, and the row is observed
+/// no earlier than its commit, so load only lengthens the measured delay.
+#[then(
+    expr = "within {string} the Iceberg table {string} contains a row no sooner than {string} \
+            after it was published"
+)]
+async fn then_within_duration_iceberg_table_contains_row_no_sooner_than(
+    world: &mut ScenarioWorld,
+    duration: String,
+    table: String,
+    delay: String,
+    #[step] step: &Step,
+) {
+    let duration = parse_duration_text(&duration).expect("step duration must be a valid duration");
+    let expected_delay = parse_duration_text(&delay).expect("step delay must be a valid duration");
+    let published_at = world
+        .last_publish_at
+        .expect("a delivery-delay assertion must follow a publishing step");
+    let table = expand_placeholders(world, &table);
+    let expected = expand_placeholders(world, docstring(step));
+    let expected = serde_json::from_str::<serde_json::Value>(&expected)
+        .expect("Iceberg expected row must be valid JSON");
+
+    await_iceberg_table_row(world, &table, &expected, duration).await;
+
+    let arrived_after = published_at.elapsed();
+    append_cucumber_log_line(&format!(
+        "Iceberg row in table {table} arrived {arrived_after:?} after it was published"
+    ));
+    assert!(
+        arrived_after >= expected_delay,
+        "expected the Iceberg row {expected} in table {table} no sooner than {expected_delay:?} \
+         after publishing, but it arrived after {arrived_after:?}"
+    );
+}
+
+/// Waits until the Iceberg table contains `expected`, failing once `duration` has passed.
+async fn await_iceberg_table_row(
+    world: &ScenarioWorld,
+    table: &str,
+    expected: &serde_json::Value,
+    duration: Duration,
+) {
+    let domain = world.domain.clone();
     let dependencies = world.dependencies.endpoints().clone();
     let deadline = Instant::now() + duration;
     let mut observed = Vec::new();
 
     loop {
         nervix_primitives::task::consume_budget().await;
-        match iceberg_table_rows(&dependencies, &domain, &table).await {
+        match iceberg_table_rows(&dependencies, &domain, table).await {
             Ok(rows) => {
                 if rows
                     .iter()
-                    .any(|row| iceberg_row_matches_expected(row, &expected))
+                    .any(|row| iceberg_row_matches_expected(row, expected))
                 {
                     append_cucumber_log_line(&format!(
                         "observed searchable Iceberg row in table {table}: {expected}"

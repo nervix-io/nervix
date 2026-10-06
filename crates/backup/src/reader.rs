@@ -6,7 +6,7 @@
 //! and verified before the next section begins, so a visitor that only needs the manifest still
 //! gets a verified archive.
 
-use std::io::{self, Read};
+use std::io::{self, Cursor, Read};
 
 use arch_into::ArchInto as _;
 use error_stack::Report;
@@ -18,6 +18,58 @@ use crate::{
     path::MANIFEST_PATH,
     section::{ArchiveRecord as _, MAX_RECORD_BYTES, SectionDigester},
 };
+
+/// The verified identity and bounded length of the archive's first physical entry.
+pub struct ManifestHeader {
+    bytes: [u8; 512],
+    length: u64,
+}
+
+impl ManifestHeader {
+    /// The manifest's encoded length, checked against the archive record limit.
+    pub fn length(&self) -> u64 {
+        self.length
+    }
+}
+
+/// Reads only the fixed-size header, before a caller admits memory for the manifest.
+/// The current archive begins physically with a regular `manifest.rkyv` entry.
+pub fn read_manifest_header(
+    reader: &mut impl Read,
+) -> Result<ManifestHeader, Report<ArchiveReadError>> {
+    let mut bytes = [0; 512];
+    if let Err(error) = reader.read_exact(&mut bytes) {
+        let context = if error.kind() == io::ErrorKind::UnexpectedEof {
+            ArchiveReadError::MissingManifest
+        } else {
+            ArchiveReadError::NotAnArchive
+        };
+        return Err(Report::new(error).change_context(context));
+    }
+    if bytes.iter().all(|byte| *byte == 0) {
+        return Err(Report::new(ArchiveReadError::MissingManifest));
+    }
+    let header = tar::Header::from_byte_slice(&bytes);
+    let path_bytes = header.path_bytes();
+    let path = std::str::from_utf8(&path_bytes)
+        .map_err(|error| Report::new(error).change_context(ArchiveReadError::InvalidPath))?;
+    if path != MANIFEST_PATH || header.entry_type() != EntryType::Regular {
+        return Err(Report::new(ArchiveReadError::UnexpectedFirstEntry {
+            path: path.to_string(),
+        }));
+    }
+    let length = header
+        .size()
+        .map_err(|error| Report::new(error).change_context(ArchiveReadError::NotAnArchive))?;
+    if length > MAX_RECORD_BYTES {
+        return Err(Report::new(ArchiveReadError::SectionTooLarge {
+            path: path.to_string(),
+            length,
+            limit: MAX_RECORD_BYTES,
+        }));
+    }
+    Ok(ManifestHeader { bytes, length })
+}
 
 /// What a caller does with an archive while it is read.
 pub trait SectionVisitor {
@@ -92,10 +144,12 @@ impl Read for SectionReader<'_> {
 /// Reads an archive from `reader`, handing its manifest and then every section to `visitor`, and
 /// returns the manifest once every section has been verified.
 pub fn read_archive<R: Read>(
-    reader: R,
+    mut reader: R,
     visitor: &mut impl SectionVisitor,
 ) -> Result<BackupManifest, Report<ArchiveReadError>> {
-    let mut archive = Archive::new(reader);
+    let header = read_manifest_header(&mut reader)?;
+    let length = header.length();
+    let mut archive = Archive::new(Cursor::new(header.bytes).chain(reader));
     let mut entries = match archive.entries() {
         Ok(entries) => entries,
         Err(error) => {
@@ -111,18 +165,6 @@ pub fn read_archive<R: Read>(
             }
             None => return Err(Report::new(ArchiveReadError::MissingManifest)),
         };
-        let path = entry_path(&first)?;
-        if path != MANIFEST_PATH || first.header().entry_type() != EntryType::Regular {
-            return Err(Report::new(ArchiveReadError::UnexpectedFirstEntry { path }));
-        }
-        let length = first.size();
-        if length > MAX_RECORD_BYTES {
-            return Err(Report::new(ArchiveReadError::SectionTooLarge {
-                path,
-                length,
-                limit: MAX_RECORD_BYTES,
-            }));
-        }
         let capacity: usize = length.arch_into();
         let mut bytes = Vec::with_capacity(capacity);
         let mut first = first;

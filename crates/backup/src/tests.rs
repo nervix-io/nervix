@@ -13,10 +13,10 @@ use nervix_models::{
 use crate::{
     ARCHIVE_FORMAT_MAJOR, ArchiveLayout, ArchivePiece, ArchiveReadError, ArchiveRecord,
     ArchiveScope, ArchiveWriteError, BackupManifest, DeclaredResource, DomainCapture, DomainRecord,
-    PublishedResourceVersion, RaftLogPosition, RecordKind, ResourceVersionRecord,
+    MAX_RECORD_BYTES, PublishedResourceVersion, RaftLogPosition, RecordKind, ResourceVersionRecord,
     ResourceVersionState, SectionContent, SectionDigester, SectionEntry, SectionPath,
     SectionReader, SectionVisitor, SkippedStateReason, StateField, StateValue, UserRecord,
-    UsersRecord, describe_archive, read_archive, read_archive_contents,
+    UsersRecord, describe_archive, read_archive, read_archive_contents, read_manifest_header,
     section::{RECORD_HEADER_BYTES, RECORD_MAGIC, decode_record, encode_record},
     state::{KafkaOffsetsRecord, WasmStateDescriptor},
     wire::{
@@ -1124,6 +1124,40 @@ fn a_section_the_manifest_does_not_name_is_refused() {
         error.current_context(),
         &ArchiveReadError::UnexpectedSection {
             path: "stray.bin".to_string(),
+        }
+    );
+}
+
+#[test]
+fn manifest_admission_reads_only_the_identified_bounded_header() {
+    let (_, bytes) = cluster_archive(BackupResources::Included);
+    let mut reader = std::io::Cursor::new(&bytes);
+    let header = read_manifest_header(&mut reader).assured("the current manifest header is valid");
+    assert_eq!(reader.position(), 512);
+    assert_eq!(
+        header.length(),
+        tar::Header::from_byte_slice(&bytes[..512])
+            .size()
+            .assured("the current header has a length")
+    );
+    assert!(header.length() > 0);
+
+    let mut header = tar::Header::new_gnu();
+    header
+        .set_path("manifest.rkyv")
+        .assured("the manifest path fits the header");
+    header.set_size(MAX_RECORD_BYTES + 1);
+    header.set_mode(0o600);
+    header.set_cksum();
+    let error = read_manifest_header(&mut header.as_bytes().as_slice())
+        .err()
+        .assured("an oversized current manifest is refused before allocation");
+    assert_eq!(
+        error.current_context(),
+        &ArchiveReadError::SectionTooLarge {
+            path: "manifest.rkyv".to_string(),
+            length: MAX_RECORD_BYTES + 1,
+            limit: MAX_RECORD_BYTES,
         }
     );
 }

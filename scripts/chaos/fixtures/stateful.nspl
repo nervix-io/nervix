@@ -1,0 +1,237 @@
+BEGIN;
+
+CREATE SCHEMA chaos_state_record (
+  event_id STRING,
+  branch_name STRING,
+  sequence I64,
+  branch_index I64,
+  dedup_key STRING,
+  content STRING
+);
+
+CREATE WIRE JSON SCHEMA chaos_state_wire MODE STRICT (
+  event_id STRING,
+  branch_name STRING,
+  sequence INTEGER,
+  branch_index INTEGER,
+  dedup_key STRING,
+  content STRING
+);
+
+CREATE CODEC chaos_state_json
+  FROM WIRE JSON SCHEMA chaos_state_wire
+  TO SCHEMA chaos_state_record;
+
+CREATE RELAY chaos_state_records SCHEMA chaos_state_record BRANCHED BY chaos_branch CAPACITY 1;
+
+CREATE INGESTOR chaos_state_ingestor
+  FROM KAFKA chaos_kafka TOPIC chaos_state_input OFFSET BY CONSUMER GROUP chaos_stateful MODE ACK PARALLEL MAX 32 BATCH TIMEOUT 100ms ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s ON QUIESCE SUSPEND
+  DECODE USING chaos_state_json
+  TO chaos_state_records
+    INHERIT ALL
+    BRANCHED BY chaos_branch SET branch_name = message.branch_name
+    FLUSH IMMEDIATE
+    ON MESSAGE ERROR LOG
+  ON GENERAL ERROR LOG;
+
+CREATE RELAY chaos_unique SCHEMA chaos_state_record BRANCHED BY chaos_branch CAPACITY 1;
+
+CREATE ATTACHED DEDUPLICATOR chaos_dedup
+  FROM chaos_state_records
+  DEDUPLICATE ON input.dedup_key
+  MAX TIME 1h
+  BRANCHED BY chaos_branch
+  TO chaos_unique
+    INHERIT ALL
+    FLUSH IMMEDIATE
+    ON MESSAGE ERROR LOG;
+
+CREATE ATTACHED EMITTER chaos_unique_emitter
+  FROM chaos_unique
+  TO KAFKA chaos_kafka TOPIC chaos_unique_output
+    MODE ACK PARALLEL MAX 16 ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s
+    ENCODE USING chaos_state_json
+  INHERIT ALL
+  FLUSH IMMEDIATE
+  ON MESSAGE ERROR LOG
+  ON GENERAL ERROR LOG;
+
+CREATE SCHEMA chaos_window_summary (
+  branch_name STRING,
+  records I64,
+  first_index I64,
+  last_index I64,
+  membership I64,
+  sequence_sum I64
+);
+
+CREATE WIRE JSON SCHEMA chaos_window_wire MODE STRICT (
+  branch_name STRING,
+  records INTEGER,
+  first_index INTEGER,
+  last_index INTEGER,
+  membership INTEGER,
+  sequence_sum INTEGER
+);
+
+CREATE CODEC chaos_window_json
+  FROM WIRE JSON SCHEMA chaos_window_wire
+  TO SCHEMA chaos_window_summary;
+
+CREATE RELAY chaos_windows SCHEMA chaos_window_summary BRANCHED BY chaos_branch CAPACITY 1;
+
+CREATE DETACHED WINDOW PROCESSOR chaos_window
+  FROM chaos_state_records
+  WIDTH 12 MESSAGES
+  STEP 12 MESSAGES
+  BRANCHED BY chaos_branch
+  TO chaos_windows
+    SET branch_name = first(input.branch_name),
+        records = count(input.branch_index),
+        first_index = min(input.branch_index),
+        last_index = max(input.branch_index),
+        membership = sum(shift_left(1, 2 * (input.branch_index % 24))),
+        sequence_sum = sum(input.sequence)
+    ON MESSAGE ERROR LOG;
+
+CREATE ATTACHED EMITTER chaos_window_emitter
+  FROM chaos_windows
+  TO KAFKA chaos_kafka TOPIC chaos_window_output
+    MODE ACK PARALLEL MAX 16 ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s
+    ENCODE USING chaos_window_json
+  INHERIT ALL
+  FLUSH IMMEDIATE
+  ON MESSAGE ERROR LOG
+  ON GENERAL ERROR LOG;
+
+CREATE SCHEMA chaos_profile (
+  branch_name STRING,
+  profile_version I64
+);
+
+CREATE WIRE JSON SCHEMA chaos_profile_wire MODE STRICT (
+  branch_name STRING,
+  profile_version INTEGER
+);
+
+CREATE CODEC chaos_profile_json
+  FROM WIRE JSON SCHEMA chaos_profile_wire
+  TO SCHEMA chaos_profile;
+
+CREATE RELAY chaos_profiles SCHEMA chaos_profile BRANCHED BY chaos_branch CAPACITY 1 WITH MATERIALIZED STATE LAST BY TIMESTAMP;
+
+CREATE INGESTOR chaos_profile_ingestor
+  FROM KAFKA chaos_kafka TOPIC chaos_profile_input OFFSET BY CONSUMER GROUP chaos_profiles MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s ON QUIESCE SUSPEND
+  DECODE USING chaos_profile_json
+  TO chaos_profiles
+    INHERIT ALL
+    BRANCHED BY chaos_branch SET branch_name = message.branch_name
+    FLUSH IMMEDIATE
+    ON MESSAGE ERROR LOG
+  ON GENERAL ERROR LOG;
+
+CREATE SCHEMA chaos_enriched_record (
+  event_id STRING,
+  branch_name STRING,
+  sequence I64,
+  branch_index I64,
+  dedup_key STRING,
+  content STRING,
+  profile_branch STRING,
+  profile_version I64
+);
+
+CREATE WIRE JSON SCHEMA chaos_enriched_wire MODE STRICT (
+  event_id STRING,
+  branch_name STRING,
+  sequence INTEGER,
+  branch_index INTEGER,
+  dedup_key STRING,
+  content STRING,
+  profile_branch STRING,
+  profile_version INTEGER
+);
+
+CREATE CODEC chaos_enriched_json
+  FROM WIRE JSON SCHEMA chaos_enriched_wire
+  TO SCHEMA chaos_enriched_record;
+
+CREATE RELAY chaos_enriched SCHEMA chaos_enriched_record BRANCHED BY chaos_branch CAPACITY 1;
+
+CREATE ATTACHED JUNCTION chaos_enrich
+  FROM chaos_state_records
+  BRANCHED BY chaos_branch
+  USING MATERIALIZED STATE chaos_profiles DEFAULT { branch_name = 'none', profile_version = 0 }
+  TO chaos_enriched
+    INHERIT ALL
+    SET profile_branch = relay_state.chaos_profiles.branch_name,
+        profile_version = relay_state.chaos_profiles.profile_version
+    FLUSH IMMEDIATE
+    ON MESSAGE ERROR LOG;
+
+CREATE ATTACHED EMITTER chaos_enriched_emitter
+  FROM chaos_enriched
+  TO KAFKA chaos_kafka TOPIC chaos_enriched_output
+    MODE ACK PARALLEL MAX 16 ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s
+    ENCODE USING chaos_enriched_json
+  INHERIT ALL
+  FLUSH IMMEDIATE
+  ON MESSAGE ERROR LOG
+  ON GENERAL ERROR LOG;
+
+CREATE SCHEMA chaos_counted_record (
+  event_id STRING,
+  branch_name STRING,
+  sequence I64,
+  branch_index I64,
+  dedup_key STRING,
+  content STRING,
+  branch_count I64
+);
+
+CREATE WIRE JSON SCHEMA chaos_counted_wire MODE STRICT (
+  event_id STRING,
+  branch_name STRING,
+  sequence INTEGER,
+  branch_index INTEGER,
+  dedup_key STRING,
+  content STRING,
+  branch_count INTEGER
+);
+
+CREATE CODEC chaos_counted_json
+  FROM WIRE JSON SCHEMA chaos_counted_wire
+  TO SCHEMA chaos_counted_record;
+
+CREATE RELAY chaos_counted SCHEMA chaos_counted_record BRANCHED BY chaos_branch CAPACITY 1;
+
+CREATE ATTACHED WASM PROCESSOR chaos_counter
+  FROM chaos_state_records
+  USING RESOURCE chaos_counter_guest VERSION 1
+  FILE 'processors/branch-counter.wat'
+  MAX FUEL 100000000
+  MAX MEMORY 16MiB
+  BRANCHED BY chaos_branch
+  TO chaos_counted
+    SET event_id = event_id,
+        branch_name = branch_name,
+        sequence = sequence,
+        branch_index = branch_index,
+        dedup_key = dedup_key,
+        content = content,
+        branch_count = branch_count
+    ON MESSAGE ERROR LOG
+  ON REJECTED STATE PRESERVE
+  ON GLOBAL ERROR LOG;
+
+CREATE ATTACHED EMITTER chaos_counted_emitter
+  FROM chaos_counted
+  TO KAFKA chaos_kafka TOPIC chaos_counted_output
+    MODE ACK PARALLEL MAX 16 ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s
+    ENCODE USING chaos_counted_json
+  INHERIT ALL
+  FLUSH IMMEDIATE
+  ON MESSAGE ERROR LOG
+  ON GENERAL ERROR LOG;
+
+COMMIT;

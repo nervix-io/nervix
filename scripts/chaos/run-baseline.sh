@@ -31,6 +31,10 @@ Options:
   --partition-seconds N  Minimum verified partition window, 20..600 (default: ${partition_seconds}).
   --isolation-seconds N  former-owner-restart window in which the restarted former owner stays
                          isolated before startup admission, 20..600 (default: ${isolation_seconds}).
+  --fault FAULT          stateful fault: none, owner-crash, owner-pause, owner-partition or
+                         cluster-restart; domain-time fault: none, voter-crash, voter-pause,
+                         voter-partition, voter-stop or cluster-restart. One node supports none and
+                         cluster-restart (default: ${fault}).
   --profile NAME         degraded-links profile: all, delay, jitter, random-loss,
                          burst-loss, rate-limit, combined (default: ${degradation_profile}).
   --load-interval-ms N   Fixed producer interval, 100..5000 (default: ${load_interval_ms}).
@@ -69,6 +73,8 @@ partition_seconds=45
 partition_option_set=false
 isolation_seconds=45
 isolation_option_set=false
+fault=none
+fault_option_set=false
 degradation_profile=all
 degradation_option_set=false
 load_interval_ms=750
@@ -98,6 +104,9 @@ while [[ "$#" -gt 0 ]]; do
             elif [[ "${scenario}" == backup ]]; then
                 record_count=1000
                 overall_timeout=1800
+            elif [[ "${scenario}" == stateful || "${scenario}" == domain-time ]]; then
+                record_count=1000
+                overall_timeout=2700
             fi
             shift 2
             ;;
@@ -150,6 +159,12 @@ while [[ "$#" -gt 0 ]]; do
             isolation_option_set=true
             shift 2
             ;;
+        --fault)
+            [[ "$#" -ge 2 ]] || setup_error '--fault requires a value'
+            fault="$2"
+            fault_option_set=true
+            shift 2
+            ;;
         --profile | --load-interval-ms | --baseline-seconds | --degrade-seconds | --drain-seconds | --max-backlog | --max-recovery-backlog | --max-memory-bytes | --max-pending | --min-throughput-pct)
             [[ "$#" -ge 2 ]] || setup_error "$1 requires a value"
             case "$1" in
@@ -183,18 +198,40 @@ done
 
 [[ -n "${image_ref}" ]] || setup_error '--image is required and must name an already-built Nervix image'
 case "${scenario}" in
-    baseline | rolling-restart | leader-crash | follower-crash | ingestor-owner-crash | emitter-owner-crash | pause-resume | partition-recovery | degraded-links | backup | stale-follower | former-owner-restart | cluster-restart) ;;
+    baseline | rolling-restart | leader-crash | follower-crash | ingestor-owner-crash | emitter-owner-crash | pause-resume | partition-recovery | degraded-links | backup | stale-follower | former-owner-restart | cluster-restart | stateful | domain-time) ;;
     *) setup_error "unknown scenario: ${scenario}" ;;
 esac
 [[ "${node_count}" == "1" || "${node_count}" == "3" ]] \
     || setup_error '--nodes must be 1 or 3'
-# The restart and recovery scenarios share their traffic, findings and exit handling.
+# The restart, recovery, stateful and domain-time scenarios share their traffic, findings and exit
+# handling.
 recovery_scenario=false
 case "${scenario}" in
-    stale-follower | former-owner-restart | cluster-restart) recovery_scenario=true ;;
+    stale-follower | former-owner-restart | cluster-restart | stateful | domain-time) recovery_scenario=true ;;
 esac
-if [[ "${scenario}" != baseline && "${scenario}" != backup && "${scenario}" != rolling-restart && "${scenario}" != leader-crash && "${scenario}" != cluster-restart && "${node_count}" != 3 ]]; then
+if [[ "${scenario}" != baseline && "${scenario}" != backup && "${scenario}" != rolling-restart && "${scenario}" != leader-crash && "${scenario}" != cluster-restart && "${scenario}" != stateful && "${scenario}" != domain-time && "${node_count}" != 3 ]]; then
     setup_error "${scenario} requires --nodes 3"
+fi
+case "${scenario}" in
+    stateful)
+        case "${fault}" in
+            none | owner-crash | owner-pause | owner-partition | cluster-restart) ;;
+            *) setup_error "--fault for stateful must be none, owner-crash, owner-pause, owner-partition or cluster-restart, not ${fault}" ;;
+        esac
+        ;;
+    domain-time)
+        case "${fault}" in
+            none | voter-crash | voter-pause | voter-partition | voter-stop | cluster-restart) ;;
+            *) setup_error "--fault for domain-time must be none, voter-crash, voter-pause, voter-partition, voter-stop or cluster-restart, not ${fault}" ;;
+        esac
+        ;;
+    *)
+        [[ "${fault_option_set}" != true ]] \
+            || setup_error '--fault applies only to stateful and domain-time'
+        ;;
+esac
+if [[ "${node_count}" == 1 && "${fault}" != none && "${fault}" != cluster-restart ]]; then
+    setup_error "${fault} requires --nodes 3; one node supports none and cluster-restart"
 fi
 if [[ "${scenario}" == pause-resume && "${outage_option_set}" == true ]]; then
     setup_error 'pause-resume selects its own finite durations; --outage-seconds is for crash scenarios'
@@ -312,7 +349,7 @@ export CHAOS_LOAD_FILE="${artifact_dir}/fixtures/input.ndjson"
 export CHAOS_TRAFFIC_DIR="${artifact_dir}/traffic"
 export CHAOS_SCRIPT_DIR="${script_dir}"
 export CHAOS_NODE_COUNT="${node_count}"
-if [[ "${scenario}" == pause-resume ]]; then
+if [[ "${scenario}" == pause-resume || "${fault}" == *-pause ]]; then
     export CHAOS_RAFT_HEARTBEAT_INTERVAL=250ms
     export CHAOS_RAFT_ELECTION_TIMEOUT_MIN=10s
     export CHAOS_RAFT_ELECTION_TIMEOUT_MAX=12s
@@ -337,6 +374,21 @@ if [[ "${scenario}" == stale-follower ]]; then
     export CHAOS_RAFT_SNAPSHOT_ENTRY_THRESHOLD=64
     export CHAOS_RAFT_COVERED_LOG_ENTRIES_RETAINED=16
 fi
+if [[ "${scenario}" == stateful || "${scenario}" == domain-time ]]; then
+    # One baseline record a second keeps the bounded fixture flowing through the whole timeline.
+    export CHAOS_LOAD_INTERVAL=1.0
+fi
+if [[ "${scenario}" == stateful ]]; then
+    # Ordinary state options: a one-second snapshot interval publishes runtime checkpoints several
+    # times inside a held milestone, and on three nodes one state replica lets the loss of an owner
+    # promote its replicated state instead of resetting it.
+    export CHAOS_STATE_SNAPSHOT_INTERVAL=1s
+    if [[ "${node_count}" == 3 ]]; then
+        export CHAOS_REPLICA_COUNT=1
+    fi
+fi
+export CHAOS_STATE_LOAD_FILE="${artifact_dir}/fixtures/state-input.ndjson"
+export CHAOS_PACED_LOAD_FILE="${artifact_dir}/fixtures/paced-input.ndjson"
 
 jq -n \
     --arg run_id "${run_id}" \
@@ -423,6 +475,11 @@ if [[ "${node_count}" == "3" ]]; then
 fi
 if [[ "${scenario}" != "baseline" ]]; then
     compose_args+=(--profile rolling)
+fi
+if [[ "${scenario}" == stateful ]]; then
+    compose_args+=(--profile stateful)
+elif [[ "${scenario}" == domain-time ]]; then
+    compose_args+=(--profile paced)
 fi
 
 compose() {
@@ -578,11 +635,33 @@ finish() {
         kill "${cluster_restart_sampler_pid}" 2>/dev/null
         wait "${cluster_restart_sampler_pid}" 2>/dev/null
     fi
-    if [[ "${scenario}" == partition-recovery || "${scenario}" == degraded-links || "${scenario}" == former-owner-restart ]]; then
+    if [[ "${fault}" == *-pause ]]; then
+        # A pause fault ends with its injector; one that outlived the controller is removed, and
+        # every run-owned node it left paused runs again before anything else is captured.
+        mapfile -t active_injectors < <(
+            docker container ls --quiet \
+                --filter "label=io.nervix.chaos.run=${run_id}" \
+                --filter label=io.nervix.chaos.role=fault 2>/dev/null
+        )
+        if ((${#active_injectors[@]} > 0)); then
+            timeout --foreground --kill-after=5s 20s docker container rm --force \
+                "${active_injectors[@]}" >"${artifact_dir}/diagnostics/pause-injector-heal.txt" 2>&1
+        fi
+        local paused_id
+        while IFS= read -r paused_id; do
+            [[ -n "${paused_id}" ]] || continue
+            if [[ "$(timeout --foreground --kill-after=5s 20s docker inspect --format '{{.State.Paused}}' "${paused_id}" 2>/dev/null)" == true ]]; then
+                timeout --foreground --kill-after=5s 20s docker unpause "${paused_id}" \
+                    >>"${artifact_dir}/diagnostics/target-unpause.txt" 2>&1
+            fi
+        done < <(docker container ls --quiet --filter "label=io.nervix.chaos.run=${run_id}" \
+            --filter label=io.nervix.chaos.role=node 2>/dev/null)
+    fi
+    if [[ "${scenario}" == partition-recovery || "${scenario}" == degraded-links || "${scenario}" == former-owner-restart || "${fault}" == *-partition ]]; then
         local heal_prefix=network
         if [[ "${scenario}" == partition-recovery ]]; then
             heal_prefix=partition
-        elif [[ "${scenario}" == former-owner-restart ]]; then
+        elif [[ "${scenario}" == former-owner-restart || "${fault}" == *-partition ]]; then
             heal_prefix=isolation
         fi
         # Heal before anything else so neither retained resources nor diagnostics stay partitioned.
@@ -669,6 +748,12 @@ finish() {
         elif [[ "${scenario}" == former-owner-restart ]]; then
             reproducer="$(printf 'just chaos run %q --image %q --records %q --isolation-seconds %q' \
                 "${scenario}" "${reproducer_image}" "${record_count}" "${isolation_seconds}")"
+        elif [[ "${scenario}" == stateful || "${scenario}" == domain-time ]]; then
+            reproducer="$(printf 'just chaos run %q --image %q --nodes %q --fault %q --records %q' \
+                "${scenario}" "${reproducer_image}" "${node_count}" "${fault}" "${record_count}")"
+            if [[ "${outage_option_set}" == true ]]; then
+                reproducer+="$(printf ' --outage-seconds %q' "${outage_seconds}")"
+            fi
         elif [[ "${scenario}" == degraded-links ]]; then
             reproducer="$(printf 'just chaos run %q --image %q --records %q --profile %q --load-interval-ms %q --baseline-seconds %q --degrade-seconds %q --drain-seconds %q --max-backlog %q --max-recovery-backlog %q --max-memory-bytes %q --max-pending %q --min-throughput-pct %q' \
                 "${scenario}" "${reproducer_image}" "${record_count}" "${degradation_profile}" "${load_interval_ms}" "${baseline_seconds}" "${degrade_seconds}" "${drain_seconds}" "${max_backlog}" "${max_recovery_backlog}" "${max_memory_bytes}" "${max_pending}" "${min_throughput_pct}")"
@@ -736,7 +821,7 @@ finish() {
                 fi
             done
             local case_directory
-            for case_directory in stale former-owner restart; do
+            for case_directory in stale former-owner restart stateful domain-time; do
                 [[ -d "${artifact_dir}/${case_directory}" ]] || continue
                 while IFS= read -r evidence_path; do
                     evidence_paths+=("${evidence_path#"${artifact_dir}/"}")
@@ -1129,7 +1214,7 @@ if [[ "${scenario}" != "baseline" && "${scenario}" != backup ]]; then
     resolve_tool_image pumba "${CHAOS_PUMBA_IMAGE}"
     pumba_image_id="${tool_image_ids[pumba]}"
 fi
-if [[ "${scenario}" == partition-recovery || "${scenario}" == degraded-links || "${scenario}" == former-owner-restart ]]; then
+if [[ "${scenario}" == partition-recovery || "${scenario}" == degraded-links || "${scenario}" == former-owner-restart || "${fault}" == *-partition ]]; then
     resolve_tool_image nettools "${CHAOS_NETTOOLS_IMAGE}"
 fi
 
@@ -1163,11 +1248,12 @@ if [[ "${scenario}" != "baseline" && "${scenario}" != backup ]]; then
         --mount type=bind,src=/var/run/docker.sock,dst=/var/run/docker.sock \
         "${pumba_image_id}" --version >"${artifact_dir}/pumba-version.txt"
     pumba_preflight=(stop --time 60 impossible-chaos-preflight-target)
-    if [[ "${scenario}" == *-crash || "${scenario}" == former-owner-restart || "${scenario}" == cluster-restart ]]; then
+    if [[ "${scenario}" == *-crash || "${scenario}" == former-owner-restart || "${scenario}" == cluster-restart \
+        || "${fault}" == *-crash || "${fault}" == cluster-restart ]]; then
         pumba_preflight=(kill --signal SIGKILL impossible-chaos-preflight-target)
-    elif [[ "${scenario}" == pause-resume ]]; then
+    elif [[ "${scenario}" == pause-resume || "${fault}" == *-pause ]]; then
         pumba_preflight=(pause --duration 1s impossible-chaos-preflight-target)
-    elif [[ "${scenario}" == partition-recovery || "${scenario}" == degraded-links ]]; then
+    elif [[ "${scenario}" == partition-recovery || "${scenario}" == degraded-links || "${fault}" == *-partition ]]; then
         pumba_preflight=(netem --duration 1s --target 192.0.2.1 loss --percent 100 impossible-chaos-preflight-target)
     fi
     run_bounded 30 docker run --rm \
@@ -1177,7 +1263,7 @@ if [[ "${scenario}" != "baseline" && "${scenario}" != backup ]]; then
         >"${artifact_dir}/diagnostics/pumba-docker-preflight.txt" 2>&1 \
         || setup_error 'Pumba cannot access the selected Docker daemon'
 fi
-if [[ "${scenario}" == partition-recovery || "${scenario}" == degraded-links || "${scenario}" == former-owner-restart ]]; then
+if [[ "${scenario}" == partition-recovery || "${scenario}" == degraded-links || "${scenario}" == former-owner-restart || "${fault}" == *-partition ]]; then
     # Pumba's netem and iptables faults must take effect on this worker's kernel and heal on SIGTERM.
     run_bounded 120 "${script_dir}/network-faults.sh" preflight --run-id "${run_id}" \
         --pumba "${pumba_image_id}" --nettools "${CHAOS_NETTOOLS_IMAGE}" \
@@ -1211,6 +1297,12 @@ elif [[ "${scenario}" == former-owner-restart ]]; then
 elif [[ "${scenario}" == cluster-restart ]]; then
     # shellcheck disable=SC2016
     update_manifest '.recovery = {minimum_outage_seconds: $seconds}' --argjson seconds "${outage_seconds}"
+elif [[ "${scenario}" == stateful || "${scenario}" == domain-time ]]; then
+    # The dollars in this jq filter are jq variables, not shell expansion.
+    # shellcheck disable=SC2016
+    update_manifest '.fault = $fault | .deployment = {replica_count: ($replicas | tonumber), state_snapshot_interval: $interval}' \
+        --arg fault "${fault}" --arg replicas "${CHAOS_REPLICA_COUNT:-0}" \
+        --arg interval "${CHAOS_STATE_SNAPSHOT_INTERVAL:-30s}"
 fi
 if [[ "${scenario}" == degraded-links ]]; then
     # The dollars in this jq filter are jq variables, not shell expansion.
@@ -1259,6 +1351,19 @@ broker_admin /opt/kafka/bin/kafka-topics.sh \
 broker_admin /opt/kafka/bin/kafka-topics.sh \
     --bootstrap-server broker:9092 --describe --topic chaos_output \
     >"${artifact_dir}/public/output-topic.txt"
+scenario_topics=()
+if [[ "${scenario}" == stateful ]]; then
+    scenario_topics=(chaos_state_input chaos_profile_input chaos_unique_output chaos_window_output
+        chaos_enriched_output chaos_counted_output)
+elif [[ "${scenario}" == domain-time ]]; then
+    scenario_topics=(chaos_paced_input chaos_paced_output)
+fi
+for scenario_topic in ${scenario_topics[@]+"${scenario_topics[@]}"}; do
+    broker_admin /opt/kafka/bin/kafka-topics.sh \
+        --bootstrap-server broker:9092 \
+        --create --topic "${scenario_topic}" --partitions 1 --replication-factor 1 \
+        >"${artifact_dir}/public/create-topic-${scenario_topic}.txt"
+done
 
 phase "Nervix startup"
 compose up --detach nervix-1
@@ -1301,9 +1406,50 @@ if [[ "${scenario}" == backup ]]; then
 fi
 cli_command 'CREATE UNPACED DOMAIN chaos_baseline;' \
     >"${artifact_dir}/public/create-domain.txt" 2>&1
+if [[ "${scenario}" == stateful ]]; then
+    # The WASM guest is a prebuilt module in WebAssembly text, which the packaged server loads
+    # directly; the run uploads exactly that file and records its identity.
+    mkdir -p "${artifact_dir}/fixtures/wasm/processors"
+    cp "${script_dir}/fixtures/wasm/processors/branch-counter.wat" \
+        "${artifact_dir}/fixtures/wasm/processors/branch-counter.wat"
+    chmod 0755 "${artifact_dir}/fixtures/wasm" "${artifact_dir}/fixtures/wasm/processors"
+    chmod 0644 "${artifact_dir}/fixtures/wasm/processors/branch-counter.wat"
+    wasm_fixture_digest="$(openssl dgst -sha256 -r \
+        "${artifact_dir}/fixtures/wasm/processors/branch-counter.wat" | awk '{ print $1 }')"
+    [[ "${wasm_fixture_digest}" =~ ^[a-f0-9]{64}$ ]] \
+        || setup_error 'the WASM fixture digest could not be computed'
+    # The dollars in this jq filter are jq variables, not shell expansion.
+    # shellcheck disable=SC2016
+    update_manifest '.fixtures.wasm = {resource: "chaos_counter_guest", resource_version: 1,
+        file: "processors/branch-counter.wat", format: "WebAssembly text", sha256: $digest,
+        bytes: ($bytes | tonumber), source: "scripts/chaos/fixtures/wasm/processors/branch-counter.wat"}' \
+        --arg digest "${wasm_fixture_digest}" \
+        --arg bytes "$(wc -c <"${artifact_dir}/fixtures/wasm/processors/branch-counter.wat")"
+    domain_cli_command 'CREATE RESOURCE chaos_counter_guest;' \
+        >"${artifact_dir}/public/create-wasm-resource.txt" 2>&1
+    compose run --rm --no-deps -v "${artifact_dir}/fixtures/wasm:/chaos-wasm:ro" admin \
+        nervix-cli --server "http://${cli_host}:47391" --domain chaos_baseline \
+        --password "${CHAOS_PASSWORD}" \
+        --command "UPLOAD RESOURCE chaos_counter_guest VERSION '/chaos-wasm';" \
+        >"${artifact_dir}/public/upload-wasm-resource.txt" 2>&1
+    grep -Fxq 'uploaded resource version 1' "${artifact_dir}/public/upload-wasm-resource.txt" \
+        || setup_error 'the packaged CLI did not upload the WASM fixture as resource version 1'
+fi
 domain_cli_command "${nspl_fixture}" \
     >"${artifact_dir}/public/configure-nspl.txt" 2>&1
+if [[ "${scenario}" == stateful ]]; then
+    domain_cli_command "$(<"${script_dir}/fixtures/stateful.nspl")" \
+        >"${artifact_dir}/public/configure-stateful-nspl.txt" 2>&1
+fi
 domain_cli_command 'START;' >"${artifact_dir}/public/start-domain.txt" 2>&1
+if [[ "${scenario}" == domain-time ]]; then
+    cli_command 'CREATE PACED DOMAIN chaos_paced WITH PERIOD 1s SKEW 1s;' \
+        >"${artifact_dir}/public/create-paced-domain.txt" 2>&1
+    run_cli chaos_paced "$(<"${script_dir}/fixtures/paced.nspl")" \
+        >"${artifact_dir}/public/configure-paced-nspl.txt" 2>&1
+    run_cli chaos_paced 'START AT NOW TIME RATE 4.0;' \
+        >"${artifact_dir}/public/start-paced-domain.txt" 2>&1
+fi
 
 phase "public placement evidence"
 if [[ "${node_count}" == "3" ]]; then
@@ -1387,6 +1533,14 @@ if [[ "${scenario}" != "baseline" ]]; then
         # shellcheck source=cluster-restart-scenario.sh
         source "${script_dir}/cluster-restart-scenario.sh"
         run_cluster_restart
+    elif [[ "${scenario}" == stateful ]]; then
+        # shellcheck source=stateful-scenario.sh
+        source "${script_dir}/stateful-scenario.sh"
+        run_stateful
+    elif [[ "${scenario}" == domain-time ]]; then
+        # shellcheck source=domain-time-scenario.sh
+        source "${script_dir}/domain-time-scenario.sh"
+        run_domain_time
     else
         # shellcheck source=crash-scenario.sh
         source "${script_dir}/crash-scenario.sh"

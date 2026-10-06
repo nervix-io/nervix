@@ -2496,6 +2496,12 @@ deps-down:
 chaos *args:
     bash scripts/chaos/chaos.sh {{ args }}
 
+# Regenerate the prebuilt WASM guest the stateful chaos scenarios upload, after a guest ABI change.
+# The chaos runner itself never builds guest code; `cargo test --package nervix-wasm` checks that
+# the checked-in module still equals what this writes.
+chaos-wasm-fixture:
+    cargo test --package nervix-wasm --test chaos_branch_counter -- --ignored write_the_branch_counter_module
+
 server *args: build-deps generate-dev-tls
     NERVIX_NODE_ID="${NERVIX_NODE_ID:-node-1}" \
     NERVIX_INTERCONNECT_TLS_CA="${NERVIX_INTERCONNECT_TLS_CA:-tls/dev/ca.pem}" \
