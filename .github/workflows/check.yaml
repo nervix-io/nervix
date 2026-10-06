@@ -556,7 +556,6 @@ jobs:
         uses: astral-sh/setup-uv@v6
 
       - name: Scenario coverage
-      - name: Scenario coverage
         run: |
           pwd > coverage-source-root.txt
           just toolchains-install
