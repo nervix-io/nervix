@@ -80,34 +80,29 @@ async fn install(store: &ResourceStore, id: &ResourceId) -> ResourceManifest {
         .assured("a version installs from the archive its bundle built")
 }
 
-/// What the store holds for `id`: its manifest as read back from disk, or the failure, and the
-/// bytes of its identity file.
-async fn read_back(
-    store: &ResourceStore,
-    id: &ResourceId,
-) -> (Result<ResourceManifest, String>, Option<Vec<u8>>) {
-    let manifest = store
-        .read_manifest(id)
-        .await
-        .map_err(|report| format!("{report:?}"));
-    let identity = std::fs::read(store.content_root(id).join(IDENTITY_FILE)).ok();
-    (manifest, identity)
-}
-
 /// Asserts that the store still holds exactly the version `installed` describes, with the
 /// identity file the archive built for it held.
 async fn assert_holds(store: &ResourceStore, installed: &ResourceManifest) {
     let id = &installed.resource.id;
-    let (manifest, identity) = read_back(store, id).await;
+    let manifest = match store.read_manifest(id).await {
+        Ok(manifest) => manifest,
+        Err(report) => panic!(
+            "version {} of resource `{}` in domain `{}` has no manifest: {report:?}",
+            id.version,
+            id.identifier.as_str(),
+            id.domain.as_str()
+        ),
+    };
     assert_eq!(
-        manifest,
-        Ok(installed.clone()),
+        &manifest,
+        installed,
         "version {} of resource `{}` in domain `{}` reads back as it was installed",
         id.version,
         id.identifier.as_str(),
         id.domain.as_str()
     );
-    assert_eq!(identity, Some(identity_text(id).into_bytes()));
+    let identity = std::fs::read(store.content_root(id).join(IDENTITY_FILE));
+    assert_eq!(identity.ok(), Some(identity_text(id).into_bytes()));
 }
 
 fn open_store(root: &Path) -> ResourceStore {
