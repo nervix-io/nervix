@@ -383,6 +383,16 @@ scenario = "A changed window model or branch incarnation starts an empty window 
 selections = ["deloxide", "deloxide-order"]
 
 [[workload]]
+coverage = "Bounded restore conversion of a deduplicator keyspace and a window above the bulk budget, their publication through an interrupted installation, and segmented persistence of the restored window under the installation barrier through restart."
+examples = 2
+feature = "tests/features/cluster/backup_branch_state_large.feature"
+id = "scenario.branch-state-large"
+invariant = "A 40 MiB keyspace and a 40 MiB window beside 24 small branches restore exactly after an interrupted publication, re-export identically from a stopped restore, and continue with exact keys and aggregates across a restart, on one node and on three nodes with a replica."
+invocation = "scenarios"
+scenario = "A keyspace and a window above the bulk budget resume exactly beside many small branches on <cluster_size> nodes"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
 coverage = "Materialized relay capture, restore and generator resumption through restart."
 examples = 2
 feature = "tests/features/cluster/backup_materialized.feature"
@@ -775,6 +785,7 @@ workloads = [
   "owner.restore-storage",
   "scenario.restore-generation",
   "scenario.restore-staging-quota",
+  "scenario.branch-state-large",
 ]
 
 [[owner]]
