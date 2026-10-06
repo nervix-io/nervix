@@ -19,6 +19,17 @@ use super::{generators::state_machine, *};
 /// bounded records of each family, far below the half of this the batch may use.
 const BATCH_RESERVATION_BYTES: u64 = 8 * 1024 * 1024;
 
+/// The most bytes a generated revision is read from. A revision holding records of every family
+/// reads about 38 KiB on average, its commit plans more than half of that.
+const STATE_INPUT_BYTES: usize = 64 * 1024;
+
+/// How many leading input bytes choose the damage. Reading the damage from bytes of its own
+/// keeps it varied when the revision's generator reads every byte that follows.
+const DAMAGE_INPUT_BYTES: usize = 64;
+
+/// The most bytes a damaged revision is read from: its damage, then the revision.
+const CORRUPTION_INPUT_BYTES: usize = DAMAGE_INPUT_BYTES + STATE_INPUT_BYTES;
+
 /// A consensus state-machine keyspace in a database of its own, removed with its directory.
 ///
 /// Fields drop in the order they are declared, so the directory goes last: a database whose files
@@ -75,7 +86,7 @@ impl StateKeyspace {
 fn bolero_consensus_state_records_recover_every_stored_value() {
     bolero::check!()
         .with_iterations(128)
-        .with_max_len(4096)
+        .with_max_len(STATE_INPUT_BYTES)
         .for_each(|bytes: &[u8]| {
             let mut arbitrary = Arbitrary::new(bytes, Domain::Vocabulary);
             let first = state_machine(&mut arbitrary);
@@ -243,6 +254,20 @@ fn assert_readers_can_rely_on(state: &StateMachineData) {
     }
     for (id, transaction) in state.transactions.iter() {
         assert_eq!(&transaction.id, id);
+        // Session status and inspection count a transaction's operations this way, and number
+        // the one a failure names.
+        let pending = transaction.pending_statement_count();
+        let completed = transaction.completed_statement_count();
+        assert!(pending <= transaction.statement_count);
+        assert!(completed <= transaction.statement_count);
+        if let crate::TransactionState::Finished(finished) = &transaction.state
+            && let crate::TransactionOutcome::Failed { failing_step, .. }
+            | crate::TransactionOutcome::PlanningInputsChanged { failing_step, .. } =
+                &finished.outcome
+        {
+            let number = nervix_models::TransactionOperationNumber::from_index(*failing_step);
+            assert!(number.is_ok(), "{number:?}");
+        }
     }
     for execution in state.command_executions.executions() {
         let stored = state.command_executions.get(&execution.reference);
@@ -260,18 +285,21 @@ fn assert_readers_can_rely_on(state: &StateMachineData) {
 fn bolero_corrupt_consensus_state_records_fail_typed_or_recover_canonically() {
     bolero::check!()
         .with_iterations(256)
-        .with_max_len(4096)
+        .with_max_len(CORRUPTION_INPUT_BYTES)
         .for_each(|bytes: &[u8]| {
-            let mut arbitrary = Arbitrary::new(bytes, Domain::Vocabulary);
+            let damage_bytes = bytes.len().min(DAMAGE_INPUT_BYTES);
+            let (damage_bytes, state_bytes) = bytes.split_at(damage_bytes);
+            let mut damage = Arbitrary::new(damage_bytes, Domain::Vocabulary);
+            let mut arbitrary = Arbitrary::new(state_bytes, Domain::Vocabulary);
             let state = state_machine(&mut arbitrary);
             let keyspace = StateKeyspace::open();
             keyspace
                 .store(&StateMachineData::default(), &state)
                 .assured("a bounded generated revision fits its batch reservation");
             let mut records = keyspace.records();
-            let corruptions = arbitrary.entropy().between(1..=3);
+            let corruptions = damage.entropy().between(1..=3);
             for _ in 0..corruptions {
-                corrupt(&mut arbitrary, &mut records);
+                corrupt(&mut damage, &mut records);
             }
             keyspace.overwrite(&records);
 
@@ -478,6 +506,134 @@ fn recovery_refuses_an_expired_execution_without_an_issue_time() {
         records.insert(key, expired);
     })
     .expect_err("only a retry identity whose issue time reads back is ever expired");
+
+    assert!(is_invalid_storage(&error), "{error:?}");
+}
+
+#[test]
+fn recovery_refuses_commit_progress_past_the_queued_statements() {
+    let mut state = StateMachineData::default();
+    let domain: DomainName = fixture_name("stored");
+    let owner: nervix_models::UserName = fixture_name("operator");
+    let activity = crate::TransactionActivity::from_timeout(
+        nervix_models::Timestamp::from_unix_nanos(1),
+        std::time::Duration::from_secs(60),
+    );
+    let mut committing = crate::ReplicatedTransaction::open(
+        "transaction".to_string(),
+        domain.clone(),
+        owner.clone(),
+        activity,
+    );
+    let request = crate::TransactionStatementRequest {
+        request_reference: nervix_models::CommandExecutionReference::parse("request")
+            .assured("the fixture reference follows the reference rule"),
+        expected_position: 0,
+        source: "SHOW TRANSACTIONS;".to_string(),
+        statement: nervix_models::Statement::ShowTransactions(nervix_models::ShowTransactions),
+    };
+    committing
+        .queue(
+            &owner,
+            &domain,
+            activity,
+            2,
+            crate::TransactionStatement::test_admitted(request),
+            crate::TransactionQueueLimits {
+                max_statements: 1,
+                max_source_bytes: 1024,
+            },
+        )
+        .assured("the one fixture statement is within every queue limit");
+    committing
+        .start_commit(
+            &owner,
+            activity,
+            3,
+            None,
+            crate::TransactionCommitPlanHeader {
+                preview: crate::transaction::test_commit_plan("transaction", 1).preview,
+                step_count: 1,
+            },
+        )
+        .assured("an open fixture transaction within its activity can begin committing");
+    // Progress 2 is one flipped bit away from the stored progress 0, and past the one statement.
+    let mut damaged = committing.clone();
+    let crate::TransactionState::Committing(progress) = &mut damaged.state else {
+        panic!("the fixture transaction began committing above");
+    };
+    progress.next_statement = 2;
+    let damaged = DurableBatch::encode(&damaged, 64 * 1024)
+        .assured("a small fixed transaction fits the storage codec budget");
+    state.transactions.insert(committing.id.clone(), committing);
+
+    let error = recover_damaged(&state, |records| {
+        let key = only_key_under(records, b't');
+        records.insert(key, damaged);
+    })
+    .expect_err("commit progress runs past the one statement the transaction queued");
+
+    assert!(is_invalid_storage(&error), "{error:?}");
+}
+
+#[test]
+fn recovery_refuses_a_failing_step_outside_the_queued_statements() {
+    let mut state = StateMachineData::default();
+    let domain: DomainName = fixture_name("stored");
+    let owner: nervix_models::UserName = fixture_name("operator");
+    let activity = crate::TransactionActivity::from_timeout(
+        nervix_models::Timestamp::from_unix_nanos(1),
+        std::time::Duration::from_secs(60),
+    );
+    let mut failed = crate::ReplicatedTransaction::open(
+        "transaction".to_string(),
+        domain.clone(),
+        owner.clone(),
+        activity,
+    );
+    let request = crate::TransactionStatementRequest {
+        request_reference: nervix_models::CommandExecutionReference::parse("request")
+            .assured("the fixture reference follows the reference rule"),
+        expected_position: 0,
+        source: "SHOW TRANSACTIONS;".to_string(),
+        statement: nervix_models::Statement::ShowTransactions(nervix_models::ShowTransactions),
+    };
+    failed
+        .queue(
+            &owner,
+            &domain,
+            activity,
+            2,
+            crate::TransactionStatement::test_admitted(request),
+            crate::TransactionQueueLimits {
+                max_statements: 1,
+                max_source_bytes: 1024,
+            },
+        )
+        .assured("the one fixture statement is within every queue limit");
+    let preview = crate::transaction::test_commit_plan("transaction", 1).preview;
+    failed
+        .fail_commit_admission(&owner, activity, 3, &preview, 0, "refused")
+        .assured("an open fixture transaction can fail its commit admission at its statement");
+    // The failure names the one queued statement; a damaged record names a statement it never
+    // queued, which inspection could not number.
+    let mut damaged = failed.clone();
+    let crate::TransactionState::Finished(finished) = &mut damaged.state else {
+        panic!("the fixture transaction finished above");
+    };
+    finished.outcome = crate::TransactionOutcome::Failed {
+        failing_step: usize::MAX,
+        error: "refused".to_string(),
+    };
+    let damaged = DurableBatch::encode(&damaged, 64 * 1024)
+        .assured("a small fixed transaction fits the storage codec budget");
+    state.transactions.insert(failed.id.clone(), failed);
+
+    let error = recover_damaged(&state, |records| {
+        let key = only_key_under(records, b't');
+        records.insert(key, damaged);
+    })
+    .expect_err("a failed transaction names one of the statements it queued");
 
     assert!(is_invalid_storage(&error), "{error:?}");
 }

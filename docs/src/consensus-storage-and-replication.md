@@ -350,8 +350,11 @@ a user, a resource version, node status or upload, a transaction, its commit pla
 report header, and a command execution. The state keyspace holds those records and the metadata and
 nothing else, so a record no family owns is refused as well. Recovered resource records hold at
 most one upload for each resource version, and an expired command execution's reference carries
-the issue time its expiry is ordered by. Every log read checks that a log record is stored under
-its own entry's index.
+the issue time its expiry is ordered by. A transaction is in a state its transitions reach: an
+open or committing transaction queues exactly the statements and source bytes it accepted, a
+finished one queues none, a commit's results apply consecutive statements from the first and its
+progress stays inside the queue, and a failure names a statement the transaction accepted. Every
+log read checks that a log record is stored under its own entry's index.
 
 ## Shutdown And Forced Endings
 

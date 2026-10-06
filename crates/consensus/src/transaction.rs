@@ -187,6 +187,18 @@ impl TransactionStepResult {
         self.operation_range().operation_count().get()
     }
 
+    /// The statement after the last of `results`, when they apply consecutive statements from the
+    /// first one.
+    fn end_of_consecutive(results: &[Self]) -> Option<usize> {
+        let mut next = 0_usize;
+        for result in results {
+            if result.first_statement() != next {
+                return None;
+            }
+            next = next.checked_add(result.statement_count())?;
+        }
+        Some(next)
+    }
 }
 
 #[cfg(test)]
@@ -424,8 +436,9 @@ pub struct ReplicatedTransaction {
 }
 
 impl crate::records::StoredUnder<String> for ReplicatedTransaction {
+    /// A transaction is stored under its id, in a state its transitions reach.
     fn is_stored_under(&self, id: &String) -> bool {
-        self.id == *id
+        self.id == *id && self.is_reachable()
     }
 }
 
@@ -556,6 +569,80 @@ impl ReplicatedTransaction {
                 .iter()
                 .map(TransactionStepResult::statement_count)
                 .sum(),
+        }
+    }
+
+    /// Whether this transaction is in a state its transitions reach. Queuing keeps every accepted
+    /// statement and its source bytes until the transaction finishes, which empties the queue. A
+    /// commit applies the queue in consecutive steps from its first statement, and a failure names
+    /// a statement the transaction accepted. Readers count statements and number operations on
+    /// these facts without checking them again, so recovery refuses a stored transaction that
+    /// breaks one.
+    fn is_reachable(&self) -> bool {
+        match &self.state {
+            TransactionState::Open(_) => self.holds_its_queue(),
+            TransactionState::Committing(progress) => {
+                self.holds_its_queue() && self.holds_commit_progress(progress)
+            }
+            TransactionState::Finished(finished) => {
+                self.statements.is_empty()
+                    && self.queued_source_bytes == 0
+                    && self.holds_finished_outcome(finished)
+            }
+        }
+    }
+
+    /// Whether the queue holds as many statements as were accepted, and exactly their source
+    /// bytes.
+    fn holds_its_queue(&self) -> bool {
+        if self.statements.len() != self.statement_count {
+            return false;
+        }
+        let mut source_bytes = 0_u64;
+        for statement in &self.statements {
+            let Some(total) = source_bytes.checked_add(statement.source_bytes()) else {
+                return false;
+            };
+            source_bytes = total;
+        }
+        source_bytes == self.queued_source_bytes
+    }
+
+    /// Whether `progress` applied consecutive steps from the first statement up to its next one,
+    /// within the queue, and a step it is applying continues from there inside the queue.
+    fn holds_commit_progress(&self, progress: &TransactionCommitProgress) -> bool {
+        let queued = self.statements.len();
+        let applied = TransactionStepResult::end_of_consecutive(&progress.results);
+        if applied != Some(progress.next_statement) || progress.next_statement > queued {
+            return false;
+        }
+        let Some(applying) = &progress.applying else {
+            return true;
+        };
+        let applying_count = applying.next_statement.checked_sub(progress.next_statement);
+        applying.next_statement > progress.next_statement
+            && applying.next_statement <= queued
+            && applying.result.first_statement() == progress.next_statement
+            && applying_count == Some(applying.result.statement_count())
+    }
+
+    /// Whether `finished` applied consecutive steps from the first statement within the accepted
+    /// ones, and a failure names an accepted statement.
+    fn holds_finished_outcome(&self, finished: &FinishedTransaction) -> bool {
+        let Some(applied) = TransactionStepResult::end_of_consecutive(&finished.results) else {
+            return false;
+        };
+        if applied > self.statement_count {
+            return false;
+        }
+        match &finished.outcome {
+            TransactionOutcome::Failed { failing_step, .. }
+            | TransactionOutcome::PlanningInputsChanged { failing_step, .. } => {
+                *failing_step < self.statement_count
+            }
+            TransactionOutcome::Committed
+            | TransactionOutcome::Reverted
+            | TransactionOutcome::Expired => true,
         }
     }
 
