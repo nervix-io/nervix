@@ -19,8 +19,8 @@
 //! Layer: engines and infrastructure.
 //!
 //! - **Owns.** The evidence format and its bounds, the evidence directory's file names and their
-//!   atomic replacement, the bounded description a finding renders as, the diagnostic run's
-//!   lifecycle, and the exit statuses that end a diagnostic process.
+//!   atomic replacement, the bounded description a finding renders as, the counts a qualification
+//!   reports, the diagnostic run's lifecycle, and the exit statuses that end a diagnostic process.
 //! - **Depends on.** The deadlock findings and detector of `nervix-primitives`, `rkyv`, and the
 //!   operating system's process exit.
 //! - **Must not know.** Which locks or owners deadlocked, the graph, the node's lifecycle or its
@@ -35,6 +35,7 @@ mod records;
 mod render;
 #[cfg(feature = "deloxide")]
 mod run;
+mod summary;
 mod wire;
 
 pub use directory::EvidenceDirectory;
@@ -49,6 +50,7 @@ pub use records::{
 pub use render::render_finding;
 #[cfg(feature = "deloxide")]
 pub use run::DiagnosticRun;
+pub use summary::EvidenceSummary;
 
 /// The status a diagnostic process ends with once it has reported an active deadlock: its
 /// description is on standard error, and in the evidence directory when the run has one.

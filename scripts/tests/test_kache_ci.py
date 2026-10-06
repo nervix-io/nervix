@@ -39,6 +39,7 @@ class KacheCiTests(unittest.TestCase):
             "shuttle",
             "loom",
             "turmoil",
+            "deloxide",
             "benchmark",
             "build-book",
         )

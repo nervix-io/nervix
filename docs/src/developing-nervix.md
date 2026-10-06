@@ -478,26 +478,51 @@ instrumentation and its cost. Ordinary product performance is measured separatel
 exits `3`; a potential cycle retains evidence and continues; lost evidence or failed diagnostics
 exit `4`.
 
-Run both applicable selections after changes to tracked blocking synchronization, acquisition order
-or lifecycle ownership:
+Run both selections of the diagnostic lane after any change that adds or alters thread-blocking
+synchronization, the order of tracked acquisitions, or a shutdown, drain, restore, cancellation,
+handoff or other lifecycle path that uses tracked locks:
 
 ```bash
 just test-deloxide
 just test-deloxide-order
-just deadlock-report inspect /var/tmp/nervix-deadlocks/deadlock-PID-TIME.rkyv --source potential
+just deadlock-report inspect target/deloxide/test-deloxide/deloxide-order/run.XXXX/evidence/scenarios/deadlock-PID-TIME.rkyv --source potential
 ```
 
-Each command retains a fresh attempt under `target/deloxide/test-deloxide`, with probe output,
-artifacts and diagnostic scenario evidence. Probes and one-/three-node diagnostic/restore scenarios
-run without retries; zero checks, failed accounting, overload or unreviewed workload findings do
-not qualify. The execution budget is 2,400 seconds by default; expiry exits `124`.
+The lane runs every workload `tests/deloxide-inventory.toml` registers for its selection: the
+disposable-process probes, the diagnostic owner tests and the tagged one- and three-node scenarios,
+without retries. It fails when a registered workload is missing or ignored, when a probe, owner test
+or tagged scenario is not registered, when a process deadlocks, fails its diagnostics, is killed by
+a signal, outlives its bound or leaves a process behind, and when evidence is missing, partly
+written or does not qualify. An active deadlock exits `3`, a diagnostic failure `4`, a timeout or the
+expired budget `124`, and every other failure `1`. A potential cycle fails the lane until its order
+is corrected; the lane keeps no list of approved cycles.
+
+Each run keeps a fresh attempt under `target/deloxide/test-deloxide/<selection>/` with every log,
+probe artifact, evidence file and finding description, and `lane.json` with the exact command,
+environment, bound and ending of every launch. Replay one recorded launch in a fresh attempt, and
+prove the lane's supervision on deliberately failing processes:
+
+```bash
+just test-deloxide-replay target/deloxide/test-deloxide/deloxide/run.XXXX/lane.json scenarios
+just test-deloxide-qualification deloxide-order
+```
+
+A new probe, owner test or tagged scenario joins the inventory with a stable identity, the
+invariant it owns, its selections and the coverage it declares; a renamed one is renamed there in
+the same change. A source file that starts acquiring tracked blocking locks needs an `[[owner]]`
+record naming the workloads that reach them or the path the lane does not reach and why:
+`just validate-deloxide-applicability`, part of `just validate`, holds the records to the compiler's
+acquisition catalog. For a pull request labeled `deloxide`, which every change the Deloxide rule
+applies to carries, CI's `deloxide` job runs both selections through the native coverage collector,
+as `just coverage-native-extras test-deloxide test-deloxide-order` does locally, and keeps their
+attempts, completion records and diagnostic coverage reports as artifacts.
 The ordinary report tool also exports selected artifacts, records explicit proofs in reviewed
 copies and qualifies whole-process evidence. `just coverage-deadlock` measures the diagnostic
 implementation and the ordinary report command in separate instrumented builds through the native
-collector. It retains each producer's completion record and exports their combined report with
-the diagnostic-evidence flag, separately from ordinary product coverage.
-[Data-Plane Concurrency](./data-plane-concurrency.md#diagnostic-deadlock-detection) has the complete
-local commands, proof requirements, current graph limits and the paths detection does not cover.
+collector. [Data-Plane Concurrency](./data-plane-concurrency.md#diagnostic-deadlock-detection) has the
+lane's classes, its record, proof requirements, current graph limits and the paths detection does
+not cover, and [Integration Test Lifecycle](./integration-test-lifecycle.md#diagnostic-lane) its
+bounds.
 
 ### Deterministic network simulation
 
@@ -559,9 +584,11 @@ just coverage-native-extras
 ```
 
 Name producers to run only those: `test-typed-ratchet`, `bench-smoke`, `nspl-completion-walk`,
-`test-shuttle`, `test-loom`, `test-deadlock-evidence-order`, `test-deadlock-report`, or an individual
-`test-primitives-<mode>` recipe. The focused diagnostic owner and probes use the `deloxide-order`
-build; the local report command uses the ordinary build. `test-primitives`
+`test-shuttle`, `test-loom`, `test-deadlock-evidence-order`, `test-deadlock-report`,
+`test-deloxide`, `test-deloxide-order`, or an individual `test-primitives-<mode>` recipe. The
+focused diagnostic owner and probes use the `deloxide-order` build; the local report command uses
+the ordinary build; the two diagnostic lanes build in their own modes and export only after their
+`lane.json` records a complete run. `test-primitives`
 selects native conformance in ordinary, Shuttle, Loom, Turmoil and Deloxide execution:
 
 ```bash
@@ -579,8 +606,15 @@ link, is built normally. The recipe
 that executes Nervix code then runs in the environment `cargo llvm-cov show-env --sh
 --no-rustc-wrapper` describes: every crate is compiled with source coverage instrumentation into
 `target/native-coverage-build` for ordinary mode and `target/native-coverage-build-<mode>` for
-each other mode, and the configured kache wrapper stays in place. Each mode has a separate build
-lock through export. The parts that only compile or target the browser stay uninstrumented;
+each other mode, and the configured kache wrapper stays in place. The `test-deloxide` and
+`test-deloxide-order` lanes instrument only workspace crates: the collector moves the
+instrumentation flags into `scripts/coverage_workspace_wrapper.py`, which Cargo runs beneath kache
+as the workspace compiler wrapper, the scope `cargo llvm-cov` gives the ordinary coverage build.
+Their nodes must meet product deadlines while they compile WASM processors and process Arrow state,
+and instrumented dependencies made that several times slower; the report is the same, because
+export keeps only repository sources. Kache runs a workspace wrapper chain directly, so their
+workspace crates are compiled each run while dependencies come from the cache. Each mode has a
+separate build lock through export. The parts that only compile or target the browser stay uninstrumented;
 `just test-primitives-compile` retains their independent verdict. Miri, mutation testing and
 `just test-loom-qualification` never run under this command. The compile and qualification
 commands run without the collector's profile environment, so altered source cannot contribute to

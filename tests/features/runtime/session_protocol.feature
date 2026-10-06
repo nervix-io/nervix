@@ -197,6 +197,32 @@ Feature: Session protocol
       CREATE SCHEMA uncertain_record (
       """
 
+  Scenario: A leader setup step learns the outcome of a command its leader admitted before losing leadership
+    Given a 3 node nervix cluster is started
+    And the active domain is "{{domain}}"
+    And the leader node is configured with these NSPL commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
+    Then the current leader node is saved as placeholder "admitted_leader"
+    And a node other than placeholder "admitted_leader" is saved as placeholder "successor"
+    Given leadership moves from node "{{admitted_leader}}" to node "{{successor}}" under its next durably admitted command
+    When these NSPL commands are executed on the leader node
+      """
+      CREATE SCHEMA recovered_record ( value STRING );
+      CREATE RELAY recovered SCHEMA recovered_record UNBRANCHED;
+      CREATE SUBSCRIPTION recovered_subscription TO recovered;
+      """
+    Then the leadership move under the durably admitted command completed
+    When this NSPL command request is executed on the leader node
+      """
+      SHOW CREATE SCHEMA recovered_record;
+      """
+    Then the last command output contains
+      """
+      CREATE SCHEMA recovered_record (
+      """
+
   Scenario: A redirect names no endpoint for a leader that discovery cannot reach
     Given a 3 node nervix cluster is started
     And the active domain is "{{domain}}"
