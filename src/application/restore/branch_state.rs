@@ -47,6 +47,8 @@ const ADMISSION_RETRY_DELAY: Duration = Duration::from_millis(50);
 pub(super) enum BranchStateRestoreError {
     #[error("deduplicator or window restore conversion could not be admitted")]
     Admission,
+    #[error("the node had no room for a deduplicator or window restore conversion for {waited:?}")]
+    NoRoom { waited: Duration },
     #[error("deduplicator or window restore conversion was cancelled")]
     Cancelled,
     #[error("an archived deduplicator or window group is longer than its bound")]
@@ -117,6 +119,11 @@ impl From<&WindowArchiveError> for BranchStateRestoreError {
 /// budget with nothing left, a worker queue that is full, or a staging quota that cannot hold
 /// another piece. Such a refusal judged nothing of the archive.
 fn refused_for_room(failure: &Report<BranchStateRestoreError>) -> bool {
+    // A refusal that already outlasted the wait of one unit is not waited for again by the
+    // conversion that unit belongs to.
+    if let BranchStateRestoreError::NoRoom { .. } = failure.current_context() {
+        return false;
+    }
     // A report holds one frame for each layer the failure crossed.
     for frame in failure.frames() {
         let memory = frame.downcast_ref::<AdmissionError>();
@@ -149,7 +156,8 @@ struct AdmissionWait {
 impl AdmissionWait {
     /// Waits before the unit is converted again after `failure`, or returns the failure that ends
     /// the conversion: any failure but a refusal for room, and a refusal for room once the unit
-    /// has been refused for [`ADMISSION_WAIT`], which is then reported as the refusal it is.
+    /// has been refused for [`ADMISSION_WAIT`], which is then reported as the node having had no
+    /// room, whatever the layer that met the refusal called it.
     async fn retry_after(
         &mut self,
         failure: Report<BranchStateRestoreError>,
@@ -160,7 +168,9 @@ impl AdmissionWait {
         let now = Instant::now();
         let refused_since = *self.refused_since.get_or_insert(now);
         if now.duration_since(refused_since) >= ADMISSION_WAIT {
-            return Err(failure.change_context(BranchStateRestoreError::Admission));
+            return Err(failure.change_context(BranchStateRestoreError::NoRoom {
+                waited: ADMISSION_WAIT,
+            }));
         }
         nervix_primitives::time::sleep(ADMISSION_RETRY_DELAY).await;
         Ok(())
@@ -354,7 +364,29 @@ async fn read_rows(
 ///
 /// Each group is sealed into quota-owned pieces as it is admitted, so only one decoded group is
 /// held at a time and a window larger than the bulk budget converts.
+///
+/// A section the node refused only for room is sealed again in place. A window refused while its
+/// sealed pieces are finished into one checkpoint is converted again from its first group.
 pub(super) async fn prepare_window_checkpoint(
+    runtime: &Runtime,
+    archive: &VerifiedArchive,
+    descriptor: &WindowStateDescriptor,
+    groups: &[DescribedWindowGroup],
+    schemas: &WindowStateSchemas,
+) -> Result<StagedArtifact, Report<BranchStateRestoreError>> {
+    let mut wait = AdmissionWait::default();
+    loop {
+        nervix_primitives::task::consume_budget().await;
+        let converted = convert_window(runtime, archive, descriptor, groups, schemas).await;
+        match converted {
+            Ok(checkpoint) => return Ok(checkpoint),
+            Err(failure) => wait.retry_after(failure).await?,
+        }
+    }
+}
+
+/// One attempt to convert an archived window. Everything it holds ends with it.
+async fn convert_window(
     runtime: &Runtime,
     archive: &VerifiedArchive,
     descriptor: &WindowStateDescriptor,
@@ -574,8 +606,9 @@ mod tests {
     }
 
     /// A unit the node refused for room is converted again until it has been refused for the
-    /// whole wait. The refusal then ends the conversion and is reported as a refusal, whatever the
-    /// layer that met it called it. Any other failure ends the conversion at once.
+    /// whole wait. The refusal then ends the conversion and is reported as the node having had no
+    /// room, whatever the layer that met it called it. Any other failure ends the conversion at
+    /// once.
     #[nervix_primitives::test(start_paused = true)]
     async fn a_refusal_for_room_is_retried_until_its_wait_ends() {
         let mut wait = AdmissionWait::default();
@@ -592,11 +625,15 @@ mod tests {
             .expect_err("a refusal that outlasts the wait ends the conversion");
         assert!(matches!(
             ended.current_context(),
-            BranchStateRestoreError::Admission
+            BranchStateRestoreError::NoRoom { waited } if *waited == ADMISSION_WAIT
         ));
         assert!(
-            refused_for_room(&ended),
+            ended.contains::<AdmissionError>(),
             "the report still names the refusal that ended it"
+        );
+        assert!(
+            !refused_for_room(&ended),
+            "the conversion the unit belongs to does not wait for the same refusal again"
         );
 
         let shape = AdmissionWait::default()

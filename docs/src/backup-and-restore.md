@@ -373,12 +373,14 @@ A conversion the node refuses only for room does not fail the restore. A memory 
 left, a worker queue that is full and a staging quota that cannot hold another piece judged nothing
 of the archive, so the conversion releases what it holds and converts the refused unit again. For a
 window the unit is one section: it is read and decoded again into a checkpoint that is exactly as
-it was before the refused attempt, whose staged pieces were dropped. For a keyspace the unit is the
-keyspace from its first group, because the keys already admitted are what held its charge. A unit
-is converted again every 50 ms for up to 30 seconds after the node first refuses it. A refusal
-that outlasts that wait ends the conversion as an admission failure, since what the restore itself
-holds can be what fills the budget. A request larger than a whole budget, and archived content
-that does not fit the restored shapes, end it at once.
+it was before the refused attempt, whose staged pieces were dropped. A window refused while its
+sealed pieces are finished into one checkpoint is converted again from its first group. For a
+keyspace the unit is the keyspace from its first group, because the keys already admitted are what
+held its charge. A unit is converted again every 50 ms for up to 30 seconds after the node first
+refuses it. A refusal that outlasts that wait ends the conversion and is reported as the node
+having had no room for it, since what the restore itself holds can be what fills the budget. A
+request larger than a whole budget, and archived content that does not fit the restored shapes,
+end it at once.
 
 Backup section openings share Snapshot admission with materialized readers. A capacity-only
 refusal retries within the opening's single 30-second deadline; other failures end the fetch.
@@ -828,7 +830,7 @@ production-owner concurrency and recovery evidence.
 | Deduplicator key group / window input group / window argument group | 8 MiB each; capture fills a group to at most half that bound, and a single larger row takes a group of its own |
 | One archived deduplicator keyspace or window | Not bounded by the bulk budget. A keyspace's key parts and values are charged to `restore_metadata` while it converts, beside the fixed per-key share admitted with the description; a window conversion holds one archived section at a time |
 | Window checkpoint identity record | 1 MiB of row identities; a larger archived group splits into groups that fit |
-| Restore conversion admission wait | 30 seconds for one window section or one keyspace after the node first refuses it for room; the unit is converted again every 50 ms |
+| Restore conversion admission wait | 30 seconds for one window section, one window's finishing or one keyspace after the node first refuses it for room; the unit is converted again every 50 ms |
 | Restored window rows a branch reopens | No row ceiling of their own; their row views are charged to the relay memory class while the branch reopens the window |
 | Physical checkpoint placement encoding | 60 KiB, including domain and installation namespace |
 | Unpublished restore checkpoint keys and values per node | 128 GiB by default; configurable with `--restore-staging-max-bytes` |
