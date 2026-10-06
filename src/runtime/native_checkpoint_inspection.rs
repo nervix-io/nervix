@@ -54,10 +54,13 @@ pub fn read_native_checkpoint_values(
     )
     .change_context(BackupStateCaptureError::Storage)?;
     let entries = store
-        .snapshot_backup_domain(domain)
+        .snapshot_backup_domain(
+            domain,
+            &[RuntimeStateKind::BranchLru, RuntimeStateKind::KafkaOffset],
+        )
         .change_context(BackupStateCaptureError::Storage)?;
     let mut observations = Vec::new();
-    for (placement, snapshot) in entries {
+    for (placement, snapshot) in entries.checkpoints {
         let observation = match placement.state.kind() {
             RuntimeStateKind::BranchLru => NativeCheckpointInspection::BranchLifecycle {
                 branches: decode_backup_branch_lifecycle(&snapshot.payload, &placement.identifier)?,

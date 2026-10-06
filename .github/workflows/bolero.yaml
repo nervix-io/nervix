@@ -41,46 +41,6 @@ env:
   BOLERO_LABELS: ${{ inputs.labels-json || '[]' }}
 
 jobs:
-  codecov-preflight:
-    name: codecov-preflight
-    if: inputs.event-name == 'pull_request' && contains(fromJSON(inputs.labels-json || '[]'), 'fuzz')
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
-    permissions:
-      contents: read
-      id-token: write
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-        with:
-          ref: ${{ inputs.tested-sha || github.sha }}
-
-      - name: Setup uv
-        uses: astral-sh/setup-uv@v6
-
-      - name: Install just and toml-cli
-        uses: taiki-e/install-action@v2
-        with:
-          tool: just@latest,toml-cli
-
-      - name: Measure Python runner coverage
-        run: just coverage-bolero-runner
-
-      - name: Install verified Codecov CLI
-        id: codecov-cli
-        uses: ./.github/actions/setup-codecov
-
-      - name: Verify Codecov upload
-        uses: codecov/codecov-action@v5
-        with:
-          binary: ${{ steps.codecov-cli.outputs.binary }}
-          disable_search: true
-          fail_ci_if_error: true
-          files: target/bolero/python-runner.lcov
-          flags: bolero
-          use_oidc: true
-          url: https://codecov.io
-
   bolero-random:
     name: bolero-random
     runs-on: blacksmith-8vcpu-ubuntu-2404
@@ -163,7 +123,6 @@ jobs:
   bolero-fuzz:
     name: bolero-fuzz
     if: inputs.event-name == 'pull_request' && contains(fromJSON(inputs.labels-json || '[]'), 'fuzz')
-    needs: codecov-preflight
     runs-on: blacksmith-16vcpu-ubuntu-2404
     # The measured 68-target campaign took 125 minutes after preparation; the
     # 85-target run needs room for cold builds, qualification and report uploads.
@@ -172,7 +131,6 @@ jobs:
       CARGO_BUILD_JOBS: "1"
     permissions:
       contents: read
-      id-token: write
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -208,6 +166,8 @@ jobs:
           wget https://apt.llvm.org/llvm.sh
           chmod +x llvm.sh
           sudo ./llvm.sh 23
+          sudo ln -s /usr/bin/llvm-symbolizer-23 /usr/local/bin/llvm-symbolizer
+          llvm-symbolizer --version
 
       - name: Install native server build dependencies
         run: |
@@ -264,40 +224,6 @@ jobs:
         run: |
           just coverage-bolero 30
 
-      - name: Install verified Codecov CLI
-        id: codecov-cli
-        uses: ./.github/actions/setup-codecov
-
-      - name: Upload runner coverage to Codecov
-        uses: codecov/codecov-action@v5
-        with:
-          binary: ${{ steps.codecov-cli.outputs.binary }}
-          disable_search: true
-          fail_ci_if_error: true
-          files: target/bolero/python.lcov
-          flags: bolero
-          use_oidc: true
-          url: https://codecov.io
-
-      - name: Publish live Rust source coverage
-        id: rust-coverage
-        run: |
-          nightly="$(toml get -r tests/bolero-targets.toml tool.nightly)"
-          report="target/native-coverage/bolero-fuzz/fuzz/${nightly}/github-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}/lcov.info"
-          test -s "$report"
-          echo "report=$report" >> "$GITHUB_OUTPUT"
-
-      - name: Upload live Rust source coverage to Codecov
-        uses: codecov/codecov-action@v5
-        with:
-          binary: ${{ steps.codecov-cli.outputs.binary }}
-          disable_search: true
-          fail_ci_if_error: true
-          files: ${{ steps.rust-coverage.outputs.report }}
-          flags: bolero-fuzz
-          use_oidc: true
-          url: https://codecov.io
-
       - name: Upload live campaign coverage and completion evidence
         if: always()
         uses: actions/upload-artifact@v4
@@ -311,7 +237,9 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: bolero-runs
-          path: target/bolero/runs/
+          path: |
+            target/bolero/runs/
+            target/bolero/python.lcov
           if-no-files-found: warn
 
   bolero-gate:
@@ -320,9 +248,6 @@ jobs:
     needs: [bolero-random, bolero-fuzz]
     runs-on: ubuntu-latest
     timeout-minutes: 5
-    permissions:
-      contents: read
-      id-token: write
     outputs:
       randomized-result: ${{ steps.selection.outputs.randomized-result }}
       sanitizer-result: ${{ steps.selection.outputs.sanitizer-result }}
@@ -363,25 +288,3 @@ jobs:
           name: bolero-selection
           path: selection.json
           if-no-files-found: error
-
-      - name: Checkout standalone notification sources
-        if: github.event_name == 'workflow_dispatch' || github.event_name == 'schedule'
-        uses: actions/checkout@v4
-        with:
-          ref: ${{ env.BOLERO_TESTED_SHA }}
-
-      - name: Install verified Codecov CLI for standalone notifications
-        if: github.event_name == 'workflow_dispatch' || github.event_name == 'schedule'
-        id: codecov-cli
-        uses: ./.github/actions/setup-codecov
-
-      - name: Finalize standalone Codecov coverage checks
-        if: github.event_name == 'workflow_dispatch' || github.event_name == 'schedule'
-        uses: codecov/codecov-action@v5
-        with:
-          binary: ${{ steps.codecov-cli.outputs.binary }}
-          run_command: send-notifications
-          fail_ci_if_error: true
-          override_commit: ${{ env.BOLERO_TESTED_SHA }}
-          url: https://codecov.io
-          use_oidc: true

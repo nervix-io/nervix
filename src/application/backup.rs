@@ -21,6 +21,7 @@ mod materialized_sections;
 pub(in crate::application) mod restore_storage;
 pub(in crate::application) mod retained;
 mod state_sections;
+mod stored_materialized_sections;
 
 use std::{collections::BTreeMap, num::NonZeroU64, time::Duration};
 

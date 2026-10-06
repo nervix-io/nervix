@@ -21,7 +21,7 @@ use nervix_primitives::{
     collections::{ConcurrentQueue, PopError, PushError},
     publication::{ArcSwap, Guard},
     sync::{
-        Arc, AtomicWaker, Notify,
+        Arc, AtomicWaker, Notify, StdArc,
         atomic::{AtomicBool, AtomicUsize, Ordering},
         blocking::Mutex,
     },
@@ -87,11 +87,13 @@ pub(in crate::runtime) struct RelayDispatchGateLease {
 
 /// Proof that one relay dispatch entered before the current gate engagements.
 ///
-/// Dispatch acquisition increments the in-flight count before inspecting the closed flag, while
-/// gate engagement closes the gate before inspecting the count. Those operations are sequentially
-/// consistent, so one side must observe the other: a dispatch either receives a permit that the
-/// fence counts or rolls its increment back and waits for the engagement to end. Dropping every
-/// permit counted by the fence completes it.
+/// Dispatch acquisition raises the in-flight count with a read-modify-write before it inspects the
+/// closed flag, while an engagement closes the gate before it reads the count, and it reads the
+/// count with a read-modify-write as well. Read-modify-writes of one count are totally ordered, so
+/// one side observes the other: when the dispatch's comes first the fence counts it, and when the
+/// fence's comes first the dispatch's acquires it and observes the gate closed, rolls its count
+/// back and waits for the engagement to end. Dropping every permit counted by the fence completes
+/// it, and releases what each dispatch did under its permit to the fence.
 #[derive(Debug)]
 pub(in crate::runtime) struct RelayDispatchPermit<'gate> {
     gate: &'gate RelayDispatchGate,
@@ -105,6 +107,31 @@ pub(in crate::runtime) struct RelayDispatchPermit<'gate> {
 #[derive(Debug)]
 pub(in crate::runtime) struct OwnedRelayDispatchPermit {
     gate: Arc<RelayDispatchGate>,
+}
+
+/// What one look at an engagement's fence found.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RelayDispatchFence {
+    /// The engagement was released, or reached its deadline and was cleared, before its fence
+    /// completed.
+    Ended,
+    /// The engagement reached its deadline before every dispatch it waits for left.
+    DeadlinePassed,
+    /// Every dispatch that entered before the engagement has left, and the engagement holds its
+    /// lease.
+    Quiescent,
+    /// Dispatches that entered before the engagement are still running.
+    Waiting { deadline: Instant },
+}
+
+/// Whether the dispatch that just left was the last one a closed gate's fences wait for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RelayDispatchLeft {
+    /// The gate is closed and no dispatch is left, so every fence waiting for quiescence must look
+    /// again.
+    Drained,
+    /// The gate is open, or dispatches are still running.
+    Running,
 }
 
 impl RelayDispatchGate {
@@ -144,10 +171,10 @@ impl RelayDispatchGate {
                 reason: reason.into(),
             },
         );
-        // Paired with the sequentially consistent counter increment and closed load in
-        // `acquire_dispatch`, and the counter load in `wait_quiescent`. This total order prevents
-        // an acquisition and an engagement from both missing one another.
-        self.closed.store(true, Ordering::SeqCst);
+        // Relaxed: the fence reads the dispatch count with a read-modify-write after this store,
+        // and a dispatch whose own read-modify-write of the count comes later acquires that one,
+        // which orders this store before the dispatch's look at the flag.
+        self.closed.store(true, Ordering::Relaxed);
         drop(state);
         self.changed.notify_waiters();
         generation
@@ -158,10 +185,16 @@ impl RelayDispatchGate {
         if state.engagements.remove(&generation).is_none() {
             return;
         }
-        self.closed
-            .store(!state.engagements.is_empty(), Ordering::Release);
+        self.reopen_unless_engaged(&state);
         drop(state);
         self.changed.notify_waiters();
+    }
+
+    /// Reopens the gate once no engagement is left, which releases what the protected mutation
+    /// changed while the gate was closed to every dispatch that observes it open.
+    fn reopen_unless_engaged(&self, state: &RelayDispatchGateState) {
+        self.closed
+            .store(!state.engagements.is_empty(), Ordering::Release);
     }
 
     pub(in crate::runtime) async fn acquire_dispatch(&self) -> RelayDispatchPermit<'_> {
@@ -222,18 +255,24 @@ impl RelayDispatchGate {
         }
     }
 
+    /// Counts a dispatch in, unless an engagement has closed the gate.
+    ///
+    /// A dispatch that observes the gate open has its count read by every later fence, and one that
+    /// observes it closed leaves again before it returns.
     fn try_enter(&self) -> bool {
-        self.increment_in_flight_dispatches();
-        if !self.closed.load(Ordering::SeqCst) {
+        self.enter();
+        // Acquire: a dispatch that observes the gate reopened by its last release also observes
+        // what the protected mutation changed while the gate was closed.
+        if !self.closed.load(Ordering::Acquire) {
             return true;
         }
-        self.decrement_in_flight_dispatches();
+        self.leave();
         false
     }
 
     /// Whether an ownership or lifecycle operation currently fences this relay.
     pub(in crate::runtime) fn is_engaged(&self) -> bool {
-        self.closed.load(Ordering::SeqCst)
+        self.closed.load(Ordering::Acquire)
     }
 
     /// Waits for all dispatch permits acquired before `generation` was engaged to be dropped.
@@ -250,27 +289,14 @@ impl RelayDispatchGate {
             tokio::pin!(drained);
             changed.as_mut().enable();
             drained.as_mut().enable();
-            let deadline = {
-                let mut state = self.state.lock();
-                let in_flight_dispatches = self.in_flight_dispatches.load(Ordering::SeqCst);
-                let Some(engagement) = state.engagements.get_mut(&generation) else {
+            let deadline = match self.poll_quiescence(generation) {
+                RelayDispatchFence::Ended => return false,
+                RelayDispatchFence::DeadlinePassed => {
+                    self.clear_if_expired();
                     return false;
-                };
-                match engagement.phase {
-                    RelayDispatchGateEngagementPhase::Leased => return true,
-                    RelayDispatchGateEngagementPhase::Fencing { deadline } => {
-                        if Instant::now() >= deadline {
-                            drop(state);
-                            self.clear_if_expired();
-                            return false;
-                        }
-                        if in_flight_dispatches == 0 {
-                            engagement.phase = RelayDispatchGateEngagementPhase::Leased;
-                            return true;
-                        }
-                        deadline
-                    }
                 }
+                RelayDispatchFence::Quiescent => return true,
+                RelayDispatchFence::Waiting { deadline } => deadline,
             };
             let woken = async {
                 nervix_primitives::select! {
@@ -280,6 +306,36 @@ impl RelayDispatchGate {
             };
             if timeout_at(deadline, woken).await.is_err() {
                 self.clear_if_expired();
+            }
+        }
+    }
+
+    /// Looks once at the dispatches the fence of `generation` waits for, and takes the lease when
+    /// none is left.
+    ///
+    /// The count is read with a read-modify-write, which reads the newest value of the count. A
+    /// dispatch whose count comes earlier is counted here, and one whose count comes later acquires
+    /// this read and observes the gate closed. A plain load could miss both: it may return a count
+    /// from before an increment that preceded it, while that dispatch's own load of the flag returns
+    /// the gate still open. Reading the count also acquires every dispatch that left, so what a
+    /// dispatch did under its permit happens before the lease.
+    fn poll_quiescence(&self, generation: u64) -> RelayDispatchFence {
+        let mut state = self.state.lock();
+        let in_flight_dispatches = self.in_flight_dispatches.fetch_add(0, Ordering::AcqRel);
+        let Some(engagement) = state.engagements.get_mut(&generation) else {
+            return RelayDispatchFence::Ended;
+        };
+        match engagement.phase {
+            RelayDispatchGateEngagementPhase::Leased => RelayDispatchFence::Quiescent,
+            RelayDispatchGateEngagementPhase::Fencing { deadline } => {
+                if Instant::now() >= deadline {
+                    return RelayDispatchFence::DeadlinePassed;
+                }
+                if in_flight_dispatches == 0 {
+                    engagement.phase = RelayDispatchGateEngagementPhase::Leased;
+                    return RelayDispatchFence::Quiescent;
+                }
+                RelayDispatchFence::Waiting { deadline }
             }
         }
     }
@@ -350,30 +406,44 @@ impl RelayDispatchGate {
 
     #[cfg(all(test, feature = "shuttle"))]
     pub(in crate::runtime) fn in_flight_dispatches(&self) -> usize {
-        self.in_flight_dispatches.load(Ordering::SeqCst)
+        self.in_flight_dispatches.load(Ordering::Acquire)
     }
 
-    #[allow(deprecated)] // until try_update is stabilized
-    #[allow(deprecated)] // until try_update is stabilized
-    fn increment_in_flight_dispatches(&self) {
+    /// Raises the in-flight count with a read-modify-write, which a fence's later read of the count
+    /// observes, and which acquires a fence's earlier read.
+    fn enter(&self) {
         self.in_flight_dispatches
-            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |current| {
-                current.checked_add(1)
-            })
+            .fetch_add(1, Ordering::AcqRel)
+            .checked_add(1)
             .assured("a process cannot hold usize::MAX live relay dispatch permits");
     }
 
-    fn decrement_in_flight_dispatches(&self) {
-        #[allow(deprecated)] // until try_update is stabilized
-        let previous = self
-            .in_flight_dispatches
-            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |current| {
-                current.checked_sub(1)
-            })
-            .verified("this permit or rolled-back acquisition raised the count");
-        if previous == 1 && self.closed.load(Ordering::SeqCst) {
+    /// Lowers the in-flight count, and wakes the fences waiting for quiescence when it was the
+    /// last dispatch a closed gate waited for.
+    fn leave(&self) {
+        if self.release_dispatch() == RelayDispatchLeft::Drained {
             self.drained.notify_waiters();
         }
+    }
+
+    /// Lowers the in-flight count and reports whether the fences waiting for it must look again.
+    ///
+    /// The read-modify-write releases what the dispatch did to the fence that reads the count
+    /// after it. When a fence read the count before it, this one acquires that read and therefore
+    /// observes the gate the fence closed, so a fence that saw this dispatch still running is
+    /// always woken once it leaves.
+    fn release_dispatch(&self) -> RelayDispatchLeft {
+        let remaining = self
+            .in_flight_dispatches
+            .fetch_sub(1, Ordering::AcqRel)
+            .checked_sub(1)
+            .verified("this permit or rolled-back acquisition raised the count");
+        // Relaxed: the read-modify-write above already orders a fence's closing store before this
+        // load whenever that fence's read of the count came first.
+        if remaining == 0 && self.closed.load(Ordering::Relaxed) {
+            return RelayDispatchLeft::Drained;
+        }
+        RelayDispatchLeft::Running
     }
 
     fn clear_if_expired(&self) {
@@ -397,8 +467,7 @@ impl RelayDispatchGate {
         for (generation, _) in &expired {
             state.engagements.remove(generation);
         }
-        self.closed
-            .store(!state.engagements.is_empty(), Ordering::Release);
+        self.reopen_unless_engaged(&state);
         drop(state);
         for (_, reason) in expired {
             debug!(reason, "relay dispatch gate fence deadline expired");
@@ -452,13 +521,13 @@ impl Default for RelayDispatchGate {
 
 impl Drop for RelayDispatchPermit<'_> {
     fn drop(&mut self) {
-        self.gate.decrement_in_flight_dispatches();
+        self.gate.leave();
     }
 }
 
 impl Drop for OwnedRelayDispatchPermit {
     fn drop(&mut self) {
-        self.gate.decrement_in_flight_dispatches();
+        self.gate.leave();
     }
 }
 
@@ -594,10 +663,12 @@ struct RelayFanout<T> {
     /// Publishers waiting in [`Self::admit`].
     ///
     /// `Notify::notify_waiters` takes the waiter-list lock on every call, so a consumer notifies
-    /// only while this count shows a waiting publisher. A waiting publisher raises the count before
-    /// it reads a consumer's admission count, and a consumer lowers its admission count before it
-    /// reads this one. Both sides use sequentially consistent operations, so one of them observes
-    /// the other: the publisher is admitted, or the consumer wakes it.
+    /// only while this count shows a waiting publisher. A waiting publisher raises this count
+    /// before it reads a consumer's admission count, and a consumer lowers its admission count
+    /// before it reads this one. Both reach the admission count by read-modify-write, and those
+    /// are totally ordered: when the consumer's comes first the publisher reads the freed room and
+    /// is admitted, and when the publisher's comes first the consumer's acquires it and reads this
+    /// count raised, so it wakes the publisher.
     waiting_publishers: AtomicUsize,
     /// Wakes waiting publishers when a consumer frees admission, capacity changes, or a consumer
     /// leaves.
@@ -619,6 +690,14 @@ struct RelayConsumerQueue<T> {
 /// Counts one publisher as waiting for admission until its wait returns or is cancelled.
 struct RelayAdmissionWait<'fanout, T> {
     fanout: &'fanout RelayFanout<T>,
+}
+
+/// Whether the admission a consumer returned frees room a publisher waits for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RelayAdmissionFreed {
+    /// A publisher waits for room, so the consumer wakes the waiting publishers.
+    PublisherWaiting,
+    NobodyWaiting,
 }
 
 /// One consumer of a relay fan-out.
@@ -643,6 +722,14 @@ pub(in crate::runtime) enum RelayTryRecv<T> {
 /// A batch returned to its publisher because no consumer was left to take it.
 pub(in crate::runtime) struct RelayFanoutClosed<T> {
     pub(in crate::runtime) batch: T,
+}
+
+/// One publication into a relay fan-out: the consumers registered when it began, which it both
+/// counts and delivers to. A consumer that registers later receives later publications only, so
+/// whatever a publisher prepares for each counted consumer matches the deliveries.
+pub(in crate::runtime) struct RelayPublication<'fanout, T> {
+    fanout: &'fanout RelayFanout<T>,
+    consumers: Guard<StdArc<Vec<Arc<RelayConsumerQueue<T>>>>>,
 }
 
 impl<T> RelayBroadcast<T> {
@@ -679,7 +766,7 @@ impl<T> RelayBroadcast<T> {
     pub(in crate::runtime) fn len(&self) -> usize {
         let mut backlog = 0;
         for consumer in self.fanout.consumers.load().iter() {
-            backlog = backlog.max(consumer.admitted.load(Ordering::SeqCst));
+            backlog = backlog.max(consumer.admitted.load(Ordering::Acquire));
         }
         backlog
     }
@@ -690,7 +777,7 @@ impl<T> RelayBroadcast<T> {
 
     #[cfg(test)]
     pub(crate) fn waiting_publishers(&self) -> usize {
-        self.fanout.waiting_publishers.load(Ordering::SeqCst)
+        self.fanout.waiting_publishers.load(Ordering::Relaxed)
     }
 
     /// Changes the admitted backlog each consumer may hold.
@@ -720,14 +807,38 @@ impl<T> RelayBroadcast<T> {
     }
 }
 
+impl<T> RelayBroadcast<T> {
+    /// Begins one publication into the consumers registered now.
+    pub(in crate::runtime) fn publication(&self) -> RelayPublication<'_, T> {
+        RelayPublication {
+            fanout: &self.fanout,
+            consumers: self.fanout.consumers.load(),
+        }
+    }
+}
+
 impl<T: Clone> RelayBroadcast<T> {
     /// Delivers `batch` to every consumer registered when publishing begins.
+    pub(in crate::runtime) async fn broadcast(&self, batch: T) -> Result<(), RelayFanoutClosed<T>> {
+        self.publication().broadcast(batch).await
+    }
+}
+
+impl<T> RelayPublication<'_, T> {
+    /// How many consumers this publication delivers to.
+    pub(in crate::runtime) fn receivers(&self) -> usize {
+        self.consumers.len()
+    }
+}
+
+impl<T: Clone> RelayPublication<'_, T> {
+    /// Delivers `batch` to every consumer this publication counted.
     ///
     /// Waits while any of those consumers is at capacity. A consumer that leaves during the wait is
     /// skipped, and the batch comes back only when no consumer is left to take it.
-    pub(in crate::runtime) async fn broadcast(&self, batch: T) -> Result<(), RelayFanoutClosed<T>> {
-        let consumers = self.fanout.consumers.load();
-        let capacity = self.fanout.capacity.load(Ordering::Acquire);
+    pub(in crate::runtime) async fn broadcast(self, batch: T) -> Result<(), RelayFanoutClosed<T>> {
+        let Self { fanout, consumers } = self;
+        let capacity = fanout.capacity.load(Ordering::Acquire);
         let mut first_full = None;
         for (index, consumer) in consumers.iter().enumerate() {
             if !consumer.try_admit(capacity) {
@@ -747,7 +858,7 @@ impl<T: Clone> RelayBroadcast<T> {
         let (reserved, remaining) = consumers.split_at(first_full);
         let mut admitted: Vec<&Arc<RelayConsumerQueue<T>>> = reserved.iter().collect();
         for consumer in remaining {
-            if self.fanout.admit(consumer).await {
+            if fanout.admit(consumer).await {
                 admitted.push(consumer);
             }
         }
@@ -771,7 +882,7 @@ impl<T> RelayFanout<T> {
     /// Returns `false` once the consumer has left the fan-out. The wait keeps every admission the
     /// publisher already reserved on earlier consumers.
     async fn admit(&self, consumer: &RelayConsumerQueue<T>) -> bool {
-        let _wait = RelayAdmissionWait::begin(self);
+        let wait = RelayAdmissionWait::begin(self);
         loop {
             nervix_primitives::task::consume_budget().await;
             let admission = self.admission.notified();
@@ -780,11 +891,26 @@ impl<T> RelayFanout<T> {
             if consumer.batches.is_closed() {
                 return false;
             }
-            if consumer.try_admit(self.capacity.load(Ordering::Acquire)) {
+            if consumer.try_admit_while_waiting(&wait, self.capacity.load(Ordering::Acquire)) {
                 return true;
             }
             admission.await;
         }
+    }
+
+    /// Takes the oldest batch delivered to `consumer`, returns its admission, and reports whether a
+    /// publisher waits for the room it freed.
+    fn take_from(
+        &self,
+        consumer: &RelayConsumerQueue<T>,
+    ) -> Result<(T, RelayAdmissionFreed), PopError> {
+        let batch = consumer.take()?;
+        // Relaxed: returning the admission was a read-modify-write, which acquires the read of a
+        // publisher that raised this count before it.
+        if self.waiting_publishers.load(Ordering::Relaxed) > 0 {
+            return Ok((batch, RelayAdmissionFreed::PublisherWaiting));
+        }
+        Ok((batch, RelayAdmissionFreed::NobodyWaiting))
     }
 
     fn register(&self, consumer: &Arc<RelayConsumerQueue<T>>) {
@@ -837,22 +963,43 @@ impl<T> RelayConsumerQueue<T> {
     }
 
     /// Reserves one admission, or reports that this consumer already holds `capacity`.
-    #[allow(deprecated)] // until try_update is stabilized
     fn try_admit(&self, capacity: usize) -> bool {
-        #[allow(deprecated)] // until try_update is stabilized
-        let admission =
-            self.admitted
-                .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |admitted| {
-                    if admitted >= capacity {
-                        return None;
-                    }
-                    Some(
-                        admitted
-                            .checked_add(1)
-                            .verified("the comparison above holds the count below the capacity"),
-                    )
-                });
-        admission.is_ok()
+        self.admit_from(self.admitted.load(Ordering::Acquire), capacity)
+    }
+
+    /// Reserves one admission for a publisher whose wait has raised the waiting count, or reports
+    /// that this consumer already holds `capacity`.
+    ///
+    /// The admission count is first read with a read-modify-write, which reads its newest value.
+    /// A consumer that returned an admission before it is seen here, and one that returns an
+    /// admission after it acquires it and reads the waiting count `wait` raised, so it wakes this
+    /// publisher. A plain load could miss both: it may return a count from before a consumer's
+    /// release that preceded it, while that consumer's read of the waiting count returns none.
+    fn try_admit_while_waiting(&self, _wait: &RelayAdmissionWait<'_, T>, capacity: usize) -> bool {
+        let admitted = self.admitted.fetch_add(0, Ordering::AcqRel);
+        self.admit_from(admitted, capacity)
+    }
+
+    /// Raises the admission count from the value last read, unless that value already holds
+    /// `capacity`.
+    fn admit_from(&self, mut admitted: usize, capacity: usize) -> bool {
+        loop {
+            if admitted >= capacity {
+                return false;
+            }
+            let raised = admitted
+                .checked_add(1)
+                .verified("the comparison above holds the count below the capacity");
+            match self.admitted.compare_exchange_weak(
+                admitted,
+                raised,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => return true,
+                Err(current) => admitted = current,
+            }
+        }
     }
 
     /// Hands one admitted batch to this consumer and wakes its receiver.
@@ -872,13 +1019,13 @@ impl<T> RelayConsumerQueue<T> {
         Ok(batch)
     }
 
-    #[allow(deprecated)] // until try_update is stabilized
+    /// Returns one admission. The read-modify-write releases the consumer's progress to a drain
+    /// that reads the count after it, and acquires the read of a publisher whose wait raised the
+    /// waiting count before it.
     fn release_admission(&self) {
-        #[allow(deprecated)] // until try_update is stabilized
         self.admitted
-            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |admitted| {
-                admitted.checked_sub(1)
-            })
+            .fetch_sub(1, Ordering::AcqRel)
+            .checked_sub(1)
             .verified("every release follows the admission that raised the count");
     }
 }
@@ -915,28 +1062,25 @@ impl<T: Clone> RelayConsumerQueue<T> {
 }
 
 impl<'fanout, T> RelayAdmissionWait<'fanout, T> {
-    #[allow(deprecated)] // until try_update is stabilized
+    /// Counts one publisher as waiting. Relaxed: the publisher's read-modify-write of a consumer's
+    /// admission count, which follows in program order, releases the raised count to every
+    /// consumer whose return of an admission comes after it.
     fn begin(fanout: &'fanout RelayFanout<T>) -> Self {
-        #[allow(deprecated)] // until try_update is stabilized
         fanout
             .waiting_publishers
-            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |waiting| {
-                waiting.checked_add(1)
-            })
+            .fetch_add(1, Ordering::Relaxed)
+            .checked_add(1)
             .assured("a node cannot hold usize::MAX publishers waiting on one relay");
         Self { fanout }
     }
 }
 
 impl<T> Drop for RelayAdmissionWait<'_, T> {
-    #[allow(deprecated)] // until try_update is stabilized
     fn drop(&mut self) {
-        #[allow(deprecated)] // until try_update is stabilized
         self.fanout
             .waiting_publishers
-            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |waiting| {
-                waiting.checked_sub(1)
-            })
+            .fetch_sub(1, Ordering::Relaxed)
+            .checked_sub(1)
             .verified("this wait raised the count when it began");
     }
 }
@@ -999,9 +1143,8 @@ impl<T> RelayReceiver<T> {
     }
 
     fn take(&self) -> Result<T, PopError> {
-        let batch = self.consumer.take()?;
-        // Paired with the sequentially consistent count that `RelayAdmissionWait::begin` raises.
-        if self.fanout.waiting_publishers.load(Ordering::SeqCst) > 0 {
+        let (batch, freed) = self.fanout.take_from(&self.consumer)?;
+        if freed == RelayAdmissionFreed::PublisherWaiting {
             self.fanout.admission.notify_waiters();
         }
         Ok(batch)
@@ -1187,3 +1330,18 @@ mod tests {
 #[cfg(all(test, feature = "shuttle"))]
 #[path = "relay_channel_shuttle_tests.rs"]
 mod shuttle_tests;
+
+/// A fence deadline that no Loom model reaches.
+///
+/// An engagement's deadline is the runtime's real time, which is outside every model, so a model
+/// engages far enough ahead that the deadline never decides the fence it explores.
+#[cfg(all(test, feature = "loom"))]
+fn deadline_no_model_reaches() -> Instant {
+    Instant::now()
+        .checked_add(std::time::Duration::from_secs(24 * 60 * 60))
+        .assured("a day from now is representable on every supported clock")
+}
+
+#[cfg(all(test, feature = "loom"))]
+#[path = "relay_channel_loom_models.rs"]
+mod loom_models;

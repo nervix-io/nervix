@@ -281,6 +281,7 @@ mod relay_interaction;
 pub mod relay_interaction_benchmark;
 mod relay_processor_node;
 mod relay_subscription;
+mod relay_transit;
 mod remote_dispatch;
 mod reorderer;
 mod resources;
@@ -306,9 +307,10 @@ mod test_fixtures;
 
 pub(crate) use backup_state::{
     BackupBranchLifecycleEntry, CapturedDomainState, CapturedMaterializedRelay,
-    CapturedRuntimeState, RESTORE_STATE_CHUNK_BYTES, RESTORE_STATE_WORKING_BYTES,
-    RestoredRuntimeState, decode_backup_branch_lifecycle, decode_backup_kafka_offsets,
-    write_restored_branch_lifecycle, write_restored_kafka_offsets,
+    CapturedMaterializedState, CapturedRuntimeState, CapturedStoredMaterializedRelay,
+    RESTORE_STATE_CHUNK_BYTES, RESTORE_STATE_WORKING_BYTES, RestoredRuntimeState,
+    decode_backup_branch_lifecycle, decode_backup_kafka_offsets, write_restored_branch_lifecycle,
+    write_restored_kafka_offsets,
 };
 use branch_aggregated_state::{
     BranchAggregatedRuntimeStateSnapshot, ReplicatedBranchAggregatedState,
@@ -441,7 +443,7 @@ use ingest_metadata::{
 };
 pub(in crate::runtime) use ingestor_quiesce::{
     BufferedIngestMetadata, BufferedIngestPayload, IngestorQuiesceCause, IngestorQuiesceControl,
-    IngestorQuiesceIntake,
+    IngestorQuiesceIntake, MemoryPressurePause,
 };
 use ingestor_quiesce::{
     DEFAULT_KAFKA_PARTITION_WATCH_INTERVAL, IngestorReadiness, RuntimeReconnectStatus,
@@ -536,6 +538,10 @@ pub(in crate::runtime) use relay_channel::{
 use relay_interaction::{
     RelayInteraction, RelayInteractionCommand, RelayInteractionError, RelayInteractionEvent,
     RelayInteractionInput,
+};
+use relay_transit::{
+    RelayAdmissions, RelayOwnerAdmission, RelayOwnerBatchCompletion, RelayRoutedAdmission,
+    RelayTransit,
 };
 use remote_dispatch::{REMOTE_ACK_ALIVE_INTERVAL, RemoteDispatchRegistry, RemoteDispatcher};
 use reorderer::{ReordererFlushContext, flush_branch_reorderer_output, reorder_key_part};

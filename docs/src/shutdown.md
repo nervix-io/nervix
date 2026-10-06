@@ -303,6 +303,15 @@ When a parked message has crossed nodes, remote ACK progress carries its parked 
 the source's acknowledgement chain. The drain excludes that chain while the message is parked;
 resuming it reactivates the chain, and only a terminal ACK completes the source attempt.
 
+Work keeps moving while the drain looks for it, so "nothing visible" is an exact observation rather
+than a series of separate reads. Each observation reads the domain's outstanding force-flush
+obligations first, so a flush it sees complete has also left everything it released or resumed
+visible to the reads that follow. It reads every relay's admission sequence before and after the
+other counts, and a relay that admitted a batch in between counts as work still moving: a batch that
+reached a relay or a node only after the read that would have counted it there entered some relay
+while the observation read. [Node quiesce accounting](./data-plane-concurrency.md#node-quiesce-accounting)
+describes the counts and the order of the reads.
+
 Each domain therefore advances independently through three states:
 
 ```text
@@ -739,6 +748,12 @@ endpoint refusal during that interval. The client can retry the open on its rest
 A former owner restarted while cut off from consensus therefore produces no output, and once
 connectivity is restored it observes the current schedule and forwards traffic to the node that now
 owns the work.
+
+The node's log marks the boundary. When its first read attempt fails, it logs this once per process
+at `warn`:
+`runtime execution is waiting for linearizable consensus catch-up`. When admission succeeds, it logs
+`runtime execution admitted after linearizable consensus catch-up` at `info`, with the
+`committed_log_index` it applied through.
 
 At startup the node offers the peer endpoints retained in its Raft membership as gossip seeds. A
 former bootstrap node therefore has a path back to surviving peers even if it was originally

@@ -296,8 +296,12 @@ leader or differs from its catalog entry, a record that does not encode, and an 
 staging area cannot hold. A quiesced capture also names its domain when the mutation lease, pause,
 drain, owner capture, or resume fails or times out, or when its coordinator loses the leader tenure
 under which it acquired the cut. Owner capture failures are classified at the
-interconnect boundary without guest bytes in the failure. An owner still applying the selected
-revision waits within a five-second bound; a closed applied-state authority or an expired catch-up
+interconnect boundary without guest bytes in the failure. Stored materialized capture refuses
+malformed headers, inconsistent group or row counts, oversized identity or column frames,
+truncated checkpoints and failed stored chunk digests. These
+typed codec/storage failures follow the same domain capture failure path without column bytes.
+An owner still applying the selected revision waits within a five-second bound; a closed
+applied-state authority or an expired catch-up
 wait is a domain capture failure. A leadership change during that wait refuses the capture before
 state is read. The failed command's message is
 `backup failed:` followed by that
