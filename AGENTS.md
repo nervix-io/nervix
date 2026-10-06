@@ -1137,6 +1137,11 @@ build and the existing tests, and nothing in it changes behavior.
   against one- and three-node clusters. CI runs it only for a pull request labeled
   `client-conformance`; a pull request that changes the client protocol, the shared binding or a
   probe carries that label.
+- `just chaos suite smoke|soak --image IMAGE` runs the external chaos suites against an already
+  built image. CI runs the smoke suite against a pull request's own image only for a pull request
+  labeled `chaos`, and the soak suite for one labeled `chaos-soak` and nightly on `main`; a pull
+  request that changes the chaos runner, or the membership, failover, recovery or delivery behavior
+  its scenarios verify, carries the `chaos` label.
 - `just nspl-completion-walk` walks the NSPL completion graph and fails on any branch that cannot be
   completed by accepting the suggestions the parser offers. It is deliberately outside `just test`
   and runs in CI beside the main tests, in the job that carries the workspace-wide checks. Grammar
