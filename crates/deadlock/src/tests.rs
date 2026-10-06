@@ -568,6 +568,113 @@ fn bolero_malformed_deadlock_evidence_is_refused_or_round_trips() {
         });
 }
 
+/// The counts a qualification reports, recounted record by record: every record is counted once by
+/// its kind, repeated deliveries of a retained cycle stay apart from findings lost to overload, and
+/// the evidence qualifies exactly when it describes the whole process and no record prevents it.
+/// The printed line names every count once, in its fixed order.
+#[test]
+fn bolero_evidence_summary_counts_every_finding_once() {
+    bolero::check!()
+        .with_iterations(256)
+        .with_max_len(4_096)
+        .for_each(|bytes: &[u8]| {
+            let evidence = generated_evidence(&mut Entropy::new(bytes));
+            let summary = evidence.summary();
+
+            let mut active = 0;
+            let mut potential = 0;
+            let mut unreviewed = 0;
+            let mut overflows = 0;
+            let mut nonqualifying = 0;
+            let mut repeated_deliveries = 0_u128;
+            let mut lost = [0_u128; 3];
+            for finding in evidence.findings() {
+                if !finding.qualifies() {
+                    nonqualifying += 1;
+                }
+                match finding {
+                    Finding::ActiveCycle(_) => active += 1,
+                    Finding::Potential {
+                        repetitions,
+                        triage,
+                        ..
+                    } => {
+                        potential += 1;
+                        if *triage == crate::PotentialTriage::Unreviewed {
+                            unreviewed += 1;
+                        }
+                        repeated_deliveries += u128::from(repetitions.get()) - 1;
+                    }
+                    Finding::Overflow {
+                        lost: count,
+                        source,
+                    } => {
+                        overflows += 1;
+                        let index = match source {
+                            crate::EvidenceLossSource::Handoff => 0,
+                            crate::EvidenceLossSource::OrderHistory => 1,
+                            crate::EvidenceLossSource::Retention => 2,
+                        };
+                        lost[index] += u128::from(count.get());
+                    }
+                }
+            }
+
+            assert_eq!(summary.scope, evidence.scope());
+            assert_eq!(summary.findings, evidence.findings().len());
+            assert_eq!(summary.findings, active + potential + overflows);
+            assert_eq!(summary.active, active);
+            assert_eq!(summary.potential, potential);
+            assert_eq!(summary.unreviewed, unreviewed);
+            assert_eq!(summary.nonqualifying, nonqualifying);
+            assert!(summary.nonqualifying >= active + overflows + unreviewed);
+            assert_eq!(summary.repeated_deliveries, repeated_deliveries);
+            assert_eq!(
+                [
+                    summary.lost_handoff,
+                    summary.lost_order_history,
+                    summary.lost_retention
+                ],
+                lost
+            );
+            assert_eq!(
+                evidence.qualifies(),
+                summary.scope == crate::EvidenceScope::WholeProcess && nonqualifying == 0
+            );
+
+            let line = summary.to_string();
+            let pairs: Vec<(&str, &str)> = line
+                .split(' ')
+                .map(|pair| {
+                    pair.split_once('=')
+                        .assured("every count is a key=value pair")
+                })
+                .collect();
+            let scope = match summary.scope {
+                crate::EvidenceScope::WholeProcess => "whole-process",
+                crate::EvidenceScope::ActiveSelection => "active-selection",
+                crate::EvidenceScope::PotentialSelection => "potential-selection",
+            };
+            let expected = [
+                ("scope", scope.to_string()),
+                ("findings", summary.findings.to_string()),
+                ("active", summary.active.to_string()),
+                ("potential", summary.potential.to_string()),
+                ("unreviewed", summary.unreviewed.to_string()),
+                ("nonqualifying", summary.nonqualifying.to_string()),
+                ("repeated-deliveries", repeated_deliveries.to_string()),
+                ("lost-handoff", lost[0].to_string()),
+                ("lost-order-history", lost[1].to_string()),
+                ("lost-retention", lost[2].to_string()),
+            ];
+            let printed: Vec<(&str, String)> = pairs
+                .iter()
+                .map(|(key, value)| (*key, (*value).to_string()))
+                .collect();
+            assert_eq!(printed, expected);
+        });
+}
+
 /// A wire shape that breaks exactly one bound of `evidence`, chosen by `entropy`.
 fn out_of_bounds_wire(entropy: &mut Entropy<'_>, evidence: &DeadlockEvidence) -> EvidenceWire {
     let mut wire = EvidenceWire::try_from(evidence).assured("generated evidence converts");
