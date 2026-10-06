@@ -2514,3 +2514,37 @@ async fn current_consensus_storage_rejects_an_unknown_keyspace() -> TestResult {
     );
     Ok(())
 }
+
+/// An append stores every entry under its own index, so a log record under another index is damaged
+/// storage, which every read refuses with the documented typed failure.
+#[nervix_primitives::test]
+async fn a_log_entry_stored_under_another_index_fails_typed() -> TestResult {
+    let mut harness = Harness::new().await?;
+    harness.append(2).await?;
+    let logs = &harness.store.inner.shared.logs;
+    let second = logs
+        .get(StoreInner::log_key(2))?
+        .ok_or("the harness appended a second entry")?;
+    logs.remove(StoreInner::log_key(2))?;
+    logs.insert(StoreInner::log_key(3), second)?;
+
+    let read = harness
+        .store
+        .get_log_reader()
+        .await
+        .try_get_log_entries(..)
+        .await;
+    let state = harness.store.get_log_state().await;
+
+    for outcome in [read.map(|_| ()), state.map(|_| ())] {
+        let error = outcome.expect_err("the entry of index 2 is stored under index 3");
+        let failure = error
+            .get_ref()
+            .and_then(|inner| inner.downcast_ref::<StorageFailure>());
+        assert!(
+            matches!(failure, Some(StorageFailure::InvalidState)),
+            "{error:?}"
+        );
+    }
+    Ok(())
+}

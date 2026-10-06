@@ -96,6 +96,11 @@ pub(super) fn physical_namespace(
     let Some(separator) = key.iter().position(|byte| *byte == 0) else {
         return Err(Report::new(RuntimePersistenceError::InvalidStorageFormat));
     };
+    // Every key begins with the canonical text of its domain, which no other spelling may stand
+    // for.
+    let domain = std::str::from_utf8(&key[..separator])
+        .change_context(RuntimePersistenceError::InvalidStorageFormat)?;
+    DomainName::decode(domain).change_context(RuntimePersistenceError::InvalidStorageFormat)?;
     let domain_end = separator + 1;
     let (namespace, tail) = match key.get(domain_end..) {
         Some([b'i', 0, tail @ ..]) => (StateNamespace::Initial, tail),

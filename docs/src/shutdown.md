@@ -816,7 +816,9 @@ Recovery also validates the current representation before decoding its counts. R
 frames and the dedicated consensus database identify their fixed-width 64-bit count shape;
 unrecognized stored state fails with an instruction to recreate it. Window checkpoints use the
 current runtime-state kind and `NVXWIN64` frame signature. Native decoding of an archived count is
-checked and cannot truncate it to fit the target. See
+checked and cannot truncate it to fit the target. Consensus recovery accepts only the records its
+state writer stores, each under its own canonical key and in a state its transitions reach, and
+fails on anything else with the same instruction. See
 [Archived Counts](./typed-states.md#archived-counts) and
 [Storage Layout And Compatibility](./consensus-storage-and-replication.md#storage-layout-and-compatibility).
 
@@ -845,7 +847,10 @@ and starts no further lifetime.
 
 A new leader reconciles durable handoff preparations after a coordinator or participant is lost, as
 described above. Resource uploads that were staged but never promoted are removed at startup, so an
-upload interrupted by a forced ending leaves no partial version behind.
+upload interrupted by a forced ending leaves no partial version behind. Only the store's own staging
+directories begin with a dot: a resource whose name does keeps a directory whose name writes that
+dot as `%2E`, so startup never removes its versions. See
+[Resource Versions And Bindings](./resource-versions.md).
 
 A backup archive a node retains for download is a temporary file in its staging area and is never
 durable. Stopping the node, gracefully or not, loses it: a later download is refused, while the

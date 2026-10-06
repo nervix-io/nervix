@@ -409,6 +409,101 @@ pub(super) fn decode_deduplicator_snapshot(
     Ok(recent_keys)
 }
 
+/// One key part of any kind a deduplicator key holds, floats of any bit pattern included.
+#[cfg(test)]
+fn generated_key_part(arbitrary: &mut nervix_arbitrary::Arbitrary<'_>) -> ReorderKeyPart {
+    match arbitrary.entropy().byte() % 8 {
+        0 => ReorderKeyPart::Null,
+        1 => ReorderKeyPart::Boolean(arbitrary.entropy().flag()),
+        2 => ReorderKeyPart::Int64(arbitrary.entropy().any_i64()),
+        3 => ReorderKeyPart::UInt64(arbitrary.entropy().any_u64()),
+        4 => ReorderKeyPart::Float64(ordered_float::OrderedFloat(f64::from_bits(
+            arbitrary.entropy().any_u64(),
+        ))),
+        5 => ReorderKeyPart::Utf8(arbitrary.string()),
+        6 => ReorderKeyPart::Bytes(arbitrary.string().into_bytes()),
+        _ => ReorderKeyPart::Datetime(arbitrary.entropy().any_i64()),
+    }
+}
+
+/// Whether two key parts hold the same kind and the same bits, floats compared by bit pattern.
+#[cfg(test)]
+fn same_key_part(left: &ReorderKeyPart, right: &ReorderKeyPart) -> bool {
+    match (left, right) {
+        (ReorderKeyPart::Float64(left), ReorderKeyPart::Float64(right)) => {
+            left.into_inner().to_bits() == right.into_inner().to_bits()
+        }
+        (ReorderKeyPart::Float64(_), _) | (_, ReorderKeyPart::Float64(_)) => false,
+        (left, right) => left == right,
+    }
+}
+
+/// A generated keyspace, built through the keyspace's own insertion so equal keys collapse as they
+/// do in a live branch, stores through `stored`, the checkpoint envelope a node keeps it in, and
+/// restores every key part bit for bit with its arrival time, in arrival order.
+#[cfg(test)]
+pub(in crate::runtime) fn assert_generated_keys_survive(
+    arbitrary: &mut nervix_arbitrary::Arbitrary<'_>,
+    stored: impl FnOnce(Vec<u8>) -> Vec<u8>,
+) {
+    use meticulous::ResultExt as _;
+
+    let mut keys = ExpiryMap::new();
+    for _ in 0..arbitrary.entropy().count(3) {
+        let parts = arbitrary.records(generated_key_part);
+        keys.insert(DeduplicatorKey::new(parts), arbitrary.timestamp());
+    }
+    let published = ReplicatedDeduplicatorState::published_keys(&keys);
+    let payload =
+        encode_deduplicator_snapshot(&published).assured("a bounded generated keyspace encodes");
+    let restored = decode_deduplicator_snapshot(&stored(payload))
+        .assured("a stored keyspace decodes from its own encoding");
+    assert_eq!(restored.len(), keys.len());
+    for ((restored_key, restored_seen), (key, seen)) in restored.iter().zip(keys.iter()) {
+        assert_eq!(restored_seen, seen);
+        assert_eq!(restored_key.0.len(), key.0.len());
+        for (restored_part, part) in restored_key.0.iter().zip(&key.0) {
+            assert!(
+                same_key_part(restored_part, part),
+                "{restored_part:?} {part:?}"
+            );
+        }
+    }
+}
+
+/// Arbitrary bytes read as a stored keyspace either fail with the typed header or decode failure,
+/// or restore a keyspace that stores back unchanged.
+#[cfg(test)]
+pub(in crate::runtime) fn assert_key_payload_decodes_typed(payload: &[u8]) {
+    use meticulous::ResultExt as _;
+
+    match decode_deduplicator_snapshot(payload) {
+        Ok(keys) => {
+            let published = ReplicatedDeduplicatorState::published_keys(&keys);
+            let encoded =
+                encode_deduplicator_snapshot(&published).assured("a decoded keyspace encodes");
+            let again =
+                decode_deduplicator_snapshot(&encoded).assured("a re-encoded keyspace decodes");
+            assert_eq!(again.len(), keys.len());
+            for ((again_key, again_seen), (key, seen)) in again.iter().zip(keys.iter()) {
+                assert_eq!(again_seen, seen);
+                assert_eq!(again_key.0.len(), key.0.len());
+                for (again_part, part) in again_key.0.iter().zip(&key.0) {
+                    assert!(same_key_part(again_part, part), "{again_part:?} {part:?}");
+                }
+            }
+        }
+        Err(error) => assert!(
+            matches!(
+                error,
+                RuntimePersistenceError::InvalidDeduplicatorSnapshotHeader
+                    | RuntimePersistenceError::DecodeState(_)
+            ),
+            "{error:?}"
+        ),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::time::Duration;
