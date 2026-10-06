@@ -290,6 +290,11 @@ impl Runtime {
             self.clear_relay_branch_presences_for_domain(domain);
             return Ok(());
         };
+        // A build attempt forgets the start failures its predecessor recorded before it can fail,
+        // so an ingestor describes a start failure of its own only when this attempt records one.
+        for plan in revision.entrypoints.ingestors() {
+            self.clear_ingestor_transient_error(domain, &plan.ingestor.name);
+        }
         self.install_state_identities(&revision);
         let stopped = self
             .inner
@@ -872,7 +877,6 @@ impl Runtime {
 
         for plan in local_ingestors {
             let ingestor_name = &plan.ingestor.name;
-            self.clear_ingestor_transient_error(domain, ingestor_name);
             if let Err(report) = Box::pin(self.start_ingestor(&plan)).await {
                 self.record_ingestor_transient_error(domain, ingestor_name, format!("{report:#}"));
                 Box::pin(self.abort_domain_execution_start(domain)).await;

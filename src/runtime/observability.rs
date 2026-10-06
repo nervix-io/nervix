@@ -588,27 +588,11 @@ impl Runtime {
             Some(control) => control.counters(),
             None => IngestorQuiesceCounters::default(),
         };
-        if !self.inner.executions.contains_key(domain) {
-            let transient_error = match self.inner.domain_instantiation_errors.get(domain) {
-                Some(error) => Some(error.value().clone()),
-                None => transient.error.clone(),
-            };
-            return Ok(IngestorDescribe {
-                running: false,
-                ready: false,
-                quiesce_state: quiesce_state.clone(),
-                quiesce_counters,
-                memory_backpressure_paused,
-                transient_error,
-                reconnect_backoff: transient.reconnect_backoff.clone(),
-                reconnect_wait_millis: transient.reconnect_wait_millis,
-                kafka_domain_offsets: None,
-                client_producers: self.client_ingestor_gauges(domain, ingestor),
-            });
-        }
-
         let key = DomainNodeRef::node_in(domain.clone(), ModelKind::Ingestor, ingestor.clone());
-        if !self.inner.ingestors.contains_key(&key) {
+        if !self.inner.executions.contains_key(domain) || !self.inner.ingestors.contains_key(&key) {
+            // An ingestor that did not start describes its own start report. One that recorded no
+            // failure of its own is not running because its domain's execution failed to build,
+            // and describes that build's failure.
             let transient_error = if let Some(error) = transient.error.clone() {
                 Some(error)
             } else {

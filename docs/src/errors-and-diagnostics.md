@@ -613,7 +613,10 @@ runtime keeps the whole report beneath its own context: the domain build's
 starts the ingestors of a prepared revision. The ingestor's transient status shows the start
 report's chain, such as `failed to initialize ingestor 'syslog_source' in domain 'edge': invalid
 Syslog client config key 'framing': UDP does not use stream framing`, and the failed command shows
-the same chain beneath the contexts above it.
+the same chain beneath the contexts above it. An ingestor that recorded no start failure of its own
+is not running because its domain's execution failed to build, and its transient status shows the
+domain's instantiation error instead. A build attempt clears the start failures its predecessor
+recorded before it can fail, so an ingestor never shows a failure a later attempt did not record.
 
 Emitter execution planning has typed failures for missing source relays or codecs, an unresolved
 or mismatched client, unsupported publishing mode, an invalid source predicate or route, invalid
