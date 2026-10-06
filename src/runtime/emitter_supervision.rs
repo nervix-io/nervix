@@ -413,7 +413,7 @@ mod tests {
     use std::time::Duration;
 
     use nervix_primitives::{
-        sync::{mpsc, watch},
+        sync::{atomic::AtomicBool, mpsc, watch},
         time::Instant,
     };
 

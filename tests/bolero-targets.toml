@@ -1416,3 +1416,33 @@ random_iterations = 256
 source = "crates/backup/src/malformed_properties.rs"
 test = "malformed_properties::bolero_corrupt_archives_fail_before_restore_contents_are_returned"
 test_target = "lib"
+
+[[target]]
+case_timeout_seconds = 10
+corpus = "src/runtime/__fuzz__/runtime__remote_ack_owner__tests__bolero_remote_correlations_preserve_capacity_and_exact_generation_outcomes/corpus"
+domain_version = 1
+features = []
+id = "remote-correlation-lifetimes"
+invariant = "Bounded register, resolve, progress, stale reply and shutdown sequences preserve independent record outcomes, exact delivery generations and complete capacity reclamation."
+manifest = "Cargo.toml"
+max_input_bytes = 64
+package = "nervix-server"
+random_iterations = 256
+source = "src/runtime/remote_ack_owner_tests.rs"
+test = "runtime::remote_ack_owner::tests::bolero_remote_correlations_preserve_capacity_and_exact_generation_outcomes"
+test_target = "lib"
+
+[[target]]
+case_timeout_seconds = 10
+corpus = "crates/interconnect/src/connection/__fuzz__/connection__relay_owner__tests__bolero_relay_owner_sequences_preserve_verdicts_and_bounded_capacity/corpus"
+domain_version = 1
+features = []
+id = "relay-admission-owners"
+invariant = "Bounded reservation, body, admission, rejection, cancellation, peer epoch and owner ending sequences preserve every terminal verdict and reclaim configured capacity."
+manifest = "Cargo.toml"
+max_input_bytes = 64
+package = "nervix-interconnect"
+random_iterations = 256
+source = "crates/interconnect/src/connection/relay_owner_tests.rs"
+test = "connection::relay_owner::tests::bolero_relay_owner_sequences_preserve_verdicts_and_bounded_capacity"
+test_target = "lib"

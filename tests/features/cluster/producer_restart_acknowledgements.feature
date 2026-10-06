@@ -1,3 +1,4 @@
+@remote_ack_owners
 Feature: Remote acknowledgements across a producer restart
 
   Scenario: An acknowledgement addressed to a restarted producer's earlier process leaves its new records pending
@@ -107,6 +108,9 @@ Feature: Remote acknowledgements across a producer restart
     When node "node-2" is started
     Then node "node-1" eventually reports interconnect to "node-2" as "connected"
     And node "node-3" eventually reports interconnect to "node-2" as "connected"
+    And within "30s" node "node-3" observability metric "nervix_interconnect_relay_attempts" with labels eventually equals 0
+      """
+      """
     When these NSPL commands are executed on the leader node
       """
       RELOCATE INGESTOR restart_ack_after_source ONTO NODE node-2 IGNORE PREFERENCES;

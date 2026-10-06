@@ -82,6 +82,11 @@ pub enum RuntimeError {
         node_unavailability_timeout: Duration,
         readiness_propagation_bound: Duration,
     },
+    #[error("could not own remote acknowledgements in domain '{domain}': {report:#}")]
+    RemoteAckAdmission {
+        domain: DomainName,
+        report: Report<nervix_execution::AdmissionError>,
+    },
     /// A relay payload another node sent did not decode into a batch of its relay. The report
     /// names what the payload got wrong and keeps the decoder's own failure beneath it.
     #[error("failed to decode remote relay '{relay}' in domain '{domain}': {report:#}")]

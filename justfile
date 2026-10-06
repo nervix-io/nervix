@@ -421,8 +421,8 @@ test-primitives-compile:
 # ends is killed by its probe's watchdog and fails it. The diagnostic node smoke then runs the
 # `@deadlock_diagnostics`, `@restore_installation`, `@client_ingestor_alter_drain`,
 # `@deadlock_reports`, `@memory_pressure_pause`, `@client_io_03_consumer_restore` and
-# `@client_io_03_generation` scenarios, without retries, in a scenario binary built for the mode:
-# in-process nodes, real
+# `@client_io_03_generation` and `@remote_ack_owners` scenarios, without retries, in a scenario
+# binary built for the mode: in-process nodes, real
 # diagnostic server processes on one and three nodes, buffered client alterations, interrupted
 # restore installation and stale publication after leadership transfer, the memory-pressure pause
 # of starting and running ingestors, and Rust client consumers restored after a session restart and
@@ -435,6 +435,11 @@ test-primitives-compile:
 # installation locks. An invocation that executed no check fails the run, and so does a smoke
 # whose scenarios did not all run and pass. Diagnostic compilation and execution share
 # `budget_seconds` and exit with 124 when it expires; prerequisites run first.
+# At most four scenarios run together: large restore fixtures and tracked lock instrumentation
+# share the host's CPU and memory with other builds. The bound applies to both diagnostic modes.
+# Historical order edges survive retired locks, so order mode starts a fresh scenario process for
+# each tagged feature, or each tagged outline in the large materialized restore feature, and
+# accounts for every selected case across those processes.
 test-deloxide budget_seconds="2400": (test-deloxide-selection "deloxide" budget_seconds)
 
 # Historical order instrumentation, with the same active probes and real node workloads.
@@ -493,18 +498,74 @@ test-deloxide-selection selection budget_seconds: tests-deps
     python3 -m scripts.libtest_accounting deloxide "${logs}/materialized-publication.log"
     within_budget scenarios-build \
         cargo test --no-run --features {{ quote("testing " + selection) }} --test scenarios
-    within_budget scenarios \
-        cargo test --features {{ quote("testing " + selection) }} --test scenarios -- \
-            --input 'tests/features/**/*.feature' \
-            --tags '@deadlock_diagnostics or @restore_installation or @client_ingestor_alter_drain or @deadlock_reports or @memory_pressure_pause or @client_io_03_consumer_restore or @client_io_03_generation' \
-            --retry 0
-    summary="$(grep -E '^[0-9]+ scenarios? \(' "${logs}/scenarios.log" | tail -n 1 || true)"
-    if [[ ! "${summary}" =~ ^([1-9][0-9]*)\ scenarios?\ \(([0-9]+)\ passed\)$ ]] \
-        || [[ "${BASH_REMATCH[1]}" != "${BASH_REMATCH[2]}" ]]; then
-        echo "test-deloxide: the diagnostic node smoke did not run and pass every scenario: ${summary:-no summary}" >&2
-        exit 1
+    diagnostic_tags='@deadlock_diagnostics or @restore_installation or @client_ingestor_alter_drain or @deadlock_reports or @memory_pressure_pause or @client_io_03_consumer_restore or @client_io_03_generation or @remote_ack_owners'
+    if [[ {{ quote(selection) }} == deloxide-order ]]; then
+        # Historical edges survive lock retirement, so each tagged feature gets a fresh process.
+        mapfile -t diagnostic_features < <(rg -l -g '*.feature' '@(deadlock_diagnostics|restore_installation|client_ingestor_alter_drain|deadlock_reports|memory_pressure_pause|client_io_03_consumer_restore|client_io_03_generation|remote_ack_owners)' tests/features | sort)
+        if (( ${#diagnostic_features[@]} == 0 )); then
+            echo 'test-deloxide: no tagged diagnostic features were found' >&2
+            exit 1
+        fi
+        scenario_count=0
+        run_scenario_chunk() {
+            local chunk="$1" feature="$2"
+            shift 2
+            local selection_args=(--tags "${diagnostic_tags}")
+            if (( $# > 0 )); then
+                selection_args=("$@")
+            fi
+            within_budget "${chunk}" \
+                cargo test --features {{ quote("testing " + selection) }} --test scenarios -- \
+                    --input "${feature}" "${selection_args[@]}" --concurrency 4 --retry 0
+            summary="$(rg '^[0-9]+ scenarios? \(' "${logs}/${chunk}.log" | tail -n 1 || true)"
+            if [[ ! "${summary}" =~ ^([1-9][0-9]*)\ scenarios?\ \(([0-9]+)\ passed\)$ ]] \
+                || [[ "${BASH_REMATCH[1]}" != "${BASH_REMATCH[2]}" ]]; then
+                echo "test-deloxide: ${feature} did not run and pass every selected scenario: ${summary:-no summary}" >&2
+                exit 1
+            fi
+            scenario_count=$((scenario_count + BASH_REMATCH[1]))
+        }
+        for index in "${!diagnostic_features[@]}"; do
+            feature="${diagnostic_features[index]}"
+            if [[ "${feature}" == tests/features/cluster/backup_materialized.feature ]]; then
+                mapfile -t scenario_names < <(awk '
+                    /^[[:space:]]*@/ {
+                        tagged = tagged || ($0 ~ /@(deadlock_diagnostics|restore_installation|client_ingestor_alter_drain|deadlock_reports|memory_pressure_pause|client_io_03_consumer_restore|client_io_03_generation|remote_ack_owners)/)
+                        next
+                    }
+                    /^[[:space:]]*Scenario( Outline)?:/ {
+                        if (tagged) {
+                            sub(/^[[:space:]]*Scenario( Outline)?:[[:space:]]*/, "")
+                            print
+                        }
+                        tagged = 0
+                    }
+                ' "${feature}")
+                if (( ${#scenario_names[@]} == 0 )); then
+                    echo "test-deloxide: no tagged materialized restore outlines were found in ${feature}" >&2
+                    exit 1
+                fi
+                for scenario_index in "${!scenario_names[@]}"; do
+                    run_scenario_chunk "scenarios-${index}-${scenario_index}" "${feature}" --name "^${scenario_names[scenario_index]}$"
+                done
+            else
+                run_scenario_chunk "scenarios-${index}" "${feature}"
+            fi
+        done
+        echo "test-deloxide: probes accounted for and ${scenario_count} scenarios passed with fresh order histories"
+    else
+        within_budget scenarios \
+            cargo test --features {{ quote("testing " + selection) }} --test scenarios -- \
+                --input 'tests/features/**/*.feature' --tags "${diagnostic_tags}" \
+                --concurrency 4 --retry 0
+        summary="$(rg '^[0-9]+ scenarios? \(' "${logs}/scenarios.log" | tail -n 1 || true)"
+        if [[ ! "${summary}" =~ ^([1-9][0-9]*)\ scenarios?\ \(([0-9]+)\ passed\)$ ]] \
+            || [[ "${BASH_REMATCH[1]}" != "${BASH_REMATCH[2]}" ]]; then
+            echo "test-deloxide: the diagnostic node smoke did not run and pass every scenario: ${summary:-no summary}" >&2
+            exit 1
+        fi
+        echo "test-deloxide: probes accounted for and ${summary}"
     fi
-    echo "test-deloxide: probes accounted for and ${summary}"
     within_budget paced-driver-build \
         cargo build --package nervix-paced-simulation --features {{ quote(selection) }}
     export NERVIX_PACED_SIMULATION_PATH="${CARGO_TARGET_DIR}/debug/nervix-paced-simulation"
@@ -512,7 +573,7 @@ test-deloxide-selection selection budget_seconds: tests-deps
     within_budget paced-simulation \
         cargo test --features {{ quote("testing " + selection) }} --test scenarios -- \
             --input tests/features/runtime/paced_simulation.feature \
-            --tags @paced_simulation_reopen --retry 0
+            --tags @paced_simulation_reopen --concurrency 4 --retry 0
     summary="$(grep -E '^[0-9]+ scenarios? \(' "${logs}/paced-simulation.log" | tail -n 1 || true)"
     if [[ ! "${summary}" =~ ^([1-9][0-9]*)\ scenarios?\ \(([0-9]+)\ passed\)$ ]] \
         || [[ "${BASH_REMATCH[1]}" != "${BASH_REMATCH[2]}" ]]; then
@@ -1262,6 +1323,19 @@ coverage-archive-counts-server-append output="target/archive-counts.lcov": downl
 coverage-runtime output="target/task-handles-runtime.lcov" *args: build-web-console wasm-processor-guests download-onnxruntime
     ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)" cargo llvm-cov --package nervix-server --features testing --lib --no-default-ignore-filename-regex --lcov --output-path {{ quote(output) }} {{ args }}
 
+# Ordinary coverage for delivery correlations, membership publication and authenticated relay owners.
+coverage-remote-owners output="target/remote-owners.lcov": build-web-console wasm-processor-guests download-onnxruntime
+    #!/usr/bin/env bash
+    set -euo pipefail
+    export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
+    just coverage-clean-workspace
+    cargo llvm-cov --no-report --package nervix-server --features testing --lib -- remote_
+    cargo llvm-cov --no-report --package nervix-server --features testing --lib -- cluster::tests
+    cargo llvm-cov --no-report --package nervix-interconnect --lib
+    cargo llvm-cov --no-report --package nervix-server --features testing --lib -- remote_ack_owner_cost --ignored --nocapture
+    cargo llvm-cov --no-report --package nervix-interconnect --lib -- remote_relay_frame_cost --ignored --nocapture
+    cargo llvm-cov report --no-default-ignore-filename-regex --lcov --output-path {{ quote(output) }}
+
 # Measure selected public scenarios with the same arguments as `test-scenarios`.
 coverage-scenarios output *args: tests-deps
     #!/usr/bin/env bash
@@ -1570,6 +1644,7 @@ bench-smoke-bodies:
     cargo bench --profile dev --package nervix-connector-syslog --bench stream_framing --features benchmarks -- --test
     cargo bench --profile dev --package nervix-vm --bench vm -- --test
     just bench-retained-channels-bodies
+    just bench-remote-owners-bodies
     just bench-materialized-state-bodies
 
 # Measure the data-plane work a node admits through its bounded executor, as the runtime submits it:
@@ -1918,7 +1993,7 @@ cargo-clippy-loom jobs=default_jobs: (run-with-jobs "loom-clippy-targets" jobs)
 
 [private, parallel]
 loom-clippy-targets: \
-    *(clippy-target *["nervix-execution", "nervix-model-harness"] ["--all-targets", "--features", "loom"]) \
+    *(clippy-target *["nervix-execution", "nervix-model-harness", "nervix-interconnect"] ["--all-targets", "--features", "loom"]) \
     (clippy-target "nervix-primitives" ["--all-targets", "--features", "loom native"]) \
     *(clippy-target *["nervix-consensus", "nervix-server"] ["--lib", "--features", "loom"]) \
     (clippy-target "nervix-server" ["--lib", "--profile", "test", "--features", "loom"]) \
@@ -2870,6 +2945,14 @@ bench-retained-channels: build-web-console wasm-processor-guests download-onnxru
 bench-retained-channels-bodies:
     ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)" cargo test --package nervix-server --features testing --lib relay_channel_cost -- --ignored --nocapture
     cargo test --package nervix-interconnect --lib established_pool_cost -- --ignored --nocapture
+
+# Delivery correlation and authenticated frame costs, including retained state and reclamation.
+bench-remote-owners: build-web-console wasm-processor-guests download-onnxruntime bench-remote-owners-bodies
+
+[private]
+bench-remote-owners-bodies:
+    ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)" cargo test --package nervix-server --features testing --lib remote_ack_owner_cost -- --ignored --nocapture
+    cargo test --package nervix-interconnect --lib remote_relay_frame_cost -- --ignored --nocapture
 
 # Native diagnostic owners and probes, composed separately from the ordinary report command.
 test-deadlock-evidence-order:

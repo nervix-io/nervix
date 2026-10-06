@@ -298,3 +298,17 @@ invariant = "server.backup.cut-generation"
 original = ".compare_exchange_weak(state, state + 1, Ordering::AcqRel, Ordering::Relaxed)"
 path = "src/runtime/backup_capture_fence.rs"
 weakened = ".compare_exchange_weak(state, state + 1, Ordering::Release, Ordering::Relaxed)"
+
+[[invariant]]
+claim = "Concurrent runtime admission and transport cancellation choose exactly one irreversible relay verdict; later participants cannot overwrite the winner."
+id = "interconnect.relay.irreversible-admission"
+package = "nervix-interconnect"
+test = "connection::relay_admission_choice::loom_models::loom_admission_and_cancellation_choose_one_irreversible_verdict"
+
+[[qualification]]
+failure = "admission verdict changed after its winning transition"
+id = "interconnect.relay.overwriting-verdict"
+invariant = "interconnect.relay.irreversible-admission"
+original = ".compare_exchange(PENDING, choice, Ordering::AcqRel, Ordering::Acquire)\n            .is_ok()"
+path = "crates/interconnect/src/connection/relay_admission_choice.rs"
+weakened = ".swap(choice, Ordering::AcqRel) == PENDING"

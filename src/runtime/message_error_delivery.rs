@@ -716,6 +716,7 @@ mod tests {
                     Vec::new(),
                     None,
                     Arc::new(BranchPresence::new()),
+                    nervix_primitives::sync::Arc::new(crate::runtime_ack::AckRootTracker::default()),
                 )),
             },
             flush_policy,
@@ -854,6 +855,7 @@ mod tests {
                 Vec::new(),
                 None,
                 Arc::new(BranchPresence::new()),
+                nervix_primitives::sync::Arc::new(crate::runtime_ack::AckRootTracker::default()),
             )),
         };
         let owner_task = runtime.spawn_relay_owner_task(
@@ -917,6 +919,7 @@ mod tests {
                 Vec::new(),
                 None,
                 Arc::new(BranchPresence::new()),
+                nervix_primitives::sync::Arc::new(crate::runtime_ack::AckRootTracker::default()),
             )),
         };
         let owner_task = runtime.spawn_relay_owner_task(
@@ -1055,6 +1058,7 @@ mod tests {
                 Vec::new(),
                 None,
                 Arc::new(BranchPresence::new()),
+                nervix_primitives::sync::Arc::new(crate::runtime_ack::AckRootTracker::default()),
             )),
         };
         let mut plan = test_plan(route.clone(), target, RuntimeFlushPolicy::Immediate);

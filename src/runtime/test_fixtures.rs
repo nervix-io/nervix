@@ -334,6 +334,7 @@ pub(super) fn test_relay_boundary_services() -> Arc<super::RelayBoundaryServices
         Vec::new(),
         None,
         nervix_primitives::sync::Arc::new(super::BranchPresence::new()),
+        nervix_primitives::sync::Arc::new(crate::runtime_ack::AckRootTracker::default()),
     ))
 }
 

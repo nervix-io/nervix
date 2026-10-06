@@ -680,6 +680,7 @@ impl Runtime {
                         relay.remote_runtime_consumers,
                         remote_dispatcher.clone(),
                         relay.branch_presence,
+                        self.domain_ack_root_tracker(domain),
                     )),
                 )
             })
@@ -1019,6 +1020,7 @@ impl Runtime {
                         relay.remote_runtime_consumers,
                         None,
                         relay.branch_presence,
+                        self.domain_ack_root_tracker(domain),
                     )),
                 )
             })

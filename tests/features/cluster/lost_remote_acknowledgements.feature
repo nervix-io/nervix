@@ -1,3 +1,4 @@
+@remote_ack_owners
 Feature: Remote record acknowledgements lost between nodes
 
   Scenario: A record acknowledgement lost on its way back to the relay owner is redelivered instead of stalling its source

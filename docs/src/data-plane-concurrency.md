@@ -36,6 +36,57 @@ it resolved when its task, branch, channel, or attempt was created. A shared reg
 cold paths around that handle: registration and first installation, where `entry()` gives racing
 installers a single winner, replacement, teardown, and observers.
 
+## Remote ACK And Admission Owners
+
+`just bench-remote-owners` measures registration, admission, Alive, ordered parking/resume and
+terminal resolution with actual ACK roots at one and 64 rows per delivery, reports delivery tail
+latency and relay-memory reclamation, and measures the full fixed-position empty sweep. Its
+authenticated frame probe sends three current Arrow rows, admits them, returns the exact terminal
+reply and checks retired attempt counts. A separate 5,000-frame peer-owner probe completes while
+another peer's protocol guard is continuously held and checks returned permits and memory. These
+native probes also run through the existing benchmark smoke producer; local debug timings describe
+their measured build and host load, rather than a production throughput guarantee.
+
+Remote record correlation uses an immutable array of delivery and admission routing positions.
+Each delivery generation owns its mutable rows under one short synchronous guard; a row's outcome
+is independent of the other rows. Separate bounded free-position queues preserve admission room
+when delivery positions fill. Record allocation and receiver watcher tasks reserve relay memory.
+The registered wire number selects the position, exact generation and row without a concurrent
+map lookup. The process identity is checked before routing. Generation exhaustion seals the
+position, and cancellation, timeout, terminal resolution and shutdown compete to take each row
+once. The ACK tree resolves after the routing guard is released.
+
+Relay services retain the domain drain tracker resolved during construction. Received rows create
+ACK roots through that handle; they never register or discover the tracker per row. Watchers read
+the membership writer's immutable incarnation publication, so registrar retirement ends their
+charged task lifetime without a gossip lock.
+
+One authenticated peer transport owns its ordinary grant, attempt, channel, watermark and outbound
+correlation collections. Connections and operation leases retain that owner. Its guard serializes
+identity and ordering decisions for this peer; there is no node-wide actor or map guard in the
+recurring protocol. The peer guard precedes the exact record guard, neither crosses an await,
+and permit release remains possible while runtime borrows an admitted record. Ordered attempt and
+grant retirement keeps cancellation effects deterministic. Cold binding and membership changes
+publish routing through CAS. [Cluster Interconnect](./interconnect.md#bounded-correlation-and-peer-owners)
+owns the capacities, grace periods and reconciliation deadlines.
+
+Production-owner Shuttle checks cover delayed events against a reused position, registration
+against shutdown, admission waiter drop against a reply, final silence sweeps against terminal and
+Alive reports, body claim against cancellation, admission against peer ending, and another peer's
+progress while one peer holds its guard. The production admission choice has a Loom model for one
+irreversible verdict; replacing its compare-and-exchange with an overwriting swap must fail and
+replay. ArcSwap, queues and external semaphore internals remain outside that atomic claim.
+Registered bounded Bolero sequences check complete verdicts, capacity and generation outcomes.
+Turmoil covers transport loss, retry, cancellation, reconnect and process restart within its
+documented scope; public one/three-node branch delivery and producer-restart scenarios cover host
+ACKs. External immutable-image faults remain separate evidence.
+
+Deloxide applies to the new delivery, peer and record blocking guards and their acquisition order.
+Both diagnostic selections run the remote ACK scenarios alongside their existing workloads. It
+does not model publication, async channels, network waits or the atomic verdict; a clean run proves
+only the tracked acquisitions the diagnostic processes executed. Generated measurements and fault
+evidence belong on the task, and a failed required attempt remains recorded.
+
 ## Relay, Transport And Source Lifetimes
 
 A concrete producer retains its branch channel handle. The relay publishes branch membership in a
@@ -1038,8 +1089,9 @@ second operation fails even when Rust would regard the expectation as fulfilled.
 Task handles remove recurring status, freeze, metric and checkpoint lookups. Source readiness,
 relay channels, buffered error delivery, domain selection and transport leasing use retained handles
 or immutable publications. Materialized writers own their mutable branch records and readers
-retain per-relay publications. Typed Ratchet 05 owns remaining remote acknowledgement/admission
-discovery. Replica catch-up retains the entity's
+retain per-relay publications. Remote acknowledgement rows and admission waiters use fixed routing
+positions with exact generations; authenticated connections retain bounded peer protocol owners.
+Replica catch-up retains the entity's
 lifecycle handle, assignment slot and its own record of each branch. Replication frames,
 synchronization and listing requests select published state handles; announcers retain their route
 and assignment slot. Their runtime registries handle installation, replacement and teardown.
@@ -1526,8 +1578,15 @@ successful serial inversion, mixed modes and recursive read multiplicity, reused
 sites in separate lifetimes, read-only/consistent-order controls, runtime-disabled instrumentation,
 context/retention overload and failed/blocked output. The commands also run one-/three-node
 `@deadlock_diagnostics`, `@restore_installation`, `@client_ingestor_alter_drain`,
-`@memory_pressure_pause`, `@client_io_03_consumer_restore`, `@client_io_03_generation` and the local
-`@deadlock_reports` workflow without retries. The commands also run `@paced_simulation_reopen` on
+`@memory_pressure_pause`, `@client_io_03_consumer_restore`, `@client_io_03_generation`,
+`@remote_ack_owners` and the local `@deadlock_reports` workflow without retries. Each diagnostic
+scenario invocation admits at most four scenarios at once, bounding the competing large restore
+fixtures and tracked-lock instrumentation on a shared build host. Order mode runs each tagged
+feature in a fresh process, and each tagged outline of the large materialized restore feature in
+its own process, because historical edges remain after lock retirement. It accounts for all
+selected scenarios across those processes and qualifies every process artifact. The commands
+also run
+`@paced_simulation_reopen` on
 one and three nodes: the Rust driver uses the selected diagnostic capability, while Python runs
 against diagnostic nodes with its ordinary shared binding. Python locks and condition variables
 remain outside the detector. Zero probes or incomplete scenario accounting fail. After successful process outcomes,
@@ -1818,7 +1877,7 @@ feature. When a protocol is embedded in asynchronous orchestration, the synchron
 made independently testable and the runtime uses that same owner; a copied algorithm, a witness
 that a join or an extra lock publishes, or a real atomic does not make a model.
 
-The execution, consensus and server crates own a `loom` feature, and each forwards it to the
+The execution, interconnect, consensus and server crates own a `loom` feature, and each forwards it to the
 primitive crate and to every dependency that owns one, so the whole library graph of each builds
 with Loom's primitives. `just cargo-clippy-loom`, whose package checks also run in `just lint`,
 lints every Loom build:

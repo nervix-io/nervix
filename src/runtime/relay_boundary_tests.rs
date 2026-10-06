@@ -462,6 +462,7 @@ async fn concrete_relay_reuses_branch_collapse_for_runtime_consumers() {
         Vec::new(),
         None,
         Arc::new(BranchPresence::new()),
+        nervix_primitives::sync::Arc::new(crate::runtime_ack::AckRootTracker::default()),
     ));
     let owner_task = runtime.spawn_relay_owner_task(
         &domain,
@@ -834,6 +835,7 @@ async fn owner_ingress_publishes_branch_presence_to_the_relay_state_placement() 
         Vec::new(),
         None,
         placement_presence.clone(),
+        nervix_primitives::sync::Arc::new(crate::runtime_ack::AckRootTracker::default()),
     ));
     let (shutdown, _) = watch::channel(false);
     let schema = test_schema(&[("user_id", ParseAsType::U32)]);
@@ -1443,6 +1445,7 @@ fn services_reporting_to(presence: RelayBranchPresence) -> Arc<RelayBoundaryServ
         Vec::new(),
         None,
         presence,
+        nervix_primitives::sync::Arc::new(crate::runtime_ack::AckRootTracker::default()),
     ))
 }
 
