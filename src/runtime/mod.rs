@@ -652,8 +652,8 @@ use window_accumulator::{
     RetainedWindowRows, WindowAccumulator, WindowAccumulatorPlan, WindowArgumentColumns, WindowRow,
 };
 pub(crate) use window_archive::{
-    ArchivedRows, ArchivedWindow, CapturedWindow, WindowAccumulatorState, WindowArchiveError,
-    WindowDelayedRemoval,
+    ArchivedRows, ArchivedWindow, CapturedWindow, PendingArguments, WindowAccumulatorState,
+    WindowArchiveError, WindowCheckpointBuilder, WindowDelayedRemoval,
 };
 use window_processor::{
     WindowAdmission, WindowProcessorError, WindowProcessorState, evaluate_window_arguments,

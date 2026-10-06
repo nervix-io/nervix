@@ -93,6 +93,8 @@ pub(super) enum WindowPublishedSnapshot {
 
 const WINDOW_SNAPSHOT_MAGIC: [u8; 8] = *b"NVXWIN64";
 const WINDOW_SNAPSHOT_FRAME_BYTES: usize = WINDOW_SNAPSHOT_MAGIC.len() + 4;
+/// The little-endian `u32` length that precedes every typed section.
+const TYPED_SECTION_PREFIX_BYTES: usize = 4;
 
 #[derive(Debug, Clone, Copy, thiserror::Error)]
 pub(super) enum WindowSnapshotError {
@@ -224,20 +226,30 @@ impl WindowGenerations {
     }
 }
 
-/// What every aggregate keeps beyond the retained rows: its descriptor in the header, and the
-/// bounded typed sections that carry each linear histogram's delayed removals.
-struct WindowTypedSections {
+/// What every aggregate keeps beyond the retained rows: its descriptor in the header, and each
+/// linear histogram's delayed removals laid out as bounded typed sections, none of them encoded
+/// yet.
+struct WindowTypedSections<'a> {
     descriptors: Vec<WindowAccumulatorDescriptor>,
-    sections: Vec<ChargedBytes>,
+    sections: Vec<WindowTypedSection<'a>>,
+    /// The most one encoded section may occupy.
+    limit: u64,
 }
 
-impl WindowTypedSections {
-    async fn encode(
-        accumulators: &[WindowAccumulatorSnapshot],
+/// One typed section: some of the delayed removals of the linear histogram at `demand`.
+struct WindowTypedSection<'a> {
+    demand: u32,
+    removals: &'a [LinearHistogramDelayedRemovalSnapshot],
+}
+
+impl<'a> WindowTypedSections<'a> {
+    /// The descriptors and the typed sections `accumulators` lay out under the node's limits.
+    fn of(
+        accumulators: &'a [WindowAccumulatorSnapshot],
         executor: &Executor,
     ) -> Result<Self, Report<WindowSnapshotError>> {
-        let typed_limit = executor.limits().snapshot_record_bytes.as_u64();
-        let chunk_rows = usize::try_from((typed_limit / 64).max(1)).map_err(|error| {
+        let limit = executor.limits().snapshot_record_bytes.as_u64();
+        let chunk_rows = usize::try_from((limit / 64).max(1)).map_err(|error| {
             Report::new(WindowSnapshotError::Encode {
                 section: WindowSnapshotSection::DelayedRemovals,
             })
@@ -246,7 +258,6 @@ impl WindowTypedSections {
         let mut descriptors = Vec::with_capacity(accumulators.len());
         let mut sections = Vec::new();
         for (demand, accumulator) in accumulators.iter().enumerate() {
-            nervix_primitives::task::consume_budget().await;
             match accumulator {
                 WindowAccumulatorSnapshot::Retained => {
                     descriptors.push(WindowAccumulatorDescriptor::Retained);
@@ -269,27 +280,7 @@ impl WindowTypedSections {
                         .attach_printable(error)
                     })?;
                     for removals in delayed_removals.chunks(chunk_rows) {
-                        nervix_primitives::task::consume_budget().await;
-                        let section = WindowDelayedRemovalSection {
-                            demand,
-                            removals: removals.to_vec(),
-                        };
-                        let bytes =
-                            rkyv::to_bytes::<rkyv::rancor::Error>(&section).map_err(|error| {
-                                Report::new(WindowSnapshotError::Encode {
-                                    section: WindowSnapshotSection::DelayedRemovals,
-                                })
-                                .attach_printable(error)
-                            })?;
-                        if u64::try_from(bytes.len()).unwrap_or(u64::MAX) > typed_limit {
-                            return Err(Report::new(WindowSnapshotError::Invalid {
-                                issue: WindowSnapshotIssue::TypedLimit,
-                            }));
-                        }
-                        let bytes = executor
-                            .try_charge_owned(MemoryClass::Bulk, bytes.to_vec())
-                            .change_context(WindowSnapshotError::Admission)?;
-                        sections.push(bytes);
+                        sections.push(WindowTypedSection { demand, removals });
                     }
                 }
             }
@@ -297,6 +288,7 @@ impl WindowTypedSections {
         Ok(Self {
             descriptors,
             sections,
+            limit,
         })
     }
 
@@ -304,6 +296,28 @@ impl WindowTypedSections {
         u32::try_from(self.sections.len()).change_context(WindowSnapshotError::Encode {
             section: WindowSnapshotSection::Header,
         })
+    }
+}
+
+impl WindowTypedSection<'_> {
+    /// The section's encoding, refused beyond `limit` bytes.
+    fn encode(&self, limit: u64) -> Result<rkyv::util::AlignedVec, Report<WindowSnapshotError>> {
+        let section = WindowDelayedRemovalSection {
+            demand: self.demand,
+            removals: self.removals.to_vec(),
+        };
+        let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&section).map_err(|error| {
+            Report::new(WindowSnapshotError::Encode {
+                section: WindowSnapshotSection::DelayedRemovals,
+            })
+            .attach_printable(error)
+        })?;
+        if u64::try_from(bytes.len()).unwrap_or(u64::MAX) > limit {
+            return Err(Report::new(WindowSnapshotError::Invalid {
+                issue: WindowSnapshotIssue::TypedLimit,
+            }));
+        }
+        Ok(bytes)
     }
 }
 
@@ -400,8 +414,17 @@ pub(super) async fn encode_window_processor_snapshot(
         .change_context(WindowSnapshotError::Encode {
             section: WindowSnapshotSection::Arguments,
         })?;
-    let typed = WindowTypedSections::encode(&snapshot.accumulators, executor).await?;
-    let typed_sections = typed.count()?;
+    let typed = WindowTypedSections::of(&snapshot.accumulators, executor)?;
+    let typed_count = typed.count()?;
+    let mut typed_sections = Vec::with_capacity(typed.sections.len());
+    for section in &typed.sections {
+        nervix_primitives::task::consume_budget().await;
+        let encoded = section.encode(typed.limit)?;
+        let encoded = executor
+            .try_charge_owned(MemoryClass::Bulk, encoded.to_vec())
+            .change_context(WindowSnapshotError::Admission)?;
+        typed_sections.push(encoded);
+    }
     let header = WindowSnapshotHeader {
         revision,
         first_sequence: snapshot.entries.first().map(|entry| entry.sequence),
@@ -421,7 +444,7 @@ pub(super) async fn encode_window_processor_snapshot(
             },
         )?,
         accumulators: typed.descriptors,
-        typed_sections,
+        typed_sections: typed_count,
     };
     let framed = header.framed(executor)?;
     let length_error = || {
@@ -434,8 +457,10 @@ pub(super) async fn encode_window_processor_snapshot(
     length = length
         .checked_add(arguments.len())
         .ok_or_else(length_error)?;
-    for section in &typed.sections {
-        let prefixed = length.checked_add(4).ok_or_else(length_error)?;
+    for section in &typed_sections {
+        let prefixed = length
+            .checked_add(TYPED_SECTION_PREFIX_BYTES)
+            .ok_or_else(length_error)?;
         length = prefixed
             .checked_add(section.len())
             .ok_or_else(length_error)?;
@@ -446,7 +471,6 @@ pub(super) async fn encode_window_processor_snapshot(
     let reservation = executor
         .try_reserve(MemoryClass::Bulk, length_u64)
         .change_context(WindowSnapshotError::Admission)?;
-    let typed_sections = typed.sections;
     let sealed = executor
         .run_cpu(CpuClass::Bulk, reservation, move |charge, cancellation| {
             cancellation
@@ -602,13 +626,15 @@ impl WindowCheckpointPieces {
         if input.records().is_empty() {
             return Ok(());
         }
-        self.count_rows(first_sequence, input.records().len())?;
+        // The rows are counted only once they are sealed, so a refused append leaves the
+        // checkpoint as it was and the same rows can be appended again.
         self.input
             .append_encoded(executor, input, columns)
             .await
             .change_context(WindowSnapshotError::Encode {
                 section: WindowSnapshotSection::Input,
-            })
+            })?;
+        self.count_rows(first_sequence, input.records().len())
     }
 
     /// Seal the argument columns `arguments` holds, row-aligned with the input rows sealed last,
@@ -649,7 +675,8 @@ impl WindowCheckpointPieces {
                 .change_context(WindowSnapshotError::Encode {
                     section: WindowSnapshotSection::Arguments,
                 })?;
-        let typed = WindowTypedSections::encode(accumulators, executor).await?;
+        let typed = WindowTypedSections::of(accumulators, executor)?;
+        let typed_limit = typed.limit;
         let header = WindowSnapshotHeader {
             revision: self.revision,
             first_sequence: self.first_sequence,
@@ -673,22 +700,28 @@ impl WindowCheckpointPieces {
             .change_context(WindowSnapshotError::Execution)?;
         pieces.extend(input);
         pieces.extend(arguments);
-        for section in typed.sections {
+        // Each typed section is encoded, staged behind its length and released before the next,
+        // so the delayed removals of a histogram never hold more than one section of the bulk
+        // budget. Nothing else of that budget is held here, so each charge waits for room.
+        for section in &typed.sections {
             nervix_primitives::task::consume_budget().await;
+            let encoded = section.encode(typed_limit)?;
             let section_length =
-                u32::try_from(section.len()).change_context(WindowSnapshotError::Encode {
+                u32::try_from(encoded.len()).change_context(WindowSnapshotError::Encode {
                     section: WindowSnapshotSection::DelayedRemovals,
                 })?;
-            let prefix = executor
-                .charge_owned(MemoryClass::Bulk, section_length.to_le_bytes().to_vec())
+            let capacity = TYPED_SECTION_PREFIX_BYTES
+                .checked_add(encoded.len())
+                .assured("a section within its bounded limit fits beside its length prefix");
+            let mut prefixed = Vec::with_capacity(capacity);
+            prefixed.extend_from_slice(&section_length.to_le_bytes());
+            prefixed.extend_from_slice(&encoded);
+            let prefixed = executor
+                .charge_owned(MemoryClass::Bulk, prefixed)
                 .await
                 .change_context(WindowSnapshotError::Admission)?;
             pieces
-                .stage(prefix)
-                .await
-                .change_context(WindowSnapshotError::Execution)?;
-            pieces
-                .stage(section)
+                .stage(prefixed)
                 .await
                 .change_context(WindowSnapshotError::Execution)?;
         }
@@ -1820,6 +1853,62 @@ mod tests {
                 .assured("a persisted window needs nothing more")
                 .is_none()
         );
+    }
+
+    /// Delayed removals that need several typed sections are sealed one section at a time into
+    /// the container the resident encoding writes, and the window opens with every one of them.
+    #[nervix_primitives::test]
+    async fn delayed_removals_beyond_one_typed_section_seal_into_the_resident_container() {
+        use meticulous::{OptionExt as _, ResultExt as _};
+
+        let fixture = WindowSnapshotFixture::new();
+        // A typed section of 512 bytes carries eight delayed removals.
+        let executor = narrow_executor();
+        let directory = tempfile::tempdir().assured("the staging directory opens");
+        let staging = SnapshotStaging::new(
+            directory.path().to_path_buf(),
+            executor.clone(),
+            crate::runtime::snapshot_staging::SnapshotStagingLimits::default(),
+        );
+        let mut delayed_removals = Vec::new();
+        for removal in 0..20_usize {
+            let expires_at = i64::try_from(removal).assured("a test removal index fits i64");
+            delayed_removals.push(LinearHistogramDelayedRemovalSnapshot {
+                expires_at: Timestamp::from_unix_nanos(expires_at),
+                bucket: removal % 5,
+            });
+        }
+        let mut window = fixture.window_of(3, 9);
+        window.accumulators = vec![
+            WindowAccumulatorSnapshot::Retained,
+            WindowAccumulatorSnapshot::LinearHistogram {
+                delayed_removals: delayed_removals.clone(),
+            },
+        ];
+        let resident = encode_window_processor_snapshot(&window, 4, &executor)
+            .await
+            .assured("the window encodes in memory");
+        let sealed = seal_window_processor_snapshot(&window, 4, &executor, &staging)
+            .await
+            .assured("the window seals in pieces");
+        let sealed = std::fs::read(sealed.path()).assured("the sealed checkpoint reads");
+        assert_eq!(
+            sealed, resident,
+            "typed sections sealed one at a time concatenate into the resident container"
+        );
+        let restored = fixture
+            .open(&sealed, &executor, 9)
+            .await
+            .assured("the sealed window opens")
+            .verified("the sealed window names its branch lifetime");
+        let WindowAccumulatorSnapshot::LinearHistogram {
+            delayed_removals: restored_removals,
+        } = &restored.accumulators[1]
+        else {
+            panic!("the second aggregate is a linear histogram");
+        };
+        assert_eq!(restored_removals, &delayed_removals);
+        assert_eq!(executor.snapshot().bulk_memory.reserved_bytes, 0);
     }
 
     /// A window may retain more rows than one relay's row-view metadata ceiling, and a branch

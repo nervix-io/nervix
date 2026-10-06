@@ -31,7 +31,7 @@ use nervix_execution::{BudgetedBuffer, ChargedBytes, Executor, MemoryClass, Stor
 use nervix_primitives::sync::OwnedSemaphorePermit;
 use thiserror::Error;
 
-pub(crate) use self::pieces::StagedPieces;
+pub(crate) use self::pieces::{StagedPieces, StagedPiecesMark};
 
 /// Why a snapshot or an artifact could not be staged or read back.
 #[derive(Debug, Error)]

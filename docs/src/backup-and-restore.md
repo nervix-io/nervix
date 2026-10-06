@@ -369,6 +369,17 @@ placed first; the delayed histogram removals follow in bounded typed sections. T
 concatenated into the checkpoint file with one 64 KiB buffer, and briefly occupy twice the
 checkpoint's disk space.
 
+A conversion the node refuses only for room does not fail the restore. A memory class with no room
+left, a worker queue that is full and a staging quota that cannot hold another piece judged nothing
+of the archive, so the conversion releases what it holds and converts the refused unit again. For a
+window the unit is one section: it is read and decoded again into a checkpoint that is exactly as
+it was before the refused attempt, whose staged pieces were dropped. For a keyspace the unit is the
+keyspace from its first group, because the keys already admitted are what held its charge. A unit
+is converted again every 50 ms for up to 30 seconds after the node first refuses it. A refusal
+that outlasts that wait ends the conversion as an admission failure, since what the restore itself
+holds can be what fills the budget. A request larger than a whole budget, and archived content
+that does not fit the restored shapes, end it at once.
+
 Backup section openings share Snapshot admission with materialized readers. A capacity-only
 refusal retries within the opening's single 30-second deadline; other failures end the fetch.
 Completed response streams release their transport permits before local verification and decoding.
@@ -817,6 +828,7 @@ production-owner concurrency and recovery evidence.
 | Deduplicator key group / window input group / window argument group | 8 MiB each; capture fills a group to at most half that bound, and a single larger row takes a group of its own |
 | One archived deduplicator keyspace or window | Not bounded by the bulk budget. A keyspace's key parts and values are charged to `restore_metadata` while it converts, beside the fixed per-key share admitted with the description; a window conversion holds one archived section at a time |
 | Window checkpoint identity record | 1 MiB of row identities; a larger archived group splits into groups that fit |
+| Restore conversion admission wait | 30 seconds for one window section or one keyspace after the node first refuses it for room; the unit is converted again every 50 ms |
 | Restored window rows a branch reopens | No row ceiling of their own; their row views are charged to the relay memory class while the branch reopens the window |
 | Physical checkpoint placement encoding | 60 KiB, including domain and installation namespace |
 | Unpublished restore checkpoint keys and values per node | 128 GiB by default; configurable with `--restore-staging-max-bytes` |
@@ -871,14 +883,18 @@ A refused restore reports `restore refused:` and the reason, and changed nothing
 - a domain's models do not form a valid configuration, as the transaction planner finds
 - an archived materialized relay, deduplicator keyspace or window does not convert under the shape
   its restored model gives it, or its conversion cannot be admitted, naming the entity; a dry run
-  runs the same conversion
+  runs the same conversion. A deduplicator or window conversion the node refuses only for room is
+  converted again first, and is refused only once that refusal has lasted its 30-second wait
 - the archive's metadata, including the fixed share of every archived deduplicator key, exceeds the
   node's available restore preparation budget
 
 A restore that failed at a step reports `restore failed at step '<step>':`, the reason, and that the
 steps before it stay applied, together with the report of every step. The reasons are a consensus
 refusal of the step, a resource version that could not be installed or completed on every live
-node, and a model batch the leader refused, such as lookup data that does not load at its path or
-TLS material that does not load. A restore whose archive no client sent to a new leader before the
-retry validity of its execution reference ended reports `restore stopped after the steps it
-recorded`. No message includes password hashes or resource bytes.
+node, a model batch the leader refused, such as lookup data that does not load at its path or TLS
+material that does not load, and state that does not convert or install. Installation converts
+each keyspace and window as planning did, with the same wait for room, so a momentarily busy node
+does not fail the step; a refusal for room that outlasts the wait does. A restore whose archive no
+client sent to a new leader before the retry validity of its execution reference ended reports
+`restore stopped after the steps it recorded`. No message includes password hashes or resource
+bytes.

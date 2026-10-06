@@ -40,7 +40,9 @@ use thiserror::Error;
 use super::snapshot_staging::StagedArtifactReader;
 use super::{
     BranchKey,
-    snapshot_staging::{SnapshotStaging, StagedArtifact, StagedPieces, StagedSnapshot},
+    snapshot_staging::{
+        SnapshotStaging, StagedArtifact, StagedPieces, StagedPiecesMark, StagedSnapshot,
+    },
 };
 use crate::runtime_schema::{
     ArrowBodyError, RuntimeRecordBatch, RuntimeRecordMetadata, RuntimeRow,
@@ -785,6 +787,15 @@ pub(in crate::runtime) struct SealedContainerPieces {
     sections: StagedPieces,
 }
 
+/// What a container under assembly held at one moment: its counted records and groups, and where
+/// its staged sections ended.
+#[derive(Debug, Clone, Copy)]
+struct SealedContainerMark {
+    records: u64,
+    groups: u32,
+    sections: StagedPiecesMark,
+}
+
 impl SealedContainerPieces {
     pub(in crate::runtime) fn new(
         staging: &SnapshotStaging,
@@ -825,7 +836,34 @@ impl SealedContainerPieces {
     /// The records stay one group, with `columns` as its section, when their identities fit one
     /// identity record and `columns` fits one section. Otherwise they are sealed in bounded groups
     /// of their own, whose columns are projected again.
+    ///
+    /// An append that fails stages nothing: the container is as it was before, so a caller the
+    /// node refused only for room can release what it holds and append the same records again.
     pub(in crate::runtime) async fn append_encoded(
+        &mut self,
+        executor: &Executor,
+        generation: &MaterializedGeneration,
+        columns: ChargedBytes,
+    ) -> Result<(), Report<MaterializedSnapshotError>> {
+        let mark = SealedContainerMark {
+            records: self.records,
+            groups: self.groups,
+            sections: self.sections.mark(),
+        };
+        let appended = self
+            .append_encoded_groups(executor, generation, columns)
+            .await;
+        if appended.is_err() {
+            self.records = mark.records;
+            self.groups = mark.groups;
+            self.sections.rewind(mark.sections);
+        }
+        appended
+    }
+
+    /// The groups [`Self::append_encoded`] stages, without its return to the state before a
+    /// failure.
+    async fn append_encoded_groups(
         &mut self,
         executor: &Executor,
         generation: &MaterializedGeneration,

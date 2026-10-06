@@ -408,6 +408,9 @@ impl WindowCheckpointBuilder {
 
     /// Admits one group's input rows and seals them before this returns. The group's argument
     /// columns, which must hold the same rows, complete it.
+    ///
+    /// A failure leaves the checkpoint as it was, so a caller the node refused only for room can
+    /// release what it holds and admit the same section again.
     pub(crate) async fn admit_input(
         &mut self,
         input: ArchivedRows,
@@ -457,9 +460,12 @@ impl WindowCheckpointBuilder {
 
     /// Admits the argument columns of the group whose input rows `pending` names, which must hold
     /// the same number of rows, and seals them before this returns.
+    ///
+    /// Like [`Self::admit_input`], a failure leaves the checkpoint as it was, so a caller the node
+    /// refused only for room can release what it holds and admit the same section again.
     pub(crate) async fn admit_arguments(
         &mut self,
-        pending: PendingArguments,
+        pending: &PendingArguments,
         arguments: ArchivedRows,
     ) -> error_stack::Result<(), WindowArchiveError> {
         if arguments.batch.batch().num_rows() != pending.rows
@@ -545,7 +551,8 @@ mod tests {
     use crate::{
         runtime::{
             OptionalTestField, TestWindow, WindowArgumentColumns, WindowProcessorState,
-            batch_value, snapshot_staging::SnapshotStagingLimits,
+            batch_value,
+            snapshot_staging::{SnapshotStagingError, SnapshotStagingLimits},
             window_state::WindowPublishedSnapshot,
         },
         runtime_schema::RuntimeValue,
@@ -794,7 +801,7 @@ mod tests {
                 .await
                 .assured("a group of the archived input rows is admitted");
             builder
-                .admit_arguments(pending, argument_rows)
+                .admit_arguments(&pending, argument_rows)
                 .await
                 .assured("the group's row-aligned argument columns are admitted");
         }
@@ -1079,39 +1086,90 @@ mod tests {
         assert!(CapturedWindow::published(&unpublished).is_none());
     }
 
+    /// A window of two admitted rows, opened as a backup opens it, with the schemas of its
+    /// retained rows.
+    struct OpenedWindow {
+        opened: CapturedWindowState,
+        input: StdArc<ArrowSchema>,
+        arguments: StdArc<ArrowSchema>,
+    }
+
+    impl OpenedWindow {
+        async fn of_two_rows(executor: &Executor) -> Self {
+            let mut window = window();
+            let latencies: ArrayRef = StdArc::new(Int64Array::from(vec![Some(1), Some(2)]));
+            let labels: ArrayRef = StdArc::new(StringArray::from(vec![Some("a"), None]));
+            let healthy: ArrayRef = StdArc::new(BooleanArray::from(vec![Some(true), Some(false)]));
+            let refused = window
+                .admit(vec![latencies, labels, healthy], &[1, 2])
+                .await;
+            assert!(refused.is_empty(), "both rows fit the window: {refused:?}");
+            let published = window.state.to_snapshot().assured("the window publishes");
+            let input = window.input_schema.arrow_schema();
+            let arguments = WindowArgumentColumns::snapshot_schema(&window.plan);
+            let generation = Generation {
+                revision: 2,
+                value: Some(WindowPublishedSnapshot::Live(published)),
+            };
+            let opened = CapturedWindow::published(&generation)
+                .verified("the generation holds a window")
+                .open(executor, &input, &arguments)
+                .await
+                .assured("the window opens")
+                .verified("the window has a branch lifetime");
+            Self {
+                opened,
+                input,
+                arguments,
+            }
+        }
+
+        /// The window as a restore reads it from its descriptor.
+        fn archived(&self) -> ArchivedWindow {
+            ArchivedWindow {
+                revision: self.opened.revision(),
+                incarnation: self.opened.incarnation(),
+                branch: None,
+                first_sequence: self.opened.first_sequence(),
+                next_sequence: self.opened.next_sequence(),
+                rows: self.opened.row_watermarks(),
+                accumulators: self.opened.accumulators().assured("bounded buckets fit"),
+            }
+        }
+
+        /// The archived input section of `rows` and the batch it decodes into.
+        async fn input_rows(&self, executor: &Executor, rows: Range<usize>) -> ArchivedRows {
+            let bytes = self
+                .opened
+                .encode_input_group(executor, &rows)
+                .await
+                .assured("the input rows encode");
+            archived_rows(executor, &self.input, bytes).await
+        }
+
+        /// The archived argument section of `rows` and the batch it decodes into.
+        async fn argument_rows(&self, executor: &Executor, rows: Range<usize>) -> ArchivedRows {
+            let bytes = self
+                .opened
+                .encode_argument_group(executor, &rows)
+                .await
+                .assured("the argument columns encode");
+            archived_rows(executor, &self.arguments, bytes).await
+        }
+    }
+
+    /// The same archived section and decoded batch, for an attempt that consumes them.
+    fn same_rows(rows: &ArchivedRows) -> ArchivedRows {
+        ArchivedRows {
+            bytes: rows.bytes.clone(),
+            batch: rows.batch.clone(),
+        }
+    }
+
     #[nervix_primitives::test]
     async fn rebuilding_a_window_refuses_groups_that_disagree_with_its_descriptor() {
-        let mut window = window();
-        let latencies: ArrayRef = StdArc::new(Int64Array::from(vec![Some(1), Some(2)]));
-        let labels: ArrayRef = StdArc::new(StringArray::from(vec![Some("a"), None]));
-        let healthy: ArrayRef = StdArc::new(BooleanArray::from(vec![Some(true), Some(false)]));
-        let refused = window
-            .admit(vec![latencies, labels, healthy], &[1, 2])
-            .await;
-        assert!(refused.is_empty(), "both rows fit the window: {refused:?}");
         let executor = Executor::default();
-        let published = window.state.to_snapshot().assured("the window publishes");
-        let input = window.input_schema.arrow_schema();
-        let arguments = WindowArgumentColumns::snapshot_schema(&window.plan);
-        let generation = Generation {
-            revision: 2,
-            value: Some(WindowPublishedSnapshot::Live(published)),
-        };
-        let opened = CapturedWindow::published(&generation)
-            .verified("the generation holds a window")
-            .open(&executor, &input, &arguments)
-            .await
-            .assured("the window opens")
-            .verified("the window has a branch lifetime");
-        let archived = || ArchivedWindow {
-            revision: opened.revision(),
-            incarnation: opened.incarnation(),
-            branch: None,
-            first_sequence: opened.first_sequence(),
-            next_sequence: opened.next_sequence(),
-            rows: opened.row_watermarks(),
-            accumulators: opened.accumulators().assured("bounded buckets fit"),
-        };
+        let window = OpenedWindow::of_two_rows(&executor).await;
         let directory = tempfile::tempdir().assured("the staging directory opens");
         let staging = SnapshotStaging::new(
             directory.path().to_path_buf(),
@@ -1119,43 +1177,21 @@ mod tests {
             SnapshotStagingLimits::default(),
         );
         let builder = |window| WindowCheckpointBuilder::new(&executor, &staging, window);
-        let all_rows = 0..2;
-        let input_rows = archived_rows(
-            &executor,
-            &input,
-            opened
-                .encode_input_group(&executor, &all_rows)
-                .await
-                .assured("the input rows encode"),
-        )
-        .await;
-        let one_row = 0..1;
-        let one_argument_row = archived_rows(
-            &executor,
-            &arguments,
-            opened
-                .encode_argument_group(&executor, &one_row)
-                .await
-                .assured("the argument columns encode"),
-        )
-        .await;
-        let same_rows = |rows: &ArchivedRows| ArchivedRows {
-            bytes: rows.bytes.clone(),
-            batch: rows.batch.clone(),
-        };
+        let input_rows = window.input_rows(&executor, 0..2).await;
+        let one_argument_row = window.argument_rows(&executor, 0..1).await;
 
-        let mut misaligned = builder(archived());
+        let mut misaligned = builder(window.archived());
         let pending = misaligned
             .admit_input(same_rows(&input_rows))
             .await
             .assured("the group's input rows are admitted");
         let error = misaligned
-            .admit_arguments(pending, one_argument_row)
+            .admit_arguments(&pending, one_argument_row)
             .await
             .expect_err("a group's input rows and arguments are row-aligned");
         assert_eq!(error.current_context(), &WindowArchiveError::GroupRows);
 
-        let mut incomplete = builder(archived());
+        let mut incomplete = builder(window.archived());
         let _pending = incomplete
             .admit_input(same_rows(&input_rows))
             .await
@@ -1166,7 +1202,7 @@ mod tests {
             .expect_err("a group's argument columns complete it");
         assert_eq!(error.current_context(), &WindowArchiveError::GroupRows);
 
-        let mut short = archived();
+        let mut short = window.archived();
         short.rows.truncate(1);
         let error = builder(short)
             .admit_input(same_rows(&input_rows))
@@ -1180,7 +1216,7 @@ mod tests {
             }
         );
 
-        let error = builder(archived())
+        let error = builder(window.archived())
             .finish()
             .await
             .expect_err("every row the descriptor lists arrives in some group");
@@ -1192,7 +1228,7 @@ mod tests {
             }
         );
 
-        let mut overflowing = archived();
+        let mut overflowing = window.archived();
         overflowing.first_sequence = Some(u64::MAX);
         let error = builder(overflowing)
             .admit_input(input_rows)
@@ -1200,5 +1236,103 @@ mod tests {
             .expect_err("row sequences never pass u64::MAX");
         assert_eq!(error.current_context(), &WindowArchiveError::Sequence);
         assert_eq!(executor.snapshot().bulk_memory.reserved_bytes, 0);
+    }
+
+    /// A section refused while it was half staged leaves the checkpoint as it was and releases
+    /// the pieces the refused attempt staged. The same section admitted again then seals the
+    /// checkpoint an unrefused conversion seals, byte for byte.
+    #[nervix_primitives::test]
+    async fn a_refused_section_is_admitted_again_into_the_same_checkpoint() {
+        const MEBIBYTE: u64 = 1024 * 1024;
+        let executor = Executor::default();
+        let window = OpenedWindow::of_two_rows(&executor).await;
+        let input_rows = window.input_rows(&executor, 0..2).await;
+        let argument_rows = window.argument_rows(&executor, 0..2).await;
+
+        let unrefused_directory = tempfile::tempdir().assured("the staging directory opens");
+        let unrefused_staging = SnapshotStaging::new(
+            unrefused_directory.path().to_path_buf(),
+            executor.clone(),
+            SnapshotStagingLimits::default(),
+        );
+        let mut unrefused =
+            WindowCheckpointBuilder::new(&executor, &unrefused_staging, window.archived());
+        let pending = unrefused
+            .admit_input(same_rows(&input_rows))
+            .await
+            .assured("the input rows are admitted");
+        unrefused
+            .admit_arguments(&pending, same_rows(&argument_rows))
+            .await
+            .assured("the argument columns are admitted");
+        let expected = unrefused
+            .finish()
+            .await
+            .assured("the unrefused checkpoint seals");
+        let expected = std::fs::read(expected.path()).assured("the sealed checkpoint reads");
+
+        // The quota is granted in whole mebibytes, one for every staged piece. With two of them
+        // free, a group's identity record and its frame stage, and the frame of its columns is
+        // refused.
+        let directory = tempfile::tempdir().assured("the staging directory opens");
+        let staging = SnapshotStaging::new(
+            directory.path().to_path_buf(),
+            executor.clone(),
+            SnapshotStagingLimits {
+                staging_bytes: 16 * MEBIBYTE,
+                snapshot_bytes: 16 * MEBIBYTE,
+            },
+        );
+        let mut refused = WindowCheckpointBuilder::new(&executor, &staging, window.archived());
+        let held = staging
+            .try_stage(14 * MEBIBYTE)
+            .await
+            .assured("another transfer holds most of the quota");
+        let failure = refused
+            .admit_input(same_rows(&input_rows))
+            .await
+            .expect_err("the quota has no room for the group's columns");
+        let mut full = false;
+        for frame in failure.frames() {
+            let staging = frame.downcast_ref::<SnapshotStagingError>();
+            if let Some(SnapshotStagingError::Full { .. }) = staging {
+                full = true;
+            }
+        }
+        assert!(
+            full,
+            "the refusal names the full staging quota: {failure:?}"
+        );
+        let released = staging
+            .try_stage(2 * MEBIBYTE)
+            .await
+            .assured("the refused attempt released the pieces it staged");
+        drop(released);
+        drop(held);
+
+        let pending = refused
+            .admit_input(same_rows(&input_rows))
+            .await
+            .assured("the same input rows are admitted again");
+        refused
+            .admit_arguments(&pending, same_rows(&argument_rows))
+            .await
+            .assured("the argument columns are admitted");
+        let sealed = refused
+            .finish()
+            .await
+            .assured("the checkpoint seals after its refusal");
+        assert_eq!(
+            std::fs::read(sealed.path()).assured("the sealed checkpoint reads"),
+            expected,
+            "a refused and repeated section seals the unrefused checkpoint"
+        );
+        drop(input_rows);
+        drop(argument_rows);
+        assert_eq!(
+            executor.snapshot().bulk_memory.reserved_bytes,
+            0,
+            "the refused attempt and the repeated one returned their bulk charges"
+        );
     }
 }

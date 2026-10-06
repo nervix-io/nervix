@@ -465,10 +465,13 @@ encoding, which refuses a window whose rows exceed the whole bulk budget before 
 section. A larger window persists through the same container sealed in bounded pieces: each group
 of rows is sealed and staged on quota-owned disk as soon as it is encoded, the header is placed
 first once the groups are counted, and the pieces are concatenated one 64 KiB chunk at a time and
-published as a segmented checkpoint. The two encodings are byte-identical for the same window.
+published as a segmented checkpoint. Each bounded typed section of delayed histogram removals is
+encoded, staged and released before the next, so the removals never hold more than one section of
+the bulk budget. The two encodings are byte-identical for the same window.
 A backup restore seals an archived window the same way, one archived section at a time and a
 group's input rows before its argument columns, keeping each archived Arrow section whenever its
-rows' identities fit one identity record.
+rows' identities fit one identity record. A section whose sealing fails stages nothing and leaves
+the checkpoint as it was, so a restore the node refused only for room seals the same section again.
 
 Retained input keys may repeat, and argument rows are unbranched. The relay restore boundary
 applies one-record-per-concrete-branch validation after this shared decoder; that relay invariant
