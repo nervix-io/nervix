@@ -270,7 +270,7 @@ jq -n --arg plan "$(sha "${recorded}/mixed/plan.json")" --arg input "$(sha "${re
      tool_images: ({kafka: 0, kcat: 0, probe: 0, pumba: 0, nettools: 0} | map_values({reference: $probe, image_id: $probe_id})),
      mixed: {seed: null, policy: "temporary-quorum-loss", plan: {sha256: $plan},
              limits: {max_memory_bytes: 1073741824, max_recovery_backlog: 20, max_pending: 128},
-             deployment: {nodes: {NERVIX_RAFT_HEARTBEAT_INTERVAL: "250ms"}, load_interval: "1.0"}},
+             deployment: {nodes: {NERVIX_RAFT_HEARTBEAT_INTERVAL: "250ms"}, load_interval_ms: 1000}},
      fixtures: {input: {sha256: $input, records: 1500}, graph: {sha256: $graph}}}' >"${recorded}/manifest.json"
 jq '.scenario = "baseline"' "${recorded}/manifest.json" >"${tmp_dir}/baseline-manifest.json"
 mkdir -p "${tmp_dir}/baseline-run"
@@ -280,8 +280,10 @@ expect_setup_rejection 'a run of another scenario' 'only mixed-instability runs 
 expect_setup_rejection 'a replay that changes the experiment' 'so --seed cannot change it' \
     "${chaos_dir}/chaos.sh" replay "${recorded}" --seed 3
 cp -R "${recorded}" "${tmp_dir}/incomplete"
-jq 'del(.tool_images.pumba) | del(.fixtures.graph)' "${recorded}/manifest.json" >"${tmp_dir}/incomplete/manifest.json"
-expect_setup_rejection 'an incomplete trace of the experiment' 'does not record the pumba image, the NSPL graph' \
+jq 'del(.tool_images.pumba) | del(.mixed.deployment.load_interval_ms) | del(.fixtures.graph)' \
+    "${recorded}/manifest.json" >"${tmp_dir}/incomplete/manifest.json"
+expect_setup_rejection 'an incomplete trace of the experiment' \
+    'does not record the pumba image, the load interval, the NSPL graph' \
     "${chaos_dir}/chaos.sh" replay "${tmp_dir}/incomplete"
 cp -R "${recorded}" "${tmp_dir}/tampered"
 jq '.steps[0].actions[0].hold_seconds = 31' "${recorded}/mixed/plan.json" >"${tmp_dir}/tampered/mixed/plan.json"

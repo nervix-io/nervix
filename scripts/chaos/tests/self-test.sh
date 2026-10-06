@@ -603,8 +603,11 @@ CHAOS_KCAT_IMAGE="${chaos_kcat_image}" \
 CHAOS_PROBE_IMAGE="${chaos_probe_image}" \
 CHAOS_SCRIPT_DIR="${chaos_dir}" \
 CHAOS_LOAD_FILE="${expected}" \
+CHAOS_LOAD_INTERVAL_MS="750" \
 CHAOS_STATE_LOAD_FILE="${expected}" \
+CHAOS_STATE_LOAD_INTERVAL_MS="1000" \
 CHAOS_PACED_LOAD_FILE="${expected}" \
+CHAOS_PACED_LOAD_INTERVAL_MS="250" \
 CHAOS_TRAFFIC_DIR="${tmp_dir}" \
 CHAOS_NODE_COUNT="3" \
 CHAOS_SUBNET="10.213.7.0/24" \
@@ -629,8 +632,11 @@ jq -e --arg image "${placeholder_image}" \
     and ([.services | to_entries[] | select(.key | test("^nervix-[123]$")) | .value]
          | all(.labels["io.nervix.chaos.run"] == "self-test"))
     and .services.load.labels["io.nervix.chaos.role"] == "load"
+    and .services.load.environment.CHAOS_LOAD_INTERVAL_MS == "750"
     and .services["state-load"].labels["io.nervix.chaos.role"] == "load"
+    and .services["state-load"].environment.CHAOS_LOAD_INTERVAL_MS == "1000"
     and .services["paced-load"].labels["io.nervix.chaos.role"] == "load"
+    and .services["paced-load"].environment.CHAOS_LOAD_INTERVAL_MS == "250"
     and .services.observer.labels["io.nervix.chaos.role"] == "observer"
     and .services["clock-observer"].labels["io.nervix.chaos.role"] == "observer"
     and .services["clock-observer"].image == $image
@@ -776,4 +782,5 @@ printf 'chaos harness self-test passed\n'
 "${script_dir}/docker-events-self-test.sh"
 "${script_dir}/recovery-self-test.sh"
 "${script_dir}/stateful-self-test.sh"
+"${script_dir}/load-self-test.sh"
 "${script_dir}/mixed-self-test.sh"

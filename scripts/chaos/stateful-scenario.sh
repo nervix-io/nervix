@@ -245,8 +245,10 @@ stateful_snapshot_interval_ms() {
 stateful_load_running() {
     local load_id
     load_id="$(owned_service_container state-load)" || return 1
-    container_running "${load_id}" \
-        || { failure_category=setup; stateful_fail setup 'the stateful load ended before the run stopped it; increase its fixture'; }
+    if ! container_running "${load_id}"; then
+        failure_category=setup
+        stateful_fail setup "the stateful load stopped before the run stopped it: $(stopped_load_reason "${load_id}" 'increase its fixture')"
+    fi
 }
 
 # Holds the stateful source after the milestone's records once it passed the hold request, drains
@@ -431,6 +433,7 @@ stateful_final_boundary() {
         >"${artifact_dir}/traffic/state-accepted-input.ndjson" 2>"${case_dir}/state-source.stderr"
     [[ "$(wc -l <"${artifact_dir}/traffic/state-accepted-input.ndjson")" -eq "${state_end}" ]] \
         || stateful_fail product 'the stateful accepted-input ledger did not cover the source boundary'
+    record_load_pacing state-load chaos_state_input "${state_end}" "${CHAOS_STATE_LOAD_INTERVAL_MS}"
     wait_for "stateful source acknowledged through ${state_end}" "${stateful_drain_bound}" \
         stateful_group_committed chaos_stateful chaos_state_input "${state_end}" "${case_dir}/final-state-group.txt" \
         || recovery_finding "${case_dir}" "the stateful source was not acknowledged through its final boundary ${state_end}"

@@ -376,6 +376,11 @@ run_domain_time() {
     local load_id
     load_id="$(owned_service_container paced-load)" || return 1
     wait_for 'paced load flushed and exited' 40 load_exited_cleanly "${load_id}"
+    local paced_input_end
+    paced_input_end="$(topic_end_offset chaos_paced_input)"
+    [[ "${paced_input_end}" =~ ^[0-9]+$ && "${paced_input_end}" -gt 0 ]] \
+        || domain_time_fail setup 'the paced source offset was unavailable'
+    record_load_pacing paced-load chaos_paced_input "${paced_input_end}" "${CHAOS_PACED_LOAD_INTERVAL_MS}"
     wait_for 'paced windows settled after the load stopped' 60 domain_time_output_settled \
         || domain_time_fail product 'paced windows kept closing after the load stopped'
     local paced_end

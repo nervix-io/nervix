@@ -289,6 +289,8 @@ load_replay_settings() {
           (if (.mixed.plan.sha256 | digest) | not then "the action plan digest" else empty end),
           (if (.mixed.limits | type == "object") | not then "the declared limits" else empty end),
           (if (.mixed.deployment.nodes | type == "object") | not then "the deployment" else empty end),
+          (if (.mixed.deployment.load_interval_ms | type == "number" and . >= 1 and . == floor) | not
+           then "the load interval" else empty end),
           (if ((.fixtures.input.sha256 | digest) and (.fixtures.input.records | type == "number")) | not
            then "the input fixture" else empty end),
           (if (.fixtures.graph.sha256 | digest) | not then "the NSPL graph" else empty end)
@@ -336,14 +338,14 @@ load_replay_settings() {
     while IFS=$'\t' read -r setting value; do
         export "CHAOS_${setting#NERVIX_}=${value}"
     done < <(jq -r '.mixed.deployment.nodes | to_entries[] | "\(.key)\t\(.value)"' "${manifest}")
-    replay_load_interval="$(jq -r '.mixed.deployment.load_interval' "${manifest}")"
+    replay_load_interval_ms="$(jq -r '.mixed.deployment.load_interval_ms' "${manifest}")"
     replay_of="$(jq -c --arg directory "${replay_dir}" '{run_id, directory: $directory, status, exit_code,
         final_phase, plan_sha256: .mixed.plan.sha256, seed: .mixed.seed}' "${manifest}")"
 }
 
 replay_image_id=""
 replay_repo_digests=""
-replay_load_interval=""
+replay_load_interval_ms=""
 replay_of=null
 declare -A replay_tool_image_ids=()
 if [[ -n "${replay_dir}" ]]; then
@@ -572,29 +574,38 @@ if [[ "${scenario}" == pause-resume || "${fault}" == *-pause ]]; then
     export CHAOS_RAFT_ELECTION_TIMEOUT_MIN=10s
     export CHAOS_RAFT_ELECTION_TIMEOUT_MAX=12s
     export CHAOS_NODE_UNAVAILABILITY_TIMEOUT=15s
-    export CHAOS_LOAD_INTERVAL=1.0
 fi
-if [[ "${scenario}" == partition-recovery ]]; then
-    # One record every two seconds keeps the bounded fixture flowing through all four cases.
-    export CHAOS_LOAD_INTERVAL=2.0
-fi
-if [[ "${scenario}" == degraded-links ]]; then
-    CHAOS_LOAD_INTERVAL="$(awk -v ms="${load_interval_ms}" 'BEGIN {printf "%.3f", ms / 1000}')"
-    export CHAOS_LOAD_INTERVAL
-fi
-if [[ "${scenario}" == stale-follower || "${scenario}" == former-owner-restart || "${scenario}" == cluster-restart ]]; then
-    # One record a second keeps the bounded fixture flowing through the slowest recovery case.
-    export CHAOS_LOAD_INTERVAL=1.0
-fi
+# The continuous load produces one fixture record per interval.
+case "${scenario}" in
+    baseline)
+        # The baseline produces its whole fixture with one call and starts no continuous load.
+        ;;
+    degraded-links)
+        # --load-interval-ms declares the interval.
+        ;;
+    partition-recovery)
+        # One record every two seconds keeps the bounded fixture flowing through all four cases.
+        load_interval_ms=2000
+        ;;
+    pause-resume | stale-follower | former-owner-restart | cluster-restart | stateful | domain-time)
+        # One record a second keeps the bounded fixture flowing through the slowest case.
+        load_interval_ms=1000
+        ;;
+    mixed-instability)
+        # One record a second keeps the fixture flowing through a long timeline of disturbances; a
+        # replay produces at the interval its run recorded.
+        load_interval_ms="${replay_load_interval_ms:-1000}"
+        ;;
+    *)
+        load_interval_ms=500
+        ;;
+esac
+export CHAOS_LOAD_INTERVAL_MS="${load_interval_ms}"
 if [[ "${scenario}" == stale-follower ]]; then
     # Ordinary retention options small enough that acknowledged changes made while one follower is
     # offline snapshot and purge the survivors' logs past its position within a bounded run.
     export CHAOS_RAFT_SNAPSHOT_ENTRY_THRESHOLD=64
     export CHAOS_RAFT_COVERED_LOG_ENTRIES_RETAINED=16
-fi
-if [[ "${scenario}" == stateful || "${scenario}" == domain-time ]]; then
-    # One baseline record a second keeps the bounded fixture flowing through the whole timeline.
-    export CHAOS_LOAD_INTERVAL=1.0
 fi
 if [[ "${scenario}" == stateful ]]; then
     # Ordinary state options: a one-second snapshot interval publishes runtime checkpoints several
@@ -605,13 +616,11 @@ if [[ "${scenario}" == stateful ]]; then
         export CHAOS_REPLICA_COUNT=1
     fi
 fi
-if [[ "${scenario}" == mixed-instability ]]; then
-    # One record a second keeps the fixture flowing through a long timeline of disturbances; a
-    # replay produces at the interval its run recorded.
-    export CHAOS_LOAD_INTERVAL="${replay_load_interval:-1.0}"
-fi
 export CHAOS_STATE_LOAD_FILE="${artifact_dir}/fixtures/state-input.ndjson"
 export CHAOS_PACED_LOAD_FILE="${artifact_dir}/fixtures/paced-input.ndjson"
+# The stateful load produces one record a second and the paced load one every 250 ms.
+export CHAOS_STATE_LOAD_INTERVAL_MS=1000
+export CHAOS_PACED_LOAD_INTERVAL_MS=250
 
 jq -n \
     --arg run_id "${run_id}" \
@@ -1117,7 +1126,9 @@ finish() {
             diagnostics/target-before-unpause.json diagnostics/target-unpause.txt \
             results/pause-progress.json \
             traffic/observed-output.ndjson results/crash-progress.json \
-            results/ledger.json results/ledger.txt results/container-images.json; do
+            results/ledger.json results/ledger.txt results/load-pacing.json \
+            results/state-load-pacing.json results/paced-load-pacing.json \
+            results/container-images.json; do
             if [[ -s "${artifact_dir}/${evidence_path}" ]]; then
                 evidence_paths+=("${evidence_path}")
             fi
@@ -1526,6 +1537,42 @@ wait_for_stable_output() {
     return 124
 }
 
+# Records a continuous load the scenario starts: the Compose SERVICE that runs it, the TOPIC it
+# produces to, its interval and where the run will leave its pacing verdict.
+manifest_load() {
+    local service="$1" topic="$2" interval_ms="$3"
+    # The dollars in this jq filter are jq variables, not shell expansion.
+    # shellcheck disable=SC2016
+    update_manifest '.loads += [{service: $service, topic: $topic, interval_ms: $interval_ms, pacing: ("results/" + $service + "-pacing.json")}]' \
+        --arg service "${service}" --arg topic "${topic}" --argjson interval_ms "${interval_ms}"
+}
+
+# Reads the create time the broker stored for each of the first COUNT records of TOPIC, in offset
+# order, and judges the gaps between them against the INTERVAL_MS of the Compose SERVICE that
+# produced them. The evidence is traffic/SERVICE-timestamps.txt and results/SERVICE-pacing.json. A
+# verdict that did not pass is kept and applied after the ledger, so a run whose load was not paced
+# still keeps its delivery evidence. Evidence that cannot be read is a controller failure at once.
+load_pacing_failures=()
+record_load_pacing() {
+    local service="$1" topic="$2" count="$3" interval_ms="$4"
+    local timestamps="${artifact_dir}/traffic/${service}-timestamps.txt"
+    local scenario_category="${failure_category}"
+    failure_category=controller
+    kcat -q -b broker:9092 -C -t "${topic}" -p 0 -o beginning -c "${count}" -f '%T %o\n' \
+        >"${timestamps}" 2>"${artifact_dir}/traffic/${service}-timestamps.stderr"
+    local timestamp_count
+    timestamp_count="$(wc -l <"${timestamps}")"
+    if [[ "${timestamp_count}" -ne "${count}" ]]; then
+        printf '%s timestamps cover %s records, expected %s\n' "${topic}" "${timestamp_count}" "${count}" >&2
+        return 1
+    fi
+    failure_category="${scenario_category}"
+    "${script_dir}/verify-load-pacing.sh" "${timestamps}" "${interval_ms}" \
+        "${artifact_dir}/results/${service}-pacing.json" \
+        >"${artifact_dir}/results/${service}-pacing.txt" 2>&1 \
+        || load_pacing_failures+=("${service}")
+}
+
 capture_metrics() {
     local hostname="$1"
     local output="${artifact_dir}/public/metrics-${hostname}.txt"
@@ -1697,6 +1744,14 @@ if [[ "${scenario}" != "baseline" && "${scenario}" != backup ]]; then
     update_manifest '.pumba_image_id = $image_id | .pumba_image = $image' \
         --arg image_id "${pumba_image_id}" --arg image "${CHAOS_PUMBA_IMAGE}"
 fi
+if [[ "${scenario}" != baseline ]]; then
+    manifest_load load chaos_input "${load_interval_ms}"
+fi
+if [[ "${scenario}" == stateful ]]; then
+    manifest_load state-load chaos_state_input "${CHAOS_STATE_LOAD_INTERVAL_MS}"
+elif [[ "${scenario}" == domain-time ]]; then
+    manifest_load paced-load chaos_paced_input "${CHAOS_PACED_LOAD_INTERVAL_MS}"
+fi
 if [[ "${scenario}" == partition-recovery ]]; then
     # shellcheck disable=SC2016
     update_manifest '.partition = {case: $case, minimum_window_seconds: ($seconds | tonumber)}' \
@@ -1740,7 +1795,10 @@ if [[ "${scenario}" == degraded-links ]]; then
 fi
 
 phase "verifier self-check"
-run_bounded 180 "${script_dir}/tests/self-test.sh" \
+# The self-check drives Docker as a scenario does, so the worker's load stretches it: it takes half
+# a minute on a quiet worker and took 247 seconds beside three chaos runs on a loaded one. The bound
+# only ends a self-check that hangs.
+run_bounded 600 "${script_dir}/tests/self-test.sh" \
     >"${artifact_dir}/results/verifier-self-test.txt" 2>&1
 
 phase "TLS generation"
@@ -1754,7 +1812,7 @@ if [[ "${scenario}" == mixed-instability ]]; then
     deployment="$(compose config --format json | jq -c '
         {nodes: (.services["nervix-1"].environment
                  | with_entries(select(.key | test("^NERVIX_(RAFT_|NODE_UNAVAILABILITY_TIMEOUT$|REPLICA_COUNT$|STATE_SNAPSHOT_INTERVAL$)")))),
-         load_interval: .services.load.environment.CHAOS_LOAD_INTERVAL}')"
+         load_interval_ms: (.services.load.environment.CHAOS_LOAD_INTERVAL_MS | tonumber)}')"
     if [[ -n "${replay_dir}" ]]; then
         jq -e --argjson rendered "${deployment}" '.mixed.deployment == $rendered' \
             "${replay_dir}/manifest.json" >/dev/null \
@@ -2016,6 +2074,11 @@ kcat -q -b broker:9092 -C -t chaos_input -p 0 -o beginning -c "${input_end}" \
 accepted_count="$(wc -l <"${artifact_dir}/traffic/accepted-input.ndjson")"
 [[ "${accepted_count}" -eq "${input_end}" ]] \
     || { printf 'accepted-input ledger has %s records, expected %s\n' "${accepted_count}" "${input_end}" >&2; exit 1; }
+fi
+
+if [[ "${scenario}" != baseline ]]; then
+    phase "load pacing"
+    record_load_pacing load chaos_input "${input_end}" "${load_interval_ms}"
 fi
 
 phase "offset and output boundaries"
@@ -2305,6 +2368,18 @@ else
         --slurpfile ledger "${artifact_dir}/results/ledger.json" \
         '{verdict:"pass",run_id:$run_id,scenario:$scenario,image_id:$image_id,tool_images:$tool_images,topology_nodes:$nodes,accepted_source_records:$accepted_records,observed_output_records:$observed_records,replay_duplicates:$ledger[0].duplicate_records,source_offsets_committed:true,ledger:"results/ledger.json",remote_path:"results/remote-path.json",progress:$progress[0]}' \
         >"${artifact_dir}/results/crash.json"
+fi
+
+# A run whose other verdicts passed still fails when a load has no passing pacing verdict: every
+# timing the run reports was then measured under a load other than the declared one.
+if ((${#load_pacing_failures[@]} > 0)); then
+    failure_category=controller
+    current_phase='load pacing'
+    for unpaced_load in "${load_pacing_failures[@]}"; do
+        printf 'controller failure: %s was not verified to keep its records an interval apart; see results/%s-pacing.json\n' \
+            "${unpaced_load}" "${unpaced_load}" >&2
+    done
+    exit 1
 fi
 
 current_phase="complete"
