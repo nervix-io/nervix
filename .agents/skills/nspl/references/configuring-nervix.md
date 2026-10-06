@@ -405,8 +405,10 @@ Choose checks relevant to the configured graph:
   logical usage from SST allocation. Recover an uncertain applying restore with its exact
   execution reference; after a terminal failed restore, restore into a fresh target name.
   Restore metadata preparation has a separate per-node `restore_metadata` memory grant, defaulting
-  to 2 GiB and admitted before decoding or planning. Native lifecycle and Kafka checkpoints stream
-  through quota-owned files and 64 KiB windows with a fixed 2 MiB bulk I/O grant per operation.
+  to 2 GiB and admitted before decoding or planning. Native lifecycle, Kafka, deduplicator and
+  window checkpoints stream through quota-owned files and 64 KiB windows with a fixed 2 MiB bulk
+  I/O grant per operation, so a keyspace or window larger than the 32 MiB bulk budget restores; a
+  deduplicator conversion also charges its resident keyspace to `restore_metadata` while it runs.
   Observe `nervix_execution_memory_reserved_bytes` by class; database and runtime `START` memory
   have separate owners. The backup chapter documents record limits and preparation sizing.
 - `SHOW UDFS`, `DESCRIBE UDF <name>`, and `SHOW CREATE UDF <name>` inspect trusted Roto functions.

@@ -360,8 +360,12 @@ runtime while it serializes.
 The publication shares the retained input and aggregate-argument Arrow columns through row views.
 The snapshot task seals those views as bounded Arrow sections on the bulk executor, while a
 separate bounded typed section carries each group of histogram delayed removals. Encoding never
-materializes a scalar-field copy of the retained payload. Restore opens the sections on the bulk
-executor and reuses their columns to rebuild exact accumulators and sketch panes.
+materializes a scalar-field copy of the retained payload. A window whose rows exceed one snapshot
+section is sealed group by group into quota-owned pieces and published as a segmented checkpoint
+under the state store's installation barrier, as a materialized relay's periodic checkpoint is;
+the snapshot task holds no lock while it seals, and the barrier is held only by the storage job
+that writes the segments and the header. Restore opens the sections on the bulk executor and
+reuses their columns to rebuild exact accumulators and sketch panes.
 
 Evicting a concrete branch resets its retained window rows and aggregate structures before the
 branch task's final publication. The published generation is empty, so a later appearance of the

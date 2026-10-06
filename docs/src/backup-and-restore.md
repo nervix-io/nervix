@@ -341,13 +341,34 @@ identity and column pieces, then concatenates them into a quota-owned file with 
 That file uses the same streamed publisher as a guest save, including when one relay's container
 exceeds the 32 MiB bulk budget. It never enters encoded metadata installation. Temporary conversion
 pieces and the completed container can briefly occupy twice the container's disk space.
-Deduplicator and window sections follow the same boundary. Planning, including a dry run, decodes
-every key group, input group and argument group under the exact Arrow schema the restored models
-give it, one bounded group at a time on the bulk CPU workers. It checks the key and row counts,
-rejects a key that appears twice, and checks each delayed histogram bucket against the restored
-histogram's bucket count. Conversion charges each decoded group to bulk memory until the branch's
-native keyspace or window checkpoint is encoded, then writes that checkpoint into a quota-owned
-file for the streamed publisher.
+Deduplicator and window sections follow the same boundary, including a keyspace or a window whose
+native checkpoint exceeds the 32 MiB bulk budget. Planning, including a dry run, and installation
+decode every key group, input group and argument group under the exact Arrow schema the restored
+models give it, one bounded group at a time on the bulk CPU workers. Each decoded group is charged
+to bulk memory only while it converts. Conversion checks the key and row counts, rejects a key that
+appears twice, and checks each delayed histogram bucket against the restored histogram's bucket
+count.
+
+A deduplicator conversion holds the keyspace as the runtime holds a restored one: every key
+normalized as the restored `DEDUPLICATE ON` expressions key it, in an expiry map. That is how a key
+the archive holds twice is found. The parts and values of the keys follow their Arrow columns, and
+are charged to the `restore_metadata` class as each group is admitted; a conversion that class
+cannot hold now is refused rather than kept waiting. The fixed share of every key, its map entry
+and its serializer resolver, was admitted with the archive description. The native checkpoint then
+streams from the resident keyspace into a quota-owned file through a 64 KiB buffered writer under
+the fixed 2 MiB bulk grant, converting one entry at a time. It is the same encoding the runtime
+writes for the same keys.
+
+A window conversion seals each archived group's input rows, and then its argument columns, into
+quota-owned pieces as soon as each is admitted, so it holds one archived section and its decoded
+batch at a time and never the whole window. When a group's row identities fit one 1 MiB identity
+record, its archived input and argument sections become the checkpoint's Arrow sections
+unchanged. Otherwise the group splits into groups that fit, whose columns are projected again.
+The window header, which counts the rows and the nested containers' bytes, is written last and
+placed first; the delayed histogram removals follow in bounded typed sections. The pieces are then
+concatenated into the checkpoint file with one 64 KiB buffer, and briefly occupy twice the
+checkpoint's disk space.
+
 Backup section openings share Snapshot admission with materialized readers. A capacity-only
 refusal retries within the opening's single 30-second deadline; other failures end the fetch.
 Completed response streams release their transport permits before local verification and decoding.
@@ -418,9 +439,14 @@ preparation reservation: 16 times encoded record bytes (including the manifest),
 bytes, and 2 MiB of fixed overhead. Resource archives, guest saves and the materialized,
 deduplicator and window Arrow groups remain on disk; their conversion is charged separately. The charge
 covers overlapping owned archive values, aligned decode buffers, model parsing and planning
-copies, branch text and typed-key conversion, and native serializer resolvers. Admission refuses
-unaddressable estimates or unavailable capacity before a restore changes the cluster. Parsing and
-the pure restore planner run as admitted bulk CPU work.
+copies, branch text and typed-key conversion, and native serializer resolvers. Once the
+description is decoded, the reservation also grows by the fixed share of every key the archive's
+deduplicator descriptors count: the key's entry in the resident keyspace and its resolver in the
+streamed checkpoint's serializer scratch. A window descriptor's record already carries each
+retained row's watermarks, so its record charge covers the per-row identities a window conversion
+builds one group at a time. Admission refuses unaddressable estimates or unavailable capacity
+before a restore changes the cluster. Parsing and the pure restore planner run as admitted bulk
+CPU work.
 
 The description, parsed Models and reservation have one shared lifetime. A native encoding job
 retains that owner through cancellation; each entry is converted separately, and fixed-capacity
@@ -743,7 +769,10 @@ missing or reordered sections and truncated streams before verified contents rea
 Materialized cases also reject inconsistent row/group counts, missing identity or column sections,
 invalid keys/watermarks and damaged Arrow bytes. Deduplicator and window properties compare
 complete descriptors, typed branch keys, row sequences and watermarks, delayed histogram removals
-and every Arrow group's bytes; their malformed cases reject reversed watermarks, impossible
+and every Arrow group's bytes. The restore conversion property streams every rebuilt keyspace and
+checks it against the runtime's own encoding of the same keys byte for byte, and rebuilds windows
+both from archived sections kept whole and from groups split by a narrow identity record; their
+malformed cases reject reversed watermarks, impossible
 sequences and group counts, a zero incarnation, missing key, input or argument groups, misplaced
 group numbers and descriptors that name more groups than the archive holds. The owning runtime column property separately
 checks exact-schema encoding, restore conversion and complete native generation equality.
@@ -786,6 +815,9 @@ production-owner concurrency and recovery evidence.
 | Materialized identity group / Arrow group | 1 MiB / 8 MiB |
 | Materialized capture metadata / typed uniqueness metadata / native row views | 8 MiB each, independently admitted |
 | Deduplicator key group / window input group / window argument group | 8 MiB each; capture fills a group to at most half that bound, and a single larger row takes a group of its own |
+| One archived deduplicator keyspace or window | Not bounded by the bulk budget. A keyspace's key parts and values are charged to `restore_metadata` while it converts, beside the fixed per-key share admitted with the description; a window conversion holds one archived section at a time |
+| Window checkpoint identity record | 1 MiB of row identities; a larger archived group splits into groups that fit |
+| Restored window rows a branch reopens | No row ceiling of their own; their row views are charged to the relay memory class while the branch reopens the window |
 | Physical checkpoint placement encoding | 60 KiB, including domain and installation namespace |
 | Unpublished restore checkpoint keys and values per node | 128 GiB by default; configurable with `--restore-staging-max-bytes` |
 
@@ -797,8 +829,15 @@ the archive is larger than one archive may be, or the leader's staging area cann
 it again once retained archives are released and snapshot transfers finish. A restore's model batch
 is not bounded by the statement and source-byte limits of a transaction. Each node must admit the
 bounded installation or publication job within its bulk working-memory budget (32 MiB by default).
-A state set may exceed that budget. An individual job that cannot be admitted fails with the start
-gate still closed.
+A state set, and an individual materialized relay, deduplicator keyspace or window, may exceed that
+budget. An individual job that cannot be admitted fails with the start gate still closed.
+
+A restored deduplicator keyspace or window that exceeds one 2 MiB state-sync response is installed
+on every assigned owner and replica, but its replicas do not follow the revisions the owner
+publishes after `RESUME`, which is the replica limit any keyspace or window of that size has. The
+owner persists them: a window whose retained rows exceed one 8 MiB snapshot section is sealed in
+pieces on quota-owned disk and published as a segmented checkpoint, so it survives a restart at
+any size the node's snapshot staging quota holds rather than only within the bulk budget.
 
 ## Failures
 
@@ -831,7 +870,10 @@ A refused restore reports `restore refused:` and the reason, and changed nothing
 - a model binds a resource version the restore does not import as completed
 - a domain's models do not form a valid configuration, as the transaction planner finds
 - an archived materialized relay, deduplicator keyspace or window does not convert under the shape
-  its restored model gives it, naming the entity; a dry run runs the same conversion
+  its restored model gives it, or its conversion cannot be admitted, naming the entity; a dry run
+  runs the same conversion
+- the archive's metadata, including the fixed share of every archived deduplicator key, exceeds the
+  node's available restore preparation budget
 
 A restore that failed at a step reports `restore failed at step '<step>':`, the reason, and that the
 steps before it stay applied, together with the report of every step. The reasons are a consensus

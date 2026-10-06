@@ -353,7 +353,10 @@ use deduplicator::{
     CompiledDeduplicatorKeyProgram, DeduplicatorKey, DeduplicatorKeyspace,
     PublishedDeduplicatorKey, ReplicatedDeduplicatorState, compile_deduplicator_key_program,
 };
-pub(crate) use deduplicator_archive::{ArchivedDeduplicatorKeys, CapturedDeduplicatorKeyspace};
+pub(crate) use deduplicator_archive::{
+    ArchivedDeduplicatorKeys, CapturedDeduplicatorKeyspace, DeduplicatorArchiveError,
+    restored_key_fixed_bytes,
+};
 use domain_clock::{
     DomainCadenceOccurrence, DomainCadenceStart, DomainClockAccessResult, LogicalDeadline,
     checked_add_duration_to_timestamp, wait_for_branch_deadline,
@@ -649,7 +652,7 @@ use window_accumulator::{
     RetainedWindowRows, WindowAccumulator, WindowAccumulatorPlan, WindowArgumentColumns, WindowRow,
 };
 pub(crate) use window_archive::{
-    ArchivedWindow, CapturedWindow, WindowAccumulatorState, WindowCheckpointBuilder,
+    ArchivedRows, ArchivedWindow, CapturedWindow, WindowAccumulatorState, WindowArchiveError,
     WindowDelayedRemoval,
 };
 use window_processor::{
@@ -659,7 +662,8 @@ use window_processor::{
 };
 use window_state::{
     LinearHistogramDelayedRemovalSnapshot, ReplicatedWindowProcessorState,
-    WindowAccumulatorSnapshot, WindowEntrySnapshot, WindowProcessorStateSnapshot,
+    WindowAccumulatorSnapshot, WindowEntrySnapshot, WindowPersistence,
+    WindowProcessorStateSnapshot,
 };
 
 #[cfg(test)]

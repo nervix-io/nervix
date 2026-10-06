@@ -200,6 +200,7 @@ class InventoryTests(unittest.TestCase):
             "runtime-state-store-checkpoints",
             "runtime-window-snapshots",
             "runtime-window-snapshots-malformed",
+            "runtime-window-sealed-checkpoints",
             "resource-store-layout",
         })
         self.assertEqual({target.package for target in inventory.targets}, {

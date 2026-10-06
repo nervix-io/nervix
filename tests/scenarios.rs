@@ -24947,16 +24947,9 @@ enum UnmatchedPayloads {
     Fail,
 }
 
-/// Waits until every docstring line's `|`-separated fragments are all found in one subscription
-/// payload, and returns the payloads that matched, in the order they arrived.
-async fn receive_subscription_fragment_sets(
-    world: &mut ScenarioWorld,
-    duration: &str,
-    step: &Step,
-    unmatched: UnmatchedPayloads,
-) -> Vec<String> {
-    let duration = parse_duration_text(duration).expect("step duration must be a valid duration");
-    let expected_fragment_sets = docstring(step)
+/// Every docstring line's `|`-separated fragments, with placeholders expanded.
+fn docstring_fragment_sets(world: &ScenarioWorld, step: &Step) -> Vec<Vec<String>> {
+    docstring(step)
         .lines()
         .map(str::trim)
         .filter(|line| !line.is_empty())
@@ -24967,13 +24960,34 @@ async fn receive_subscription_fragment_sets(
                 .map(|fragment| expand_placeholders(world, fragment))
                 .collect::<Vec<_>>()
         })
-        .collect::<Vec<_>>();
+        .collect::<Vec<_>>()
+}
 
+/// Waits until every docstring line's `|`-separated fragments are all found in one subscription
+/// payload, and returns the payloads that matched, in the order they arrived.
+async fn receive_subscription_fragment_sets(
+    world: &mut ScenarioWorld,
+    duration: &str,
+    step: &Step,
+    unmatched: UnmatchedPayloads,
+) -> Vec<String> {
+    let expected_fragment_sets = docstring_fragment_sets(world, step);
     assert!(
         !expected_fragment_sets.is_empty(),
         "step docstring must contain at least one expected payload fragment set"
     );
+    receive_expected_fragment_sets(world, duration, expected_fragment_sets, unmatched).await
+}
 
+/// Waits until each of `expected_fragment_sets` is found whole in one subscription payload, and
+/// returns the payloads that matched, in the order they arrived.
+async fn receive_expected_fragment_sets(
+    world: &mut ScenarioWorld,
+    duration: &str,
+    expected_fragment_sets: Vec<Vec<String>>,
+    unmatched: UnmatchedPayloads,
+) -> Vec<String> {
+    let duration = parse_duration_text(duration).expect("step duration must be a valid duration");
     let session = world
         .active_session
         .as_mut()

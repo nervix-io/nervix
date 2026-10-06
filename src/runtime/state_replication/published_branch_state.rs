@@ -51,17 +51,6 @@ impl PublishedBranchState {
         }
     }
 
-    async fn snapshot_after(
-        &self,
-        after_lsm: u64,
-        executor: &Executor,
-    ) -> Result<Option<PersistedRuntimeStateEntry>, Report<RuntimePersistenceError>> {
-        match self {
-            Self::Deduplicator(state) => state.snapshot_after(Some(after_lsm)),
-            Self::WindowProcessor(state) => state.snapshot_after(Some(after_lsm), executor).await,
-        }
-    }
-
     /// Ask the branch task that owns this state to publish its live state, when that changed after
     /// the last publication.
     pub(super) async fn request_publication(
@@ -94,25 +83,67 @@ impl PublishedBranchState {
     ///
     /// This does not need the branch task: one that is gone can no longer publish, and what it
     /// published before is then the newest state anyone can restore. The encode reads the published
-    /// value, so a branch that is still running keeps processing while it runs.
+    /// value, so a branch that is still running keeps processing while it runs. A window too large
+    /// to encode in memory is sealed on quota-owned disk and published in bounded segments.
     pub(super) async fn persist_published(
         &self,
         store: &RuntimeStateStore,
         executor: &Executor,
+        staging: &SnapshotStaging,
     ) -> RuntimeStateResult<Option<u64>> {
-        let snapshot = self
-            .snapshot_after(self.last_persisted_lsm(), executor)
-            .await
-            .map_err(|error| {
-                RuntimeStateOperationError::persistence(error.current_context().clone())
-            })?;
-        let Some(snapshot) = snapshot else {
-            return Ok(None);
+        let revision = match self {
+            Self::Deduplicator(state) => {
+                let snapshot = state
+                    .snapshot_after(Some(self.last_persisted_lsm()))
+                    .map_err(|error| {
+                        RuntimeStateOperationError::persistence(error.current_context().clone())
+                    })?;
+                let Some(snapshot) = snapshot else {
+                    return Ok(None);
+                };
+                store
+                    .persist_latest_snapshot(self.placement(), snapshot.lsm, &snapshot.payload)
+                    .map_err(RuntimeStateOperationError::persistence)?;
+                snapshot.lsm
+            }
+            Self::WindowProcessor(state) => {
+                let persistence = state
+                    .persistence_after(self.last_persisted_lsm(), executor, staging)
+                    .await
+                    .map_err(|error| {
+                        RuntimeStateOperationError::persistence(error.current_context().clone())
+                    })?;
+                match persistence {
+                    None => return Ok(None),
+                    Some(WindowPersistence::Resident(snapshot)) => {
+                        store
+                            .persist_latest_snapshot(
+                                self.placement(),
+                                snapshot.lsm,
+                                &snapshot.payload,
+                            )
+                            .map_err(RuntimeStateOperationError::persistence)?;
+                        snapshot.lsm
+                    }
+                    Some(WindowPersistence::Sealed { revision, artifact }) => {
+                        store
+                            .publish_checkpoint_artifact(
+                                self.placement(),
+                                revision,
+                                Arc::new(artifact),
+                            )
+                            .await
+                            .map_err(|error| {
+                                RuntimeStateOperationError::persistence(
+                                    error.current_context().clone(),
+                                )
+                            })?;
+                        revision
+                    }
+                }
+            }
         };
-        store
-            .persist_latest_snapshot(self.placement(), snapshot.lsm, &snapshot.payload)
-            .map_err(RuntimeStateOperationError::persistence)?;
-        self.record_persisted(snapshot.lsm);
-        Ok(Some(snapshot.lsm))
+        self.record_persisted(revision);
+        Ok(Some(revision))
     }
 }

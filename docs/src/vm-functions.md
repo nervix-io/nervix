@@ -457,11 +457,25 @@ All paths are relative to the repository root.
 | `src/runtime/window_archive.rs` | A captured window as bounded archive Arrow groups, and the window snapshot rebuilt from them |
 | `src/runtime/subscription_predicate.rs` | Session subscription filters |
 
-Window checkpoints nest bounded resident Arrow containers from the shared snapshot codec under
-the window's complete-payload admission. Their retained input keys may repeat, and their argument
-rows are unbranched. The relay restore boundary applies one-record-per-concrete-branch validation
-after this shared decoder; that relay invariant does not restrict retained window rows. Relay
-snapshot transfers use quota-owned files independently of the window's resident encoding.
+Window checkpoints nest two Arrow containers of the shared snapshot codec, the retained input rows
+and their argument columns, behind a header that counts the rows and both containers' bytes. A
+window whose retained rows fit one 8 MiB snapshot section is encoded in memory under the window's
+complete-payload admission; replica synchronization and ownership handoff use that resident
+encoding, which refuses a window whose rows exceed the whole bulk budget before it encodes a
+section. A larger window persists through the same container sealed in bounded pieces: each group
+of rows is sealed and staged on quota-owned disk as soon as it is encoded, the header is placed
+first once the groups are counted, and the pieces are concatenated one 64 KiB chunk at a time and
+published as a segmented checkpoint. The two encodings are byte-identical for the same window.
+A backup restore seals an archived window the same way, one archived section at a time and a
+group's input rows before its argument columns, keeping each archived Arrow section whenever its
+rows' identities fit one identity record.
+
+Retained input keys may repeat, and argument rows are unbranched. The relay restore boundary
+applies one-record-per-concrete-branch validation after this shared decoder; that relay invariant
+does not restrict retained window rows. A relay's restored row views stay within its 8 MiB metadata
+ceiling, while a branch reopening its window charges the row views of every retained row to the
+relay memory class, so a window retaining more rows than that ceiling reopens after a restart or a
+restore. Relay snapshot transfers use quota-owned files independently of the window's encoding.
 
 ## Worked Example: `clamp`
 

@@ -16,6 +16,7 @@
 //! whole snapshot in memory.
 
 mod encoding;
+mod pieces;
 
 use std::{
     io::{Read as _, Seek as _, SeekFrom, Write as _},
@@ -29,6 +30,8 @@ use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_execution::{BudgetedBuffer, ChargedBytes, Executor, MemoryClass, StorageClass};
 use nervix_primitives::sync::OwnedSemaphorePermit;
 use thiserror::Error;
+
+pub(crate) use self::pieces::StagedPieces;
 
 /// Why a snapshot or an artifact could not be staged or read back.
 #[derive(Debug, Error)]

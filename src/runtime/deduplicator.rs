@@ -1,8 +1,9 @@
-use std::time::Duration;
+use std::{io::Write, mem::MaybeUninit, time::Duration};
 
 use error_stack::{Report, ResultExt as _};
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_checkpoint_replication::CheckpointReplication;
+use nervix_execution::Cancellation;
 use nervix_expiry_map::ExpiryMap;
 use nervix_models::{Expression, ModelName, RelayName, Timestamp};
 use nervix_primitives::sync::{Arc, StdArc};
@@ -12,9 +13,12 @@ use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 
 use super::{
     KeyProjectionKind, PersistedRuntimeStateEntry, ProcessorCompileError, ReorderKeyPart,
-    RuntimePersistenceError, RuntimeStatePlacement, UdfExecutor,
+    RuntimePersistenceError, RuntimeStateKind, RuntimeStatePlacement, UdfExecutor,
     branch_checkpoint_catalog::{BranchCheckpointCatalog, CatalogRegistration},
     checked_add_duration_to_timestamp, compile_key_projection_program,
+    native_checkpoint_encoding::{
+        CancellableEntry, CancellableIterator, IteratorAsVec, scratch_bytes,
+    },
     published_generation::{Generation, PublishedGenerations},
 };
 
@@ -37,10 +41,7 @@ impl DeduplicatorKey {
         let mut bytes = 0_u64;
         for part in &self.0 {
             let part_bytes = match part {
-                ReorderKeyPart::Utf8(value) => u64::try_from(value.len())
-                    .assured("an addressable string's length fits 64 bits"),
-                ReorderKeyPart::Bytes(value) => u64::try_from(value.len())
-                    .assured("an addressable byte string's length fits 64 bits"),
+                ReorderKeyPart::Utf8(_) | ReorderKeyPart::Bytes(_) => part.value_bytes(),
                 ReorderKeyPart::Null
                 | ReorderKeyPart::Boolean(_)
                 | ReorderKeyPart::Int64(_)
@@ -124,9 +125,119 @@ enum DeduplicatorKeyPartSnapshot {
     Datetime(i64),
 }
 
+/// A serialization view of the current archived keyspace root, whose entries are converted from
+/// the keys they share one at a time.
+#[derive(Archive, RkyvSerialize)]
+#[rkyv(as = ArchivedDeduplicatorSnapshot)]
+#[rkyv(serialize_bounds(__S: rkyv::ser::Writer + rkyv::ser::Allocator, __S::Error: rkyv::rancor::Source))]
+struct StreamingDeduplicatorSnapshot<
+    'a,
+    I: ExactSizeIterator<Item = DeduplicatorEntrySnapshot> + Clone,
+> {
+    #[rkyv(with = IteratorAsVec<CancellableEntry<'a, DeduplicatorEntrySnapshot>>, omit_bounds)]
+    entries: CancellableIterator<'a, I>,
+}
+
 // The header identifies this persisted shape before rkyv interprets its contents. Its length
 // preserves the archive's alignment when the header is stripped on restore.
 const SNAPSHOT_HEADER: &[u8; 16] = b"NERVIX DEDUP KEY";
+
+/// What each key adds to a streamed keyspace checkpoint's serializer scratch: the resolver of its
+/// entry, which stays there until the entries are written.
+pub(super) const STREAMED_KEY_RESOLVER_BYTES: usize =
+    std::mem::size_of::<<DeduplicatorEntrySnapshot as Archive>::Resolver>();
+
+/// The resolvers one key's parts occupy in serializer scratch while that key is written.
+const STREAMED_PART_RESOLVER_BYTES: usize =
+    std::mem::size_of::<<DeduplicatorKeyPartSnapshot as Archive>::Resolver>();
+
+/// What one entry and each of its parts can occupy in the encoded checkpoint beyond the bytes of
+/// their text and byte values, alignment padding included.
+const ENCODED_ENTRY_BYTES: u64 = 64;
+const ENCODED_PART_BYTES: u64 = 48;
+
+/// What a keyspace checkpoint occupies beside its entries: its header, the archived root and the
+/// root's alignment.
+pub(super) const ENCODED_SNAPSHOT_BYTES: u64 = 128;
+
+impl DeduplicatorKey {
+    /// What the key's parts and their text and byte values occupy on the heap.
+    pub(super) fn resident_bytes(&self) -> u64 {
+        let parts = self
+            .0
+            .len()
+            .checked_mul(std::mem::size_of::<ReorderKeyPart>())
+            .assured("an addressable key's parts occupy fewer bytes than the address space");
+        let mut bytes = u64::try_from(parts).assured("an addressable size fits 64 bits");
+        for part in &self.0 {
+            bytes = bytes
+                .checked_add(part.value_bytes())
+                .assured("an addressable key's values total fewer than 2^64 bytes");
+        }
+        bytes
+    }
+
+    /// The most this key can occupy in a keyspace checkpoint, alignment padding included.
+    pub(super) fn encoded_bound(&self) -> u64 {
+        let mut bytes = ENCODED_ENTRY_BYTES;
+        for part in &self.0 {
+            let part_bytes = part
+                .value_bytes()
+                .checked_add(ENCODED_PART_BYTES)
+                .assured("an addressable value and its fixed overhead fit 64 bits");
+            bytes = bytes
+                .checked_add(part_bytes)
+                .assured("an addressable key's encoded parts total fewer than 2^64 bytes");
+        }
+        bytes
+    }
+}
+
+/// The serializer scratch a streamed checkpoint of `keys` keys needs when its largest key has
+/// `largest_parts` parts: one entry resolver per key, and the part resolvers of one key at a time.
+pub(super) fn streamed_snapshot_scratch_bytes(keys: usize, largest_parts: usize) -> Option<usize> {
+    let nested = largest_parts.checked_mul(STREAMED_PART_RESOLVER_BYTES)?;
+    scratch_bytes::<DeduplicatorEntrySnapshot>(keys, nested)
+}
+
+/// Write the current keyspace checkpoint of `keys`, oldest first, converting one entry at a time.
+///
+/// The encoding is exactly what [`encode_deduplicator_snapshot`] produces for the same keys, but
+/// neither the converted entries nor the encoded bytes collect into a second whole keyspace: only
+/// the entry resolvers occupy serializer scratch, sized by [`streamed_snapshot_scratch_bytes`]
+/// for `largest_parts`, the most parts any of the keys has.
+pub(super) fn write_deduplicator_snapshot<'k>(
+    keys: impl ExactSizeIterator<Item = (&'k DeduplicatorKey, &'k Timestamp)> + Clone,
+    largest_parts: usize,
+    writer: &mut dyn Write,
+    cancellation: &Cancellation,
+) -> error_stack::Result<(), RuntimePersistenceError> {
+    let encode_error = || RuntimePersistenceError::NativeEncoding {
+        state: RuntimeStateKind::Deduplicator,
+    };
+    let capacity = streamed_snapshot_scratch_bytes(keys.len(), largest_parts)
+        .ok_or_else(|| Report::new(encode_error()))?;
+    writer
+        .write_all(SNAPSHOT_HEADER)
+        .map_err(|error| Report::new(error).change_context(encode_error()))?;
+    let mut scratch = vec![MaybeUninit::uninit(); capacity];
+    let snapshot = StreamingDeduplicatorSnapshot {
+        entries: CancellableIterator {
+            cancellation,
+            entries: keys.map(|(key, seen_at)| DeduplicatorEntrySnapshot {
+                key: DeduplicatorKeySnapshot::from(key),
+                seen_at: *seen_at,
+            }),
+        },
+    };
+    rkyv::api::low::to_bytes_in_with_alloc::<_, _, rkyv::rancor::Error>(
+        &snapshot,
+        rkyv::ser::writer::IoWriter::new(writer),
+        rkyv::ser::allocator::SubAllocator::new(&mut scratch),
+    )
+    .map(|_| ())
+    .map_err(|error| Report::new(error).change_context(encode_error()))
+}
 
 impl From<&DeduplicatorKey> for DeduplicatorKeySnapshot {
     fn from(key: &DeduplicatorKey) -> Self {

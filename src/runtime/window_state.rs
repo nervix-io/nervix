@@ -11,6 +11,7 @@ use std::io::Write as _;
 
 use arrow_schema::Schema as ArrowSchema;
 use error_stack::{Report, ResultExt as _};
+use meticulous::OptionExt as _;
 use nervix_checkpoint_replication::CheckpointReplication;
 use nervix_execution::{BudgetedBuffer, ChargedBytes, CpuClass, Executor, MemoryClass};
 use nervix_models::Timestamp;
@@ -23,9 +24,10 @@ use super::{
     branch_checkpoint_catalog::{BranchCheckpointCatalog, CatalogRegistration},
     materialized_snapshot::{
         MaterializedGeneration, MaterializedGenerationRecord, RestoredMaterializedSnapshot,
-        SealedSource, decode_aligned_rkyv,
+        RestoredRows, SealedContainerPieces, SealedSource, decode_aligned_rkyv,
     },
     published_generation::{Generation, PublishedGenerations},
+    snapshot_staging::{SnapshotStaging, StagedArtifact, StagedPieces},
 };
 
 /// One row a published window retains as shared Arrow views of its input and arguments.
@@ -170,116 +172,236 @@ struct WindowDelayedRemovalSection {
     removals: Vec<LinearHistogramDelayedRemovalSnapshot>,
 }
 
+/// The input and argument generations of consecutive retained rows, nested in a checkpoint as two
+/// sealed containers of the same row order.
+struct WindowGenerations {
+    input: MaterializedGeneration,
+    arguments: MaterializedGeneration,
+}
+
+impl WindowGenerations {
+    /// The rows `entries` hold as the nested generations of a checkpoint at `revision`, numbered by
+    /// `branch_generation`. Rows of no window lay out empty schemas.
+    fn of(entries: &[WindowEntrySnapshot], revision: u64, branch_generation: u64) -> Self {
+        let (input_schema, argument_schema) = match entries.first() {
+            Some(entry) => (
+                entry.record.one_row_batch().schema(),
+                entry.arguments.one_row_batch().schema(),
+            ),
+            None => (
+                StdArc::new(ArrowSchema::empty()),
+                StdArc::new(ArrowSchema::empty()),
+            ),
+        };
+        let mut input_records = Vec::with_capacity(entries.len());
+        let mut argument_records = Vec::with_capacity(entries.len());
+        for entry in entries {
+            input_records.push(MaterializedGenerationRecord {
+                branch: entry.key.clone(),
+                row: entry.record.clone(),
+            });
+            argument_records.push(MaterializedGenerationRecord {
+                branch: None,
+                row: entry.arguments.clone(),
+            });
+        }
+        Self {
+            input: MaterializedGeneration::new(
+                revision,
+                0,
+                branch_generation,
+                input_schema,
+                input_records,
+            ),
+            arguments: MaterializedGeneration::new(
+                revision,
+                0,
+                branch_generation,
+                argument_schema,
+                argument_records,
+            ),
+        }
+    }
+}
+
+/// What every aggregate keeps beyond the retained rows: its descriptor in the header, and the
+/// bounded typed sections that carry each linear histogram's delayed removals.
+struct WindowTypedSections {
+    descriptors: Vec<WindowAccumulatorDescriptor>,
+    sections: Vec<ChargedBytes>,
+}
+
+impl WindowTypedSections {
+    async fn encode(
+        accumulators: &[WindowAccumulatorSnapshot],
+        executor: &Executor,
+    ) -> Result<Self, Report<WindowSnapshotError>> {
+        let typed_limit = executor.limits().snapshot_record_bytes.as_u64();
+        let chunk_rows = usize::try_from((typed_limit / 64).max(1)).map_err(|error| {
+            Report::new(WindowSnapshotError::Encode {
+                section: WindowSnapshotSection::DelayedRemovals,
+            })
+            .attach_printable(error)
+        })?;
+        let mut descriptors = Vec::with_capacity(accumulators.len());
+        let mut sections = Vec::new();
+        for (demand, accumulator) in accumulators.iter().enumerate() {
+            nervix_primitives::task::consume_budget().await;
+            match accumulator {
+                WindowAccumulatorSnapshot::Retained => {
+                    descriptors.push(WindowAccumulatorDescriptor::Retained);
+                }
+                WindowAccumulatorSnapshot::LinearHistogram { delayed_removals } => {
+                    descriptors.push(WindowAccumulatorDescriptor::LinearHistogram {
+                        delayed_removals: u64::try_from(delayed_removals.len()).map_err(
+                            |error| {
+                                Report::new(WindowSnapshotError::Encode {
+                                    section: WindowSnapshotSection::DelayedRemovals,
+                                })
+                                .attach_printable(error)
+                            },
+                        )?,
+                    });
+                    let demand = u32::try_from(demand).map_err(|error| {
+                        Report::new(WindowSnapshotError::Encode {
+                            section: WindowSnapshotSection::DelayedRemovals,
+                        })
+                        .attach_printable(error)
+                    })?;
+                    for removals in delayed_removals.chunks(chunk_rows) {
+                        nervix_primitives::task::consume_budget().await;
+                        let section = WindowDelayedRemovalSection {
+                            demand,
+                            removals: removals.to_vec(),
+                        };
+                        let bytes =
+                            rkyv::to_bytes::<rkyv::rancor::Error>(&section).map_err(|error| {
+                                Report::new(WindowSnapshotError::Encode {
+                                    section: WindowSnapshotSection::DelayedRemovals,
+                                })
+                                .attach_printable(error)
+                            })?;
+                        if u64::try_from(bytes.len()).unwrap_or(u64::MAX) > typed_limit {
+                            return Err(Report::new(WindowSnapshotError::Invalid {
+                                issue: WindowSnapshotIssue::TypedLimit,
+                            }));
+                        }
+                        let bytes = executor
+                            .try_charge_owned(MemoryClass::Bulk, bytes.to_vec())
+                            .change_context(WindowSnapshotError::Admission)?;
+                        sections.push(bytes);
+                    }
+                }
+            }
+        }
+        Ok(Self {
+            descriptors,
+            sections,
+        })
+    }
+
+    fn count(&self) -> Result<u32, Report<WindowSnapshotError>> {
+        u32::try_from(self.sections.len()).change_context(WindowSnapshotError::Encode {
+            section: WindowSnapshotSection::Header,
+        })
+    }
+}
+
+impl WindowSnapshotHeader {
+    /// The header's encoding, refused beyond the node's snapshot header limit.
+    fn encode(&self, executor: &Executor) -> Result<Vec<u8>, Report<WindowSnapshotError>> {
+        let header = rkyv::to_bytes::<rkyv::rancor::Error>(self).change_context(
+            WindowSnapshotError::Encode {
+                section: WindowSnapshotSection::Header,
+            },
+        )?;
+        let header_limit = executor.limits().snapshot_header_bytes.as_u64();
+        if u64::try_from(header.len()).unwrap_or(u64::MAX) > header_limit {
+            return Err(Report::new(WindowSnapshotError::Invalid {
+                issue: WindowSnapshotIssue::HeaderLimit,
+            }));
+        }
+        Ok(header.to_vec())
+    }
+
+    /// The magic, the header's length and the header that open every window checkpoint.
+    fn framed(&self, executor: &Executor) -> Result<Vec<u8>, Report<WindowSnapshotError>> {
+        let header = self.encode(executor)?;
+        let header_length =
+            u32::try_from(header.len()).change_context(WindowSnapshotError::Encode {
+                section: WindowSnapshotSection::Header,
+            })?;
+        let mut framed = Vec::with_capacity(
+            WINDOW_SNAPSHOT_FRAME_BYTES
+                .checked_add(header.len())
+                .assured("a header within its bounded limit fits beside its fixed frame"),
+        );
+        framed.extend_from_slice(&WINDOW_SNAPSHOT_MAGIC);
+        framed.extend_from_slice(&header_length.to_le_bytes());
+        framed.extend_from_slice(&header);
+        Ok(framed)
+    }
+}
+
+impl WindowProcessorStateSnapshot {
+    /// Whether the retained rows' input and argument columns, as their Arrow slices measure them,
+    /// occupy more than `limit` bytes. A total past u64::MAX is past every limit.
+    fn retains_more_than(&self, limit: u64) -> bool {
+        let mut bytes = 0_u64;
+        for entry in &self.entries {
+            let input = entry.record.one_row_batch().estimated_bytes();
+            let arguments = entry.arguments.one_row_batch().estimated_bytes();
+            let Some(row_bytes) = input.checked_add(arguments) else {
+                return true;
+            };
+            let Some(total) = bytes.checked_add(row_bytes) else {
+                return true;
+            };
+            if total > limit {
+                return true;
+            }
+            bytes = total;
+        }
+        false
+    }
+}
+
+/// Encode a window checkpoint in memory, for a window small enough to hold whole under the bulk
+/// budget: replica synchronization, ownership handoff, and periodic persistence of a window whose
+/// rows fit one snapshot section. A larger window is sealed in pieces by
+/// [`seal_window_processor_snapshot`] into the same container.
 pub(super) async fn encode_window_processor_snapshot(
     snapshot: &WindowProcessorStateSnapshot,
     revision: u64,
     executor: &Executor,
 ) -> Result<Vec<u8>, Report<WindowSnapshotError>> {
-    let (input_schema, argument_schema) = match snapshot.entries.first() {
-        Some(entry) => (
-            entry.record.one_row_batch().schema(),
-            entry.arguments.one_row_batch().schema(),
-        ),
-        None => (
-            StdArc::new(ArrowSchema::empty()),
-            StdArc::new(ArrowSchema::empty()),
-        ),
-    };
-    let input_records = snapshot
-        .entries
-        .iter()
-        .map(|entry| MaterializedGenerationRecord {
-            branch: entry.key.clone(),
-            row: entry.record.clone(),
-        })
-        .collect();
-    let argument_records = snapshot
-        .entries
-        .iter()
-        .map(|entry| MaterializedGenerationRecord {
-            branch: None,
-            row: entry.arguments.clone(),
-        })
-        .collect();
+    // A window whose rows alone exceed the whole bulk budget can never be held whole, so it is
+    // refused before any section is encoded for nothing.
+    let bulk_capacity = executor.snapshot().bulk_memory.capacity_bytes;
+    if snapshot.retains_more_than(bulk_capacity) {
+        return Err(Report::new(WindowSnapshotError::Admission));
+    }
     // An empty forced-recovery checkpoint has no concrete branch lifetime. The nested Arrow
     // container requires a numeric generation, but the outer `None` makes restore return before
     // those empty sections are opened; only the outer typed incarnation selects behavior.
     let branch_generation = snapshot.incarnation.unwrap_or_default();
-    let input =
-        MaterializedGeneration::new(revision, 0, branch_generation, input_schema, input_records)
-            .encode_resident_container(executor)
-            .await
-            .change_context(WindowSnapshotError::Encode {
-                section: WindowSnapshotSection::Input,
-            })?;
-    let arguments = MaterializedGeneration::new(
-        revision,
-        0,
-        branch_generation,
-        argument_schema,
-        argument_records,
-    )
-    .encode_resident_container(executor)
-    .await
-    .change_context(WindowSnapshotError::Encode {
-        section: WindowSnapshotSection::Arguments,
-    })?;
-    let typed_limit = executor.limits().snapshot_record_bytes.as_u64();
-    let chunk_rows = usize::try_from((typed_limit / 64).max(1)).map_err(|error| {
-        Report::new(WindowSnapshotError::Encode {
-            section: WindowSnapshotSection::DelayedRemovals,
-        })
-        .attach_printable(error)
-    })?;
-    let mut accumulators = Vec::with_capacity(snapshot.accumulators.len());
-    let mut typed_sections = Vec::new();
-    for (demand, accumulator) in snapshot.accumulators.iter().enumerate() {
-        nervix_primitives::task::consume_budget().await;
-        match accumulator {
-            WindowAccumulatorSnapshot::Retained => {
-                accumulators.push(WindowAccumulatorDescriptor::Retained);
-            }
-            WindowAccumulatorSnapshot::LinearHistogram { delayed_removals } => {
-                accumulators.push(WindowAccumulatorDescriptor::LinearHistogram {
-                    delayed_removals: u64::try_from(delayed_removals.len()).map_err(|error| {
-                        Report::new(WindowSnapshotError::Encode {
-                            section: WindowSnapshotSection::DelayedRemovals,
-                        })
-                        .attach_printable(error)
-                    })?,
-                });
-                let demand = u32::try_from(demand).map_err(|error| {
-                    Report::new(WindowSnapshotError::Encode {
-                        section: WindowSnapshotSection::DelayedRemovals,
-                    })
-                    .attach_printable(error)
-                })?;
-                for removals in delayed_removals.chunks(chunk_rows) {
-                    nervix_primitives::task::consume_budget().await;
-                    let section = WindowDelayedRemovalSection {
-                        demand,
-                        removals: removals.to_vec(),
-                    };
-                    let bytes =
-                        rkyv::to_bytes::<rkyv::rancor::Error>(&section).map_err(|error| {
-                            Report::new(WindowSnapshotError::Encode {
-                                section: WindowSnapshotSection::DelayedRemovals,
-                            })
-                            .attach_printable(error)
-                        })?;
-                    if u64::try_from(bytes.len()).unwrap_or(u64::MAX) > typed_limit {
-                        return Err(Report::new(WindowSnapshotError::Invalid {
-                            issue: WindowSnapshotIssue::TypedLimit,
-                        }));
-                    }
-                    let bytes = executor
-                        .try_charge_owned(MemoryClass::Bulk, bytes.to_vec())
-                        .change_context(WindowSnapshotError::Admission)?;
-                    typed_sections.push(bytes);
-                }
-            }
-        }
-    }
+    let generations = WindowGenerations::of(&snapshot.entries, revision, branch_generation);
+    let input = generations
+        .input
+        .encode_resident_container(executor)
+        .await
+        .change_context(WindowSnapshotError::Encode {
+            section: WindowSnapshotSection::Input,
+        })?;
+    let arguments = generations
+        .arguments
+        .encode_resident_container(executor)
+        .await
+        .change_context(WindowSnapshotError::Encode {
+            section: WindowSnapshotSection::Arguments,
+        })?;
+    let typed = WindowTypedSections::encode(&snapshot.accumulators, executor).await?;
+    let typed_sections = typed.count()?;
     let header = WindowSnapshotHeader {
         revision,
         first_sequence: snapshot.entries.first().map(|entry| entry.sequence),
@@ -298,43 +420,25 @@ pub(super) async fn encode_window_processor_snapshot(
                 section: WindowSnapshotSection::Header,
             },
         )?,
-        accumulators,
-        typed_sections: u32::try_from(typed_sections.len()).change_context(
-            WindowSnapshotError::Encode {
-                section: WindowSnapshotSection::Header,
-            },
-        )?,
+        accumulators: typed.descriptors,
+        typed_sections,
     };
-    let header = rkyv::to_bytes::<rkyv::rancor::Error>(&header).change_context(
-        WindowSnapshotError::Encode {
-            section: WindowSnapshotSection::Header,
-        },
-    )?;
-    let header_limit = executor.limits().snapshot_header_bytes.as_u64();
-    if u64::try_from(header.len()).unwrap_or(u64::MAX) > header_limit {
-        return Err(Report::new(WindowSnapshotError::Invalid {
-            issue: WindowSnapshotIssue::HeaderLimit,
-        }));
-    }
-    let header_length =
-        u32::try_from(header.len()).change_context(WindowSnapshotError::Encode {
-            section: WindowSnapshotSection::Header,
-        })?;
+    let framed = header.framed(executor)?;
     let length_error = || {
         Report::new(WindowSnapshotError::Invalid {
             issue: WindowSnapshotIssue::Length,
         })
     };
-    let mut length = WINDOW_SNAPSHOT_FRAME_BYTES
-        .checked_add(header.len())
-        .ok_or_else(length_error)?;
+    let mut length = framed.len();
     length = length.checked_add(input.len()).ok_or_else(length_error)?;
     length = length
         .checked_add(arguments.len())
         .ok_or_else(length_error)?;
-    for section in &typed_sections {
-        let framed = length.checked_add(4).ok_or_else(length_error)?;
-        length = framed.checked_add(section.len()).ok_or_else(length_error)?;
+    for section in &typed.sections {
+        let prefixed = length.checked_add(4).ok_or_else(length_error)?;
+        length = prefixed
+            .checked_add(section.len())
+            .ok_or_else(length_error)?;
     }
     let length_u64 = u64::try_from(length).change_context(WindowSnapshotError::Encode {
         section: WindowSnapshotSection::Container,
@@ -342,24 +446,15 @@ pub(super) async fn encode_window_processor_snapshot(
     let reservation = executor
         .try_reserve(MemoryClass::Bulk, length_u64)
         .change_context(WindowSnapshotError::Admission)?;
+    let typed_sections = typed.sections;
     let sealed = executor
         .run_cpu(CpuClass::Bulk, reservation, move |charge, cancellation| {
             cancellation
                 .check()
                 .change_context(WindowSnapshotError::Execution)?;
             let mut buffer = BudgetedBuffer::with_limit(charge, length_u64);
-            buffer.write_all(&WINDOW_SNAPSHOT_MAGIC).change_context(
-                WindowSnapshotError::Encode {
-                    section: WindowSnapshotSection::Container,
-                },
-            )?;
             buffer
-                .write_all(&header_length.to_le_bytes())
-                .change_context(WindowSnapshotError::Encode {
-                    section: WindowSnapshotSection::Container,
-                })?;
-            buffer
-                .write_all(&header)
+                .write_all(&framed)
                 .change_context(WindowSnapshotError::Encode {
                     section: WindowSnapshotSection::Header,
                 })?;
@@ -397,6 +492,237 @@ pub(super) async fn encode_window_processor_snapshot(
         .await
         .change_context(WindowSnapshotError::Execution)??;
     Ok(sealed.as_ref().to_vec())
+}
+
+/// A window checkpoint staged group by group on quota-owned disk.
+///
+/// The nested input and argument containers grow as their groups are sealed, each group's bulk
+/// charge ending once it is staged, so a window larger than the bulk budget never exists whole in
+/// memory. `finish` places the window header, which counts the rows and the containers' bytes,
+/// ahead of them, and the typed delayed-removal sections behind them, in the same container
+/// [`encode_window_processor_snapshot`] writes.
+pub(super) struct WindowCheckpointPieces {
+    staging: SnapshotStaging,
+    revision: u64,
+    incarnation: Option<u64>,
+    first_sequence: Option<u64>,
+    rows: u64,
+    input: SealedContainerPieces,
+    arguments: SealedContainerPieces,
+}
+
+impl WindowCheckpointPieces {
+    pub(super) fn new(staging: &SnapshotStaging, revision: u64, incarnation: Option<u64>) -> Self {
+        // As in the resident encoding, only the outer typed incarnation selects behavior; an empty
+        // window without a lifetime still numbers its nested containers.
+        let branch_generation = incarnation.unwrap_or_default();
+        Self {
+            staging: staging.clone(),
+            revision,
+            incarnation,
+            first_sequence: None,
+            rows: 0,
+            input: SealedContainerPieces::new(staging, revision, 0, branch_generation),
+            arguments: SealedContainerPieces::new(staging, revision, 0, branch_generation),
+        }
+    }
+
+    /// Count `rows` more retained rows, the first of them admitted at `first_sequence`.
+    fn count_rows(
+        &mut self,
+        first_sequence: u64,
+        rows: usize,
+    ) -> Result<(), Report<WindowSnapshotError>> {
+        if self.first_sequence.is_none() {
+            self.first_sequence = Some(first_sequence);
+        }
+        let rows = u64::try_from(rows).change_context(WindowSnapshotError::Encode {
+            section: WindowSnapshotSection::Header,
+        })?;
+        self.rows = self.rows.checked_add(rows).ok_or_else(|| {
+            Report::new(WindowSnapshotError::Invalid {
+                issue: WindowSnapshotIssue::Length,
+            })
+        })?;
+        Ok(())
+    }
+
+    /// The input and argument generations of `entries` in this checkpoint.
+    fn generations_of(&self, entries: &[WindowEntrySnapshot]) -> WindowGenerations {
+        let branch_generation = self.incarnation.unwrap_or_default();
+        WindowGenerations::of(entries, self.revision, branch_generation)
+    }
+
+    /// `records` of `schema` as one nested generation of this checkpoint, for a caller that seals a
+    /// window's input rows and argument columns separately.
+    pub(super) fn nested_generation(
+        &self,
+        schema: StdArc<ArrowSchema>,
+        records: Vec<MaterializedGenerationRecord>,
+    ) -> MaterializedGeneration {
+        let branch_generation = self.incarnation.unwrap_or_default();
+        MaterializedGeneration::new(self.revision, 0, branch_generation, schema, records)
+    }
+
+    /// Seal `entries`, the next retained rows in admission order, in bounded groups.
+    pub(super) async fn append_entries(
+        &mut self,
+        executor: &Executor,
+        entries: &[WindowEntrySnapshot],
+    ) -> Result<(), Report<WindowSnapshotError>> {
+        let Some(first) = entries.first() else {
+            return Ok(());
+        };
+        self.count_rows(first.sequence, entries.len())?;
+        let generations = self.generations_of(entries);
+        self.input
+            .append_generation(executor, &generations.input)
+            .await
+            .change_context(WindowSnapshotError::Encode {
+                section: WindowSnapshotSection::Input,
+            })?;
+        self.arguments
+            .append_generation(executor, &generations.arguments)
+            .await
+            .change_context(WindowSnapshotError::Encode {
+                section: WindowSnapshotSection::Arguments,
+            })
+    }
+
+    /// Seal the input rows `input` holds, the next retained rows from `first_sequence`, whose Arrow
+    /// columns `columns` already holds as one section. The section is kept as it is whenever the
+    /// rows' identities fit one identity record.
+    pub(super) async fn append_encoded_input(
+        &mut self,
+        executor: &Executor,
+        first_sequence: u64,
+        input: &MaterializedGeneration,
+        columns: ChargedBytes,
+    ) -> Result<(), Report<WindowSnapshotError>> {
+        if input.records().is_empty() {
+            return Ok(());
+        }
+        self.count_rows(first_sequence, input.records().len())?;
+        self.input
+            .append_encoded(executor, input, columns)
+            .await
+            .change_context(WindowSnapshotError::Encode {
+                section: WindowSnapshotSection::Input,
+            })
+    }
+
+    /// Seal the argument columns `arguments` holds, row-aligned with the input rows sealed last,
+    /// whose Arrow columns `columns` already holds as one section.
+    pub(super) async fn append_encoded_arguments(
+        &mut self,
+        executor: &Executor,
+        arguments: &MaterializedGeneration,
+        columns: ChargedBytes,
+    ) -> Result<(), Report<WindowSnapshotError>> {
+        self.arguments
+            .append_encoded(executor, arguments, columns)
+            .await
+            .change_context(WindowSnapshotError::Encode {
+                section: WindowSnapshotSection::Arguments,
+            })
+    }
+
+    /// The finished checkpoint in one quota-owned artifact, whose window resumes at
+    /// `next_sequence` with `accumulators`.
+    pub(super) async fn finish(
+        self,
+        executor: &Executor,
+        next_sequence: u64,
+        accumulators: &[WindowAccumulatorSnapshot],
+    ) -> Result<StagedArtifact, Report<WindowSnapshotError>> {
+        let input =
+            self.input
+                .finish(executor)
+                .await
+                .change_context(WindowSnapshotError::Encode {
+                    section: WindowSnapshotSection::Input,
+                })?;
+        let arguments =
+            self.arguments
+                .finish(executor)
+                .await
+                .change_context(WindowSnapshotError::Encode {
+                    section: WindowSnapshotSection::Arguments,
+                })?;
+        let typed = WindowTypedSections::encode(accumulators, executor).await?;
+        let header = WindowSnapshotHeader {
+            revision: self.revision,
+            first_sequence: self.first_sequence,
+            next_sequence,
+            incarnation: self.incarnation,
+            rows: self.rows,
+            input_bytes: input.length(),
+            argument_bytes: arguments.length(),
+            typed_sections: typed.count()?,
+            accumulators: typed.descriptors,
+        };
+        let framed = header.framed(executor)?;
+        let framed = executor
+            .charge_owned(MemoryClass::Bulk, framed)
+            .await
+            .change_context(WindowSnapshotError::Admission)?;
+        let mut pieces = StagedPieces::new(self.staging);
+        pieces
+            .stage(framed)
+            .await
+            .change_context(WindowSnapshotError::Execution)?;
+        pieces.extend(input);
+        pieces.extend(arguments);
+        for section in typed.sections {
+            nervix_primitives::task::consume_budget().await;
+            let section_length =
+                u32::try_from(section.len()).change_context(WindowSnapshotError::Encode {
+                    section: WindowSnapshotSection::DelayedRemovals,
+                })?;
+            let prefix = executor
+                .charge_owned(MemoryClass::Bulk, section_length.to_le_bytes().to_vec())
+                .await
+                .change_context(WindowSnapshotError::Admission)?;
+            pieces
+                .stage(prefix)
+                .await
+                .change_context(WindowSnapshotError::Execution)?;
+            pieces
+                .stage(section)
+                .await
+                .change_context(WindowSnapshotError::Execution)?;
+        }
+        pieces
+            .concatenate()
+            .await
+            .change_context(WindowSnapshotError::Execution)
+    }
+}
+
+/// Seal a window checkpoint in bounded pieces on quota-owned disk: the same container
+/// [`encode_window_processor_snapshot`] writes in memory, for a window too large to hold whole.
+pub(super) async fn seal_window_processor_snapshot(
+    snapshot: &WindowProcessorStateSnapshot,
+    revision: u64,
+    executor: &Executor,
+    staging: &SnapshotStaging,
+) -> Result<StagedArtifact, Report<WindowSnapshotError>> {
+    let mut pieces = WindowCheckpointPieces::new(staging, revision, snapshot.incarnation);
+    pieces.append_entries(executor, &snapshot.entries).await?;
+    pieces
+        .finish(executor, snapshot.next_sequence, &snapshot.accumulators)
+        .await
+}
+
+/// How one published window is written to the state store.
+pub(super) enum WindowPersistence {
+    /// A checkpoint small enough to encode in memory, written as one value.
+    Resident(PersistedRuntimeStateEntry),
+    /// A checkpoint sealed in bounded pieces on quota-owned disk, published in segments.
+    Sealed {
+        revision: u64,
+        artifact: StagedArtifact,
+    },
 }
 
 /// Which branch lifetime a decoded window snapshot must belong to.
@@ -565,6 +891,7 @@ pub(super) async fn decode_window_processor_snapshot(
         executor,
         schemas.input,
         SealedSource::borrowed(executor, input),
+        RestoredRows::Window,
     )
     .await
     .change_context(WindowSnapshotError::Decode {
@@ -574,6 +901,7 @@ pub(super) async fn decode_window_processor_snapshot(
         executor,
         schemas.arguments,
         SealedSource::borrowed(executor, arguments),
+        RestoredRows::Window,
     )
     .await
     .change_context(WindowSnapshotError::Decode {
@@ -744,6 +1072,38 @@ impl ReplicatedWindowProcessorState {
             return Ok(None);
         };
         Ok(Some(self.snapshot_of(&published, executor).await?))
+    }
+
+    /// What persisting the window published after `after_lsm` writes, or nothing when that window
+    /// is already persisted.
+    ///
+    /// A live window whose retained rows exceed one snapshot section is sealed in bounded pieces on
+    /// quota-owned disk instead of being encoded in memory, so the windows the runtime persists are
+    /// bounded by its staging quota rather than by the bulk budget.
+    pub(super) async fn persistence_after(
+        &self,
+        after_lsm: u64,
+        executor: &Executor,
+        staging: &SnapshotStaging,
+    ) -> Result<Option<WindowPersistence>, Report<RuntimePersistenceError>> {
+        let Some(published) = self.generations.load_after(Some(after_lsm)) else {
+            return Ok(None);
+        };
+        let section_limit = executor.limits().snapshot_section_bytes.as_u64();
+        if let Some(WindowPublishedSnapshot::Live(snapshot)) = &published.value
+            && snapshot.retains_more_than(section_limit)
+        {
+            let artifact =
+                seal_window_processor_snapshot(snapshot, published.revision, executor, staging)
+                    .await
+                    .change_context(RuntimePersistenceError::WindowSnapshot)?;
+            return Ok(Some(WindowPersistence::Sealed {
+                revision: published.revision,
+                artifact,
+            }));
+        }
+        let entry = self.snapshot_of(&published, executor).await?;
+        Ok(Some(WindowPersistence::Resident(entry)))
     }
 
     async fn snapshot_of(
@@ -1021,6 +1381,57 @@ mod tests {
             }
         }
 
+        /// A window of `rows` unbranched rows sharing one input and one argument batch, admitted at
+        /// consecutive sequences from 100 in branch lifetime `incarnation`.
+        fn window_of(&self, rows: usize, incarnation: u64) -> WindowProcessorStateSnapshot {
+            use meticulous::ResultExt as _;
+
+            let count = i64::try_from(rows).assured("a test window's row count fits i64");
+            let latencies: ArrayRef = StdArc::new(Int64Array::from_iter_values(0..count));
+            let input_schema = self.input_schema.arrow_schema();
+            let input = RecordBatch::try_new(StdArc::clone(&input_schema), vec![latencies])
+                .assured("the latency column matches the input schema");
+            let input = Arc::new(
+                RuntimeRecordBatch::from_record_batch(input_schema, input)
+                    .assured("the input batch has its declared schema"),
+            );
+            let values: ArrayRef = StdArc::new(Int64Array::from_iter_values(0..count));
+            let arguments = RecordBatch::try_new(self.argument_schema.clone(), vec![values])
+                .assured("the argument column matches its plan's schema");
+            let arguments = Arc::new(
+                RuntimeRecordBatch::from_record_batch(self.argument_schema.clone(), arguments)
+                    .assured("the argument batch has its declared schema"),
+            );
+            let mut entries = Vec::with_capacity(rows);
+            for row in 0..rows {
+                let offset = u64::try_from(row).assured("a test row index fits u64");
+                let at = Timestamp::from_unix_nanos(
+                    i64::try_from(row).assured("a test row index fits i64"),
+                );
+                let metadata = RuntimeRecordMetadata::from_ingested_at_watermarks(at, at);
+                entries.push(WindowEntrySnapshot {
+                    sequence: 100_u64
+                        .checked_add(offset)
+                        .assured("a test window stays far below u64::MAX"),
+                    timestamp: at,
+                    key: None,
+                    record: RuntimeRow::new(Arc::clone(&input), row, metadata.clone())
+                        .assured("the row is inside its input batch"),
+                    arguments: RuntimeRow::new(Arc::clone(&arguments), row, metadata)
+                        .assured("the row is inside its argument batch"),
+                });
+            }
+            let rows = u64::try_from(rows).assured("a test window's row count fits u64");
+            WindowProcessorStateSnapshot {
+                entries,
+                next_sequence: 100_u64
+                    .checked_add(rows)
+                    .assured("a test window stays far below u64::MAX"),
+                incarnation: Some(incarnation),
+                accumulators: vec![WindowAccumulatorSnapshot::Retained],
+            }
+        }
+
         /// A window of up to three rows with consecutive sequences and typed aggregate state.
         fn generated(&self, arbitrary: &mut nervix_arbitrary::Arbitrary<'_>) -> GeneratedWindow {
             use meticulous::{OptionExt as _, ResultExt as _};
@@ -1246,6 +1657,230 @@ mod tests {
                     assert!(other.is_none(), "another branch lifetime restores nothing");
                 });
             });
+    }
+
+    /// A window sealed in pieces on quota-owned disk is the same container, byte for byte, as its
+    /// resident encoding, so either one restores the window the other does.
+    #[test]
+    fn bolero_sealed_window_checkpoints_match_their_resident_encoding() {
+        use meticulous::ResultExt as _;
+        use nervix_arbitrary::{Arbitrary, Domain};
+
+        let fixture = WindowSnapshotFixture::new();
+        bolero::check!()
+            .with_iterations(64)
+            .with_max_len(2048)
+            .for_each(|bytes: &[u8]| {
+                let runtime = nervix_primitives::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .assured("a property runtime opens");
+                let mut arbitrary = Arbitrary::new(bytes, Domain::Vocabulary);
+                let executor = Executor::default();
+                let directory = tempfile::tempdir().assured("the staging directory opens");
+                let staging = SnapshotStaging::new(
+                    directory.path().to_path_buf(),
+                    executor.clone(),
+                    crate::runtime::snapshot_staging::SnapshotStagingLimits::default(),
+                );
+                let generated = fixture.generated(&mut arbitrary);
+                runtime.block_on(async {
+                    let resident = encode_window_processor_snapshot(
+                        &generated.snapshot,
+                        generated.revision,
+                        &executor,
+                    )
+                    .await
+                    .assured("a bounded generated window encodes in memory");
+                    let sealed = seal_window_processor_snapshot(
+                        &generated.snapshot,
+                        generated.revision,
+                        &executor,
+                        &staging,
+                    )
+                    .await
+                    .assured("a bounded generated window seals in pieces");
+                    let sealed_bytes =
+                        std::fs::read(sealed.path()).assured("the sealed checkpoint reads");
+                    assert_eq!(
+                        sealed.length(),
+                        u64::try_from(sealed_bytes.len()).assured("fits")
+                    );
+                    assert_eq!(sealed.digest(), *blake3::hash(&sealed_bytes).as_bytes());
+                    assert_eq!(
+                        sealed_bytes, resident,
+                        "the sealed pieces concatenate into the resident container"
+                    );
+                });
+                assert_eq!(executor.snapshot().bulk_memory.reserved_bytes, 0);
+            });
+    }
+
+    /// An executor whose snapshot sections and identity records are small, so a test window
+    /// counts as one too large to persist in memory and seals in several groups.
+    fn narrow_executor() -> Executor {
+        use meticulous::ResultExt as _;
+
+        Executor::new(nervix_execution::ExecutionConfig {
+            limits: nervix_execution::OperationLimits {
+                snapshot_section_bytes: ubyte::ByteUnit::Byte(4096),
+                snapshot_record_bytes: ubyte::ByteUnit::Byte(512),
+                ..nervix_execution::OperationLimits::default()
+            },
+            ..nervix_execution::ExecutionConfig::default()
+        })
+        .assured("narrow snapshot limits within the default bulk budget are valid")
+    }
+
+    /// A published window persists in memory while its rows fit one snapshot section, and is
+    /// sealed in pieces for segmented publication once they do not; both persist the window it
+    /// published.
+    #[nervix_primitives::test]
+    async fn a_window_beyond_one_section_persists_through_sealed_pieces() {
+        use meticulous::{OptionExt as _, ResultExt as _};
+
+        let fixture = WindowSnapshotFixture::new();
+        let executor = narrow_executor();
+        let directory = tempfile::tempdir().assured("the staging directory opens");
+        let staging = SnapshotStaging::new(
+            directory.path().to_path_buf(),
+            executor.clone(),
+            crate::runtime::snapshot_staging::SnapshotStagingLimits::default(),
+        );
+        let small = fixture.window_of(1, 9);
+        let large = fixture.window_of(300, 9);
+        let placement = RuntimeStatePlacement {
+            domain: nervix_models::DomainName::parse("test").assured("a valid domain name"),
+            state: super::super::RuntimeState::WindowProcessor {
+                schema: nervix_models::SchemaFingerprint::from_digest([3; 32]),
+            },
+            kind: nervix_models::ModelKind::WindowProcessor,
+            identifier: nervix_models::ModelName::parse("latency_window")
+                .assured("a valid model name"),
+            branch_key: None,
+        };
+        let state = ReplicatedWindowProcessorState::new(placement, None)
+            .assured("an empty window state has nothing to decode");
+        assert!(
+            state
+                .persistence_after(0, &executor, &staging)
+                .await
+                .assured("an unpublished window needs no persistence")
+                .is_none()
+        );
+        let small_revision = state
+            .generations
+            .publish(Some(WindowPublishedSnapshot::Live(small.clone())));
+        let resident = state
+            .persistence_after(0, &executor, &staging)
+            .await
+            .assured("a small window persists")
+            .verified("a newer window was published");
+        let WindowPersistence::Resident(entry) = resident else {
+            panic!("a window within one section persists in memory");
+        };
+        assert_eq!(entry.lsm, small_revision);
+        assert_eq!(
+            entry.payload,
+            encode_window_processor_snapshot(&small, small_revision, &executor)
+                .await
+                .assured("the small window encodes")
+        );
+        let large_revision = state
+            .generations
+            .publish(Some(WindowPublishedSnapshot::Live(large.clone())));
+        let sealed = state
+            .persistence_after(small_revision, &executor, &staging)
+            .await
+            .assured("a large window persists")
+            .verified("a newer window was published");
+        let WindowPersistence::Sealed { revision, artifact } = sealed else {
+            panic!("a window beyond one section seals in pieces");
+        };
+        assert_eq!(revision, large_revision);
+        let payload = std::fs::read(artifact.path()).assured("the sealed window reads");
+        assert_eq!(
+            payload,
+            encode_window_processor_snapshot(&large, large_revision, &executor)
+                .await
+                .assured("the large window still fits the bulk budget in memory"),
+            "the window sealed in several groups is its resident container"
+        );
+        let restored = fixture
+            .open(&payload, &executor, 9)
+            .await
+            .assured("the sealed window opens")
+            .verified("the sealed window names its branch lifetime");
+        assert_eq!(restored.entries.len(), 300);
+        assert_eq!(restored.next_sequence, large.next_sequence);
+        assert!(
+            state
+                .persistence_after(large_revision, &executor, &staging)
+                .await
+                .assured("a persisted window needs nothing more")
+                .is_none()
+        );
+    }
+
+    /// A window may retain more rows than one relay's row-view metadata ceiling, and a branch
+    /// reopens all of them, charged to the relay memory class while it does.
+    #[nervix_primitives::test]
+    async fn a_window_beyond_one_relays_row_view_ceiling_reopens() {
+        use meticulous::{OptionExt as _, ResultExt as _};
+
+        let fixture = WindowSnapshotFixture::new();
+        let executor = Executor::default();
+        let window = fixture.window_of(100_000, 9);
+        let payload = encode_window_processor_snapshot(&window, 5, &executor)
+            .await
+            .assured("a window of small rows encodes in memory");
+        let restored = fixture
+            .open(&payload, &executor, 9)
+            .await
+            .assured("every retained row reopens")
+            .verified("the window names its branch lifetime");
+        assert_eq!(restored.entries.len(), 100_000);
+        assert_eq!(restored.entries[99_999].sequence, 100_099);
+        drop(restored);
+        assert_eq!(executor.snapshot().relay_memory.reserved_bytes, 0);
+    }
+
+    /// A window whose rows alone exceed the whole bulk budget is refused by the resident encoding
+    /// before it encodes a section for nothing.
+    #[nervix_primitives::test]
+    async fn the_resident_encoding_refuses_a_window_beyond_the_bulk_budget_first() {
+        use meticulous::ResultExt as _;
+
+        let fixture = WindowSnapshotFixture::new();
+        let executor = Executor::new(nervix_execution::ExecutionConfig {
+            budgets: nervix_execution::MemoryBudgets {
+                bulk: ubyte::ByteUnit::Kibibyte(512),
+                ..nervix_execution::MemoryBudgets::default()
+            },
+            limits: nervix_execution::OperationLimits {
+                snapshot_section_bytes: ubyte::ByteUnit::Kibibyte(64),
+                snapshot_record_bytes: ubyte::ByteUnit::Kibibyte(16),
+                snapshot_header_bytes: ubyte::ByteUnit::Kibibyte(16),
+                bulk_chunk_bytes: ubyte::ByteUnit::Kibibyte(16),
+                ..nervix_execution::OperationLimits::default()
+            },
+            ..nervix_execution::ExecutionConfig::default()
+        })
+        .assured("a small bulk budget above two sections is valid");
+        let window = fixture.window_of(40_000, 9);
+        let granted = executor.snapshot().bulk_memory.granted;
+        let error = encode_window_processor_snapshot(&window, 1, &executor)
+            .await
+            .expect_err("a window larger than the whole bulk budget is refused");
+        assert!(matches!(
+            error.current_context(),
+            WindowSnapshotError::Admission
+        ));
+        assert_eq!(
+            executor.snapshot().bulk_memory.granted,
+            granted,
+            "no section was encoded for a window that can never be held whole"
+        );
     }
 
     /// A sealed window damaged once, and arbitrary bytes behind the snapshot's magic, either fail

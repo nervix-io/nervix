@@ -40,7 +40,7 @@ use thiserror::Error;
 use super::snapshot_staging::StagedArtifactReader;
 use super::{
     BranchKey,
-    snapshot_staging::{SnapshotStaging, StagedArtifact, StagedSnapshot},
+    snapshot_staging::{SnapshotStaging, StagedArtifact, StagedPieces, StagedSnapshot},
 };
 use crate::runtime_schema::{
     ArrowBodyError, RuntimeRecordBatch, RuntimeRecordMetadata, RuntimeRow,
@@ -68,7 +68,7 @@ const IDENTITY_OVERHEAD_BYTES: u64 = 96;
 pub(crate) enum MaterializedSnapshotError {
     #[error("materialized snapshot memory admission was refused")]
     Admission,
-    #[error("materialized row views exceed the 8 MiB metadata limit")]
+    #[error("materialized row views exceed one relay's 8 MiB metadata limit")]
     MetadataTooLarge,
     #[error("the snapshot could not be admitted for execution")]
     Execution,
@@ -182,9 +182,41 @@ struct MaterializedRecordLayout {
     metadata_bytes: u64,
 }
 
+/// The row-view metadata one relay's materialized records may restore.
+const RELAY_ROW_VIEW_BYTES: u64 = 8 * 1024 * 1024;
+
+/// Whose rows an opened container restores, which decides how many row views it may hold.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(in crate::runtime) enum RestoredRows {
+    /// A relay's materialized records, within one relay's 8 MiB row-view metadata ceiling.
+    Relay,
+    /// A window's retained rows, which the window's own model bounds: as many as the relay memory
+    /// class holds while the window reopens.
+    Window,
+}
+
+impl RestoredRows {
+    /// The row-view metadata this kind of container may restore, when it has its own ceiling.
+    fn ceiling(self) -> Option<u64> {
+        match self {
+            Self::Relay => Some(RELAY_ROW_VIEW_BYTES),
+            Self::Window => None,
+        }
+    }
+
+    /// Whether `bytes` of row-view metadata exceed this kind's own ceiling.
+    fn exceeds_ceiling(self, bytes: u64) -> bool {
+        match self.ceiling() {
+            Some(ceiling) => bytes > ceiling,
+            None => false,
+        }
+    }
+}
+
 impl SealedSnapshotHeader {
     fn metadata_layout(
         &self,
+        rows: RestoredRows,
     ) -> Result<MaterializedRecordLayout, Report<MaterializedSnapshotError>> {
         if (self.records == 0) != (self.groups == 0) || u64::from(self.groups) > self.records {
             return Err(MaterializedSnapshotError::decoding(
@@ -206,7 +238,7 @@ impl SealedSnapshotHeader {
                 .map_err(|_| Report::new(MaterializedSnapshotError::MetadataTooLarge))?,
             )
             .ok_or_else(|| Report::new(MaterializedSnapshotError::MetadataTooLarge))?;
-        if metadata_bytes > 8 * 1024 * 1024 {
+        if rows.exceeds_ceiling(metadata_bytes) {
             return Err(Report::new(MaterializedSnapshotError::MetadataTooLarge));
         }
         Ok(MaterializedRecordLayout {
@@ -479,68 +511,16 @@ impl MaterializedGeneration {
         executor: &Executor,
         staging: &SnapshotStaging,
     ) -> Result<SealedMaterializedSnapshot, Report<MaterializedSnapshotError>> {
-        let groups = self.groups(executor);
-        let count = u32::try_from(groups.len())
-            .map_err(|_| MaterializedSnapshotError::encoding("too many snapshot groups"))?;
-        let header = materialized_container_header(
-            self.revision,
-            self.fence,
-            self.branch_generation,
-            self.records.len().arch_into(),
-            count,
-        )?;
-        let header = executor
-            .charge_owned(MemoryClass::Bulk, header)
-            .await
-            .change_context(MaterializedSnapshotError::Admission)?;
-        let mut pieces = vec![stage_sealed_piece(staging, header).await?];
-        for group in &groups {
-            nervix_primitives::task::consume_budget().await;
-            for section in [
-                self.seal_identities(executor, group).await?,
-                self.seal_columns(executor, group).await?,
-            ] {
-                let frame = section_frame(section.kind, section.bytes.len())?;
-                let frame = executor
-                    .charge_owned(MemoryClass::Bulk, frame)
-                    .await
-                    .change_context(MaterializedSnapshotError::Admission)?;
-                pieces.push(stage_sealed_piece(staging, frame).await?);
-                pieces.push(stage_sealed_piece(staging, section.bytes).await?);
-            }
-        }
-        let length = pieces
-            .iter()
-            .try_fold(0_u64, |total, piece| total.checked_add(piece.length()))
-            .ok_or_else(|| {
-                MaterializedSnapshotError::encoding("snapshot length is unaddressable")
-            })?;
-        let mut writer = staging
-            .try_stage(length)
+        let mut container =
+            SealedContainerPieces::new(staging, self.revision, self.fence, self.branch_generation);
+        container.append_generation(executor, self).await?;
+        let artifact = container
+            .finish(executor)
+            .await?
+            .concatenate()
             .await
             .change_context(MaterializedSnapshotError::Execution)?;
-        for piece in pieces {
-            let mut reader = piece
-                .open_reader()
-                .await
-                .change_context(MaterializedSnapshotError::Execution)?;
-            while let Some(chunk) = reader
-                .next_chunk(64 * 1024)
-                .await
-                .change_context(MaterializedSnapshotError::Execution)?
-            {
-                writer
-                    .write_chunk(chunk)
-                    .await
-                    .change_context(MaterializedSnapshotError::Execution)?;
-            }
-        }
-        let artifact = Arc::new(
-            writer
-                .finish_artifact()
-                .await
-                .change_context(MaterializedSnapshotError::Execution)?,
-        );
+        let artifact = Arc::new(artifact);
         Ok(SealedMaterializedSnapshot {
             descriptor: SealedSnapshotDescriptor {
                 length: artifact.length(),
@@ -791,6 +771,160 @@ impl MaterializedGeneration {
     }
 }
 
+/// One sealed container staged group by group on quota-owned disk.
+///
+/// Each group's identity record and Arrow section are staged as soon as they are encoded, so their
+/// bulk charge ends there and the container never exists whole in memory. `finish` places the
+/// header, which counts every record and group, ahead of the groups.
+pub(in crate::runtime) struct SealedContainerPieces {
+    revision: u64,
+    fence: u64,
+    branch_generation: u64,
+    records: u64,
+    groups: u32,
+    sections: StagedPieces,
+}
+
+impl SealedContainerPieces {
+    pub(in crate::runtime) fn new(
+        staging: &SnapshotStaging,
+        revision: u64,
+        fence: u64,
+        branch_generation: u64,
+    ) -> Self {
+        Self {
+            revision,
+            fence,
+            branch_generation,
+            records: 0,
+            groups: 0,
+            sections: StagedPieces::new(staging.clone()),
+        }
+    }
+
+    /// Seal every bounded group of `generation` behind the groups already staged.
+    pub(in crate::runtime) async fn append_generation(
+        &mut self,
+        executor: &Executor,
+        generation: &MaterializedGeneration,
+    ) -> Result<(), Report<MaterializedSnapshotError>> {
+        for group in generation.groups(executor) {
+            nervix_primitives::task::consume_budget().await;
+            let identities = generation.seal_identities(executor, &group).await?;
+            self.stage_section(executor, identities).await?;
+            let columns = generation.seal_columns(executor, &group).await?;
+            self.stage_section(executor, columns).await?;
+            self.count_group(group.len())?;
+        }
+        Ok(())
+    }
+
+    /// Append the records of `generation`, whose Arrow columns `columns` already holds as one
+    /// section of the generation's schema, such as a group read from an archive.
+    ///
+    /// The records stay one group, with `columns` as its section, when their identities fit one
+    /// identity record and `columns` fits one section. Otherwise they are sealed in bounded groups
+    /// of their own, whose columns are projected again.
+    pub(in crate::runtime) async fn append_encoded(
+        &mut self,
+        executor: &Executor,
+        generation: &MaterializedGeneration,
+        columns: ChargedBytes,
+    ) -> Result<(), Report<MaterializedSnapshotError>> {
+        let records = generation.records.len();
+        if records == 0 {
+            return Ok(());
+        }
+        let identity_limit = executor.limits().snapshot_record_bytes.as_u64();
+        let section_limit = executor.limits().snapshot_section_bytes.as_u64();
+        // A total that does not fit a u64 is past every limit there is.
+        let mut identities = Some(0_u64);
+        for record in generation.records.iter() {
+            let record_identity = estimated_identity_bytes(record.branch.as_ref());
+            identities = match identities {
+                Some(bytes) => bytes.checked_add(record_identity),
+                None => None,
+            };
+        }
+        let columns_bytes: u64 = columns.len().arch_into();
+        let fits = match identities {
+            Some(bytes) => bytes <= identity_limit && columns_bytes <= section_limit,
+            None => false,
+        };
+        if !fits {
+            return self.append_generation(executor, generation).await;
+        }
+        let identities = generation.seal_identities(executor, &(0..records)).await?;
+        self.stage_section(executor, identities).await?;
+        self.stage_section(
+            executor,
+            SealedSection {
+                kind: SealedSectionKind::RecordColumns,
+                bytes: columns,
+            },
+        )
+        .await?;
+        self.count_group(records)
+    }
+
+    /// Stage one section and the frame that names its kind and length.
+    async fn stage_section(
+        &mut self,
+        executor: &Executor,
+        section: SealedSection,
+    ) -> Result<(), Report<MaterializedSnapshotError>> {
+        let frame = section_frame(section.kind, section.bytes.len())?;
+        let frame = executor
+            .charge_owned(MemoryClass::Bulk, frame)
+            .await
+            .change_context(MaterializedSnapshotError::Admission)?;
+        self.sections
+            .stage(frame)
+            .await
+            .change_context(MaterializedSnapshotError::Execution)?;
+        self.sections
+            .stage(section.bytes)
+            .await
+            .change_context(MaterializedSnapshotError::Execution)
+    }
+
+    fn count_group(&mut self, records: usize) -> Result<(), Report<MaterializedSnapshotError>> {
+        let records: u64 = records.arch_into();
+        self.records = self.records.checked_add(records).ok_or_else(|| {
+            MaterializedSnapshotError::encoding("the snapshot record count is unaddressable")
+        })?;
+        self.groups = self
+            .groups
+            .checked_add(1)
+            .ok_or_else(|| MaterializedSnapshotError::encoding("too many snapshot groups"))?;
+        Ok(())
+    }
+
+    /// The header, followed by every staged group, in container order.
+    pub(in crate::runtime) async fn finish(
+        self,
+        executor: &Executor,
+    ) -> Result<StagedPieces, Report<MaterializedSnapshotError>> {
+        let header = materialized_container_header(
+            self.revision,
+            self.fence,
+            self.branch_generation,
+            self.records,
+            self.groups,
+        )?;
+        let header = executor
+            .charge_owned(MemoryClass::Bulk, header)
+            .await
+            .change_context(MaterializedSnapshotError::Admission)?;
+        let mut pieces = self.sections;
+        pieces
+            .stage_first(header)
+            .await
+            .change_context(MaterializedSnapshotError::Execution)?;
+        Ok(pieces)
+    }
+}
+
 /// Native framing for a generation assembled from bounded external column sections.
 pub(crate) fn materialized_container_header(
     revision: u64,
@@ -914,7 +1048,7 @@ impl RestoredMaterializedSnapshot {
         schema: &StdArc<ArrowSchema>,
         source: SealedSource<'_>,
     ) -> Result<Self, Report<MaterializedSnapshotError>> {
-        let snapshot = Self::open(executor, schema, source).await?;
+        let snapshot = Self::open(executor, schema, source, RestoredRows::Relay).await?;
         let charge = executor
             .reserve(MemoryClass::Bulk, 1)
             .await
@@ -955,12 +1089,13 @@ impl RestoredMaterializedSnapshot {
         executor: &Executor,
         schema: &StdArc<ArrowSchema>,
         source: SealedSource<'_>,
+        rows: RestoredRows,
     ) -> Result<Self, Report<MaterializedSnapshotError>> {
         let mut cursor = source;
         let header = cursor.take_header(executor).await?;
         let identity_limit = executor.limits().snapshot_record_bytes.as_u64();
         let section_limit = executor.limits().snapshot_section_bytes.as_u64();
-        let layout = header.metadata_layout()?;
+        let layout = header.metadata_layout(rows)?;
         // Admit the row views and uniqueness table before either grows. The columns become
         // materialized runtime state; these arrays are transient until installation consumes them.
         let mut metadata_charge = executor
@@ -982,7 +1117,7 @@ impl RestoredMaterializedSnapshot {
                 .bytes()
                 .checked_add(identity_bytes)
                 .ok_or_else(|| Report::new(MaterializedSnapshotError::MetadataTooLarge))?;
-            if identity_bytes > 8 * 1024 * 1024 {
+            if rows.exceeds_ceiling(identity_bytes) {
                 return Err(Report::new(MaterializedSnapshotError::MetadataTooLarge));
             }
             metadata_charge
@@ -1311,26 +1446,6 @@ impl<'a> SealedSource<'a> {
         }
         self.take(length, "section body").await
     }
-}
-
-/// Retain one bounded encoded piece on quota-owned disk, releasing its bulk charge before the
-/// next group is encoded. Concatenation holds one 64 KiB chunk regardless of total snapshot size.
-async fn stage_sealed_piece(
-    staging: &SnapshotStaging,
-    bytes: ChargedBytes,
-) -> Result<StagedArtifact, Report<MaterializedSnapshotError>> {
-    let mut writer = staging
-        .try_stage(bytes.len().arch_into())
-        .await
-        .change_context(MaterializedSnapshotError::Execution)?;
-    writer
-        .write_chunk(bytes)
-        .await
-        .change_context(MaterializedSnapshotError::Execution)?;
-    writer
-        .finish_artifact()
-        .await
-        .change_context(MaterializedSnapshotError::Execution)
 }
 
 /// Encode the bounded resident container nested in a window checkpoint. Its caller admits the
