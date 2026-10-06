@@ -106,8 +106,12 @@ never has an unbranched instance.
 
 The committed schedule gives each processor one owner and zero or more replicas. The owner runs
 every branch's instance and is the only node that checkpoints guest state. A replica holds durable
-copies of the owner's checkpoints. Any other node runs a guest only to prove it can restore a
-checkpoint while an ownership move prepares that node as the new owner. The control plane and the
+copies of the owner's checkpoints. An ownership move for an active domain runs a guest at the
+destination to prove it can restore a checkpoint. A passive revision for a stopped domain carries
+the complete validated checkpoint inventory and preserves its guest saves without executing guest
+callbacks or reading domain time. The guest validates the save when `START` installs the running
+revision. A stopped clock is not a missing-checkpoint outcome and cannot justify a state reset.
+The control plane and the
 inspection name a concrete branch by its fingerprint, a fixed-size digest of the canonical
 branch-key text, never by its field values.
 

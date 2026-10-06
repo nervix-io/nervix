@@ -72,6 +72,69 @@ async fn default_limits_validate_together() {
 }
 
 #[nervix_primitives::test]
+async fn retained_restore_metadata_is_admitted_independently_of_bulk_buffers() {
+    use meticulous::ResultExt as _;
+
+    let executor = small_executor();
+    let snapshot = executor.snapshot();
+    assert_eq!(
+        snapshot.bulk_memory.capacity_bytes,
+        ByteUnit::Mebibyte(32).as_u64()
+    );
+    assert_eq!(
+        snapshot.restore_metadata_memory.capacity_bytes,
+        ByteUnit::Gibibyte(2).as_u64()
+    );
+    let bulk = executor
+        .try_reserve(MemoryClass::Bulk, snapshot.bulk_memory.capacity_bytes)
+        .assured("the complete bulk class is available");
+    let metadata = executor
+        .try_reserve(
+            MemoryClass::RestoreMetadata,
+            snapshot.restore_metadata_memory.capacity_bytes,
+        )
+        .assured("retained metadata has independent admission");
+    let error = executor
+        .try_reserve(MemoryClass::RestoreMetadata, 1)
+        .err()
+        .assured("the occupied metadata class refuses more memory");
+    assert_eq!(
+        *error.current_context(),
+        AdmissionError::BudgetExhausted {
+            class: "restore_metadata",
+            requested: 1
+        }
+    );
+    assert_eq!(MemoryClass::RestoreMetadata.as_str(), "restore_metadata");
+    drop(metadata);
+    assert_eq!(
+        executor.snapshot().restore_metadata_memory.reserved_bytes,
+        0
+    );
+    assert_eq!(
+        executor.snapshot().bulk_memory.reserved_bytes,
+        snapshot.bulk_memory.capacity_bytes
+    );
+    let oversized = executor
+        .reserve(
+            MemoryClass::RestoreMetadata,
+            snapshot.restore_metadata_memory.capacity_bytes + 1,
+        )
+        .await
+        .err()
+        .assured("an oversized preparation is refused immediately");
+    assert_eq!(
+        *oversized.current_context(),
+        AdmissionError::ExceedsBudget {
+            class: "restore_metadata",
+            requested: snapshot.restore_metadata_memory.capacity_bytes + 1,
+            capacity: snapshot.restore_metadata_memory.capacity_bytes,
+        }
+    );
+    drop(bulk);
+}
+
+#[nervix_primitives::test]
 async fn a_relay_budget_below_two_maximum_operations_fails_to_start() {
     let error = Executor::new(ExecutionConfig {
         budgets: MemoryBudgets {
@@ -249,6 +312,7 @@ mod shuttle_checks {
             ("commands", snapshot.commands_memory),
             ("relay", snapshot.relay_memory),
             ("bulk", snapshot.bulk_memory),
+            ("restore_metadata", snapshot.restore_metadata_memory),
             ("credentials", snapshot.credentials_memory),
         ] {
             assert!(
@@ -282,6 +346,7 @@ mod shuttle_checks {
             ("commands", snapshot.commands_memory),
             ("relay", snapshot.relay_memory),
             ("bulk", snapshot.bulk_memory),
+            ("restore_metadata", snapshot.restore_metadata_memory),
             ("credentials", snapshot.credentials_memory),
         ] {
             assert_eq!(
