@@ -2386,8 +2386,10 @@ deps-down:
     docker compose down --remove-orphans --volumes
 
 # Run black-box cluster scenarios against an explicitly supplied, already-built Nervix image.
+# The script replaces the recipe's shell, so the TERM that just passes on when it is cancelled
+# reaches the controller, whose exit trap heals, captures evidence and cleans up.
 chaos *args:
-    bash scripts/chaos/chaos.sh {{ args }}
+    exec bash scripts/chaos/chaos.sh {{ args }}
 
 # Regenerate the prebuilt WASM guest the stateful chaos scenarios upload, after a guest ABI change.
 # The chaos runner itself never builds guest code; `cargo test --package nervix-wasm` checks that
