@@ -13,6 +13,7 @@
 //! expression that produced it, and the reason a record has none, both stay with the host.
 
 use arrow_array::UInt64Array;
+use error_stack::ResultExt as _;
 
 use super::{filter_map::ExecutedFilterMap, *};
 
@@ -32,11 +33,11 @@ impl CompiledOrderingGroup {
     /// Compiles the group `declared` against the emitter's input schema.
     pub(super) fn compile(
         declared: &EmitterOrderingGroupPlan,
-        domain: &DomainName,
         emitter: &EmitterName,
         input: RuntimeVmSchema,
         context: RuntimeVmCompileContext<'_>,
-    ) -> Result<Self, RuntimeError> {
+    ) -> RuntimeVmCompileResult<Self> {
+        let node = ModelName::from(emitter);
         let expression = match declared {
             EmitterOrderingGroupPlan::FromBranch => return Ok(Self::FromBranch),
             EmitterOrderingGroupPlan::Expression(program) => program,
@@ -47,17 +48,12 @@ impl CompiledOrderingGroup {
             false,
         )]));
         let error_sites =
-            compiled_message_error_sites(expression, &[MessageErrorOperation::Set], None).map_err(
-                |reason| RuntimeError::BuildDomainExecution {
-                    domain: domain.as_str().to_string(),
-                    reason: format!("{reason:#}"),
-                },
-            )?;
+            compiled_message_error_sites(expression, &[MessageErrorOperation::Set], None)
+                .change_context_lazy(|| RuntimeVmCompileError::CompileFilterMap {
+                    node: node.clone(),
+                })?;
         let program = compile_emitter_filter_map_part(
-            RuntimeCompileTarget {
-                domain,
-                identifier: &ModelName::from(emitter),
-            },
+            &node,
             expression.clone(),
             RuntimeVmSchemaPair {
                 input: input.schema,
@@ -404,7 +400,6 @@ mod tests {
         .expect("the ordering group expression must lower");
         CompiledOrderingGroup::compile(
             &declared,
-            &domain("default"),
             &emitter,
             RuntimeVmSchema {
                 schema: input_schema.arrow_schema(),

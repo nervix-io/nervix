@@ -145,6 +145,7 @@ impl Runtime {
             return Ok(StreamingResponse::new(0, stream::empty()));
         };
         let lsm = captured.lsm;
+        tracing::debug!(%placement, lsm, "encoding native Kafka offset checkpoint");
         let (maximum, scratch) = captured.bounds().map_err(StreamHandlerError::with_cause)?;
         let metadata = self
             .inner
@@ -182,6 +183,7 @@ impl Runtime {
                     "Kafka offset stream length exceeds address space",
                 ))
             })?;
+        tracing::debug!(%placement, lsm, length, "encoded native Kafka offset checkpoint");
         let mut header = lsm.to_le_bytes().to_vec();
         header.extend_from_slice(&artifact.digest());
         let header = self
@@ -280,6 +282,7 @@ impl Runtime {
             .stage(length)
             .await
             .change_context_lazy(failure)?;
+        tracing::debug!(%placement, after_lsm, described_lsm, length, "receiving native Kafka offset checkpoint");
         let mut header = [0_u8; HEADER_BYTES];
         let mut header_read = 0;
         while let Some(chunk) = body.next_chunk().await.change_context_lazy(failure)? {
@@ -301,6 +304,7 @@ impl Runtime {
         drop(body);
         let (lsm, digest) = checkpoint_header(&header[..header_read], after_lsm, described_lsm)
             .change_context_lazy(failure)?;
+        tracing::debug!(%placement, lsm, length, "received native Kafka offset checkpoint");
         let mut staged = writer.finish(digest).await.change_context_lazy(failure)?;
         // Native conversion retains the encoded checkpoint beside decoded positions and the new
         // table. Its charge is separate from the bounded transport and file I/O working set.
@@ -346,6 +350,7 @@ impl Runtime {
             .await
             .change_context_lazy(failure)?
             .change_context_lazy(failure)?;
+        tracing::debug!(%placement, lsm, "installed native Kafka offset checkpoint");
         Ok(lsm)
     }
 }

@@ -1493,10 +1493,7 @@ mod tests {
         schema: &Arc<CompiledSchema>,
     ) -> CompiledProgramWithMaterializedInterest {
         compile_processor_output_filter_map_program(
-            RuntimeCompileTarget {
-                domain: &domain("default"),
-                identifier: &named("validate_filter_map"),
-            },
+            &named("validate_filter_map"),
             &[named("input_records")],
             &named("output_records"),
             &construction("INHERIT ALL"),
@@ -1868,10 +1865,7 @@ mod tests {
         ]);
         let branching = test_branching(&[("tenant", ParseAsType::String)]);
         let program = compile_processor_output_filter_map_program(
-            RuntimeCompileTarget {
-                domain: &domain("default"),
-                identifier: &named("project_notifications"),
-            },
+            &named("project_notifications"),
             &[named("notifications")],
             &named("projected_notifications"),
             &construction(
@@ -1971,10 +1965,7 @@ mod tests {
         ]);
         let branching = test_branching(&[("tenant", ParseAsType::String)]);
         let program = compile_processor_output_filter_map_program(
-            RuntimeCompileTarget {
-                domain: &domain("default"),
-                identifier: &named("project_notifications"),
-            },
+            &named("project_notifications"),
             &[named("notifications")],
             &named("projected_notifications"),
             &construction(
@@ -2071,10 +2062,7 @@ mod tests {
             },
         )]);
         let program = compile_processor_output_filter_map_program(
-            RuntimeCompileTarget {
-                domain: &domain("default"),
-                identifier: &named("copy_vectors"),
-            },
+            &named("copy_vectors"),
             &[named("vectors")],
             &named("copied_vectors"),
             &construction("INHERIT ALL"),
@@ -2139,10 +2127,7 @@ mod tests {
         ]);
         let output_schema = test_schema(&[("amount", ParseAsType::I64)]);
         let program = compile_processor_output_filter_map_program(
-            RuntimeCompileTarget {
-                domain: &domain("default"),
-                identifier: &named("calculate_amount"),
-            },
+            &named("calculate_amount"),
             &[named("amounts")],
             &named("calculated_amounts"),
             &construction("SET amount = input.amount, amount = amount / input.denominator"),
@@ -2246,10 +2231,7 @@ mod tests {
         let schema = test_schema(&[("tenant", ParseAsType::String)]);
         let branching = test_branching(&[("region", ParseAsType::String)]);
         let error = compile_processor_output_filter_map_program(
-            RuntimeCompileTarget {
-                domain: &domain("default"),
-                identifier: &named("project_notifications"),
-            },
+            &named("project_notifications"),
             &[named("notifications")],
             &named("projected_notifications"),
             &construction("INHERIT ALL WHERE branch.tenant = output.tenant"),
@@ -2268,7 +2250,7 @@ mod tests {
             },
         )
         .expect_err("branch namespace must reject missing keys");
-        let error = error.to_string();
+        let error = format!("{error:#}");
 
         assert!(
             error.contains("branch.tenant") || error.contains("tenant"),
@@ -2325,7 +2307,6 @@ mod tests {
         )
         .expect("emitter route must lower");
         let program = compile_emitter_filter_map_program(
-            &domain("default"),
             &emitter.name,
             route.as_ref(),
             RuntimeVmSchemaPair {
@@ -2618,7 +2599,6 @@ mod tests {
             ],
         }));
         let program = bind_ingestor_route_for_test(
-            &domain("default"),
             &named::<ModelName>("logic_ingestor"),
             IngestMetadataKind::Headers,
             true,

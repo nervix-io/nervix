@@ -7,6 +7,7 @@
 //!   public archive reader.
 //! - **Must not know.** Runtime maps, checkpoint storage keys or private restore installation.
 
+use arrow_array::TimestampNanosecondArray;
 use nervix_backup::DescribedRuntimeState;
 use nervix_client_core::ProducerOutcome;
 use nervix_models::{ClientProducerLimits, IngestorName};
@@ -19,7 +20,7 @@ async fn when_materialized_workload_is_created(world: &mut ScenarioWorld, relays
     let domain = &world.domain;
     let mut commands = format!(
         "CREATE UNPACED DOMAIN {domain};
-         CREATE SCHEMA event ( tenant STRING, value STRING, round I64 );
+         CREATE SCHEMA event ( tenant STRING, value STRING, round I64, occurred_at DATETIME );
          CREATE SCHEMA tenant_key ( tenant STRING );
          CREATE BRANCH by_tenant SCHEMA tenant_key TTL 30m;
          CREATE SCHEMA summary ( tenant STRING, relay STRING, length I64, round I64 );
@@ -39,7 +40,7 @@ async fn when_materialized_workload_is_created(world: &mut ScenarioWorld, relays
     }
     commands.push_str(
         "CREATE INGESTOR source FROM CLIENT SCHEMA event MODE ACK SEQUENTIAL ACK TIMEOUT 30s \
-         RETRY POLICY BACKOFF 100ms MAX 1s ON QUIESCE SUSPEND ",
+         RETRY POLICY BACKOFF 100ms MAX 1s ON QUIESCE SUSPEND TIMESTAMP AT occurred_at ",
     );
     for index in 0..relays {
         commands.push_str(&format!(
@@ -116,7 +117,9 @@ async fn when_large_materialized_round_is_submitted(
         .open_ingestor(
             domain,
             IngestorName::parse("source").assured("the fixture ingestor name is valid"),
-            crate::client_producers::expected_fields("tenant STRING, value STRING, round I64"),
+            crate::client_producers::expected_fields(
+                "tenant STRING, value STRING, round I64, occurred_at DATETIME",
+            ),
             ClientProducerLimits {
                 batches: std::num::NonZeroU32::new(1).assured("one batch is nonzero"),
                 bytes: NonZeroU64::new(2 * 1024 * 1024)
@@ -133,10 +136,18 @@ async fn when_large_materialized_round_is_submitted(
                 StdArc::new(StringArray::from(vec![format!("restore-tenant-{tenant}")])),
                 StdArc::new(StringArray::from(vec![value.as_str()])),
                 StdArc::new(Int64Array::from(vec![i64::from(round)])),
+                StdArc::new(
+                    TimestampNanosecondArray::from(vec![i64::from(round) * 1_000_000_000])
+                        .with_timezone("+00:00"),
+                ),
             ],
         )
         .assured("the bounded row has the producer's exact input schema");
         let body = producer.batch(&rows).assured("the fixture row encodes");
+        // Exercise an identical successful replay as well as possible partial failures. Every
+        // relay must retain exactly one revision per tenant and round in the archive below.
+        let completions_required = if round == 2 && tenant == 0 { 2 } else { 1 };
+        let mut completions = 0;
         let mut attempts = 0_u32;
         loop {
             let remaining = deadline
@@ -153,10 +164,14 @@ async fn when_large_materialized_round_is_submitted(
                         "materialized input round {round}, tenant {tenant}: completed after \
                          {attempts} attempts"
                     );
-                    break;
+                    completions += 1;
+                    if completions == completions_required {
+                        break;
+                    }
                 }
                 ProducerOutcome::ProcessingFailed { failure, message } => {
-                    // The fixture replaces the same materialized keys with the same values.
+                    // The fixture retains each row's explicit event timestamp on replay, so a
+                    // partially applied attempt does not create another materialized revision.
                     // Replaying a reported failed attempt preserves its complete value oracle;
                     // an unknown outcome or a final admission refusal remains a setup failure.
                     println!(

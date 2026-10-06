@@ -17,7 +17,9 @@
 use std::num::NonZeroUsize;
 
 use error_stack::ResultExt as _;
-use nervix_interconnect::BranchCheckpointCursor;
+use nervix_interconnect::{
+    BranchCheckpointCursor, InterconnectStreamRequest as _, SyncKafkaOffsets,
+};
 
 use super::{
     branch_checkpoint_catalog::BranchCheckpointCatalog,
@@ -2558,7 +2560,9 @@ impl Runtime {
             state.record_persisted(lsm);
             self.announce_checkpoint(offsets.placement(), offsets.replication(), lsm);
         }
-        offsets.wait_for_replica_quorum(lsm).await
+        offsets
+            .wait_for_replica_quorum(lsm, SyncKafkaOffsets::TIMEOUT)
+            .await
     }
 
     /// Record a committed Kafka offset and wait until the offset state's replicas hold it.
@@ -2586,7 +2590,9 @@ impl Runtime {
             return Ok(());
         }
         self.announce_checkpoint(offsets.placement(), offsets.replication(), lsm);
-        offsets.wait_for_replica_quorum(lsm).await
+        offsets
+            .wait_for_replica_quorum(lsm, SyncKafkaOffsets::TIMEOUT)
+            .await
     }
 
     pub(in crate::runtime) async fn reset_domain_kafka_offsets(

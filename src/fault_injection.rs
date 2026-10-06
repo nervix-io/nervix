@@ -420,6 +420,7 @@ impl Default for FaultInjection {
 enum RestoreStateFailure {
     GuestStaging,
     MaterializedStaging,
+    BranchStateStaging,
     DurablePublication,
 }
 
@@ -433,6 +434,12 @@ impl FaultInjection {
         self.inner
             .failed_restore_state_installations
             .insert(domain, RestoreStateFailure::GuestStaging);
+    }
+
+    pub fn fail_restored_branch_state_checkpoint(&self, domain: DomainName) {
+        self.inner
+            .failed_restore_state_installations
+            .insert(domain, RestoreStateFailure::BranchStateStaging);
     }
 
     pub fn fail_after_durable_restore_publication(&self, domain: DomainName) {
@@ -550,6 +557,15 @@ impl FaultInjection {
             .failed_restore_state_installations
             .remove_if(domain, |_, fault| {
                 *fault == RestoreStateFailure::MaterializedStaging
+            })
+            .is_some()
+    }
+
+    pub(crate) fn restored_branch_state_checkpoint_fails(&self, domain: &DomainName) -> bool {
+        self.inner
+            .failed_restore_state_installations
+            .remove_if(domain, |_, fault| {
+                *fault == RestoreStateFailure::BranchStateStaging
             })
             .is_some()
     }

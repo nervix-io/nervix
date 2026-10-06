@@ -63,11 +63,11 @@ impl WasmCallbackReporting<'_> {
     /// Apply the processor's general error policy to every input the branch holds, because a
     /// callback failed without reporting lineage for any of them. A success the policy grants is
     /// held back until the checkpoint that completes the callback.
-    pub(super) fn fail_held_inputs(
+    pub(super) fn fail_held_inputs<C: error_stack::Context>(
         self,
         ack_map: &mut WasmAckMap,
         holds: &mut WasmCheckpointHolds,
-        reason: String,
+        error: &Report<C>,
     ) {
         let held = std::mem::take(ack_map);
         for context in held.values() {
@@ -79,7 +79,7 @@ impl WasmCallbackReporting<'_> {
             self.processor,
             self.error_policies,
             held.values().map(|context| &context.acks),
-            reason,
+            error,
         );
     }
 
@@ -101,7 +101,7 @@ impl WasmCallbackReporting<'_> {
             .verified("a guest callback only runs on a branch that holds an instance")
             .module;
         let reported = module.guest_failure(failure, None);
-        self.fail_held_inputs(ack_map, holds, format!("{reported:#}"));
+        self.fail_held_inputs(ack_map, holds, &reported);
         if resource_limit_exceeded {
             *instance = None;
         }
@@ -147,7 +147,7 @@ impl WasmCallbackReporting<'_> {
                     self.processor,
                     self.error_policies,
                     withheld,
-                    format!("{failure:#}"),
+                    &failure,
                 );
                 *instance = None;
             }

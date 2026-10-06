@@ -227,7 +227,7 @@ Feature: WASM processor runtime behavior
     Then within "10s" the active session observes a server error
     And the last server error contains
       """
-      Column 'value' is declared as non-nullable but contains null values
+      wasm_processor 'emit_uninitialized_required' general error in domain '{{domain}}': wasm processor 'emit_uninitialized_required' output emission failed (unbranched, resource 'wasm_uninitialized_required_guest' version 1 file 'processors/filter_even.wasm', export 'nervix_read_emit'): failed to build WASM output batch for relay 'required_output': Invalid argument error: Column 'value' is declared as non-nullable but contains null values
       """
 
     Examples:

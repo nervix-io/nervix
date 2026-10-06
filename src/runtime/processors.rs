@@ -29,7 +29,7 @@ use super::{
     RelayMessage, RelayRecordBatch, ReplicatedWasmProcessorState, ReplicatedWindowProcessorState,
     RuntimeFlushPolicy, RuntimeInputCollectPolicy, RuntimeInputCollector, WasmGuestStateResetFence,
     WasmLiveInstance, WindowAccumulatorPlan, WindowProcessorState, branch_key_display,
-    inferencer::OnnxInferencerSession, relay_batch::RelayRecordBatchError,
+    inferencer::OnnxInferencerSession,
 };
 use crate::{
     registry::{BranchInstanceAckBoundary, BranchedProcessorNodeSpec},
@@ -363,29 +363,17 @@ pub(super) enum ProcessorMaterializedError {
     )]
     Resolve { branch: Option<BranchKey> },
     #[error(
-        "{} '{}' requires materialized state that was evicted from branch '{}' after the batch was \
-         admitted",
-        .node_kind.as_str(),
-        .processor.as_str(),
+        "materialized state a REQUIRED SKIP dependency needs was evicted from branch '{}' after \
+         the batch was admitted",
         branch_key_display(.branch)
     )]
-    EvictedRequiredSkip {
-        node_kind: ModelKind,
-        processor: ModelName,
-        branch: Option<BranchKey>,
-    },
+    EvictedRequiredSkip { branch: Option<BranchKey> },
     #[error(
-        "{} '{}' awaits materialized state that was evicted from branch '{}' after the batch was \
-         admitted",
-        .node_kind.as_str(),
-        .processor.as_str(),
+        "materialized state a REQUIRED WAIT dependency awaits was evicted from branch '{}' after \
+         the batch was admitted",
         branch_key_display(.branch)
     )]
-    EvictedRequiredWait {
-        node_kind: ModelKind,
-        processor: ModelName,
-        branch: Option<BranchKey>,
-    },
+    EvictedRequiredWait { branch: Option<BranchKey> },
 }
 
 /// A stateful processor failed to publish the live state its branch task owns.
@@ -712,33 +700,28 @@ pub(super) enum ReordererOutputBatchError {
     RowCountOverflow,
     #[error("cannot order an empty reorderer output buffer")]
     Empty,
-    #[error("failed to concatenate buffered reorderer batches: {report}")]
-    Concatenate {
-        report: Report<RelayRecordBatchError>,
-    },
-    #[error("failed to reorder the buffered relay batch: {report}")]
-    Reorder {
-        report: Report<RelayRecordBatchError>,
-    },
+    #[error("failed to concatenate buffered reorderer batches")]
+    Concatenate,
+    #[error("failed to reorder the buffered relay batch")]
+    Reorder,
 }
 
-#[derive(Debug, thiserror::Error)]
-#[error("{error}")]
+/// A reorderer flush that failed, together with every batch the buffer held. The caller resolves
+/// the ACKs those batches carry, so a failure that dropped one would strand them.
+#[derive(Debug)]
 pub(super) struct ReordererOutputBatchFailure {
-    #[source]
-    pub(super) error: ReordererOutputBatchError,
+    pub(super) error: Report<ReordererOutputBatchError>,
     pub(super) batches: Vec<RelayRecordBatch>,
 }
 
 impl ReordererOutputBatchFailure {
-    /// Fail a flush while handing every buffered batch back to the caller. The caller resolves the
-    /// ACKs those batches carry, so a failure that dropped one would strand them.
+    /// Fail a flush while handing every buffered batch back to the caller.
     fn retaining(
         error: ReordererOutputBatchError,
         pending: Vec<ReordererPendingBatch>,
     ) -> Box<Self> {
         Box::new(Self {
-            error,
+            error: Report::new(error),
             batches: pending.into_iter().map(|pending| pending.batch).collect(),
         })
     }
@@ -838,9 +821,9 @@ impl ReordererOutputBuffer {
             Err(failure) => {
                 let failure = *failure;
                 return Err(Box::new(ReordererOutputBatchFailure {
-                    error: ReordererOutputBatchError::Concatenate {
-                        report: failure.error,
-                    },
+                    error: failure
+                        .error
+                        .change_context(ReordererOutputBatchError::Concatenate),
                     batches: failure.preserved,
                 }));
             }
@@ -853,9 +836,9 @@ impl ReordererOutputBuffer {
             Err(failure) => {
                 let failure = *failure;
                 Err(Box::new(ReordererOutputBatchFailure {
-                    error: ReordererOutputBatchError::Reorder {
-                        report: failure.error,
-                    },
+                    error: failure
+                        .error
+                        .change_context(ReordererOutputBatchError::Reorder),
                     batches: vec![failure.batch],
                 }))
             }

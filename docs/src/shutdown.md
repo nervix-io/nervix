@@ -284,8 +284,12 @@ drain, because the force flush does not wait for a logical cadence to come due.
 
 Window processors are the one exception to that release. A force flush purges timed-out aggregate
 state but emits only windows that have met their declared `WIDTH`. A partially filled window is not
-emitted early by a shutdown, so its rows do not reach the sink; the window's input was already
-acknowledged when it was admitted, so nothing redelivers them either.
+emitted early by a shutdown, so its rows do not reach the sink. A row's acknowledgement completes
+when the window steps past the row; until then its shares are parked, so the drain does not wait
+for them. The branch's final checkpoint keeps the retained rows for the next task of the branch to
+restore, and teardown ends their shares unacknowledged: a source with external acknowledgements
+redelivers those rows after the restart, and the restored window admits them beside the rows it
+restored.
 
 An ownership handoff publishes the remaining window for the destination to restore. Evicting a
 concrete branch has a different endpoint: it drops the branch's retained rows and aggregate state
@@ -300,7 +304,8 @@ downstream node finished its own flush is not left behind. A domain is quiescent
 confirming generation completes with nothing visible.
 Quiesced backup applies the same admitted-work view to its selected domain across all live nodes.
 It requests a separate cluster-wide confirming generation before capturing checkpoints. Parked
-`REQUIRED WAIT` messages do not hold that cut open, and a failed drain resumes the domain.
+`REQUIRED WAIT` messages and the rows windows retain do not hold that cut open, and a failed drain
+resumes the domain. The cut captures retained window rows as window state.
 When a parked message has crossed nodes, remote ACK progress carries its parked state back through
 the source's acknowledgement chain. The drain excludes that chain while the message is parked;
 resuming it reactivates the chain, and only a terminal ACK completes the source attempt.
@@ -374,12 +379,14 @@ gate and processor command lane select only that branch; sibling callbacks, chec
 ACKs, and timers continue until shutdown itself reaches them. Old timeout handles belong to the
 discarded branch instance and are never transferred to the fresh instance.
 
-Two kinds of work deliberately do not hold the drain open:
+Three kinds of work deliberately do not hold the drain open:
 
 - **Pending `REQUIRED WAIT` records.** A message suspended on absent materialized state cannot
   finish, because the dependency is not there. Every force flush retries it against the state that
   is present; whatever still waits at the end is negatively acknowledged. Its source redelivers it
   after the restart, and the record is processed then against the state that has since arrived.
+- **Rows a window retains.** Only further input steps a window past them, and the window's
+  checkpoint keeps them, as described above.
 - **Outstanding force-flush obligations.** They are the mechanism of the drain, not admitted work
   waiting inside it.
 
@@ -700,7 +707,7 @@ strongly consistent, selected runtime state is checkpointed, and the hot path is
 | Durable handoff and forced-recovery preparations | Preserved, then reconciled or activated | Preserved, then reconciled or activated |
 | Runtime-state checkpoints: Kafka domain offsets, deduplicator and window state, materialized relay records | Flushed again as runtime tasks stop | Reopen at the last completed periodic checkpoint |
 | WASM guest-state checkpoints | Every checkpoint that released an acknowledgement is already synchronized | Reopen at the newest checkpoint on the node's storage, which covers every acknowledged input |
-| Restored backup state: materialized relay rows, WASM guest saves, Kafka domain offsets and branch lifecycle | A restore synchronizes a complete chunked namespace and its atomic active-generation pointer before releasing the stopped domain's START gate or resuming its archived lifecycle | Reopens pointer and checkpoints from one complete database view on each assigned owner and replica; a durable pointer alone does not release an incomplete replicated installation gate. A resumed domain retains every restored kind. A normal START continues saved guest state, source positions and branch incarnations, and resets materialized rows |
+| Restored backup state: materialized relay rows, WASM guest saves, Kafka domain offsets, branch lifecycle, deduplicator keys and window state | A restore synchronizes a complete chunked namespace and its atomic active-generation pointer before releasing the stopped domain's START gate or resuming its archived lifecycle | Reopens pointer and checkpoints from one complete database view on each assigned owner and replica; a durable pointer alone does not release an incomplete replicated installation gate. A resumed domain retains every restored kind. A normal START continues saved guest state, source positions, branch incarnations, deduplicator keys and windows, and resets materialized rows |
 | External source offsets and sink commits | Complete when the drain succeeds | Only the external connector's own delivery and transaction guarantee applies |
 | Relay batches, queued payload attempts, suspended work, ACK guards, ACK tokens, ACK maps, handoff payloads, gate leases, clock progress | The drain tries to resolve them before its deadline | Volatile; lost |
 | Client producers, their credit and queued batches, producer links | Ended as `shutting down` after the drain, or detached with their sessions | Volatile; lost with the process. Every producer another node forwarded here ends there as `owner lost`: its batches that node never cleared for admission are refused as `producer ended`, and only the cleared ones are of unknown outcome. The node's own sessions end, so their clients report every batch they sent without an outcome as of unknown outcome, and the nodes executing the ingestors detach those producers and finish what they admitted |
@@ -712,10 +719,13 @@ generation only after every assigned owner and replica has published its complet
 rows reopen from one pinned database snapshot across a node restart; the stored clock mapping
 projects downtime under the recovered authority. A failed installation retains its durable
 activation gate across restart. A normal `START` creates a new generation and clears materialized
-rows while retaining compatible WASM, offset and branch lifecycle state. Periodic materialized
+rows while retaining compatible WASM, offset, branch lifecycle, deduplicator and window state. Periodic materialized
 flushes seal to quota-owned files and write bounded database segments, synchronizing their data
 before the replacement header, so a large relay has the same shutdown durability boundary. See
-[Backup And Restore](backup-and-restore.md#publishing-the-state-generation).
+[Backup And Restore](backup-and-restore.md#publishing-the-state-generation). A deduplicator or
+window backup likewise captures what each branch task publishes when the cut's lifecycle
+checkpoint asks it to, independently of the periodic interval, and a restore rebuilds each branch's
+native checkpoint from its archived Arrow groups and streams it through the same publisher.
 
 Durability is not uniform across those rows, and the difference is operationally visible:
 

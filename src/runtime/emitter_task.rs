@@ -179,6 +179,14 @@ pub(in crate::runtime) enum EmitterRuntimeError {
     PublishBatch,
     #[error("emitter publish is stalled")]
     PublishStalled,
+    #[error("failed to build the publish batch")]
+    BuildPublishBatch,
+    /// `publish_failure` is the emitter's description of the publish failure, which its message
+    /// error policy would otherwise have reported for each message of the batch.
+    #[error("failed to split a batch whose publish failed ({publish_failure}) into its messages")]
+    SplitFailedBatch { publish_failure: String },
+    #[error("the source filter of input relay '{relay}' failed")]
+    SourceFilter { relay: RelayName },
 }
 
 impl EmitterRuntimeError {
@@ -212,7 +220,10 @@ impl EmitterRuntimeError {
             | Self::FinalFlush
             | Self::FlushTiming
             | Self::RetryTiming
-            | Self::EncodeBatch => false,
+            | Self::EncodeBatch
+            | Self::BuildPublishBatch
+            | Self::SplitFailedBatch { .. }
+            | Self::SourceFilter { .. } => false,
         }
     }
 }
@@ -415,25 +426,32 @@ impl SinkGeneralErrorHandler for EmitterSinkContext {
         match self.error_policies.general {
             GeneralErrorPolicy::Ignore => acks.acknowledge(),
             GeneralErrorPolicy::Log => {
-                self.runtime.events().report_error(format!(
+                let report = format!(
                     "emitter '{}' general error in domain '{}': {}",
                     self.emitter.as_str(),
                     self.domain.as_str(),
                     reason
-                ));
+                );
+                self.runtime.events().report_error(report.clone());
                 warn!(
                     domain = self.domain.as_str(),
                     emitter = self.emitter.as_str(),
                     reason = %reason,
                     "runtime node handled general error"
                 );
-                acks.reject(reason);
+                acks.reject(report);
             }
         }
     }
 }
 
-pub(super) fn emitter_error_message(error: &Report<EmitterRuntimeError>) -> String {
+/// How an emitter describes `error`: by the first printable attachment in its chain, which carries
+/// the connector's or task's own description, or else by the error's outermost context.
+#[cfg_attr(
+    nervix_lint,
+    nervix::dispatch(reason = "the failure is formatted through its context's Display contract")
+)]
+pub(super) fn emitter_error_message<C: error_stack::Context>(error: &Report<C>) -> String {
     error
         .frames()
         .find_map(|frame| match frame.kind() {
@@ -634,7 +652,7 @@ impl EmitterTask {
         emitter: EmitterExecutionPlan,
         plan: EmitterStartPlan,
         inputs: Vec<(RelayName, RelayRuntimeFanIn)>,
-    ) -> Result<ScheduledEmitterTask, RuntimeError> {
+    ) -> error_stack::Result<ScheduledEmitterTask, EmitterStartError> {
         let EmitterTaskBuildDeps {
             domain,
             shutdown_tx,
@@ -647,30 +665,25 @@ impl EmitterTask {
             materialized_relay_specs: materialized_stream_specs,
             lookups,
         } = deps;
-        let codec = if let Some(codec_name) = emitter.codec.as_ref() {
-            Some(codecs.get(codec_name).cloned().ok_or_else(|| {
-                RuntimeError::BuildDomainExecution {
-                    domain: domain.as_str().to_string(),
-                    reason: format!("missing emitter codec '{}'", codec_name.as_str()),
-                }
-            })?)
-        } else {
-            None
+        let codec = match emitter.codec.as_ref() {
+            Some(codec_name) => {
+                let Some(codec) = codecs.get(codec_name).cloned() else {
+                    return Err(Report::new(EmitterStartError::MissingCodec {
+                        codec: codec_name.clone(),
+                    }));
+                };
+                Some(codec)
+            }
+            None => None,
         };
         if plan.sink.batch().is_some()
             && let Some(codec) = &codec
         {
-            codec
-                .check_batch_container()
-                .map_err(|error| RuntimeError::BuildDomainExecution {
-                    domain: domain.as_str().to_string(),
-                    reason: format!(
-                        "batching emitter '{}' cannot publish through codec '{}': {}",
-                        emitter.name.as_str(),
-                        codec.name.as_str(),
-                        error.current_context(),
-                    ),
-                })?;
+            codec.check_batch_container().change_context_lazy(|| {
+                EmitterStartError::BatchCodec {
+                    codec: CodecName::from(&codec.name),
+                }
+            })?;
         }
         let output_compiled_schema = emitter.output_schema.clone();
         let udfs = runtime.udf_executor(domain);
@@ -681,7 +694,6 @@ impl EmitterTask {
             udfs: udfs.as_ref(),
         };
         let filter_map = compile_emitter_filter_map_program(
-            domain,
             &emitter.name,
             emitter.route.as_ref(),
             RuntimeVmSchemaPair {
@@ -691,7 +703,8 @@ impl EmitterTask {
                 output_sensitivity: output_compiled_schema.vm_sensitivity(),
             },
             compile_context,
-        )?;
+        )
+        .change_context(EmitterStartError::Route)?;
         let http_requests = match &plan.sink {
             EmitterSinkPlan::Http(sink) => {
                 let output = codec.as_ref().map(|codec| RuntimeVmSchema {
@@ -714,31 +727,30 @@ impl EmitterTask {
                     },
                     compile_context,
                 )
-                .map_err(|error| RuntimeError::BuildDomainExecution {
-                    domain: domain.as_str().to_string(),
-                    reason: format!("{error:#}"),
-                })?;
+                .change_context(EmitterStartError::HttpRequests)?;
                 Some(compiled)
             }
             _ => None,
         };
         let ordering_group = match emitter.ordering_group.as_ref() {
             None => None,
-            Some(declared) => Some(CompiledOrderingGroup::compile(
-                declared,
-                domain,
-                &emitter.name,
-                RuntimeVmSchema {
-                    schema: input_schema.arrow_schema(),
-                    sensitivity: input_schema.vm_sensitivity(),
-                },
-                RuntimeVmCompileContext {
-                    available_materialized_streams: &materialized_stream_specs,
-                    available_lookups: &lookups,
-                    current_branching: &input_branching,
-                    udfs: udfs.as_ref(),
-                },
-            )?),
+            Some(declared) => Some(
+                CompiledOrderingGroup::compile(
+                    declared,
+                    &emitter.name,
+                    RuntimeVmSchema {
+                        schema: input_schema.arrow_schema(),
+                        sensitivity: input_schema.vm_sensitivity(),
+                    },
+                    RuntimeVmCompileContext {
+                        available_materialized_streams: &materialized_stream_specs,
+                        available_lookups: &lookups,
+                        current_branching: &input_branching,
+                        udfs: udfs.as_ref(),
+                    },
+                )
+                .change_context(EmitterStartError::OrderingGroup)?,
+            ),
         };
         let mut source_filters = HashMap::default();
         for input in &emitter.inputs {
@@ -746,10 +758,7 @@ impl EmitterTask {
                 continue;
             };
             let program = bind_scoped_filter_program(
-                RuntimeCompileTarget {
-                    domain,
-                    identifier: &ModelName::from(&emitter.name),
-                },
+                &ModelName::from(&emitter.name),
                 source_filter.program(),
                 RuntimeVmSchema {
                     schema: input_schema.arrow_schema(),
@@ -767,7 +776,10 @@ impl EmitterTask {
                     allow_header_reads: false,
                     allow_metadata: false,
                 },
-            )?;
+            )
+            .change_context_lazy(|| EmitterStartError::SourceFilter {
+                relay: input.relay.clone(),
+            })?;
             source_filters.insert(input.relay.clone(), program);
         }
         let task_domain = domain.clone();
@@ -847,22 +859,15 @@ impl EmitterTask {
             .clone();
         let buffered_messages =
             Arc::new(EmitterBufferedMessages::new(emitter_buffer_count.clone()));
-        if let Err(error) = EmitterSinkStarter::check_client_config(&plan) {
-            return Err(RuntimeError::BuildDomainExecution {
-                domain: domain.as_str().to_string(),
-                reason: format!(
-                    "failed to resolve {} emitter client: {}",
-                    plan.sink.label(),
-                    emitter_error_message(&error)
-                ),
-            });
-        }
+        EmitterSinkStarter::check_client_config(&plan)
+            .change_context(EmitterStartError::ClientConfig)?;
         let input_collect_policy = Runtime::parse_runtime_node_input_collect_policy(
             domain,
             "emitter",
             &emitter.name,
             emitter.collect_policy.as_ref(),
-        )?;
+        )
+        .change_context(EmitterStartError::CollectPolicy)?;
         let (commands, command_rx) = mpsc::channel(4);
         let (stop_signal, mut stop_rx) = watch::channel(None);
         let task_stop_signal = stop_signal.clone();
@@ -875,7 +880,8 @@ impl EmitterTask {
                 Ok(routing) => routing,
                 Err(error) => {
                     runtime.events().report_error(format!(
-                        "emitter '{}' in domain '{}' could not bind its routing snapshot: {error}",
+                        "emitter '{}' in domain '{}' could not bind its routing snapshot: \
+                         {error:#}",
                         task_emitter.as_str(),
                         task_domain.as_str(),
                     ));
@@ -889,7 +895,7 @@ impl EmitterTask {
                 Ok(clock) => clock,
                 Err(error) => {
                     runtime.events().report_error(format!(
-                        "emitter '{}' in domain '{}' could not bind its domain clock: {error}",
+                        "emitter '{}' in domain '{}' could not bind its domain clock: {error:#}",
                         task_emitter.as_str(),
                         task_domain.as_str(),
                     ));
@@ -1041,8 +1047,8 @@ impl EmitterTaskLoop<'_> {
                 // clock is not readable in this generation. There is no wall-clock fallback
                 // for a logical cadence, so the work stays buffered and unpublished while the
                 // acknowledgements it owns are kept alive on the physical beat.
-                Err(RelayInteractionError::WakeTiming { reason, .. }) => {
-                    self.context.record_failure(reason);
+                Err(failure) if failure.error.current_context().is_wake_timing() => {
+                    self.context.record_failure(format!("{:#}", failure.error));
                     let acks = self.state.sink.pending_acks(&self.state.buffer);
                     RuntimeReconnectBackoff::wait_duration_with_ack_alive(
                         RETRY_ACK_ALIVE_EACH,
@@ -1052,10 +1058,11 @@ impl EmitterTaskLoop<'_> {
                     .await;
                     continue;
                 }
-                Err(error) => {
-                    let reason = error.to_string();
-                    self.context
-                        .report_flush_error(self.plan.sink.label(), &reason);
+                Err(failure) => {
+                    self.context.report_flush_error(
+                        self.plan.sink.label(),
+                        &format!("{:#}", failure.error),
+                    );
                     self.context
                         .runtime
                         .handle_internal_processor_error_for_acks(
@@ -1063,8 +1070,8 @@ impl EmitterTaskLoop<'_> {
                             ModelKind::Emitter,
                             &self.context.emitter,
                             &self.context.error_policies,
-                            error.acks(),
-                            reason,
+                            [&failure.acks],
+                            &failure.error,
                         );
                     continue;
                 }
@@ -1559,7 +1566,11 @@ impl EmitterBatchContext<'_> {
                 let failure = *error;
                 self.report_general_error(
                     failure.preserved.acks.iter(),
-                    format!("{reason}; {}", failure.error),
+                    &failure
+                        .error
+                        .change_context(EmitterRuntimeError::SplitFailedBatch {
+                            publish_failure: reason,
+                        }),
                 );
                 return;
             }
@@ -1596,14 +1607,18 @@ impl EmitterBatchContext<'_> {
 
     /// Report a failure that no single message owns, so the node-wide general error policy
     /// decides what happens to the acknowledgments the failed work was holding.
-    fn report_general_error<'a>(&self, acks: impl IntoIterator<Item = &'a AckSet>, reason: String) {
+    fn report_general_error<'a, C: error_stack::Context>(
+        &self,
+        acks: impl IntoIterator<Item = &'a AckSet>,
+        error: &Report<C>,
+    ) {
         self.runtime.handle_general_error_for_acks(
             self.domain,
             ModelKind::Emitter,
             self.emitter,
             self.error_policies,
             acks,
-            reason,
+            error,
         );
     }
 
@@ -1659,10 +1674,7 @@ impl EmitterBatchContext<'_> {
                     self.emitter,
                     self.error_policies,
                     dependency_error_acks.iter(),
-                    format!(
-                        "emitter '{}' failed to resolve materialized dependencies: {error}",
-                        self.emitter.as_str()
-                    ),
+                    &error,
                 );
                 return None;
             }
@@ -1724,10 +1736,7 @@ impl EmitterBatchContext<'_> {
                 match evaluated {
                     Ok(groups) => Some(groups),
                     Err(failure) => {
-                        self.report_general_error(
-                            failure.acks.iter(),
-                            format!("{:#}", failure.error),
-                        );
+                        self.report_general_error(failure.acks.iter(), &failure.error);
                         return None;
                     }
                 }
@@ -1774,7 +1783,7 @@ impl EmitterBatchContext<'_> {
         let plan = match planned {
             Ok(plan) => plan,
             Err(failure) => {
-                self.report_general_error(failure.acks.iter(), format!("{:#}", failure.error));
+                self.report_general_error(failure.acks.iter(), &failure.error);
                 return None;
             }
         };
@@ -1855,7 +1864,7 @@ impl EmitterBatchContext<'_> {
         let prepared = match prepared {
             Ok(prepared) => prepared,
             Err(failure) => {
-                self.report_general_error(failure.acks.iter(), format!("{:#}", failure.error));
+                self.report_general_error(failure.acks.iter(), &failure.error);
                 return None;
             }
         };
@@ -1902,10 +1911,7 @@ impl EmitterBatchContext<'_> {
     fn report_publish_batch_error(&self, error: Report<EmitterRuntimeError>) {
         self.report_general_error(
             std::iter::empty::<&AckSet>(),
-            format!(
-                "emitter '{}' failed to build publish batch: {error:#}",
-                self.emitter.as_str(),
-            ),
+            &error.change_context(EmitterRuntimeError::BuildPublishBatch),
         );
     }
 
@@ -1937,11 +1943,11 @@ impl EmitterBatchContext<'_> {
             Err(failure) => {
                 self.report_general_error(
                     failure.acks.iter(),
-                    format!(
-                        "input relay '{}': {:#}",
-                        input_relay.as_str(),
-                        failure.error
-                    ),
+                    &failure
+                        .error
+                        .change_context(EmitterRuntimeError::SourceFilter {
+                            relay: input_relay.clone(),
+                        }),
                 );
                 return None;
             }
@@ -2410,14 +2416,16 @@ mod tests {
         let (logged_acks, logged_completion) = AckSet::root();
         let logged_acks = SinkAcknowledgements::new(logged_acks);
         host.handle_general_error(&logged_acks, "publish failed".to_string());
+        let logged_report =
+            "emitter 'output' general error in domain 'emitter_tests': publish failed";
         let RuntimeEvent::Error(message) = events
             .recv()
             .await
             .expect("the logged general error must publish an event");
-        assert!(message.contains("publish failed"));
+        assert_eq!(message, logged_report);
         assert_eq!(
             logged_completion.wait().await,
-            AckOutcome::NoAck("publish failed".to_string())
+            AckOutcome::NoAck(logged_report.to_string())
         );
 
         let mut ignored_context = sink_context();

@@ -12,8 +12,22 @@ pub(super) struct WasmOutputContext<'a> {
     pub(super) output_schemas: &'a [(RelayName, Arc<CompiledSchema>)],
     pub(super) key: &'a Option<BranchKey>,
     pub(super) module: &'a WasmBranchModule,
-    pub(super) dispatch_error: &'static str,
+    pub(super) callback: WasmCallbackOutput,
     pub(super) execution_now: Timestamp,
+}
+
+/// The guest callback whose output a dispatch forwards.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, strum::Display)]
+pub(super) enum WasmCallbackOutput {
+    /// The output of processing one input batch.
+    #[strum(serialize = "message")]
+    Process,
+    /// The output a guest-requested timeout emitted.
+    #[strum(serialize = "timeout output")]
+    Timeout,
+    /// The output a guest released when the host asked it to flush before a quiesce.
+    #[strum(serialize = "quiesce flush output")]
+    QuiesceFlush,
 }
 
 pub(super) struct WasmDecodedOutputBatch {
@@ -77,8 +91,8 @@ pub(super) enum WasmOutputError {
         expected: usize,
         actual: usize,
     },
-    #[error("WASM output group has invalid generated Arrow IPC: {reason}")]
-    InvalidGeneratedArrowIpc { reason: String },
+    #[error("WASM output group has invalid generated Arrow IPC: {defect}")]
+    InvalidGeneratedArrowIpc { defect: WasmGeneratedIpcDefect },
     #[error("WASM generated Arrow IPC has {actual} record batches instead of exactly one")]
     GeneratedRecordBatchCount { actual: usize },
     #[error(
@@ -164,13 +178,60 @@ pub(super) enum WasmOutputError {
         row_index: usize,
         token: u64,
     },
-    #[error("invalid WASM token decision for token {token}: {reason}")]
-    InvalidTokenDecision { token: u64, reason: String },
-    #[error("failed to build WASM output batch for relay '{output_relay}': {reason}")]
-    OutputBatchBuild {
-        output_relay: String,
-        reason: String,
+    #[error("invalid WASM token decision for token {token}: {defect}")]
+    InvalidTokenDecision {
+        token: u64,
+        defect: WasmTokenDecisionDefect,
     },
+    #[error("failed to build WASM output batch for relay '{output_relay}'")]
+    OutputBatchBuild { output_relay: String },
+    #[error("failed to forward {output}")]
+    Forward { output: WasmCallbackOutput },
+    #[error("failed to materialize the output for relay '{relay}'")]
+    MaterializeRouteOutput { relay: RelayName },
+    #[error("failed to load the materialized state the route to relay '{relay}' reads")]
+    RouteSideInputs { relay: RelayName },
+    #[error("failed to materialize the input row of a message error")]
+    MessageErrorInputRow,
+}
+
+/// What makes the Arrow IPC a guest generated unusable as the column pool of its output group.
+#[derive(Debug, Clone, PartialEq, Eq, strum::Display)]
+pub(super) enum WasmGeneratedIpcDefect {
+    #[strum(to_string = "the IPC stream does not decode")]
+    Unreadable,
+    #[strum(to_string = "the IPC stream has {trailing} trailing bytes")]
+    TrailingBytes { trailing: usize },
+    #[strum(to_string = "encoded zero-column Arrow streams are not valid empty generated pools")]
+    ZeroColumns,
+    #[strum(to_string = "generated field {field_index} has non-empty name '{name}'")]
+    NamedField { field_index: usize, name: String },
+}
+
+/// Why the acknowledgement token decisions one guest callback reported cannot be applied.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, strum::Display)]
+pub(super) enum WasmTokenDecisionDefect {
+    #[strum(to_string = "carried token is unknown to this branch instance")]
+    UnknownCarried,
+    #[strum(to_string = "token occurs more than once in one output row")]
+    RepeatedInRow,
+    #[strum(to_string = "terminal {decision} token is unknown to this branch instance")]
+    UnknownTerminal { decision: WasmTerminalDecision },
+    #[strum(to_string = "token receives more than one terminal decision in one callback")]
+    RepeatedTerminal,
+    #[strum(to_string = "token is both carried and terminally completed in one callback")]
+    CarriedAndTerminal,
+}
+
+/// The terminal decision a guest reported for an input token.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, strum::Display)]
+pub(super) enum WasmTerminalDecision {
+    #[strum(serialize = "ACK")]
+    Ack,
+    #[strum(serialize = "NACK")]
+    Nack,
+    #[strum(serialize = "message error")]
+    MessageError,
 }
 
 pub(super) struct WasmOutputValidator<'a> {
@@ -184,7 +245,7 @@ impl WasmOutputValidator<'_> {
     pub(super) fn validate(
         &self,
         outputs: Vec<WasmEnvelope>,
-    ) -> Result<Vec<WasmMaterializedOutput>, WasmOutputError> {
+    ) -> error_stack::Result<Vec<WasmMaterializedOutput>, WasmOutputError> {
         self.validate_token_decisions(&outputs)?;
         let mut materialized = Vec::new();
         for (envelope_index, output) in outputs.into_iter().enumerate() {
@@ -196,66 +257,76 @@ impl WasmOutputValidator<'_> {
     pub(super) fn validate_token_decisions(
         &self,
         outputs: &[WasmEnvelope],
-    ) -> Result<(), WasmOutputError> {
+    ) -> error_stack::Result<(), WasmOutputError> {
         let mut carried_tokens = HashSet::<u64>::default();
         let mut terminal_tokens = HashSet::<u64>::default();
         for (envelope_index, output) in outputs.iter().enumerate() {
             let WasmEnvelope::Output { outputs, .. } = output else {
-                return Err(WasmOutputError::UnexpectedEnvelopeKind { envelope_index });
+                return Err(Report::new(WasmOutputError::UnexpectedEnvelopeKind {
+                    envelope_index,
+                }));
             };
             if outputs.is_empty() {
-                return Err(WasmOutputError::EmptyOutputGroup { envelope_index });
+                return Err(Report::new(WasmOutputError::EmptyOutputGroup {
+                    envelope_index,
+                }));
             }
             for output in outputs {
                 for (row_index, row) in output.acks.rows.iter().enumerate() {
                     if let Some(source_token) = row.source_token
                         && !self.ack_map.contains_key(&source_token.0)
                     {
-                        return Err(WasmOutputError::UnknownSourceToken {
+                        return Err(Report::new(WasmOutputError::UnknownSourceToken {
                             output_relay: output.output_relay.clone(),
                             row_index,
                             token: source_token.0,
-                        });
+                        }));
                     }
                     let mut row_tokens = HashSet::<u64>::default();
                     for token in &row.tokens {
                         if !self.ack_map.contains_key(&token.0) {
-                            return Err(WasmOutputError::InvalidTokenDecision {
+                            return Err(Report::new(WasmOutputError::InvalidTokenDecision {
                                 token: token.0,
-                                reason: "carried token is unknown to this branch instance"
-                                    .to_string(),
-                            });
+                                defect: WasmTokenDecisionDefect::UnknownCarried,
+                            }));
                         }
                         if !row_tokens.insert(token.0) {
-                            return Err(WasmOutputError::InvalidTokenDecision {
+                            return Err(Report::new(WasmOutputError::InvalidTokenDecision {
                                 token: token.0,
-                                reason: "token occurs more than once in one output row".to_string(),
-                            });
+                                defect: WasmTokenDecisionDefect::RepeatedInRow,
+                            }));
                         }
                         carried_tokens.insert(token.0);
                     }
                 }
                 for token_set in &output.acks.acked {
-                    self.validate_terminal_tokens(&token_set.tokens, &mut terminal_tokens, "ACK")?;
+                    self.validate_terminal_tokens(
+                        &token_set.tokens,
+                        &mut terminal_tokens,
+                        WasmTerminalDecision::Ack,
+                    )?;
                 }
                 for token_set in &output.acks.nacked {
-                    self.validate_terminal_tokens(&token_set.tokens, &mut terminal_tokens, "NACK")?;
+                    self.validate_terminal_tokens(
+                        &token_set.tokens,
+                        &mut terminal_tokens,
+                        WasmTerminalDecision::Nack,
+                    )?;
                 }
                 for token_set in &output.acks.message_errors {
                     self.validate_terminal_tokens(
                         &token_set.tokens,
                         &mut terminal_tokens,
-                        "message error",
+                        WasmTerminalDecision::MessageError,
                     )?;
                 }
             }
         }
         if let Some(token) = carried_tokens.intersection(&terminal_tokens).next() {
-            return Err(WasmOutputError::InvalidTokenDecision {
+            return Err(Report::new(WasmOutputError::InvalidTokenDecision {
                 token: *token,
-                reason: "token is both carried and terminally completed in one callback"
-                    .to_string(),
-            });
+                defect: WasmTokenDecisionDefect::CarriedAndTerminal,
+            }));
         }
         Ok(())
     }
@@ -264,21 +335,20 @@ impl WasmOutputValidator<'_> {
         &self,
         tokens: &[WasmAckToken],
         terminal_tokens: &mut HashSet<u64>,
-        decision: &str,
-    ) -> Result<(), WasmOutputError> {
+        decision: WasmTerminalDecision,
+    ) -> error_stack::Result<(), WasmOutputError> {
         for token in tokens {
             if !self.ack_map.contains_key(&token.0) {
-                return Err(WasmOutputError::InvalidTokenDecision {
+                return Err(Report::new(WasmOutputError::InvalidTokenDecision {
                     token: token.0,
-                    reason: format!("terminal {decision} token is unknown to this branch instance"),
-                });
+                    defect: WasmTokenDecisionDefect::UnknownTerminal { decision },
+                }));
             }
             if !terminal_tokens.insert(token.0) {
-                return Err(WasmOutputError::InvalidTokenDecision {
+                return Err(Report::new(WasmOutputError::InvalidTokenDecision {
                     token: token.0,
-                    reason: "token receives more than one terminal decision in one callback"
-                        .to_string(),
-                });
+                    defect: WasmTokenDecisionDefect::RepeatedTerminal,
+                }));
             }
         }
         Ok(())
@@ -288,16 +358,20 @@ impl WasmOutputValidator<'_> {
         &self,
         envelope_index: usize,
         output: WasmEnvelope,
-    ) -> Result<Vec<WasmMaterializedOutput>, WasmOutputError> {
+    ) -> error_stack::Result<Vec<WasmMaterializedOutput>, WasmOutputError> {
         let WasmEnvelope::Output {
             generated_arrow_ipc_batch,
             outputs,
         } = output
         else {
-            return Err(WasmOutputError::UnexpectedEnvelopeKind { envelope_index });
+            return Err(Report::new(WasmOutputError::UnexpectedEnvelopeKind {
+                envelope_index,
+            }));
         };
         if outputs.is_empty() {
-            return Err(WasmOutputError::EmptyOutputGroup { envelope_index });
+            return Err(Report::new(WasmOutputError::EmptyOutputGroup {
+                envelope_index,
+            }));
         }
         let generated_batch = self.decode_generated_batch(&generated_arrow_ipc_batch)?;
         let generated_column_count = match generated_batch.as_ref() {
@@ -317,7 +391,9 @@ impl WasmOutputValidator<'_> {
             .iter()
             .position(|referenced| !referenced)
         {
-            return Err(WasmOutputError::UnreferencedGeneratedColumn { column_index });
+            return Err(Report::new(WasmOutputError::UnreferencedGeneratedColumn {
+                column_index,
+            }));
         }
         Ok(materialized)
     }
@@ -327,18 +403,21 @@ impl WasmOutputValidator<'_> {
         output: WasmRoutedOutput,
         generated_batch: Option<&RecordBatch>,
         referenced_generated_columns: &mut [bool],
-    ) -> Result<WasmMaterializedOutput, WasmOutputError> {
+    ) -> error_stack::Result<WasmMaterializedOutput, WasmOutputError> {
         let WasmRoutedOutput {
             output_relay,
             columns,
             acks,
         } = output;
-        let output_identifier =
-            RelayName::parse(&output_relay).map_err(|_| WasmOutputError::UnknownOutputRelay {
+        let output_identifier = RelayName::parse(&output_relay).map_err(|_| {
+            Report::new(WasmOutputError::UnknownOutputRelay {
                 output_relay: output_relay.clone(),
-            })?;
+            })
+        })?;
         let Some(schema) = wasm_output_schema(self.output_schemas, &output_identifier) else {
-            return Err(WasmOutputError::UnknownOutputRelay { output_relay });
+            return Err(Report::new(WasmOutputError::UnknownOutputRelay {
+                output_relay,
+            }));
         };
         let Some(output_route_index) = self
             .output_routes
@@ -346,16 +425,20 @@ impl WasmOutputValidator<'_> {
             .iter()
             .position(|route| route.relay == output_identifier)
         else {
-            return Err(WasmOutputError::UnknownOutputRelay { output_relay });
+            return Err(Report::new(WasmOutputError::UnknownOutputRelay {
+                output_relay,
+            }));
         };
         let destination_schema = schema.arrow_schema();
         let destination_fields = destination_schema.fields();
         if columns.len() != destination_fields.len() {
-            return Err(WasmOutputError::RoutedOutputColumnCountMismatch {
-                output_relay,
-                expected: destination_fields.len(),
-                actual: columns.len(),
-            });
+            return Err(Report::new(
+                WasmOutputError::RoutedOutputColumnCountMismatch {
+                    output_relay,
+                    expected: destination_fields.len(),
+                    actual: columns.len(),
+                },
+            ));
         }
         let has_input_columns = columns.iter().any(WasmOutputColumnRef::is_input);
         self.validate_source_tokens(&output_relay, &acks.rows, has_input_columns)?;
@@ -372,45 +455,47 @@ impl WasmOutputValidator<'_> {
                     };
                     let generated_index = column_index.arch_into();
                     let Some(generated_batch) = generated_batch else {
-                        return Err(WasmOutputError::GeneratedColumnOutOfRange {
+                        return Err(Report::new(WasmOutputError::GeneratedColumnOutOfRange {
                             output_relay: output_relay.clone(),
                             field_index,
                             field_name: destination_field.name().to_string(),
                             column_index,
                             generated_column_count,
-                        });
+                        }));
                     };
                     let generated_schema = generated_batch.schema();
                     let Some(generated_field) = generated_schema.fields().get(generated_index)
                     else {
-                        return Err(WasmOutputError::GeneratedColumnOutOfRange {
+                        return Err(Report::new(WasmOutputError::GeneratedColumnOutOfRange {
                             output_relay: output_relay.clone(),
                             field_index,
                             field_name: destination_field.name().to_string(),
                             column_index,
                             generated_column_count,
-                        });
+                        }));
                     };
                     let expected_generated_field = destination_field.as_ref().clone().with_name("");
                     if generated_field.as_ref() != &expected_generated_field {
-                        return Err(WasmOutputError::GeneratedColumnTypeMismatch {
+                        return Err(Report::new(WasmOutputError::GeneratedColumnTypeMismatch {
                             output_relay: output_relay.clone(),
                             field_index,
                             field_name: destination_field.name().to_string(),
                             column_index,
                             expected: format!("{expected_generated_field:?}"),
                             actual: format!("{generated_field:?}"),
-                        });
+                        }));
                     }
                     if generated_batch.num_rows() != acks.rows.len() {
-                        return Err(WasmOutputError::GeneratedColumnRowCountMismatch {
-                            output_relay: output_relay.clone(),
-                            field_index,
-                            field_name: destination_field.name().to_string(),
-                            column_index,
-                            expected: acks.rows.len(),
-                            actual: generated_batch.num_rows(),
-                        });
+                        return Err(Report::new(
+                            WasmOutputError::GeneratedColumnRowCountMismatch {
+                                output_relay: output_relay.clone(),
+                                field_index,
+                                field_name: destination_field.name().to_string(),
+                                column_index,
+                                expected: acks.rows.len(),
+                                actual: generated_batch.num_rows(),
+                            },
+                        ));
                     }
                     referenced_generated_columns[generated_index] = true;
                     Ok(generated_batch.column(generated_index).clone())
@@ -431,18 +516,13 @@ impl WasmOutputValidator<'_> {
                 }
             })
             .collect::<Result<Vec<_>, _>>()?;
-        let record_batch =
-            RecordBatch::try_new(destination_schema.clone(), arrays).map_err(|error| {
-                WasmOutputError::OutputBatchBuild {
-                    output_relay: output_relay.clone(),
-                    reason: error.to_string(),
-                }
-            })?;
+        let batch_failure = || WasmOutputError::OutputBatchBuild {
+            output_relay: output_relay.clone(),
+        };
+        let record_batch = RecordBatch::try_new(destination_schema.clone(), arrays)
+            .change_context_lazy(batch_failure)?;
         let batch = RuntimeRecordBatch::from_record_batch(destination_schema, record_batch)
-            .map_err(|reason| WasmOutputError::OutputBatchBuild {
-                output_relay: output_relay.clone(),
-                reason: reason.to_string(),
-            })?;
+            .change_context_lazy(batch_failure)?;
         Ok(WasmMaterializedOutput {
             output_route_index,
             schema: Arc::clone(schema),
@@ -455,49 +535,49 @@ impl WasmOutputValidator<'_> {
     pub(super) fn decode_generated_batch(
         &self,
         ipc: &[u8],
-    ) -> Result<Option<RecordBatch>, WasmOutputError> {
+    ) -> error_stack::Result<Option<RecordBatch>, WasmOutputError> {
         if ipc.is_empty() {
             return Ok(None);
         }
-        let invalid = |reason: String| WasmOutputError::InvalidGeneratedArrowIpc { reason };
+        let invalid =
+            |defect: WasmGeneratedIpcDefect| WasmOutputError::InvalidGeneratedArrowIpc { defect };
         let mut cursor = std::io::Cursor::new(ipc);
         let (actual_schema, mut batches) = {
             let reader = StreamReader::try_new(&mut cursor, None)
-                .map_err(|error| invalid(error.to_string()))?;
+                .change_context(invalid(WasmGeneratedIpcDefect::Unreadable))?;
             let actual_schema = reader.schema();
             let batches = reader
                 .collect::<Result<Vec<_>, _>>()
-                .map_err(|error| invalid(error.to_string()))?;
+                .change_context(invalid(WasmGeneratedIpcDefect::Unreadable))?;
             (actual_schema, batches)
         };
         let consumed = cursor.position().arch_into();
         if consumed != ipc.len() {
-            return Err(invalid(format!(
-                "IPC stream has {} trailing bytes",
-                ipc.len()
-                    .checked_sub(consumed)
-                    .verified("the reader consumed a prefix of this same buffer")
+            let trailing = ipc
+                .len()
+                .checked_sub(consumed)
+                .verified("the reader consumed a prefix of this same buffer");
+            return Err(Report::new(invalid(
+                WasmGeneratedIpcDefect::TrailingBytes { trailing },
             )));
         }
         if batches.len() != 1 {
-            return Err(WasmOutputError::GeneratedRecordBatchCount {
+            return Err(Report::new(WasmOutputError::GeneratedRecordBatchCount {
                 actual: batches.len(),
-            });
+            }));
         }
         if actual_schema.fields().is_empty() {
-            return Err(invalid(
-                "encoded zero-column Arrow streams are not valid empty generated pools".to_string(),
-            ));
+            return Err(Report::new(invalid(WasmGeneratedIpcDefect::ZeroColumns)));
         }
         if let Some(field_index) = actual_schema
             .fields()
             .iter()
             .position(|field| !field.name().is_empty())
         {
-            return Err(invalid(format!(
-                "generated field {field_index} has non-empty name '{}'",
-                actual_schema.field(field_index).name()
-            )));
+            return Err(Report::new(invalid(WasmGeneratedIpcDefect::NamedField {
+                field_index,
+                name: actual_schema.field(field_index).name().clone(),
+            })));
         }
         Ok(batches.pop())
     }
@@ -507,32 +587,32 @@ impl WasmOutputValidator<'_> {
         output_relay: &str,
         rows: &[WasmOutputRow],
         required: bool,
-    ) -> Result<(), WasmOutputError> {
+    ) -> error_stack::Result<(), WasmOutputError> {
         for (row_index, row) in rows.iter().enumerate() {
             let Some(source_token) = row.source_token else {
                 if required {
-                    return Err(WasmOutputError::MissingSourceToken {
+                    return Err(Report::new(WasmOutputError::MissingSourceToken {
                         output_relay: output_relay.to_string(),
                         row_index,
-                    });
+                    }));
                 }
                 continue;
             };
             if !self.ack_map.contains_key(&source_token.0) {
-                return Err(WasmOutputError::UnknownSourceToken {
+                return Err(Report::new(WasmOutputError::UnknownSourceToken {
                     output_relay: output_relay.to_string(),
                     row_index,
                     token: source_token.0,
-                });
+                }));
             }
             // Bounded by the ack tokens the guest attached to this one row, so a per-row set
             // would allocate more than the walk it replaces.
             if !row.tokens.contains(&source_token) {
-                return Err(WasmOutputError::SourceTokenNotCarried {
+                return Err(Report::new(WasmOutputError::SourceTokenNotCarried {
                     output_relay: output_relay.to_string(),
                     row_index,
                     token: source_token.0,
-                });
+                }));
             }
         }
         Ok(())
@@ -545,50 +625,48 @@ impl WasmOutputValidator<'_> {
         destination_field: &StdArc<arrow_schema::Field>,
         column_index: u32,
         rows: &[WasmOutputRow],
-    ) -> Result<ArrayRef, WasmOutputError> {
+    ) -> error_stack::Result<ArrayRef, WasmOutputError> {
         let input_index = column_index.arch_into();
         let input_schema = self.input_schema.arrow_schema();
         let Some(source_field) = input_schema.fields().get(input_index) else {
-            return Err(WasmOutputError::InputColumnOutOfRange {
+            return Err(Report::new(WasmOutputError::InputColumnOutOfRange {
                 output_relay: output_relay.to_string(),
                 field_index,
                 column_index,
                 input_column_count: input_schema.fields().len(),
-            });
+            }));
         };
         if source_field.data_type() != destination_field.data_type()
             || source_field.is_nullable() != destination_field.is_nullable()
         {
-            return Err(WasmOutputError::InputColumnTypeMismatch {
+            return Err(Report::new(WasmOutputError::InputColumnTypeMismatch {
                 output_relay: output_relay.to_string(),
                 field_index,
                 column_index,
                 expected: format!("{destination_field:?}"),
                 actual: format!("{source_field:?}"),
-            });
+            }));
         }
         if rows.is_empty() {
             return Ok(new_empty_array(destination_field.data_type()));
         }
-        let sources = rows
-            .iter()
-            .enumerate()
-            .map(|(row_index, row)| {
-                let source_token =
-                    row.source_token
-                        .ok_or_else(|| WasmOutputError::MissingSourceToken {
-                            output_relay: output_relay.to_string(),
-                            row_index,
-                        })?;
-                self.ack_map.get(&source_token.0).ok_or_else(|| {
-                    WasmOutputError::UnknownSourceToken {
-                        output_relay: output_relay.to_string(),
-                        row_index,
-                        token: source_token.0,
-                    }
-                })
-            })
-            .collect::<Result<Vec<_>, _>>()?;
+        let mut sources = Vec::with_capacity(rows.len());
+        for (row_index, row) in rows.iter().enumerate() {
+            let Some(source_token) = row.source_token else {
+                return Err(Report::new(WasmOutputError::MissingSourceToken {
+                    output_relay: output_relay.to_string(),
+                    row_index,
+                }));
+            };
+            let Some(source) = self.ack_map.get(&source_token.0) else {
+                return Err(Report::new(WasmOutputError::UnknownSourceToken {
+                    output_relay: output_relay.to_string(),
+                    row_index,
+                    token: source_token.0,
+                }));
+            };
+            sources.push(source);
+        }
         let first = sources[0];
         let one_batch = sources
             .iter()
@@ -614,12 +692,11 @@ impl WasmOutputValidator<'_> {
             let indices = UInt64Array::from_iter_values(
                 sources.iter().map(|source| source.input_row.arch_into()),
             );
-            return take_arrow_array(array.as_ref(), &indices, None).map_err(|error| {
+            return take_arrow_array(array.as_ref(), &indices, None).change_context(
                 WasmOutputError::OutputBatchBuild {
                     output_relay: output_relay.to_string(),
-                    reason: error.to_string(),
-                }
-            });
+                },
+            );
         }
         let slices = sources
             .iter()
@@ -635,9 +712,8 @@ impl WasmOutputValidator<'_> {
             .iter()
             .map(|array| array.as_ref())
             .collect::<Vec<_>>();
-        concat_arrow_arrays(&arrays).map_err(|error| WasmOutputError::OutputBatchBuild {
+        concat_arrow_arrays(&arrays).change_context(WasmOutputError::OutputBatchBuild {
             output_relay: output_relay.to_string(),
-            reason: error.to_string(),
         })
     }
 }
@@ -663,7 +739,7 @@ pub(super) async fn dispatch_wasm_output_envelopes(
         output_schemas,
         key,
         module,
-        dispatch_error,
+        callback,
         execution_now,
     } = context;
     let validated_outputs = match (WasmOutputValidator {
@@ -676,7 +752,7 @@ pub(super) async fn dispatch_wasm_output_envelopes(
     {
         Ok(outputs) => outputs,
         Err(error) => {
-            let failure = module.emission_failure(Report::new(error));
+            let failure = module.emission_failure(error);
             let reporting = WasmCallbackReporting {
                 runtime: &branch.runtime,
                 domain: &branch.domain,
@@ -684,7 +760,7 @@ pub(super) async fn dispatch_wasm_output_envelopes(
                 processor,
                 error_policies,
             };
-            reporting.fail_held_inputs(ack_map, holds, format!("{failure:#}"));
+            reporting.fail_held_inputs(ack_map, holds, &failure);
             return Ok(());
         }
     };
@@ -737,7 +813,6 @@ pub(super) async fn dispatch_wasm_output_envelopes(
                 node_kind,
                 processor,
                 error_policies,
-                dispatch_error,
                 execution_now,
             },
             output_batch,
@@ -755,7 +830,7 @@ pub(super) async fn dispatch_wasm_output_envelopes(
                 processor,
                 error_policies,
                 ack_map.values().map(|context| &context.acks),
-                format!("wasm processor '{}' {}", processor.as_str(), dispatch_error),
+                &Report::new(WasmOutputError::Forward { output: callback }),
             );
         }
     }
@@ -767,7 +842,6 @@ pub(super) struct WasmRouteDispatchContext<'a> {
     pub(super) node_kind: ModelKind,
     pub(super) processor: &'a ModelName,
     pub(super) error_policies: &'a ErrorPolicies,
-    pub(super) dispatch_error: &'static str,
     pub(super) execution_now: Timestamp,
 }
 
@@ -791,12 +865,9 @@ pub(super) async fn dispatch_wasm_output_route(
                     context.processor,
                     context.error_policies,
                     decoded.batch.acks.iter(),
-                    format!(
-                        "wasm processor '{}' failed to materialize output for relay '{}': \
-                         {error:#}",
-                        context.processor.as_str(),
-                        output.relay.as_str(),
-                    ),
+                    &error.change_context(WasmOutputError::MaterializeRouteOutput {
+                        relay: output.relay.clone(),
+                    }),
                 );
             return None;
         }
@@ -823,12 +894,9 @@ pub(super) async fn dispatch_wasm_output_route(
                 context.processor,
                 context.error_policies,
                 decoded.batch.acks.iter(),
-                format!(
-                    "wasm processor '{}' {} to relay '{}'",
-                    context.processor.as_str(),
-                    context.dispatch_error,
-                    output.relay.as_str()
-                ),
+                &Report::new(RouteOutputError::Forward {
+                    relay: output.relay.clone(),
+                }),
             );
         return None;
     };
@@ -845,7 +913,7 @@ pub(super) async fn dispatch_wasm_output_route(
                     context.processor,
                     context.error_policies,
                     decoded.batch.acks.iter(),
-                    error.to_string(),
+                    &error,
                 );
             return None;
         }
@@ -872,12 +940,9 @@ pub(super) async fn dispatch_wasm_output_route(
                     context.processor,
                     context.error_policies,
                     decoded.batch.acks.iter(),
-                    format!(
-                        "{} '{}' failed to load materialized side inputs: {}",
-                        context.node_kind.as_str(),
-                        context.processor.as_str(),
-                        error
-                    ),
+                    &error.change_context(WasmOutputError::RouteSideInputs {
+                        relay: output.relay.clone(),
+                    }),
                 );
             return None;
         }
@@ -917,12 +982,9 @@ pub(super) async fn dispatch_wasm_output_route(
                     context.processor,
                     context.error_policies,
                     decoded.batch.acks.iter(),
-                    format!(
-                        "{} '{}' failed to prepare LOOKUP_HASH_MAP columns: {}",
-                        context.node_kind.as_str(),
-                        context.processor.as_str(),
-                        error
-                    ),
+                    &error.change_context(PlannedGeneralError::PrepareLookups {
+                        operation: MessageErrorOperation::Set,
+                    }),
                 );
             return None;
         }
@@ -952,12 +1014,9 @@ pub(super) async fn dispatch_wasm_output_route(
                     context.processor,
                     context.error_policies,
                     decoded.batch.acks.iter(),
-                    format!(
-                        "{} '{}' failed to project WASM output into FILTER-MAP input: {}",
-                        context.node_kind.as_str(),
-                        context.processor.as_str(),
-                        error
-                    ),
+                    &error.change_context(PlannedGeneralError::PrepareInput {
+                        operation: MessageErrorOperation::Set,
+                    }),
                 );
             return None;
         }
@@ -984,12 +1043,9 @@ pub(super) async fn dispatch_wasm_output_route(
                     context.processor,
                     context.error_policies,
                     decoded.batch.acks.iter(),
-                    format!(
-                        "{} '{}' FILTER-MAP execution failed: {}",
-                        context.node_kind.as_str(),
-                        context.processor.as_str(),
-                        error
-                    ),
+                    &error.change_context(PlannedGeneralError::Execute {
+                        operation: MessageErrorOperation::Set,
+                    }),
                 );
             return None;
         }
@@ -1012,13 +1068,10 @@ pub(super) async fn dispatch_wasm_output_route(
                             context.processor,
                             context.error_policies,
                             decoded.batch.acks.iter(),
-                            format!(
-                                "{} '{}' failed to address WASM input row {}: {}",
-                                context.node_kind.as_str(),
-                                context.processor.as_str(),
-                                input_row,
-                                error
-                            ),
+                            &error.change_context(PlannedGeneralError::MaterializeErrorInput {
+                                operation: MessageErrorOperation::Set,
+                                row: input_row,
+                            }),
                         );
                     return None;
                 }
@@ -1117,12 +1170,9 @@ pub(super) async fn dispatch_wasm_output_route(
                     context.processor,
                     context.error_policies,
                     ack_queues.iter().flatten(),
-                    format!(
-                        "{} '{}' failed to materialize successful FILTER-MAP rows: {}",
-                        context.node_kind.as_str(),
-                        context.processor.as_str(),
-                        error
-                    ),
+                    &error.change_context(PlannedGeneralError::MaterializeOutput {
+                        operation: MessageErrorOperation::Set,
+                    }),
                 );
             return None;
         }
@@ -1142,8 +1192,7 @@ pub(super) async fn dispatch_wasm_output_route(
                     context.processor,
                     context.error_policies,
                     batch_acks.iter(),
-                    "WASM processor output batch ack count does not match selected row count"
-                        .to_string(),
+                    &Report::new(ProcessorOutputError::SelectedRowAcks),
                 );
             return None;
         };
@@ -1166,7 +1215,9 @@ pub(super) async fn dispatch_wasm_output_route(
                     context.processor,
                     context.error_policies,
                     ack_queues.iter().flatten(),
-                    error.to_string(),
+                    &error.change_context(PlannedGeneralError::BuildOutputBatch {
+                        operation: MessageErrorOperation::Set,
+                    }),
                 );
             return None;
         }
@@ -1194,12 +1245,9 @@ pub(super) async fn dispatch_wasm_output_route(
                 context.processor,
                 context.error_policies,
                 forwarded.acks.iter(),
-                format!(
-                    "wasm processor '{}' {} to relay '{}'",
-                    context.processor.as_str(),
-                    context.dispatch_error,
-                    output.relay.as_str()
-                ),
+                &Report::new(RouteOutputError::Forward {
+                    relay: output.relay.clone(),
+                }),
             );
         None
     }
@@ -1270,11 +1318,7 @@ pub(super) async fn apply_wasm_sidecar_terminal_decisions(
                         processor,
                         error_policies,
                         std::iter::once(&context.acks),
-                        format!(
-                            "wasm processor '{}' failed to materialize message-error input row: {}",
-                            processor.as_str(),
-                            error
-                        ),
+                        &error.change_context(WasmOutputError::MessageErrorInputRow),
                     );
                     continue;
                 }
@@ -1593,7 +1637,7 @@ mod tests {
         )
         .expect_err("out-of-range generated column must fail");
         assert!(matches!(
-            out_of_range,
+            out_of_range.current_context(),
             WasmOutputError::GeneratedColumnOutOfRange {
                 column_index: 1,
                 ..
@@ -1619,7 +1663,7 @@ mod tests {
         )
         .expect_err("unreferenced generated column must fail");
         assert!(matches!(
-            unreferenced,
+            unreferenced.current_context(),
             WasmOutputError::UnreferencedGeneratedColumn { column_index: 1 }
         ));
     }
@@ -1649,7 +1693,7 @@ mod tests {
         )
         .expect_err("generated row count must match every referencing route");
         assert!(matches!(
-            row_count,
+            row_count.current_context(),
             WasmOutputError::GeneratedColumnRowCountMismatch {
                 expected: 1,
                 actual: 2,
@@ -1674,7 +1718,7 @@ mod tests {
         )
         .expect_err("generated nullability must match the destination");
         assert!(matches!(
-            nullability,
+            nullability.current_context(),
             WasmOutputError::GeneratedColumnTypeMismatch { .. }
         ));
 
@@ -1686,7 +1730,7 @@ mod tests {
         )
         .expect_err("routed output column count must match the destination");
         assert!(matches!(
-            column_count,
+            column_count.current_context(),
             WasmOutputError::RoutedOutputColumnCountMismatch {
                 expected: 1,
                 actual: 0,
@@ -1702,7 +1746,7 @@ mod tests {
         )
         .expect_err("empty output group must fail");
         assert!(matches!(
-            empty_group,
+            empty_group.current_context(),
             WasmOutputError::EmptyOutputGroup { .. }
         ));
     }
@@ -1750,7 +1794,7 @@ mod tests {
         .expect_err("one pool cannot serve routes with different row counts");
 
         assert!(matches!(
-            error,
+            error.current_context(),
             WasmOutputError::GeneratedColumnRowCountMismatch {
                 output_relay,
                 expected: 1,
@@ -1978,7 +2022,7 @@ mod tests {
         let empty =
             validate_ipc(Vec::new()).expect_err("generated reference without a pool must fail");
         assert!(matches!(
-            empty,
+            empty.current_context(),
             WasmOutputError::GeneratedColumnOutOfRange { .. }
         ));
 
@@ -1989,7 +2033,7 @@ mod tests {
         );
         let zero_fields = validate_ipc(zero_fields).expect_err("zero fields must fail");
         assert!(matches!(
-            zero_fields,
+            zero_fields.current_context(),
             WasmOutputError::InvalidGeneratedArrowIpc { .. }
         ));
 
@@ -2002,7 +2046,7 @@ mod tests {
         let named_field = validate_ipc(wasm_guest_stream(named_field_schema, &[named_field_batch]))
             .expect_err("generated field names must be empty");
         assert!(matches!(
-            named_field,
+            named_field.current_context(),
             WasmOutputError::InvalidGeneratedArrowIpc { .. }
         ));
 
@@ -2012,7 +2056,7 @@ mod tests {
         let no_batches = validate_ipc(wasm_guest_stream(one_field_schema.clone(), &[]))
             .expect_err("missing guest record batch must fail");
         assert!(matches!(
-            no_batches,
+            no_batches.current_context(),
             WasmOutputError::GeneratedRecordBatchCount { actual: 0 }
         ));
         let one_batch = RecordBatch::try_new(
@@ -2026,7 +2070,7 @@ mod tests {
         ))
         .expect_err("multiple guest batches must fail");
         assert!(matches!(
-            multiple_batches,
+            multiple_batches.current_context(),
             WasmOutputError::GeneratedRecordBatchCount { actual: 2 }
         ));
 
@@ -2036,7 +2080,7 @@ mod tests {
         ))
         .expect_err("guest field mismatch must fail");
         assert!(matches!(
-            mismatched_field,
+            mismatched_field.current_context(),
             WasmOutputError::GeneratedColumnTypeMismatch { .. }
         ));
 
@@ -2046,7 +2090,7 @@ mod tests {
         ))
         .expect_err("guest row-count mismatch must fail");
         assert!(matches!(
-            row_count,
+            row_count.current_context(),
             WasmOutputError::GeneratedColumnRowCountMismatch { .. }
         ));
 
@@ -2055,7 +2099,7 @@ mod tests {
         trailing_ipc.push(0);
         let trailing = validate_ipc(trailing_ipc).expect_err("trailing guest IPC must fail");
         assert!(matches!(
-            trailing,
+            trailing.current_context(),
             WasmOutputError::InvalidGeneratedArrowIpc { .. }
         ));
     }
@@ -2095,7 +2139,7 @@ mod tests {
         )
         .expect_err("out-of-range input column must fail");
         assert!(matches!(
-            out_of_range,
+            out_of_range.current_context(),
             WasmOutputError::InputColumnOutOfRange { .. }
         ));
 
@@ -2110,7 +2154,7 @@ mod tests {
         )
         .expect_err("input type mismatch must fail");
         assert!(matches!(
-            type_mismatch,
+            type_mismatch.current_context(),
             WasmOutputError::InputColumnTypeMismatch { .. }
         ));
 
@@ -2125,7 +2169,7 @@ mod tests {
         )
         .expect_err("input nullability mismatch must fail");
         assert!(matches!(
-            nullability_mismatch,
+            nullability_mismatch.current_context(),
             WasmOutputError::InputColumnTypeMismatch { .. }
         ));
 
@@ -2142,7 +2186,7 @@ mod tests {
         )
         .expect_err("missing source token must fail");
         assert!(matches!(
-            missing,
+            missing.current_context(),
             WasmOutputError::MissingSourceToken { .. }
         ));
 
@@ -2160,7 +2204,7 @@ mod tests {
         )
         .expect_err("unknown source token must fail");
         assert!(matches!(
-            unknown,
+            unknown.current_context(),
             WasmOutputError::UnknownSourceToken { .. }
         ));
 
@@ -2177,7 +2221,7 @@ mod tests {
         )
         .expect_err("source token outside lineage must fail");
         assert!(matches!(
-            not_carried,
+            not_carried.current_context(),
             WasmOutputError::SourceTokenNotCarried { .. }
         ));
     }
@@ -2205,7 +2249,7 @@ mod tests {
         let error = validate_wasm_test_outputs(&schema, &schema, &ack_map, vec![output])
             .expect_err("one token cannot be carried and terminally completed");
         assert!(matches!(
-            error,
+            error.current_context(),
             WasmOutputError::InvalidTokenDecision { token: 1, .. }
         ));
 
@@ -2243,7 +2287,7 @@ mod tests {
             validate_wasm_test_outputs(&schema, &schema, &ack_map, vec![duplicate_terminal])
                 .expect_err("one token cannot receive multiple terminal decisions");
         assert!(matches!(
-            error,
+            error.current_context(),
             WasmOutputError::InvalidTokenDecision { token: 1, .. }
         ));
     }
@@ -2265,7 +2309,7 @@ mod tests {
         )
         .expect_err("a token outside the current live branch map must fail");
         assert!(matches!(
-            error,
+            error.current_context(),
             WasmOutputError::UnknownSourceToken { token: 1, .. }
         ));
     }
@@ -2302,13 +2346,145 @@ mod tests {
             ],
         );
 
-        validate_wasm_test_outputs(&schema, &schema, &ack_map, vec![output_group])
+        let rejection = validate_wasm_test_outputs(&schema, &schema, &ack_map, vec![output_group])
             .expect_err("later malformed output must reject the whole callback");
+        assert!(matches!(
+            rejection.current_context(),
+            WasmOutputError::InvalidTokenDecision {
+                token: 1,
+                defect: WasmTokenDecisionDefect::CarriedAndTerminal,
+            }
+        ));
         assert!(
             timeout(Duration::from_millis(50), completion.wait())
                 .await
                 .is_err(),
             "validation must not apply an earlier terminal ACK"
         );
+    }
+
+    fn wasm_routed_test_output(output_relay: &str, acks: WasmAckSidecar) -> WasmEnvelope {
+        WasmEnvelope::output(
+            Vec::new(),
+            vec![WasmRoutedOutput::new(
+                output_relay,
+                vec![WasmOutputColumnRef::Input { column_index: 0 }],
+                acks,
+            )],
+        )
+    }
+
+    fn wasm_rows_carrying(tokens: Vec<WasmAckToken>) -> WasmAckSidecar {
+        WasmAckSidecar {
+            rows: vec![WasmOutputRow {
+                tokens,
+                source_token: None,
+            }],
+            acked: Vec::new(),
+            nacked: Vec::new(),
+            message_errors: Vec::new(),
+        }
+    }
+
+    /// A callback whose output cannot be applied is refused with the defect that makes it so.
+    #[nervix_primitives::test]
+    async fn wasm_output_validation_names_each_token_and_route_defect() {
+        let schema = test_schema(&[("value", ParseAsType::I32)]);
+        let (input, ack_map) = wasm_input_for_values(&schema, &[10]).await;
+        let carried_rows = wasm_input_acks(&input).rows.clone();
+
+        let not_output = validate_wasm_test_outputs(&schema, &schema, &ack_map, vec![input])
+            .expect_err("an input envelope is not a callback's output");
+        assert!(matches!(
+            not_output.current_context(),
+            WasmOutputError::UnexpectedEnvelopeKind { envelope_index: 0 }
+        ));
+
+        let unknown_carried = validate_wasm_test_outputs(
+            &schema,
+            &schema,
+            &ack_map,
+            vec![wasm_routed_test_output(
+                "output",
+                wasm_rows_carrying(vec![WasmAckToken(99)]),
+            )],
+        )
+        .expect_err("a row cannot carry a token the branch does not hold");
+        assert!(matches!(
+            unknown_carried.current_context(),
+            WasmOutputError::InvalidTokenDecision {
+                token: 99,
+                defect: WasmTokenDecisionDefect::UnknownCarried,
+            }
+        ));
+
+        let repeated = validate_wasm_test_outputs(
+            &schema,
+            &schema,
+            &ack_map,
+            vec![wasm_routed_test_output(
+                "output",
+                wasm_rows_carrying(vec![WasmAckToken(1), WasmAckToken(1)]),
+            )],
+        )
+        .expect_err("a row cannot carry one token twice");
+        assert!(matches!(
+            repeated.current_context(),
+            WasmOutputError::InvalidTokenDecision {
+                token: 1,
+                defect: WasmTokenDecisionDefect::RepeatedInRow,
+            }
+        ));
+
+        let unknown_terminal = validate_wasm_test_outputs(
+            &schema,
+            &schema,
+            &ack_map,
+            vec![wasm_routed_test_output(
+                "output",
+                WasmAckSidecar {
+                    rows: Vec::new(),
+                    acked: vec![WasmAckTokenSet {
+                        tokens: vec![WasmAckToken(99)],
+                    }],
+                    nacked: Vec::new(),
+                    message_errors: Vec::new(),
+                },
+            )],
+        )
+        .expect_err("a callback cannot acknowledge a token the branch does not hold");
+        assert_eq!(
+            unknown_terminal.current_context().to_string(),
+            "invalid WASM token decision for token 99: terminal ACK token is unknown to this \
+             branch instance"
+        );
+
+        for output_relay in ["not a relay", "elsewhere"] {
+            let unknown_relay = validate_wasm_test_outputs(
+                &schema,
+                &schema,
+                &ack_map,
+                vec![wasm_routed_test_output(
+                    output_relay,
+                    WasmAckSidecar {
+                        rows: carried_rows.clone(),
+                        acked: Vec::new(),
+                        nacked: Vec::new(),
+                        message_errors: Vec::new(),
+                    },
+                )],
+            )
+            .expect_err("a callback cannot route output to a relay its processor does not write");
+            let WasmOutputError::UnknownOutputRelay {
+                output_relay: refused,
+            } = unknown_relay.current_context()
+            else {
+                panic!(
+                    "an unknown output relay must be named, got {:?}",
+                    unknown_relay.current_context()
+                );
+            };
+            assert_eq!(refused, output_relay);
+        }
     }
 }

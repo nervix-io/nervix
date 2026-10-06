@@ -551,7 +551,10 @@ arrival order and seals a payload when the source relay, branch, key, ordered he
 group or codec container metadata changes. The codec encodes each candidate under `MAX SIZE`, and
 the host subdivides a candidate that does not fit; Arrow memory accounting still belongs to
 `FLUSH`. The connector sees one encoded record per completed payload and answers for it under the
-record's identity, without learning which rows the payload carries.
+record's identity, without learning which rows the payload carries. A candidate whose container
+cannot be produced fails each of its members with one message error, which the container failure's
+typed reason decides; the evaluation failure beneath that reason can quote the payload it
+evaluated and is never rendered.
 
 The connector owns the destination's own limit on each record, whether the record carries one row
 or a whole batch payload, because only the connector knows what it writes around the payload.
@@ -764,7 +767,10 @@ sequenceDiagram
   With `OFFSET BY DOMAIN`, the host supplies typed access to replicated next-offset state and a
   committed partition schedule. The leader observes partition topology and commits assignments;
   executing sources follow that schedule. Offset snapshots can lag a crash, so this mode remains
-  at least once. [Kafka ingestion](./ingestors.md#kafka) defines the recovery details.
+  at least once. Commits and start-point resets wait for the assigned state replicas within the
+  native checkpoint bulk operation's thirty-second budget. A missing acknowledgement still fails
+  the commit and follows the host's existing rejection and retry policy.
+  [Kafka ingestion](./ingestors.md#kafka) defines the recovery details.
   Replica ACKs reach that installed offset state through a resolved, retired-on-ending route and
   the existing assignment publication. The host's announcer retains its route and follows replica
   assignment changes without reading node-wide state or execution registries. The Kafka commit and
@@ -879,9 +885,18 @@ and missing external topics, queues, tables, namespaces, or other required entit
 start errors: Nervix does not create them as a side effect. During execution, read and publish
 failures are classified separately from definitive record rejections. The host reports transient
 status and events, retries infrastructure failures, and preserves the configured message and
-general error policies. A commit failure keeps staged ACKs pending and visible until retry or
-drain failure; it never turns staging into success. A forced ending loses in-memory batches and
-ACK state, leaving external redelivery to each source's contract.
+general error policies. The general error policy receives the host's typed report of a failure
+that ended a batch's work and renders its whole chain once: the event and every negative
+acknowledgement carry it after the emitter's name and domain, and the log records it beside them.
+A general error the connector reports itself reaches the same policy with the connector's
+description. An emitter that does not start on a node reports an `EmitterStartError` naming the
+emitter, its domain and the step that failed, such as a client configuration that does not
+resolve, a codec that cannot hold a batch, or a program that does not compile. A swap whose old
+task does not stop keeps that task installed and running, and fails with the task's own
+description of its drain failure, or with the stop failure when the task did not answer. A commit
+failure keeps staged ACKs pending and visible until retry or drain failure; it never turns staging
+into success. A forced ending loses in-memory batches and ACK state, leaving external redelivery to
+each source's contract.
 
 Connector-owned fallible helpers return contextual reports. Syslog configuration and frame
 decoding create a report at the failed parse, read, or framing check; the source adds its

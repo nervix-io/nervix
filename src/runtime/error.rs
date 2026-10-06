@@ -15,6 +15,14 @@ pub enum RuntimeError {
     /// An ingestor did not start. The report names the ingestor and keeps every cause beneath it.
     #[error("{report:#}")]
     IngestorStart { report: Report<IngestorStartError> },
+    /// An emitter did not start. The report names the emitter and its domain and keeps every
+    /// cause beneath them.
+    #[error("{report:#}")]
+    EmitterStart { report: Report<EmitterStartError> },
+    /// A generator did not start. The report names the generator and its domain and keeps every
+    /// cause beneath them.
+    #[error("{report:#}")]
+    GeneratorStart { report: Report<GeneratorError> },
     #[error("relay '{relay}' in domain '{domain}' is not instantiated")]
     RelayNotInstantiated { domain: String, relay: String },
     #[error(
@@ -39,12 +47,6 @@ pub enum RuntimeError {
         domain: DomainName,
         report: Report<CodecError>,
     },
-    #[error("failed to build domain execution for '{domain}': {reason}")]
-    VmCompile {
-        domain: String,
-        reason: String,
-        report: Report<nervix_vm::CompileError>,
-    },
     #[error(
         "failed to build domain execution for '{domain}': failed to compile domain UDFs: {report}"
     )]
@@ -52,7 +54,9 @@ pub enum RuntimeError {
         domain: String,
         report: Report<nervix_roto::UdfError>,
     },
-    #[error("failed to bind an ingestor or reingestor of domain '{domain}': {report}")]
+    /// An ingestor or reingestor could not bind its programs on this node. The report names the
+    /// node and the program, and keeps the compile failure beneath them.
+    #[error("failed to bind an ingestor or reingestor of domain '{domain}': {report:#}")]
     EntrypointBinding {
         domain: DomainName,
         report: Report<EntrypointBindingError>,
@@ -82,13 +86,13 @@ pub enum RuntimeError {
         node_unavailability_timeout: Duration,
         readiness_propagation_bound: Duration,
     },
-    /// A relay payload another node sent did not decode into a batch of its relay. The report
-    /// names what the payload got wrong and keeps the decoder's own failure beneath it.
-    #[error("failed to decode remote relay '{relay}' in domain '{domain}': {report:#}")]
+    /// A relay payload another node sent did not decode into a batch of its relay. The
+    /// `RemoteRelayDecodeError` beneath it names what the payload got wrong and keeps the
+    /// decoder's own failure beneath that.
+    #[error("failed to decode remote relay '{relay}' in domain '{domain}'")]
     DecodeRemoteRelay {
         domain: DomainName,
         relay: RelayName,
-        report: Report<RemoteRelayDecodeError>,
     },
     /// The local boundary of a relay refused a batch another node sent, after it was decoded.
     #[error(
@@ -112,15 +116,17 @@ impl RuntimeError {
         }
     }
 
-    pub(super) fn decode_remote_relay(
-        domain: &DomainName,
-        relay: &RelayName,
-        report: Report<RemoteRelayDecodeError>,
-    ) -> Self {
+    pub(super) fn decode_remote_relay(domain: &DomainName, relay: &RelayName) -> Self {
         Self::DecodeRemoteRelay {
             domain: domain.clone(),
             relay: relay.clone(),
-            report,
+        }
+    }
+
+    pub(super) fn relay_not_instantiated(domain: &DomainName, relay: &RelayName) -> Self {
+        Self::RelayNotInstantiated {
+            domain: domain.as_str().to_string(),
+            relay: relay.as_str().to_string(),
         }
     }
 }

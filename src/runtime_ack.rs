@@ -72,8 +72,14 @@ pub struct AckRootTracker {
     ownership_handoff_outstanding: AtomicUsize,
 }
 
+/// Parks the acknowledgement shares of some sets for as long as it lives.
+///
+/// A parked share stays pending, while a drain or an ownership handoff stops waiting for it. A
+/// share parks while it waits on what only further input can supply: a `REQUIRED WAIT`
+/// dependency, or a window that retains its row until the window fills. Dropping the guard makes
+/// the shares active again, so a holder unparks a share before it acknowledges it.
 #[derive(Debug)]
-pub(crate) struct AckRequiredWaitGuard {
+pub(crate) struct AckParkGuard {
     handles: Vec<AckHandle>,
 }
 
@@ -87,8 +93,9 @@ enum AckShareResolution {
 /// What one root's ownership-handoff tracking holds.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum AckHandoffState {
-    /// The root still tracks shares. No active share means every share it still holds is parked on
-    /// `REQUIRED WAIT`, which an ownership handoff does not wait for.
+    /// The root still tracks shares. No active share means every share it still holds is parked,
+    /// on `REQUIRED WAIT` or in a window that retains its row, which an ownership handoff does not
+    /// wait for.
     Tracking { active_shares: usize },
     /// The root resolved, so nothing it tracked is outstanding and nothing may make it active
     /// again.
@@ -133,8 +140,8 @@ struct AckState {
     /// Zero is terminal. Attaching a share reserves it here before publishing it as active below.
     /// An attachment that finds zero reserves nothing, yet still returns a handle to this root.
     pending: AtomicUsize,
-    /// The pending shares that are not parked on `REQUIRED WAIT`. Completing the root closes this
-    /// tracking, so a racing wait release or attachment cannot reactivate it.
+    /// The pending shares that are not parked. Completing the root closes this tracking, so a
+    /// racing unpark or attachment cannot reactivate it.
     ///
     /// Only a handle that owns a share removes one from this tracking. An acknowledgement resolves
     /// its share in `pending` before it removes the share here, and a share parks only while
@@ -519,7 +526,7 @@ impl AckHandle {
         }
     }
 
-    fn mark_required_wait(&self) -> bool {
+    fn park_share(&self) -> bool {
         if self.0.root_trackers.is_empty() {
             return false;
         }
@@ -531,7 +538,7 @@ impl AckHandle {
         self.remove_handoff_share()
     }
 
-    fn leave_required_wait(&self) {
+    fn unpark_share(&self) {
         if self.0.root_trackers.is_empty() {
             return;
         }
@@ -683,7 +690,7 @@ impl Drop for OwnershipHandoffTrackerReservation<'_> {
     }
 }
 
-impl AckRequiredWaitGuard {
+impl AckParkGuard {
     #[cfg_attr(
         nervix_lint,
         nervix::dispatch(
@@ -695,7 +702,7 @@ impl AckRequiredWaitGuard {
         let mut handles = Vec::new();
         for set in sets {
             for handle in &set.handles {
-                if handle.mark_required_wait() {
+                if handle.park_share() {
                     handles.push(handle.clone());
                 }
             }
@@ -704,10 +711,10 @@ impl AckRequiredWaitGuard {
     }
 }
 
-impl Drop for AckRequiredWaitGuard {
+impl Drop for AckParkGuard {
     fn drop(&mut self) {
         for handle in &self.handles {
-            handle.leave_required_wait();
+            handle.unpark_share();
         }
     }
 }
@@ -794,8 +801,8 @@ impl AckSet {
     }
 
     #[cfg(test)]
-    pub(crate) fn required_wait_guard(&self) -> AckRequiredWaitGuard {
-        AckRequiredWaitGuard::new([self])
+    pub(crate) fn park_guard(&self) -> AckParkGuard {
+        AckParkGuard::new([self])
     }
 
     #[cfg_attr(
@@ -893,7 +900,7 @@ mod tests {
         let tracker = Arc::new(AckRootTracker::default());
         let (waiting, completion) = AckSet::tracked_root(tracker.clone());
         let active = waiting.attached();
-        let required_wait = waiting.required_wait_guard();
+        let required_wait = waiting.park_guard();
 
         assert_eq!(tracker.outstanding(), 1);
         assert_eq!(tracker.outstanding_for_ownership_handoff(), 1);
@@ -1092,8 +1099,8 @@ mod shuttle_tests {
     };
 
     use super::{
-        AckCompletion, AckHandle, AckHandoffState, AckOutcome, AckRequiredWaitGuard,
-        AckRootTracker, AckSet, Ordering,
+        AckCompletion, AckHandle, AckHandoffState, AckOutcome, AckParkGuard, AckRootTracker,
+        AckSet, Ordering,
     };
 
     // Models with more than three tasks have too many interleavings to enumerate, so they sample
@@ -1312,7 +1319,7 @@ mod shuttle_tests {
                 let attached = root.attached();
                 let waiting = root.clone();
 
-                let wait_thread = thread::spawn(move || AckRequiredWaitGuard::new([&waiting]));
+                let wait_thread = thread::spawn(move || AckParkGuard::new([&waiting]));
                 let ack_thread = thread::spawn(move || attached.ack_success());
 
                 let required_wait = wait_thread.join().assured(JOINED);
@@ -1348,7 +1355,7 @@ mod shuttle_tests {
                 let waiting = root.clone();
                 let heartbeat = root.clone();
 
-                let wait_thread = thread::spawn(move || AckRequiredWaitGuard::new([&waiting]));
+                let wait_thread = thread::spawn(move || AckParkGuard::new([&waiting]));
                 let heartbeat_thread = thread::spawn(move || heartbeat.ack_alive());
                 let required_wait = wait_thread.join().assured(JOINED);
                 heartbeat_thread.join().assured(JOINED);
@@ -1376,7 +1383,7 @@ mod shuttle_tests {
             || {
                 let tracker = Arc::new(AckRootTracker::default());
                 let (root, mut observed) = ObservedRoot::tracked(vec![tracker.clone()]);
-                let required_wait = AckRequiredWaitGuard::new([&root]);
+                let required_wait = AckParkGuard::new([&root]);
 
                 let release_thread = thread::spawn(move || drop(required_wait));
                 let completion_thread = thread::spawn(move || root.no_ack("test completion"));
@@ -1432,7 +1439,7 @@ mod shuttle_tests {
                 let tracker = Arc::new(AckRootTracker::default());
                 let (processing, mut observed) = ObservedRoot::tracked(vec![tracker.clone()]);
                 let waiting = processing.attached();
-                let required_wait = AckRequiredWaitGuard::new([&waiting]);
+                let required_wait = AckParkGuard::new([&waiting]);
 
                 let stopping = thread::spawn(move || waiting.no_ack(STOPPED_WHILE_WAITING));
                 let processor = thread::spawn(move || {
@@ -1467,12 +1474,12 @@ mod shuttle_tests {
                 let tracker = Arc::new(AckRootTracker::default());
                 let (processing, mut observed) = ObservedRoot::tracked(vec![tracker.clone()]);
                 let waiting = processing.attached();
-                let required_wait = AckRequiredWaitGuard::new([&waiting]);
+                let required_wait = AckParkGuard::new([&waiting]);
 
                 let stopping = thread::spawn(move || waiting.no_ack(STOPPED_WHILE_WAITING));
                 let processor = thread::spawn(move || {
                     let output = processing.attached();
-                    let output_wait = AckRequiredWaitGuard::new([&output]);
+                    let output_wait = AckParkGuard::new([&output]);
                     processing.ack_success();
                     (output, output_wait)
                 });
@@ -1506,7 +1513,7 @@ mod shuttle_tests {
                 let trackers = DomainTrackers::new();
                 let (active, mut observed) = trackers.first_ingestor_root();
                 let waiting = active.attached();
-                let required_wait = AckRequiredWaitGuard::new([&waiting]);
+                let required_wait = AckParkGuard::new([&waiting]);
 
                 let release = thread::spawn(move || drop(required_wait));
                 let acknowledgement = thread::spawn(move || active.ack_success());
@@ -1538,7 +1545,7 @@ mod shuttle_tests {
                 let waiting = root.clone();
 
                 let attachment = thread::spawn(move || attachment_source.attached());
-                let wait = thread::spawn(move || AckRequiredWaitGuard::new([&waiting]));
+                let wait = thread::spawn(move || AckParkGuard::new([&waiting]));
 
                 let attached = attachment.join().assured(JOINED);
                 let required_wait = wait.join().assured(JOINED);
@@ -1588,7 +1595,7 @@ mod shuttle_tests {
                     let output = batch.attached_for_receivers(2);
                     let waiting_consumer_share = output.clone();
                     let waiting_consumer = thread::spawn(move || {
-                        let required_wait = AckRequiredWaitGuard::new([&waiting_consumer_share]);
+                        let required_wait = AckParkGuard::new([&waiting_consumer_share]);
                         drop(required_wait);
                         waiting_consumer_share.ack_success();
                     });
@@ -1598,12 +1605,12 @@ mod shuttle_tests {
                     consumer.join().assured(JOINED);
                 });
                 let waiting = thread::spawn(move || {
-                    let required_wait = AckRequiredWaitGuard::new([&waiting_message]);
+                    let required_wait = AckParkGuard::new([&waiting_message]);
                     drop(required_wait);
                     waiting_message.ack_success();
                 });
                 let stopping = thread::spawn(move || {
-                    let required_wait = AckRequiredWaitGuard::new([&failing_payload]);
+                    let required_wait = AckParkGuard::new([&failing_payload]);
                     failing_payload.no_ack(STOPPED_WHILE_WAITING);
                     drop(required_wait);
                 });
@@ -1650,7 +1657,7 @@ mod shuttle_tests {
                     output
                 });
                 let parking = thread::spawn(move || {
-                    let required_wait = AckRequiredWaitGuard::new([&fanned_payload]);
+                    let required_wait = AckParkGuard::new([&fanned_payload]);
                     (fanned_payload, required_wait)
                 });
                 let fan_out = thread::spawn(move || {

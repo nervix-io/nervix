@@ -39,10 +39,6 @@ use super::{
     lsm_sequence::LsmSequence, state_replication::StateReplicationError,
 };
 
-/// How long a committed or replaced offset waits for the replicas the offsets are assigned to hold
-/// it.
-const REPLICA_QUORUM_WAIT: Duration = Duration::from_secs(5);
-
 #[derive(Debug, Clone, Archive, RkyvSerialize, RkyvDeserialize)]
 struct KafkaOffsetEntrySnapshot {
     topic: String,
@@ -307,8 +303,8 @@ impl KafkaOffsetStateRead {
         progress.holding(&roles.replica_nodes, lsm) >= roles.required_replica_acks
     }
 
-    /// Wait until enough of the assigned replicas report holding revision `lsm`, for at most
-    /// [`REPLICA_QUORUM_WAIT`].
+    /// Wait until enough assigned replicas report holding revision `lsm`, within the caller's
+    /// checkpoint-operation budget.
     ///
     /// The wait registers for the next replica report before it reads what the replicas hold, so a
     /// report that lands in between wakes it instead of leaving the commit to its deadline. The
@@ -316,10 +312,11 @@ impl KafkaOffsetStateRead {
     pub(super) async fn wait_for_replica_quorum(
         &self,
         lsm: u64,
+        wait: Duration,
     ) -> error_stack::Result<(), StateReplicationError> {
         let deadline = Instant::now()
-            .checked_add(REPLICA_QUORUM_WAIT)
-            .assured("a wait of a few seconds stays within Instant");
+            .checked_add(wait)
+            .assured("the bounded checkpoint operation fits a monotonic deadline");
         let quorum = self
             .state
             .replication
@@ -1657,7 +1654,8 @@ mod tests {
                     .assured("the owner assignment is current");
                 let read = originator.read().clone();
                 let waiting = nervix_primitives::task::spawn(async move {
-                    read.wait_for_replica_quorum(lsm).await
+                    read.wait_for_replica_quorum(lsm, Duration::from_secs(30))
+                        .await
                 });
                 let reporting = nervix_primitives::task::spawn(async move {
                     state.replication().record(&node_2, lsm);

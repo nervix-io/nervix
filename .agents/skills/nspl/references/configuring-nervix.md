@@ -258,6 +258,9 @@ relay. Do not use them to scan across branches.
 - Every Kafka client states the required `auto.offset.reset` policy explicitly when a new consumer
   group may need records that already exist; Nervix passes the setting through and does not supply
   a hidden default.
+- Kafka `OFFSET BY DOMAIN` commits and start-point resets wait up to the native checkpoint bulk
+  operation's thirty-second budget for all assigned state replicas. A missing acknowledgement
+  follows the source's existing rejection and retry policy; this mode remains at least once.
 - Every transport ingestor source ends with its documented `ON QUIESCE` body immediately before
   `DECODE USING`, with a positive `MAX SIZE`, explicit non-endpoint overflow policy, or endpoint
   `RETRY AFTER` wherever that mode requires it. MQTT `SUSPEND` also declares `SESSION PERSISTENT
@@ -371,8 +374,8 @@ Choose checks relevant to the configured graph:
 - `BACKUP CLUSTER TO '<file>';` or `BACKUP DOMAIN [<name>] TO '<file>' [WITHOUT RESOURCES]
   [WITHOUT STATE | WITHOUT PAUSE | TIMEOUT <duration>];` writes an archive on the client's machine,
   sent alone from `nervix-cli` or a native client. A normal backup quiesces each running domain
-  before capturing WASM guest state, Kafka domain source offsets, branch lifecycle and fresh
-  materialized relay generations. `WITHOUT
+  before capturing WASM guest state, Kafka domain source offsets, branch lifecycle, fresh
+  materialized relay generations, deduplicator keys and the rows windows retain. `WITHOUT
   PAUSE` reads published checkpoints while execution continues; `WITHOUT STATE` captures only
   configuration. `DESCRIBE BACKUP '<file>';` verifies one offline and inventories its state,
   domains, users, and resource versions. Treat an archive as a secret.
@@ -383,8 +386,11 @@ Choose checks relevant to the configured graph:
   resource versions under their archived numbers, models, and compatible runtime state from an archive, sent alone from
   `nervix-cli` or a native client. The default leaves restored domains stopped. `RESUME` makes them
   running at the archived start generation and clock mapping after complete publication, preserving
-  materialized rows. Paced mappings project downtime; normal `START` establishes a new generation
-  and clears materialized state. `START` remains blocked until the complete state installation
+  materialized rows, deduplicator keys and windows. Paced mappings project downtime; normal `START`
+  establishes a new generation and clears materialized state. Restored deduplicator keys expire at
+  their archived first sighting plus `MAX TIME`; a window whose model or branch incarnation changed
+  starts empty and the restore warns about it. A Kafka source restored with its offsets reads again
+  the rows its windows retained at the cut. `START` remains blocked until the complete state installation
   succeeds, including after a failed restore or restart. A domain name that exists is
   refused, so copy a domain with `AS`. A fresh cluster already has its bootstrap user, so a cluster
   restore there needs `ON EXISTING USER SKIP` or `REPLACE`. Run `DRY RUN` first to see the plan and

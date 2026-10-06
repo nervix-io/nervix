@@ -16,6 +16,7 @@
 //! final archive. Configuration-only and live captures have their own explicit cut semantics.
 
 mod assembly;
+mod branch_state_sections;
 pub(in crate::application) mod interconnect;
 mod materialized_sections;
 pub(in crate::application) mod restore_storage;
