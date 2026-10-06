@@ -236,10 +236,10 @@ The boundary between them is kept in four places.
 - **Ordinary commands.** The NSPL commands a scenario runs go through the production Rust client,
   with its execution identity, redirects, and reconnects. This includes the transaction qualification
   graph's setup commands, which retain each execution reference if leadership changes while setup
-  is applying. Multi-statement graph setup beside a raw Row subscription sends its ordinary
-  statements through that client and opens the raw session only for the subscription. Ordinary
-  commands issued while a non-transactional subscription session remains open also use the client,
-  preserving that session for Row observations. The large materialized backup workload submits
+  is applying. When a command document has server statements after a subscription, the harness
+  sends those statements through the client and opens a raw session for the subscription on the
+  node requested by the step. A standalone subscription stays on that requested node, including
+  after failover. The large materialized backup workload submits
   each graph statement through the production client so a leadership change during its many relay
   definitions recovers that statement by reference; its Row subscription opens on a raw session
   after the graph is ready.

@@ -12194,18 +12194,30 @@ async fn execute_nspl_commands_on_node(
     let statements = nervix_nspl::client_statement::parse_client_statement_sources(commands)
         .ok()
         .filter(|statements| {
-            statements.iter().any(|statement| {
-                matches!(
+            let mut saw_subscription = false;
+            let server_follows_subscription = statements.iter().any(|statement| {
+                if matches!(
                     statement.statement,
                     nervix_nspl::client_statement::ClientStatement::CreateSubscription(_)
-                )
-            }) && statements.iter().all(|statement| {
-                matches!(
-                    statement.statement,
-                    nervix_nspl::client_statement::ClientStatement::Server(_)
-                        | nervix_nspl::client_statement::ClientStatement::CreateSubscription(_)
-                )
-            })
+                ) {
+                    saw_subscription = true;
+                    false
+                } else {
+                    saw_subscription
+                        && matches!(
+                            statement.statement,
+                            nervix_nspl::client_statement::ClientStatement::Server(_)
+                        )
+                }
+            });
+            server_follows_subscription
+                && statements.iter().all(|statement| {
+                    matches!(
+                        statement.statement,
+                        nervix_nspl::client_statement::ClientStatement::Server(_)
+                            | nervix_nspl::client_statement::ClientStatement::CreateSubscription(_)
+                    )
+                })
         });
     if let Some(statements) = statements {
         let mut session = None;
@@ -12213,21 +12225,17 @@ async fn execute_nspl_commands_on_node(
             let command = statement.source(commands);
             append_cucumber_log_line(&format!("nspl command with subscription: {command}"));
             let output = match statement.statement {
-                nervix_nspl::client_statement::ClientStatement::Server(_) => {
-                    let leader = current_leader_node(world).await;
-                    world
-                        .cluster()
-                        .run_command(&leader, &world.domain, command)
-                        .await
-                        .map_err(|error| error.to_string())?
-                }
+                nervix_nspl::client_statement::ClientStatement::Server(_) => world
+                    .cluster()
+                    .run_command(node_id, &world.domain, command)
+                    .await
+                    .map_err(|error| error.to_string())?,
                 nervix_nspl::client_statement::ClientStatement::CreateSubscription(_) => {
                     if session.is_none() {
-                        let leader = current_leader_node(world).await;
                         session = Some(
                             world
                                 .cluster()
-                                .open_session(&leader, &world.domain)
+                                .open_session(node_id, &world.domain)
                                 .await
                                 .map_err(|error| error.to_string())?,
                         );
@@ -14392,34 +14400,6 @@ async fn when_these_nspl_commands_are_executed_on_leader_node(
     world.last_command_output = None;
     let commands = expand_placeholders(world, docstring(step));
     let leader = current_leader_node(world).await;
-    let ordinary_server_commands = nervix_nspl::client_statement::parse_client_statement_sources(
-        &commands,
-    )
-    .is_ok_and(|statements| {
-        !statements.is_empty()
-            && statements.iter().all(|statement| {
-                matches!(
-                    statement.statement,
-                    nervix_nspl::client_statement::ClientStatement::Server(_)
-                )
-            })
-    });
-    if world.active_session_has_subscription
-        && world
-            .active_session
-            .as_ref()
-            .is_some_and(|session| !session.has_transaction())
-        && ordinary_server_commands
-    {
-        record_avro_wire_optional_fields(world, &commands);
-        world.last_command_output = Some(
-            run_nspl_commands_on_node(world, &leader, &commands)
-                .await
-                .expect("failed to execute NSPL setup command through the client"),
-        );
-        record_mqtt_ingestors(world, &commands);
-        return;
-    }
     let retry_safe = commands_are_retry_safe_session_ops(&commands);
     if world.active_session_has_subscription
         && world.active_session.is_some()

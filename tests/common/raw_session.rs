@@ -1080,10 +1080,6 @@ impl TestSession {
         self.ending.as_ref()
     }
 
-    pub(crate) fn has_transaction(&self) -> bool {
-        self.transaction.is_some()
-    }
-
     pub(crate) async fn run_command(&mut self, query: &str) -> io::Result<String> {
         let result = self.run_command_result(query).await?;
         if outcome_succeeded(&result) {

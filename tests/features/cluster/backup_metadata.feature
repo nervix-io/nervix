@@ -101,7 +101,6 @@ Feature: Large native restore metadata
     When the cluster is restarted
     And these NSPL commands are executed on the leader node
       """
-      CREATE SUBSCRIPTION filtered_metrics_subscription TO filtered_metrics;
       START;
       """
     Then within "10s" DESCRIBE INGESTOR "metric_source" on the leader node contains
@@ -120,7 +119,11 @@ Feature: Large native restore metadata
       """
       ready: true
       """
-    And the relay subscription does not receive a payload within "2s"
+    When these NSPL commands are executed on the leader node
+      """
+      CREATE SUBSCRIPTION filtered_metrics_subscription TO filtered_metrics;
+      """
+    Then the relay subscription does not receive a payload within "2s"
     When round 3 of Kafka messages for <branches> restore tenants is published to topic "backup_wasm_in_{{test_id}}"
     Then within "30s" DESCRIBE DOMAIN section "input_output" metric "messages_total" "sent" relay "raw_metrics" across physical nodes totals <branches>
     When round 4 of Kafka messages for <branches> restore tenants is published to topic "backup_wasm_in_{{test_id}}"
