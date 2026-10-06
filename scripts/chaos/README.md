@@ -973,7 +973,7 @@ observed the lost quorum as the policy requires. Started again while nervix-1 wa
 exited at startup with `failed to start cluster membership … resolving 'nervix-1' failed: the name does
 not exist`: Docker's DNS does not resolve a stopped container, and a node fails startup when its
 bootstrap host does not resolve, although its recovered Raft members would let it rejoin. [Cluster Chaos
-52: Start a restarting voter from its recovered Raft members when its bootstrap host does not
+56: Start a restarting voter from its recovered Raft members when its bootstrap host does not
 resolve](https://app.clickup.com/t/86bcdk4tn) owns that. An explicit one-step plan, a crash of the leader
 with a crash of its peer inside it, reproduced the failure on its first run, within four and a half
 minutes. That run, which ended inside its fault phase, still wrote its incomplete trace verdict and its
