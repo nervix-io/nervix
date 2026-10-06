@@ -41,7 +41,10 @@ impl VerifiedArchive {
         let record = match archived {
             DescribedRuntimeState::BranchLifecycle { record, .. }
             | DescribedRuntimeState::KafkaOffsets { record, .. } => record,
-            DescribedRuntimeState::Wasm { .. } | DescribedRuntimeState::Materialized { .. } => {
+            DescribedRuntimeState::Wasm { .. }
+            | DescribedRuntimeState::Materialized { .. }
+            | DescribedRuntimeState::Deduplicator { .. }
+            | DescribedRuntimeState::Window { .. } => {
                 return Err(Report::new(RestoreRefusal::InvalidArchive));
             }
         };
@@ -99,7 +102,9 @@ impl VerifiedArchive {
                         .change_context(SnapshotStagingError::Encode)
                     }
                     DescribedRuntimeState::Wasm { .. }
-                    | DescribedRuntimeState::Materialized { .. } => {
+                    | DescribedRuntimeState::Materialized { .. }
+                    | DescribedRuntimeState::Deduplicator { .. }
+                    | DescribedRuntimeState::Window { .. } => {
                         Err(Report::new(SnapshotStagingError::Encode))
                     }
                 }

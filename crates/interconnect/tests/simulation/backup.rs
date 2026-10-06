@@ -1,8 +1,9 @@
 //! Backup capture and section transfer over the authenticated simulated transport.
 //!
 //! Layer: test harness outside the product layer order.
-//! - **Owns.** Bounded multi-section capture and install assertions across a partition, sender
-//!   identity mismatch, and receiving-process restart.
+//! - **Owns.** Bounded multi-section capture and install assertions for materialized relay columns
+//!   and window input and argument groups across a partition, sender identity mismatch, and
+//!   receiving-process restart.
 //! - **Depends on.** The transport fixture and production backup wire requests.
 //! - **Must not know.** Persistent state stores or an actual server graph.
 
@@ -17,7 +18,10 @@ use nervix_interconnect::{
         InstallRestoredStateRequest, RestoreStateInventory,
     },
 };
-use nervix_models::{CommandExecutionReference, CoordinationIdentity, RestoreStateAuthority};
+use nervix_models::{
+    CommandExecutionReference, CoordinationIdentity, RemoteRuntimeField, RemoteRuntimeValue,
+    RestoreStateAuthority,
+};
 use nervix_primitives::sync::blocking::Mutex;
 
 use super::*;
@@ -36,8 +40,89 @@ fn backup_transfer_config(seed: u64) -> SimulationConfig {
     config
 }
 
-fn section_path(index: usize) -> String {
-    format!("domains/simulated/state/materialized_relay/state/groups/{index:010}/columns.arrow")
+/// The captured sections a transfer stages: a materialized relay's column groups, or a window
+/// branch's row-aligned input and argument groups, two sections per group.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SectionSet {
+    Materialized,
+    Window,
+}
+
+impl SectionSet {
+    /// The fixture window branch's key fingerprint.
+    const WINDOW_BRANCH: [u8; 32] = [5; 32];
+
+    fn path(self, index: usize) -> String {
+        match self {
+            Self::Materialized => format!(
+                "domains/simulated/state/materialized_relay/state/groups/{index:010}/columns.arrow"
+            ),
+            Self::Window => {
+                let group = index / 2;
+                let file = if index.is_multiple_of(2) {
+                    "input"
+                } else {
+                    "arguments"
+                };
+                let mut branch = String::with_capacity(64);
+                for byte in Self::WINDOW_BRANCH {
+                    branch.push_str(&format!("{byte:02x}"));
+                }
+                format!(
+                    "domains/simulated/state/window_processor/latency/{branch}/groups/{group:010}/\
+                     {file}.arrow"
+                )
+            }
+        }
+    }
+
+    fn kind(self, index: usize) -> CapturedStateSectionKind {
+        match self {
+            Self::Materialized => CapturedStateSectionKind::MaterializedColumns,
+            Self::Window if index.is_multiple_of(2) => CapturedStateSectionKind::WindowInputRows,
+            Self::Window => CapturedStateSectionKind::WindowArgumentColumns,
+        }
+    }
+
+    /// The native checkpoint the restore installs from the transferred sections.
+    fn begin_install(self) -> InstallRestoredStateAction {
+        let (placement, branch_fingerprint) = match self {
+            Self::Materialized => (
+                StatePlacementEnvelope {
+                    domain: domain(),
+                    state: RuntimeState::MaterializedRelay {
+                        schema: SchemaFingerprint::from_digest([11; 32]).materialized_at(37),
+                    },
+                    kind: ModelKind::Relay,
+                    identifier: ModelName::parse("state").assured("fixture relay is valid"),
+                    branch_key: None,
+                },
+                None,
+            ),
+            Self::Window => (
+                StatePlacementEnvelope {
+                    domain: domain(),
+                    state: RuntimeState::WindowProcessor {
+                        schema: SchemaFingerprint::from_digest([12; 32]),
+                    },
+                    kind: ModelKind::WindowProcessor,
+                    identifier: ModelName::parse("latency").assured("fixture window is valid"),
+                    branch_key: Some(vec![RemoteRuntimeField {
+                        name: "tenant".to_string(),
+                        value: RemoteRuntimeValue::String("acme".to_string()),
+                    }]),
+                },
+                Some(Self::WINDOW_BRANCH),
+            ),
+        };
+        InstallRestoredStateAction::Begin {
+            placement,
+            branch_fingerprint,
+            revision: 80,
+            length: u64::try_from(CONTAINER_BYTES).assured("fixture length fits"),
+            digest: container_digest(),
+        }
+    }
 }
 
 fn section_byte(index: usize) -> u8 {
@@ -82,37 +167,28 @@ fn install_request(
     }
 }
 
-fn begin_install() -> InstallRestoredStateAction {
-    InstallRestoredStateAction::Begin {
-        placement: StatePlacementEnvelope {
-            domain: domain(),
-            state: RuntimeState::MaterializedRelay {
-                schema: SchemaFingerprint::from_digest([11; 32]).materialized_at(37),
-            },
-            kind: ModelKind::Relay,
-            identifier: ModelName::parse("state").assured("fixture relay is valid"),
-            branch_key: None,
-        },
-        branch_fingerprint: None,
-        revision: 80,
-        length: u64::try_from(CONTAINER_BYTES).assured("fixture length fits"),
-        digest: container_digest(),
-    }
-}
-
-#[derive(Default)]
 struct InstallReceiver {
+    sections: SectionSet,
     incoming: Option<(u64, blake3::Hasher)>,
     finished: bool,
     published: bool,
 }
 
 impl InstallReceiver {
+    fn new(sections: SectionSet) -> Self {
+        Self {
+            sections,
+            incoming: None,
+            finished: false,
+            published: false,
+        }
+    }
+
     fn apply(&mut self, action: InstallRestoredStateAction) -> Result<(), RemoteOperationFailure> {
         let reject = || RemoteOperationFailure::rejected(RemoteOperationSubject::domain(&domain()));
         match action {
             action @ InstallRestoredStateAction::Begin { .. } => {
-                assert_eq!(action, begin_install());
+                assert_eq!(action, self.sections.begin_install());
                 self.incoming = Some((0, blake3::Hasher::new()));
                 self.finished = false;
             }
@@ -149,15 +225,18 @@ impl InstallReceiver {
     }
 }
 
-fn register_install_receiver(server: &Transport) -> StdArc<Mutex<InstallReceiver>> {
-    let receiver = StdArc::new(Mutex::new(InstallReceiver::default()));
+fn register_install_receiver(
+    server: &Transport,
+    sections: SectionSet,
+) -> StdArc<Mutex<InstallReceiver>> {
+    let receiver = StdArc::new(Mutex::new(InstallReceiver::new(sections)));
     let handler_receiver = receiver.clone();
     server
         .register_handler::<InstallRestoredStateRequest, _, _>(move |_, request| {
             let receiver = handler_receiver.clone();
             async move { receiver.lock().apply(request.action) }
         })
-        .assured("materialized install receiver registers");
+        .assured("the install receiver registers");
     receiver
 }
 
@@ -204,11 +283,11 @@ fn domain() -> DomainName {
     DomainName::parse("simulated").assured("fixture domain is valid")
 }
 
-fn fetch(coordination: CoordinationIdentity) -> FetchCapturedSection {
+fn fetch(sections: SectionSet, coordination: CoordinationIdentity) -> FetchCapturedSection {
     FetchCapturedSection {
         coordination,
         domain: domain(),
-        path: section_path(0),
+        path: sections.path(0),
     }
 }
 
@@ -220,10 +299,26 @@ fn backup_section_fetch_is_fenced_and_recovers_after_partition() {
                      install six streamed sections totaling 36 MiB after repairing the link",
         seeds: &[101],
     }
-    .check(backup_transfer_config, exercise_backup_section);
+    .check(backup_transfer_config, |run| {
+        exercise_backup_section(run, SectionSet::Materialized)
+    });
 }
 
-fn exercise_backup_section(run: ScenarioRun) -> Result<(), SimulationError> {
+#[test]
+fn window_sections_larger_than_the_bulk_budget_stream_across_a_partition() {
+    Scenario {
+        name: "window section transfer",
+        fault_plan: "reject forged identities and bound stalled and partitioned fetches, then \
+                     stream three window groups of input rows and argument columns totaling 36 \
+                     MiB and install their window checkpoint after repairing the link",
+        seeds: &[103],
+    }
+    .check(backup_transfer_config, |run| {
+        exercise_backup_section(run, SectionSet::Window)
+    });
+}
+
+fn exercise_backup_section(run: ScenarioRun, sections: SectionSet) -> Result<(), SimulationError> {
     let seed = run.seed();
     let authority = Authority::new();
     let server_credentials = authority.issue("server");
@@ -245,7 +340,7 @@ fn exercise_backup_section(run: ScenarioRun) -> Result<(), SimulationError> {
                 let result = HostSupervisor::run(async move {
                     let server = bind("server", credentials, seed).await;
                     let staged = StdArc::new(Mutex::new(BTreeSet::<usize>::new()));
-                    let installed = register_install_receiver(&server);
+                    let installed = register_install_receiver(&server, sections);
                     let capture_stage = staged.clone();
                     server
                         .register_handler::<CaptureDomainStateRequest, _, _>(move |_, _| {
@@ -265,11 +360,11 @@ fn exercise_backup_section(run: ScenarioRun) -> Result<(), SimulationError> {
                                     .lock()
                                     .iter()
                                     .map(|index| CapturedSectionInventory {
-                                        path: section_path(*index),
+                                        path: sections.path(*index),
                                         length: u64::try_from(SECTION_BYTES)
                                             .assured("fixture length fits"),
                                         digest: section_digest(*index),
-                                        kind: CapturedStateSectionKind::MaterializedColumns,
+                                        kind: sections.kind(*index),
                                     })
                                     .collect())
                             }
@@ -286,7 +381,7 @@ fn exercise_backup_section(run: ScenarioRun) -> Result<(), SimulationError> {
                                     std::future::pending::<()>().await;
                                 }
                                 let index = (0..SECTION_COUNT)
-                                    .find(|index| section_path(*index) == request.path)
+                                    .find(|index| sections.path(*index) == request.path)
                                     .filter(|index| staged.lock().remove(index))
                                     .ok_or_else(|| {
                                         StreamHandlerError::new("capture stage is absent")
@@ -436,13 +531,16 @@ fn exercise_backup_section(run: ScenarioRun) -> Result<(), SimulationError> {
                         u64::try_from(SECTION_BYTES).assured("fixture length fits")
                     );
                     assert!(
-                        client.request_stream(&peer, fetch(forged)).await.is_err(),
+                        client
+                            .request_stream(&peer, fetch(sections, forged))
+                            .await
+                            .is_err(),
                         "a forged fetch must fail before its handler consumes the section"
                     );
                     trace.record("client", "forged capture and fetch rejected");
                     let stalled = FetchCapturedSection {
                         path: "state/stalled.bin".to_string(),
-                        ..fetch(coordination.clone())
+                        ..fetch(sections, coordination.clone())
                     };
                     let started = turmoil::elapsed();
                     assert!(
@@ -454,7 +552,7 @@ fn exercise_backup_section(run: ScenarioRun) -> Result<(), SimulationError> {
                     turmoil::partition("client", "server");
                     assert!(
                         client
-                            .request_stream(&peer, fetch(coordination.clone()))
+                            .request_stream(&peer, fetch(sections, coordination.clone()))
                             .await
                             .is_err(),
                         "a partitioned fetch reaches its request deadline"
@@ -469,7 +567,7 @@ fn exercise_backup_section(run: ScenarioRun) -> Result<(), SimulationError> {
                                 &peer,
                                 FetchCapturedSection {
                                     path: section.path.clone(),
-                                    ..fetch(coordination.clone())
+                                    ..fetch(sections, coordination.clone())
                                 },
                             )
                             .await
@@ -497,7 +595,7 @@ fn exercise_backup_section(run: ScenarioRun) -> Result<(), SimulationError> {
                     );
                     // Fetch and install use the same reserved snapshot stream slot. Complete
                     // capture first, as the production archive staging boundary does.
-                    install_action(&client, &peer, &coordination, begin_install()).await;
+                    install_action(&client, &peer, &coordination, sections.begin_install()).await;
                     let mut offset = 0;
                     for index in 0..SECTION_COUNT {
                         for _ in 0..SECTION_BYTES / CHUNK_BYTES {
@@ -579,7 +677,8 @@ fn exercise_backup_restart(run: ScenarioRun) -> Result<(), SimulationError> {
             async move {
                 let result = HostSupervisor::run(async move {
                     let server = bind("server", credentials.clone(), seed).await;
-                    let interrupted_install = register_install_receiver(&server);
+                    let interrupted_install =
+                        register_install_receiver(&server, SectionSet::Materialized);
                     let executor = Executor::default();
                     server
                         .register_stream_handler::<FetchCapturedSection, _, _>(move |_, _| {
@@ -622,7 +721,8 @@ fn exercise_backup_restart(run: ScenarioRun) -> Result<(), SimulationError> {
                     server.shutdown().await;
                     trace.record("server", "owner and receiver process ended mid-transfer");
                     let replacement = bind("server", credentials, seed + 2).await;
-                    let replacement_install = register_install_receiver(&replacement);
+                    let replacement_install =
+                        register_install_receiver(&replacement, SectionSet::Materialized);
                     replacement
                         .register_stream_handler::<FetchCapturedSection, _, _>(|_, _| async {
                             Err(Report::new(StreamHandlerError::new(
@@ -679,7 +779,13 @@ fn exercise_backup_restart(run: ScenarioRun) -> Result<(), SimulationError> {
                     let coordination = client
                         .next_coordination_identity()
                         .assured("fixture can allocate coordination identity");
-                    install_action(&client, &peer, &coordination, begin_install()).await;
+                    install_action(
+                        &client,
+                        &peer,
+                        &coordination,
+                        SectionSet::Materialized.begin_install(),
+                    )
+                    .await;
                     install_action(
                         &client,
                         &peer,
@@ -692,7 +798,10 @@ fn exercise_backup_restart(run: ScenarioRun) -> Result<(), SimulationError> {
                     .await;
                     trace.record("client", "first bounded install chunk acknowledged");
                     let mut body = client
-                        .request_stream(&peer, fetch(coordination.clone()))
+                        .request_stream(
+                            &peer,
+                            fetch(SectionSet::Materialized, coordination.clone()),
+                        )
                         .await
                         .assured("first owner's fetch opens");
                     assert_eq!(
@@ -721,7 +830,10 @@ fn exercise_backup_restart(run: ScenarioRun) -> Result<(), SimulationError> {
                     wait_for_liveness_recovery(&client, &peer).await;
                     assert!(
                         client
-                            .request_stream(&peer, fetch(coordination.clone()))
+                            .request_stream(
+                                &peer,
+                                fetch(SectionSet::Materialized, coordination.clone())
+                            )
                             .await
                             .is_err(),
                         "the replacement owner has no stage from the first process"
@@ -742,7 +854,13 @@ fn exercise_backup_restart(run: ScenarioRun) -> Result<(), SimulationError> {
                         "a replacement receiver cannot finish the preceding process's partial \
                          install"
                     );
-                    install_action(&client, &peer, &coordination, begin_install()).await;
+                    install_action(
+                        &client,
+                        &peer,
+                        &coordination,
+                        SectionSet::Materialized.begin_install(),
+                    )
+                    .await;
                     let mut offset = 0;
                     for index in 0..SECTION_COUNT {
                         for _ in 0..SECTION_BYTES / CHUNK_BYTES {

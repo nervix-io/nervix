@@ -27,7 +27,10 @@ use nervix_vm::{
 };
 use petgraph::{graph::DiGraph, prelude::NodeIndex};
 
+mod deduplicator_key;
 mod sketch;
+
+pub(in crate::registry) use deduplicator_key::deduplicator_key_types;
 
 use crate::registry::{
     error::RegistryError,
@@ -1042,70 +1045,7 @@ pub(in crate::registry) fn ensure_deduplicator_key_compiles(
             reason: "deduplicator input requires at least one input relay".to_string(),
         }));
     };
-    if deduplicator.deduplicate_on.is_empty() {
-        return Err(Report::new(RegistryError::InvalidModel {
-            domain: domain.as_str().to_string(),
-            identifier: identifier.as_str().to_string(),
-            reason: "DEDUPLICATE ON requires at least one expression".to_string(),
-        }));
-    }
-    let assignments = deduplicator
-        .deduplicate_on
-        .iter()
-        .enumerate()
-        .map(|(index, expression)| {
-            Ok(Assignment {
-                target: AssignmentTarget::bare(
-                    FieldName::parse(&format!("deduplicate_key_{index}")).map_err(|error| {
-                        Report::new(RegistryError::InvalidModel {
-                            domain: domain.as_str().to_string(),
-                            identifier: identifier.as_str().to_string(),
-                            reason: format!("invalid deduplicate key target: {error}"),
-                        })
-                    })?,
-                ),
-                value: expression.clone(),
-            })
-        })
-        .collect::<Result<Vec<_>, Report<RegistryError>>>()?;
-    let parsed = lower_route_construction(
-        &RouteConstruction {
-            assignments,
-            ..RouteConstruction::default()
-        },
-        SemanticScopePolicy::read_write("input", "input"),
-    )
-    .map_err(|reason| {
-        Report::new(RegistryError::InvalidModel {
-            domain: domain.as_str().to_string(),
-            identifier: identifier.as_str().to_string(),
-            reason: format!("DEDUPLICATE ON is invalid: {reason}"),
-        })
-    })?;
-    let bindings = vec![writable_binding_for_internal_schema(
-        "input",
-        primary_schema,
-    )];
-    let key_types = infer_set_expr_types_for_bindings_with_udfs(
-        &parsed,
-        bindings,
-        udf_compile_options(models, CompileOptions::default()).udf_signatures,
-    )
-    .map_err(|error| {
-        let message = error.current_context().message.clone();
-        error.change_context(RegistryError::InvalidModel {
-            domain: domain.as_str().to_string(),
-            identifier: identifier.as_str().to_string(),
-            reason: format!("DEDUPLICATE ON compile failed: {}", message),
-        })
-    })?;
-    if key_types.len() != deduplicator.deduplicate_on.len() {
-        return Err(Report::new(RegistryError::InvalidModel {
-            domain: domain.as_str().to_string(),
-            identifier: identifier.as_str().to_string(),
-            reason: "DEDUPLICATE ON inferred a different number of key fields".to_string(),
-        }));
-    }
+    deduplicator_key_types(domain, identifier, models, deduplicator, primary_schema)?;
     Ok(())
 }
 

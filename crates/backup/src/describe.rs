@@ -15,6 +15,7 @@ use error_stack::Report;
 use nervix_models::DomainName;
 
 use crate::{
+    branch_state::{DeduplicatorStateDescriptor, WindowStateDescriptor},
     error::ArchiveReadError,
     manifest::{
         ArchiveScope, BackupManifest, DomainCapture, SectionContent, SectionDigest, SectionEntry,
@@ -90,6 +91,25 @@ pub enum DescribedRuntimeState {
         record: DescribedSection,
         groups: Vec<DescribedMaterializedGroup>,
     },
+    /// One deduplicator branch's keyspace, its Arrow key groups in key order.
+    Deduplicator {
+        descriptor: DeduplicatorStateDescriptor,
+        record: DescribedSection,
+        groups: Vec<DescribedSection>,
+    },
+    /// One window processor branch's state, its row groups oldest first.
+    Window {
+        descriptor: WindowStateDescriptor,
+        record: DescribedSection,
+        groups: Vec<DescribedWindowGroup>,
+    },
+}
+
+/// The two row-aligned Arrow sections of one window group, read only when converted.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DescribedWindowGroup {
+    pub input: DescribedSection,
+    pub arguments: DescribedSection,
 }
 
 /// A verified group whose identities and columns stay in the archive until conversion.
@@ -214,7 +234,11 @@ struct Describer {
     wasm_blob_paths: BTreeMap<SectionPath, (DomainName, usize)>,
     skipped_wasm_blobs: BTreeSet<SectionPath>,
     materialized_paths: BTreeMap<SectionPath, (DomainName, usize)>,
-    skipped_materialized_prefixes: BTreeSet<String>,
+    /// Where each deduplicator and window descriptor read so far belongs, by descriptor path.
+    branch_state_paths: BTreeMap<SectionPath, (DomainName, usize)>,
+    /// State directories whose descriptor this reader cannot interpret; every section under one
+    /// is verified and passed over.
+    skipped_state_prefixes: BTreeSet<String>,
 }
 
 /// A domain whose sections are still arriving.
@@ -246,6 +270,39 @@ enum AssembledRuntimeState {
         record: DescribedSection,
         groups: BTreeMap<u32, MaterializedGroupParts>,
     },
+    Deduplicator {
+        descriptor: DeduplicatorStateDescriptor,
+        record: DescribedSection,
+        groups: BTreeMap<u32, DescribedSection>,
+    },
+    Window {
+        descriptor: WindowStateDescriptor,
+        record: DescribedSection,
+        groups: BTreeMap<u32, WindowGroupParts>,
+    },
+}
+
+#[derive(Default)]
+struct WindowGroupParts {
+    input: Option<DescribedSection>,
+    arguments: Option<DescribedSection>,
+}
+
+/// Which of a window group's two sections one entry is.
+#[derive(Debug, Clone, Copy)]
+enum WindowGroupSection {
+    Input,
+    Arguments,
+}
+
+impl WindowGroupSection {
+    /// The file name the section has inside its group directory.
+    fn file_name(self) -> &'static str {
+        match self {
+            Self::Input => "/input.arrow",
+            Self::Arguments => "/arguments.arrow",
+        }
+    }
 }
 
 #[derive(Default)]
@@ -298,7 +355,7 @@ impl SectionVisitor for Describer {
         content: &mut SectionReader<'_>,
     ) -> Result<(), Report<ArchiveReadError>> {
         if self
-            .skipped_materialized_prefixes
+            .skipped_state_prefixes
             .iter()
             .any(|prefix| entry.path.as_str().starts_with(prefix))
         {
@@ -331,6 +388,21 @@ impl SectionVisitor for Describer {
                 self.state_record_or_skip(entry, decoded)
             }
             SectionContent::MaterializedColumns => self.materialized_columns(entry, content),
+            SectionContent::Record(RecordKind::DeduplicatorStateDescriptor) => {
+                let decoded = self.deduplicator_descriptor(entry, content);
+                self.state_record_or_skip(entry, decoded)
+            }
+            SectionContent::Record(RecordKind::WindowStateDescriptor) => {
+                let decoded = self.window_descriptor(entry, content);
+                self.state_record_or_skip(entry, decoded)
+            }
+            SectionContent::DeduplicatorKeys => self.deduplicator_keys(entry, content),
+            SectionContent::WindowInputRows => {
+                self.window_group(entry, content, WindowGroupSection::Input)
+            }
+            SectionContent::WindowArgumentColumns => {
+                self.window_group(entry, content, WindowGroupSection::Arguments)
+            }
             SectionContent::Record(RecordKind::Manifest) => Err(misplaced(entry)),
             SectionContent::Nspl => self.models(entry, content),
             SectionContent::ResourceArchive => self.resource_archive(entry, content),
@@ -399,8 +471,20 @@ impl Describer {
                     },
                 )
                 .ok_or_else(|| misplaced(entry))?;
-            self.skipped_materialized_prefixes
-                .insert(format!("{prefix}/"));
+            self.skipped_state_prefixes.insert(format!("{prefix}/"));
+        }
+        if matches!(
+            entry.content,
+            SectionContent::Record(
+                RecordKind::DeduplicatorStateDescriptor | RecordKind::WindowStateDescriptor
+            )
+        ) {
+            let prefix = entry
+                .path
+                .as_str()
+                .strip_suffix("/descriptor.rkyv")
+                .ok_or_else(|| misplaced(entry))?;
+            self.skipped_state_prefixes.insert(format!("{prefix}/"));
         }
         self.domains
             .get_mut(&domain)
@@ -539,6 +623,176 @@ impl Describer {
             return Err(misplaced(entry));
         }
         group.columns = Some(DescribedSection::read_at(entry, content));
+        Ok(())
+    }
+
+    fn deduplicator_descriptor(
+        &mut self,
+        entry: &SectionEntry,
+        content: &mut SectionReader<'_>,
+    ) -> Result<(), Report<ArchiveReadError>> {
+        let bytes = content.read_all(entry, MAX_RECORD_BYTES)?;
+        let descriptor = DeduplicatorStateDescriptor::decode(entry.path.as_str(), &bytes)?;
+        let expected = SectionPath::deduplicator_descriptor(
+            &descriptor.domain,
+            &descriptor.entity,
+            descriptor.branch_fingerprint.as_ref(),
+        );
+        if entry.path != expected {
+            return Err(misplaced(entry));
+        }
+        let Some(domain) = self.domains.get_mut(&descriptor.domain) else {
+            return Err(misplaced(entry));
+        };
+        let index = domain.state.len();
+        if self
+            .branch_state_paths
+            .insert(entry.path.clone(), (descriptor.domain.clone(), index))
+            .is_some()
+        {
+            return Err(misplaced(entry));
+        }
+        domain.state.push(AssembledRuntimeState::Deduplicator {
+            descriptor,
+            record: DescribedSection::read_at(entry, content),
+            groups: BTreeMap::new(),
+        });
+        Ok(())
+    }
+
+    fn window_descriptor(
+        &mut self,
+        entry: &SectionEntry,
+        content: &mut SectionReader<'_>,
+    ) -> Result<(), Report<ArchiveReadError>> {
+        let bytes = content.read_all(entry, MAX_RECORD_BYTES)?;
+        let descriptor = WindowStateDescriptor::decode(entry.path.as_str(), &bytes)?;
+        let expected = SectionPath::window_descriptor(
+            &descriptor.domain,
+            &descriptor.entity,
+            descriptor.branch_fingerprint.as_ref(),
+        );
+        if entry.path != expected {
+            return Err(misplaced(entry));
+        }
+        let Some(domain) = self.domains.get_mut(&descriptor.domain) else {
+            return Err(misplaced(entry));
+        };
+        let index = domain.state.len();
+        if self
+            .branch_state_paths
+            .insert(entry.path.clone(), (descriptor.domain.clone(), index))
+            .is_some()
+        {
+            return Err(misplaced(entry));
+        }
+        domain.state.push(AssembledRuntimeState::Window {
+            descriptor,
+            record: DescribedSection::read_at(entry, content),
+            groups: BTreeMap::new(),
+        });
+        Ok(())
+    }
+
+    /// The state a group section belongs to, from the descriptor beside its `groups` directory,
+    /// and the group number its path names.
+    fn branch_state_of_group(
+        &mut self,
+        entry: &SectionEntry,
+        file_name: &str,
+    ) -> Result<(&mut AssembledRuntimeState, u32), Report<ArchiveReadError>> {
+        let Some((prefix, group_path)) = entry.path.as_str().rsplit_once("/groups/") else {
+            return Err(misplaced(entry));
+        };
+        let Some(group) = group_path.strip_suffix(file_name) else {
+            return Err(misplaced(entry));
+        };
+        let Ok(group) = group.parse::<u32>() else {
+            return Err(misplaced(entry));
+        };
+        let descriptor_path = SectionPath::parse(&format!("{prefix}/descriptor.rkyv"))?;
+        let Some((domain, index)) = self.branch_state_paths.get(&descriptor_path) else {
+            return Err(misplaced(entry));
+        };
+        let Some(state) = self
+            .domains
+            .get_mut(domain)
+            .and_then(|domain| domain.state.get_mut(*index))
+        else {
+            return Err(misplaced(entry));
+        };
+        Ok((state, group))
+    }
+
+    fn deduplicator_keys(
+        &mut self,
+        entry: &SectionEntry,
+        content: &SectionReader<'_>,
+    ) -> Result<(), Report<ArchiveReadError>> {
+        let (state, group) = self.branch_state_of_group(entry, "/keys.arrow")?;
+        let AssembledRuntimeState::Deduplicator {
+            descriptor, groups, ..
+        } = state
+        else {
+            return Err(misplaced(entry));
+        };
+        let expected = SectionPath::deduplicator_keys(
+            &descriptor.domain,
+            &descriptor.entity,
+            descriptor.branch_fingerprint.as_ref(),
+            group,
+        );
+        if group >= descriptor.groups || entry.path != expected {
+            return Err(misplaced(entry));
+        }
+        match groups.entry(group) {
+            Entry::Vacant(vacant) => {
+                vacant.insert(DescribedSection::read_at(entry, content));
+                Ok(())
+            }
+            Entry::Occupied(_) => Err(misplaced(entry)),
+        }
+    }
+
+    fn window_group(
+        &mut self,
+        entry: &SectionEntry,
+        content: &SectionReader<'_>,
+        section: WindowGroupSection,
+    ) -> Result<(), Report<ArchiveReadError>> {
+        let (state, group) = self.branch_state_of_group(entry, section.file_name())?;
+        let AssembledRuntimeState::Window {
+            descriptor, groups, ..
+        } = state
+        else {
+            return Err(misplaced(entry));
+        };
+        let expected = match section {
+            WindowGroupSection::Input => SectionPath::window_input_rows(
+                &descriptor.domain,
+                &descriptor.entity,
+                descriptor.branch_fingerprint.as_ref(),
+                group,
+            ),
+            WindowGroupSection::Arguments => SectionPath::window_argument_columns(
+                &descriptor.domain,
+                &descriptor.entity,
+                descriptor.branch_fingerprint.as_ref(),
+                group,
+            ),
+        };
+        if group >= descriptor.groups || entry.path != expected {
+            return Err(misplaced(entry));
+        }
+        let parts = groups.entry(group).or_default();
+        let slot = match section {
+            WindowGroupSection::Input => &mut parts.input,
+            WindowGroupSection::Arguments => &mut parts.arguments,
+        };
+        if slot.is_some() {
+            return Err(misplaced(entry));
+        }
+        *slot = Some(DescribedSection::read_at(entry, content));
         Ok(())
     }
 
@@ -794,7 +1048,7 @@ impl Describer {
                     .into_iter()
                     .filter(|state| match state {
                         AssembledRuntimeState::Materialized { record, .. } => !self
-                            .skipped_materialized_prefixes
+                            .skipped_state_prefixes
                             .iter()
                             .any(|prefix| record.path.as_str().starts_with(prefix)),
                         _ => true,
@@ -858,6 +1112,47 @@ impl Describer {
                                 descriptor,
                                 record,
                                 groups,
+                            })
+                        }
+                        AssembledRuntimeState::Deduplicator {
+                            descriptor,
+                            record,
+                            groups,
+                        } => {
+                            if usize::try_from(descriptor.groups).ok() != Some(groups.len()) {
+                                return Err(incomplete(&capture.domain, "deduplicator key groups"));
+                            }
+                            Ok(DescribedRuntimeState::Deduplicator {
+                                descriptor,
+                                record,
+                                groups: groups.into_values().collect(),
+                            })
+                        }
+                        AssembledRuntimeState::Window {
+                            descriptor,
+                            record,
+                            groups,
+                        } => {
+                            if usize::try_from(descriptor.groups).ok() != Some(groups.len()) {
+                                return Err(incomplete(&capture.domain, "window row groups"));
+                            }
+                            let mut described = Vec::with_capacity(groups.len());
+                            for group in groups.into_values() {
+                                let Some(input) = group.input else {
+                                    return Err(incomplete(&capture.domain, "window input rows"));
+                                };
+                                let Some(arguments) = group.arguments else {
+                                    return Err(incomplete(
+                                        &capture.domain,
+                                        "window argument columns",
+                                    ));
+                                };
+                                described.push(DescribedWindowGroup { input, arguments });
+                            }
+                            Ok(DescribedRuntimeState::Window {
+                                descriptor,
+                                record,
+                                groups: described,
                             })
                         }
                     })

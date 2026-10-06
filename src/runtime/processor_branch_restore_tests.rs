@@ -20,7 +20,10 @@ use super::*;
 use crate::{
     runtime::{
         processor_branch_task::run_processor_node_runtime,
-        window_state::{decode_window_processor_snapshot, encode_window_processor_snapshot},
+        window_state::{
+            WindowSnapshotLifetime, WindowSnapshotSchemas, decode_window_processor_snapshot,
+            encode_window_processor_snapshot,
+        },
     },
     runtime_ack::{AckCompletion, AckOutcome, AckProgress, AckSet},
     runtime_schema::{
@@ -265,12 +268,16 @@ impl OpenWindowFixture {
             .latest_snapshot(runtime.executor())
             .await
             .expect("the published window encodes");
+        let input = self.input_schema.arrow_schema();
+        let arguments = WindowArgumentColumns::snapshot_schema(&self.plan);
         let window = decode_window_processor_snapshot(
             &published.payload,
             runtime.executor(),
-            &self.plan,
-            &self.input_schema,
-            incarnation,
+            WindowSnapshotSchemas {
+                input: &input,
+                arguments: &arguments,
+            },
+            WindowSnapshotLifetime::Branch(incarnation),
         )
         .await
         .expect("the published window decodes")?;

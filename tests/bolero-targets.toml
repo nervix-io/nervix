@@ -130,7 +130,7 @@ test_target = "lib"
 [[target]]
 case_timeout_seconds = 10
 corpus = "crates/backup/src/__fuzz__/tests__bolero_domain_records_and_manifests_round_trip/corpus"
-domain_version = 3
+domain_version = 4
 features = []
 id = "backup-record-manifest"
 invariant = "All current archive records and manifests preserve complete users, lifecycle, catalog, cut metadata, ordered section identities and native-width values through their owning codecs."
@@ -1387,6 +1387,51 @@ test_target = "lib"
 
 [[target]]
 case_timeout_seconds = 10
+corpus = "crates/backup/src/__fuzz__/branch_state__tests__bolero_branch_state_descriptors_preserve_every_field/corpus"
+domain_version = 1
+features = []
+id = "backup-branch-state-descriptors"
+invariant = "Current deduplicator and window descriptors preserve every identity, schema and model digest, typed branch value, revision, incarnation, sequence, watermark, group count and delayed histogram removal."
+manifest = "Cargo.toml"
+max_input_bytes = 4096
+package = "nervix-backup"
+random_iterations = 256
+source = "crates/backup/src/branch_state.rs"
+test = "branch_state::tests::bolero_branch_state_descriptors_preserve_every_field"
+test_target = "lib"
+
+[[target]]
+case_timeout_seconds = 10
+corpus = "src/runtime/__fuzz__/runtime__deduplicator_archive__tests__bolero_deduplicator_archive_keys_preserve_every_key_and_seen_at/corpus"
+domain_version = 1
+features = ["testing"]
+id = "backup-deduplicator-keys"
+invariant = "A deduplicator keyspace written as bounded typed Arrow key groups and rebuilt by the restore conversion keeps every key in order with its exact normalized parts, float bits and seen_at time."
+manifest = "Cargo.toml"
+max_input_bytes = 2048
+package = "nervix-server"
+random_iterations = 128
+source = "src/runtime/deduplicator_archive.rs"
+test = "runtime::deduplicator_archive::tests::bolero_deduplicator_archive_keys_preserve_every_key_and_seen_at"
+test_target = "lib"
+
+[[target]]
+case_timeout_seconds = 10
+corpus = "src/runtime/__fuzz__/runtime__window_archive__tests__bolero_window_archive_groups_rebuild_the_published_window/corpus"
+domain_version = 1
+features = ["testing"]
+id = "backup-window-groups"
+invariant = "A published window written as bounded input and argument Arrow groups and rebuilt as a native checkpoint keeps every row, sequence, watermark, argument value and delayed removal, and answers every aggregate as before."
+manifest = "Cargo.toml"
+max_input_bytes = 1024
+package = "nervix-server"
+random_iterations = 64
+source = "src/runtime/window_archive.rs"
+test = "runtime::window_archive::tests::bolero_window_archive_groups_rebuild_the_published_window"
+test_target = "lib"
+
+[[target]]
+case_timeout_seconds = 10
 corpus = "src/runtime/__fuzz__/runtime__native_checkpoint_properties__bolero_streamed_lifecycle_preserves_complete_current_values/corpus"
 domain_version = 1
 features = []
@@ -1417,10 +1462,10 @@ test_target = "lib"
 [[target]]
 case_timeout_seconds = 10
 corpus = "crates/backup/src/__fuzz__/archive_properties__bolero_complete_archives_preserve_every_record_section_and_payload/corpus"
-domain_version = 2
+domain_version = 3
 features = []
 id = "backup-complete-archives"
-invariant = "Every promised current record, ordered section, length, digest and raw payload survives export, extraction, restore reads and deterministic re-export under cluster/domain and resource/state options."
+invariant = "Every promised current record, ordered section, length, digest and raw payload, including deduplicator key and window row and argument groups, survives export, extraction, restore reads and deterministic re-export under cluster/domain and resource/state options."
 manifest = "Cargo.toml"
 max_input_bytes = 4096
 package = "nervix-backup"
@@ -1433,7 +1478,7 @@ test_target = "lib"
 [[target]]
 case_timeout_seconds = 10
 corpus = "crates/backup/src/__fuzz__/malformed_properties__bolero_malformed_current_records_return_safe_typed_errors/corpus"
-domain_version = 2
+domain_version = 3
 features = []
 id = "backup-malformed-records"
 invariant = "Bounded current malformed records and headers return safe typed owning errors; accepted records preserve their complete value through re-encoding."
@@ -1449,10 +1494,10 @@ test_target = "lib"
 [[target]]
 case_timeout_seconds = 10
 corpus = "crates/backup/src/__fuzz__/malformed_properties__bolero_corrupt_archives_fail_before_restore_contents_are_returned/corpus"
-domain_version = 2
+domain_version = 3
 features = []
 id = "backup-corrupt-archives"
-invariant = "Changed current section lengths, digests, kinds, order, membership and record bytes or truncated sections fail before verified archive contents reach restore installation."
+invariant = "Changed current section lengths, digests, kinds, order, membership and record bytes, missing or misplaced deduplicator and window groups, or truncated sections fail before verified archive contents reach restore installation."
 manifest = "Cargo.toml"
 max_input_bytes = 4096
 package = "nervix-backup"

@@ -76,6 +76,25 @@ pub struct CompiledWindowRoute {
     pub invocations: Vec<CompiledWindowInvocation>,
 }
 
+/// The columns a window saves its retained rows' aggregate arguments in: one nullable column per
+/// argument of every demand, in demand order, named `argument_0` onwards.
+///
+/// A window's snapshots and backup archives both lay the argument columns out by this schema, so
+/// saved arguments read back only into a window whose compiled demands match them.
+pub fn argument_snapshot_schema(demands: &[CompiledWindowDemand]) -> Schema {
+    let mut fields = Vec::new();
+    for demand in demands {
+        for column in demand.arguments.iter() {
+            fields.push(Field::new(
+                format!("argument_{}", fields.len()),
+                column.data_type.clone(),
+                true,
+            ));
+        }
+    }
+    Schema::new(fields)
+}
+
 /// One aggregate demand of a route, with the argument program columns it reads.
 #[derive(Debug, Clone, PartialEq)]
 pub struct CompiledWindowDemand {
