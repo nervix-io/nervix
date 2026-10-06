@@ -415,7 +415,8 @@ Restore preparation has a separate, per-node `restore_metadata` admission class,
 regular `manifest.rkyv` entry and checks its length against the record limit; the manifest
 then verifies off the async workers under its own charge. A verified manifest sizes the retained
 preparation reservation: 16 times encoded record bytes (including the manifest), 64 times NSPL
-bytes, and 2 MiB of fixed overhead. Resource archives, guest saves and materialized Arrow columns remain on disk. The charge
+bytes, and 2 MiB of fixed overhead. Resource archives, guest saves and the materialized,
+deduplicator and window Arrow groups remain on disk; their conversion is charged separately. The charge
 covers overlapping owned archive values, aligned decode buffers, model parsing and planning
 copies, branch text and typed-key conversion, and native serializer resolvers. Admission refuses
 unaddressable estimates or unavailable capacity before a restore changes the cluster. Parsing and

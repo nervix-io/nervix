@@ -31,9 +31,9 @@ use thiserror::Error;
 
 use super::{
     BranchKey, CapturedDeduplicatorKeyspace, CapturedWindow, MaterializedGeneration,
-    OwnershipHandoffError, OwnershipHandoffResult,
-    ReplicatedKafkaOffsetState, ReplicatedMaterializedRelayState, Runtime, RuntimeStateKind,
-    RuntimeStatePlacement, ScheduledNodeTask,
+    OwnershipHandoffError, OwnershipHandoffResult, ReplicatedKafkaOffsetState,
+    ReplicatedMaterializedRelayState, Runtime, RuntimeStateKind, RuntimeStatePlacement,
+    ScheduledNodeTask,
     backup_capture_fence::{BackupCaptureFence, BackupPublication},
     branch_lru_state::write_branch_lru_snapshot,
     decode_branch_lru_snapshot,

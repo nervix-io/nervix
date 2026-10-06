@@ -287,21 +287,19 @@ impl SessionServiceImpl {
                             revision: descriptor.revision,
                         }
                     }
-                    DescribedRuntimeState::Window { descriptor, .. } => {
-                        RestoredStateSection {
-                            reference: NodeRef::new(
-                                ModelKind::WindowProcessor,
-                                descriptor.entity.clone(),
-                            ),
+                    DescribedRuntimeState::Window { descriptor, .. } => RestoredStateSection {
+                        reference: NodeRef::new(
+                            ModelKind::WindowProcessor,
+                            descriptor.entity.clone(),
+                        ),
+                        schema: descriptor.schema,
+                        branch_fingerprint: descriptor.branch_fingerprint,
+                        branch_key: remote_branch_key(descriptor.branch.as_ref()),
+                        runtime_state: RuntimeState::WindowProcessor {
                             schema: descriptor.schema,
-                            branch_fingerprint: descriptor.branch_fingerprint,
-                            branch_key: remote_branch_key(descriptor.branch.as_ref()),
-                            runtime_state: RuntimeState::WindowProcessor {
-                                schema: descriptor.schema,
-                            },
-                            revision: descriptor.revision,
-                        }
-                    }
+                        },
+                        revision: descriptor.revision,
+                    },
                     DescribedRuntimeState::Wasm { descriptor, .. } => RestoredStateSection {
                         reference: NodeRef::new(
                             ModelKind::WasmProcessor,
