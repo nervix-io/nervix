@@ -76,7 +76,8 @@ can name several contributing operation numbers.
 
 An **execution step** records its inclusive operation range, completeness, required pause, planned
 effects, actual engagement history, actual effects, and `UNATTEMPTED`, `APPLYING`, `APPLIED`, or
-`FAILED` outcome. The effective requirement comes from the whole model run or the single
+`FAILED` outcome. A range's last operation never comes before its first: a stored or transmitted
+range that puts it there is refused as it is read, with `OperationRangeReversed`. The effective requirement comes from the whole model run or the single
 non-model step, including schedule changes. The **transaction summary** combines the effective
 requirements of all steps: no pause contributes nothing, entity subgraphs combine their nodes and
 gates, and any domain pause makes the summary domain-wide. This is the *planned* maximum. A commit
