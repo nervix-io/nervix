@@ -1347,10 +1347,13 @@ two rotating seeds, one per policy, that every run draws and records. Seed 136 c
 inside the crash of the bootstrap node, and it fails whenever node-1 holds that step's role until
 [Cluster Chaos 56](https://app.clickup.com/t/86bcdk4tn) is fixed.
 
-Before its first run the suite checks its own verdict logic with `tests/suite-self-test.sh`, which
-`just chaos self-test` runs too. It resolves the image once: a digest reference stays as given, and
-any other reference runs as the local image ID it resolves to, so every run of the suite uses one
-immutable image. A suite writes `ARTIFACTS/SUITE_ID/` (by default `target/chaos/<suite>-<time>-<pid>/`):
+Beside what a run needs, a suite needs `setsid` from util-linux and a `tee` that takes `-p`, as the
+one of GNU coreutils does, and refuses to start without them; its cleanup reads process state from
+`/proc` and `ps`. Before its first run the suite checks its own verdict logic with
+`tests/suite-self-test.sh`, which `just chaos self-test` runs too. It resolves the image once: a
+digest reference stays as given, and any other reference runs as the local image ID it resolves to,
+so every run of the suite uses one immutable image. A suite writes `ARTIFACTS/SUITE_ID/` (by default
+`target/chaos/<suite>-<time>-<pid>/`):
 
 - one run directory per entry, named `<suite-id>-<entry>`, exactly as `just chaos run` writes it;
 - `logs/<entry>.log`, the console output of each run;
@@ -1582,4 +1585,8 @@ executes. A local reproduction of the sequence against
 ended as intended: the run received the suite's TERM, healed, captured and tore down in 6 seconds,
 after `just` had been killed, and recorded its interruption; the suite wrote its verdict and summary
 into `suite.log` after its console had closed; and the cleanup that followed found the controller
-still executing, waited 4 seconds for it to finish and found nothing left.
+still executing, waited 4 seconds for it to finish and found nothing left. In CI, cancelling the
+first attempt of run 37527441862 during the smoke suite's leader crash ended inside the runner's ten
+seconds: the run recorded its interruption after a one-second teardown and the suite its verdict
+before `just` was killed, the cleanup step found nothing left, both artifacts were uploaded, and the
+rerun attempt passed with the cancelled attempt listed in its verdict.

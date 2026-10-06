@@ -447,6 +447,23 @@ grep -Fq 'the chaos scripts need jq 1.8 or later, not jq-1.7.1' "${tmp_dir}/old-
     || fail 'a suite under jq 1.7.1 did not name the jq it refused'
 [[ ! -e "${tmp_dir}/runs/old-jq-1" ]] || fail 'a suite under jq 1.7.1 created its directory'
 
+# A tee that cannot outlive its reader is refused before the suite creates its directory.
+stub_dir="${tmp_dir}/tee-without-p"
+mkdir -p "${stub_dir}"
+real_tee="$(command -v tee)"
+# The dollars in this stand-in are its own arguments, expanded when it runs.
+# shellcheck disable=SC2016
+printf '#!/usr/bin/env bash\nfor argument in "$@"; do\n    if [[ "${argument}" == -p ]]; then\n        exit 1\n    fi\ndone\nexec %q "$@"\n' \
+    "${real_tee}" >"${stub_dir}/tee"
+chmod +x "${stub_dir}/tee"
+status=0
+PATH="${stub_dir}:${bundle}/bin:${PATH}" "${bundle}/suite.sh" green --image nervix:local \
+    --artifacts "${tmp_dir}/runs" --suite-id plain-tee-1 >"${tmp_dir}/plain-tee.txt" 2>&1 || status=$?
+[[ "${status}" -eq 2 ]] || fail "a suite with a tee that refuses -p returned ${status}, expected 2"
+grep -Fq 'the suite needs a tee that takes -p' "${tmp_dir}/plain-tee.txt" \
+    || fail 'a suite with a tee that refuses -p did not name what it needs'
+[[ ! -e "${tmp_dir}/runs/plain-tee-1" ]] || fail 'a suite with a tee that refuses -p created its directory'
+
 # An image that is neither local nor pullable stops the suite before any run.
 status=0
 suite green --image registry.example/nervix:gone --artifacts "${tmp_dir}/runs" --suite-id gone-1 \

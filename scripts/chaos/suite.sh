@@ -506,6 +506,9 @@ run_suite() {
         command -v "${command_name}" >/dev/null 2>&1 \
             || suite_error "required command is unavailable: ${command_name}"
     done
+    # The console and every run log go through a tee that outlives its reader, which -p asks of it.
+    tee -p </dev/null >/dev/null 2>&1 \
+        || suite_error 'the suite needs a tee that takes -p, as the tee of GNU coreutils does'
     # Listing, planning, reporting and cleanup read the suite records with any jq; the runs need 1.8.
     chaos_jq_supported || suite_error "the chaos scripts need jq 1.8 or later, not $(chaos_jq_found)"
 
