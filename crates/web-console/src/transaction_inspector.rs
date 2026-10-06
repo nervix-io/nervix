@@ -2,8 +2,9 @@
 //!
 //! Layer: edges.
 //!
-//! - **Owns.** The inspected report, its viewport and selection, and the preview identity the
-//!   console may send with a commit of its attached transaction.
+//! - **Owns.** The inspected report, the preview identity the console may send with a commit of
+//!   its attached transaction, and the drawing of any typed impact report: its scope selection,
+//!   viewport and detail.
 //! - **Depends on.** The client wire request channel, report vocabulary, and impact projection.
 //! - **Must not know.** How inspection is planned or persisted, or the live graph's geometry.
 
@@ -13,9 +14,9 @@ use leptos::{ev, prelude::*};
 use meticulous::OptionExt as _;
 use nervix_client_wire::InspectTransactionRequest;
 use nervix_models::{
-    OperationImpactReport, TransactionInspection, TransactionInspectionTarget,
-    TransactionOperation, TransactionOperationNumber, TransactionOperationRange,
-    TransactionPosition, TransactionPreviewIdentity, TransactionStatus,
+    OperationImpactReport, TransactionImpactReport, TransactionInspection,
+    TransactionInspectionTarget, TransactionOperation, TransactionOperationNumber,
+    TransactionOperationRange, TransactionPosition, TransactionPreviewIdentity, TransactionStatus,
 };
 use nervix_web_console::graph::{
     GraphSearch,
@@ -270,19 +271,6 @@ pub(super) fn TransactionInspector(
     run_command: impl Fn(Option<String>) + Copy + Send + Sync + 'static,
 ) -> impl IntoView {
     let lookup_id = RwSignal::new(String::new());
-    let selection = RwSignal::new(ScopeSelection::Transaction);
-    let view = RwSignal::new(ImpactView::Changes);
-    let outcome = RwSignal::new(ImpactOutcome::Planned);
-    let search = RwSignal::new(String::new());
-    let drawing = RwSignal::new(None::<ImpactGraph>);
-    let detail = RwSignal::new(None::<DetailSelection>);
-    let transform = RwSignal::new(CanvasTransform {
-        zoom: 1.0,
-        x: 0.0,
-        y: 0.0,
-    });
-    let drag = RwSignal::new(None::<(i32, i32, f64, f64)>);
-    let stage = NodeRef::<leptos::html::Div>::new();
     // Command replies can repeat an unchanged status. Only a changed position, lifecycle, or
     // applied count warrants another attached inspection; a stale-preview refusal leaves these
     // unchanged and must keep its explicit stale marker until the operator refreshes.
@@ -318,13 +306,83 @@ pub(super) fn TransactionInspector(
         }
     });
 
+    let report = Signal::derive(move || {
+        let inspection = inspector.inspection.get()?;
+        Some(inspection.report)
+    });
+    let summary = Signal::derive(move || {
+        inspection_summary(
+            inspector.inspection.get().as_ref(),
+            transaction_status.get().as_ref(),
+            inspector.stale_preview.get(),
+        )
+    });
+
+    view! {
+        <Show when=move || inspector.open.get() fallback=|| ()>
+            <section class="transaction-inspector" aria-label="Transaction inspector">
+                <header class="inspector-toolbar">
+                    <strong>"Transaction inspector"</strong>
+                    <button type="button" on:click=move |_| inspector.refresh()>"Refresh"</button>
+                    <button type="button" aria-label="Close transaction inspector" on:click=move |_| inspector.open.set(false)>"Close"</button>
+                </header>
+                <div class="inspector-lookup">
+                    <button type="button" on:click=move |_| run_command(Some("SHOW TRANSACTIONS;".to_string()))>"Discover transactions"</button>
+                    <Show when=move || transaction_status.get().is_some_and(|status| status.lifecycle().is_active()) fallback=|| ()>
+                        <button type="button" on:click=move |_| inspector.open_attached()>"Attached transaction"</button>
+                    </Show>
+                    <label>"Transaction ID" <input type="text" prop:value=move || lookup_id.get() on:input=move |event| lookup_id.set(event_target_input(&event).value()) /></label>
+                    <button type="button" on:click=move |_| {
+                        let id = lookup_id.get_untracked().trim().to_string();
+                        if !id.is_empty() { inspector.open_transaction(id); }
+                    }>"Inspect ID"</button>
+                </div>
+                <Show when=move || inspector.error.get().is_some() fallback=|| ()>
+                    <p class="inspector-error" role="alert">{move || inspector.error.get().unwrap_or_default()}</p>
+                </Show>
+                <ImpactReportView report=report summary=summary waiting="Waiting for inspection report…" />
+            </section>
+        </Show>
+    }
+}
+
+/// Draws one typed impact report: its outline of execution steps and operations, its relations,
+/// and the canvas they project onto, with the summary `summary` reads above the outline. The view
+/// keeps its scope, viewport and selection while the report changes, and shows `waiting` while
+/// there is no report.
+#[component]
+pub(super) fn ImpactReportView(
+    report: Signal<Option<TransactionImpactReport>>,
+    summary: Signal<String>,
+    waiting: &'static str,
+) -> impl IntoView {
+    let selection = RwSignal::new(ScopeSelection::Transaction);
+    let view = RwSignal::new(ImpactView::Changes);
+    let outcome = RwSignal::new(ImpactOutcome::Planned);
+    let search = RwSignal::new(String::new());
+    let detail = RwSignal::new(None::<DetailSelection>);
+    let transform = RwSignal::new(CanvasTransform {
+        zoom: 1.0,
+        x: 0.0,
+        y: 0.0,
+    });
+    let drag = RwSignal::new(None::<(i32, i32, f64, f64)>);
+    let stage = NodeRef::<leptos::html::Div>::new();
+    // The drawing is projected when it is first read and again whenever the report, the scope or
+    // the outcome changes, so the view draws the report it is created with. Every projection
+    // notifies its readers, as a newly drawn report does.
+    let drawing = Memo::new_with_compare(
+        move |_| {
+            let report = report.get()?;
+            Some(project_impact(&report, selection.get(), outcome.get()))
+        },
+        |_, _| true,
+    );
     Effect::new(move |_| {
-        let Some(inspection) = inspector.inspection.get() else {
-            drawing.set(None);
+        let Some(graph) = drawing.get() else {
             detail.set(None);
             return;
         };
-        let graph = project_impact(&inspection, selection.get(), outcome.get());
         let selection_still_exists = match detail.get_untracked() {
             Some(DetailSelection::Item(id)) => graph.items.contains_key(&id),
             Some(DetailSelection::Edge(id)) => graph.edges.contains_key(&id),
@@ -333,7 +391,6 @@ pub(super) fn TransactionInspector(
         if !selection_still_exists {
             detail.set(None);
         }
-        drawing.set(Some(graph));
     });
 
     let frame = move |bounds: GraphBounds, max_zoom: f64| {
@@ -401,280 +458,256 @@ pub(super) fn TransactionInspector(
     });
 
     view! {
-        <Show when=move || inspector.open.get() fallback=|| ()>
-            <section class="transaction-inspector" aria-label="Transaction inspector">
-                <header class="inspector-toolbar">
-                    <strong>"Transaction inspector"</strong>
-                    <button type="button" on:click=move |_| inspector.refresh()>"Refresh"</button>
-                    <button type="button" aria-label="Close transaction inspector" on:click=move |_| inspector.open.set(false)>"Close"</button>
-                </header>
-                <div class="inspector-lookup">
-                    <button type="button" on:click=move |_| run_command(Some("SHOW TRANSACTIONS;".to_string()))>"Discover transactions"</button>
-                    <Show when=move || transaction_status.get().is_some_and(|status| status.lifecycle().is_active()) fallback=|| ()>
-                        <button type="button" on:click=move |_| inspector.open_attached()>"Attached transaction"</button>
-                    </Show>
-                    <label>"Transaction ID" <input type="text" prop:value=move || lookup_id.get() on:input=move |event| lookup_id.set(event_target_input(&event).value()) /></label>
-                    <button type="button" on:click=move |_| {
-                        let id = lookup_id.get_untracked().trim().to_string();
-                        if !id.is_empty() { inspector.open_transaction(id); }
-                    }>"Inspect ID"</button>
-                </div>
-                <Show when=move || inspector.error.get().is_some() fallback=|| ()>
-                    <p class="inspector-error" role="alert">{move || inspector.error.get().unwrap_or_default()}</p>
-                </Show>
-                <Show when=move || inspector.inspection.get().is_some() fallback=|| view! { <p class="inspector-loading">"Waiting for inspection report…"</p> }>
-                    <div class="inspector-body">
-                        <aside class="inspector-outline">
-                            <div class="inspector-summary">
-                                {move || inspection_summary(inspector.inspection.get().as_ref(), transaction_status.get().as_ref(), inspector.stale_preview.get())}
-                            </div>
-                            <button type="button" class="scope-select" on:click=move |_| selection.set(ScopeSelection::Transaction)>"Whole transaction · scoped union"</button>
-                            <For each=move || match inspector.inspection.get() {
-                                Some(value) => value.report.execution_steps().to_vec(),
-                                None => Vec::new(),
-                            }
-                                key=|step| step.operations()
-                                children=move |step| {
-                                    let range = step.operations();
-                                    view! {
-                                        <button type="button" class="step-select" on:click=move |_| selection.set(ScopeSelection::Step(range))>
-                                            {move || match inspector.inspection.get() {
-                                                Some(value) => match value.report.execution_steps().iter().find(|current| current.operations() == range) {
-                                                    Some(current) => format!("Execution step {}–{} · {}", range.first(), range.last(), current.actual().outcome.as_ref()),
+        <Show when=move || report.with(Option::is_some) fallback=move || view! { <p class="inspector-loading">{waiting}</p> }>
+            <div class="inspector-body">
+                <aside class="inspector-outline">
+                    <div class="inspector-summary">
+                        {move || summary.get()}
+                    </div>
+                    <button type="button" class="scope-select" on:click=move |_| selection.set(ScopeSelection::Transaction)>"Whole transaction · scoped union"</button>
+                    <For each=move || match report.get() {
+                        Some(value) => value.execution_steps().to_vec(),
+                        None => Vec::new(),
+                    }
+                        key=|step| step.operations()
+                        children=move |step| {
+                            let range = step.operations();
+                            view! {
+                                <button type="button" class="step-select" on:click=move |_| selection.set(ScopeSelection::Step(range))>
+                                    {move || match report.get() {
+                                        Some(value) => match value.execution_steps().iter().find(|current| current.operations() == range) {
+                                            Some(current) => format!("Execution step {}–{} · {}", range.first(), range.last(), current.actual().outcome.as_ref()),
+                                            None => String::new(),
+                                        },
+                                        None => String::new(),
+                                    }}
+                                </button>
+                                <For each=move || match report.get() {
+                                    Some(value) => range.operations().filter_map(|number| value.operations().get(number.index()).cloned()).collect::<Vec<_>>(),
+                                    None => Vec::new(),
+                                }
+                                    key=|operation| operation.number
+                                    children=move |operation| {
+                                        let number = operation.number;
+                                        view! { <button type="button" class="operation-select" on:click=move |_| selection.set(ScopeSelection::Operation(number))>
+                                            {move || match report.get() {
+                                                Some(value) => match value.operations().get(number.index()) {
+                                                    Some(current) => format!("Operation {} · {}", number, operation_label(current)),
                                                     None => String::new(),
                                                 },
                                                 None => String::new(),
                                             }}
-                                        </button>
-                                        <For each=move || match inspector.inspection.get() {
-                                            Some(value) => range.operations().filter_map(|number| value.report.operations().get(number.index()).cloned()).collect::<Vec<_>>(),
-                                            None => Vec::new(),
-                                        }
-                                            key=|operation| operation.number
-                                            children=move |operation| {
-                                                let number = operation.number;
-                                                view! { <button type="button" class="operation-select" on:click=move |_| selection.set(ScopeSelection::Operation(number))>
-                                                    {move || match inspector.inspection.get() {
-                                                        Some(value) => match value.report.operations().get(number.index()) {
-                                                            Some(current) => format!("Operation {} · {}", number, operation_label(current)),
-                                                            None => String::new(),
-                                                        },
-                                                        None => String::new(),
-                                                    }}
-                                                </button> }
-                                            }
-                                        />
+                                        </button> }
                                     }
+                                />
+                            }
+                        }
+                    />
+                    <p class="inspector-scope">{move || scope_summary(report.get().as_ref(), selection.get(), outcome.get())}</p>
+                    <details class="inspector-relation-list">
+                        <summary>"Relations"</summary>
+                        <For each=move || match drawing.get() {
+                            Some(graph) => graph.edges.into_values().collect::<Vec<_>>(),
+                            None => Vec::new(),
+                        }
+                            key=|edge| (edge.id.clone(), edge.presence)
+                            children=move |edge| {
+                                let id = edge.id;
+                                let selected = id.clone();
+                                let relation = format!("{:?}", id.relation);
+                                let source = id.source.name().to_string();
+                                let target = id.target.name().to_string();
+                                let label = format!("{relation}: {source} → {target} ({:?})", edge.presence);
+                                view! {
+                                    <button type="button" class="inspector-relation-select"
+                                        data-relation=relation data-source=source data-target=target
+                                        on:click=move |_| {
+                                            detail.set(Some(DetailSelection::Edge(selected.clone())));
+                                            focus_edge(&selected);
+                                        }
+                                    >{label}</button>
                                 }
-                            />
-                            <p class="inspector-scope">{move || scope_summary(inspector.inspection.get().as_ref(), selection.get(), outcome.get())}</p>
-                            <details class="inspector-relation-list">
-                                <summary>"Relations"</summary>
+                            }
+                        />
+                    </details>
+                </aside>
+                <div class="inspector-visual">
+                    <div class="inspector-controls">
+                        <button type="button" class:active=move || view.get() == ImpactView::Before on:click=move |_| view.set(ImpactView::Before)>"Before"</button>
+                        <button type="button" class:active=move || view.get() == ImpactView::Changes on:click=move |_| view.set(ImpactView::Changes)>"Changes"</button>
+                        <button type="button" class:active=move || view.get() == ImpactView::After on:click=move |_| view.set(ImpactView::After)>"After"</button>
+                        <button type="button" class:active=move || outcome.get() == ImpactOutcome::Planned on:click=move |_| outcome.set(ImpactOutcome::Planned)>"Planned"</button>
+                        <button type="button" class:active=move || outcome.get() == ImpactOutcome::Actual on:click=move |_| outcome.set(ImpactOutcome::Actual)>"Actual"</button>
+                        <label>"Search" <input type="search" prop:value=move || search.get() on:input=move |event| search.set(event_target_input(&event).value()) /></label>
+                        <button type="button" aria-label="Zoom out" on:click=move |_| transform.update(|value| value.zoom = (value.zoom - Viewport::ZOOM_STEP).max(Viewport::MIN_ZOOM))>"−"</button>
+                        <button type="button" aria-label="Zoom in" on:click=move |_| transform.update(|value| value.zoom = (value.zoom + Viewport::ZOOM_STEP).min(Viewport::MAX_ZOOM))>"+"</button>
+                        <button type="button" class="inspector-fit" on:click=move |_| fit()>"FIT"</button>
+                    </div>
+                    <div class="inspector-stage" node_ref=stage
+                        on:mousedown=move |event: ev::MouseEvent| {
+                            let current = transform.get_untracked();
+                            drag.set(Some((event.client_x(), event.client_y(), current.x, current.y)));
+                        }
+                        on:mousemove=move |event: ev::MouseEvent| {
+                            if let Some((x, y, start_x, start_y)) = drag.get_untracked() {
+                                transform.update(|value| {
+                                    value.x = start_x + f64::from(event.client_x() - x);
+                                    value.y = start_y + f64::from(event.client_y() - y);
+                                });
+                            }
+                        }
+                        on:mouseup=move |_| drag.set(None)
+                        on:mouseleave=move |_| drag.set(None)
+                        on:wheel=move |event: ev::WheelEvent| {
+                            if event.ctrl_key() || event.meta_key() {
+                                event.prevent_default();
+                                transform.update(|value| value.zoom = (value.zoom - event.delta_y() * 0.001).clamp(Viewport::MIN_ZOOM, Viewport::MAX_ZOOM));
+                            }
+                        }
+                    >
+                        <Show when=move || drawing.get().is_some() fallback=|| ()>
+                            <div class="inspector-canvas" style=move || {
+                                let graph = drawing.get().verified("a mounted inspector canvas retains its graph until unmount");
+                                let transform = transform.get();
+                                format!("width:{}px;height:{}px;transform:translate({}px, {}px) scale({})", graph.width, graph.height, transform.x, transform.y, transform.zoom)
+                            }>
+                                <svg class="inspector-relations" viewBox=move || {
+                                    let graph = drawing.get().verified("a mounted inspector canvas retains its graph until unmount");
+                                    format!("0 0 {} {}", graph.width, graph.height)
+                                }>
+                                    <For each=move || match drawing.get() {
+                                        Some(graph) => graph.groups,
+                                        None => Vec::new(),
+                                    }
+                                        key=|group| (group.branch.clone(), group.bands.clone())
+                                        children=move |group| {
+                                            let name = group.branch.to_string();
+                                            view! {
+                                                <path class="inspector-branch" d=group.outline() data-branch=name />
+                                            }
+                                        }
+                                    />
+                                    <For each=move || match drawing.get() {
+                                        Some(graph) => graph.edges.into_values().collect::<Vec<_>>(),
+                                        None => Vec::new(),
+                                    }
+                                        key=|edge| (edge.id.clone(), edge.presence, edge.route.points.clone())
+                                        children=move |edge| {
+                                            let edge_id = edge.id.clone();
+                                            let relation = format!("{:?}", edge_id.relation);
+                                            let source = edge_id.source.name().to_string();
+                                            let target = edge_id.target.name().to_string();
+                                            let path = edge_path(&edge);
+                                            view! {
+                                                <path class="inspector-edge"
+                                                    class:absent=move || !view.get().shows(edge.presence)
+                                                    class:added=edge.presence == TopologyPresence::After
+                                                    class:dropped=edge.presence == TopologyPresence::Before
+                                                    class:transient=edge.presence == TopologyPresence::Transient
+                                                    d=path
+                                                    data-source=source
+                                                    data-target=target
+                                                    data-relation=relation.clone()
+                                                    on:click=move |_| {
+                                                        detail.set(Some(DetailSelection::Edge(edge_id.clone())));
+                                                        focus_edge(&edge_id);
+                                                    }
+                                                />
+                                            }
+                                        }
+                                    />
+                                </svg>
                                 <For each=move || match drawing.get() {
-                                    Some(graph) => graph.edges.into_values().collect::<Vec<_>>(),
+                                    Some(graph) => graph.groups,
                                     None => Vec::new(),
                                 }
-                                    key=|edge| (edge.id.clone(), edge.presence)
-                                    children=move |edge| {
-                                        let id = edge.id;
-                                        let selected = id.clone();
-                                        let relation = format!("{:?}", id.relation);
-                                        let source = id.source.name().to_string();
-                                        let target = id.target.name().to_string();
-                                        let label = format!("{relation}: {source} → {target} ({:?})", edge.presence);
+                                    key=|group| (group.branch.clone(), group.bands.clone())
+                                    children=move |group| {
+                                        let Some(header) = group.header_anchor() else {
+                                            return ().into_any();
+                                        };
                                         view! {
-                                            <button type="button" class="inspector-relation-select"
-                                                data-relation=relation data-source=source data-target=target
-                                                on:click=move |_| {
-                                                    detail.set(Some(DetailSelection::Edge(selected.clone())));
-                                                    focus_edge(&selected);
-                                                }
-                                            >{label}</button>
+                                            <span class="inspector-branch-label" style=format!(
+                                                "left:{}px;top:{}px", header.x + 8, header.y,
+                                            )>{group.branch.to_string()}</span>
+                                        }.into_any()
+                                    }
+                                />
+                                {move || {
+                                    let graph = drawing.get()?;
+                                    let outline = graph.domain.outline?;
+                                    let frame = outline.frame;
+                                    let label = outline.label;
+                                    Some(view! {
+                                        <div class="inspector-domain-outline" style=format!(
+                                            "left:{}px;top:{}px;width:{}px;height:{}px",
+                                            frame.x, frame.y, frame.width, frame.height,
+                                        )>
+                                            <span class="inspector-domain-label" style=format!(
+                                                "left:{}px;top:{}px",
+                                                label.x - frame.x, label.y - frame.y,
+                                            )>"Whole domain pause"</span>
+                                        </div>
+                                    })
+                                }}
+                                <For each=move || match drawing.get() {
+                                    Some(graph) => graph.items.into_values().collect::<Vec<_>>(),
+                                    None => Vec::new(),
+                                }
+                                    key=|item| (
+                                        item.id.clone(),
+                                        item.rect,
+                                        item.presence,
+                                        item.roles.keys().map(role_label).collect::<Vec<_>>().join(" · "),
+                                    )
+                                    children=move |item| {
+                                        let id = item.id.clone();
+                                        let name = id.name().to_string();
+                                        let kind = id.caption().to_string();
+                                        let style = format!("left:{}px;top:{}px;width:{}px;height:{}px", item.rect.x, item.rect.y, item.rect.width, item.rect.height);
+                                        let marks = item.roles.keys().map(role_label).collect::<Vec<_>>().join(" · ");
+                                        let aria_label = format!("{} {}: {}", kind, name, marks);
+                                        view! {
+                                            <button type="button" class="inspector-item"
+                                                class:absent=move || !view.get().shows(item.presence)
+                                                class:added=item.presence == TopologyPresence::After
+                                                class:dropped=item.presence == TopologyPresence::Before
+                                                class:transient=item.presence == TopologyPresence::Transient
+                                                style=style
+                                                data-name=name.clone()
+                                                data-kind=kind.clone()
+                                                aria-label=aria_label
+                                                on:click=move |_| detail.set(Some(DetailSelection::Item(id.clone())))
+                                            >
+                                                <span class="inspector-kind">{kind.clone()}</span>
+                                                <span class="inspector-name">{name.clone()}</span>
+                                                <span class="inspector-marks">{marks.clone()}</span>
+                                            </button>
                                         }
                                     }
                                 />
-                            </details>
-                        </aside>
-                        <div class="inspector-visual">
-                            <div class="inspector-controls">
-                                <button type="button" class:active=move || view.get() == ImpactView::Before on:click=move |_| view.set(ImpactView::Before)>"Before"</button>
-                                <button type="button" class:active=move || view.get() == ImpactView::Changes on:click=move |_| view.set(ImpactView::Changes)>"Changes"</button>
-                                <button type="button" class:active=move || view.get() == ImpactView::After on:click=move |_| view.set(ImpactView::After)>"After"</button>
-                                <button type="button" class:active=move || outcome.get() == ImpactOutcome::Planned on:click=move |_| outcome.set(ImpactOutcome::Planned)>"Planned"</button>
-                                <button type="button" class:active=move || outcome.get() == ImpactOutcome::Actual on:click=move |_| outcome.set(ImpactOutcome::Actual)>"Actual"</button>
-                                <label>"Search" <input type="search" prop:value=move || search.get() on:input=move |event| search.set(event_target_input(&event).value()) /></label>
-                                <button type="button" aria-label="Zoom out" on:click=move |_| transform.update(|value| value.zoom = (value.zoom - Viewport::ZOOM_STEP).max(Viewport::MIN_ZOOM))>"−"</button>
-                                <button type="button" aria-label="Zoom in" on:click=move |_| transform.update(|value| value.zoom = (value.zoom + Viewport::ZOOM_STEP).min(Viewport::MAX_ZOOM))>"+"</button>
-                                <button type="button" class="inspector-fit" on:click=move |_| fit()>"FIT"</button>
                             </div>
-                            <div class="inspector-stage" node_ref=stage
-                                on:mousedown=move |event: ev::MouseEvent| {
-                                    let current = transform.get_untracked();
-                                    drag.set(Some((event.client_x(), event.client_y(), current.x, current.y)));
-                                }
-                                on:mousemove=move |event: ev::MouseEvent| {
-                                    if let Some((x, y, start_x, start_y)) = drag.get_untracked() {
-                                        transform.update(|value| {
-                                            value.x = start_x + f64::from(event.client_x() - x);
-                                            value.y = start_y + f64::from(event.client_y() - y);
-                                        });
-                                    }
-                                }
-                                on:mouseup=move |_| drag.set(None)
-                                on:mouseleave=move |_| drag.set(None)
-                                on:wheel=move |event: ev::WheelEvent| {
-                                    if event.ctrl_key() || event.meta_key() {
-                                        event.prevent_default();
-                                        transform.update(|value| value.zoom = (value.zoom - event.delta_y() * 0.001).clamp(Viewport::MIN_ZOOM, Viewport::MAX_ZOOM));
-                                    }
-                                }
-                            >
-                                <Show when=move || drawing.get().is_some() fallback=|| ()>
-                                    <div class="inspector-canvas" style=move || {
-                                        let graph = drawing.get().verified("a mounted inspector canvas retains its graph until unmount");
-                                        let transform = transform.get();
-                                        format!("width:{}px;height:{}px;transform:translate({}px, {}px) scale({})", graph.width, graph.height, transform.x, transform.y, transform.zoom)
-                                    }>
-                                        <svg class="inspector-relations" viewBox=move || {
-                                            let graph = drawing.get().verified("a mounted inspector canvas retains its graph until unmount");
-                                            format!("0 0 {} {}", graph.width, graph.height)
-                                        }>
-                                            <For each=move || match drawing.get() {
-                                                Some(graph) => graph.groups,
-                                                None => Vec::new(),
-                                            }
-                                                key=|group| (group.branch.clone(), group.bands.clone())
-                                                children=move |group| {
-                                                    let name = group.branch.to_string();
-                                                    view! {
-                                                        <path class="inspector-branch" d=group.outline() data-branch=name />
-                                                    }
-                                                }
-                                            />
-                                            <For each=move || match drawing.get() {
-                                                Some(graph) => graph.edges.into_values().collect::<Vec<_>>(),
-                                                None => Vec::new(),
-                                            }
-                                                key=|edge| (edge.id.clone(), edge.presence, edge.route.points.clone())
-                                                children=move |edge| {
-                                                    let edge_id = edge.id.clone();
-                                                    let relation = format!("{:?}", edge_id.relation);
-                                                    let source = edge_id.source.name().to_string();
-                                                    let target = edge_id.target.name().to_string();
-                                                    let path = edge_path(&edge);
-                                                    view! {
-                                                        <path class="inspector-edge"
-                                                            class:absent=move || !view.get().shows(edge.presence)
-                                                            class:added=edge.presence == TopologyPresence::After
-                                                            class:dropped=edge.presence == TopologyPresence::Before
-                                                            class:transient=edge.presence == TopologyPresence::Transient
-                                                            d=path
-                                                            data-source=source
-                                                            data-target=target
-                                                            data-relation=relation.clone()
-                                                            on:click=move |_| {
-                                                                detail.set(Some(DetailSelection::Edge(edge_id.clone())));
-                                                                focus_edge(&edge_id);
-                                                            }
-                                                        />
-                                                    }
-                                                }
-                                            />
-                                        </svg>
-                                        <For each=move || match drawing.get() {
-                                            Some(graph) => graph.groups,
-                                            None => Vec::new(),
-                                        }
-                                            key=|group| (group.branch.clone(), group.bands.clone())
-                                            children=move |group| {
-                                                let Some(header) = group.header_anchor() else {
-                                                    return ().into_any();
-                                                };
-                                                view! {
-                                                    <span class="inspector-branch-label" style=format!(
-                                                        "left:{}px;top:{}px", header.x + 8, header.y,
-                                                    )>{group.branch.to_string()}</span>
-                                                }.into_any()
-                                            }
-                                        />
-                                        {move || {
-                                            let graph = drawing.get()?;
-                                            let outline = graph.domain.outline?;
-                                            let frame = outline.frame;
-                                            let label = outline.label;
-                                            Some(view! {
-                                                <div class="inspector-domain-outline" style=format!(
-                                                    "left:{}px;top:{}px;width:{}px;height:{}px",
-                                                    frame.x, frame.y, frame.width, frame.height,
-                                                )>
-                                                    <span class="inspector-domain-label" style=format!(
-                                                        "left:{}px;top:{}px",
-                                                        label.x - frame.x, label.y - frame.y,
-                                                    )>"Whole domain pause"</span>
-                                                </div>
-                                            })
-                                        }}
-                                        <For each=move || match drawing.get() {
-                                            Some(graph) => graph.items.into_values().collect::<Vec<_>>(),
-                                            None => Vec::new(),
-                                        }
-                                            key=|item| (
-                                                item.id.clone(),
-                                                item.rect,
-                                                item.presence,
-                                                item.roles.keys().map(role_label).collect::<Vec<_>>().join(" · "),
-                                            )
-                                            children=move |item| {
-                                                let id = item.id.clone();
-                                                let name = id.name().to_string();
-                                                let kind = id.caption().to_string();
-                                                let style = format!("left:{}px;top:{}px;width:{}px;height:{}px", item.rect.x, item.rect.y, item.rect.width, item.rect.height);
-                                                let marks = item.roles.keys().map(role_label).collect::<Vec<_>>().join(" · ");
-                                                let aria_label = format!("{} {}: {}", kind, name, marks);
-                                                view! {
-                                                    <button type="button" class="inspector-item"
-                                                        class:absent=move || !view.get().shows(item.presence)
-                                                        class:added=item.presence == TopologyPresence::After
-                                                        class:dropped=item.presence == TopologyPresence::Before
-                                                        class:transient=item.presence == TopologyPresence::Transient
-                                                        style=style
-                                                        data-name=name.clone()
-                                                        data-kind=kind.clone()
-                                                        aria-label=aria_label
-                                                        on:click=move |_| detail.set(Some(DetailSelection::Item(id.clone())))
-                                                    >
-                                                        <span class="inspector-kind">{kind.clone()}</span>
-                                                        <span class="inspector-name">{name.clone()}</span>
-                                                        <span class="inspector-marks">{marks.clone()}</span>
-                                                    </button>
-                                                }
-                                            }
-                                        />
-                                    </div>
-                                </Show>
-                            </div>
-                            <div class="inspector-detail" aria-live="polite">
-                                {move || detail_text(
-                                    drawing.get().as_ref(),
-                                    detail.get().as_ref(),
-                                    inspector.inspection.get().as_ref(),
-                                    outcome.get(),
-                                )}
-                            </div>
-                        </div>
+                        </Show>
                     </div>
-                </Show>
-            </section>
+                    <div class="inspector-detail" aria-live="polite">
+                        {move || detail_text(
+                            drawing.get().as_ref(),
+                            detail.get().as_ref(),
+                            report.get().as_ref(),
+                            outcome.get(),
+                        )}
+                    </div>
+                </div>
+            </div>
         </Show>
     }
 }
 
 fn project_impact(
-    inspection: &TransactionInspection,
+    report: &TransactionImpactReport,
     selection: ScopeSelection,
     outcome: ImpactOutcome,
 ) -> ImpactGraph {
-    let report = &inspection.report;
     match selection {
         ScopeSelection::Transaction => ImpactGraph::transaction(report, outcome),
         ScopeSelection::Step(range) => {
@@ -798,17 +831,17 @@ fn operation_label(operation: &OperationImpactReport) -> String {
 }
 
 fn scope_summary(
-    inspection: Option<&TransactionInspection>,
+    report: Option<&TransactionImpactReport>,
     scope: ScopeSelection,
     outcome: ImpactOutcome,
 ) -> String {
-    let Some(inspection) = inspection else {
+    let Some(report) = report else {
         return String::new();
     };
     match scope {
         ScopeSelection::Transaction => format!(
             "Transaction scoped union · {} execution steps",
-            inspection.report.execution_steps().len()
+            report.execution_steps().len()
         ),
         ScopeSelection::Step(range) => format!(
             "Execution step {}–{} effective scope · {:?}",
@@ -817,7 +850,7 @@ fn scope_summary(
             outcome
         ),
         ScopeSelection::Operation(number) => {
-            let Some(operation) = inspection.report.operations().get(number.index()) else {
+            let Some(operation) = report.operations().get(number.index()) else {
                 return String::new();
             };
             let reasons = operation
@@ -876,7 +909,7 @@ fn edge_path(edge: &ImpactEdge) -> String {
 fn detail_text(
     graph: Option<&ImpactGraph>,
     selection: Option<&DetailSelection>,
-    inspection: Option<&TransactionInspection>,
+    report: Option<&TransactionImpactReport>,
     outcome: ImpactOutcome,
 ) -> String {
     let Some(graph) = graph else {
@@ -890,7 +923,7 @@ fn detail_text(
             format!(
                 "{} · {}",
                 item_detail(item),
-                impact_explanation(inspection, &item.contributors, outcome)
+                impact_explanation(report, &item.contributors, outcome)
             )
         }
         Some(DetailSelection::Edge(id)) => {
@@ -905,7 +938,7 @@ fn detail_text(
                 edge.presence,
                 contributors(&edge.contributors),
                 edge.route.points.len(),
-                impact_explanation(inspection, &edge.contributors, outcome),
+                impact_explanation(report, &edge.contributors, outcome),
             )
         }
         None => "Select a node or relation to inspect its recorded impact.".to_string(),
@@ -913,25 +946,24 @@ fn detail_text(
 }
 
 fn impact_explanation(
-    inspection: Option<&TransactionInspection>,
+    report: Option<&TransactionImpactReport>,
     contributors: &nervix_web_console::graph::impact::Contributors,
     outcome: ImpactOutcome,
 ) -> String {
-    let Some(inspection) = inspection else {
+    let Some(report) = report else {
         return String::new();
     };
     let explanations = contributors
         .operations()
         .filter_map(|number| {
-            let operation = inspection.report.operations().get(number.index())?;
+            let operation = report.operations().get(number.index())?;
             let reasons = operation
                 .reasons
                 .iter()
                 .map(|reason| format!("{reason:?}"))
                 .collect::<Vec<_>>()
                 .join(", ");
-            let actual = match inspection
-                .report
+            let actual = match report
                 .execution_steps()
                 .iter()
                 .find(|step| step.operations() == operation.execution_step)
@@ -1376,12 +1408,12 @@ mod tests {
         let operation = inspected.report.operations()[0].number;
         let step = inspected.report.execution_steps()[0].operations();
         let planned = project_impact(
-            &inspected,
+            &inspected.report,
             ScopeSelection::Operation(operation),
             ImpactOutcome::Planned,
         );
         let actual = project_impact(
-            &inspected,
+            &inspected.report,
             ScopeSelection::Operation(operation),
             ImpactOutcome::Actual,
         );
@@ -1389,7 +1421,7 @@ mod tests {
         assert!(actual.items.is_empty());
         assert_eq!(
             project_impact(
-                &inspected,
+                &inspected.report,
                 ScopeSelection::Step(step),
                 ImpactOutcome::Planned
             )
@@ -1399,7 +1431,7 @@ mod tests {
         );
         assert!(
             scope_summary(
-                Some(&inspected),
+                Some(&inspected.report),
                 ScopeSelection::Operation(operation),
                 ImpactOutcome::Planned
             )
@@ -1407,7 +1439,7 @@ mod tests {
         );
         assert!(
             scope_summary(
-                Some(&inspected),
+                Some(&inspected.report),
                 ScopeSelection::Operation(operation),
                 ImpactOutcome::Actual
             )
@@ -1415,7 +1447,7 @@ mod tests {
         );
         assert!(
             scope_summary(
-                Some(&inspected),
+                Some(&inspected.report),
                 ScopeSelection::Step(step),
                 ImpactOutcome::Planned
             )
@@ -1427,7 +1459,7 @@ mod tests {
             .assured("a one-operation range is valid");
         assert_eq!(
             project_impact(
-                &inspected,
+                &inspected.report,
                 ScopeSelection::Operation(next_operation),
                 ImpactOutcome::Planned,
             )
@@ -1437,7 +1469,7 @@ mod tests {
         );
         assert_eq!(
             project_impact(
-                &inspected,
+                &inspected.report,
                 ScopeSelection::Step(missing_step),
                 ImpactOutcome::Planned,
             )
@@ -1473,7 +1505,7 @@ mod tests {
         let selected_detail = detail_text(
             Some(&planned),
             Some(&DetailSelection::Item(item.id.clone())),
-            Some(&inspected),
+            Some(&inspected.report),
             ImpactOutcome::Planned,
         );
         assert!(selected_detail.contains("Created"));
@@ -1482,7 +1514,7 @@ mod tests {
             detail_text(
                 Some(&planned),
                 None,
-                Some(&inspected),
+                Some(&inspected.report),
                 ImpactOutcome::Planned
             )
             .contains("Select a node")
@@ -1640,7 +1672,7 @@ mod tests {
     fn relation_detail_preserves_route_and_endpoints() {
         let inspected = configured_inspection();
         let mut graph = project_impact(
-            &inspected,
+            &inspected.report,
             ScopeSelection::Transaction,
             ImpactOutcome::Planned,
         );
@@ -1675,7 +1707,7 @@ mod tests {
         let detail = detail_text(
             Some(&graph),
             Some(&DetailSelection::Edge(id)),
-            Some(&inspected),
+            Some(&inspected.report),
             ImpactOutcome::Planned,
         );
         assert!(detail.contains("inspected_event → inspected_audit"));
