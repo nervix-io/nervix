@@ -1393,10 +1393,13 @@ workflow calls it with the image its build job published,
 A manual run of the `Chaos` workflow names the suite and an immutable image,
 `REPOSITORY@sha256:DIGEST`, and builds nothing. The workflow's plan job resolves the image to its
 digest, so every shard runs the same image, and reads the shards and their budgets from
-`just chaos suite shards`. Each shard then runs on its own Linux Docker worker,
-`blacksmith-4vcpu-ubuntu-2404`. The job installs `just` and `toml`, removes every Rust toolchain
-directory from the `PATH` the suite runs with and fails if `cargo`, `rustc` or `rustup` is still
-reachable, pulls the image and logs out of the registry, and runs
+`just chaos suite shards`. Each shard then runs on its own GitHub-hosted `ubuntu-24.04` Docker
+worker. The repository's Blacksmith workers cannot qualify: their kernel offers none of the
+queueing disciplines Pumba installs, so every run there stops in its network preflight or in the
+network healing exercise of its verifier self-check. The job loads the `sch_prio`, `sch_sfq` and
+`sch_netem` modules and fails when the kernel cannot provide one, installs `just` and `toml`,
+removes every Rust toolchain directory from the `PATH` the suite runs with and fails if `cargo`,
+`rustc` or `rustup` is still reachable, pulls the image and logs out of the registry, and runs
 `just chaos suite <suite> --shard <n> --image <digest> --artifacts <dir> --suite-id ci-<run>-<attempt>-<suite>-<n>`.
 The suite step ends at the shard's step budget and the job at its job budget. A cancellation sends
 the step SIGINT, then SIGTERM, then SIGKILL within about ten seconds, which can cut a run's exit trap
