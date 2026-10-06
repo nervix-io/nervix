@@ -8,9 +8,10 @@
 use std::os::unix::fs::PermissionsExt as _;
 
 use nervix_backup::{
-    ArchiveRecord, BranchLifecycleRecord, DomainRecord, KafkaOffsetsRecord,
-    MaterializedIdentitiesRecord, MaterializedRelayDescriptor, RecordKind, ResourceVersionRecord,
-    SectionPath, WasmStateDescriptor, read_archive_contents,
+    ArchiveRecord, BranchLifecycleRecord, DeduplicatorStateDescriptor, DomainRecord,
+    KafkaOffsetsRecord, MaterializedIdentitiesRecord, MaterializedRelayDescriptor, RecordKind,
+    ResourceVersionRecord, SectionPath, WasmStateDescriptor, WindowStateDescriptor,
+    read_archive_contents,
 };
 use nervix_models::{DomainStatus, WasmStateGeneration};
 
@@ -216,6 +217,81 @@ impl ArchiveValues {
                             .assured("the restored identity expectation encodes"),
                     )
                 }
+                RecordKind::DeduplicatorStateDescriptor => {
+                    let mut record =
+                        DeduplicatorStateDescriptor::decode(path.as_str(), &section.bytes)
+                            .assured("the original deduplicator descriptor validates");
+                    let branch = record.branch_fingerprint;
+                    for group in 0..record.groups {
+                        payload_paths.insert(
+                            SectionPath::deduplicator_keys(
+                                &record.domain,
+                                &record.entity,
+                                branch.as_ref(),
+                                group,
+                            ),
+                            SectionPath::deduplicator_keys(
+                                target,
+                                &record.entity,
+                                branch.as_ref(),
+                                group,
+                            ),
+                        );
+                    }
+                    record.domain = target.clone();
+                    (
+                        SectionPath::deduplicator_descriptor(
+                            target,
+                            &record.entity,
+                            branch.as_ref(),
+                        ),
+                        record
+                            .encode()
+                            .assured("the restored keyspace expectation encodes"),
+                    )
+                }
+                RecordKind::WindowStateDescriptor => {
+                    let mut record = WindowStateDescriptor::decode(path.as_str(), &section.bytes)
+                        .assured("the original window descriptor validates");
+                    let branch = record.branch_fingerprint;
+                    for group in 0..record.groups {
+                        payload_paths.insert(
+                            SectionPath::window_input_rows(
+                                &record.domain,
+                                &record.entity,
+                                branch.as_ref(),
+                                group,
+                            ),
+                            SectionPath::window_input_rows(
+                                target,
+                                &record.entity,
+                                branch.as_ref(),
+                                group,
+                            ),
+                        );
+                        payload_paths.insert(
+                            SectionPath::window_argument_columns(
+                                &record.domain,
+                                &record.entity,
+                                branch.as_ref(),
+                                group,
+                            ),
+                            SectionPath::window_argument_columns(
+                                target,
+                                &record.entity,
+                                branch.as_ref(),
+                                group,
+                            ),
+                        );
+                    }
+                    record.domain = target.clone();
+                    (
+                        SectionPath::window_descriptor(target, &record.entity, branch.as_ref()),
+                        record
+                            .encode()
+                            .assured("the restored window expectation encodes"),
+                    )
+                }
                 RecordKind::Manifest | RecordKind::Users => {
                     panic!("a domain archive has domain-owned sections")
                 }
@@ -239,7 +315,10 @@ impl ArchiveValues {
                 SectionContent::Nspl => SectionPath::domain_models(target),
                 SectionContent::ResourceArchive
                 | SectionContent::WasmGuestBlob
-                | SectionContent::MaterializedColumns => payload_paths
+                | SectionContent::MaterializedColumns
+                | SectionContent::DeduplicatorKeys
+                | SectionContent::WindowInputRows
+                | SectionContent::WindowArgumentColumns => payload_paths
                     .remove(&path)
                     .assured("the raw payload has its original owning descriptor"),
             };

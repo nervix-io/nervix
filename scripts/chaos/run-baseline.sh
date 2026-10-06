@@ -19,10 +19,13 @@ Required:
 
 Options:
   --nodes 1|3            Cluster topology (default: 3).
-  --records N            Finite fixture size, 1..1000 (default: ${record_count}).
+  --records N            Finite fixture size, 1..1000; mixed-instability 1..20000 and by default
+                         twice its planned timeline plus 15 minutes of records (default: ${record_count}).
   --artifacts DIR        Artifact root (default: target/chaos).
   --run-id ID            Stable run identifier; generated when omitted.
-  --timeout SECONDS      Whole-run bound, 120..3600 (default: ${overall_timeout}).
+  --timeout SECONDS      Whole-run bound, 120..3600 (default: ${overall_timeout}); mixed-instability
+                         from its duration plus 600 through 21600, by default its duration plus the
+                         larger of its duration and 1200, at most 21600.
   --outage-seconds N     Minimum held crash outage, 5..120 (default: ${outage_seconds}).
   pause-resume uses configured 10s/12s Raft election and 15s node detection
   thresholds, with 1s short and 75s failover-length pauses.
@@ -31,6 +34,10 @@ Options:
   --partition-seconds N  Minimum verified partition window, 20..600 (default: ${partition_seconds}).
   --isolation-seconds N  former-owner-restart window in which the restarted former owner stays
                          isolated before startup admission, 20..600 (default: ${isolation_seconds}).
+  --fault FAULT          stateful fault: none, owner-crash, owner-pause, owner-partition or
+                         cluster-restart; domain-time fault: none, voter-crash, voter-pause,
+                         voter-partition, voter-stop or cluster-restart. One node supports none and
+                         cluster-restart (default: ${fault}).
   --profile NAME         degraded-links profile: all, delay, jitter, random-loss,
                          burst-loss, rate-limit, combined (default: ${degradation_profile}).
   --load-interval-ms N   Fixed producer interval, 100..5000 (default: ${load_interval_ms}).
@@ -43,6 +50,17 @@ Options:
   --max-pending N        Maximum public interconnect pending operations (default: ${max_pending}).
   --min-throughput-pct N Minimum recovered output rate as percent of healthy baseline
                          for three consecutive intervals (default: ${min_throughput_pct}).
+  --seed N               mixed-instability seed that selects the action plan, 0..2147483646
+                         (default: drawn and recorded).
+  --duration D           mixed-instability planned fault timeline, as seconds or with an s, m or h
+                         suffix, 60s..4h (default: 30m).
+  --policy POLICY        mixed-instability quorum policy: preserve-quorum or temporary-quorum-loss
+                         (default: preserve-quorum).
+  --coverage LIST        mixed-instability FAMILY:ROLE items and quorum-loss the run must exercise
+                         (default: every family against the leader and a follower, plus
+                         quorum-loss under temporary-quorum-loss).
+  --plan FILE            mixed-instability explicit action plan instead of a seeded one.
+  --max-memory-bytes, --max-recovery-backlog and --max-pending also bound mixed-instability.
   --keep                 Retain labeled Docker resources after diagnostics.
   -h, --help             Show this help.
 EOF
@@ -69,6 +87,8 @@ partition_seconds=45
 partition_option_set=false
 isolation_seconds=45
 isolation_option_set=false
+fault=none
+fault_option_set=false
 degradation_profile=all
 degradation_option_set=false
 load_interval_ms=750
@@ -81,8 +101,24 @@ max_memory_bytes=1073741824
 max_pending=128
 min_throughput_pct=50
 keep_resources=false
+mixed_seed=""
+mixed_duration=""
+mixed_policy=""
+mixed_coverage=""
+mixed_plan_file=""
+# No mixed-instability run, its default bound included, lasts longer than six hours.
+mixed_max_timeout=21600
+replay_dir=""
+records_option_set=false
+timeout_option_set=false
+mixed_option_set=false
+limit_option_set=false
+# Every option the command line gave, so a replay can refuse the ones that would change the
+# recorded experiment.
+given_options=()
 
 while [[ "$#" -gt 0 ]]; do
+    given_options+=("$1")
     case "$1" in
         --image)
             [[ "$#" -ge 2 ]] || setup_error '--image requires a value'
@@ -98,7 +134,15 @@ while [[ "$#" -gt 0 ]]; do
             elif [[ "${scenario}" == backup ]]; then
                 record_count=1000
                 overall_timeout=1800
+            elif [[ "${scenario}" == stateful || "${scenario}" == domain-time ]]; then
+                record_count=1000
+                overall_timeout=2700
             fi
+            shift 2
+            ;;
+        --replay)
+            [[ "$#" -ge 2 ]] || setup_error '--replay requires a run directory'
+            replay_dir="$2"
             shift 2
             ;;
         --nodes)
@@ -109,6 +153,7 @@ while [[ "$#" -gt 0 ]]; do
         --records)
             [[ "$#" -ge 2 ]] || setup_error '--records requires a value'
             record_count="$2"
+            records_option_set=true
             shift 2
             ;;
         --artifacts)
@@ -124,6 +169,19 @@ while [[ "$#" -gt 0 ]]; do
         --timeout)
             [[ "$#" -ge 2 ]] || setup_error '--timeout requires seconds'
             overall_timeout="$2"
+            timeout_option_set=true
+            shift 2
+            ;;
+        --seed | --duration | --policy | --coverage | --plan)
+            [[ "$#" -ge 2 ]] || setup_error "$1 requires a value"
+            case "$1" in
+                --seed) mixed_seed="$2" ;;
+                --duration) mixed_duration="$2" ;;
+                --policy) mixed_policy="$2" ;;
+                --coverage) mixed_coverage="$2" ;;
+                --plan) mixed_plan_file="$2" ;;
+            esac
+            mixed_option_set=true
             shift 2
             ;;
         --outage-seconds)
@@ -150,7 +208,13 @@ while [[ "$#" -gt 0 ]]; do
             isolation_option_set=true
             shift 2
             ;;
-        --profile | --load-interval-ms | --baseline-seconds | --degrade-seconds | --drain-seconds | --max-backlog | --max-recovery-backlog | --max-memory-bytes | --max-pending | --min-throughput-pct)
+        --fault)
+            [[ "$#" -ge 2 ]] || setup_error '--fault requires a value'
+            fault="$2"
+            fault_option_set=true
+            shift 2
+            ;;
+        --profile | --load-interval-ms | --baseline-seconds | --degrade-seconds | --drain-seconds | --max-backlog | --min-throughput-pct)
             [[ "$#" -ge 2 ]] || setup_error "$1 requires a value"
             case "$1" in
                 --profile) degradation_profile="$2" ;;
@@ -159,12 +223,19 @@ while [[ "$#" -gt 0 ]]; do
                 --degrade-seconds) degrade_seconds="$2" ;;
                 --drain-seconds) drain_seconds="$2" ;;
                 --max-backlog) max_backlog="$2" ;;
-                --max-recovery-backlog) max_recovery_backlog="$2" ;;
-                --max-memory-bytes) max_memory_bytes="$2" ;;
-                --max-pending) max_pending="$2" ;;
                 --min-throughput-pct) min_throughput_pct="$2" ;;
             esac
             degradation_option_set=true
+            shift 2
+            ;;
+        --max-recovery-backlog | --max-memory-bytes | --max-pending)
+            [[ "$#" -ge 2 ]] || setup_error "$1 requires a value"
+            case "$1" in
+                --max-recovery-backlog) max_recovery_backlog="$2" ;;
+                --max-memory-bytes) max_memory_bytes="$2" ;;
+                --max-pending) max_pending="$2" ;;
+            esac
+            limit_option_set=true
             shift 2
             ;;
         --keep)
@@ -181,20 +252,149 @@ while [[ "$#" -gt 0 ]]; do
     esac
 done
 
+for command_name in docker jq openssl timeout awk sed grep sort wc date; do
+    command -v "${command_name}" >/dev/null 2>&1 \
+        || setup_error "required command is unavailable: ${command_name}"
+done
+
+sha256_of() {
+    openssl dgst -sha256 -r "$1" | awk '{ print $1 }'
+}
+
+# Loads the experiment a mixed-instability run directory recorded: its Nervix and tool image
+# identities, deployment, limits, plan and fixtures. A directory that does not record all of them,
+# or whose plan or fixtures no longer match the digests its manifest records, is refused before the
+# replay creates anything.
+load_replay_settings() {
+    [[ -d "${replay_dir}" ]] || setup_error "the replay run directory does not exist: ${replay_dir}"
+    replay_dir="$(cd "${replay_dir}" && pwd)"
+    local manifest="${replay_dir}/manifest.json"
+    [[ -s "${manifest}" ]] || setup_error "the replay run directory has no manifest.json: ${replay_dir}"
+    jq -e 'type == "object"' "${manifest}" >/dev/null 2>&1 \
+        || setup_error "the replay manifest is not a JSON object: ${manifest}"
+    [[ "$(jq -r '.scenario' "${manifest}")" == mixed-instability ]] \
+        || setup_error "only mixed-instability runs can be replayed; ${replay_dir} recorded $(jq -r '.scenario // "no scenario"' "${manifest}")"
+    local missing
+    missing="$(jq -r '
+        def digest: type == "string" and test("^[a-f0-9]{64}$");
+        [ (if (.resolved_image_id | type == "string" and test("^sha256:[a-f0-9]{64}$")) | not then "the resolved Nervix image" else empty end),
+          (if (.requested_image | type == "string" and length > 0) | not then "the requested Nervix image" else empty end),
+          (if (.resolved_repo_digests | type == "string") | not then "the Nervix repository digests" else empty end),
+          (["kafka", "kcat", "probe", "pumba", "nettools"][] as $tool
+           | select(((.tool_images[$tool].reference | type == "string" and test("@sha256:[a-f0-9]{64}$"))
+                     and (.tool_images[$tool].image_id | type == "string" and test("^sha256:[a-f0-9]{64}$"))) | not)
+           | "the \($tool) image"),
+          (if .topology_nodes != 3 then "a three-node topology" else empty end),
+          (if (.timeout_seconds | type == "number") | not then "its timeout" else empty end),
+          (if (.mixed.plan.sha256 | digest) | not then "the action plan digest" else empty end),
+          (if (.mixed.limits | type == "object") | not then "the declared limits" else empty end),
+          (if (.mixed.deployment.nodes | type == "object") | not then "the deployment" else empty end),
+          (if (.mixed.deployment.load_interval_ms | type == "number" and . >= 1 and . == floor) | not
+           then "the load interval" else empty end),
+          (if ((.fixtures.input.sha256 | digest) and (.fixtures.input.records | type == "number")) | not
+           then "the input fixture" else empty end),
+          (if (.fixtures.graph.sha256 | digest) | not then "the NSPL graph" else empty end)
+        ] | join(", ")' "${manifest}")"
+    [[ -z "${missing}" ]] \
+        || setup_error "the replay manifest ${manifest} does not record ${missing}, so the experiment cannot be reconstructed"
+    local entry
+    for entry in 'mixed/plan.json .mixed.plan.sha256' 'fixtures/input.ndjson .fixtures.input.sha256' \
+        'fixtures/baseline.nspl .fixtures.graph.sha256'; do
+        local path="${entry%% *}"
+        local field="${entry#* }"
+        [[ -s "${replay_dir}/${path}" ]] || setup_error "the replay run directory lacks its recorded ${path}"
+        local recorded actual
+        recorded="$(jq -r "${field}" "${manifest}")"
+        actual="$(sha256_of "${replay_dir}/${path}")"
+        [[ "${actual}" == "${recorded}" ]] \
+            || setup_error "${path} in ${replay_dir} no longer matches the digest its manifest records"
+    done
+    replay_image_id="$(jq -r '.resolved_image_id' "${manifest}")"
+    replay_repo_digests="$(jq -r '.resolved_repo_digests' "${manifest}")"
+    image_ref="$(jq -r '.requested_image' "${manifest}")"
+    node_count=3
+    record_count="$(jq -r '.fixtures.input.records' "${manifest}")"
+    mixed_duration="$(jq -r '.duration_seconds' "${replay_dir}/mixed/plan.json" 2>/dev/null)" || mixed_duration=""
+    [[ "${mixed_duration}" =~ ^[0-9]{1,6}$ ]] \
+        || setup_error "the recorded action plan of ${replay_dir} has no whole duration_seconds"
+    if [[ "${timeout_option_set}" != true ]]; then
+        overall_timeout="$(jq -r '.timeout_seconds' "${manifest}")"
+    fi
+    max_memory_bytes="$(jq -r '.mixed.limits.max_memory_bytes' "${manifest}")"
+    max_recovery_backlog="$(jq -r '.mixed.limits.max_recovery_backlog' "${manifest}")"
+    max_pending="$(jq -r '.mixed.limits.max_pending' "${manifest}")"
+    # The recorded tool references replace the pins checked in now, and the recorded deployment the
+    # Compose defaults.
+    chaos_kafka_image="$(jq -r '.tool_images.kafka.reference' "${manifest}")"
+    chaos_kcat_image="$(jq -r '.tool_images.kcat.reference' "${manifest}")"
+    chaos_probe_image="$(jq -r '.tool_images.probe.reference' "${manifest}")"
+    chaos_pumba_image="$(jq -r '.tool_images.pumba.reference' "${manifest}")"
+    chaos_nettools_image="$(jq -r '.tool_images.nettools.reference' "${manifest}")"
+    local tool
+    for tool in kafka kcat probe pumba nettools; do
+        replay_tool_image_ids["${tool}"]="$(jq -r --arg tool "${tool}" '.tool_images[$tool].image_id' "${manifest}")"
+    done
+    local setting value
+    while IFS=$'\t' read -r setting value; do
+        export "CHAOS_${setting#NERVIX_}=${value}"
+    done < <(jq -r '.mixed.deployment.nodes | to_entries[] | "\(.key)\t\(.value)"' "${manifest}")
+    replay_load_interval_ms="$(jq -r '.mixed.deployment.load_interval_ms' "${manifest}")"
+    replay_of="$(jq -c --arg directory "${replay_dir}" '{run_id, directory: $directory, status, exit_code,
+        final_phase, plan_sha256: .mixed.plan.sha256, seed: .mixed.seed}' "${manifest}")"
+}
+
+replay_image_id=""
+replay_repo_digests=""
+replay_load_interval_ms=""
+replay_of=null
+declare -A replay_tool_image_ids=()
+if [[ -n "${replay_dir}" ]]; then
+    [[ "${scenario}" == mixed-instability ]] || setup_error 'only mixed-instability runs can be replayed'
+    for option in "${given_options[@]}"; do
+        case "${option}" in
+            --replay | --scenario | --artifacts | --run-id | --timeout | --keep) ;;
+            *) setup_error "a replay reuses the experiment its run directory recorded, so ${option} cannot change it" ;;
+        esac
+    done
+    load_replay_settings
+fi
+
 [[ -n "${image_ref}" ]] || setup_error '--image is required and must name an already-built Nervix image'
 case "${scenario}" in
-    baseline | rolling-restart | leader-crash | follower-crash | ingestor-owner-crash | emitter-owner-crash | pause-resume | partition-recovery | degraded-links | backup | stale-follower | former-owner-restart | cluster-restart) ;;
+    baseline | rolling-restart | leader-crash | follower-crash | ingestor-owner-crash | emitter-owner-crash | pause-resume | partition-recovery | degraded-links | backup | stale-follower | former-owner-restart | cluster-restart | stateful | domain-time | mixed-instability) ;;
     *) setup_error "unknown scenario: ${scenario}" ;;
 esac
 [[ "${node_count}" == "1" || "${node_count}" == "3" ]] \
     || setup_error '--nodes must be 1 or 3'
-# The restart and recovery scenarios share their traffic, findings and exit handling.
+# The restart, recovery, stateful, domain-time and mixed-instability scenarios share their traffic,
+# findings and exit handling.
 recovery_scenario=false
 case "${scenario}" in
-    stale-follower | former-owner-restart | cluster-restart) recovery_scenario=true ;;
+    stale-follower | former-owner-restart | cluster-restart | stateful | domain-time | mixed-instability) recovery_scenario=true ;;
 esac
-if [[ "${scenario}" != baseline && "${scenario}" != backup && "${scenario}" != rolling-restart && "${scenario}" != leader-crash && "${scenario}" != cluster-restart && "${node_count}" != 3 ]]; then
+if [[ "${scenario}" != baseline && "${scenario}" != backup && "${scenario}" != rolling-restart && "${scenario}" != leader-crash && "${scenario}" != cluster-restart && "${scenario}" != stateful && "${scenario}" != domain-time && "${node_count}" != 3 ]]; then
     setup_error "${scenario} requires --nodes 3"
+fi
+case "${scenario}" in
+    stateful)
+        case "${fault}" in
+            none | owner-crash | owner-pause | owner-partition | cluster-restart) ;;
+            *) setup_error "--fault for stateful must be none, owner-crash, owner-pause, owner-partition or cluster-restart, not ${fault}" ;;
+        esac
+        ;;
+    domain-time)
+        case "${fault}" in
+            none | voter-crash | voter-pause | voter-partition | voter-stop | cluster-restart) ;;
+            *) setup_error "--fault for domain-time must be none, voter-crash, voter-pause, voter-partition, voter-stop or cluster-restart, not ${fault}" ;;
+        esac
+        ;;
+    *)
+        [[ "${fault_option_set}" != true ]] \
+            || setup_error '--fault applies only to stateful and domain-time'
+        ;;
+esac
+if [[ "${node_count}" == 1 && "${fault}" != none && "${fault}" != cluster-restart ]]; then
+    setup_error "${fault} requires --nodes 3; one node supports none and cluster-restart"
 fi
 if [[ "${scenario}" == pause-resume && "${outage_option_set}" == true ]]; then
     setup_error 'pause-resume selects its own finite durations; --outage-seconds is for crash scenarios'
@@ -217,6 +417,57 @@ fi
     || setup_error '--isolation-seconds must be an integer from 20 through 600'
 if [[ "${scenario}" != degraded-links && "${degradation_option_set}" == true ]]; then
     setup_error 'degradation profiles and thresholds apply only to degraded-links'
+fi
+if [[ "${scenario}" != degraded-links && "${scenario}" != mixed-instability && "${limit_option_set}" == true ]]; then
+    setup_error '--max-memory-bytes, --max-recovery-backlog and --max-pending apply only to degraded-links and mixed-instability'
+fi
+if [[ "${scenario}" != mixed-instability && "${mixed_option_set}" == true ]]; then
+    setup_error '--seed, --duration, --policy, --coverage and --plan apply only to mixed-instability'
+fi
+if [[ "${scenario}" == mixed-instability ]]; then
+    [[ "${outage_option_set}" != true ]] \
+        || setup_error 'mixed-instability takes every hold from its action plan; --outage-seconds is for crash and recovery scenarios'
+    if [[ -n "${mixed_plan_file}" ]]; then
+        [[ -z "${mixed_seed}${mixed_duration}${mixed_policy}${mixed_coverage}" ]] \
+            || setup_error '--plan carries its own seed, duration, policy and coverage'
+        [[ -s "${mixed_plan_file}" ]] || setup_error "the action plan does not exist: ${mixed_plan_file}"
+        mixed_duration="$(jq -r '.duration_seconds' "${mixed_plan_file}" 2>/dev/null)" || mixed_duration=""
+        [[ "${mixed_duration}" =~ ^[0-9]{1,6}$ ]] \
+            || setup_error "the action plan ${mixed_plan_file} records no whole duration_seconds"
+    elif [[ -z "${replay_dir}" ]]; then
+        mixed_policy="${mixed_policy:-preserve-quorum}"
+        [[ "${mixed_policy}" == preserve-quorum || "${mixed_policy}" == temporary-quorum-loss ]] \
+            || setup_error "--policy must be preserve-quorum or temporary-quorum-loss, not ${mixed_policy}"
+        mixed_duration="${mixed_duration:-30m}"
+        if [[ "${mixed_duration}" =~ ^([0-9]{1,6})(s|m|h)?$ ]]; then
+            mixed_duration=$((10#${BASH_REMATCH[1]}))
+            case "${BASH_REMATCH[2]}" in
+                m) mixed_duration=$((mixed_duration * 60)) ;;
+                h) mixed_duration=$((mixed_duration * 3600)) ;;
+            esac
+        else
+            setup_error "--duration must be whole seconds, or minutes or hours with an m or h suffix, not ${mixed_duration}"
+        fi
+        if [[ -z "${mixed_seed}" ]]; then
+            mixed_seed=$(((RANDOM << 15 | RANDOM) % 2147483647))
+        fi
+        if [[ ! "${mixed_seed}" =~ ^[0-9]{1,10}$ ]] || ((10#${mixed_seed} > 2147483646)); then
+            setup_error '--seed must be an integer from 0 through 2147483646'
+        fi
+        mixed_seed=$((10#${mixed_seed}))
+        if [[ -z "${mixed_coverage}" ]]; then
+            mixed_coverage="$("${script_dir}/mixed-plan.sh" default-coverage --policy "${mixed_policy}")"
+        fi
+    fi
+    mixed_duration=$((10#${mixed_duration}))
+    ((mixed_duration >= 60 && mixed_duration <= 14400)) \
+        || setup_error "a mixed-instability duration runs from 60 seconds through 4 hours, not ${mixed_duration} seconds"
+    if [[ "${timeout_option_set}" != true && -z "${replay_dir}" ]]; then
+        overall_timeout=$((mixed_duration + (mixed_duration > 1200 ? mixed_duration : 1200)))
+        if ((overall_timeout > mixed_max_timeout)); then
+            overall_timeout="${mixed_max_timeout}"
+        fi
+    fi
 fi
 case "${degradation_profile}" in
     all | delay | jitter | random-loss | burst-loss | rate-limit | combined) ;;
@@ -242,14 +493,22 @@ esac
     || setup_error '--partition-seconds must be an integer from 20 through 600'
 ((partition_seconds >= 20 && partition_seconds <= 600)) \
     || setup_error '--partition-seconds must be an integer from 20 through 600'
+max_records=1000
+min_timeout=120
+max_timeout=3600
+if [[ "${scenario}" == mixed-instability ]]; then
+    max_records=20000
+    min_timeout=$((mixed_duration + 600))
+    max_timeout="${mixed_max_timeout}"
+fi
 [[ "${record_count}" =~ ^[0-9]+$ ]] \
-    || setup_error '--records must be an integer from 1 through 1000'
-((record_count >= 1 && record_count <= 1000)) \
-    || setup_error '--records must be an integer from 1 through 1000'
+    || setup_error "--records must be an integer from 1 through ${max_records}"
+((record_count >= 1 && record_count <= max_records)) \
+    || setup_error "--records must be an integer from 1 through ${max_records}"
 [[ "${overall_timeout}" =~ ^[0-9]+$ ]] \
-    || setup_error '--timeout must be an integer from 120 through 3600'
-((overall_timeout >= 120 && overall_timeout <= 3600)) \
-    || setup_error '--timeout must be an integer from 120 through 3600'
+    || setup_error "--timeout must be an integer from ${min_timeout} through ${max_timeout}"
+((overall_timeout >= min_timeout && overall_timeout <= max_timeout)) \
+    || setup_error "--timeout must be an integer from ${min_timeout} through ${max_timeout}"
 [[ "${outage_seconds}" =~ ^[0-9]+$ ]] \
     || setup_error '--outage-seconds must be an integer from 5 through 120'
 ((outage_seconds >= 5 && outage_seconds <= 120)) \
@@ -260,11 +519,6 @@ if [[ -z "${run_id}" ]]; then
 fi
 [[ "${run_id}" =~ ^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,95}$ ]] \
     || setup_error '--run-id must be 1..96 letters, numbers, dots, underscores, or hyphens'
-
-for command_name in docker jq openssl timeout awk sed grep sort wc date; do
-    command -v "${command_name}" >/dev/null 2>&1 \
-        || setup_error "required command is unavailable: ${command_name}"
-done
 
 mkdir -p "${artifact_root}"
 artifact_root="$(cd "${artifact_root}" && pwd)"
@@ -298,6 +552,9 @@ declare -A tool_image_ids=()
 # that outgrows this bound fails the run instead.
 docker_event_bytes_limit=67108864
 run_event_recording_covered=false
+# Every teardown step after the run's timeout is bounded on its own, and together they fit this
+# reserve, which the live event subscriber also outlives the timeout by.
+teardown_reserve_seconds=900
 
 export CHAOS_RUN_ID="${run_id}"
 export CHAOS_CLUSTER_ID="${cluster_id}"
@@ -312,31 +569,58 @@ export CHAOS_LOAD_FILE="${artifact_dir}/fixtures/input.ndjson"
 export CHAOS_TRAFFIC_DIR="${artifact_dir}/traffic"
 export CHAOS_SCRIPT_DIR="${script_dir}"
 export CHAOS_NODE_COUNT="${node_count}"
-if [[ "${scenario}" == pause-resume ]]; then
+if [[ "${scenario}" == pause-resume || "${fault}" == *-pause ]]; then
     export CHAOS_RAFT_HEARTBEAT_INTERVAL=250ms
     export CHAOS_RAFT_ELECTION_TIMEOUT_MIN=10s
     export CHAOS_RAFT_ELECTION_TIMEOUT_MAX=12s
     export CHAOS_NODE_UNAVAILABILITY_TIMEOUT=15s
-    export CHAOS_LOAD_INTERVAL=1.0
 fi
-if [[ "${scenario}" == partition-recovery ]]; then
-    # One record every two seconds keeps the bounded fixture flowing through all four cases.
-    export CHAOS_LOAD_INTERVAL=2.0
-fi
-if [[ "${scenario}" == degraded-links ]]; then
-    CHAOS_LOAD_INTERVAL="$(awk -v ms="${load_interval_ms}" 'BEGIN {printf "%.3f", ms / 1000}')"
-    export CHAOS_LOAD_INTERVAL
-fi
-if [[ "${scenario}" == stale-follower || "${scenario}" == former-owner-restart || "${scenario}" == cluster-restart ]]; then
-    # One record a second keeps the bounded fixture flowing through the slowest recovery case.
-    export CHAOS_LOAD_INTERVAL=1.0
-fi
+# The continuous load produces one fixture record per interval.
+case "${scenario}" in
+    baseline)
+        # The baseline produces its whole fixture with one call and starts no continuous load.
+        ;;
+    degraded-links)
+        # --load-interval-ms declares the interval.
+        ;;
+    partition-recovery)
+        # One record every two seconds keeps the bounded fixture flowing through all four cases.
+        load_interval_ms=2000
+        ;;
+    pause-resume | stale-follower | former-owner-restart | cluster-restart | stateful | domain-time)
+        # One record a second keeps the bounded fixture flowing through the slowest case.
+        load_interval_ms=1000
+        ;;
+    mixed-instability)
+        # One record a second keeps the fixture flowing through a long timeline of disturbances; a
+        # replay produces at the interval its run recorded.
+        load_interval_ms="${replay_load_interval_ms:-1000}"
+        ;;
+    *)
+        load_interval_ms=500
+        ;;
+esac
+export CHAOS_LOAD_INTERVAL_MS="${load_interval_ms}"
 if [[ "${scenario}" == stale-follower ]]; then
     # Ordinary retention options small enough that acknowledged changes made while one follower is
     # offline snapshot and purge the survivors' logs past its position within a bounded run.
     export CHAOS_RAFT_SNAPSHOT_ENTRY_THRESHOLD=64
     export CHAOS_RAFT_COVERED_LOG_ENTRIES_RETAINED=16
 fi
+if [[ "${scenario}" == stateful ]]; then
+    # Ordinary state options: a one-second snapshot interval publishes runtime checkpoints several
+    # times inside a held milestone, and on three nodes one state replica lets the loss of an owner
+    # promote its replicated state instead of resetting it.
+    export CHAOS_STATE_SNAPSHOT_INTERVAL=1s
+    if [[ "${node_count}" == 3 ]]; then
+        export CHAOS_REPLICA_COUNT=1
+    fi
+fi
+export CHAOS_STATE_LOAD_FILE="${artifact_dir}/fixtures/state-input.ndjson"
+export CHAOS_PACED_LOAD_FILE="${artifact_dir}/fixtures/paced-input.ndjson"
+# The stateful load produces one record a second and the paced load one every 250 ms.
+export CHAOS_STATE_LOAD_INTERVAL_MS=1000
+export CHAOS_PACED_LOAD_INTERVAL_MS=250
 
 jq -n \
     --arg run_id "${run_id}" \
@@ -349,6 +633,7 @@ jq -n \
     --argjson timeout_seconds "${overall_timeout}" \
     --argjson outage_seconds "${outage_seconds}" \
     --argjson docker_event_bytes "${docker_event_bytes_limit}" \
+    --argjson fixture_records "${max_records}" \
     '{
       run_id: $run_id,
       compose_project: $project,
@@ -362,7 +647,7 @@ jq -n \
       timeout_seconds: $timeout_seconds,
       outage_seconds: $outage_seconds,
       artifact_limits: {
-        fixture_records: 1000,
+        fixture_records: $fixture_records,
         compose_log_bytes: 2097152,
         docker_event_bytes: $docker_event_bytes,
         metrics_bytes_per_node: 1048576,
@@ -417,12 +702,93 @@ update_manifest() {
     fi
 }
 
+# Fixes a mixed-instability experiment before the run alters anything: the validated action plan,
+# the fixture records and the NSPL graph, each kept in the run directory with the digest a replay
+# checks, and the limits the run judges. A seeded plan is generated here; a supplied or replayed one
+# is copied. An invalid plan fails the run as a setup error before any container exists.
+prepare_mixed_experiment() {
+    local plan="${artifact_dir}/mixed/plan.json"
+    mkdir -p "${artifact_dir}/mixed"
+    local plan_source
+    if [[ -n "${replay_dir}" ]]; then
+        cp "${replay_dir}/mixed/plan.json" "${plan}"
+        plan_source='replay'
+    elif [[ -n "${mixed_plan_file}" ]]; then
+        cp "${mixed_plan_file}" "${plan}"
+        plan_source='file'
+    else
+        "${script_dir}/mixed-plan.sh" generate --seed "${mixed_seed}" --duration "${mixed_duration}" \
+            --policy "${mixed_policy}" --coverage "${mixed_coverage}" --output "${plan}" \
+            2>"${artifact_dir}/mixed/plan-generation.txt" \
+            || setup_error "seed ${mixed_seed} selected no plan: $(tail -n 1 "${artifact_dir}/mixed/plan-generation.txt")"
+        plan_source='seed'
+    fi
+    if ! "${script_dir}/mixed-plan.sh" validate --plan "${plan}" \
+        --report "${artifact_dir}/mixed/plan-validation.json" 2>"${artifact_dir}/mixed/plan-validation.txt"; then
+        setup_error "the action plan is invalid, so no container was altered: $(head -n 1 "${artifact_dir}/mixed/plan-validation.txt"); every reason is in mixed/plan-validation.json"
+    fi
+    mixed_seed="$(jq -r '.seed // empty' "${plan}")"
+    mixed_policy="$(jq -r '.policy' "${plan}")"
+    mixed_duration="$(jq -r '.duration_seconds' "${plan}")"
+    local plan_end
+    plan_end="$(jq -r '.steps[-1].at_seconds + .steps[-1].estimated_seconds' "${plan}")"
+    if [[ -n "${replay_dir}" ]]; then
+        cp "${replay_dir}/fixtures/input.ndjson" "${artifact_dir}/fixtures/input.ndjson"
+        cp "${replay_dir}/fixtures/baseline.nspl" "${artifact_dir}/fixtures/baseline.nspl"
+    else
+        # The load produces one record a second until the run stops it, so the fixture lasts the
+        # planned timeline and fifteen minutes of startup and final boundaries, and by default twice
+        # the timeline for steps that outlast their estimates.
+        local minimum_records=$((plan_end + 900))
+        if [[ "${records_option_set}" == true ]]; then
+            ((record_count >= minimum_records)) \
+                || setup_error "${record_count} records cannot keep the load running through a plan that ends at ${plan_end}s; use at least ${minimum_records}"
+        else
+            record_count=$((2 * plan_end + 900))
+            if ((record_count > max_records)); then
+                record_count="${max_records}"
+            fi
+        fi
+        jq -nc --arg run_id "${run_id}" --argjson count "${record_count}" \
+            -f "${fixture_generator}" >"${artifact_dir}/fixtures/input.ndjson"
+        cp "${script_dir}/fixtures/baseline.nspl" "${artifact_dir}/fixtures/baseline.nspl"
+    fi
+    [[ "$(wc -l <"${artifact_dir}/fixtures/input.ndjson")" -eq "${record_count}" ]] \
+        || setup_error "the input fixture does not hold ${record_count} records"
+    fixture_file="${artifact_dir}/fixtures/baseline.nspl"
+    # The dollars in this jq filter are jq variables, not shell expansion.
+    # shellcheck disable=SC2016
+    update_manifest '.fixture_record_limit = $records
+        | .mixed = {seed: (if $seed == "" then null else ($seed | tonumber) end), policy: $policy,
+                    duration_seconds: ($duration | tonumber), coverage: $plan[0].coverage,
+                    plan: {file: "mixed/plan.json", source: $source, sha256: $plan_sha256,
+                           steps: ($plan[0].steps | length), planned_end_seconds: ($plan_end | tonumber)},
+                    limits: {max_memory_bytes: $memory, max_recovery_backlog: $backlog, max_pending: $pending}}
+        | .fixtures = {input: {file: "fixtures/input.ndjson", sha256: $input_sha256, records: $records},
+                       graph: {file: "fixtures/baseline.nspl", sha256: $graph_sha256}}
+        | .replay_of = $replay_of' \
+        --argjson records "${record_count}" --arg seed "${mixed_seed}" --arg policy "${mixed_policy}" \
+        --arg duration "${mixed_duration}" --slurpfile plan "${plan}" --arg source "${plan_source}" \
+        --arg plan_sha256 "$(sha256_of "${plan}")" --arg plan_end "${plan_end}" \
+        --argjson memory "${max_memory_bytes}" --argjson backlog "${max_recovery_backlog}" \
+        --argjson pending "${max_pending}" \
+        --arg input_sha256 "$(sha256_of "${artifact_dir}/fixtures/input.ndjson")" \
+        --arg graph_sha256 "$(sha256_of "${fixture_file}")" --argjson replay_of "${replay_of}"
+    printf 'mixed-instability plan: %s steps, %s policy, seed %s, ending at %ss of a %ss timeline\n' \
+        "$(jq '.steps | length' "${plan}")" "${mixed_policy}" "${mixed_seed:-none}" "${plan_end}" "${mixed_duration}"
+}
+
 compose_args=(--project-name "${project_name}" --file "${compose_file}" --profile tools)
 if [[ "${node_count}" == "3" ]]; then
     compose_args+=(--profile three-node)
 fi
 if [[ "${scenario}" != "baseline" ]]; then
     compose_args+=(--profile rolling)
+fi
+if [[ "${scenario}" == stateful ]]; then
+    compose_args+=(--profile stateful)
+elif [[ "${scenario}" == domain-time ]]; then
+    compose_args+=(--profile paced)
 fi
 
 compose() {
@@ -551,6 +917,19 @@ finish() {
     local status=$?
     trap - EXIT INT TERM HUP
     set +e
+    local teardown_started="${SECONDS}"
+    if [[ "${scenario}" == mixed-instability ]]; then
+        # The sampler and every pause the controller still waits for end before anything is healed.
+        if declare -F mixed_stop_sampler >/dev/null; then
+            mixed_stop_sampler
+        fi
+        if declare -F mixed_stop_pause_injectors >/dev/null; then
+            mixed_stop_pause_injectors
+        fi
+        if declare -F mixed_summarize_interrupted >/dev/null; then
+            mixed_summarize_interrupted
+        fi
+    fi
     if [[ "${scenario}" == pause-resume ]]; then
         if [[ -n "${pause_injector_pid:-}" ]]; then
             kill "${pause_injector_pid}" 2>/dev/null
@@ -578,11 +957,33 @@ finish() {
         kill "${cluster_restart_sampler_pid}" 2>/dev/null
         wait "${cluster_restart_sampler_pid}" 2>/dev/null
     fi
-    if [[ "${scenario}" == partition-recovery || "${scenario}" == degraded-links || "${scenario}" == former-owner-restart ]]; then
+    if [[ "${fault}" == *-pause || "${scenario}" == mixed-instability ]]; then
+        # A pause fault ends with its injector; one that outlived the controller is removed, and
+        # every run-owned node it left paused runs again before anything else is captured.
+        mapfile -t active_injectors < <(
+            docker container ls --quiet \
+                --filter "label=io.nervix.chaos.run=${run_id}" \
+                --filter label=io.nervix.chaos.role=fault 2>/dev/null
+        )
+        if ((${#active_injectors[@]} > 0)); then
+            timeout --foreground --kill-after=5s 20s docker container rm --force \
+                "${active_injectors[@]}" >"${artifact_dir}/diagnostics/pause-injector-heal.txt" 2>&1
+        fi
+        local paused_id
+        while IFS= read -r paused_id; do
+            [[ -n "${paused_id}" ]] || continue
+            if [[ "$(timeout --foreground --kill-after=5s 20s docker inspect --format '{{.State.Paused}}' "${paused_id}" 2>/dev/null)" == true ]]; then
+                timeout --foreground --kill-after=5s 20s docker unpause "${paused_id}" \
+                    >>"${artifact_dir}/diagnostics/target-unpause.txt" 2>&1
+            fi
+        done < <(docker container ls --quiet --filter "label=io.nervix.chaos.run=${run_id}" \
+            --filter label=io.nervix.chaos.role=node 2>/dev/null)
+    fi
+    if [[ "${scenario}" == partition-recovery || "${scenario}" == degraded-links || "${scenario}" == former-owner-restart || "${fault}" == *-partition || "${scenario}" == mixed-instability ]]; then
         local heal_prefix=network
         if [[ "${scenario}" == partition-recovery ]]; then
             heal_prefix=partition
-        elif [[ "${scenario}" == former-owner-restart ]]; then
+        elif [[ "${scenario}" == former-owner-restart || "${fault}" == *-partition ]]; then
             heal_prefix=isolation
         fi
         # Heal before anything else so neither retained resources nor diagnostics stay partitioned.
@@ -657,7 +1058,35 @@ finish() {
             reproducer_image="${image_digest%%,*}"
         fi
         local reproducer
-        if [[ "${scenario}" == pause-resume ]]; then
+        if [[ "${scenario}" == mixed-instability ]]; then
+            # Once the run directory records the deployment, it holds everything a replay reuses.
+            # Before then a replay of the run's own source reproduces a failed replay, and a run
+            # command reproduces any other run with its plan or with what selects it, together with
+            # every other option that shaped it.
+            if mixed_replayable; then
+                reproducer="$(printf 'just chaos replay %q' "${artifact_dir}")"
+            elif [[ -n "${replay_dir}" ]]; then
+                reproducer="$(printf 'just chaos replay %q' "${replay_dir}")"
+            else
+                if [[ -s "${artifact_dir}/mixed/plan.json" ]]; then
+                    reproducer="$(printf 'just chaos run mixed-instability --image %q --plan %q' \
+                        "${reproducer_image}" "${artifact_dir}/mixed/plan.json")"
+                else
+                    reproducer="$(printf 'just chaos run mixed-instability --image %q --seed %q --duration %q --policy %q --coverage %q' \
+                        "${reproducer_image}" "${mixed_seed}" "${mixed_duration}" "${mixed_policy}" "${mixed_coverage}")"
+                fi
+                if [[ "${records_option_set}" == true ]]; then
+                    reproducer+="$(printf ' --records %q' "${record_count}")"
+                fi
+                if [[ "${timeout_option_set}" == true ]]; then
+                    reproducer+="$(printf ' --timeout %q' "${overall_timeout}")"
+                fi
+                if [[ "${limit_option_set}" == true ]]; then
+                    reproducer+="$(printf ' --max-memory-bytes %q --max-recovery-backlog %q --max-pending %q' \
+                        "${max_memory_bytes}" "${max_recovery_backlog}" "${max_pending}")"
+                fi
+            fi
+        elif [[ "${scenario}" == pause-resume ]]; then
             reproducer="$(printf 'just chaos run %q --image %q --records %q' \
                 "${scenario}" "${reproducer_image}" "${record_count}")"
         elif [[ "${scenario}" == partition-recovery ]]; then
@@ -669,6 +1098,12 @@ finish() {
         elif [[ "${scenario}" == former-owner-restart ]]; then
             reproducer="$(printf 'just chaos run %q --image %q --records %q --isolation-seconds %q' \
                 "${scenario}" "${reproducer_image}" "${record_count}" "${isolation_seconds}")"
+        elif [[ "${scenario}" == stateful || "${scenario}" == domain-time ]]; then
+            reproducer="$(printf 'just chaos run %q --image %q --nodes %q --fault %q --records %q' \
+                "${scenario}" "${reproducer_image}" "${node_count}" "${fault}" "${record_count}")"
+            if [[ "${outage_option_set}" == true ]]; then
+                reproducer+="$(printf ' --outage-seconds %q' "${outage_seconds}")"
+            fi
         elif [[ "${scenario}" == degraded-links ]]; then
             reproducer="$(printf 'just chaos run %q --image %q --records %q --profile %q --load-interval-ms %q --baseline-seconds %q --degrade-seconds %q --drain-seconds %q --max-backlog %q --max-recovery-backlog %q --max-memory-bytes %q --max-pending %q --min-throughput-pct %q' \
                 "${scenario}" "${reproducer_image}" "${record_count}" "${degradation_profile}" "${load_interval_ms}" "${baseline_seconds}" "${degrade_seconds}" "${drain_seconds}" "${max_backlog}" "${max_recovery_backlog}" "${max_memory_bytes}" "${max_pending}" "${min_throughput_pct}")"
@@ -691,7 +1126,9 @@ finish() {
             diagnostics/target-before-unpause.json diagnostics/target-unpause.txt \
             results/pause-progress.json \
             traffic/observed-output.ndjson results/crash-progress.json \
-            results/ledger.json results/ledger.txt results/container-images.json; do
+            results/ledger.json results/ledger.txt results/load-pacing.json \
+            results/state-load-pacing.json results/paced-load-pacing.json \
+            results/container-images.json; do
             if [[ -s "${artifact_dir}/${evidence_path}" ]]; then
                 evidence_paths+=("${evidence_path}")
             fi
@@ -735,8 +1172,22 @@ finish() {
                     evidence_paths+=("${evidence_path}")
                 fi
             done
+            for evidence_path in manifest.json fixtures/input.ndjson fixtures/baseline.nspl \
+                mixed/plan-validation.json results/mixed-trace.json results/mixed-resources.json \
+                results/mixed-instability.json; do
+                if [[ -s "${artifact_dir}/${evidence_path}" ]]; then
+                    evidence_paths+=("${evidence_path}")
+                fi
+            done
+            if [[ -d "${artifact_dir}/mixed/steps" ]]; then
+                while IFS= read -r evidence_path; do
+                    evidence_paths+=("${evidence_path#"${artifact_dir}/"}")
+                done < <(find "${artifact_dir}/mixed/steps" -mindepth 2 -maxdepth 2 -type f \
+                    \( -name 'result.json' -o -name 'recovered.json' -o -name 'hold-*.json' -o -name 'nodes.json' \) \
+                    -size +0c 2>/dev/null | sort)
+            fi
             local case_directory
-            for case_directory in stale former-owner restart; do
+            for case_directory in stale former-owner restart stateful domain-time mixed; do
                 [[ -d "${artifact_dir}/${case_directory}" ]] || continue
                 while IFS= read -r evidence_path; do
                     evidence_paths+=("${evidence_path#"${artifact_dir}/"}")
@@ -810,11 +1261,15 @@ finish() {
         --arg setup_error "${setup_error_message}" \
         --argjson exit_code "${status}" \
         --argjson resources_retained "${retained}" \
+        --argjson teardown_seconds "$((SECONDS - teardown_started))" \
+        --argjson teardown_reserve_seconds "${teardown_reserve_seconds}" \
         '.status = $status
          | .final_phase = $phase
          | .finished_at = $finished_at
          | .exit_code = $exit_code
          | .resources_retained = $resources_retained
+         | .teardown_seconds = $teardown_seconds
+         | .teardown_reserve_seconds = $teardown_reserve_seconds
          | if $signal == "" then . else .signal = $signal end
          | if $setup_error == "" then . else .setup_error = $setup_error end' \
         "${artifact_dir}/manifest.json" >"${manifest_tmp}" \
@@ -822,10 +1277,18 @@ finish() {
 
     printf '\nchaos %s %s (exit %d)\n' "${scenario}" "${final_status}" "${status}"
     printf 'artifacts: %s\n' "${artifact_dir}"
+    if [[ "${scenario}" == mixed-instability ]] && mixed_replayable; then
+        printf 'replay: just chaos replay %s\n' "${artifact_dir}"
+    fi
     if [[ "${retained}" == true ]]; then
         printf 'cleanup: just chaos cleanup --run-id %s\n' "${run_id}"
     fi
     exit "${status}"
+}
+
+# True once the run's manifest records the deployment, the last part of the experiment a replay needs.
+mixed_replayable() {
+    jq -e '.mixed.deployment.nodes | type == "object"' "${artifact_dir}/manifest.json" >/dev/null 2>&1
 }
 
 on_signal() {
@@ -877,7 +1340,7 @@ start_run_event_recording() {
         || setup_error "containers labeled for run ${run_id} already exist; remove them with just chaos cleanup --run-id ${run_id}"
     local start_status=0
     docker_event_recording_start "${artifact_dir}" diagnostics/docker-events.ndjson "${run_id}" \
-        "${CHAOS_PROBE_IMAGE}" "$((overall_timeout + 900))" || start_status=$?
+        "${CHAOS_PROBE_IMAGE}" "$((overall_timeout + teardown_reserve_seconds))" || start_status=$?
     if ((start_status == 3)); then
         setup_error 'the Docker daemon stamps events outside the time this controller measures around them; run chaos against the local Docker daemon'
     fi
@@ -968,16 +1431,29 @@ probe_broker() {
         --bootstrap-server broker:9092 --list >/dev/null 2>&1
 }
 
+# The probe container's script that requires every listener of the node its first argument names to
+# answer.
+node_listener_probe="
+    nc -z -w 2 \"\$1\" 47391
+    nc -z -w 2 \"\$1\" 47395
+    wget -q -T 3 -O /dev/null \"http://\$1:9090/livez\"
+    wget -q -T 3 -O /dev/null \"http://\$1:9090/metrics\"
+    wget -q -T 3 -O /dev/null \"http://\$1:47420/console/\"
+"
+
+# Requires every listener of HOSTNAME to answer and its /readyz to report a known leader.
 probe_node() {
     local hostname="$1"
-    compose run --rm --no-deps probe sh -eu -c "
-        nc -z -w 2 \"\$1\" 47391
-        nc -z -w 2 \"\$1\" 47395
-        wget -q -T 3 -O /dev/null \"http://\$1:9090/livez\"
+    compose run --rm --no-deps probe sh -eu -c "${node_listener_probe}
         wget -q -T 3 -O /dev/null \"http://\$1:9090/readyz\"
-        wget -q -T 3 -O /dev/null \"http://\$1:9090/metrics\"
-        wget -q -T 3 -O /dev/null \"http://\$1:47420/console/\"
     " -- "${hostname}" >/dev/null 2>&1
+}
+
+# Requires every listener of HOSTNAME to answer, whatever its /readyz reports: a node can know no
+# leader for a moment during an election, which loss on a leader's link can start.
+probe_node_listeners() {
+    local hostname="$1"
+    compose run --rm --no-deps probe sh -eu -c "${node_listener_probe}" -- "${hostname}" >/dev/null 2>&1
 }
 
 cluster_status_ready() {
@@ -1061,6 +1537,42 @@ wait_for_stable_output() {
     return 124
 }
 
+# Records a continuous load the scenario starts: the Compose SERVICE that runs it, the TOPIC it
+# produces to, its interval and where the run will leave its pacing verdict.
+manifest_load() {
+    local service="$1" topic="$2" interval_ms="$3"
+    # The dollars in this jq filter are jq variables, not shell expansion.
+    # shellcheck disable=SC2016
+    update_manifest '.loads += [{service: $service, topic: $topic, interval_ms: $interval_ms, pacing: ("results/" + $service + "-pacing.json")}]' \
+        --arg service "${service}" --arg topic "${topic}" --argjson interval_ms "${interval_ms}"
+}
+
+# Reads the create time the broker stored for each of the first COUNT records of TOPIC, in offset
+# order, and judges the gaps between them against the INTERVAL_MS of the Compose SERVICE that
+# produced them. The evidence is traffic/SERVICE-timestamps.txt and results/SERVICE-pacing.json. A
+# verdict that did not pass is kept and applied after the ledger, so a run whose load was not paced
+# still keeps its delivery evidence. Evidence that cannot be read is a controller failure at once.
+load_pacing_failures=()
+record_load_pacing() {
+    local service="$1" topic="$2" count="$3" interval_ms="$4"
+    local timestamps="${artifact_dir}/traffic/${service}-timestamps.txt"
+    local scenario_category="${failure_category}"
+    failure_category=controller
+    kcat -q -b broker:9092 -C -t "${topic}" -p 0 -o beginning -c "${count}" -f '%T %o\n' \
+        >"${timestamps}" 2>"${artifact_dir}/traffic/${service}-timestamps.stderr"
+    local timestamp_count
+    timestamp_count="$(wc -l <"${timestamps}")"
+    if [[ "${timestamp_count}" -ne "${count}" ]]; then
+        printf '%s timestamps cover %s records, expected %s\n' "${topic}" "${timestamp_count}" "${count}" >&2
+        return 1
+    fi
+    failure_category="${scenario_category}"
+    "${script_dir}/verify-load-pacing.sh" "${timestamps}" "${interval_ms}" \
+        "${artifact_dir}/results/${service}-pacing.json" \
+        >"${artifact_dir}/results/${service}-pacing.txt" 2>&1 \
+        || load_pacing_failures+=("${service}")
+}
+
 capture_metrics() {
     local hostname="$1"
     local output="${artifact_dir}/public/metrics-${hostname}.txt"
@@ -1115,6 +1627,36 @@ traffic_metrics_ready() {
     fi
 }
 
+# A replay starts exactly the Nervix image its run recorded: by that image ID when it is local, or
+# pulled through a recorded repository digest that resolves to the same ID.
+resolve_recorded_image() {
+    if image_id="$(run_bounded 30 docker image inspect --format '{{.Id}}' "${replay_image_id}" 2>/dev/null)" \
+        && [[ "${image_id}" == "${replay_image_id}" ]]; then
+        return 0
+    fi
+    local candidates=()
+    IFS=, read -r -a candidates <<<"${replay_repo_digests}"
+    if [[ "${image_ref}" == *@sha256:* ]]; then
+        candidates+=("${image_ref}")
+    fi
+    local candidate
+    for candidate in ${candidates[@]+"${candidates[@]}"}; do
+        [[ -n "${candidate}" ]] || continue
+        printf 'the recorded image is not local; attempting bounded pull: %s\n' "${candidate}"
+        if run_bounded 180 docker pull "${candidate}" >>"${artifact_dir}/image-pull.txt" 2>&1 \
+            && image_id="$(run_bounded 30 docker image inspect --format '{{.Id}}' "${candidate}" 2>/dev/null)" \
+            && [[ "${image_id}" == "${replay_image_id}" ]]; then
+            return 0
+        fi
+    done
+    setup_error "the recorded Nervix image ${replay_image_id} is unavailable: it is not local and no recorded repository digest pulled it"
+}
+
+if [[ "${scenario}" == mixed-instability ]]; then
+    phase "action plan and fixtures"
+    prepare_mixed_experiment
+fi
+
 phase "preflight"
 run_bounded 30 docker info >/dev/null \
     || setup_error 'Docker daemon is unavailable'
@@ -1129,11 +1671,17 @@ if [[ "${scenario}" != "baseline" && "${scenario}" != backup ]]; then
     resolve_tool_image pumba "${CHAOS_PUMBA_IMAGE}"
     pumba_image_id="${tool_image_ids[pumba]}"
 fi
-if [[ "${scenario}" == partition-recovery || "${scenario}" == degraded-links || "${scenario}" == former-owner-restart ]]; then
+if [[ "${scenario}" == partition-recovery || "${scenario}" == degraded-links || "${scenario}" == former-owner-restart || "${fault}" == *-partition || "${scenario}" == mixed-instability ]]; then
     resolve_tool_image nettools "${CHAOS_NETTOOLS_IMAGE}"
 fi
+for tool in "${!replay_tool_image_ids[@]}"; do
+    [[ "${tool_image_ids[${tool}]:-}" == "${replay_tool_image_ids[${tool}]}" ]] \
+        || setup_error "the recorded ${tool} image resolved to ${tool_image_ids[${tool}]:-nothing}, not the recorded ${replay_tool_image_ids[${tool}]}"
+done
 
-if ! image_id="$(run_bounded 30 docker image inspect --format '{{.Id}}' "${image_ref}" 2>/dev/null)"; then
+if [[ -n "${replay_dir}" ]]; then
+    resolve_recorded_image
+elif ! image_id="$(run_bounded 30 docker image inspect --format '{{.Id}}' "${image_ref}" 2>/dev/null)"; then
     printf 'image is not local; attempting bounded pull: %s\n' "${image_ref}"
     run_bounded 180 docker pull "${image_ref}" \
         >"${artifact_dir}/image-pull.txt" 2>&1 \
@@ -1145,7 +1693,7 @@ fi
     || setup_error "image '${image_ref}' did not resolve to an immutable local image ID"
 
 image_digest="$(run_bounded 30 docker image inspect \
-    --format '{{join .RepoDigests ","}}' "${image_ref}" 2>/dev/null || true)"
+    --format '{{join .RepoDigests ","}}' "${image_id}" 2>/dev/null || true)"
 # The dollars in this jq filter are jq variables, not shell expansion.
 # shellcheck disable=SC2016
 update_manifest '.resolved_image_id = $image_id | .resolved_repo_digests = $digests' \
@@ -1163,11 +1711,13 @@ if [[ "${scenario}" != "baseline" && "${scenario}" != backup ]]; then
         --mount type=bind,src=/var/run/docker.sock,dst=/var/run/docker.sock \
         "${pumba_image_id}" --version >"${artifact_dir}/pumba-version.txt"
     pumba_preflight=(stop --time 60 impossible-chaos-preflight-target)
-    if [[ "${scenario}" == *-crash || "${scenario}" == former-owner-restart || "${scenario}" == cluster-restart ]]; then
+    if [[ "${scenario}" == *-crash || "${scenario}" == former-owner-restart || "${scenario}" == cluster-restart \
+        || "${fault}" == *-crash || "${fault}" == cluster-restart ]]; then
         pumba_preflight=(kill --signal SIGKILL impossible-chaos-preflight-target)
-    elif [[ "${scenario}" == pause-resume ]]; then
+    elif [[ "${scenario}" == pause-resume || "${fault}" == *-pause ]]; then
         pumba_preflight=(pause --duration 1s impossible-chaos-preflight-target)
-    elif [[ "${scenario}" == partition-recovery || "${scenario}" == degraded-links ]]; then
+    elif [[ "${scenario}" == partition-recovery || "${scenario}" == degraded-links || "${fault}" == *-partition \
+        || "${scenario}" == mixed-instability ]]; then
         pumba_preflight=(netem --duration 1s --target 192.0.2.1 loss --percent 100 impossible-chaos-preflight-target)
     fi
     run_bounded 30 docker run --rm \
@@ -1177,7 +1727,7 @@ if [[ "${scenario}" != "baseline" && "${scenario}" != backup ]]; then
         >"${artifact_dir}/diagnostics/pumba-docker-preflight.txt" 2>&1 \
         || setup_error 'Pumba cannot access the selected Docker daemon'
 fi
-if [[ "${scenario}" == partition-recovery || "${scenario}" == degraded-links || "${scenario}" == former-owner-restart ]]; then
+if [[ "${scenario}" == partition-recovery || "${scenario}" == degraded-links || "${scenario}" == former-owner-restart || "${fault}" == *-partition || "${scenario}" == mixed-instability ]]; then
     # Pumba's netem and iptables faults must take effect on this worker's kernel and heal on SIGTERM.
     run_bounded 120 "${script_dir}/network-faults.sh" preflight --run-id "${run_id}" \
         --pumba "${pumba_image_id}" --nettools "${CHAOS_NETTOOLS_IMAGE}" \
@@ -1193,6 +1743,14 @@ if [[ "${scenario}" != "baseline" && "${scenario}" != backup ]]; then
     # shellcheck disable=SC2016
     update_manifest '.pumba_image_id = $image_id | .pumba_image = $image' \
         --arg image_id "${pumba_image_id}" --arg image "${CHAOS_PUMBA_IMAGE}"
+fi
+if [[ "${scenario}" != baseline ]]; then
+    manifest_load load chaos_input "${load_interval_ms}"
+fi
+if [[ "${scenario}" == stateful ]]; then
+    manifest_load state-load chaos_state_input "${CHAOS_STATE_LOAD_INTERVAL_MS}"
+elif [[ "${scenario}" == domain-time ]]; then
+    manifest_load paced-load chaos_paced_input "${CHAOS_PACED_LOAD_INTERVAL_MS}"
 fi
 if [[ "${scenario}" == partition-recovery ]]; then
     # shellcheck disable=SC2016
@@ -1211,6 +1769,12 @@ elif [[ "${scenario}" == former-owner-restart ]]; then
 elif [[ "${scenario}" == cluster-restart ]]; then
     # shellcheck disable=SC2016
     update_manifest '.recovery = {minimum_outage_seconds: $seconds}' --argjson seconds "${outage_seconds}"
+elif [[ "${scenario}" == stateful || "${scenario}" == domain-time ]]; then
+    # The dollars in this jq filter are jq variables, not shell expansion.
+    # shellcheck disable=SC2016
+    update_manifest '.fault = $fault | .deployment = {replica_count: ($replicas | tonumber), state_snapshot_interval: $interval}' \
+        --arg fault "${fault}" --arg replicas "${CHAOS_REPLICA_COUNT:-0}" \
+        --arg interval "${CHAOS_STATE_SNAPSHOT_INTERVAL:-30s}"
 fi
 if [[ "${scenario}" == degraded-links ]]; then
     # The dollars in this jq filter are jq variables, not shell expansion.
@@ -1231,7 +1795,10 @@ if [[ "${scenario}" == degraded-links ]]; then
 fi
 
 phase "verifier self-check"
-run_bounded 180 "${script_dir}/tests/self-test.sh" \
+# The self-check drives Docker as a scenario does, so the worker's load stretches it: it takes half
+# a minute on a quiet worker and took 247 seconds beside three chaos runs on a loaded one. The bound
+# only ends a self-check that hangs.
+run_bounded 600 "${script_dir}/tests/self-test.sh" \
     >"${artifact_dir}/results/verifier-self-test.txt" 2>&1
 
 phase "TLS generation"
@@ -1239,6 +1806,22 @@ generate_tls
 
 phase "Compose validation"
 compose config --quiet
+if [[ "${scenario}" == mixed-instability ]]; then
+    # The node settings and load interval Compose renders are part of the experiment, so a replay
+    # deploys them again and refuses to start when its rendering differs.
+    deployment="$(compose config --format json | jq -c '
+        {nodes: (.services["nervix-1"].environment
+                 | with_entries(select(.key | test("^NERVIX_(RAFT_|NODE_UNAVAILABILITY_TIMEOUT$|REPLICA_COUNT$|STATE_SNAPSHOT_INTERVAL$)")))),
+         load_interval_ms: (.services.load.environment.CHAOS_LOAD_INTERVAL_MS | tonumber)}')"
+    if [[ -n "${replay_dir}" ]]; then
+        jq -e --argjson rendered "${deployment}" '.mixed.deployment == $rendered' \
+            "${replay_dir}/manifest.json" >/dev/null \
+            || setup_error "this controller renders the deployment ${deployment}, not the one ${replay_dir} recorded"
+    fi
+    # The dollars in this jq filter are jq variables, not shell expansion.
+    # shellcheck disable=SC2016
+    update_manifest '.mixed.deployment = $deployment' --argjson deployment "${deployment}"
+fi
 compose config >"${artifact_dir}/compose.rendered.yaml"
 compose_ready=true
 
@@ -1259,6 +1842,19 @@ broker_admin /opt/kafka/bin/kafka-topics.sh \
 broker_admin /opt/kafka/bin/kafka-topics.sh \
     --bootstrap-server broker:9092 --describe --topic chaos_output \
     >"${artifact_dir}/public/output-topic.txt"
+scenario_topics=()
+if [[ "${scenario}" == stateful ]]; then
+    scenario_topics=(chaos_state_input chaos_profile_input chaos_unique_output chaos_window_output
+        chaos_enriched_output chaos_counted_output)
+elif [[ "${scenario}" == domain-time ]]; then
+    scenario_topics=(chaos_paced_input chaos_paced_output)
+fi
+for scenario_topic in ${scenario_topics[@]+"${scenario_topics[@]}"}; do
+    broker_admin /opt/kafka/bin/kafka-topics.sh \
+        --bootstrap-server broker:9092 \
+        --create --topic "${scenario_topic}" --partitions 1 --replication-factor 1 \
+        >"${artifact_dir}/public/create-topic-${scenario_topic}.txt"
+done
 
 phase "Nervix startup"
 compose up --detach nervix-1
@@ -1301,9 +1897,50 @@ if [[ "${scenario}" == backup ]]; then
 fi
 cli_command 'CREATE UNPACED DOMAIN chaos_baseline;' \
     >"${artifact_dir}/public/create-domain.txt" 2>&1
+if [[ "${scenario}" == stateful ]]; then
+    # The WASM guest is a prebuilt module in WebAssembly text, which the packaged server loads
+    # directly; the run uploads exactly that file and records its identity.
+    mkdir -p "${artifact_dir}/fixtures/wasm/processors"
+    cp "${script_dir}/fixtures/wasm/processors/branch-counter.wat" \
+        "${artifact_dir}/fixtures/wasm/processors/branch-counter.wat"
+    chmod 0755 "${artifact_dir}/fixtures/wasm" "${artifact_dir}/fixtures/wasm/processors"
+    chmod 0644 "${artifact_dir}/fixtures/wasm/processors/branch-counter.wat"
+    wasm_fixture_digest="$(openssl dgst -sha256 -r \
+        "${artifact_dir}/fixtures/wasm/processors/branch-counter.wat" | awk '{ print $1 }')"
+    [[ "${wasm_fixture_digest}" =~ ^[a-f0-9]{64}$ ]] \
+        || setup_error 'the WASM fixture digest could not be computed'
+    # The dollars in this jq filter are jq variables, not shell expansion.
+    # shellcheck disable=SC2016
+    update_manifest '.fixtures.wasm = {resource: "chaos_counter_guest", resource_version: 1,
+        file: "processors/branch-counter.wat", format: "WebAssembly text", sha256: $digest,
+        bytes: ($bytes | tonumber), source: "scripts/chaos/fixtures/wasm/processors/branch-counter.wat"}' \
+        --arg digest "${wasm_fixture_digest}" \
+        --arg bytes "$(wc -c <"${artifact_dir}/fixtures/wasm/processors/branch-counter.wat")"
+    domain_cli_command 'CREATE RESOURCE chaos_counter_guest;' \
+        >"${artifact_dir}/public/create-wasm-resource.txt" 2>&1
+    compose run --rm --no-deps -v "${artifact_dir}/fixtures/wasm:/chaos-wasm:ro" admin \
+        nervix-cli --server "http://${cli_host}:47391" --domain chaos_baseline \
+        --password "${CHAOS_PASSWORD}" \
+        --command "UPLOAD RESOURCE chaos_counter_guest VERSION '/chaos-wasm';" \
+        >"${artifact_dir}/public/upload-wasm-resource.txt" 2>&1
+    grep -Fxq 'uploaded resource version 1' "${artifact_dir}/public/upload-wasm-resource.txt" \
+        || setup_error 'the packaged CLI did not upload the WASM fixture as resource version 1'
+fi
 domain_cli_command "${nspl_fixture}" \
     >"${artifact_dir}/public/configure-nspl.txt" 2>&1
+if [[ "${scenario}" == stateful ]]; then
+    domain_cli_command "$(<"${script_dir}/fixtures/stateful.nspl")" \
+        >"${artifact_dir}/public/configure-stateful-nspl.txt" 2>&1
+fi
 domain_cli_command 'START;' >"${artifact_dir}/public/start-domain.txt" 2>&1
+if [[ "${scenario}" == domain-time ]]; then
+    cli_command 'CREATE PACED DOMAIN chaos_paced WITH PERIOD 1s SKEW 1s;' \
+        >"${artifact_dir}/public/create-paced-domain.txt" 2>&1
+    run_cli chaos_paced "$(<"${script_dir}/fixtures/paced.nspl")" \
+        >"${artifact_dir}/public/configure-paced-nspl.txt" 2>&1
+    run_cli chaos_paced 'START AT NOW TIME RATE 4.0;' \
+        >"${artifact_dir}/public/start-paced-domain.txt" 2>&1
+fi
 
 phase "public placement evidence"
 if [[ "${node_count}" == "3" ]]; then
@@ -1387,6 +2024,18 @@ if [[ "${scenario}" != "baseline" ]]; then
         # shellcheck source=cluster-restart-scenario.sh
         source "${script_dir}/cluster-restart-scenario.sh"
         run_cluster_restart
+    elif [[ "${scenario}" == stateful ]]; then
+        # shellcheck source=stateful-scenario.sh
+        source "${script_dir}/stateful-scenario.sh"
+        run_stateful
+    elif [[ "${scenario}" == domain-time ]]; then
+        # shellcheck source=domain-time-scenario.sh
+        source "${script_dir}/domain-time-scenario.sh"
+        run_domain_time
+    elif [[ "${scenario}" == mixed-instability ]]; then
+        # shellcheck source=mixed-scenario.sh
+        source "${script_dir}/mixed-scenario.sh"
+        run_mixed_instability
     else
         # shellcheck source=crash-scenario.sh
         source "${script_dir}/crash-scenario.sh"
@@ -1425,6 +2074,11 @@ kcat -q -b broker:9092 -C -t chaos_input -p 0 -o beginning -c "${input_end}" \
 accepted_count="$(wc -l <"${artifact_dir}/traffic/accepted-input.ndjson")"
 [[ "${accepted_count}" -eq "${input_end}" ]] \
     || { printf 'accepted-input ledger has %s records, expected %s\n' "${accepted_count}" "${input_end}" >&2; exit 1; }
+fi
+
+if [[ "${scenario}" != baseline ]]; then
+    phase "load pacing"
+    record_load_pacing load chaos_input "${input_end}" "${load_interval_ms}"
 fi
 
 phase "offset and output boundaries"
@@ -1611,6 +2265,47 @@ elif [[ "${scenario}" == "partition-recovery" ]]; then
         jq -r '.findings[] | "- \(.case): \(.message)"' "${artifact_dir}/results/partition-recovery.json" >&2
         exit 1
     fi
+elif [[ "${scenario}" == mixed-instability ]]; then
+    jq -n \
+        --arg run_id "${run_id}" \
+        --arg image_id "${image_id}" \
+        --argjson tool_images "${tool_images_json}" \
+        --argjson accepted_records "${input_end}" \
+        --argjson observed_records "${output_end}" \
+        --slurpfile manifest "${artifact_dir}/manifest.json" \
+        --slurpfile trace "${artifact_dir}/results/mixed-trace.json" \
+        --slurpfile resources "${artifact_dir}/results/mixed-resources.json" \
+        --slurpfile ledger "${artifact_dir}/results/ledger.json" \
+        --slurpfile findings "${artifact_dir}/results/recovery-findings.ndjson" \
+        '{verdict: (if $trace[0].verdict != "complete" or $resources[0].verdict == "gapped" then "incomplete"
+                    elif ($findings | length) > 0 then "fail" else "pass" end),
+          run_id: $run_id, image_id: $image_id, tool_images: $tool_images,
+          seed: $manifest[0].mixed.seed, policy: $manifest[0].mixed.policy,
+          plan: $manifest[0].mixed.plan, replay_of: $manifest[0].replay_of, topology_nodes: 3,
+          coverage: $trace[0].coverage, action_trace: $trace[0].verdict, resources: $resources[0].verdict,
+          accepted_source_records: $accepted_records, observed_output_records: $observed_records,
+          replay_duplicates: $ledger[0].duplicate_records, source_offsets_committed: true,
+          ledger: "results/ledger.json", remote_path: "results/remote-path.json", findings: $findings,
+          progress: "results/mixed-instability-progress.json"}' \
+        >"${artifact_dir}/results/mixed-instability.json"
+    case "$(jq -r '.verdict' "${artifact_dir}/results/mixed-instability.json")" in
+        incomplete)
+            failure_category=controller
+            current_phase='mixed-instability evidence'
+            printf 'mixed-instability evidence is incomplete: action trace %s, resource sampling %s; see results/mixed-trace.json and results/mixed-resources.json\n' \
+                "$(jq -r '.action_trace' "${artifact_dir}/results/mixed-instability.json")" \
+                "$(jq -r '.resources' "${artifact_dir}/results/mixed-instability.json")" >&2
+            exit 1
+            ;;
+        fail)
+            failure_category=product
+            current_phase='mixed-instability product findings'
+            printf 'mixed-instability recorded %d product finding(s):\n' \
+                "$(jq '.findings | length' "${artifact_dir}/results/mixed-instability.json")" >&2
+            jq -r '.findings[] | "- \(.phase): \(.message)"' "${artifact_dir}/results/mixed-instability.json" >&2
+            exit 1
+            ;;
+    esac
 elif [[ "${recovery_scenario}" == true ]]; then
     jq -n \
         --arg run_id "${run_id}" \
@@ -1673,6 +2368,18 @@ else
         --slurpfile ledger "${artifact_dir}/results/ledger.json" \
         '{verdict:"pass",run_id:$run_id,scenario:$scenario,image_id:$image_id,tool_images:$tool_images,topology_nodes:$nodes,accepted_source_records:$accepted_records,observed_output_records:$observed_records,replay_duplicates:$ledger[0].duplicate_records,source_offsets_committed:true,ledger:"results/ledger.json",remote_path:"results/remote-path.json",progress:$progress[0]}' \
         >"${artifact_dir}/results/crash.json"
+fi
+
+# A run whose other verdicts passed still fails when a load has no passing pacing verdict: every
+# timing the run reports was then measured under a load other than the declared one.
+if ((${#load_pacing_failures[@]} > 0)); then
+    failure_category=controller
+    current_phase='load pacing'
+    for unpaced_load in "${load_pacing_failures[@]}"; do
+        printf 'controller failure: %s was not verified to keep its records an interval apart; see results/%s-pacing.json\n' \
+            "${unpaced_load}" "${unpaced_load}" >&2
+    done
+    exit 1
 fi
 
 current_phase="complete"

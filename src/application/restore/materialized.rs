@@ -17,7 +17,7 @@ use nervix_execution::{ChargedBytes, CpuClass, MemoryClass};
 use nervix_primitives::sync::StdArc;
 use thiserror::Error;
 
-use super::prepare::VerifiedArchive;
+use super::prepare::{ArchiveSectionReadError, VerifiedArchive};
 use crate::{
     runtime::{
         Runtime, StagedArtifact, materialized_columns_frame, materialized_container_header,
@@ -54,30 +54,17 @@ async fn read_section(
     section: &DescribedSection,
     limit: u64,
 ) -> Result<ChargedBytes, Report<MaterializedRestoreError>> {
-    if section.length > limit {
-        return Err(Report::new(MaterializedRestoreError::SectionLength));
-    }
-    let charge = runtime
-        .executor()
-        .reserve(MemoryClass::Bulk, section.length.max(1))
+    archive
+        .read_bounded_section(runtime, section, limit)
         .await
-        .change_context(MaterializedRestoreError::Admission)?;
-    let capacity = usize::try_from(section.length)
-        .map_err(|_| Report::new(MaterializedRestoreError::SectionLength))?;
-    let mut bytes = Vec::with_capacity(capacity);
-    let mut offset = 0_u64;
-    while offset < section.length {
-        nervix_primitives::task::consume_budget().await;
-        let chunk = archive
-            .read_guest_chunk(runtime, section, offset)
-            .await
-            .change_context(MaterializedRestoreError::Storage)?;
-        bytes.extend_from_slice(&chunk);
-        offset = offset
-            .checked_add(u64::try_from(chunk.len()).verified("one bounded chunk fits"))
-            .ok_or_else(|| Report::new(MaterializedRestoreError::SectionLength))?;
-    }
-    Ok(ChargedBytes::from_owned(bytes, charge))
+        .map_err(|error| {
+            let context = match error.current_context() {
+                ArchiveSectionReadError::TooLong { .. } => MaterializedRestoreError::SectionLength,
+                ArchiveSectionReadError::Admission => MaterializedRestoreError::Admission,
+                ArchiveSectionReadError::Read => MaterializedRestoreError::Storage,
+            };
+            error.change_context(context)
+        })
 }
 
 async fn stage_piece(

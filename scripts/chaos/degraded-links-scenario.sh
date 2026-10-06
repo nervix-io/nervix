@@ -3,6 +3,8 @@
 
 # shellcheck source=partition-scenario.sh
 source "${script_dir}/partition-scenario.sh"
+# shellcheck source=link-degradation.sh
+source "${script_dir}/link-degradation.sh"
 
 degradation_root="${artifact_dir}/degraded"
 degradation_sample_number=0
@@ -121,151 +123,16 @@ degradation_sample_window() {
     degradation_sample "${stage}" "${profile}"
 }
 
-degradation_ping() {
-    local output="$1"
-    local sender_id address
-    sender_id="$(owned_service_container nervix-2)"
-    address="$(node_address nervix-3)"
-    local ping_status=0
-    run_bounded 30 docker run --rm \
-        --label "io.nervix.chaos.run=${run_id}" \
-        --label io.nervix.chaos.role=link-probe \
-        --network "container:${sender_id}" "${CHAOS_PROBE_IMAGE}" \
-        ping -c 40 -i 0.1 -W 1 "${address}" >"${output}" 2>&1 || ping_status=$?
-    [[ "${ping_status}" -eq 0 || "${ping_status}" -eq 1 ]] \
-        || degradation_fail observation "ping helper failed with ${ping_status}"
-    "${script_dir}/verify-degraded-evidence.sh" ping "${output}" "${output%.txt}.json"
-}
-
-degradation_rate_probe() {
-    local output="$1"
-    local sender_id receiver_id receiver_ip server_id
-    sender_id="$(owned_service_container nervix-2)"
-    receiver_id="$(owned_service_container nervix-3)"
-    receiver_ip="$(node_address nervix-3)"
-    server_id="$(run_bounded 30 docker run --detach \
-        --label "io.nervix.chaos.run=${run_id}" \
-        --label io.nervix.chaos.role=link-probe \
-        --network "container:${receiver_id}" --entrypoint sh "${CHAOS_PROBE_IMAGE}" \
-        -c 'nc -l -p 18081 | wc -c')"
-    local ready=false
-    local _
-    for _ in $(seq 1 10); do
-        if run_bounded 5 docker exec "${server_id}" sh -c \
-            'netstat -ltn | grep -q ":18081 "'; then
-            ready=true
-            break
-        fi
-        sleep 1
-    done
-    if [[ "${ready}" != true ]]; then
-        run_bounded 20 docker container rm --force "${server_id}" >/dev/null 2>&1 || true
-        degradation_fail observation 'rate receiver did not start listening within 10 seconds'
-    fi
-    local started finished status=0
-    started="$(epoch_ms)"
-    # The positional parameter belongs to the helper container's shell.
-    # shellcheck disable=SC2016
-    run_bounded 35 docker run --rm \
-        --label "io.nervix.chaos.run=${run_id}" \
-        --label io.nervix.chaos.role=link-probe \
-        --network "container:${sender_id}" --entrypoint sh "${CHAOS_PROBE_IMAGE}" \
-        -c 'dd if=/dev/zero bs=1024 count=256 2>/dev/null | nc -w 1 "$1" 18081' \
-        -- "${receiver_ip}" >"${output%.json}.log" 2>&1 || status=$?
-    local server_status=0 receiver_bytes=""
-    run_bounded 40 docker wait "${server_id}" >"${output%.json}.server-exit.txt" \
-        2>&1 || server_status=$?
-    finished="$(epoch_ms)"
-    receiver_bytes="$(run_bounded 20 docker logs "${server_id}" 2>/dev/null | tr -d '[:space:]')"
-    run_bounded 20 docker container rm --force "${server_id}" >/dev/null 2>&1 || true
-    [[ "${status}" -eq 0 ]] || degradation_fail observation "rate probe failed with ${status}"
-    [[ "${server_status}" -eq 0 && "${receiver_bytes}" == 262144 \
-        && "$(cat "${output%.json}.server-exit.txt")" == 0 ]] \
-        || degradation_fail observation "rate receiver got ${receiver_bytes:-no count} bytes instead of 262144"
-    jq -n --argjson bytes 262144 --argjson received_bytes "${receiver_bytes}" \
-        --argjson duration_ms "$((finished - started))" \
-        '{bytes:$bytes,received_bytes:$received_bytes,duration_ms:$duration_ms,
-          bytes_per_second:($received_bytes * 1000 / $duration_ms)}' \
-        >"${output}"
-}
-
-degradation_fault_args() {
-    local profile="$1"
-    degradation_args=(netem --duration 300s --interface eth0 --tc-image "${CHAOS_NETTOOLS_IMAGE}"
-        --pull-image=false --target "$(node_address nervix-3)")
-    case "${profile}" in
-        delay) degradation_args+=(delay --time 180 --jitter 0 --correlation 0) ;;
-        jitter) degradation_args+=(delay --time 180 --jitter 100 --correlation 0 --distribution normal) ;;
-        random-loss) degradation_args+=(loss --percent 30 --correlation 0) ;;
-        burst-loss) degradation_args+=(loss-state --p13 20 --p31 15 --p32 0 --p23 100 --p14 0) ;;
-        rate-limit) degradation_args+=(rate --rate 256kbit) ;;
-        combined) degradation_args+=(combine --delay --delay-time 180 --delay-jitter 60
-            --loss --loss-percent 20 --rate --rate-value 256kbit --) ;;
-    esac
-}
-
+# Degrades the relay-to-emitter link from nervix-2 to nervix-3 with PROFILE, recording the injector's
+# start and the verified fault on the action timeline.
 degradation_install() {
     local case_dir="$1" profile="$2" ordinal="$3"
-    local sender_id sender_name
-    sender_id="$(owned_service_container nervix-2)"
-    sender_name="$(run_bounded 20 docker inspect --format '{{.Name}}' "${sender_id}")"
-    sender_name="${sender_name#/}"
-    local host
-    for host in "${node_hosts[@]}"; do
-        inspect_node_rules "${host}" "${case_dir}/rules-before-${host}.txt"
-        "${script_dir}/verify-degraded-evidence.sh" rules default \
-            "${case_dir}/rules-before-${host}.txt" "$(node_address nervix-3)"
-    done
-    degradation_fault_args "${profile}"
-    local dry_args=("${degradation_args[@]}")
-    dry_args[2]=1s
-    run_bounded 30 docker run --rm \
-        --label "io.nervix.chaos.run=${run_id}" \
-        --label io.nervix.chaos.role=fault \
-        --mount type=bind,src=/var/run/docker.sock,dst=/var/run/docker.sock \
-        "${pumba_image_id}" --dry-run --log-level info \
-        --label "io.nervix.chaos.run=${run_id}" --label io.nervix.chaos.role=node \
-        "${dry_args[@]}" "${sender_name}" >"${case_dir}/pumba-dry-run.txt" 2>&1
-    local selections
-    selections="$(grep -F 'msg="running netem on container"' "${case_dir}/pumba-dry-run.txt" || true)"
-    if [[ "$(grep -c . <<<"${selections}")" -ne 1 ]] \
-        || ! grep -Fq "id=${sender_id}" <<<"${selections}" \
-        || ! grep -Fq "name=/${sender_name}" <<<"${selections}"; then
-        degradation_fail injection 'Pumba dry run did not select exactly nervix-2'
-    fi
-    printf '%s\n' "${degradation_args[@]}" | jq -R . | jq -s . >"${case_dir}/pumba-arguments.json"
-    degradation_injector_id="$(run_bounded 30 docker run --detach \
-        --name "${project_name}-degraded-${ordinal}-${profile}" \
-        --label "io.nervix.chaos.run=${run_id}" --label io.nervix.chaos.role=fault \
-        --mount type=bind,src=/var/run/docker.sock,dst=/var/run/docker.sock \
-        "${pumba_image_id}" --log-level info \
-        --label "io.nervix.chaos.run=${run_id}" --label io.nervix.chaos.role=node \
-        "${degradation_args[@]}" "${sender_name}")"
+    link_degradation_start "${case_dir}" nervix-2 nervix-3 "${profile}" \
+        "${project_name}-degraded-${ordinal}-${profile}" 300
+    degradation_injector_id="${link_degradation_injector_id}"
     degradation_action "${profile}" injector_started
-    printf '%s\n' "${degradation_injector_id}" >"${case_dir}/injector-id.txt"
-    local _
-    for _ in $(seq 1 30); do
-        inspect_node_rules nervix-2 "${case_dir}/rules-installed.txt"
-        if "${script_dir}/verify-degraded-evidence.sh" rules "${profile}" \
-            "${case_dir}/rules-installed.txt" "$(node_address nervix-3)" \
-            >"${case_dir}/rules-verdict.txt" 2>&1; then
-            for host in nervix-1 nervix-3; do
-                inspect_node_rules "${host}" "${case_dir}/rules-installed-${host}.txt"
-                "${script_dir}/verify-degraded-evidence.sh" rules default \
-                    "${case_dir}/rules-installed-${host}.txt" "$(node_address nervix-3)" \
-                    || degradation_fail injection "${host} received an unintended network rule"
-            done
-            degradation_action "${profile}" fault_verified
-            probe_broker || degradation_fail injection 'broker endpoint changed during the fault'
-            for host in "${node_hosts[@]}"; do
-                probe_node "${host}" || degradation_fail injection "${host} application endpoint changed during the fault"
-            done
-            return 0
-        fi
-        container_running "${degradation_injector_id}" || break
-        sleep 1
-    done
-    degradation_fail injection "${profile} rules did not match the owned netem plan"
+    link_degradation_verify "${case_dir}" nervix-2 nervix-3 "${profile}"
+    degradation_action "${profile}" fault_verified
 }
 
 degradation_heal() {
@@ -273,23 +140,9 @@ degradation_heal() {
     local profile="${case_dir##*/}"
     profile="${profile#*-}"
     degradation_action "${profile}" heal_requested
-    run_bounded 60 docker stop -t 40 "${degradation_injector_id}" \
-        >"${case_dir}/pumba-stop.txt" 2>&1
-    local exit_code
-    exit_code="$(run_bounded 20 docker inspect --format '{{.State.ExitCode}}' "${degradation_injector_id}")"
-    run_bounded 20 docker logs "${degradation_injector_id}" >"${case_dir}/pumba.log" 2>&1
-    run_bounded 20 docker container rm "${degradation_injector_id}" >/dev/null
+    link_degradation_heal "${case_dir}" nervix-2 nervix-3 "${degradation_injector_id}" \
+        "${case_dir}/ping-baseline.json"
     degradation_injector_id=""
-    [[ "${exit_code}" == 0 ]] || degradation_fail injection "Pumba exited ${exit_code} after SIGTERM"
-    local host
-    for host in "${node_hosts[@]}"; do
-        inspect_node_rules "${host}" "${case_dir}/rules-healed-${host}.txt"
-        "${script_dir}/verify-degraded-evidence.sh" rules default \
-            "${case_dir}/rules-healed-${host}.txt" "$(node_address nervix-3)"
-    done
-    degradation_ping "${case_dir}/ping-healed.txt"
-    "${script_dir}/verify-degraded-evidence.sh" effect healed \
-        "${case_dir}/ping-baseline.json" "${case_dir}/ping-healed.json"
     degradation_action "${profile}" link_healed
 }
 
@@ -400,8 +253,8 @@ run_degraded_links() {
     jq '.traffic_observed_before_degradation = true' \
         "${artifact_dir}/results/remote-path.json" >"${remote_path_tmp}"
     mv "${remote_path_tmp}" "${artifact_dir}/results/remote-path.json"
-    degradation_ping "${degradation_root}/ping-baseline.txt"
-    degradation_rate_probe "${degradation_root}/rate-baseline.json"
+    link_ping "${degradation_root}/ping-baseline.txt" nervix-2 nervix-3
+    link_rate_probe "${degradation_root}/rate-baseline.json" nervix-2 nervix-3
     degradation_action healthy baseline_started
     degradation_sample_window baseline healthy "${baseline_seconds}"
     degradation_baseline_rps="$(jq -s -r '
@@ -427,9 +280,9 @@ run_degraded_links() {
         phase "degraded-links ${ordinal}/${#cases[@]}: ${profile}"
         check_support_containers || degradation_fail setup 'load ended before all profiles completed; increase --records'
         degradation_install "${case_dir}" "${profile}" "${ordinal}"
-        degradation_ping "${case_dir}/ping-fault.txt"
+        link_ping "${case_dir}/ping-fault.txt" nervix-2 nervix-3
         if [[ "${profile}" == rate-limit || "${profile}" == combined ]]; then
-            degradation_rate_probe "${case_dir}/rate-fault.json"
+            link_rate_probe "${case_dir}/rate-fault.json" nervix-2 nervix-3
         fi
         "${script_dir}/verify-degraded-evidence.sh" effect "${profile}" \
             "${case_dir}/ping-baseline.json" "${case_dir}/ping-fault.json" \

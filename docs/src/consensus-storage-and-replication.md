@@ -108,7 +108,12 @@ The retention view keeps the current generation of every applying restore and an
 ahead of the applied log; without an applied log it keeps all generations. Leadership and lease
 expiry alone do not end an applying execution's retry lifetime. Terminal, expired, missing or
 superseded executions no longer retain an applied unpublished generation. The runtime store
-protects its selected durable publication independently. This adds no consensus record or log
+protects its selected durable publication independently. Within the selected initial or restored namespace, the store
+retains only chunk sets referenced by the same view's segmented header and exact checkpoint
+revision; segmented or inline replacement, header purge and incomplete unpublished revisions
+permit bounded chunk deletion. Snapshot retention
+preserves preexisting readers, while the installation barrier serializes ordinary, replica and
+ownership writes with cleanup. This adds no consensus record or log
 mutation and never removes a replicated incomplete-installation gate. See
 [Backup And Restore](backup-and-restore.md#restore-checkpoint-storage-quota-and-metrics) for the
 quota, metrics and node-local cleanup boundary.
@@ -338,8 +343,23 @@ and snapshot installation therefore retain their complete magnitudes. See
 [Archived Counts](./typed-states.md#archived-counts).
 
 This layout has one current shape. A consensus database containing an unknown keyspace, a malformed
-current archive, or incomplete current state fails with `invalid consensus record storage; recreate
-the node's stored state`. Recreate the node's stored state and let it rejoin from the cluster.
+current archive, or incomplete or inconsistent current state fails with `invalid consensus record
+storage; recreate the node's stored state`. Recreate the node's stored state and let it rejoin from
+the cluster.
+
+Recovery accepts exactly the records the state writer stores. Each state record sits under the
+canonical encoding of its key, so a key spelled another way, or one with bytes after its encoding,
+is refused instead of being read as a neighbouring record. A record whose value names its own
+identity must name the key it is stored under: a domain, a schedule's domain and each of its nodes,
+a user, a resource version, node status or upload, a transaction, its commit plan header or impact
+report header, and a command execution. The state keyspace holds those records and the metadata and
+nothing else, so a record no family owns is refused as well. Recovered resource records hold at
+most one upload for each resource version, and an expired command execution's reference carries
+the issue time its expiry is ordered by. A transaction is in a state its transitions reach: an
+open or committing transaction queues exactly the statements and source bytes it accepted, a
+finished one queues none, a commit's results apply consecutive statements from the first and its
+progress stays inside the queue, and a failure names a statement the transaction accepted. Every
+log read checks that a log record is stored under its own entry's index.
 
 ## Shutdown And Forced Endings
 

@@ -96,6 +96,13 @@ impl DomainMutationLease {
     pub fn recovery_fence(&self) -> DomainMutationRecoveryFence {
         self.recovery_fence
     }
+
+    /// The lease `owner` holds since its acquisition committed at `revision`, as durable
+    /// admission records it, for generated storage states.
+    #[cfg(test)]
+    pub(crate) fn recorded(owner: DomainMutationOwner, revision: u64) -> Self {
+        Self::new(owner, DomainMutationRecoveryFence::at_revision(revision))
+    }
 }
 
 /// The complete result of admitting one owner against the current durable lease.

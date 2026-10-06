@@ -21,6 +21,7 @@ use std::{
 };
 
 use error_stack::{Report as StackReport, ResultExt as _};
+use meticulous::OptionExt as _;
 use nervix_backup::{
     ArchiveDescription, ArchiveScope, DescribedDomain, DescribedResourceVersion,
     DescribedRuntimeState, DescribedSection, ResourceVersionState, describe_archive,
@@ -176,10 +177,28 @@ pub(super) async fn run_backup(request: BackupRequest) -> Result<(), StackReport
         resources,
         capture,
     };
+    let mut connect_options = request.connect_options;
+    if let Some(timeout) = request.timeout {
+        // The server may spend the entire quiesce budget before it can answer. Leave one
+        // ordinary request budget for command admission, capture and the final reply.
+        let Some(budget) = timeout.checked_add(
+            connect_options
+                .request_timeout
+                .max(connect_options.retry_timeout),
+        ) else {
+            let error = ClientError::BackupArguments {
+                reason: "the backup timeout plus the client request budget is too large",
+            };
+            report_failure(report, format, "INVALID_ARGUMENTS", &error.to_string());
+            return Err(StackReport::new(error));
+        };
+        connect_options.request_timeout = connect_options.request_timeout.max(budget);
+        connect_options.retry_timeout = connect_options.retry_timeout.max(budget);
+    }
     let client = match Client::connect_with_options(
         &request.server,
         Some(request.session_domain),
-        request.connect_options,
+        connect_options,
     )
     .await
     {
@@ -453,10 +472,7 @@ fn runtime_state_text(state: &DescribedRuntimeState) -> String {
         } => format!(
             "  - wasm_processor={} branch={} generation={} revision={} bytes={} blake3={}",
             descriptor.entity,
-            match descriptor.branch_fingerprint.as_ref() {
-                Some(fingerprint) => digest_hex(fingerprint.fingerprint()),
-                None => "unbranched".to_string(),
-            },
+            branch_text(descriptor.branch_fingerprint.as_ref()),
             u64::from(descriptor.generation),
             descriptor.revision,
             guest.length,
@@ -487,7 +503,57 @@ fn runtime_state_text(state: &DescribedRuntimeState) -> String {
             lifecycle.branches.len(),
             lifecycle.revision,
         ),
+        DescribedRuntimeState::Deduplicator {
+            descriptor, groups, ..
+        } => format!(
+            "  - deduplicator={} branch={} keys={} groups={} revision={} schema_fingerprint={}",
+            descriptor.entity,
+            branch_text(descriptor.branch_fingerprint.as_ref()),
+            descriptor.keys,
+            groups.len(),
+            descriptor.revision,
+            digest_hex(descriptor.schema.as_digest()),
+        ),
+        DescribedRuntimeState::Window {
+            descriptor, groups, ..
+        } => format!(
+            "  - window_processor={} branch={} rows={} groups={} incarnation={} next_sequence={} \
+             delayed_removals={} revision={} schema_fingerprint={} model={}",
+            descriptor.entity,
+            branch_text(descriptor.branch_fingerprint.as_ref()),
+            descriptor.rows.len(),
+            groups.len(),
+            descriptor.incarnation,
+            descriptor.next_sequence,
+            delayed_removals(&descriptor.accumulators),
+            descriptor.revision,
+            digest_hex(descriptor.schema.as_digest()),
+            digest_hex(descriptor.model.as_digest()),
+        ),
     }
+}
+
+/// A branch fingerprint as hexadecimal, or `unbranched`.
+fn branch_text(branch: Option<&nervix_models::BranchKeyFingerprint>) -> String {
+    match branch {
+        Some(fingerprint) => digest_hex(fingerprint.fingerprint()),
+        None => "unbranched".to_string(),
+    }
+}
+
+/// How many stepped rows the window's histograms still count.
+fn delayed_removals(accumulators: &[nervix_backup::WindowAccumulatorRecord]) -> usize {
+    let mut count = 0_usize;
+    for accumulator in accumulators {
+        if let nervix_backup::WindowAccumulatorRecord::LinearHistogram { delayed_removals } =
+            accumulator
+        {
+            count = count
+                .checked_add(delayed_removals.len())
+                .assured("removals a verified archive holds in memory count below usize::MAX");
+        }
+    }
+    count
 }
 
 fn resource_version_text(version: &DescribedResourceVersion) -> String {
@@ -641,6 +707,39 @@ fn runtime_state_json(state: &DescribedRuntimeState) -> Value {
             "revision": lifecycle.revision,
             "branches": lifecycle.branches.len(),
             "record": section_json(record),
+        }),
+        DescribedRuntimeState::Deduplicator {
+            descriptor,
+            record,
+            groups,
+        } => json!({
+            "kind": "deduplicator",
+            "entity": descriptor.entity.as_str(),
+            "schema_fingerprint": digest_hex(descriptor.schema.as_digest()),
+            "branch_fingerprint": descriptor.branch_fingerprint.as_ref().map(|fingerprint| digest_hex(fingerprint.fingerprint())),
+            "revision": descriptor.revision,
+            "keys": descriptor.keys,
+            "descriptor": section_json(record),
+            "groups": groups.iter().map(section_json).collect::<Vec<_>>(),
+        }),
+        DescribedRuntimeState::Window {
+            descriptor,
+            record,
+            groups,
+        } => json!({
+            "kind": "window_processor",
+            "entity": descriptor.entity.as_str(),
+            "schema_fingerprint": digest_hex(descriptor.schema.as_digest()),
+            "model_digest": digest_hex(descriptor.model.as_digest()),
+            "branch_fingerprint": descriptor.branch_fingerprint.as_ref().map(|fingerprint| digest_hex(fingerprint.fingerprint())),
+            "revision": descriptor.revision,
+            "incarnation": descriptor.incarnation,
+            "first_sequence": descriptor.first_sequence,
+            "next_sequence": descriptor.next_sequence,
+            "rows": descriptor.rows.len(),
+            "delayed_removals": delayed_removals(&descriptor.accumulators),
+            "descriptor": section_json(record),
+            "groups": groups.iter().map(|group| json!({"input": section_json(&group.input), "arguments": section_json(&group.arguments)})).collect::<Vec<_>>(),
         }),
     }
 }

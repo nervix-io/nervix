@@ -2,9 +2,10 @@
 //!
 //! Layer: data plane.
 //! - **Owns.** Forcing Kafka and branch-lifecycle publications, then reading one database
-//!   snapshot, reattaching typed branch keys from lifecycle checkpoints, and selecting stored
+//!   snapshot, reattaching typed branch keys from lifecycle checkpoints, selecting stored
 //!   materialized readers for stopped domains or fresh shared Arrow rows under the assignment
-//!   barrier for running and paused domains.
+//!   barrier for running and paused domains, and taking each active deduplicator and window
+//!   branch from the generation its branch task published or, without one, from its checkpoint.
 //! - **Depends on.** Branch-local state, the runtime state store, and typed placement envelopes.
 //! - **Must not know.** Archive records, backup command execution, or restore planning.
 
@@ -17,7 +18,7 @@
     )
 )]
 
-use std::io::Read;
+use std::io::{Read, Write};
 
 use error_stack::{Report, ResultExt as _};
 use nervix_execution::Cancellation;
@@ -29,12 +30,14 @@ use nervix_models::{
 use thiserror::Error;
 
 use super::{
-    BranchInstanceSnapshotEntry, BranchKey, MaterializedGeneration, OwnershipHandoffError,
-    OwnershipHandoffResult, ReplicatedKafkaOffsetState, ReplicatedMaterializedRelayState, Runtime,
-    RuntimeStateKind, RuntimeStatePlacement, ScheduledNodeTask,
+    BranchKey, CapturedDeduplicatorKeyspace, CapturedWindow, MaterializedGeneration,
+    OwnershipHandoffError, OwnershipHandoffResult, ReplicatedKafkaOffsetState,
+    ReplicatedMaterializedRelayState, Runtime, RuntimeStateKind, RuntimeStatePlacement,
+    ScheduledNodeTask,
     backup_capture_fence::{BackupCaptureFence, BackupPublication},
-    decode_branch_lru_snapshot, encode_branch_lru_snapshot,
-    kafka_offset_state::{backup_offset_positions, restore_offset_payload},
+    branch_lru_state::write_branch_lru_snapshot,
+    decode_branch_lru_snapshot,
+    kafka_offset_state::{backup_offset_positions, write_offset_payload},
     state_store::{RuntimePersistenceError, StoredPlacement, generation::CheckpointMetadata},
 };
 
@@ -50,6 +53,27 @@ pub(crate) struct CapturedRuntimeState {
 pub(crate) struct CapturedDomainState {
     pub(crate) checkpoints: Vec<CapturedRuntimeState>,
     pub(crate) materialized: CapturedMaterializedState,
+    /// The deduplicator keyspaces and windows of the branches the captured lifecycles hold.
+    pub(crate) branch_states: Vec<CapturedBranchState>,
+}
+
+/// One active branch's deduplicator keyspace or window at the cut.
+pub(crate) struct CapturedBranchState {
+    pub(crate) placement: StatePlacementEnvelope,
+    pub(crate) branch_fingerprint: Option<BranchKeyFingerprint>,
+    pub(crate) state: CapturedBranchStateKind,
+}
+
+pub(crate) enum CapturedBranchStateKind {
+    Deduplicator(CapturedDeduplicatorKeyspace),
+    Window(CapturedWindow),
+}
+
+/// A deduplicator or window state's entity and branch, which names it once in a cut.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct BranchStateIdentity {
+    node: NodeRef,
+    branch: Option<BranchKeyFingerprint>,
 }
 
 pub(crate) enum CapturedMaterializedState {
@@ -84,14 +108,14 @@ pub(crate) use super::state_store::generation::{
 };
 
 #[derive(Debug, Clone)]
-pub(crate) struct BackupBranchLifecycleEntry {
-    pub(crate) key: Option<Vec<RemoteRuntimeField>>,
-    pub(crate) last_ingestion: Timestamp,
-    pub(crate) incarnation: u64,
+pub struct BackupBranchLifecycleEntry {
+    pub key: Option<Vec<RemoteRuntimeField>>,
+    pub last_ingestion: Timestamp,
+    pub incarnation: u64,
 }
 
 #[derive(Debug, Error)]
-pub(crate) enum BackupStateCaptureError {
+pub enum BackupStateCaptureError {
     #[error("runtime state storage is unavailable")]
     Unavailable,
     #[error("runtime state could not be read or published")]
@@ -102,6 +126,8 @@ pub(crate) enum BackupStateCaptureError {
     BranchFingerprint,
     #[error("a restored state placement is invalid")]
     Placement,
+    #[error("the deduplicator keyspace of '{entity}' could not be read")]
+    Keyspace { entity: ModelName },
 }
 
 impl Runtime {
@@ -238,18 +264,25 @@ impl Runtime {
         cancellation: &Cancellation,
     ) -> error_stack::Result<(), BackupStateCaptureError> {
         #[cfg(feature = "testing")]
-        if (checkpoint.placement.state.kind() == RuntimeStateKind::WasmProcessor
-            && self
-                .inner
-                .fault_injection
-                .restored_wasm_checkpoint_fails(&checkpoint.placement.domain))
-            || (checkpoint.placement.state.kind() == RuntimeStateKind::MaterializedRelay
-                && self
-                    .inner
-                    .fault_injection
-                    .restored_materialized_checkpoint_fails(&checkpoint.placement.domain))
         {
-            return Err(Report::new(BackupStateCaptureError::Storage));
+            let faults = &self.inner.fault_injection;
+            let domain = &checkpoint.placement.domain;
+            let injected = match checkpoint.placement.state.kind() {
+                RuntimeStateKind::WasmProcessor => faults.restored_wasm_checkpoint_fails(domain),
+                RuntimeStateKind::MaterializedRelay => {
+                    faults.restored_materialized_checkpoint_fails(domain)
+                }
+                RuntimeStateKind::Deduplicator | RuntimeStateKind::WindowProcessor => {
+                    faults.restored_branch_state_checkpoint_fails(domain)
+                }
+                RuntimeStateKind::BranchAggregated
+                | RuntimeStateKind::Correlator
+                | RuntimeStateKind::KafkaOffset
+                | RuntimeStateKind::BranchLru => false,
+            };
+            if injected {
+                return Err(Report::new(BackupStateCaptureError::Storage));
+            }
         }
         let Some(store) = self.inner.state_store.as_ref() else {
             return Err(Report::new(BackupStateCaptureError::Unavailable));
@@ -382,11 +415,15 @@ impl Runtime {
                 RuntimeStateKind::KafkaOffset,
                 RuntimeStateKind::BranchLru,
                 RuntimeStateKind::MaterializedRelay,
+                RuntimeStateKind::Deduplicator,
+                RuntimeStateKind::WindowProcessor,
             ],
             DomainStatus::Running | DomainStatus::Paused => &[
                 RuntimeStateKind::WasmProcessor,
                 RuntimeStateKind::KafkaOffset,
                 RuntimeStateKind::BranchLru,
+                RuntimeStateKind::Deduplicator,
+                RuntimeStateKind::WindowProcessor,
             ],
         };
         let stored_snapshots = store
@@ -430,16 +467,60 @@ impl Runtime {
                 );
             }
         }
+        let mut branch_states = self.capture_published_branch_states(domain, &keys);
+        let mut published = ahash::HashSet::default();
+        for captured in &branch_states {
+            published.insert(BranchStateIdentity {
+                node: NodeRef::new(
+                    captured.placement.kind,
+                    captured.placement.identifier.clone(),
+                ),
+                branch: captured.branch_fingerprint,
+            });
+        }
         let mut captured = Vec::new();
         for (stored, snapshot) in snapshots {
+            let kind = stored.state.kind();
+            let branch_state = matches!(
+                kind,
+                RuntimeStateKind::Deduplicator | RuntimeStateKind::WindowProcessor
+            );
+            if branch_state
+                && published.contains(&BranchStateIdentity {
+                    node: NodeRef::new(stored.kind, stored.identifier.clone()),
+                    branch: stored.branch,
+                })
+            {
+                continue;
+            }
             let Some(placement) = restored_placement(domain, stored, &keys) else {
                 continue;
             };
-            captured.push(CapturedRuntimeState {
+            let branch_fingerprint = placement.branch_key.as_ref().map(BranchKey::fingerprint);
+            let state = match kind {
+                RuntimeStateKind::Deduplicator => CapturedBranchStateKind::Deduplicator(
+                    CapturedDeduplicatorKeyspace::stored(snapshot.lsm, &snapshot.payload)
+                        .change_context_lazy(|| BackupStateCaptureError::Keyspace {
+                            entity: placement.identifier.clone(),
+                        })?,
+                ),
+                RuntimeStateKind::WindowProcessor => CapturedBranchStateKind::Window(
+                    CapturedWindow::stored(snapshot.lsm, snapshot.payload),
+                ),
+                _ => {
+                    captured.push(CapturedRuntimeState {
+                        placement: placement.to_remote(),
+                        branch_fingerprint,
+                        revision: snapshot.lsm,
+                        payload: snapshot.payload,
+                    });
+                    continue;
+                }
+            };
+            branch_states.push(CapturedBranchState {
                 placement: placement.to_remote(),
-                branch_fingerprint: placement.branch_key.as_ref().map(BranchKey::fingerprint),
-                revision: snapshot.lsm,
-                payload: snapshot.payload,
+                branch_fingerprint,
+                state,
             });
         }
         let materialized = match status {
@@ -503,7 +584,87 @@ impl Runtime {
         Ok(CapturedDomainState {
             checkpoints: captured,
             materialized,
+            branch_states,
         })
+    }
+
+    /// The generation each deduplicator and window branch task of `domain` on this node published
+    /// last, for every branch the captured lifecycles in `keys` hold. A quiesced cut asked those
+    /// tasks to publish before it closed, so each generation holds every change before the cut.
+    fn capture_published_branch_states(
+        &self,
+        domain: &DomainName,
+        keys: &ahash::HashMap<(NodeRef, Option<BranchKeyFingerprint>), Option<BranchKey>>,
+    ) -> Vec<CapturedBranchState> {
+        let mut deduplicators = Vec::new();
+        for state in self.inner.replicated_deduplicator_states.iter() {
+            if self.captures_published_branch_state(domain, state.key(), keys) {
+                deduplicators.push(state.value().clone());
+            }
+        }
+        let mut windows = Vec::new();
+        for state in self.inner.replicated_window_processor_states.iter() {
+            if self.captures_published_branch_state(domain, state.key(), keys) {
+                windows.push(state.value().clone());
+            }
+        }
+        let mut captured = Vec::with_capacity(deduplicators.len() + windows.len());
+        for state in deduplicators {
+            captured.push(CapturedBranchState {
+                placement: state.placement.to_remote(),
+                branch_fingerprint: state
+                    .placement
+                    .branch_key
+                    .as_ref()
+                    .map(BranchKey::fingerprint),
+                state: CapturedBranchStateKind::Deduplicator(
+                    CapturedDeduplicatorKeyspace::published(&state),
+                ),
+            });
+        }
+        for state in windows {
+            let generation = state.generations.load();
+            let Some(window) = CapturedWindow::published(&generation) else {
+                continue;
+            };
+            captured.push(CapturedBranchState {
+                placement: state.placement.to_remote(),
+                branch_fingerprint: state
+                    .placement
+                    .branch_key
+                    .as_ref()
+                    .map(BranchKey::fingerprint),
+                state: CapturedBranchStateKind::Window(window),
+            });
+        }
+        captured
+    }
+
+    /// Whether a published branch state belongs to this cut: it is this node's state of `domain`,
+    /// named by its entity's current identity, for a branch a captured lifecycle holds.
+    fn captures_published_branch_state(
+        &self,
+        domain: &DomainName,
+        placement: &RuntimeStatePlacement,
+        keys: &ahash::HashMap<(NodeRef, Option<BranchKeyFingerprint>), Option<BranchKey>>,
+    ) -> bool {
+        if &placement.domain != domain
+            || !self.runtime_state_placement_is_assigned_locally(placement)
+        {
+            return false;
+        }
+        let branch = placement.branch_key.as_ref().map(BranchKey::fingerprint);
+        let node = NodeRef::new(placement.kind, placement.identifier.clone());
+        if !keys.contains_key(&(node.clone(), branch)) {
+            return false;
+        }
+        let Some(slot) = self.inner.state_identities.get(&node.in_domain(domain)) else {
+            return false;
+        };
+        let Some(assignment) = slot.load_full() else {
+            return false;
+        };
+        assignment.identity.names(placement.state, branch.as_ref())
     }
 }
 
@@ -513,10 +674,13 @@ pub(crate) fn decode_backup_kafka_offsets(
     backup_offset_positions(payload).change_context(BackupStateCaptureError::Storage)
 }
 
-pub(crate) fn encode_restored_kafka_offsets(
-    offsets: Vec<(String, i32, i64)>,
-) -> error_stack::Result<Vec<u8>, BackupStateCaptureError> {
-    restore_offset_payload(offsets).change_context(BackupStateCaptureError::Storage)
+pub(crate) fn write_restored_kafka_offsets(
+    offsets: impl ExactSizeIterator<Item = (String, i32, i64)> + Clone,
+    writer: &mut dyn Write,
+    cancellation: &Cancellation,
+) -> error_stack::Result<(), BackupStateCaptureError> {
+    write_offset_payload(offsets, writer, cancellation)
+        .change_context(BackupStateCaptureError::Storage)
 }
 
 pub(crate) fn decode_backup_branch_lifecycle(
@@ -537,27 +701,17 @@ pub(crate) fn decode_backup_branch_lifecycle(
         .collect())
 }
 
-pub(crate) fn encode_restored_branch_lifecycle(
-    entries: Vec<BackupBranchLifecycleEntry>,
+pub(crate) fn write_restored_branch_lifecycle(
+    entries: impl ExactSizeIterator<Item = BackupBranchLifecycleEntry> + Clone,
     entity: &ModelName,
-) -> error_stack::Result<Vec<u8>, BackupStateCaptureError> {
-    let entries = entries
-        .into_iter()
-        .map(|entry| {
-            Ok(BranchInstanceSnapshotEntry {
-                key: BranchKey::from_remote_key(entry.key).change_context(
-                    BackupStateCaptureError::Lifecycle {
-                        entity: entity.clone(),
-                    },
-                )?,
-                last_ingestion: entry.last_ingestion,
-                incarnation: entry.incarnation,
-            })
-        })
-        .collect::<error_stack::Result<Vec<_>, BackupStateCaptureError>>()?;
-    encode_branch_lru_snapshot(&entries).change_context(BackupStateCaptureError::Lifecycle {
-        entity: entity.clone(),
-    })
+    writer: &mut dyn Write,
+    cancellation: &Cancellation,
+) -> error_stack::Result<(), BackupStateCaptureError> {
+    write_branch_lru_snapshot(entries, writer, cancellation).change_context(
+        BackupStateCaptureError::Lifecycle {
+            entity: entity.clone(),
+        },
+    )
 }
 
 fn restored_placement(
@@ -565,8 +719,14 @@ fn restored_placement(
     stored: StoredPlacement,
     keys: &ahash::HashMap<(NodeRef, Option<BranchKeyFingerprint>), Option<BranchKey>>,
 ) -> Option<RuntimeStatePlacement> {
-    let branch_key = if stored.state.kind() == RuntimeStateKind::WasmProcessor {
-        // Eviction removes the lifecycle entry, while its durable guest checkpoint may remain.
+    let branch_local = matches!(
+        stored.state.kind(),
+        RuntimeStateKind::WasmProcessor
+            | RuntimeStateKind::Deduplicator
+            | RuntimeStateKind::WindowProcessor
+    );
+    let branch_key = if branch_local {
+        // Eviction removes the lifecycle entry, while a branch's durable checkpoint may remain.
         // Only a currently active execution has a typed key worth reconstructing for this cut.
         keys.get(&(
             NodeRef::new(stored.kind, stored.identifier.clone()),
@@ -585,6 +745,10 @@ fn restored_placement(
     })
 }
 
+#[cfg(all(test, feature = "shuttle"))]
+#[path = "branch_state_capture_shuttle_tests.rs"]
+mod branch_state_shuttle_tests;
+
 #[cfg(test)]
 mod tests {
     use meticulous::{OptionExt as _, ResultExt as _};
@@ -592,6 +756,7 @@ mod tests {
     use nervix_models::{ModelKind, SchemaFingerprint, WasmStateGeneration};
 
     use super::*;
+    use crate::runtime::encode_branch_lru_snapshot;
 
     #[nervix_primitives::test]
     async fn backup_omits_a_guest_checkpoint_after_its_branch_leaves_the_lifecycle() {

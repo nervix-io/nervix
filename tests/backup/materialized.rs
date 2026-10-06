@@ -50,14 +50,41 @@ async fn when_materialized_workload_is_created(world: &mut ScenarioWorld, relays
              IMMEDIATE ON MESSAGE ERROR LOG "
         ));
     }
-    commands.push_str(
-        "ON GENERAL ERROR LOG; START; CREATE SUBSCRIPTION summary_subscription TO summaries;",
-    );
-    let ran = crate::execute_nspl_commands_on_leader(world, &commands)
-        .await
-        .assured("the public materialized workload is valid");
-    world.active_session = Some(ran.session);
-    world.active_session_node = Some(ran.node);
+    commands.push_str("ON GENERAL ERROR LOG; START;");
+    let leader = current_leader_node(world).await;
+    let grpc_uri = world
+        .cluster()
+        .grpc_uri(&leader)
+        .assured("the workload leader has a public gRPC endpoint");
+    let client = Client::connect_with_options(
+        &grpc_uri,
+        client_domain(&world.domain),
+        client_connect_options(&grpc_uri).assured("the workload client is configured"),
+    )
+    .await
+    .assured("the workload client connects");
+    for command in nspl_statements(&commands) {
+        let outcome = client
+            .execute(command.clone())
+            .await
+            .assured("the workload command recovers through a leader change");
+        assert!(
+            outcome.succeeded(),
+            "the public materialized workload is valid: {command}: {}",
+            outcome.message
+        );
+        world.last_command_output = Some(outcome.message);
+    }
+    let leader = current_leader_node(world).await;
+    let session = crate::execute_nspl_commands_on_node(
+        world,
+        &leader,
+        "CREATE SUBSCRIPTION summary_subscription TO summaries;",
+    )
+    .await
+    .assured("the materialized workload subscription opens");
+    world.active_session = Some(session);
+    world.active_session_node = Some(leader);
     world.active_session_has_subscription = true;
 }
 
@@ -156,6 +183,20 @@ async fn then_materialized_generators_report_every_row(
             pending.remove(&found);
         }
     }
+}
+
+#[when(expr = "the materialized summary subscription {string} is closed")]
+async fn when_materialized_summary_subscription_is_closed(world: &mut ScenarioWorld, name: String) {
+    let mut session = world
+        .active_session
+        .take()
+        .assured("the materialized summary subscription is open");
+    session
+        .run_command(&format!("DELETE SUBSCRIPTION {name};"))
+        .await
+        .assured("the summary subscription closes before the backup cut");
+    world.active_session_node = None;
+    world.active_session_has_subscription = false;
 }
 
 #[then(

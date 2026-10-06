@@ -154,11 +154,11 @@ impl RuntimeRecordBatch {
         nervix_lint,
         nervix::dispatch(reason = "the caller supplies the admitted bounded row projection")
     )]
-    pub(crate) async fn encode_arrow_snapshot_projection(
+    pub(crate) async fn encode_arrow_snapshot_projection<E: error_stack::Context>(
         executor: &Executor,
         projection_bytes: u64,
         encoded_estimate: u64,
-        project: impl FnOnce() -> error_stack::Result<Self, super::RuntimeSchemaError> + Send + 'static,
+        project: impl FnOnce() -> error_stack::Result<Self, E> + Send + 'static,
     ) -> Result<ChargedBytes, Report<ArrowBodyError>> {
         let limit = executor.limits().snapshot_section_bytes.as_u64();
         let encoded_bytes = encoded_estimate.min(limit);
@@ -427,11 +427,12 @@ mod projection_tests {
         let _busy = executor
             .try_reserve(MemoryClass::Bulk, bulk_bytes)
             .assured("the test holds the bulk budget");
-        let result =
-            RuntimeRecordBatch::encode_arrow_snapshot_projection(&executor, 1024, 1024, || {
-                panic!("a refused projection must not allocate or convert rows")
-            })
-            .await;
+        let result = RuntimeRecordBatch::encode_arrow_snapshot_projection::<
+            super::super::RuntimeSchemaError,
+        >(&executor, 1024, 1024, || {
+            panic!("a refused projection must not allocate or convert rows")
+        })
+        .await;
         assert!(matches!(
             result
                 .expect_err("the occupied budget refuses projection")

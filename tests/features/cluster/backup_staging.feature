@@ -17,7 +17,7 @@ Feature: Restore staging reclamation and storage accounting
       CREATE RESOURCE wasm_filter;
       UPLOAD RESOURCE wasm_filter VERSION '{{wasm_processor}}';
       """
-    And these NSPL commands are executed on the leader node
+    When these NSPL commands are executed through the client on the leader node
       """
       CREATE SCHEMA metric ( value I32, tenant STRING );
       CREATE SCHEMA result ( tenant STRING OPTIONAL, note STRING OPTIONAL );
@@ -53,7 +53,13 @@ Feature: Restore staging reclamation and storage accounting
         SET tenant = branch.tenant, note = coalesce(note, "even")
         ON MESSAGE ERROR LOG
         ON GLOBAL ERROR LOG;
+      """
+    When these NSPL commands are executed on the leader node
+      """
       CREATE SUBSCRIPTION filtered_metrics_subscription TO filtered_metrics;
+      """
+    When these NSPL commands are executed through the client on the leader node
+      """
       START;
       """
     When round 1 of Kafka messages for 2 restore tenants is published to topic "backup_wasm_in_{{test_id}}"
@@ -64,7 +70,7 @@ Feature: Restore staging reclamation and storage accounting
     When round 2 of Kafka messages for 2 restore tenants is published to topic "backup_wasm_in_{{test_id}}"
     Then within "30s" the restore subscription receives one isolated even row for each of 2 tenants
     Then the current leader node is saved as placeholder "leader"
-    When the CLI backs up "domain {{domain}} --timeout 30s" from node "{{leader}}" into "stateful.nvxb" reporting JSON
+    When the CLI backs up "domain {{domain}} --timeout 120s" from node "{{leader}}" into "stateful.nvxb" reporting JSON
     Then the CLI backup succeeded with a JSON report naming domain "{{domain}}"
     Given the active domain is saved as placeholder "source_domain"
     When the CLI restores "domain {{domain}} --as {{domain}}_quota" from "stateful.nvxb" on node "{{leader}}" reporting JSON
@@ -102,7 +108,7 @@ Feature: Restore staging reclamation and storage accounting
       """
       START;
       """
-    When the CLI backs up "domain {{domain}} --timeout 30s" from node "{{leader}}" into "restored-state.nvxb" reporting JSON
+    When the CLI backs up "domain {{domain}} --timeout 120s" from node "{{leader}}" into "restored-state.nvxb" reporting JSON
     Then the CLI backup succeeded with a JSON report naming domain "{{domain}}"
     And backup archives "stateful.nvxb" and "restored-state.nvxb" keep all 2 WASM processor branch incarnations
 

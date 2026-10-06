@@ -19,7 +19,7 @@ use thiserror::Error;
 pub use self::route::{
     CompiledWindowAssignment, CompiledWindowDemand, CompiledWindowExpr, CompiledWindowInvocation,
     CompiledWindowRoute, WINDOW_ARGUMENT_NAMESPACE, WindowArgumentColumn, WindowRouteCompileError,
-    WindowRouteSchemas,
+    WindowRouteSchemas, argument_snapshot_schema,
 };
 pub use crate::program::{WindowAggregateFunction, WindowAggregateInvocation};
 use crate::{

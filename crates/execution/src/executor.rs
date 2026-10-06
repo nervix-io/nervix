@@ -35,6 +35,7 @@ struct ExecutorInner {
     commands_memory: MemoryBudget,
     relay_memory: MemoryBudget,
     bulk_memory: MemoryBudget,
+    restore_metadata_memory: MemoryBudget,
     credentials_memory: MemoryBudget,
 }
 
@@ -53,6 +54,7 @@ pub struct ExecutorSnapshot {
     pub commands_memory: MemoryBudgetSnapshot,
     pub relay_memory: MemoryBudgetSnapshot,
     pub bulk_memory: MemoryBudgetSnapshot,
+    pub restore_metadata_memory: MemoryBudgetSnapshot,
     pub credentials_memory: MemoryBudgetSnapshot,
 }
 
@@ -131,6 +133,10 @@ impl Executor {
                 ),
                 relay_memory: MemoryBudget::new(MemoryClass::Relay, validated.budgets.relay),
                 bulk_memory: MemoryBudget::new(MemoryClass::Bulk, validated.budgets.bulk),
+                restore_metadata_memory: MemoryBudget::new(
+                    MemoryClass::RestoreMetadata,
+                    validated.budgets.restore_metadata,
+                ),
                 credentials_memory: MemoryBudget::new(
                     MemoryClass::Credentials,
                     validated.budgets.credentials,
@@ -266,6 +272,7 @@ impl Executor {
             commands_memory: self.inner.commands_memory.snapshot(),
             relay_memory: self.inner.relay_memory.snapshot(),
             bulk_memory: self.inner.bulk_memory.snapshot(),
+            restore_metadata_memory: self.inner.restore_metadata_memory.snapshot(),
             credentials_memory: self.inner.credentials_memory.snapshot(),
         }
     }
@@ -276,6 +283,7 @@ impl Executor {
             MemoryClass::Commands => &self.inner.commands_memory,
             MemoryClass::Relay => &self.inner.relay_memory,
             MemoryClass::Bulk => &self.inner.bulk_memory,
+            MemoryClass::RestoreMetadata => &self.inner.restore_metadata_memory,
             MemoryClass::Credentials => &self.inner.credentials_memory,
         }
     }

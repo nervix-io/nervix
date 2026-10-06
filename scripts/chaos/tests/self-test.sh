@@ -103,6 +103,33 @@ jq '.[0].Mounts[0].Name = "other-volume"' \
 expect_restart_failure 'changed volume' started "${test_run_id}" "${test_project}" nervix-1 \
     "${test_image_id}" "${inspection_before}" "${tmp_dir}/wrong-volume.json"
 
+drain_verifier="${chaos_dir}/verify-drain-evidence.sh"
+expect_drain_failure() {
+    local case_name="$1"
+    local shutdown_log_path="$2"
+    local status=0
+    "${drain_verifier}" nervix-2 "${shutdown_log_path}" >"${tmp_dir}/drain-failure.txt" 2>&1 \
+        || status=$?
+    [[ "${status}" -eq 1 ]] || fail "${case_name} returned ${status}, expected failure 1"
+}
+printf '%s\n' \
+    'INFO nervix_server::application::scheduling: drained local node before graceful shutdown node_id=node-2 leader=node-1' \
+    'INFO nervix_server::application::shutdown: shutdown drain-support phase finished outcome=Completed' \
+    >"${tmp_dir}/completed-drain.log"
+"${drain_verifier}" nervix-2 "${tmp_dir}/completed-drain.log"
+printf '%s\n' \
+    'WARN nervix_server::application::scheduling: the leader did not answer the graceful shutdown drain of the local node node_id=node-2 leader=node-1' \
+    'INFO nervix_server::application::shutdown: shutdown drain-support phase finished outcome=Abandoned' \
+    >"${tmp_dir}/abandoned-drain.log"
+expect_drain_failure 'abandoned drain' "${tmp_dir}/abandoned-drain.log"
+grep -Fq 'the leader did not answer the graceful shutdown drain' "${tmp_dir}/drain-failure.txt" \
+    || fail 'an abandoned drain verdict did not name the drain record'
+printf '%s\n' 'INFO nervix_server::application::shutdown: shutdown admission phase finished outcome=Completed' \
+    >"${tmp_dir}/missing-drain.log"
+expect_drain_failure 'missing drain phase' "${tmp_dir}/missing-drain.log"
+cat "${tmp_dir}/completed-drain.log" "${tmp_dir}/completed-drain.log" >"${tmp_dir}/two-drains.log"
+expect_drain_failure 'two drain phases' "${tmp_dir}/two-drains.log"
+
 crash_verifier="${chaos_dir}/verify-crash-evidence.sh"
 inspection_killed="${tmp_dir}/killed.json"
 crash_events="${tmp_dir}/crash-events.ndjson"
@@ -166,6 +193,17 @@ jq '.[0].Config.Env = [
 ] | .[0].State.Paused = false' "${inspection_before}" >"${pause_before}"
 jq '.[0].State.Paused = true' "${pause_before}" >"${pause_active}"
 cp "${pause_before}" "${pause_resumed}"
+# These fixtures run the pause deployment, so the verifier checks them against its settings.
+pause_deployment=(CHAOS_RAFT_HEARTBEAT_INTERVAL CHAOS_RAFT_ELECTION_TIMEOUT_MIN
+    CHAOS_RAFT_ELECTION_TIMEOUT_MAX CHAOS_NODE_UNAVAILABILITY_TIMEOUT)
+declare -A deployed_liveness=()
+for setting in "${pause_deployment[@]}"; do
+    if [[ -n "${!setting+set}" ]]; then
+        deployed_liveness["${setting}"]="${!setting}"
+    fi
+done
+export CHAOS_RAFT_HEARTBEAT_INTERVAL=250ms CHAOS_RAFT_ELECTION_TIMEOUT_MIN=10s \
+    CHAOS_RAFT_ELECTION_TIMEOUT_MAX=12s CHAOS_NODE_UNAVAILABILITY_TIMEOUT=15s
 printf '%s\n' \
     "$(jq -nc --arg id "${test_container_id}" '{Type:"container",Action:"pause",Actor:{ID:$id},timeNano:1800000000000000000}')" \
     "$(jq -nc --arg id "${test_container_id}" '{Type:"container",Action:"unpause",Actor:{ID:$id},timeNano:1800000006000000000}')" \
@@ -223,6 +261,22 @@ jq '.[0].Config.Env |= map(select(. != "NERVIX_NODE_UNAVAILABILITY_TIMEOUT=15s")
     "${pause_before}" >"${tmp_dir}/pause-wrong-threshold.json"
 expect_pause_failure 'wrong configured threshold' before "${test_run_id}" "${test_project}" nervix-1 \
     "${test_image_id}" "${tmp_dir}/pause-wrong-threshold.json" "${tmp_dir}/pause-wrong-threshold.json"
+# A run that passes no liveness settings deploys the Compose defaults, and its pauses are judged
+# against those defaults instead of the pause deployment's.
+unset "${pause_deployment[@]}"
+jq '.[0].Config.Env = [
+    "NERVIX_RAFT_HEARTBEAT_INTERVAL=250ms",
+    "NERVIX_RAFT_ELECTION_TIMEOUT_MIN=1500ms",
+    "NERVIX_RAFT_ELECTION_TIMEOUT_MAX=3000ms",
+    "NERVIX_NODE_UNAVAILABILITY_TIMEOUT=10s"
+]' "${pause_before}" >"${tmp_dir}/pause-default-deployment.json"
+"${pause_verifier}" before "${test_run_id}" "${test_project}" nervix-1 \
+    "${test_image_id}" "${tmp_dir}/pause-default-deployment.json" "${tmp_dir}/pause-default-deployment.json"
+expect_pause_failure 'settings other than the deployed ones' before "${test_run_id}" "${test_project}" \
+    nervix-1 "${test_image_id}" "${pause_before}" "${pause_before}"
+for setting in "${!deployed_liveness[@]}"; do
+    export "${setting}=${deployed_liveness[${setting}]}"
+done
 
 expected="${tmp_dir}/expected.ndjson"
 observed="${tmp_dir}/observed.ndjson"
@@ -525,7 +579,7 @@ jq -e --slurpfile manifest "${crash_setup_dir}/manifest.json" '
 for script in "${chaos_dir}"/*.sh "${chaos_dir}"/tests/*.sh; do
     bash -n "${script}"
 done
-sh -n "${chaos_dir}/continuous-load.sh" "${chaos_dir}/observe-nodes.sh"
+sh -n "${chaos_dir}/continuous-load.sh" "${chaos_dir}/observe-nodes.sh" "${chaos_dir}/observe-clock.sh"
 
 # Every tool image a run starts is pinned in tool-images.sh by a registry-qualified digest.
 qualified_digest_reference='^[a-z0-9-]+(\.[a-z0-9-]+)+(:[0-9]+)?(/[a-z0-9._-]+)+@sha256:[a-f0-9]{64}$'
@@ -549,6 +603,11 @@ CHAOS_KCAT_IMAGE="${chaos_kcat_image}" \
 CHAOS_PROBE_IMAGE="${chaos_probe_image}" \
 CHAOS_SCRIPT_DIR="${chaos_dir}" \
 CHAOS_LOAD_FILE="${expected}" \
+CHAOS_LOAD_INTERVAL_MS="750" \
+CHAOS_STATE_LOAD_FILE="${expected}" \
+CHAOS_STATE_LOAD_INTERVAL_MS="1000" \
+CHAOS_PACED_LOAD_FILE="${expected}" \
+CHAOS_PACED_LOAD_INTERVAL_MS="250" \
 CHAOS_TRAFFIC_DIR="${tmp_dir}" \
 CHAOS_NODE_COUNT="3" \
 CHAOS_SUBNET="10.213.7.0/24" \
@@ -557,7 +616,7 @@ CHAOS_NODE_1_ADDRESS="10.213.7.11" \
 CHAOS_NODE_2_ADDRESS="10.213.7.12" \
 CHAOS_NODE_3_ADDRESS="10.213.7.13" \
     docker compose -f "${chaos_dir}/compose.yaml" --profile tools --profile three-node --profile rolling \
-    config --format json \
+    --profile stateful --profile paced config --format json \
     >"${compose_json}"
 
 jq -e --arg image "${placeholder_image}" \
@@ -573,7 +632,14 @@ jq -e --arg image "${placeholder_image}" \
     and ([.services | to_entries[] | select(.key | test("^nervix-[123]$")) | .value]
          | all(.labels["io.nervix.chaos.run"] == "self-test"))
     and .services.load.labels["io.nervix.chaos.role"] == "load"
+    and .services.load.environment.CHAOS_LOAD_INTERVAL_MS == "750"
+    and .services["state-load"].labels["io.nervix.chaos.role"] == "load"
+    and .services["state-load"].environment.CHAOS_LOAD_INTERVAL_MS == "1000"
+    and .services["paced-load"].labels["io.nervix.chaos.role"] == "load"
+    and .services["paced-load"].environment.CHAOS_LOAD_INTERVAL_MS == "250"
     and .services.observer.labels["io.nervix.chaos.role"] == "observer"
+    and .services["clock-observer"].labels["io.nervix.chaos.role"] == "observer"
+    and .services["clock-observer"].image == $image
     and .services["nervix-1"].environment.NERVIX_RAFT_ELECTION_TIMEOUT_MIN == $election_min
     and .services["nervix-1"].environment.NERVIX_NODE_UNAVAILABILITY_TIMEOUT == $node_timeout
     and .services["nervix-1"].environment.NERVIX_RAFT_SNAPSHOT_ENTRY_THRESHOLD == $snapshot_entries
@@ -585,7 +651,8 @@ jq -e --arg nervix "${placeholder_image}" \
     --arg kcat "${chaos_kcat_image}" \
     --arg probe "${chaos_probe_image}" '
     [.services.broker.image, .services["broker-admin"].image] == [$kafka, $kafka]
-    and [.services.kcat.image, .services.load.image] == [$kcat, $kcat]
+    and [.services.kcat.image, .services.load.image, .services["state-load"].image,
+         .services["paced-load"].image] == [$kcat, $kcat, $kcat, $kcat]
     and [.services.probe.image, .services.observer.image] == [$probe, $probe]
     and ([.services[].image] | all(. == $nervix or . == $kafka or . == $kcat or . == $probe))
 ' "${compose_json}" >/dev/null || fail "Compose does not start every tool service from its pinned image"
@@ -714,3 +781,6 @@ printf 'chaos harness self-test passed\n'
 "${script_dir}/degraded-self-test.sh"
 "${script_dir}/docker-events-self-test.sh"
 "${script_dir}/recovery-self-test.sh"
+"${script_dir}/stateful-self-test.sh"
+"${script_dir}/load-self-test.sh"
+"${script_dir}/mixed-self-test.sh"

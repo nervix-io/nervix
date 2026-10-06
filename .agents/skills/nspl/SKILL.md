@@ -92,12 +92,13 @@ Build configuration in dependency order:
 8. Commit the graph, inspect it, and start the active domain only when prerequisites exist.
 
 For backup recovery, `RESTORE ... FROM '<file>' RESUME` (CLI `--resume`) installs compatible
-materialized relay rows on owners and replicas, then makes the domain running at its archived
-start generation and latest start point. Paced recovery retains the wall/logical mapping and time
-rate verbatim and projects downtime under a newly selected clock authority. The default restore
-leaves the domain stopped; a normal `START` advances the generation and clears materialized state
-while preserving compatible WASM state, source offsets and branch lifecycle. `RESUME` precedes
-the user policy and `DRY RUN`; the dry run reports the planned status and generation. Read
+materialized relay rows, deduplicator keys and windows on owners and replicas, then makes the domain
+running at its archived start generation and latest start point. Paced recovery retains the
+wall/logical mapping and time rate verbatim and projects downtime under a newly selected clock
+authority. The default restore leaves the domain stopped; a normal `START` advances the generation
+and clears materialized state while preserving compatible WASM state, source offsets, branch
+lifecycle, deduplicator keys and windows. `RESUME` precedes the user policy and `DRY RUN`; the dry
+run reports the planned status and generation. Read
 [Backup And Restore](https://docs.nervix.io/backup-and-restore.html) for format and memory limits.
 
 Use `BEGIN; ... COMMIT;` when sending multiple queueable configuration statements. A transaction
@@ -107,7 +108,9 @@ resumable, but their content is deliberately limited to that domain's model muta
 configuration/lifecycle, `CREATE RESOURCE`, and `RESET WASM PROCESSOR ... STATE`. Keep
 `CREATE DOMAIN`, `CREATE USER`, other read-only statements, subscriptions, `USE`,
 `ATTACH DOMAIN CLOCK`/`DETACH DOMAIN CLOCK`, resource uploads, backups, restores, and node
-administration outside the transaction. Use `SHOW TRANSACTIONS;` when transaction state or a retained outcome needs
+administration outside the transaction. Plan restore capacity for independently admitted archive
+metadata and streamed checkpoint I/O, following the backup guidance in `references/configuring-nervix.md`.
+Use `SHOW TRANSACTIONS;` when transaction state or a retained outcome needs
 verification. Use `DESCRIBE TRANSACTION [ '<id>' ] [ OPERATION <n> ] [ FORMAT TEXT | JSON ];` to
 explain what an open, committing, or retained transaction requires and changes before or after
 `COMMIT`. These two reads are allowed while a transaction is open, are sent on their own, and neither

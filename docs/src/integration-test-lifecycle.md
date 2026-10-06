@@ -75,6 +75,23 @@ retries. The recorded evidence covers tracked blocking locks reached by those wo
 waits, capture atomics, dependency locks and cross-node waits retain their other concurrency
 checks.
 
+The measured restore steps sample each node's public bulk and restore-metadata executor gauges
+every 20 milliseconds while the ordinary CLI runs. They also record the harness process's
+jemalloc allocated and resident bytes. The executor measurements separate the fixed checkpoint
+I/O and publication grant from retained archive descriptions, typed native values and planning
+allocations. Process measurements include every in-process node, dependency fixture and harness
+allocation; isolated one-node and three-node runs provide attributable comparisons. Sampled peaks
+are observations, not continuous maxima, and allocator resident bytes exclude mappings outside
+jemalloc. The scenarios also compare bulk refusal counters before and after each restore.
+The large-native-metadata oracle stops the cluster after public restore and exact replay, then
+opens each node's database through the production snapshot reader. It compares every lifecycle
+key, timestamp, incarnation, revision and Kafka topic/partition/offset on primary and replica
+copies. Those complete-value inspection allocations occur outside the restore measurement.
+The runtime's testing-only inspection API returns decoded current metadata; the harness owns all
+archive comparisons and assertions.
+The scenario takes the CLI's execution reference and replays it through the public session before
+and after restart, comparing the complete typed restore report.
+
 The lane then selects `@paced_simulation_reopen` from the public paced-driver feature. It builds the
 Rust driver in the lane's selection and supplies its path to the same scenario fixture, so the
 driver installs its own detector before entering its runtime. Both drivers exercise endpoint
@@ -222,14 +239,20 @@ The boundary between them is kept in four places.
 - **Ordinary commands.** The NSPL commands a scenario runs go through the production Rust client,
   with its execution identity, redirects, and reconnects. This includes the transaction qualification
   graph's setup commands, which retain each execution reference if leadership changes while setup
-  is applying. The paced simulation's published graph is loaded through one native client so its
-  BEGIN/COMMIT state and command references survive an interrupted finalization. A leader setup
-  step whose commands need one session, because they create a subscription or open a transaction,
-  runs them over a raw wire session; when leadership moves before one of them reached the leader,
-  or after the leader admitted it and before its outcome was known, the step sends that command
-  again with the same execution reference to the current leader, as a client must, and goes on
-  there, within 60 seconds per command and only while the session holds no subscription or
-  transaction yet. Raw wire probes
+  is applying. When a command document has server statements after a subscription, the harness
+  sends those statements through the client and opens a raw session for the subscription on the
+  node requested by the step. A standalone subscription stays on that requested node, including
+  after failover. The large materialized backup workload submits
+  each graph statement through the production client so a leadership change during its many relay
+  definitions recovers that statement by reference; its Row subscription opens on a raw session
+  after the graph is ready. A leader setup step whose other commands need one session, because
+  they create a subscription or open a transaction, runs them over a raw wire session; when
+  leadership moves before one of them reached the leader, or after the leader admitted it and
+  before its outcome was known, the step sends that command again with the same execution
+  reference to the current leader, as a client must, and goes on there, within 60 seconds per
+  command and only while the session holds no subscription or transaction yet.
+  The paced simulation's published graph is loaded through one native client so its
+  BEGIN/COMMIT state and command references survive an interrupted finalization. Raw wire probes
   expose the received dispositions directly for protocol assertions. No harness deadline shortens
   native commands. Only
   the status path described below is harness-owned, and it is a separate test-only boundary: it

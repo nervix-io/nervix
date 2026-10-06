@@ -7,7 +7,8 @@ x-nervix-environment: &nervix-environment
   NERVIX_INTERCONNECT_TLS_CA: /etc/nervix/interconnect/ca.pem
   NERVIX_INTERCONNECT_TLS_CERT: /etc/nervix/interconnect/node.pem
   NERVIX_INTERCONNECT_TLS_KEY: /etc/nervix/interconnect/node-key.pem
-  NERVIX_REPLICA_COUNT: "0"
+  NERVIX_REPLICA_COUNT: ${CHAOS_REPLICA_COUNT:-0}
+  NERVIX_STATE_SNAPSHOT_INTERVAL: ${CHAOS_STATE_SNAPSHOT_INTERVAL:-30s}
   NERVIX_RAFT_HEARTBEAT_INTERVAL: ${CHAOS_RAFT_HEARTBEAT_INTERVAL:-250ms}
   NERVIX_RAFT_ELECTION_TIMEOUT_MIN: ${CHAOS_RAFT_ELECTION_TIMEOUT_MIN:-1500ms}
   NERVIX_RAFT_ELECTION_TIMEOUT_MAX: ${CHAOS_RAFT_ELECTION_TIMEOUT_MAX:-3000ms}
@@ -198,7 +199,7 @@ services:
       <<: *run-labels
       io.nervix.chaos.role: load
     environment:
-      CHAOS_LOAD_INTERVAL: ${CHAOS_LOAD_INTERVAL:-0.5}
+      CHAOS_LOAD_INTERVAL_MS: ${CHAOS_LOAD_INTERVAL_MS:?CHAOS_LOAD_INTERVAL_MS is required}
     volumes:
       - ${CHAOS_SCRIPT_DIR:?CHAOS_SCRIPT_DIR is required}/continuous-load.sh:/opt/chaos/continuous-load.sh:ro
       - ${CHAOS_LOAD_FILE:?CHAOS_LOAD_FILE is required}:/opt/chaos/input.ndjson:ro
@@ -208,6 +209,87 @@ services:
       options:
         max-file: "2"
         max-size: 2m
+    networks:
+      - chaos
+
+  state-load:
+    image: ${CHAOS_KCAT_IMAGE:?CHAOS_KCAT_IMAGE is required}
+    profiles:
+      - stateful
+    entrypoint:
+      - /bin/sh
+      - /opt/chaos/continuous-load.sh
+    labels:
+      <<: *run-labels
+      io.nervix.chaos.role: load
+    environment:
+      CHAOS_LOAD_INTERVAL_MS: ${CHAOS_STATE_LOAD_INTERVAL_MS:?CHAOS_STATE_LOAD_INTERVAL_MS is required}
+      CHAOS_LOAD_TOPIC: chaos_state_input
+      CHAOS_LOAD_STOP_FILE: stop-state-load
+      CHAOS_LOAD_HOLD_FILE: hold-state-load
+    volumes:
+      - ${CHAOS_SCRIPT_DIR:?CHAOS_SCRIPT_DIR is required}/continuous-load.sh:/opt/chaos/continuous-load.sh:ro
+      - ${CHAOS_STATE_LOAD_FILE:?CHAOS_STATE_LOAD_FILE is required}:/opt/chaos/input.ndjson:ro
+      - ${CHAOS_TRAFFIC_DIR:?CHAOS_TRAFFIC_DIR is required}:/opt/chaos/traffic:ro
+    logging:
+      driver: local
+      options:
+        max-file: "2"
+        max-size: 2m
+    networks:
+      - chaos
+
+  paced-load:
+    image: ${CHAOS_KCAT_IMAGE:?CHAOS_KCAT_IMAGE is required}
+    profiles:
+      - paced
+    entrypoint:
+      - /bin/sh
+      - /opt/chaos/continuous-load.sh
+    labels:
+      <<: *run-labels
+      io.nervix.chaos.role: load
+    environment:
+      CHAOS_LOAD_INTERVAL_MS: ${CHAOS_PACED_LOAD_INTERVAL_MS:?CHAOS_PACED_LOAD_INTERVAL_MS is required}
+      CHAOS_LOAD_TOPIC: chaos_paced_input
+      CHAOS_LOAD_STOP_FILE: stop-paced-load
+    volumes:
+      - ${CHAOS_SCRIPT_DIR:?CHAOS_SCRIPT_DIR is required}/continuous-load.sh:/opt/chaos/continuous-load.sh:ro
+      - ${CHAOS_PACED_LOAD_FILE:?CHAOS_PACED_LOAD_FILE is required}:/opt/chaos/input.ndjson:ro
+      - ${CHAOS_TRAFFIC_DIR:?CHAOS_TRAFFIC_DIR is required}:/opt/chaos/traffic:ro
+    logging:
+      driver: local
+      options:
+        max-file: "2"
+        max-size: 2m
+    networks:
+      - chaos
+
+  # One independent observer per node follows the paced domain's clock through that node's
+  # session route with the packaged CLI; the runner starts each with its CHAOS_CLOCK_HOST.
+  clock-observer:
+    image: ${NERVIX_IMAGE:?NERVIX_IMAGE is required}
+    profiles:
+      - paced
+    entrypoint:
+      - /bin/sh
+      - /opt/chaos/observe-clock.sh
+    labels:
+      <<: *run-labels
+      io.nervix.chaos.role: observer
+    environment:
+      NERVIX_PASSWORD: ${CHAOS_PASSWORD:?CHAOS_PASSWORD is required}
+      CHAOS_CLOCK_DOMAIN: chaos_paced
+      CHAOS_CLOCK_HOST: nervix-1
+    tmpfs:
+      - /var/lib/nervix
+    volumes:
+      - ${CHAOS_SCRIPT_DIR:?CHAOS_SCRIPT_DIR is required}/observe-clock.sh:/opt/chaos/observe-clock.sh:ro
+    logging:
+      driver: local
+      options:
+        max-file: "2"
+        max-size: 8m
     networks:
       - chaos
 

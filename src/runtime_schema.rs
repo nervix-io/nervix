@@ -368,6 +368,14 @@ pub enum RuntimeValue {
     Vec(Vec<RuntimeValue>),
 }
 
+/// Why a value in the remote form a peer's frame or a stored checkpoint carries is not a runtime
+/// value. The variant names the defect without the value, which may be sensitive.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
+pub enum RemoteRuntimeValueError {
+    #[error("a remote datetime value is not RFC 3339 text")]
+    Datetime,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", content = "value")]
 enum SerializableRuntimeValue {
@@ -2639,8 +2647,14 @@ impl RuntimeValue {
         }
     }
 
-    pub fn from_remote(value: RemoteRuntimeValue) -> Self {
-        match value {
+    /// The typed value a peer's frame or a stored checkpoint carries in its remote form.
+    ///
+    /// A remote datetime is RFC 3339 text, which this node reads back rather than trusts: text
+    /// that does not read as a datetime fails here instead of reaching any owner of the value.
+    pub fn from_remote(
+        value: RemoteRuntimeValue,
+    ) -> error_stack::Result<Self, RemoteRuntimeValueError> {
+        let value = match value {
             RemoteRuntimeValue::U8(v) => Self::U8(v),
             RemoteRuntimeValue::I8(v) => Self::I8(v),
             RemoteRuntimeValue::U16(v) => Self::U16(v),
@@ -2651,19 +2665,32 @@ impl RuntimeValue {
             RemoteRuntimeValue::I64(v) => Self::I64(v),
             RemoteRuntimeValue::Bool(v) => Self::Bool(v),
             RemoteRuntimeValue::String(v) => Self::String(v),
-            RemoteRuntimeValue::Datetime(v) => Self::Datetime(
-                DateTime::parse_from_rfc3339(&v)
-                    .assured("the peer renders these with to_rfc3339, which this parser accepts"),
-            ),
+            RemoteRuntimeValue::Datetime(v) => Self::Datetime(Self::remote_datetime(&v)?),
             RemoteRuntimeValue::F32(v) => Self::F32(OrderedFloat(v)),
             RemoteRuntimeValue::F64(v) => Self::F64(OrderedFloat(v)),
-            RemoteRuntimeValue::Array(v) => {
-                Self::Array(v.into_iter().map(Self::from_remote_element).collect())
-            }
-            RemoteRuntimeValue::Vec(v) => {
-                Self::Vec(v.into_iter().map(Self::from_remote_element).collect())
-            }
+            RemoteRuntimeValue::Array(v) => Self::Array(Self::from_remote_elements(v)?),
+            RemoteRuntimeValue::Vec(v) => Self::Vec(Self::from_remote_elements(v)?),
+        };
+        Ok(value)
+    }
+
+    /// The datetime a remote value spells as RFC 3339 text.
+    fn remote_datetime(
+        text: &str,
+    ) -> error_stack::Result<DateTime<FixedOffset>, RemoteRuntimeValueError> {
+        DateTime::parse_from_rfc3339(text)
+            .map_err(|error| Report::new(RemoteRuntimeValueError::Datetime).attach_printable(error))
+    }
+
+    /// The elements of a remote array or list, in their order.
+    fn from_remote_elements(
+        values: Vec<RemoteRuntimeElementValue>,
+    ) -> error_stack::Result<Vec<Self>, RemoteRuntimeValueError> {
+        let mut elements = Vec::with_capacity(values.len());
+        for value in values {
+            elements.push(Self::from_remote_element(value)?);
         }
+        Ok(elements)
     }
 
     fn to_remote_element(&self) -> RemoteRuntimeElementValue {
@@ -2690,8 +2717,10 @@ impl RuntimeValue {
         }
     }
 
-    fn from_remote_element(value: RemoteRuntimeElementValue) -> Self {
-        match value {
+    fn from_remote_element(
+        value: RemoteRuntimeElementValue,
+    ) -> error_stack::Result<Self, RemoteRuntimeValueError> {
+        let value = match value {
             RemoteRuntimeElementValue::U8(v) => Self::U8(v),
             RemoteRuntimeElementValue::I8(v) => Self::I8(v),
             RemoteRuntimeElementValue::U16(v) => Self::U16(v),
@@ -2702,19 +2731,17 @@ impl RuntimeValue {
             RemoteRuntimeElementValue::I64(v) => Self::I64(v),
             RemoteRuntimeElementValue::Bool(v) => Self::Bool(v),
             RemoteRuntimeElementValue::String(v) => Self::String(v),
-            RemoteRuntimeElementValue::Datetime(v) => Self::Datetime(
-                DateTime::parse_from_rfc3339(&v)
-                    .assured("the peer renders these with to_rfc3339, which this parser accepts"),
-            ),
+            RemoteRuntimeElementValue::Datetime(v) => Self::Datetime(Self::remote_datetime(&v)?),
             RemoteRuntimeElementValue::F32(v) => Self::F32(OrderedFloat(v)),
             RemoteRuntimeElementValue::F64(v) => Self::F64(OrderedFloat(v)),
             RemoteRuntimeElementValue::Array(values) => {
-                Self::Array(values.into_iter().map(Self::from_remote_element).collect())
+                Self::Array(Self::from_remote_elements(values)?)
             }
             RemoteRuntimeElementValue::Vec(values) => {
-                Self::Vec(values.into_iter().map(Self::from_remote_element).collect())
+                Self::Vec(Self::from_remote_elements(values)?)
             }
-        }
+        };
+        Ok(value)
     }
 
     pub(crate) fn to_key_fragment(&self) -> String {
@@ -2722,6 +2749,28 @@ impl RuntimeValue {
             Self::String(v) => v.clone(),
             Self::Datetime(v) => v.to_rfc3339(),
             other => other.to_json_value().to_string(),
+        }
+    }
+
+    /// Whether every float this value holds, at any depth, is finite.
+    pub(crate) fn holds_only_finite_floats(&self) -> bool {
+        match self {
+            Self::F32(v) => v.into_inner().is_finite(),
+            Self::F64(v) => v.into_inner().is_finite(),
+            Self::Array(values) | Self::Vec(values) => {
+                values.iter().all(RuntimeValue::holds_only_finite_floats)
+            }
+            Self::U8(_)
+            | Self::I8(_)
+            | Self::U16(_)
+            | Self::I16(_)
+            | Self::U32(_)
+            | Self::I32(_)
+            | Self::U64(_)
+            | Self::I64(_)
+            | Self::Bool(_)
+            | Self::String(_)
+            | Self::Datetime(_) => true,
         }
     }
 

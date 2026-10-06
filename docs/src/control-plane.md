@@ -522,13 +522,24 @@ and has no intake to pause;
 quiescing. A retry still uses the command execution's stable identity and outcome.
 The backup drain reads admitted work on every live node and uses a separate confirming force-flush
 round after the cluster first appears quiet. A parked materialized-state wait is reported but does
-not keep the cut open. If work reappears, the leader drains and confirms again. Each drain request
+not keep the cut open, and neither do the rows a window retains, which the cut captures as window
+state. If work reappears, the leader drains and confirms again. Each drain request
 is bound to the authenticated coordinator process; a successor cannot reuse its cut identity.
 The cut captures each materialized relay's fresh Arrow views and scalar identities under its
 assignment barrier. Paused generators release their admitted-work guard after flushing, so the
 drain can reach zero while their branch tasks remain paused.
 
 ## Restoring A Backup
+
+Before admission, restore verification measures the manifest and obtains a separate retained
+`restore_metadata` reservation for archive descriptions, parsing, planning copies and native
+conversion scratch. The default per-node ceiling is 2 GiB; raw resources and guest saves stay on
+disk. The verified description, parsed Models and reservation share one owner that encoding jobs
+retain until they finish, including cancellation. Parsing and the pure restore planner run on
+admitted bulk CPU workers. Native checkpoints stream into quota-owned files and use the same
+bounded installation path as guest saves. The ordinary bulk budget stays at 32 MiB, with fixed
+2 MiB conversion I/O and installation jobs. [Backup And Restore](backup-and-restore.md#restoring)
+owns the preparation estimate and its allocation limits.
 
 A restore is a persistent administrative command whose progress is replicated state; the operator
 view is in [Backup And Restore](./backup-and-restore.md#restoring). The leader admits a restore
@@ -658,10 +669,12 @@ until the shutdown deadline.
 
 Graceful shutdown records whether that stable node name was already cordoned before it invokes the
 drain. Its cleanup clears the drain cordon only when shutdown began with an uncordoned node, and it
-runs after a successful, failed, or timed-out drain attempt. A pre-existing operator cordon therefore
-remains set across shutdown and restart. When the drain timeout or the shutdown deadline passes, or
-the leader cannot be reached, before the node requests its drain, nothing was cordoned and no
-cleanup runs.
+runs after a successful, failed, timed-out, or unanswered drain attempt. A pre-existing operator
+cordon therefore remains set across shutdown and restart. When the drain timeout or the shutdown
+deadline passes before the node observes a leader to request its drain from, nothing was cordoned
+and no cleanup runs. A follower requests both the drain and the cleanup from the leader over the
+cluster interconnect, authenticated by its node certificate rather than by a user credential; see
+[Topology Cases](./shutdown.md#topology-cases).
 
 A graceful-shutdown drain has two parts that share one drain timeout, and the drain also ends when
 the shutdown deadline passes first. When another live, schedulable Raft voter exists, the node

@@ -423,3 +423,126 @@ Feature: LOOKUP_HASH_MAP filter-map function
       | cluster_size | replica_count |
       | 1            | 0             |
       | 3            | 0             |
+
+  Scenario Outline: A LOOKUP_HASH_MAP key that fails for one row fails the junction's whole batch as one internal error
+    Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
+    And a <cluster_size> node nervix cluster is started
+    And node "node-1" has resource directory "titles_dir" containing
+      """
+      {
+        "lookup.jsonl": "{\"normalized_title\":\"mr\",\"city_name\":\"Chicago\",\"region_name\":\"IL\"}\n"
+      }
+      """
+    And the leader node is configured with these NSPL commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
+    When these NSPL commands are executed on the leader node
+      """
+      CREATE RESOURCE titles_data;
+      UPLOAD RESOURCE titles_data VERSION '{{titles_dir}}';
+      """
+    Then the last command output contains
+      """
+      uploaded resource version 1
+      """
+    When these NSPL commands are executed on the leader node
+      """
+      CREATE SCHEMA notification_in (
+        id STRING,
+        title STRING,
+        width I64
+      );
+
+      CREATE SCHEMA notification_out (
+        id STRING,
+        city STRING OPTIONAL
+      );
+
+      CREATE SCHEMA title_lookup (
+        normalized_title STRING,
+        city_name STRING,
+        region_name STRING
+      );
+
+      CREATE WIRE JSON SCHEMA notification_wire MODE STRICT (
+        id string,
+        title string,
+        width integer
+      );
+
+      CREATE WIRE JSON SCHEMA title_lookup_wire MODE STRICT (
+        normalized_title string,
+        city_name string,
+        region_name string
+      );
+
+      CREATE CODEC notification_codec
+        FROM WIRE JSON SCHEMA notification_wire
+        TO SCHEMA notification_in;
+
+      CREATE CODEC title_lookup_codec
+        FROM WIRE JSON SCHEMA title_lookup_wire
+        TO SCHEMA title_lookup;
+
+      CREATE RELAY incoming_logs SCHEMA notification_in UNBRANCHED;
+      CREATE RELAY enriched_logs SCHEMA notification_out UNBRANCHED;
+
+      CREATE HASH MAP titles_by_normalized
+        KEY normalized_title
+        FROM RESOURCE titles_data VERSION 1
+        PATH 'lookup.jsonl'
+        DECODE USING title_lookup_codec;
+
+      CREATE VHOST edge http-lookup-failure-{{test_id}}.example.com;
+
+      CREATE ENDPOINT ingress
+        ON edge
+        PATH '/lookup-failure'
+        TYPE HTTP;
+
+      CREATE INGESTOR source_logs
+        FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL
+        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
+        TO incoming_logs
+          INHERIT ALL
+          UNBRANCHED
+          FLUSH IMMEDIATE
+          ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
+
+      CREATE JUNCTION enrich_titles
+        FROM incoming_logs
+        UNBRANCHED
+        TO enriched_logs
+          INHERIT ALL EXCEPT title, width
+          SET city = LOOKUP_HASH_MAP("titles_by_normalized", lower(left(input.title, 8 / input.width)), "city_name")
+          FLUSH IMMEDIATE
+          ON MESSAGE ERROR LOG;
+
+      CREATE SUBSCRIPTION enriched_logs_subscription TO enriched_logs;
+
+      START;
+      """
+    When http payload is posted to node "node-1" with host "http-lookup-failure-{{test_id}}.example.com" path "/lookup-failure"
+      """
+      {"id":"hit-1","title":"MR","width":1}
+      """
+    Then within "10s" the relay subscription receives payloads
+      """
+      {"city":"Chicago","id":"hit-1"}
+      """
+    When http payload is posted to node "node-1" with host "http-lookup-failure-{{test_id}}.example.com" path "/lookup-failure"
+      """
+      {"id":"failed-1","title":"MR","width":0}
+      """
+    Then within "10s" the active session observes a server error containing
+      """
+      junction 'enrich_titles' internal error in domain '{{domain}}': failed to prepare FILTER-MAP LOOKUP_HASH_MAP inputs: execute a VM key projection produced side error
+      """
+    And the relay subscription does not receive a payload within "1s"
+
+    Examples:
+      | cluster_size | replica_count |
+      | 1            | 0             |
+      | 3            | 0             |

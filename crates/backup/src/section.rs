@@ -28,8 +28,8 @@ pub(crate) const RECORD_MAGIC: [u8; 8] = *b"NVXBKREC";
 /// The magic, the kind and the version.
 pub(crate) const RECORD_HEADER_BYTES: usize = RECORD_MAGIC.len() + 2 + 2;
 
-/// The largest record section this crate writes or a reader accepts.
-pub(crate) const MAX_RECORD_BYTES: u64 = 64 * 1024 * 1024;
+/// The largest encoded record this crate writes or accepts, checked before reading or decoding.
+pub const MAX_RECORD_BYTES: u64 = 64 * 1024 * 1024;
 
 /// The alignment an rkyv payload is validated at.
 const RECORD_ALIGNMENT: usize = 16;
@@ -57,6 +57,10 @@ pub enum RecordKind {
     MaterializedRelayDescriptor = 8,
     #[strum(serialize = "materialized record identities")]
     MaterializedIdentities = 9,
+    #[strum(serialize = "deduplicator keyspace descriptor")]
+    DeduplicatorStateDescriptor = 10,
+    #[strum(serialize = "window state descriptor")]
+    WindowStateDescriptor = 11,
 }
 
 impl RecordKind {
@@ -72,6 +76,8 @@ impl RecordKind {
             Self::BranchLifecycle => 7,
             Self::MaterializedRelayDescriptor => 8,
             Self::MaterializedIdentities => 9,
+            Self::DeduplicatorStateDescriptor => 10,
+            Self::WindowStateDescriptor => 11,
         }
     }
 }

@@ -23,7 +23,7 @@ use nervix_primitives::{
 };
 use nonzero_ext::nonzero;
 
-use super::*;
+use super::{remote_dispatch::RemoteRelayDecodeError, *};
 use crate::{
     runtime_ack::{AckCompletion, AckOutcome, AckSet},
     runtime_schema::{RuntimeValue, test_runtime_row},
@@ -988,10 +988,18 @@ async fn a_routed_attached_delivery_fails_on_a_node_that_no_longer_runs_its_cons
         )
         .await;
 
+    let Err(error) = delivery else {
+        panic!(
+            "an attached record routed to a node without an attached consumer of its relay must \
+             not be acknowledged as delivered"
+        );
+    };
     assert!(
-        matches!(delivery, Err(RuntimeError::DispatchRemoteRelay { .. })),
-        "an attached record routed to a node without an attached consumer of its relay must not \
-         be acknowledged as delivered: {delivery:?}"
+        matches!(
+            error.current_context(),
+            RuntimeError::DispatchRemoteRelay { .. }
+        ),
+        "the delivery must fail as a refused dispatch: {error:#}"
     );
 }
 
@@ -1070,12 +1078,19 @@ async fn a_remote_payload_that_does_not_decode_names_its_defect() {
         let Err(error) = delivery else {
             panic!("a payload that does not decode must not be delivered");
         };
-        let RuntimeError::DecodeRemoteRelay { report, .. } = &error else {
-            panic!("the payload is refused as a decode failure: {error:?}");
-        };
-        assert_eq!(report.current_context(), &expected);
+        assert!(
+            matches!(
+                error.current_context(),
+                RuntimeError::DecodeRemoteRelay { .. }
+            ),
+            "the payload is refused as a decode failure: {error:#}"
+        );
         assert_eq!(
-            error.to_string(),
+            error.downcast_ref::<RemoteRelayDecodeError>(),
+            Some(&expected)
+        );
+        assert_eq!(
+            format!("{error:#}"),
             format!("failed to decode remote relay 'orders' in domain 'default': {reason}")
         );
     }
@@ -1146,10 +1161,17 @@ async fn a_subscription_fanout_that_does_not_decode_is_refused() {
             .await
             .expect_err("a fan-out that does not decode is refused");
 
-        let RuntimeError::DecodeRemoteRelay { report, .. } = error.current_context() else {
-            panic!("the fan-out is refused as a decode failure: {error:?}");
-        };
-        assert_eq!(report.current_context(), &expected);
+        assert!(
+            matches!(
+                error.current_context(),
+                RuntimeError::DecodeRemoteRelay { .. }
+            ),
+            "the fan-out is refused as a decode failure: {error:#}"
+        );
+        assert_eq!(
+            error.downcast_ref::<RemoteRelayDecodeError>(),
+            Some(&expected)
+        );
     }
 }
 
@@ -2230,4 +2252,86 @@ async fn an_unscheduled_materialized_record_is_visible_only_while_its_owner_hold
     );
     drop(owner);
     assert!(!runtime.materialized_stream_key_is_visible(Some(&routing), &placement, &acme));
+}
+
+#[nervix_primitives::test]
+async fn a_payload_for_a_relay_this_node_has_not_instantiated_names_its_domain_and_relay() {
+    let runtime = Runtime::default();
+    let relay = named::<RelayName>("incoming");
+    let installed = domain("installed");
+    install_unpaced_test_domain(&runtime, &installed);
+    let batch_ipc = test_schema(&[("value", ParseAsType::I64)])
+        .batch_from_test_rows([[("value".to_string(), RuntimeValue::I64(1))]])
+        .expect("batch should build")
+        .encode_arrow_ipc(runtime.executor())
+        .await
+        .expect("batch ipc should serialize");
+    let payload = |kind, target: &DomainName| RelayPayload {
+        delivery: RelayDelivery {
+            channel_incarnation: [1; 16],
+            sequence: 0,
+        },
+        kind,
+        domain: target.clone(),
+        relay: relay.clone(),
+        key: None,
+        batch_ipc: batch_ipc.clone(),
+        metadata: Vec::new(),
+        acks: Vec::new(),
+        admission: None,
+    };
+
+    let absent = domain("absent");
+    let stream = match runtime
+        .handle_remote_stream_payload_with_owner_ingress(
+            payload(RelayPayloadKind::Ingress, &absent),
+            true,
+        )
+        .await
+    {
+        Ok(()) => panic!("a stream payload needs its domain on this node"),
+        Err(error) => error,
+    };
+    assert_eq!(
+        stream.to_string(),
+        "relay 'incoming' in domain 'absent' is not instantiated"
+    );
+    for target in [&absent, &installed] {
+        let fanout = match runtime
+            .handle_remote_subscription_payload(payload(
+                RelayPayloadKind::SubscriptionFanout,
+                target,
+            ))
+            .await
+        {
+            Ok(()) => panic!("a subscription payload needs its relay instantiated"),
+            Err(error) => error,
+        };
+        assert_eq!(
+            fanout.to_string(),
+            format!(
+                "relay 'incoming' in domain '{}' is not instantiated",
+                target.as_str()
+            )
+        );
+    }
+
+    let passive = DomainRoutingSnapshot {
+        passive_only: true,
+        ..DomainRoutingSnapshot::default()
+    };
+    let without_schema = DomainRoutingSnapshot {
+        relay_services: HashMap::from_iter([(relay.clone(), test_relay_boundary_services())]),
+        ..DomainRoutingSnapshot::default()
+    };
+    for routing in [passive, DomainRoutingSnapshot::default(), without_schema] {
+        let target = match runtime.remote_stream_target(&routing, &installed, &relay) {
+            Ok(_) => panic!("a relay this node does not run is not a remote stream target"),
+            Err(error) => error,
+        };
+        assert_eq!(
+            target.to_string(),
+            "relay 'incoming' in domain 'installed' is not instantiated"
+        );
+    }
 }

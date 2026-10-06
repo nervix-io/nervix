@@ -139,12 +139,15 @@ writer.
 | Ingestor quiesce decision | Each ingestor publishes the declared and pending modes, active causes, source support, and derived intake decision as one value. Concurrent lifecycle changes derive their replacement from the current publication. | Polling and per-message intake make one load to decide whether to dispatch, suspend, skip, buffer, drop, or reject. A source host retains its last observed publication across dispatch awaits; its change wait registers before comparing that publication with the current one, so an engagement or release in the gap wakes it. The retained-payload lock is reached only after the published decision selects buffering. |
 | Backup state snapshot | Branch lifecycle publications, Kafka offset commits and WASM checkpoints register on a per-domain atomic generation before changing their published state. After the domain is paused and drained, the owner closes that generation with a Release RMW and waits with Acquire loads for registered publishers to leave. It then serializes Kafka positions and branch lifecycle into the runtime state store and opens one database snapshot for those records and durable WASM saves. The closing RMW is in the release sequence that a publisher entering the next generation acquires. | A publisher that entered before the cut completes into the captured view; a publisher that enters after it waits for the next generation. An older periodic storage write cannot replace a newer forced publication. The backup reads the database snapshot off the record path and stages owned section bytes. A live backup does not close the generation and reports its weaker cut explicitly. The server's Shuttle and Loom checks drive this production fence. |
 
-| Restore state publication | The control plane stages checkpoints under a replicated authority, then admits one fixed-size storage job, validates a complete generation namespace and durably publishes its active pointer. It holds the consensus applied-state read guard through authority validation, synchronous storage mutation and runtime-handle clearing. The state store reuses its existing latest-snapshot installation mutex for staging, pointer publication and bounded cleanup. Checkpoint jobs retain their selected namespace and validate it under that barrier; entity replacement and purge also select the active namespace while holding the barrier. | A newer applied generation and the release of the start gate require the state-machine write guard. Every node therefore replaces a whole state set before `START` is available, and stale coordinators cannot mutate a running restored domain. The store retains authority and inventory for exact retry and monotonic rejection. Database readers select pointer, header and chunk values from one snapshot, which retains its complete set across bounded deletion of obsolete namespaces. These are stopped-domain cold paths; record paths add no lock. |
+| Restore state publication | The control plane stages checkpoints under a replicated authority, then admits one fixed-size storage job, validates a complete generation namespace and durably publishes its active pointer. It holds the consensus applied-state read guard through authority validation, synchronous storage mutation and runtime-handle clearing. The state store reuses its existing latest-snapshot installation mutex for staging, pointer publication and bounded cleanup. Checkpoint jobs retain their selected namespace and validate it under that barrier; entity replacement and purge also select the active namespace while holding the barrier. | A newer applied generation and the release of the start gate require the state-machine write guard. Every node therefore replaces a whole state set before `START` is available, and stale coordinators cannot mutate a running restored domain. The store retains authority and inventory for exact retry and monotonic rejection. Database readers select pointer, header and chunk values from one snapshot, which retains its complete set across bounded deletion of obsolete namespaces and unreferenced active chunk sets. Publication runs on stopped-domain lifecycle paths. The admitted maintenance loop also follows running checkpoint replacement and purge under the installation barrier; record delivery adds no lock. |
 
 Restore storage qualification includes the store's cancellation, corruption, snapshot, queued
-writer and many-key cleanup regressions in `just test-deloxide`, plus the public one-node and
-three-node `@restore_installation` workloads for large saves, many checkpoints, durable publication
-failure, restart and delayed coordinators. Deloxide tracks the installation barrier and other
+writer, active chunk liveness and many-key cleanup regressions in `just test-deloxide` and
+`just test-deloxide-order`, plus the public one-node and three-node `@restore_installation`
+workloads for large saves, many checkpoints, native lifecycle and Kafka records above the default
+32 MiB bulk budget, active chunk replacement and purge, durable publication failure, restart and
+delayed coordinators. The many-checkpoint three-node case includes one replica per state; its
+one-MiB saves fit the replication operation's limit. Deloxide tracks the installation barrier and other
 boundary blocking locks; Fjall's internal locks, async authority ordering and memory ordering keep
 their separate ordinary, Shuttle, Loom and Turmoil checks. Measurements and diagnostic artifacts
 are delivered to the owning task.
@@ -167,10 +170,19 @@ models continue to qualify their ordering; new Shuttle checks qualify branch mem
 replica revision races and publication before activation. Paused generators release their
 admitted-work guard after flushing and reacquire it before producing more output.
 
+Native restore conversion retains the immutable verified-description owner and its preparation
+reservation while an admitted storage job streams the current checkpoint encoding into a
+quota-owned file. The job owns the disk permit until its file closes or becomes a completed
+artifact, including cancellation. Entry serialization and 64 KiB writes check cancellation
+between bounded units. Each bounded artifact read also retains its file and quota in the storage
+job until it exits. Local and remote installation retain their exact file source and use
+the existing authority and installation barriers; conversion adds no lock to record paths.
+
 The backup coordinator waits for each node's admitted-work counters to reach zero, then orders one
 confirming force-flush generation across the cluster. The generation's obligations use the same
 atomic counters as shutdown; a parked `REQUIRED WAIT` batch stays visible separately and cannot
-hold the cut open.
+hold the cut open. Rows a window retains park their shares too, and the cut captures them as
+window state.
 | Metric series handles | Each relay, node, ingestor, emitter, or concrete branch resolves its label set, internal series, and Prometheus child when its owning task or branch is created. | Recording uses the retained series directly. Counters update atomically; a histogram records through its already-resolved per-series accumulator without a registry lookup, key construction, or map guard. A node input folds a whole batch's delivery latencies in one kernel pass over the batch's high-watermark column before recording, so each latency series locks its accumulator and reads the wall clock once per batch rather than once per row, and its Prometheus child takes the batch in one flush. Whether a series was ever observed is an atomic flag set under that lock and read without it. Registration and removal stay on lifecycle paths. |
 | MQTT broker packet limit | Each MQTT sink's event-loop task stores the Maximum Packet Size of every `CONNACK` its client receives, or the broker's silence about one, as one atomic scalar. A reconnect replaces it. | A publish loads the scalar once per record to reject a packet the broker would refuse before handing it to the client. The value stands alone, so relaxed ordering is its whole contract, and a record published before the first `CONNACK` is measured only against the protocol's largest packet. |
 
@@ -356,8 +368,11 @@ branch task's final publication. The published generation is empty, so a later a
 same branch key cannot inherit the evicted window or its sketch panes. After the final checkpoint,
 the owner releases the evicted branch's in-memory publication. A branch that appears without a
 restored lifecycle entry also publishes an empty initial window, even if a previous lifetime of its
-key left a checkpoint behind. Stopping a branch for an ownership handoff follows the normal
-finalization path and publishes its retained window instead.
+key left a checkpoint behind. A processor task therefore installs every branch its lifecycle names
+before it dequeues any input, and a restore the bulk executor refuses installs none of them and is
+attempted again; see [Restoring Processor Branches](./shutdown.md#restoring-processor-branches).
+Stopping a branch for an ownership handoff follows the normal finalization path and publishes its
+retained window instead.
 The branch lifecycle and window checkpoint carry the same incarnation, assigned when the concrete
 branch appears. A restore whose incarnations differ begins with empty window state and marks it
 for publication, so a delayed checkpoint from the preceding lifetime cannot restore its panes.
@@ -611,7 +626,9 @@ pending count, and each completion resolves one share with a compare-and-swap. A
 encodes either a typed tracking state with its active-share count or the completed state; its
 reserved raw representation stays inside the encoding's owner. That state records whether shares
 still count against ownership handoff; a message parked on materialized `REQUIRED WAIT` does not
-keep a handoff blocked.
+keep a handoff blocked, and neither does a row a window retains until the window steps past it.
+Both owners hold one park guard per retained message and drop it before they acknowledge, so the
+acknowledgement removes the share the holder owns.
 Remote ACK progress publishes a monotonic sequence with the root's parked handoff state. An
 upstream remote share follows that state, and its root publishes the resulting transition farther
 upstream. A delayed progress event cannot reactivate a newer parked state. Terminal ACK resolution
@@ -1620,7 +1637,15 @@ stale authority, bounded cleanup across 600 checkpoints and a 40 MiB guest save 
 also exercises quota refusal and exact staging retry, partial chunks without receipts across
 reopen, reclamation with applying and future generations retained, published and initial state
 preservation, snapshot readers across deletion, and interrupted bounded reclamation resumed after
-restart. The node-local sweeper takes the applied consensus read guard before the checkpoint
+restart. Active-generation owner checks also exercise ordinary and same-revision inline writes,
+replica installation, handoff, forced recovery, entity and stale-identity purge, queued writers,
+exact publication retries, referenced-revision cursors and cancelled active deletion across restart.
+Current-shape storage fixtures also qualify segmented replacement and incomplete unpublished
+revisions in both initial and restored namespaces, with retained readers and reopen.
+Retained readers keep complete deleted payloads; SST observations distinguish logical deletion
+from snapshot release and explicit compaction. Header copies stay bounded, while Fjall's value
+size queries and database caches retain their separate allocation owner. The node-local sweeper
+takes the applied consensus read guard before the checkpoint
 installation barrier, matching staging and publication; both remain held through bounded deletion.
 The public quota scenarios retain active staging through completed sweeps and prove failed
 targets remain gated after reclamation and restart on one and three nodes. The selected
@@ -1632,7 +1657,14 @@ failed drains or full-hold engagement, and the restore installation workloads. T
 the blocking applied-state authority guard through staging failure, complete publication, runtime
 handle clearing and a delayed coordinator across leadership transfer and a successor's START.
 The large-generation scenarios cover two 20 MiB saves and forty 1 MiB saves on one and three nodes,
-failure after durable publication, cluster restart, branch isolation and saved source offsets.
+failure after durable publication, cluster restart, branch isolation, saved source offsets and
+positive reclamation after resumed checkpoints and the state purge from module rebinding.
+The three-node many-save case retains one replica per state and observes reclamation of both
+owner and replica chunks.
+Restore workload setup sends durable mutations and activation through the Rust client, which
+recovers the same execution reference when leadership moves; the raw subscription session keeps
+its own row stream. Large-generation and staging archive captures use a two-minute command budget
+so positive capture waits accommodate concurrent diagnostic workloads.
 The three-node copy restore cordons its coordinator before planning, so every guest save uses the
 remote chunk transfer and the receiver's quota-owned completed file.
 Those restore scenarios also run in the ordinary public suite. The memory-pressure scenarios take
@@ -1867,7 +1899,7 @@ A family of names means each member runs independently through the recipe.
 | Checkpoint replication (`src/runtime/kafka_offset_state.rs`, `src/runtime/state_replication/checkpoint_announcement_shuttle_tests.rs`) | `shuttle_a_replica_acknowledgement_racing_the_quorum_wait_is_never_missed` races a Kafka offset commit's replica quorum wait against its replica's acknowledgement: the wait registers before it reads, so it completes without its deadline, which a Shuttle timeout only reaches when a check triggers it. `shuttle_an_offer_racing_the_end_of_an_announcement_is_always_announced` races a second offer against the announcer of the first finding its replica caught up: the second revision is always announced and acknowledged. `shuttle_a_retired_replication_ends_its_announcer` ends an announcer whose replicated state goes away while its replica never acknowledges. `shuttle_an_announcement_racing_the_replica_wait_is_never_missed` races an owner's announcement against the replica task's synchronization and wait: an announcement that lands before the wait is kept as its permit. `shuttle_checkpoint_announcement_close_cancels_pending_dispatch` exercises the production task owner with close racing the first poll and close after dispatch starts: both cancel a dispatch that never becomes ready and release its retained announcer. |
 | Resolved state replication (`src/runtime/state_replication/routing_shuttle_tests.rs`) | `shuttle_state_replacement_and_retirement_fence_frames_in_flight` exercises the production routing owner: a frame can complete only on its selected lifetime, never change a successor, and cannot enter a route after retirement. ArcSwap internals remain opaque; this check covers owner use and scheduling, with no new Nervix-owned memory-ordering claim. |
 | Replica catch-up announcements (`src/runtime/branch_lifecycle_state_shuttle_tests.rs`) | `shuttle_an_announced_branch_racing_the_replica_round_is_never_missed` races an owner's announcement of a branch checkpoint against the replica task taking the pending announcements and waiting for the next: the task takes it whether it lands before the take, between the take and the wait, or during the wait. `shuttle_announcements_of_one_branch_keep_the_newest_pending` delivers two announcements of one branch in either order while the task takes them: an older one never replaces a newer one still pending. |
-| Backup capture, restore publication and reclamation (`src/runtime/backup_capture_fence.rs`, `crates/consensus/src/restore.rs`, `materialized_state.rs`) | `shuttle_backup_cut_includes_pre_cut_branch_publication` includes every registered publication before a cut. `shuttle_restore_publication_and_handle_clear_precede_resume_and_fence_delayed_publishers` drives the applied-state authority guard against a successor generation and RESUME, requiring complete publication and cleared handles before activation. `shuttle_materialized_capture_names_exactly_its_branch_generation` races capture with an update and eviction. `shuttle_replica_synchronization_preserves_the_restored_materialized_revision` races delayed and current owner snapshots. `shuttle_restore_reclamation_holds_the_revision_through_queued_installation` races the reclamation guard with a successor generation and queued installer, requiring the borrowed revision to stay fixed through deletion and preserving the current installation. They register in the shared Shuttle inventory and use its exploration, nondeterminism and replay contract. |
+| Backup capture, restore publication and reclamation (`src/runtime/backup_capture_fence.rs`, `src/runtime/branch_state_capture_shuttle_tests.rs`, `crates/consensus/src/restore.rs`, `materialized_state.rs`) | `shuttle_backup_cut_includes_pre_cut_branch_publication` includes every registered publication before a cut. `shuttle_a_forced_deduplicator_publication_holds_every_key_acknowledged_before_the_cut` and `shuttle_a_forced_window_publication_holds_every_step_acknowledged_before_the_cut` race a branch task's admissions or window steps against the cut's checkpoint request over the branch task's own command and input channels: once the task answers, the keyspace or window the capture reads holds every change acknowledged before the cut asked. Restored deduplicator and window checkpoints install through the same staged publisher and domain handle clear as the other kinds, so the restore checks below hold their installation order too. `shuttle_restore_publication_and_handle_clear_precede_resume_and_fence_delayed_publishers` drives the applied-state authority guard against a successor generation and RESUME, requiring complete publication and cleared handles before activation. `shuttle_materialized_capture_names_exactly_its_branch_generation` races capture with an update and eviction. `shuttle_replica_synchronization_preserves_the_restored_materialized_revision` races delayed and current owner snapshots. `shuttle_restore_reclamation_holds_the_revision_through_queued_installation` races the reclamation guard with a successor generation and queued installer, requiring the borrowed revision to stay fixed through deletion and preserving the current installation. They register in the shared Shuttle inventory and use its exploration, nondeterminism and replay contract. |
 | Domain clock (`src/runtime/domain_clock.rs`) | `shuttle_lifecycle_tests::concurrent_reads_of_one_installed_generation_never_decrease` checks the nondecreasing watermark; `a_clock_bound_to_a_replaced_generation_is_refused_by_revalidation` rejects a superseded generation; `readers_never_observe_an_installation_older_than_one_they_observed` prevents publication regression. `shuttle_delivery_sends_state_before_ticks_without_regressing_progress` explores the production observer and attachment delivery order across accepted ticks, same-generation unassignment and reassignment, and a generation change. `shuttle_an_attach_waiting_for_the_first_installation_observes_its_domains` races an attach's wait and lookup against the node's first installation of the committed domains and requires the lookup to find the domain and its clock. `a_logical_waiter_wakes_when_its_generation_stops`, `a_logical_waiter_wakes_when_its_generation_is_replaced`, `a_logical_waiter_wakes_when_its_domain_is_removed`, and `a_logical_waiter_wakes_when_a_replacement_mapping_reaches_its_deadline` cover each lifecycle wakeup. |
 
 The checks of WASM checkpoint holds and the durability barrier use the same runner and replay

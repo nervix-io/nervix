@@ -18,7 +18,7 @@ use nervix_models::{
 use nervix_primitives::sync::Arc;
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 
-use crate::durable_batch::{DurableBatch, StorageDecode, StorageEncode};
+use crate::durable_batch::{DurableBatch, StorageDecode, StorageEncode, StorageFailure};
 
 /// Each leaf shares its record too: copying a tree path never copies unrelated record contents.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -115,6 +115,78 @@ impl<K: Ord + Clone, V: Clone> From<&Records<K, V>> for BTreeMap<K, V> {
     }
 }
 
+/// What a stored value says about the key it is stored under.
+///
+/// A value that carries its own identity carries the key it is stored under: every mutation writes
+/// a record under the key its value names. Only damaged storage holds one that names another, and
+/// recovery refuses it before anything reads the record.
+pub(crate) trait StoredUnder<K> {
+    /// Whether this value can be the record stored under `key`.
+    fn is_stored_under(&self, key: &K) -> bool;
+}
+
+/// Declares record values that name no key of their own, so any key may hold them.
+macro_rules! stored_under_any_key {
+    ($($value:ty),+ $(,)?) => {
+        $(impl<K> StoredUnder<K> for $value {
+            fn is_stored_under(&self, _: &K) -> bool {
+                true
+            }
+        })+
+    };
+}
+
+stored_under_any_key!(
+    u64,
+    (),
+    nervix_models::ClusterNodeIncarnation,
+    nervix_models::DomainClockAuthority,
+    crate::DomainMutationLease,
+    crate::restore::DomainRestoreInstallation,
+);
+
+impl StoredUnder<DomainName> for DomainSchedule {
+    /// A schedule names its domain, and keys each entry by the node its configuration places,
+    /// which every reader resolving an entry by kind relies on.
+    fn is_stored_under(&self, domain: &DomainName) -> bool {
+        self.domain == *domain
+            && self
+                .nodes
+                .iter()
+                .all(|(node, scheduled)| *node == scheduled.identity())
+    }
+}
+
+impl StoredUnder<DomainName> for nervix_models::DomainState {
+    fn is_stored_under(&self, domain: &DomainName) -> bool {
+        self.id == *domain
+    }
+}
+
+impl StoredUnder<nervix_models::UserName> for crate::UserCredentials {
+    fn is_stored_under(&self, name: &nervix_models::UserName) -> bool {
+        self.name == *name
+    }
+}
+
+impl StoredUnder<ResourceId> for ResourceVersion {
+    fn is_stored_under(&self, id: &ResourceId) -> bool {
+        self.id == *id
+    }
+}
+
+impl StoredUnder<ResourceReplicaKey> for ResourceNodeStatus {
+    fn is_stored_under(&self, key: &ResourceReplicaKey) -> bool {
+        self.key == *key
+    }
+}
+
+impl StoredUnder<ResourceUploadKey> for ResourceUpload {
+    fn is_stored_under(&self, key: &ResourceUploadKey) -> bool {
+        self.key == *key
+    }
+}
+
 impl<K, V> Records<K, V>
 where
     K: Ord + Clone + Serialize + DeserializeOwned,
@@ -141,14 +213,36 @@ where
         Ok(())
     }
 
-    pub(crate) fn load(tag: u8, keyspace: &fjall::Keyspace) -> io::Result<Self> {
+    /// Every record stored under `tag`, refusing a key or a value no mutation writes.
+    pub(crate) fn load(tag: u8, keyspace: &fjall::Keyspace) -> io::Result<Self>
+    where
+        V: StoredUnder<K>,
+    {
         let mut records = Self::default();
         for item in keyspace.prefix([tag]) {
-            let (key, value) = item.into_inner().map_err(io::Error::other)?;
-            let key = storekey::deserialize(&key[1..]).map_err(io::Error::other)?;
-            records.insert(key, crate::storage_decode(&value)?);
+            let (stored_key, stored_value) = item.into_inner().map_err(io::Error::other)?;
+            let key = Self::decode_key(tag, &stored_key)?;
+            let value: V = crate::storage_decode(&stored_value)?;
+            if !value.is_stored_under(&key) {
+                return Err(io::Error::other(StorageFailure::InvalidState));
+            }
+            records.insert(key, value);
         }
         Ok(records)
+    }
+
+    /// The key a stored record key names. Only the exact encoding of a key names it: trailing bytes
+    /// or another spelling of the same key would let a second stored record claim the entry.
+    fn decode_key(tag: u8, stored: &[u8]) -> io::Result<K> {
+        let Some(encoded) = stored.get(1..) else {
+            return Err(io::Error::other(StorageFailure::InvalidState));
+        };
+        let key: K = storekey::deserialize(encoded)
+            .map_err(|_| io::Error::other(StorageFailure::InvalidState))?;
+        if Self::key(tag, &key)? != stored {
+            return Err(io::Error::other(StorageFailure::InvalidState));
+        }
+        Ok(key)
     }
 
     fn key(tag: u8, key: &K) -> io::Result<Vec<u8>> {
@@ -273,6 +367,24 @@ pub(crate) enum ResourceMutationError {
 }
 
 impl ResourceRecords {
+    /// Refuses a recovered catalog that assigns one version to two uploads. Every mutation
+    /// allocates a version of its own, and every reader of the catalog relies on that.
+    pub(crate) fn check_recovered(&self) -> io::Result<()> {
+        if ResourceUploads::try_from_uploads(self.uploads.values().cloned()).is_err() {
+            return Err(io::Error::other(StorageFailure::InvalidState));
+        }
+        Ok(())
+    }
+
+    /// How many keyed records the catalog stores.
+    pub(crate) fn stored_records(&self) -> Option<usize> {
+        self.counters
+            .len()
+            .checked_add(self.versions.len())?
+            .checked_add(self.replicas.len())?
+            .checked_add(self.uploads.len())
+    }
+
     pub(crate) fn declares(&self, domain: &DomainName, identifier: &ResourceName) -> bool {
         self.counters
             .contains_key(&ResourceCatalogKey::new(domain, identifier))
@@ -556,7 +668,8 @@ impl From<&ResourceRecords> for ResourceVersionStatus {
             replicas: resources.replicas.values().cloned().collect(),
             uploads: ResourceUploads::try_from_uploads(resources.uploads.values().cloned())
                 .assured(
-                    "the monotonically allocated resource version belongs to exactly one upload",
+                    "every mutation allocates an upload a version of its own, and recovery \
+                     refuses a catalog that assigns one version twice",
                 ),
         }
     }

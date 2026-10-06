@@ -371,8 +371,8 @@ Choose checks relevant to the configured graph:
 - `BACKUP CLUSTER TO '<file>';` or `BACKUP DOMAIN [<name>] TO '<file>' [WITHOUT RESOURCES]
   [WITHOUT STATE | WITHOUT PAUSE | TIMEOUT <duration>];` writes an archive on the client's machine,
   sent alone from `nervix-cli` or a native client. A normal backup quiesces each running domain
-  before capturing WASM guest state, Kafka domain source offsets, branch lifecycle and fresh
-  materialized relay generations. `WITHOUT
+  before capturing WASM guest state, Kafka domain source offsets, branch lifecycle, fresh
+  materialized relay generations, deduplicator keys and the rows windows retain. `WITHOUT
   PAUSE` reads published checkpoints while execution continues; `WITHOUT STATE` captures only
   configuration. `DESCRIBE BACKUP '<file>';` verifies one offline and inventories its state,
   domains, users, and resource versions. Treat an archive as a secret.
@@ -383,14 +383,20 @@ Choose checks relevant to the configured graph:
   resource versions under their archived numbers, models, and compatible runtime state from an archive, sent alone from
   `nervix-cli` or a native client. The default leaves restored domains stopped. `RESUME` makes them
   running at the archived start generation and clock mapping after complete publication, preserving
-  materialized rows. Paced mappings project downtime; normal `START` establishes a new generation
-  and clears materialized state. `START` remains blocked until the complete state installation
+  materialized rows, deduplicator keys and windows. Paced mappings project downtime; normal `START`
+  establishes a new generation and clears materialized state. Restored deduplicator keys expire at
+  their archived first sighting plus `MAX TIME`; a window whose model or branch incarnation changed
+  starts empty and the restore warns about it. A Kafka source restored with its offsets reads again
+  the rows its windows retained at the cut. `START` remains blocked until the complete state installation
   succeeds, including after a failed restore or restart. A domain name that exists is
   refused, so copy a domain with `AS`. A fresh cluster already has its bootstrap user, so a cluster
   restore there needs `ON EXISTING USER SKIP` or `REPLACE`. Run `DRY RUN` first to see the plan and
   each domain's impact report without changing anything.
   Failed unpublished checkpoint data is reclaimed on every node while the failed target's
-  `START` gate stays closed. Size the server's `--restore-staging-max-bytes` or
+  `START` gate stays closed. The same maintenance also reclaims restored chunks made unreachable
+  by resumed checkpoints, module rebinding or entity removal; existing snapshot readers can
+  retain their disk data.
+  Size the server's `--restore-staging-max-bytes` or
   `NERVIX_RESTORE_STAGING_MAX_BYTES` allowance for all concurrent unpublished checkpoints on that
   node; it defaults to `128GiB` and counts keys and values, including incomplete chunks. It is
   separate from archive-file staging and does not bound snapshot retention or filesystem
@@ -398,6 +404,11 @@ Choose checks relevant to the configured graph:
   `nervix_restore_staging_reclaimed_bytes_total` at `/metrics`; the backup chapter distinguishes
   logical usage from SST allocation. Recover an uncertain applying restore with its exact
   execution reference; after a terminal failed restore, restore into a fresh target name.
+  Restore metadata preparation has a separate per-node `restore_metadata` memory grant, defaulting
+  to 2 GiB and admitted before decoding or planning. Native lifecycle and Kafka checkpoints stream
+  through quota-owned files and 64 KiB windows with a fixed 2 MiB bulk I/O grant per operation.
+  Observe `nervix_execution_memory_reserved_bytes` by class; database and runtime `START` memory
+  have separate owners. The backup chapter documents record limits and preparation sizing.
 - `SHOW UDFS`, `DESCRIBE UDF <name>`, and `SHOW CREATE UDF <name>` inspect trusted Roto functions.
   Creation itself is the test gate: a rejecting Roto `test` block prevents persistence.
 - `SHOW PLACEMENTS`, `DESCRIBE PLACEMENT <name>`, `SHOW CREATE PLACEMENT <name>`, and

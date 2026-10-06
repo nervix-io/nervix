@@ -26,6 +26,13 @@ fi
 container_name="/${project}-${service}-1"
 volume_name="${project}_node-${service##*-}-data"
 
+# A pause window means something only against the liveness settings the run deployed: the values the
+# runner passed to Compose, or the Compose file's defaults when it passed none.
+heartbeat_interval="${CHAOS_RAFT_HEARTBEAT_INTERVAL:-250ms}"
+election_timeout_min="${CHAOS_RAFT_ELECTION_TIMEOUT_MIN:-1500ms}"
+election_timeout_max="${CHAOS_RAFT_ELECTION_TIMEOUT_MAX:-3000ms}"
+unavailability_timeout="${CHAOS_NODE_UNAVAILABILITY_TIMEOUT:-10s}"
+
 identity_matches() {
     local inspection="$1"
     jq -e \
@@ -34,7 +41,11 @@ identity_matches() {
         --arg service "${service}" \
         --arg image_id "${image_id}" \
         --arg container_name "${container_name}" \
-        --arg volume_name "${volume_name}" '
+        --arg volume_name "${volume_name}" \
+        --arg heartbeat "NERVIX_RAFT_HEARTBEAT_INTERVAL=${heartbeat_interval}" \
+        --arg election_min "NERVIX_RAFT_ELECTION_TIMEOUT_MIN=${election_timeout_min}" \
+        --arg election_max "NERVIX_RAFT_ELECTION_TIMEOUT_MAX=${election_timeout_max}" \
+        --arg unavailability "NERVIX_NODE_UNAVAILABILITY_TIMEOUT=${unavailability_timeout}" '
         length == 1 and
         (.[0].Id | test("^[a-f0-9]{64}$")) and
         .[0].Name == $container_name and
@@ -46,10 +57,10 @@ identity_matches() {
         .[0].HostConfig.RestartPolicy.Name == "no" and
         .[0].Image == $image_id and
         (.[0].Mounts | any(.Type == "volume" and .Name == $volume_name)) and
-        (.[0].Config.Env | index("NERVIX_RAFT_HEARTBEAT_INTERVAL=250ms") != null) and
-        (.[0].Config.Env | index("NERVIX_RAFT_ELECTION_TIMEOUT_MIN=10s") != null) and
-        (.[0].Config.Env | index("NERVIX_RAFT_ELECTION_TIMEOUT_MAX=12s") != null) and
-        (.[0].Config.Env | index("NERVIX_NODE_UNAVAILABILITY_TIMEOUT=15s") != null)
+        (.[0].Config.Env | index($heartbeat) != null) and
+        (.[0].Config.Env | index($election_min) != null) and
+        (.[0].Config.Env | index($election_max) != null) and
+        (.[0].Config.Env | index($unavailability) != null)
     ' "${inspection}" >/dev/null
 }
 

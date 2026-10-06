@@ -6490,7 +6490,12 @@ async fn await_covered_log_purge(
 async fn when_leadership_is_transferred_to_node(world: &mut ScenarioWorld, to_node_id: String) {
     let to_node_id = expand_placeholders(world, &to_node_id);
     let leader = running_leader_node(world).await;
-    world.cluster().transfer_leadership(&leader, &to_node_id);
+    // A leader asked to hand leadership to itself stops its heartbeats as any transferring leader
+    // does, and then the first follower whose election timeout passes takes over. A node that
+    // already leads therefore keeps leading without a transfer.
+    if leader != to_node_id {
+        world.cluster().transfer_leadership(&leader, &to_node_id);
+    }
     world
         .cluster()
         .wait_for_leader(&to_node_id, Some(&to_node_id))
@@ -8192,6 +8197,18 @@ async fn given_graceful_shutdown_drain_is_enabled(world: &mut ScenarioWorld) {
         "graceful shutdown drain must be configured before cluster startup"
     );
     world.cluster_config.graceful_shutdown_drain = true;
+}
+
+#[given("only the bootstrap node is given the default user's password")]
+async fn given_only_the_bootstrap_node_is_given_the_default_user_password(
+    world: &mut ScenarioWorld,
+) {
+    assert!(
+        world.cluster.is_none(),
+        "the default user's password must be configured before cluster startup"
+    );
+    world.cluster_config.default_user_password =
+        crate::common::cluster::DefaultUserPasswordSeed::BootstrapNodeOnly;
 }
 
 #[given(expr = "client grpc transport is configured with mode {string}")]
@@ -11466,6 +11483,28 @@ async fn when_the_cluster_is_restarted(world: &mut ScenarioWorld) {
         .expect("failed to restart cluster");
 }
 
+/// Every node stops with its stored state moved from memtables into on-disk tables, so the restart
+/// reads each stored record back from a table, as a node does once journal rotation has flushed
+/// it. A node that did not perform the move fails the step rather than restarting from memory.
+#[when("the cluster is restarted from state its nodes moved into on-disk tables")]
+async fn when_the_cluster_restarts_from_on_disk_tables(world: &mut ScenarioWorld) {
+    let nodes = world.cluster().node_ids();
+    for node in &nodes {
+        world
+            .fault_injection
+            .flush_node_database_on_stop(crate::common::cluster::node_name(node));
+    }
+    when_the_cluster_is_restarted(world).await;
+    for node in &nodes {
+        assert!(
+            world
+                .fault_injection
+                .node_database_flushed(&crate::common::cluster::node_name(node)),
+            "node '{node}' stopped without moving its node database into on-disk tables"
+        );
+    }
+}
+
 #[then(expr = "the last cluster operation completes within {string}")]
 async fn then_last_cluster_operation_completes_within(world: &mut ScenarioWorld, duration: String) {
     let max_duration =
@@ -12199,6 +12238,42 @@ fn record_mqtt_ingestors(world: &mut ScenarioWorld, commands: &str) {
     }
 }
 
+/// The statements of a command document whose server statements follow a subscription, when it
+/// holds only server statements and subscriptions. The harness sends those server statements
+/// through the client and opens a raw session for the subscription alone.
+fn subscription_graph_statements(
+    commands: &str,
+) -> Option<Vec<nervix_nspl::client_statement::ParsedClientStatement>> {
+    nervix_nspl::client_statement::parse_client_statement_sources(commands)
+        .ok()
+        .filter(|statements| {
+            let mut saw_subscription = false;
+            let server_follows_subscription = statements.iter().any(|statement| {
+                if matches!(
+                    statement.statement,
+                    nervix_nspl::client_statement::ClientStatement::CreateSubscription(_)
+                ) {
+                    saw_subscription = true;
+                    false
+                } else {
+                    saw_subscription
+                        && matches!(
+                            statement.statement,
+                            nervix_nspl::client_statement::ClientStatement::Server(_)
+                        )
+                }
+            });
+            server_follows_subscription
+                && statements.iter().all(|statement| {
+                    matches!(
+                        statement.statement,
+                        nervix_nspl::client_statement::ClientStatement::Server(_)
+                            | nervix_nspl::client_statement::ClientStatement::CreateSubscription(_)
+                    )
+                })
+        })
+}
+
 async fn execute_nspl_commands_on_node(
     world: &mut ScenarioWorld,
     node_id: &str,
@@ -12225,6 +12300,42 @@ async fn execute_nspl_commands_on_node(
             .open_session(node_id, &world.domain)
             .await
             .map_err(|error| error.to_string());
+    }
+
+    if let Some(statements) = subscription_graph_statements(commands) {
+        let mut session = None;
+        for statement in statements {
+            let command = statement.source(commands);
+            append_cucumber_log_line(&format!("nspl command with subscription: {command}"));
+            let output = match statement.statement {
+                nervix_nspl::client_statement::ClientStatement::Server(_) => world
+                    .cluster()
+                    .run_command(node_id, &world.domain, command)
+                    .await
+                    .map_err(|error| error.to_string())?,
+                nervix_nspl::client_statement::ClientStatement::CreateSubscription(_) => {
+                    if session.is_none() {
+                        session = Some(
+                            world
+                                .cluster()
+                                .open_session(node_id, &world.domain)
+                                .await
+                                .map_err(|error| error.to_string())?,
+                        );
+                    }
+                    session
+                        .as_mut()
+                        .expect("subscription session is open")
+                        .run_command(command)
+                        .await
+                        .map_err(|error| error.to_string())?
+                }
+                _ => unreachable!("subscription graph statements were classified above"),
+            };
+            world.last_command_output = Some(output);
+        }
+        record_mqtt_ingestors(world, commands);
+        return Ok(session.expect("subscription graph contains a subscription"));
     }
 
     let mut session = world
@@ -12267,8 +12378,9 @@ async fn execute_nspl_commands_on_leader(
     commands: &str,
 ) -> Result<LeaderSession, String> {
     let mut node = current_leader_node(world).await;
-    if !requires_persistent_session(commands) {
-        // The client library sends each command and recovers its outcome itself.
+    if !requires_persistent_session(commands) || subscription_graph_statements(commands).is_some() {
+        // The client library sends each command and recovers its outcome itself, the server
+        // statements of a subscription graph included.
         let session = execute_nspl_commands_on_node(world, &node, commands).await?;
         return Ok(LeaderSession { session, node });
     }

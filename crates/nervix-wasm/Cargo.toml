@@ -34,3 +34,4 @@ arrow-ipc = { workspace = true }
 arrow-schema = { workspace = true }
 bolero = { workspace = true }
 nervix-arbitrary = { workspace = true }
+nervix-models = { workspace = true, features = ["arrow"] }

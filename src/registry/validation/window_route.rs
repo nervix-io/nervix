@@ -43,6 +43,43 @@ pub(in crate::registry) fn validate_window_route_types(
     input_schema: &CreateSchema,
     branch_schema: Option<&CreateSchema>,
 ) -> Result<(), Report<RegistryError>> {
+    let compiled = compile_window_route(
+        context,
+        output,
+        aggregate,
+        output_schema,
+        input_schema,
+        branch_schema,
+    )?;
+    let ModelValidationContext {
+        domain, identifier, ..
+    } = context;
+    for (demand_index, demand) in compiled.demands.iter().enumerate() {
+        for (argument_index, argument) in demand.arguments.iter().enumerate() {
+            if contains_bytes(&argument.data_type) {
+                return Err(Report::new(RegistryError::WindowArgumentContainsBytes {
+                    domain: domain.clone(),
+                    processor: identifier.clone(),
+                    route: output.relay.clone(),
+                    demand: demand_index,
+                    argument: argument_index,
+                }));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// The route's aggregate program compiled against the declared input, output, branch and
+/// materialized-state schemas, exactly as the runtime compiles it.
+pub(in crate::registry) fn compile_window_route(
+    context: ModelValidationContext<'_, '_>,
+    output: &ProcessorOutput,
+    aggregate: &WindowAggregateProgram,
+    output_schema: &CreateSchema,
+    input_schema: &CreateSchema,
+    branch_schema: Option<&CreateSchema>,
+) -> Result<CompiledWindowRoute, Report<RegistryError>> {
     let ModelValidationContext {
         domain,
         identifier,
@@ -72,7 +109,7 @@ pub(in crate::registry) fn validate_window_route_types(
     let input_sensitivity = schema_sensitivity_for_internal_schema(input_schema);
     let output_arrow_schema = arrow_schema_for_internal_schema(output_schema);
     let output_sensitivity = schema_sensitivity_for_internal_schema(output_schema);
-    let compiled = CompiledWindowRoute::compile(
+    CompiledWindowRoute::compile(
         aggregate,
         WindowRouteSchemas {
             input: &input_arrow_schema,
@@ -89,21 +126,7 @@ pub(in crate::registry) fn validate_window_route_types(
             identifier: identifier.as_str().to_string(),
             reason: format!("window output '{}' compile failed: {error:#}", output.relay),
         })
-    })?;
-    for (demand_index, demand) in compiled.demands.iter().enumerate() {
-        for (argument_index, argument) in demand.arguments.iter().enumerate() {
-            if contains_bytes(&argument.data_type) {
-                return Err(Report::new(RegistryError::WindowArgumentContainsBytes {
-                    domain: domain.clone(),
-                    processor: identifier.clone(),
-                    route: output.relay.clone(),
-                    demand: demand_index,
-                    argument: argument_index,
-                }));
-            }
-        }
-    }
-    Ok(())
+    })
 }
 
 fn contains_bytes(data_type: &DataType) -> bool {

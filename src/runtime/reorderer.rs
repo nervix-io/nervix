@@ -142,11 +142,7 @@ pub(super) async fn flush_branch_reorderer_output(
                 processor,
                 error_policies,
                 failure.batches.iter().flat_map(|batch| batch.acks.iter()),
-                format!(
-                    "reorderer '{}' failed to order buffered Arrow batches: {}",
-                    processor.as_str(),
-                    failure.error
-                ),
+                &failure.error,
             );
             output_routes.routes[output_index].clear_flush_timer();
             return;
@@ -386,7 +382,7 @@ mod tests {
             .expect_err("ordering keys that do not pair with the Arrow rows must not order");
 
         assert!(matches!(
-            failure.error,
+            failure.error.current_context(),
             ReordererOutputBatchError::OrderingKeyCount {
                 arrow_rows: 1,
                 ordering_keys: 2,
@@ -453,9 +449,16 @@ mod tests {
             .expect_err("reorderer batches with different schemas cannot concatenate");
 
         assert!(matches!(
-            failure.error,
-            ReordererOutputBatchError::Concatenate { .. }
+            failure.error.current_context(),
+            ReordererOutputBatchError::Concatenate
         ));
+        assert!(
+            failure
+                .error
+                .downcast_ref::<crate::runtime::relay_batch::RelayRecordBatchError>()
+                .is_some(),
+            "the relay batch failure must stay beneath the reorderer's own context"
+        );
         assert_eq!(failure.batches.len(), 2);
         assert!(buffer.is_empty());
         assert_eq!(buffer.estimated_bytes(), 0);

@@ -133,6 +133,10 @@ of the eligible placement set. A cordoned restore coordinator therefore still se
 endpoint intake after `RESUME`, while placed relays and processors execute on eligible nodes.
 Removing a voter recomputes listener assignments from the remaining live voters before publication.
 
+WASM ownership preparation follows the installed revision's execution mode. A passive revision
+retains and transfers the validated checkpoint inventory without instantiating guests or reading
+its stopped clock. Guest restoration is deferred until `START` installs a running revision.
+
 Server endpoint installation replaces that domain's complete set of host-and-path definitions in
 the node's immutable intake table. Source starts bind prepared intake lifetimes to the same table;
 source ending and domain teardown end those lifetimes before withdrawing them. Other domains'
@@ -234,7 +238,12 @@ then activates prepared state under the desired plan, fences the previous owner,
 retains only the tasks that should execute here. A crash or disconnected owner follows the
 control plane's failover and state-recovery rules; in-flight batches and ACKs do not survive it.
 Restart reconstructs the plan from committed control-plane state and loads only state whose
-published identity and generation match the desired placement. A stopped domain reconstructs
+published identity and generation match the desired placement. A processor task restores its
+branches from its own plan: the plan carries the schema a window processor's retained rows are read
+under, so the restore never reads the domain's routing snapshot, which installation publishes only
+after it starts the tasks. The restore installs every branch its lifecycle names or none, and the
+task takes no input until it has; [Restoring Processor Branches](./shutdown.md#restoring-processor-branches)
+owns its retry and its failure semantics. A stopped domain reconstructs
 passive surfaces; a running or paused domain reconstructs the applicable execution and intake
 state. [Shutdown And Recovery](./shutdown.md) and [WASM State And Recovery](./wasm-state.md) own
 the detailed handoff, checkpoint, duplicate-window, and restart guarantees.

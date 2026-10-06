@@ -15,8 +15,9 @@
 
 use super::*;
 
-/// One chunk, its database copies, placement encoding and one bounded deletion batch fit in this
-/// reservation. It is independent of both checkpoint length and generation checkpoint count.
+/// Caller-owned chunk buffers, placement encoding and a bounded deletion batch fit in this
+/// reservation, independent of checkpoint length and count. Fjall's internal reads, caches,
+/// memtables and snapshot retention have separate allocation ownership.
 pub(crate) const RESTORE_STATE_CHUNK_BYTES: usize = 64 * 1024;
 const CHUNK_AND_DATABASE_COPIES: u64 = 512 * 1024;
 const PLACEMENT_AND_HEADER_ENCODING: u64 = 512 * 1024;
@@ -29,7 +30,9 @@ pub(crate) const RESTORE_STATE_WORKING_BYTES: u64 = CHUNK_AND_DATABASE_COPIES
 const DELETE_BATCH_BYTES: usize = RESTORE_STATE_CHUNK_BYTES;
 const MAX_PLACEMENT_BYTES: usize = 60 * 1024;
 const MAX_STORAGE_KEY_BYTES: usize = (1_usize << u16::BITS) - 1;
-const _: () = assert!(MAX_PLACEMENT_BYTES + 18 <= MAX_STORAGE_KEY_BYTES);
+pub(super) const CHUNK_COORDINATE_BYTES: usize = 2 * std::mem::size_of::<u64>() + 2;
+const _: () = assert!(MAX_PLACEMENT_BYTES + CHUNK_COORDINATE_BYTES <= MAX_STORAGE_KEY_BYTES);
+const _: () = assert!(StoredCheckpoint::SEGMENTED_BYTES <= RESTORE_STATE_CHUNK_BYTES);
 pub(super) const STORAGE_FORMAT: &[u8] = b"namespaced-checkpoint-segments";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -93,6 +96,11 @@ pub(super) fn physical_namespace(
     let Some(separator) = key.iter().position(|byte| *byte == 0) else {
         return Err(Report::new(RuntimePersistenceError::InvalidStorageFormat));
     };
+    // Every key begins with the canonical text of its domain, which no other spelling may stand
+    // for.
+    let domain = std::str::from_utf8(&key[..separator])
+        .change_context(RuntimePersistenceError::InvalidStorageFormat)?;
+    DomainName::decode(domain).change_context(RuntimePersistenceError::InvalidStorageFormat)?;
     let domain_end = separator + 1;
     let (namespace, tail) = match key.get(domain_end..) {
         Some([b'i', 0, tail @ ..]) => (StateNamespace::Initial, tail),
@@ -143,6 +151,11 @@ pub(in crate::runtime) enum StoredCheckpoint {
 }
 
 impl StoredCheckpoint {
+    // Segmented headers have no out-of-line archived fields: their encoding is exactly the
+    // archived root. Larger current values are Inline. Maintenance never copies or decodes those
+    // large payloads; Fjall's size query and caches retain their separate allocation owner.
+    pub(super) const SEGMENTED_BYTES: usize = std::mem::size_of::<ArchivedStoredCheckpoint>();
+
     pub(super) fn decode(raw: &[u8]) -> error_stack::Result<Self, RuntimePersistenceError> {
         let mut aligned = rkyv::util::AlignedVec::<16>::with_capacity(raw.len());
         aligned.extend_from_slice(raw);
@@ -160,6 +173,74 @@ impl StoredCheckpoint {
         match self {
             Self::Inline(entry) => entry.lsm,
             Self::Segmented(metadata) => metadata.lsm,
+        }
+    }
+}
+
+/// One placement/revision segment set. Its exclusive cursor skips referenced chunks without
+/// visiting their payloads or allocating a collection proportional to the checkpoint length.
+pub(super) struct CheckpointChunkSet<'a> {
+    pub(super) placement_key: &'a [u8],
+    pub(super) lsm: u64,
+}
+
+impl<'a> TryFrom<&'a [u8]> for CheckpointChunkSet<'a> {
+    type Error = Report<RuntimePersistenceError>;
+
+    fn try_from(key: &'a [u8]) -> Result<Self, Self::Error> {
+        let start = key
+            .len()
+            .checked_sub(CHUNK_COORDINATE_BYTES)
+            .ok_or(RuntimePersistenceError::InvalidCheckpointChunks)?;
+        let (placement_key, coordinates) = key.split_at(start);
+        let revision_end = 1 + std::mem::size_of::<u64>();
+        if coordinates[0] != 0 || coordinates[revision_end] != 0 {
+            return Err(Report::new(
+                RuntimePersistenceError::InvalidCheckpointChunks,
+            ));
+        }
+        physical_placement(placement_key)?;
+        let lsm = u64::from_be_bytes(
+            coordinates[1..revision_end]
+                .try_into()
+                .verified("the chunk coordinate contains exactly eight revision bytes"),
+        );
+        Ok(Self { placement_key, lsm })
+    }
+}
+
+impl CheckpointChunkSet<'_> {
+    pub(super) fn exclusive_end(&self) -> Vec<u8> {
+        let mut end = chunk_prefix(self.placement_key, self.lsm);
+        *end.last_mut()
+            .verified("a constructed chunk prefix ends with a zero separator") = 1;
+        end
+    }
+
+    pub(super) fn is_selected(
+        &self,
+        view: &fjall::Snapshot,
+        latest: &Keyspace,
+    ) -> error_stack::Result<bool, RuntimePersistenceError> {
+        let Some(bytes) = view
+            .size_of(latest, self.placement_key)
+            .change_context(RuntimePersistenceError::ReadValue)?
+        else {
+            return Ok(false);
+        };
+        if u64::from(bytes)
+            > u64::try_from(StoredCheckpoint::SEGMENTED_BYTES)
+                .verified("the fixed archived header size fits u64")
+        {
+            return Ok(false);
+        }
+        let raw = view
+            .get(latest, self.placement_key)
+            .change_context(RuntimePersistenceError::ReadValue)?
+            .ok_or(RuntimePersistenceError::ReadValue)?;
+        match StoredCheckpoint::decode(&raw)? {
+            StoredCheckpoint::Segmented(metadata) => Ok(metadata.lsm == self.lsm),
+            StoredCheckpoint::Inline(_) => Ok(false),
         }
     }
 }
@@ -282,9 +363,10 @@ pub(super) fn remove_bounded(
     prefix: &[u8],
     mut select: impl FnMut(&[u8]) -> error_stack::Result<bool, RuntimePersistenceError>,
     check: &mut impl FnMut() -> error_stack::Result<(), RuntimePersistenceError>,
-) -> error_stack::Result<(), RuntimePersistenceError> {
+) -> error_stack::Result<u64, RuntimePersistenceError> {
     let mut batch = db.batch();
     let mut bytes = 0_usize;
+    let mut reclaimed = 0_u64;
     for item in keyspace.prefix(prefix) {
         check()?;
         let key = item.key().map_err(|_| RuntimePersistenceError::ReadValue)?;
@@ -296,6 +378,17 @@ pub(super) fn remove_bounded(
                 RuntimePersistenceError::CheckpointPlacementTooLarge,
             ));
         }
+        let value_bytes = keyspace
+            .size_of(&key)
+            .change_context(RuntimePersistenceError::ReadValue)?
+            .ok_or(RuntimePersistenceError::ReadValue)?;
+        let key_value_bytes = u64::try_from(key.len())
+            .verified("bounded database keys fit u64")
+            .checked_add(u64::from(value_bytes))
+            .ok_or(RuntimePersistenceError::RestoreStagingSize)?;
+        reclaimed = reclaimed
+            .checked_add(key_value_bytes)
+            .ok_or(RuntimePersistenceError::RestoreStagingSize)?;
         bytes = bytes
             .checked_add(key.len() + 32)
             .ok_or(RuntimePersistenceError::WriteValue)?;
@@ -313,5 +406,5 @@ pub(super) fn remove_bounded(
             .commit()
             .map_err(|_| RuntimePersistenceError::WriteValue)?;
     }
-    Ok(())
+    Ok(reclaimed)
 }
