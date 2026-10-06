@@ -525,7 +525,7 @@ jq -e --slurpfile manifest "${crash_setup_dir}/manifest.json" '
 for script in "${chaos_dir}"/*.sh "${chaos_dir}"/tests/*.sh; do
     bash -n "${script}"
 done
-sh -n "${chaos_dir}/continuous-load.sh" "${chaos_dir}/observe-nodes.sh"
+sh -n "${chaos_dir}/continuous-load.sh" "${chaos_dir}/observe-nodes.sh" "${chaos_dir}/observe-clock.sh"
 
 # Every tool image a run starts is pinned in tool-images.sh by a registry-qualified digest.
 qualified_digest_reference='^[a-z0-9-]+(\.[a-z0-9-]+)+(:[0-9]+)?(/[a-z0-9._-]+)+@sha256:[a-f0-9]{64}$'
@@ -549,6 +549,8 @@ CHAOS_KCAT_IMAGE="${chaos_kcat_image}" \
 CHAOS_PROBE_IMAGE="${chaos_probe_image}" \
 CHAOS_SCRIPT_DIR="${chaos_dir}" \
 CHAOS_LOAD_FILE="${expected}" \
+CHAOS_STATE_LOAD_FILE="${expected}" \
+CHAOS_PACED_LOAD_FILE="${expected}" \
 CHAOS_TRAFFIC_DIR="${tmp_dir}" \
 CHAOS_NODE_COUNT="3" \
 CHAOS_SUBNET="10.213.7.0/24" \
@@ -557,7 +559,7 @@ CHAOS_NODE_1_ADDRESS="10.213.7.11" \
 CHAOS_NODE_2_ADDRESS="10.213.7.12" \
 CHAOS_NODE_3_ADDRESS="10.213.7.13" \
     docker compose -f "${chaos_dir}/compose.yaml" --profile tools --profile three-node --profile rolling \
-    config --format json \
+    --profile stateful --profile paced config --format json \
     >"${compose_json}"
 
 jq -e --arg image "${placeholder_image}" \
@@ -573,7 +575,11 @@ jq -e --arg image "${placeholder_image}" \
     and ([.services | to_entries[] | select(.key | test("^nervix-[123]$")) | .value]
          | all(.labels["io.nervix.chaos.run"] == "self-test"))
     and .services.load.labels["io.nervix.chaos.role"] == "load"
+    and .services["state-load"].labels["io.nervix.chaos.role"] == "load"
+    and .services["paced-load"].labels["io.nervix.chaos.role"] == "load"
     and .services.observer.labels["io.nervix.chaos.role"] == "observer"
+    and .services["clock-observer"].labels["io.nervix.chaos.role"] == "observer"
+    and .services["clock-observer"].image == $image
     and .services["nervix-1"].environment.NERVIX_RAFT_ELECTION_TIMEOUT_MIN == $election_min
     and .services["nervix-1"].environment.NERVIX_NODE_UNAVAILABILITY_TIMEOUT == $node_timeout
     and .services["nervix-1"].environment.NERVIX_RAFT_SNAPSHOT_ENTRY_THRESHOLD == $snapshot_entries
@@ -585,7 +591,8 @@ jq -e --arg nervix "${placeholder_image}" \
     --arg kcat "${chaos_kcat_image}" \
     --arg probe "${chaos_probe_image}" '
     [.services.broker.image, .services["broker-admin"].image] == [$kafka, $kafka]
-    and [.services.kcat.image, .services.load.image] == [$kcat, $kcat]
+    and [.services.kcat.image, .services.load.image, .services["state-load"].image,
+         .services["paced-load"].image] == [$kcat, $kcat, $kcat, $kcat]
     and [.services.probe.image, .services.observer.image] == [$probe, $probe]
     and ([.services[].image] | all(. == $nervix or . == $kafka or . == $kcat or . == $probe))
 ' "${compose_json}" >/dev/null || fail "Compose does not start every tool service from its pinned image"
@@ -714,3 +721,4 @@ printf 'chaos harness self-test passed\n'
 "${script_dir}/degraded-self-test.sh"
 "${script_dir}/docker-events-self-test.sh"
 "${script_dir}/recovery-self-test.sh"
+"${script_dir}/stateful-self-test.sh"
