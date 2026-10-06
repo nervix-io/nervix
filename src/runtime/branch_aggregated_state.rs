@@ -1,4 +1,4 @@
-use error_stack::Report;
+use error_stack::ResultExt as _;
 use nervix_checkpoint_replication::CheckpointReplication;
 use nervix_models::ClusterNodeName;
 use nervix_primitives::sync::atomic::{AtomicU64, Ordering};
@@ -51,7 +51,7 @@ impl ReplicatedBranchAggregatedState {
         physical_node_id: ClusterNodeName,
         metrics: &RuntimeMetrics,
         initial: Option<PersistedRuntimeStateEntry>,
-    ) -> Result<Self, RuntimePersistenceError> {
+    ) -> error_stack::Result<Self, RuntimePersistenceError> {
         let mut current_lsm = 0;
         let mut last_persisted_lsm = 0;
         if let Some(initial) = initial {
@@ -107,12 +107,12 @@ impl ReplicatedBranchAggregatedState {
     pub(super) fn snapshot_to_persist(
         &self,
         metrics: &RuntimeMetrics,
-    ) -> Result<Option<PersistedRuntimeStateEntry>, Report<RuntimePersistenceError>> {
+    ) -> error_stack::Result<Option<PersistedRuntimeStateEntry>, RuntimePersistenceError> {
         let persisted = self.last_persisted_lsm.load(Ordering::SeqCst);
         if self.current_lsm.current() <= persisted {
             return Ok(None);
         }
-        let snapshot = self.latest_snapshot(metrics).map_err(Report::new)?;
+        let snapshot = self.latest_snapshot(metrics)?;
         if snapshot.lsm <= persisted {
             return Ok(None);
         }
@@ -147,7 +147,7 @@ impl ReplicatedBranchAggregatedState {
     pub(super) fn latest_snapshot(
         &self,
         metrics: &RuntimeMetrics,
-    ) -> Result<PersistedRuntimeStateEntry, RuntimePersistenceError> {
+    ) -> error_stack::Result<PersistedRuntimeStateEntry, RuntimePersistenceError> {
         // The revision is read first, so an update whose metrics this snapshot misses has a newer
         // revision than the one the snapshot is stamped with.
         let lsm = self.current_lsm.current();
@@ -178,7 +178,7 @@ impl ReplicatedBranchAggregatedState {
         metrics: &RuntimeMetrics,
         lsm: u64,
         payload: &[u8],
-    ) -> Result<(), RuntimePersistenceError> {
+    ) -> error_stack::Result<(), RuntimePersistenceError> {
         let snapshot = decode_branch_aggregated_snapshot(payload)?;
         metrics.apply_global_target_snapshot(
             &self.placement.domain,
@@ -203,7 +203,7 @@ impl ReplicatedBranchAggregatedState {
         &self,
         metrics: &RuntimeMetrics,
         snapshot: PersistedRuntimeStateEntry,
-    ) -> Result<(), RuntimePersistenceError> {
+    ) -> error_stack::Result<(), RuntimePersistenceError> {
         let current_lsm = self.current_lsm.current();
         if snapshot.lsm <= current_lsm
             && metrics.has_global_target_measurements(
@@ -231,17 +231,17 @@ impl ReplicatedBranchAggregatedState {
 
 pub(super) fn encode_branch_aggregated_snapshot(
     snapshot: &BranchAggregatedRuntimeStateSnapshot,
-) -> Result<Vec<u8>, RuntimePersistenceError> {
+) -> error_stack::Result<Vec<u8>, RuntimePersistenceError> {
     rkyv::to_bytes::<rkyv::rancor::Error>(snapshot)
         .map(|bytes| bytes.to_vec())
-        .map_err(|error| RuntimePersistenceError::EncodeState(error.to_string()))
+        .change_context(RuntimePersistenceError::EncodeState)
 }
 
 pub(super) fn decode_branch_aggregated_snapshot(
     payload: &[u8],
-) -> Result<BranchAggregatedRuntimeStateSnapshot, RuntimePersistenceError> {
+) -> error_stack::Result<BranchAggregatedRuntimeStateSnapshot, RuntimePersistenceError> {
     rkyv::from_bytes::<BranchAggregatedRuntimeStateSnapshot, rkyv::rancor::Error>(payload)
-        .map_err(|error| RuntimePersistenceError::DecodeState(error.to_string()))
+        .change_context(RuntimePersistenceError::DecodeState)
 }
 
 /// A generated metrics snapshot stores through `stored`, the checkpoint envelope a node keeps it
@@ -283,7 +283,10 @@ pub(in crate::runtime) fn assert_metrics_payload_decodes_typed(payload: &[u8]) {
             assert_eq!(again, encoded);
         }
         Err(error) => assert!(
-            matches!(error, RuntimePersistenceError::DecodeState(_)),
+            matches!(
+                error.current_context(),
+                RuntimePersistenceError::DecodeState
+            ),
             "{error:?}"
         ),
     }

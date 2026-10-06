@@ -1002,10 +1002,9 @@ impl Runtime {
                 return Ok(routing);
             }
             if Instant::now() >= deadline {
-                return Err(Report::new(RuntimeError::RelayNotInstantiated {
-                    domain: domain.as_str().to_string(),
-                    relay: relay.as_str().to_string(),
-                }));
+                return Err(Report::new(RuntimeError::relay_not_instantiated(
+                    domain, relay,
+                )));
             }
             sleep(REMOTE_RELAY_INSTANTIATION_POLL).await;
         }

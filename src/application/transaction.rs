@@ -2642,7 +2642,7 @@ impl SessionServiceImpl {
             };
             if let Some(error) = &activation_error {
                 self.broadcast_error(format!(
-                    "failed to reconcile runtime after transaction '{}' step {}: {error}",
+                    "failed to reconcile runtime after transaction '{}' step {}: {error:#}",
                     transaction.id,
                     statement_index
                         .checked_add(1)
@@ -2663,7 +2663,7 @@ impl SessionServiceImpl {
                 {
                     application_failure = Some(format!(
                         "transaction '{}' committed step {}, but ownership activation did not \
-                         complete: {error}",
+                         complete: {error:#}",
                         transaction.id,
                         statement_index
                             .checked_add(1)
@@ -2671,7 +2671,7 @@ impl SessionServiceImpl {
                     ));
                     self.broadcast_error(format!(
                         "failed to confirm ownership state activation after transaction '{}' step \
-                         {}: {error}",
+                         {}: {error:#}",
                         transaction.id,
                         statement_index
                             .checked_add(1)
@@ -2681,14 +2681,14 @@ impl SessionServiceImpl {
             }
             if let Some(error) = activation_error
                 && !matches!(
-                    error,
+                    error.current_context(),
                     RuntimeError::RuntimeRevisionPreparation { .. }
                         | RuntimeError::RuntimeRevisionReadiness { .. }
                 )
             {
                 application_failure = Some(format!(
                     "transaction '{}' committed step {}, but runtime activation did not complete: \
-                     {error}",
+                     {error:#}",
                     transaction.id,
                     statement_index
                         .checked_add(1)
