@@ -471,6 +471,20 @@ without expiring the records whose match policy it asserts. The Kafka handoff sc
 after entity-gate engagement uses a test-configured two-minute gate lease so its broker-delivery
 assertions and pause release fit inside the handoff budget under concurrent suite load.
 
+Collection and route-flush timing assertions measure observed row arrival from the HTTP publication
+instant. Concurrent branch posts retain one publication origin, and every expected row must match
+its tenant and sequence and arrive after the declared lower bound, inside the unchanged delivery
+budget. Starting a new silence window after an HTTP response would reject a valid row whose
+collection or flush deadline elapsed while the harness awaited that response. The production
+owner's timing checks retain the independent branch-deadline assertions.
+
+The MQTT changed-address restart scenario waits for the post-restart marker within its bounded
+delivery window. Its persistent QoS 1 source may replay the pre-restart marker before that row;
+broker receipt does not establish that its source acknowledgement reached the broker before the
+node stopped. The OTEL metric scenario observes one successful export from each concrete emitter
+owner before checking Collector output. HTTP intake acceptance does not establish sink export,
+and the per-owner counters retain exact progress assertions for both HTTP and gRPC.
+
 A scenario step can also read status inside a window of its own, passing that window as the phase
 deadline. Where the window bounds how long something is watched rather than how long one read may
 take, every read keeps a full request timeout instead.

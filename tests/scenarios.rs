@@ -23028,6 +23028,7 @@ async fn when_http_payloads_are_posted_concurrently(
     append_cucumber_log_line(&format!(
         "http publish concurrent: node=node-1 host={host} path={path} payloads={payloads:?}"
     ));
+    world.last_publish_at = Some(Instant::now());
     let cluster = world.cluster();
     try_join_all(
         payloads
@@ -25010,7 +25011,7 @@ async fn then_within_duration_the_stream_subscription_receives_payloads_containi
     duration: String,
     #[step] step: &Step,
 ) {
-    receive_subscription_fragment_sets(world, &duration, step, UnmatchedPayloads::Skip).await;
+    receive_subscription_fragment_sets(world, &duration, step, UnmatchedPayloads::Skip, None).await;
 }
 
 /// Like the step above, except that every payload arriving before the last fragment set matches
@@ -25025,10 +25026,36 @@ async fn then_within_duration_the_stream_subscription_receives_exactly_the_fragm
     duration: String,
     #[step] step: &Step,
 ) {
-    receive_subscription_fragment_sets(world, &duration, step, UnmatchedPayloads::Fail).await;
+    receive_subscription_fragment_sets(world, &duration, step, UnmatchedPayloads::Fail, None).await;
 }
 
-/// Like the step above, and every payload matching a fragment set carries the same value in the
+/// Measures every expected row from publication, so a delayed HTTP response cannot start a new
+/// silence window after a valid collection or flush deadline has already passed.
+#[then(
+    expr = "within {string} the relay subscription receives payloads no sooner than {string} \
+            after they were published"
+)]
+async fn then_subscription_payloads_arrive_after_publication_delay(
+    world: &mut ScenarioWorld,
+    duration: String,
+    delay: String,
+    #[step] step: &Step,
+) {
+    let delay = parse_duration_text(&delay).expect("step delay must be a valid duration");
+    let published_at = world
+        .last_publish_at
+        .expect("a delivery-delay assertion must follow a publishing step");
+    receive_subscription_fragment_sets(
+        world,
+        &duration,
+        step,
+        UnmatchedPayloads::Fail,
+        Some(published_at + delay),
+    )
+    .await;
+}
+
+/// Every payload matching a fragment set carries the same value in the
 /// named JSON field, such as the one error reference the members of a failed batch share.
 #[then(
     expr = "within {string} the relay subscription receives payloads containing all fragments \
@@ -25041,7 +25068,8 @@ async fn then_within_duration_the_stream_subscription_receives_fragments_sharing
     #[step] step: &Step,
 ) {
     let matched =
-        receive_subscription_fragment_sets(world, &duration, step, UnmatchedPayloads::Skip).await;
+        receive_subscription_fragment_sets(world, &duration, step, UnmatchedPayloads::Skip, None)
+            .await;
     let values = matched
         .iter()
         .map(|payload| {
@@ -25080,6 +25108,7 @@ async fn receive_subscription_fragment_sets(
     duration: &str,
     step: &Step,
     unmatched: UnmatchedPayloads,
+    delivery_not_before: Option<Instant>,
 ) -> Vec<String> {
     let duration = parse_duration_text(duration).expect("step duration must be a valid duration");
     let expected_fragment_sets = docstring(step)
@@ -25139,6 +25168,13 @@ async fn receive_subscription_fragment_sets(
             .position(|fragments| fragments.iter().all(|fragment| payload.contains(fragment)));
         match (position, unmatched) {
             (Some(index), _) => {
+                if let Some(not_before) = delivery_not_before {
+                    assert!(
+                        Instant::now() >= not_before,
+                        "subscription payload {payload:?} arrived before its publication-relative \
+                         delivery bound"
+                    );
+                }
                 remaining.remove(index);
                 matched.push(payload);
             }

@@ -536,6 +536,12 @@ files for RabbitMQ, Redis, MQTT, Syslog, WebSocket, ClickHouse and SQS, the fixt
 in the HTTP polling, Prometheus, Sentry, OTEL, Iceberg, HTTP emitter and WebSocket client features,
 `tools/cli_session.feature`, and `runtime/client_wire_qualification.feature`.
 
+The MQTT changed-answer and restart scenario requires the new post-restart payload inside a
+bounded delivery wait. Its persistent QoS 1 source may replay the preceding payload before that
+marker; the resolver qualification proves reconnecting delivery and preserves MQTT's replay
+semantics. The OTEL fixture-name metric scenario observes a successful export from both concrete
+emitter owners before checking the Collector's HTTP and gRPC output.
+
 ## Guarantees And Non-Guarantees
 
 The evidence above establishes these guarantees:
