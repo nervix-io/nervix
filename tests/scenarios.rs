@@ -12208,6 +12208,70 @@ async fn execute_nspl_commands_on_node(
             .map_err(|error| error.to_string());
     }
 
+    let statements = nervix_nspl::client_statement::parse_client_statement_sources(commands)
+        .ok()
+        .filter(|statements| {
+            let mut saw_subscription = false;
+            let server_follows_subscription = statements.iter().any(|statement| {
+                if matches!(
+                    statement.statement,
+                    nervix_nspl::client_statement::ClientStatement::CreateSubscription(_)
+                ) {
+                    saw_subscription = true;
+                    false
+                } else {
+                    saw_subscription
+                        && matches!(
+                            statement.statement,
+                            nervix_nspl::client_statement::ClientStatement::Server(_)
+                        )
+                }
+            });
+            server_follows_subscription
+                && statements.iter().all(|statement| {
+                    matches!(
+                        statement.statement,
+                        nervix_nspl::client_statement::ClientStatement::Server(_)
+                            | nervix_nspl::client_statement::ClientStatement::CreateSubscription(_)
+                    )
+                })
+        });
+    if let Some(statements) = statements {
+        let mut session = None;
+        for statement in statements {
+            let command = statement.source(commands);
+            append_cucumber_log_line(&format!("nspl command with subscription: {command}"));
+            let output = match statement.statement {
+                nervix_nspl::client_statement::ClientStatement::Server(_) => world
+                    .cluster()
+                    .run_command(node_id, &world.domain, command)
+                    .await
+                    .map_err(|error| error.to_string())?,
+                nervix_nspl::client_statement::ClientStatement::CreateSubscription(_) => {
+                    if session.is_none() {
+                        session = Some(
+                            world
+                                .cluster()
+                                .open_session(node_id, &world.domain)
+                                .await
+                                .map_err(|error| error.to_string())?,
+                        );
+                    }
+                    session
+                        .as_mut()
+                        .expect("subscription session is open")
+                        .run_command(command)
+                        .await
+                        .map_err(|error| error.to_string())?
+                }
+                _ => unreachable!("subscription graph statements were classified above"),
+            };
+            world.last_command_output = Some(output);
+        }
+        record_mqtt_ingestors(world, commands);
+        return Ok(session.expect("subscription graph contains a subscription"));
+    }
+
     let mut session = world
         .cluster()
         .open_session(node_id, &world.domain)

@@ -357,13 +357,33 @@ directory.
 
 Local archive readers and received upload readers retain their staged artifact and disk quota through the storage job, including cancellation.
 
-The streamed state-install and publication jobs reserve 2 MiB per node, independent of total guest or materialized
-bytes and checkpoint count. Physical checkpoint placement encodings are limited to 60 KiB, leaving room for revision
-and chunk coordinates within the database key limit. Archive verification, model planning, typed
-lifecycle and offset conversion, database caches, and loading a guest when the domain starts retain
-their own allocation bounds. Encoded lifecycle and offset staging reserves twice the encoded
-payload size plus 2 MiB; it can be refused if that individual conversion does not fit the bulk
-budget. The generation publisher has no aggregate-payload admission limit.
+All checkpoint installation and generation-publication jobs reserve 2 MiB of bulk memory per
+node, independent of checkpoint bytes and count. Native lifecycle and Kafka conversion writes the
+current checkpoint encoding directly to a quota-owned file, using a 64 KiB buffered writer; it
+never collects converted entries or complete encoded output. The same file source drives local
+installation and ordered 64 KiB transfers to remote owners and replicas. Completed native files
+retain their actual length, digest and rounded disk quota until the final reader exits.
+
+Restore preparation has a separate, per-node `restore_metadata` admission class, defaulting to
+2 GiB. Before decoding, an admitted 512-byte read validates the first physical tar header as the
+regular `manifest.rkyv` entry and checks its length against the record limit; the manifest
+then verifies off the async workers under its own charge. A verified manifest sizes the retained
+preparation reservation: 16 times encoded record bytes (including the manifest), 64 times NSPL
+bytes, and 2 MiB of fixed overhead. Resource archives, guest saves and materialized Arrow columns remain on disk. The charge
+covers overlapping owned archive values, aligned decode buffers, model parsing and planning
+copies, branch text and typed-key conversion, and native serializer resolvers. Admission refuses
+unaddressable estimates or unavailable capacity before a restore changes the cluster. Parsing and
+the pure restore planner run as admitted bulk CPU work.
+
+The description, parsed Models and reservation have one shared lifetime. A native encoding job
+retains that owner through cancellation; each entry is converted separately, and fixed-capacity
+serializer scratch holds entry resolvers plus the largest entry's nested resolvers. Resolver
+scratch therefore depends on entry count, while strings and encoded checkpoint output stream.
+The 2 MiB bulk charge measures bounded I/O and storage working memory, and does not describe total
+restore memory. Physical checkpoint placement encodings remain limited to 60 KiB. Database caches,
+memtables, compaction, and live-state materialization at `START` keep their respective owners and
+allocation bounds. The generation publisher has no aggregate-payload admission limit.
+
 Materialized capture row views and grouping arrays have an 8 MiB metadata ceiling per relay and
 are charged before capture. Archive identities are at most 1 MiB per group, and Arrow columns at
 most 8 MiB. Typed branch uniqueness conversion has an independent 8 MiB commands reservation;
@@ -694,8 +714,9 @@ production-owner concurrency and recovery evidence.
 | Restore frames the Rust client queues ahead of the transport | 8 |
 | Restore archive retention | Until the restore finishes, or the retry validity of the execution reference ends |
 | State section staging on an owner | Charged to the same node staging quota until fetched or expired |
-| Streamed guest installation and complete generation publication per node | Fixed 2 MiB bulk working-memory reservation; 64 KiB checkpoint chunks |
-| Encoded lifecycle and offset staging per node | Twice the encoded record size plus 2 MiB |
+| Native conversion I/O, checkpoint installation and complete generation publication per node | Fixed 2 MiB bulk working-memory reservation; 64 KiB buffers and checkpoint chunks |
+| Retained archive metadata and preparation per node | 2 GiB default independent admission class; 16 times record bytes plus 64 times NSPL bytes plus 2 MiB |
+| Native conversion serializer scratch | Fixed-capacity entry resolvers plus the largest entry's nested resolvers, covered by the retained preparation charge |
 | Materialized identity group / Arrow group | 1 MiB / 8 MiB |
 | Materialized capture metadata / typed uniqueness metadata / native row views | 8 MiB each, independently admitted |
 | Physical checkpoint placement encoding | 60 KiB, including domain and installation namespace |

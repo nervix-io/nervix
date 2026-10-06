@@ -464,6 +464,154 @@ async fn committed_preparation_survives_coordinator_failure_and_destination_rest
 }
 
 #[nervix_primitives::test]
+async fn stopped_wasm_ownership_recovery_preserves_the_complete_checkpoint_inventory() {
+    let dir = tempdir().expect("temporary runtime state directory should open");
+    let db = Database::builder(dir.path())
+        .open()
+        .expect("database should open");
+    let runtime = Runtime::with_persistence(Some(db), Duration::from_secs(3_600))
+        .expect("runtime should open persisted state");
+    let domain = domain("stopped_guest");
+    let source = named::<ClusterNodeName>("node-1");
+    let destination = named::<ClusterNodeName>("node-2");
+    let destination_incarnation = attach_loopback_cluster(&runtime, &destination).await;
+    let mut state = unpaced_domain_state(domain.as_str());
+    state.status = DomainStatus::Stopped;
+    runtime.sync_domains(&BTreeMap::from([(domain.clone(), state)]));
+    let mut nodes = vec![ScheduledNode::new(
+        nervix_models::Model::Schema(CreateSchema {
+            name: named("counted_event"),
+            fields: Vec::new(),
+        }),
+        unchanged_schema_fingerprint(),
+    )];
+    for name in ["counted_input", "counted_output"] {
+        nodes.push(
+            ScheduledNode::new(
+                nervix_models::Model::Relay(CreateRelay {
+                    name: named(name),
+                    schema: named("counted_event"),
+                    buffer: nonzero!(4usize),
+                    branching: RelayBranching::unbranched(),
+                    materialized_state: None,
+                }),
+                unchanged_schema_fingerprint(),
+            )
+            .with_resolved_branching(Some(ResolvedBranching::unbranched())),
+        );
+    }
+    let processor = wasm_processor_node()
+        .with_resolved_branching(Some(ResolvedBranching::unbranched()))
+        .placed_on(
+            Some(source.clone()),
+            vec![source.clone(), destination.clone()],
+        );
+    let entity = NodeRef::new(ModelKind::WasmProcessor, processor.identifier.clone());
+    nodes.push(processor);
+    let schedule = DomainSchedule::new(domain.clone(), nodes, Vec::new());
+    let fingerprint = ExecutionRevision::ownership_fingerprint(&schedule)
+        .expect("the recovery schedule should have a fingerprint");
+    runtime
+        .rebuild_domain_from_schedule(&destination, &domain, Some(schedule), false)
+        .await
+        .expect("a stopped WASM domain should install its passive revision");
+    let entries = [BranchInstanceSnapshotEntry {
+        key: None,
+        last_ingestion: Timestamp::from_unix_nanos(42),
+        incarnation: 7,
+    }];
+    let store = runtime
+        .inner
+        .state_store
+        .as_ref()
+        .expect("runtime should own state storage");
+    let mut checkpoints = Vec::new();
+    for (kind, payload) in [
+        (
+            RuntimeStateKind::BranchLru,
+            encode_branch_lru_snapshot(&entries).expect("the complete lifecycle should encode"),
+        ),
+        (
+            RuntimeStateKind::WasmProcessor,
+            b"durable guest save".to_vec(),
+        ),
+    ] {
+        let placement = runtime
+            .state_placement(&domain, kind, entity.kind, &entity.identifier, None)
+            .expect("the installed revision should publish the state identity");
+        let checkpoint = PersistedRuntimeStateEntry { lsm: 9, payload };
+        store
+            .persist_latest_snapshot(&placement, checkpoint.lsm, &checkpoint.payload)
+            .expect("the replica's checkpoint should persist");
+        checkpoints.push((placement, checkpoint));
+    }
+    let metrics = runtime
+        .state_placement(
+            &domain,
+            RuntimeStateKind::BranchAggregated,
+            entity.kind,
+            &entity.identifier,
+            None,
+        )
+        .expect("the processor metrics should have a placement");
+    let checkpoint = runtime
+        .empty_ownership_handoff_snapshot(&metrics)
+        .expect("the complete metrics checkpoint should encode");
+    store
+        .persist_latest_snapshot(&metrics, checkpoint.lsm, &checkpoint.payload)
+        .expect("the replica's metrics should persist");
+    checkpoints.push((metrics, checkpoint));
+    let result = runtime
+        .prepare_forced_ownership_recovery(
+            nervix_interconnect::PrepareForcedOwnershipRecoveryRequest {
+                operation_id: "stopped-wasm-recovery".to_string(),
+                source,
+                destination,
+                destination_incarnation,
+                domain: domain.clone(),
+                entity: entity.clone(),
+                base_schedule_fingerprint: fingerprint,
+                target_schedule_fingerprint: fingerprint,
+            },
+            Instant::now() + Duration::from_secs(10),
+        )
+        .await
+        .expect("passive recovery should preserve saves without executing a guest");
+    assert_eq!(
+        result.state_recovery,
+        OwnershipStateRecoveryOutcome::Unverified
+    );
+    assert!(result.resets.is_empty());
+    let prepared = runtime
+        .inner
+        .prepared_forced_runtime_state_recoveries
+        .get(&entity.in_domain(&domain))
+        .expect("the complete recovery should be retained");
+    assert_eq!(prepared.checkpoints.len(), checkpoints.len());
+    for (placement, checkpoint) in checkpoints {
+        let (_, retained) = prepared
+            .checkpoints
+            .iter()
+            .find(|(retained, _)| retained == &placement)
+            .expect("every state component should be retained");
+        assert_eq!(retained.lsm, checkpoint.lsm);
+        assert_eq!(retained.payload, checkpoint.payload);
+    }
+    assert!(matches!(
+        runtime
+            .inner
+            .executions
+            .get(&domain)
+            .expect("the passive revision should remain")
+            .domain_clock
+            .snapshot()
+            .expect_err("recovery must leave the stopped clock unreadable")
+            .current_context(),
+        DomainClockAccessError::Stopped { .. }
+    ));
+}
+
+#[nervix_primitives::test]
 async fn forced_recovery_completion_survives_runtime_restart_and_schedule_rebuild() {
     let dir = tempdir().expect("temporary runtime state directory should open");
     let domain = domain("default");

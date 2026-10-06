@@ -909,6 +909,13 @@ other failures end the fetch. The captured stage remains unconsumed on an admiss
 Completed backup and materialized-state response streams release their Snapshot request and
 connection-stream permits before local file verification or Arrow decoding.
 
+The coordinator streams native lifecycle and Kafka metadata into quota-owned files before
+installation. It retains the verified description's separate `restore_metadata` preparation
+charge through conversion, while buffered file I/O reserves 2 MiB of bulk memory. Complete
+encoded records are never copied into a local request or retained for remote transmission.
+Native checkpoints and guest saves share the file source and bounded chunk path. See
+[Backup And Restore](backup-and-restore.md#restoring) for preparation admission and its limits.
+
 Restore state installation uses the snapshot bulk subquota after the stopped-domain schedule is
 published. The leader admits a replicated installation authority carrying its identity and term,
 the restore execution, mutation lease revision and installation generation. Every request carries
@@ -916,7 +923,7 @@ that authority. A receiver waits for its generation to apply and authenticates t
 A begin request declares placement, length and digest; chunks are ordered and at most 64 KiB;
 finish verifies the staged file, then reads it directly inside a filesystem storage job that
 reserves 2 MiB and stages bounded checkpoint chunks into an invisible installation namespace.
-It retains the upload's disk-quota owner through that job. There is no full guest buffer or nested
+It retains the upload's disk-quota owner through that job. There is no full checkpoint buffer or nested
 staged-reader reservation. Incomplete transfers expire under the node's staging quota.
 Materialized restoration first converts archive-owned identities and exact-schema Arrow sections
 to a staged native sealed file. That file uses these same begin/chunk/finish requests, preserving
@@ -983,6 +990,10 @@ activate after a later one is committed. The control plane computes the exact fi
 committed schedule before runtime installation and carries it in the complete typed execution
 revision used for activation and reconciliation; a node does not reconstruct it from a second
 schedule view.
+WASM handoff and forced-recovery preparation on a passive revision validate and retain the complete
+checkpoint inventory without running guest callbacks or reading the stopped domain clock. The
+guest validates its saved bytes when `START` installs the active revision, so stopped time is not
+classified as missing checkpoint state.
 Window state also binds to its current window model. A model replacement with unchanged schemas
 therefore addresses a different checkpoint and cannot install rows accumulated under the preceding
 window definition.

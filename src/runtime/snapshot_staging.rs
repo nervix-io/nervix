@@ -15,6 +15,8 @@
 //! they arrive and are read back one bounded section at a time, so no step of a transfer holds a
 //! whole snapshot in memory.
 
+mod encoding;
+
 use std::{
     io::{Read as _, Seek as _, SeekFrom, Write as _},
     path::PathBuf,
@@ -35,14 +37,25 @@ pub(crate) enum SnapshotStagingError {
     Admission,
     #[error("staging this snapshot could not be admitted for execution")]
     Execution,
+    #[error("failed to encode the staged artifact")]
+    Encode,
     #[error("the staging area was cancelled before the snapshot was complete")]
     Cancelled,
-    #[error("failed to create a staging file for the snapshot: {reason}")]
-    Create { reason: String },
-    #[error("failed to write the staged snapshot: {reason}")]
-    Write { reason: String },
-    #[error("failed to read the staged snapshot: {reason}")]
-    Read { reason: String },
+    #[error("failed to create a staging file for the snapshot")]
+    Create,
+    #[error("failed to write the staged snapshot")]
+    Write,
+    #[error("failed to read the staged snapshot")]
+    Read,
+    #[error(
+        "the staged artifact window at {position} with {length} bytes exceeds its \
+         {artifact_length} bytes or the transfer bound"
+    )]
+    Window {
+        position: u64,
+        length: u64,
+        artifact_length: u64,
+    },
     #[error(
         "a staged snapshot of {actual} bytes exceeds the {limit} bytes of node staging quota that \
          remain"
@@ -194,16 +207,12 @@ impl SnapshotStaging {
                     if cancellation.is_cancelled() {
                         return Err(Report::new(SnapshotStagingError::Cancelled));
                     }
-                    std::fs::create_dir_all(&root).map_err(|error| {
-                        Report::new(SnapshotStagingError::Create {
-                            reason: error.to_string(),
-                        })
-                    })?;
-                    tempfile::NamedTempFile::new_in(&root).map_err(|error| {
-                        Report::new(SnapshotStagingError::Create {
-                            reason: error.to_string(),
-                        })
-                    })
+                    std::fs::create_dir_all(&root)
+                        .map_err(Report::new)
+                        .change_context(SnapshotStagingError::Create)?;
+                    tempfile::NamedTempFile::new_in(&root)
+                        .map_err(Report::new)
+                        .change_context(SnapshotStagingError::Create)
                 },
             )
             .await
@@ -287,11 +296,8 @@ impl StagedSnapshotWriter {
                         file.write_all(chunk.as_ref())
                             .map(|()| hasher.update(chunk.as_ref()))
                             .map(|_| ())
-                            .map_err(|error| {
-                                Report::new(SnapshotStagingError::Write {
-                                    reason: error.to_string(),
-                                })
-                            })
+                            .map_err(Report::new)
+                            .change_context(SnapshotStagingError::Write)
                     };
                     StagedWrite {
                         file,
@@ -350,18 +356,14 @@ impl StagedSnapshotWriter {
                         return Err(Report::new(SnapshotStagingError::DigestMismatch));
                     }
                     let mut file = file;
-                    file.as_file_mut().sync_all().map_err(|error| {
-                        Report::new(SnapshotStagingError::Write {
-                            reason: error.to_string(),
-                        })
-                    })?;
+                    file.as_file_mut()
+                        .sync_all()
+                        .map_err(Report::new)
+                        .change_context(SnapshotStagingError::Write)?;
                     file.as_file_mut()
                         .seek(SeekFrom::Start(0))
-                        .map_err(|error| {
-                            Report::new(SnapshotStagingError::Read {
-                                reason: error.to_string(),
-                            })
-                        })?;
+                        .map_err(Report::new)
+                        .change_context(SnapshotStagingError::Read)?;
                     Ok(file)
                 },
             )
@@ -413,11 +415,10 @@ impl StagedSnapshotWriter {
                         return Err(Report::new(SnapshotStagingError::Cancelled));
                     }
                     let mut file = file;
-                    file.as_file_mut().sync_all().map_err(|error| {
-                        Report::new(SnapshotStagingError::Write {
-                            reason: error.to_string(),
-                        })
-                    })?;
+                    file.as_file_mut()
+                        .sync_all()
+                        .map_err(Report::new)
+                        .change_context(SnapshotStagingError::Write)?;
                     Ok(file)
                 },
             )
@@ -480,11 +481,9 @@ impl StagedArtifact {
                     if cancellation.is_cancelled() {
                         return Err(Report::new(SnapshotStagingError::Cancelled));
                     }
-                    std::fs::File::open(path).map_err(|error| {
-                        Report::new(SnapshotStagingError::Read {
-                            reason: error.to_string(),
-                        })
-                    })
+                    std::fs::File::open(path)
+                        .map_err(Report::new)
+                        .change_context(SnapshotStagingError::Read)
                 },
             )
             .await
@@ -596,11 +595,9 @@ fn read_artifact_chunk(
 ) -> Result<ChargedBytes, Report<SnapshotStagingError>> {
     let size: usize = length.arch_into();
     let mut bytes = vec![0_u8; size];
-    file.read_exact(&mut bytes).map_err(|error| {
-        Report::new(SnapshotStagingError::Read {
-            reason: error.to_string(),
-        })
-    })?;
+    file.read_exact(&mut bytes)
+        .map_err(Report::new)
+        .change_context(SnapshotStagingError::Read)?;
     Ok(ChargedBytes::from_owned(bytes, charge))
 }
 
@@ -693,11 +690,8 @@ fn read_exact(
         let read = file
             .as_file_mut()
             .read(&mut block[..wanted])
-            .map_err(|error| {
-                Report::new(SnapshotStagingError::Read {
-                    reason: error.to_string(),
-                })
-            })?;
+            .map_err(Report::new)
+            .change_context(SnapshotStagingError::Read)?;
         if read == 0 {
             return Err(Report::new(SnapshotStagingError::LengthMismatch {
                 actual: length
@@ -706,11 +700,10 @@ fn read_exact(
                 declared: length,
             }));
         }
-        buffer.write_all(&block[..read]).map_err(|error| {
-            Report::new(SnapshotStagingError::Read {
-                reason: error.to_string(),
-            })
-        })?;
+        buffer
+            .write_all(&block[..read])
+            .map_err(Report::new)
+            .change_context(SnapshotStagingError::Read)?;
         let read: u64 = read.arch_into();
         remaining = remaining
             .checked_sub(read)
