@@ -160,9 +160,22 @@ Feature: Bounded complete restore generations
       """
     Then at least <reclaimed_mib> MiB of replaced restore chunks are reclaimed
 
+    @order_generation_two_saves_single
     Examples:
       | cluster_size | save_mib | branches | restored_inputs | replicas | reclaimed_mib |
       | 1            | 20       | 2        | 4               | 0        | 40            |
+
+    @order_generation_two_saves_cluster
+    Examples:
+      | cluster_size | save_mib | branches | restored_inputs | replicas | reclaimed_mib |
       | 3            | 20       | 2        | 4               | 0        | 40            |
+
+    @order_generation_many_saves_single
+    Examples:
+      | cluster_size | save_mib | branches | restored_inputs | replicas | reclaimed_mib |
       | 1            | 1        | 40       | 80              | 0        | 40            |
+
+    @order_generation_many_saves_cluster
+    Examples:
+      | cluster_size | save_mib | branches | restored_inputs | replicas | reclaimed_mib |
       | 3            | 1        | 40       | 80              | 1        | 80            |

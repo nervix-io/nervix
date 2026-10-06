@@ -396,12 +396,20 @@ class InventoryTests(unittest.TestCase):
         self.assertEqual(
             {chunk.example_tag for chunk in order if chunk.example_tag is not None},
             {
+                "@order_generation_two_saves_single", "@order_generation_two_saves_cluster",
+                "@order_generation_many_saves_single", "@order_generation_many_saves_cluster",
                 "@order_resume_fanout_single", "@order_resume_fanout_cluster",
                 "@order_resume_tenants_single", "@order_resume_tenants_cluster",
                 "@order_materialized_fanout", "@order_materialized_tenants",
             },
         )
         self.assertTrue(all(chunk.expected == 1 for chunk in order if chunk.example_tag))
+        generation = [
+            chunk for chunk in order
+            if chunk.inputs == ("tests/features/cluster/backup_generation.feature",)
+        ]
+        self.assertEqual(len(generation), 4)
+        self.assertTrue(all(chunk.expected == 1 and chunk.example_tag for chunk in generation))
         named = next(chunk for chunk in order if chunk.name_filter is not None)
         named_arguments = deloxide_lane.scenario_arguments(named, invocation.concurrency)
         self.assertEqual(named_arguments.count("--name"), 1)

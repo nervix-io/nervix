@@ -1612,8 +1612,10 @@ reports how many workloads it discovered, selected, executed and saw complete. G
 configurations never share a process: each probe workload is a disposable child, each owner test
 installs its detector in a fresh process, and each scenario binary process installs once in `main`.
 Active detection runs its tagged scenarios together; order analysis starts a fresh process per
-feature, and gives the six large materialized restore examples their own processes. Their
-`order_tags` in the inventory select and account for each example. Every diagnostic server and
+feature, and gives the six large materialized restore and four complete-generation restore
+examples their own processes. These restores each start several nodes and carry large state
+payloads, so per-example order histories stay within the detector and host budgets. Their
+`order_tags` in the inventory select and account for every example. Every diagnostic server and
 paced driver process installs its own detector. The two selections are separate
 builds in separate target directories, apart from ordinary, fuzz, Loom, Shuttle and Turmoil builds.
 

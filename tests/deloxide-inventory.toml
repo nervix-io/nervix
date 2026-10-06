@@ -370,6 +370,12 @@ feature = "tests/features/cluster/backup_generation.feature"
 id = "scenario.restore-generation"
 invariant = "A complete restore generation of two 20 MiB or forty 1 MiB saves on one and three nodes preserves branches and source offsets through publication and restart."
 invocation = "scenarios"
+order_tags = [
+  "@order_generation_two_saves_single",
+  "@order_generation_two_saves_cluster",
+  "@order_generation_many_saves_single",
+  "@order_generation_many_saves_cluster",
+]
 scenario = "A complete restore generation with <branches> saves of <save_mib> MiB on <cluster_size> nodes preserves branches and source offsets"
 selections = ["deloxide", "deloxide-order"]
 
