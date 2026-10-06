@@ -660,16 +660,6 @@ pub struct Application {
     pub drain_timeout: Duration,
 }
 
-#[cfg(test)]
-fn encode_hex(bytes: &[u8]) -> String {
-    let mut out = String::with_capacity(bytes.len() * 2);
-    for byte in bytes {
-        use std::fmt::Write as _;
-        write!(&mut out, "{byte:02x}").assured("writing a byte into a String cannot fail");
-    }
-    out
-}
-
 /// Runs the server command line with termination signals the caller has already registered, so
 /// neither signal can end the process by its default action while the application starts.
 pub async fn run_cli(
