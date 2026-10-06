@@ -1555,34 +1555,109 @@ checks, the run selection, pending-callback limit, revision and declared coverag
 copies separate from files a live recorder replaces. The operator's workload is not ended merely
 because an unreviewed historical cycle exists.
 
-**Verification.** `just test-deloxide` and `just test-deloxide-order` run in separate selections and
-fresh retained attempt directories below `target/deloxide/test-deloxide`. After prerequisites,
-diagnostic compilation and execution share the default forty-minute budget. Every active workload
-runs in a disposable subprocess and must record its typed active cycle and exit `3`. Order probes add
-successful serial inversion, mixed modes and recursive read multiplicity, reused construction
-sites in separate lifetimes, read-only/consistent-order controls, runtime-disabled instrumentation,
-context/retention overload and failed/blocked output. The commands also run one-/three-node
-`@deadlock_diagnostics`, `@restore_installation`, `@client_ingestor_alter_drain`,
-`@memory_pressure_pause`, `@client_io_03_consumer_restore`, `@client_io_03_generation` and the local
-`@deadlock_reports` workflow without retries. The `@restarted_voter_observation` workload reaches
-whole-cluster restart and automatic scheduling with one relayed voter heartbeat; its test-only
-watch channels and concurrent fault map remain untracked. The commands also run `@paced_simulation_reopen`,
-including explicit producer opens following a later START generation, on
-one and three nodes: the Rust driver uses the selected diagnostic capability, while Python runs
-against diagnostic nodes with its ordinary shared binding. Python locks and condition variables
-remain outside the detector. Zero probes or incomplete scenario accounting fail. After successful process outcomes,
-every retained scenario/child-process observation must qualify; missing evidence or an unreviewed,
-active, lost or incomplete finding fails the command. Probe output/artifacts and diagnostic
-scenario evidence are retained per attempt with its revision. Format equality, malformed/bounds
-rejection and normalized-cycle/dedup invariants are registered Bolero properties using the same
-assertion in ordinary and sanitizer execution.
+**The diagnostic lane.** `just test-deloxide` and `just test-deloxide-order` run the lane of each
+selection, and CI's `deloxide` job runs both side by side for every pull request labeled
+`deloxide`, the label each change the Deloxide rule applies to carries.
+`tests/deloxide-inventory.toml` is the lane's bounded inventory. It registers every workload a
+selection runs, each with a stable identity, the invariant it owns, the selections that must run it
+and the coverage it declares: the disposable-process probes of `nervix-deadlock`, the diagnostic
+owner tests of the server library, and the tagged scenarios with the number of example runs each
+must make. It also bounds the lane: one real-time budget for a selection's diagnostic compilation
+and execution after its prerequisites, a bound for every invocation, a stop grace period, the
+reserve the scenario binary keeps for its own teardown inside its invocation's bound, and how many
+scenarios run at once, which is the same on every machine.
 
-A fresh state-store test process starts its detector before constructing store or executor locks
-and runs the current generation regressions: cancellation before and after pointer publication, snapshot
+The registered `@restarted_voter_observation` workload reaches whole-cluster restart and automatic scheduling when the leader first hears a voter through a relayed heartbeat. Its test-only watch channels and concurrent fault map are untracked. The registered native metadata restore workload exercises distributed Kafka checkpoint replication, acknowledgement, restart and exact restoration above the resident replication message budget; its stream waits and assignment atomics retain their complementary checks.
+
+For each invocation the lane builds the selection's executable, lists what the build holds or reads
+the tagged scenarios from the feature files, and refuses a registered workload that the build no
+longer holds or holds ignored, a discovered probe, owner test or tagged scenario that is not
+registered, a scenario whose example runs changed, and an invocation that selects nothing. It
+reports how many workloads it discovered, selected, executed and saw complete. Global detector
+configurations never share a process: each probe workload is a disposable child, each owner test
+installs its detector in a fresh process, the scenario binary installs once in `main`, and every
+diagnostic server and paced driver process installs its own. The two selections are separate
+builds in separate target directories, apart from ordinary, fuzz, Loom, Shuttle and Turmoil builds.
+
+Every process the lane starts runs in a session of its own. A process that outlives its bound
+receives `SIGTERM` and, after the stop grace period, `SIGKILL` with its whole group. The lane is a
+child subreaper, so a process that left its group is found too, and anything still running after an
+invocation ends is killed and fails the lane. The lane names each ending:
+
+| Ending | Lane class | Lane status |
+| --- | --- | --- |
+| A process reported an active cycle, or a failed invocation's evidence records one | `active-deadlock` | `3` |
+| Recording or output failed, findings or context were lost, or the recording budget expired | `diagnostic-failure` | `4` |
+| A process outlived its bound, or the lane's budget expired | `timed-out`, `budget-expired` | `124` |
+| A signal ended a process | `signaled` | `1` |
+| A test or step failed | `failed` | `1` |
+| A process was left running | `leftover-processes` | `1` |
+| A registered workload did not run or ran ignored, or the scenario count differs | `incomplete` | `1` |
+| Evidence is missing, partly written or does not qualify | `evidence-missing`, `evidence-partial`, `evidence-unqualified` | `1` |
+| The inventory, a build or a prerequisite is wrong | `inventory`, `build-failed`, `prerequisite-missing` | `1` |
+
+A failed invocation's evidence is qualified before the lane reports it, so a node that deadlocked
+inside a scenario is reported as the active cycle it recorded rather than as the step it failed.
+After each invocation that records evidence, every process observation must be present, completely
+written and qualify. `nervix-deadlock-report qualify` prints one `evidence summary:` line of counts
+per file, and the lane reports repeated deliveries of a retained potential cycle apart from findings
+lost to overload. The first failure ends the lane.
+
+A potential cycle fails the lane. The lane qualifies only the current run's whole-process evidence,
+and it keeps no ledger that approves a recurring cycle: lock identities are run-local, and a source
+line never stands in for a lock instance. A correction removes the order from the exercised
+workload, and the lane is its regression. A reviewed infeasibility proof qualifies the retained
+evidence of the run it reviews, for the owner's investigation and record; it never qualifies a
+later run.
+
+Each run keeps a fresh attempt directory below `<build target>/test-deloxide/<selection>/`, which no
+later run reuses or removes: every log, the probes' artifacts, every process's evidence, the
+description of every finding with its source sites, and `lane.json`. The record holds the revision
+and whether the tree was modified, the toolchain, Cargo and Deloxide's locked version and source, the
+inventory's digest, the selection, the features of every build and the bounds, and for every launch
+its exact command, working directory, environment additions, bound, ending, duration, discovery and
+accounting, with the qualification of every evidence file. `just test-deloxide-replay <lane.json>
+<launch>` runs one recorded launch again, exactly, in a fresh attempt. OS schedules and stress timing
+are not recorded, so a replay can take another interleaving; deterministic reproduction belongs to
+Shuttle and Loom.
+
+`just test-deloxide-qualification` proves the supervision on the probe binary's real processes,
+through the lane's own launch, evidence and classification code. A two-thread deadlock, an evidence
+directory that cannot be written, an untracked wait that never ends, an aborted process and, in the
+order selection, an unreviewed serial inversion and retention overload must each fail the lane with
+its own class and status, keep their output and the evidence they could write, and leave no process
+behind. A consistent-order control must pass, and the recorded deadlock must replay to the same
+class.
+
+Under `just coverage-native-extras test-deloxide` or `test-deloxide-order`, the lane builds in the
+collector's instrumented target, with instrumentation on workspace crates only, so dependencies such
+as wasmtime's compiler keep the speed the product's deadlines assume. It takes the report tool, CLI
+and shared client binding from the target its prerequisites built, starts every test executable
+through Cargo's configured runner, and hands `lane.json` to the collector, which exports nothing
+unless the lane completed. CI's
+`deloxide` job runs each selection this way, then the qualification, and uploads the completion
+records, the diagnostic LCOV reports and every attempt directory whatever the verdict. Diagnostic
+coverage stays out of ordinary coverage and the CRAP gate. The [Integration Test
+Lifecycle](./integration-test-lifecycle.md#diagnostic-lane) chapter owns the job's bounds and
+reserves.
+
+**Applicability.** `[[owner]]` records in the same inventory cover every source file in which the
+compiler finds a tracked blocking acquisition in a diagnostic configuration. Each names the
+registered workloads whose processes reach its tracked locks, the path the lane does not reach and
+why, or both. `just validate-deloxide-applicability`, part of `just validate` and CI's `checks`
+job, reads the acquisition catalog `just ratchet` writes and fails on an owner without a record and
+on a record whose file no longer acquires a tracked lock. The catalog is the compiler's resolution
+of the Deloxide adapters' operations, not a search for lock names. A record is a reviewed
+declaration: the lane's coverage report is evidence about it, not a proof of ownership. Format
+equality, malformed and out-of-bounds rejection, normalized-cycle deduplication and the summary's
+counts are registered Bolero properties with the same assertion in ordinary and sanitizer execution.
+
+The lane's state-store owner test starts its detector in a fresh process before constructing store
+or executor locks and runs the current generation regressions: cancellation before and after pointer publication, snapshot
 readers, queued checkpoint writers, corrupt and incomplete chunks, exact retry after reopen,
 stale authority, bounded cleanup across 600 checkpoints and a 40 MiB guest save admitted with a
-2 MiB reservation. Its evidence is retained beside the probe and scenario evidence. The commands
-also exercise quota refusal and exact staging retry, partial chunks without receipts across
+2 MiB reservation. Its evidence is retained beside the probe and scenario evidence. The lane
+also exercises quota refusal and exact staging retry, partial chunks without receipts across
 reopen, reclamation with applying and future generations retained, published and initial state
 preservation, snapshot readers across deletion, and interrupted bounded reclamation resumed after
 restart. Active-generation owner checks also exercise ordinary and same-revision inline writes,
@@ -1622,10 +1697,12 @@ client consumer's state and parked-read locks in the scenario process as a consu
 after a session restart and closed by a domain restart.
 
 Shuttle checks the production handoff's delivery/refusal and close races, including counter drain,
-through the registered replay-capable harness. The queue internals and OS wakeups are opaque; the
-relaxed refusal counter publishes no other location. `OnceLock` publishes the installation port;
-no new independent cross-location atomic protocol is introduced. Existing primitive Loom
-conformance remains separate. Deloxide models no async or network scheduling. Tokio locks,
+through the registered replay-capable harness, in the Shuttle build where no detector is installed.
+The queue internals and OS wakeups are opaque; the relaxed refusal counter publishes no other
+location. `OnceLock` publishes the installation port; no new independent cross-location atomic
+protocol is introduced. Existing primitive Loom conformance remains separate. The lane's supervisor
+runs outside every diagnostic process: it adds no synchronization to a process it observes and
+reads only the processes' exits and the evidence files they wrote. Deloxide models no async or network scheduling. Tokio locks,
 channels, `Notify`, DashMap shards, dependency locks, atomic protocols, missing notifications and
 cross-node waits remain outside its detection claims and retain Shuttle/Loom/Turmoil/Chaos checks.
 No diagnostic check proves safety for an untracked path or an order the workload did not take.
