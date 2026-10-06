@@ -166,6 +166,16 @@ fn given_restored_materialized_checkpoint_fails(world: &mut ScenarioWorld, domai
         .fail_restored_materialized_checkpoint(scenario_domain(world, &domain));
 }
 
+#[given(
+    expr = "restoring domain {string} fails before installing its first deduplicator or window \
+            checkpoint"
+)]
+fn given_restored_branch_state_checkpoint_fails(world: &mut ScenarioWorld, domain: String) {
+    world
+        .fault_injection
+        .fail_restored_branch_state_checkpoint(scenario_domain(world, &domain));
+}
+
 #[then(expr = "client {string} observes resumed clock progress beyond backup {string}'s frontier")]
 fn then_resumed_clock_projects_downtime(world: &mut ScenarioWorld, client: String, file: String) {
     let archive = nervix_backup::describe_archive(
@@ -310,25 +320,47 @@ fn then_restored_checkpoints_match(world: &mut ScenarioWorld, before: String, af
     );
 }
 
+/// The bytes of every section an archive holds under one of `directories` of its domains' state.
+fn state_sections(path: &Path, directories: &[&str]) -> BTreeMap<String, Vec<u8>> {
+    let mut entries = BTreeMap::new();
+    for (section, bytes) in copy_of_archive(path).sections {
+        let mut selected = false;
+        for directory in directories {
+            if section.contains(&format!("/state/{directory}/")) {
+                selected = true;
+            }
+        }
+        if selected {
+            entries.insert(section, bytes);
+        }
+    }
+    assert!(
+        !entries.is_empty(),
+        "sections under {directories:?} are visible"
+    );
+    entries
+}
+
 #[then(expr = "backup archives {string} and {string} have identical materialized generations")]
 fn then_restored_materialized_generations_match(
     world: &mut ScenarioWorld,
     before: String,
     after: String,
 ) {
-    fn generations(path: &Path) -> BTreeMap<String, Vec<u8>> {
-        let entries = copy_of_archive(path)
-            .sections
-            .into_iter()
-            .filter(|(path, _)| path.contains("/state/materialized_relay/"))
-            .collect::<BTreeMap<_, _>>();
-        assert!(!entries.is_empty(), "materialized sections are visible");
-        entries
-    }
     assert_eq!(
-        generations(&archive_path(world, &before)),
-        generations(&archive_path(world, &after)),
+        state_sections(&archive_path(world, &before), &["materialized_relay"]),
+        state_sections(&archive_path(world, &after), &["materialized_relay"]),
         "a stale installer cannot replace the active materialized generation"
+    );
+}
+
+#[then(expr = "backup archives {string} and {string} have identical deduplicator and window state")]
+fn then_restored_branch_states_match(world: &mut ScenarioWorld, before: String, after: String) {
+    let directories = ["deduplicator", "window_processor"];
+    assert_eq!(
+        state_sections(&archive_path(world, &before), &directories),
+        state_sections(&archive_path(world, &after), &directories),
+        "a stale installer cannot replace the active deduplicator keys or windows"
     );
 }
 

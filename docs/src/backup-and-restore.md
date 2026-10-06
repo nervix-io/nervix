@@ -733,6 +733,10 @@ START behavior and two-branch isolation. It asserts domain renaming, the stopped
 new guest lifetime explicitly; capture metadata belongs to each new backup. The materialized
 one-node and three-node restore scenario also re-exports the stopped domain before START, comparing
 every descriptor field, identity and Arrow byte, including generations larger than the bulk budget.
+The deduplicator and window one-node and three-node scenarios re-export a stopped restore with
+identical descriptors and Arrow groups, stop an installation before its first deduplicator or
+window checkpoint, which leaves `START` gated, and release a delayed coordinator's publication
+after a resumed restore, which is refused without changing the active keyspaces and windows.
 RESTORE explicitly resets the source ownership fence to zero in the stored checkpoint; revisions
 and branch generations remain exact. A stopped backup reads this checkpoint's ordered groups from
 the same immutable database view as its other state, stages one bounded group at a time and retains

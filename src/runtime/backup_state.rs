@@ -263,18 +263,25 @@ impl Runtime {
         cancellation: &Cancellation,
     ) -> error_stack::Result<(), BackupStateCaptureError> {
         #[cfg(feature = "testing")]
-        if (checkpoint.placement.state.kind() == RuntimeStateKind::WasmProcessor
-            && self
-                .inner
-                .fault_injection
-                .restored_wasm_checkpoint_fails(&checkpoint.placement.domain))
-            || (checkpoint.placement.state.kind() == RuntimeStateKind::MaterializedRelay
-                && self
-                    .inner
-                    .fault_injection
-                    .restored_materialized_checkpoint_fails(&checkpoint.placement.domain))
         {
-            return Err(Report::new(BackupStateCaptureError::Storage));
+            let faults = &self.inner.fault_injection;
+            let domain = &checkpoint.placement.domain;
+            let injected = match checkpoint.placement.state.kind() {
+                RuntimeStateKind::WasmProcessor => faults.restored_wasm_checkpoint_fails(domain),
+                RuntimeStateKind::MaterializedRelay => {
+                    faults.restored_materialized_checkpoint_fails(domain)
+                }
+                RuntimeStateKind::Deduplicator | RuntimeStateKind::WindowProcessor => {
+                    faults.restored_branch_state_checkpoint_fails(domain)
+                }
+                RuntimeStateKind::BranchAggregated
+                | RuntimeStateKind::Correlator
+                | RuntimeStateKind::KafkaOffset
+                | RuntimeStateKind::BranchLru => false,
+            };
+            if injected {
+                return Err(Report::new(BackupStateCaptureError::Storage));
+            }
         }
         let Some(store) = self.inner.state_store.as_ref() else {
             return Err(Report::new(BackupStateCaptureError::Unavailable));
