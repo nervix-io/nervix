@@ -17,7 +17,7 @@
 
 use error_stack::Report;
 use meticulous::{OptionExt as _, ResultExt as _};
-use nervix_backup::{DescribedRuntimeState, DescribedSection};
+use nervix_backup::DescribedRuntimeState;
 use nervix_consensus::{CommandExecution, ConsensusError, RestoreStepEffect};
 use nervix_interconnect::{RuntimeState, StatePlacementEnvelope, backup::RestoreStateInventory};
 use nervix_models::{
@@ -41,10 +41,7 @@ use crate::{
         session_service::SessionServiceImpl,
     },
     registry::{PlannedDomain, RestorePlan},
-    runtime::{
-        BackupBranchLifecycleEntry, RESTORE_STATE_CHUNK_BYTES, RestoredRuntimeState,
-        encode_restored_branch_lifecycle, encode_restored_kafka_offsets,
-    },
+    runtime::{RESTORE_STATE_CHUNK_BYTES, RestoredRuntimeState, StagedArtifact},
 };
 
 /// The steps of one admitted restore, taking effect in consensus and the stores this leader
@@ -168,19 +165,13 @@ impl SessionServiceImpl {
         archive: &VerifiedArchive,
         state: RestoreState,
     ) -> Result<RestoreStateAuthority, StepFailure> {
-        enum RestorePayload<'a> {
-            Encoded(Vec<u8>),
-            Guest(&'a DescribedSection),
-            Materialized(Arc<crate::runtime::StagedArtifact>),
-        }
-        struct RestoredStateSection<'a> {
+        struct RestoredStateSection {
             reference: NodeRef,
             schema: SchemaFingerprint,
             branch_fingerprint: Option<BranchKeyFingerprint>,
             branch_key: Option<Vec<RemoteRuntimeField>>,
             runtime_state: RuntimeState,
             revision: u64,
-            payload: RestorePayload<'a>,
         }
 
         let authority = match self
@@ -206,7 +197,7 @@ impl SessionServiceImpl {
             if state == RestoreState::ConfigurationOnly {
                 break;
             }
-            for archived in archive.states_for(&domain.source) {
+            for (index, archived) in archive.states_for(&domain.source).iter().enumerate() {
                 nervix_primitives::task::consume_budget().await;
                 let is_lifecycle =
                     matches!(archived, DescribedRuntimeState::BranchLifecycle { .. });
@@ -220,27 +211,8 @@ impl SessionServiceImpl {
                     branch_key,
                     runtime_state,
                     revision,
-                    payload,
                 } = match archived {
                     DescribedRuntimeState::BranchLifecycle { lifecycle, .. } => {
-                        let payload = encode_restored_branch_lifecycle(
-                            lifecycle
-                                .branches
-                                .iter()
-                                .map(|entry| BackupBranchLifecycleEntry {
-                                    key: entry.key.clone().map(|fields| {
-                                        fields
-                                            .into_iter()
-                                            .map(|field| field.into_remote())
-                                            .collect()
-                                    }),
-                                    last_ingestion: entry.last_ingestion,
-                                    incarnation: entry.incarnation,
-                                })
-                                .collect(),
-                            &lifecycle.entity,
-                        )
-                        .map_err(|error| StepFailure::Failed(error.to_string()))?;
                         RestoredStateSection {
                             reference: NodeRef::new(lifecycle.owner_kind, lifecycle.entity.clone()),
                             schema: lifecycle.schema,
@@ -250,23 +222,12 @@ impl SessionServiceImpl {
                                 schema: lifecycle.schema,
                             },
                             revision: lifecycle.revision,
-                            payload: RestorePayload::Encoded(payload),
                         }
                     }
                     DescribedRuntimeState::KafkaOffsets { offsets, .. } => {
                         if state == RestoreState::WithoutSourceOffsets {
                             continue;
                         }
-                        let payload = encode_restored_kafka_offsets(
-                            offsets
-                                .offsets
-                                .iter()
-                                .map(|entry| {
-                                    (entry.topic.clone(), entry.partition, entry.next_offset)
-                                })
-                                .collect(),
-                        )
-                        .map_err(|error| StepFailure::Failed(error.to_string()))?;
                         RestoredStateSection {
                             reference: NodeRef::new(ModelKind::Ingestor, offsets.entity.clone()),
                             schema: offsets.schema,
@@ -274,34 +235,10 @@ impl SessionServiceImpl {
                             branch_key: None,
                             runtime_state: RuntimeState::KafkaOffset,
                             revision: offsets.revision,
-                            payload: RestorePayload::Encoded(payload),
                         }
                     }
-                    DescribedRuntimeState::Materialized {
-                        descriptor, groups, ..
-                    } => {
+                    DescribedRuntimeState::Materialized { descriptor, .. } => {
                         let reference = NodeRef::new(ModelKind::Relay, descriptor.entity.clone());
-                        let Some(node) =
-                            scheduled.and_then(|scheduled| scheduled.nodes.get(&reference))
-                        else {
-                            continue;
-                        };
-                        if node.schema_fingerprint != descriptor.schema {
-                            continue;
-                        }
-                        let Some(schema) = domain.materialized_schemas.get(&descriptor.entity)
-                        else {
-                            continue;
-                        };
-                        let artifact = super::materialized::prepare_materialized_checkpoint(
-                            &self.inner.runtime,
-                            archive,
-                            descriptor,
-                            groups,
-                            schema.clone(),
-                        )
-                        .await
-                        .map_err(|error| StepFailure::Failed(error.to_string()))?;
                         RestoredStateSection {
                             reference,
                             schema: descriptor.schema,
@@ -313,12 +250,9 @@ impl SessionServiceImpl {
                                     .materialized_at(domain.state.start_version),
                             },
                             revision: descriptor.revision,
-                            payload: RestorePayload::Materialized(Arc::new(artifact)),
                         }
                     }
-                    DescribedRuntimeState::Wasm {
-                        descriptor, guest, ..
-                    } => RestoredStateSection {
+                    DescribedRuntimeState::Wasm { descriptor, .. } => RestoredStateSection {
                         reference: NodeRef::new(
                             ModelKind::WasmProcessor,
                             descriptor.entity.clone(),
@@ -336,7 +270,6 @@ impl SessionServiceImpl {
                             generation: descriptor.generation,
                         },
                         revision: descriptor.revision,
-                        payload: RestorePayload::Guest(guest),
                     },
                 };
                 let Some(node) = scheduled.and_then(|scheduled| scheduled.nodes.get(&reference))
@@ -363,18 +296,44 @@ impl SessionServiceImpl {
                     }
                     state => state,
                 };
-                let (length, digest) = match &payload {
-                    RestorePayload::Encoded(bytes) => (
-                        u64::try_from(bytes.len()).map_err(|_| {
-                            StepFailure::Failed(
-                                "restored metadata length exceeds address space".to_string(),
-                            )
-                        })?,
-                        *blake3::hash(bytes).as_bytes(),
+                let (artifact, offset, length, digest) = match archived {
+                    DescribedRuntimeState::Wasm { guest, .. } => (
+                        archive.artifact(),
+                        guest.offset,
+                        guest.length,
+                        *guest.digest.as_bytes(),
                     ),
-                    RestorePayload::Guest(section) => (section.length, *section.digest.as_bytes()),
-                    RestorePayload::Materialized(artifact) => {
-                        (artifact.length(), artifact.digest())
+                    DescribedRuntimeState::Materialized {
+                        descriptor, groups, ..
+                    } => {
+                        let Some(schema) = domain.materialized_schemas.get(&descriptor.entity)
+                        else {
+                            continue;
+                        };
+                        let artifact = Arc::new(
+                            super::materialized::prepare_materialized_checkpoint(
+                                &self.inner.runtime,
+                                archive,
+                                descriptor,
+                                groups,
+                                schema.clone(),
+                            )
+                            .await
+                            .map_err(|error| StepFailure::Failed(error.to_string()))?,
+                        );
+                        let length = artifact.length();
+                        let digest = artifact.digest();
+                        (artifact, 0, length, digest)
+                    }
+                    DescribedRuntimeState::BranchLifecycle { .. }
+                    | DescribedRuntimeState::KafkaOffsets { .. } => {
+                        let artifact = archive
+                            .stage_native_checkpoint(&self.inner.runtime, &domain.source, index)
+                            .await
+                            .map_err(|error| StepFailure::Failed(format!("{error:#}")))?;
+                        let length = artifact.length();
+                        let digest = artifact.digest();
+                        (artifact, 0, length, digest)
                     }
                 };
                 let checkpoint = RestoredRuntimeState {
@@ -405,36 +364,14 @@ impl SessionServiceImpl {
                                 "restore state length exceeds address space".to_string(),
                             )
                         })?;
-                    match &payload {
-                        RestorePayload::Encoded(bytes) => {
-                            self.install_restored_checkpoint_on(
-                                owner_or_replica,
-                                &authority,
-                                checkpoint.clone(),
-                                bytes,
-                            )
-                            .await?
-                        }
-                        RestorePayload::Materialized(artifact) => {
-                            self.install_restored_materialized_on(
-                                owner_or_replica,
-                                &authority,
-                                checkpoint.clone(),
-                                artifact.clone(),
-                            )
-                            .await?;
-                        }
-                        RestorePayload::Guest(section) => {
-                            self.install_restored_guest_on(
-                                owner_or_replica,
-                                &authority,
-                                checkpoint.clone(),
-                                archive,
-                                section,
-                            )
-                            .await?
-                        }
-                    }
+                    self.install_restored_checkpoint_on(
+                        owner_or_replica,
+                        &authority,
+                        checkpoint.clone(),
+                        artifact.clone(),
+                        offset,
+                    )
+                    .await?;
                 }
             }
         }
@@ -473,85 +410,8 @@ impl SessionServiceImpl {
         node: &ClusterNodeName,
         authority: &RestoreStateAuthority,
         checkpoint: RestoredRuntimeState,
-        payload: &[u8],
-    ) -> Result<(), StepFailure> {
-        if node == self.inner.consensus.local_node_id() {
-            return self
-                .stage_restored_state_checkpoint(
-                    authority,
-                    checkpoint,
-                    RestoredStateSource::Encoded(payload.to_vec()),
-                )
-                .await
-                .map_err(|error| StepFailure::Failed(error.to_string()));
-        }
-        let coordination = self
-            .inner
-            .interconnect
-            .next_coordination_identity()
-            .map_err(|error| {
-                StepFailure::Failed(format!(
-                    "failed to identify restored state transfer: {error}"
-                ))
-            })?;
-        let domain = checkpoint.placement.domain.clone();
-        self.send_restored_state_action(
-            node,
-            &coordination,
-            &domain,
-            authority,
-            InstallRestoredStateAction::Begin {
-                placement: checkpoint.placement,
-                branch_fingerprint: checkpoint
-                    .branch_fingerprint
-                    .map(|fingerprint| *fingerprint.fingerprint()),
-                revision: checkpoint.revision,
-                length: checkpoint.length,
-                digest: checkpoint.digest,
-            },
-        )
-        .await?;
-        for (index, chunk) in payload.chunks(RESTORE_STATE_CHUNK_BYTES).enumerate() {
-            nervix_primitives::task::consume_budget().await;
-            let offset = u64::try_from(index)
-                .map_err(|_| {
-                    StepFailure::Failed(
-                        "restored state chunk index exceeds address space".to_string(),
-                    )
-                })?
-                .checked_mul(u64::try_from(RESTORE_STATE_CHUNK_BYTES).verified("chunk size fits"))
-                .ok_or_else(|| {
-                    StepFailure::Failed("restored state offset exceeds address space".to_string())
-                })?;
-            self.send_restored_state_action(
-                node,
-                &coordination,
-                &domain,
-                authority,
-                InstallRestoredStateAction::Chunk {
-                    offset,
-                    payload: chunk.to_vec(),
-                },
-            )
-            .await?;
-        }
-        self.send_restored_state_action(
-            node,
-            &coordination,
-            &domain,
-            authority,
-            InstallRestoredStateAction::Finish,
-        )
-        .await
-    }
-
-    async fn install_restored_guest_on(
-        &self,
-        node: &ClusterNodeName,
-        authority: &RestoreStateAuthority,
-        checkpoint: RestoredRuntimeState,
-        archive: &VerifiedArchive,
-        section: &DescribedSection,
+        artifact: Arc<StagedArtifact>,
+        source_offset: u64,
     ) -> Result<(), StepFailure> {
         if node == self.inner.consensus.local_node_id() {
             return self
@@ -559,8 +419,8 @@ impl SessionServiceImpl {
                     authority,
                     checkpoint,
                     RestoredStateSource::Archive {
-                        artifact: archive.artifact(),
-                        offset: section.offset,
+                        artifact,
+                        offset: source_offset,
                     },
                 )
                 .await
@@ -572,6 +432,7 @@ impl SessionServiceImpl {
             .next_coordination_identity()
             .map_err(|error| StepFailure::Failed(error.to_string()))?;
         let domain = checkpoint.placement.domain.clone();
+        let payload_length = checkpoint.length;
         self.send_restored_state_action(
             node,
             &coordination,
@@ -589,13 +450,23 @@ impl SessionServiceImpl {
         )
         .await?;
         let mut offset = 0_u64;
-        while offset < section.length {
+        while offset < payload_length {
             nervix_primitives::task::consume_budget().await;
-            let chunk = archive
-                .read_guest_chunk(&self.inner.runtime, section, offset)
+            let position = source_offset.checked_add(offset).ok_or_else(|| {
+                StepFailure::Failed("restore state offset exceeds address space".to_string())
+            })?;
+            let length = payload_length
+                .checked_sub(offset)
+                .verified("the loop admits only offsets below the payload length")
+                .min(
+                    u64::try_from(RESTORE_STATE_CHUNK_BYTES)
+                        .assured("the 64 KiB checkpoint chunk fits u64"),
+                );
+            let chunk = StagedArtifact::read_window(artifact.clone(), position, length)
                 .await
                 .map_err(|error| StepFailure::Failed(error.to_string()))?;
-            let length = u64::try_from(chunk.len()).verified("a bounded chunk fits");
+            let length = u64::try_from(chunk.len())
+                .verified("read_window returned at most the requested 64 KiB");
             self.send_restored_state_action(
                 node,
                 &coordination,
@@ -608,84 +479,8 @@ impl SessionServiceImpl {
             )
             .await?;
             offset = offset.checked_add(length).ok_or_else(|| {
-                StepFailure::Failed("restore guest offset exceeds address space".to_string())
+                StepFailure::Failed("restore state offset exceeds address space".to_string())
             })?;
-        }
-        self.send_restored_state_action(
-            node,
-            &coordination,
-            &domain,
-            authority,
-            InstallRestoredStateAction::Finish,
-        )
-        .await
-    }
-
-    async fn install_restored_materialized_on(
-        &self,
-        node: &ClusterNodeName,
-        authority: &RestoreStateAuthority,
-        checkpoint: RestoredRuntimeState,
-        artifact: Arc<crate::runtime::StagedArtifact>,
-    ) -> Result<(), StepFailure> {
-        if node == self.inner.consensus.local_node_id() {
-            return self
-                .stage_restored_state_checkpoint(
-                    authority,
-                    checkpoint,
-                    RestoredStateSource::Archive {
-                        artifact,
-                        offset: 0,
-                    },
-                )
-                .await
-                .map_err(|error| StepFailure::Failed(error.to_string()));
-        }
-        let coordination = self
-            .inner
-            .interconnect
-            .next_coordination_identity()
-            .map_err(|error| StepFailure::Failed(error.to_string()))?;
-        let domain = checkpoint.placement.domain.clone();
-        self.send_restored_state_action(
-            node,
-            &coordination,
-            &domain,
-            authority,
-            InstallRestoredStateAction::Begin {
-                placement: checkpoint.placement,
-                branch_fingerprint: None,
-                revision: checkpoint.revision,
-                length: checkpoint.length,
-                digest: checkpoint.digest,
-            },
-        )
-        .await?;
-        let mut reader = artifact
-            .open_reader()
-            .await
-            .map_err(|error| StepFailure::Failed(error.to_string()))?;
-        let mut offset = 0_u64;
-        while let Some(chunk) = reader
-            .next_chunk(u64::try_from(RESTORE_STATE_CHUNK_BYTES).verified("chunk size fits"))
-            .await
-            .map_err(|error| StepFailure::Failed(error.to_string()))?
-        {
-            nervix_primitives::task::consume_budget().await;
-            self.send_restored_state_action(
-                node,
-                &coordination,
-                &domain,
-                authority,
-                InstallRestoredStateAction::Chunk {
-                    offset,
-                    payload: chunk.to_vec(),
-                },
-            )
-            .await?;
-            offset = offset
-                .checked_add(u64::try_from(chunk.len()).verified("chunk size fits"))
-                .ok_or_else(|| StepFailure::Failed("restore offset overflow".to_string()))?;
         }
         self.send_restored_state_action(
             node,

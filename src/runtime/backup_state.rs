@@ -17,7 +17,7 @@
     )
 )]
 
-use std::io::Read;
+use std::io::{Read, Write};
 
 use error_stack::{Report, ResultExt as _};
 use nervix_execution::Cancellation;
@@ -29,12 +29,13 @@ use nervix_models::{
 use thiserror::Error;
 
 use super::{
-    BranchInstanceSnapshotEntry, BranchKey, MaterializedGeneration, OwnershipHandoffError,
-    OwnershipHandoffResult, ReplicatedKafkaOffsetState, ReplicatedMaterializedRelayState, Runtime,
-    RuntimeStateKind, RuntimeStatePlacement, ScheduledNodeTask,
+    BranchKey, MaterializedGeneration, OwnershipHandoffError, OwnershipHandoffResult,
+    ReplicatedKafkaOffsetState, ReplicatedMaterializedRelayState, Runtime, RuntimeStateKind,
+    RuntimeStatePlacement, ScheduledNodeTask,
     backup_capture_fence::{BackupCaptureFence, BackupPublication},
-    decode_branch_lru_snapshot, encode_branch_lru_snapshot,
-    kafka_offset_state::{backup_offset_positions, restore_offset_payload},
+    branch_lru_state::write_branch_lru_snapshot,
+    decode_branch_lru_snapshot,
+    kafka_offset_state::{backup_offset_positions, write_offset_payload},
     state_store::{RuntimePersistenceError, StoredPlacement, generation::CheckpointMetadata},
 };
 
@@ -84,14 +85,14 @@ pub(crate) use super::state_store::generation::{
 };
 
 #[derive(Debug, Clone)]
-pub(crate) struct BackupBranchLifecycleEntry {
-    pub(crate) key: Option<Vec<RemoteRuntimeField>>,
-    pub(crate) last_ingestion: Timestamp,
-    pub(crate) incarnation: u64,
+pub struct BackupBranchLifecycleEntry {
+    pub key: Option<Vec<RemoteRuntimeField>>,
+    pub last_ingestion: Timestamp,
+    pub incarnation: u64,
 }
 
 #[derive(Debug, Error)]
-pub(crate) enum BackupStateCaptureError {
+pub enum BackupStateCaptureError {
     #[error("runtime state storage is unavailable")]
     Unavailable,
     #[error("runtime state could not be read or published")]
@@ -513,10 +514,13 @@ pub(crate) fn decode_backup_kafka_offsets(
     backup_offset_positions(payload).change_context(BackupStateCaptureError::Storage)
 }
 
-pub(crate) fn encode_restored_kafka_offsets(
-    offsets: Vec<(String, i32, i64)>,
-) -> error_stack::Result<Vec<u8>, BackupStateCaptureError> {
-    restore_offset_payload(offsets).change_context(BackupStateCaptureError::Storage)
+pub(crate) fn write_restored_kafka_offsets(
+    offsets: impl ExactSizeIterator<Item = (String, i32, i64)> + Clone,
+    writer: &mut dyn Write,
+    cancellation: &Cancellation,
+) -> error_stack::Result<(), BackupStateCaptureError> {
+    write_offset_payload(offsets, writer, cancellation)
+        .change_context(BackupStateCaptureError::Storage)
 }
 
 pub(crate) fn decode_backup_branch_lifecycle(
@@ -537,27 +541,17 @@ pub(crate) fn decode_backup_branch_lifecycle(
         .collect())
 }
 
-pub(crate) fn encode_restored_branch_lifecycle(
-    entries: Vec<BackupBranchLifecycleEntry>,
+pub(crate) fn write_restored_branch_lifecycle(
+    entries: impl ExactSizeIterator<Item = BackupBranchLifecycleEntry> + Clone,
     entity: &ModelName,
-) -> error_stack::Result<Vec<u8>, BackupStateCaptureError> {
-    let entries = entries
-        .into_iter()
-        .map(|entry| {
-            Ok(BranchInstanceSnapshotEntry {
-                key: BranchKey::from_remote_key(entry.key).change_context(
-                    BackupStateCaptureError::Lifecycle {
-                        entity: entity.clone(),
-                    },
-                )?,
-                last_ingestion: entry.last_ingestion,
-                incarnation: entry.incarnation,
-            })
-        })
-        .collect::<error_stack::Result<Vec<_>, BackupStateCaptureError>>()?;
-    encode_branch_lru_snapshot(&entries).change_context(BackupStateCaptureError::Lifecycle {
-        entity: entity.clone(),
-    })
+    writer: &mut dyn Write,
+    cancellation: &Cancellation,
+) -> error_stack::Result<(), BackupStateCaptureError> {
+    write_branch_lru_snapshot(entries, writer, cancellation).change_context(
+        BackupStateCaptureError::Lifecycle {
+            entity: entity.clone(),
+        },
+    )
 }
 
 fn restored_placement(
@@ -592,6 +586,7 @@ mod tests {
     use nervix_models::{ModelKind, SchemaFingerprint, WasmStateGeneration};
 
     use super::*;
+    use crate::runtime::encode_branch_lru_snapshot;
 
     #[nervix_primitives::test]
     async fn backup_omits_a_guest_checkpoint_after_its_branch_leaves_the_lifecycle() {
