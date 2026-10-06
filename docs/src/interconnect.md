@@ -325,6 +325,19 @@ Each receiver lease is a distinct in-memory instance even when an identical requ
 after release. Its deadline task may remove only that exact instance. An earlier deadline can
 therefore neither release nor erase a replacement lease occupying the same logical operation key.
 
+A stopping node moves its own scheduled work with one typed commands-pool request to the current
+leader, `stopping_node_drain`. It names no node and carries one of two actions: drain, which cordons
+the sender and moves its scheduled work through planned ownership handoffs, and release, which
+clears the cordon that drain set. The leader acts for the node the authenticated connection belongs
+to, so the certificate that admitted the connection is the whole authorization: a node can drain
+and uncordon only itself, and no user credential takes part. The answer is completed or failed, each
+with the leader's account of the action for the stopping node's log, or not the leader, from a node
+that changed nothing and leaves the sender to ask the leader it observes next. The leader runs the
+action in a service task of its own, so a drain that has begun finishes, and releases what it holds,
+even when the sender's deadline, which is what remains of its drain timeout, abandons the request
+first.
+[Topology Cases](./shutdown.md#topology-cases) owns when a node sends it.
+
 ## Wire Contract And Payloads
 
 All nodes in a running cluster use one current wire contract. A fixed fingerprint covers the set of
@@ -896,6 +909,13 @@ other failures end the fetch. The captured stage remains unconsumed on an admiss
 Completed backup and materialized-state response streams release their Snapshot request and
 connection-stream permits before local file verification or Arrow decoding.
 
+The coordinator streams native lifecycle and Kafka metadata into quota-owned files before
+installation. It retains the verified description's separate `restore_metadata` preparation
+charge through conversion, while buffered file I/O reserves 2 MiB of bulk memory. Complete
+encoded records are never copied into a local request or retained for remote transmission.
+Native checkpoints and guest saves share the file source and bounded chunk path. See
+[Backup And Restore](backup-and-restore.md#restoring) for preparation admission and its limits.
+
 Restore state installation uses the snapshot bulk subquota after the stopped-domain schedule is
 published. The leader admits a replicated installation authority carrying its identity and term,
 the restore execution, mutation lease revision and installation generation. Every request carries
@@ -903,7 +923,7 @@ that authority. A receiver waits for its generation to apply and authenticates t
 A begin request declares placement, length and digest; chunks are ordered and at most 64 KiB;
 finish verifies the staged file, then reads it directly inside a filesystem storage job that
 reserves 2 MiB and stages bounded checkpoint chunks into an invisible installation namespace.
-It retains the upload's disk-quota owner through that job. There is no full guest buffer or nested
+It retains the upload's disk-quota owner through that job. There is no full checkpoint buffer or nested
 staged-reader reservation. Incomplete transfers expire under the node's staging quota.
 Materialized restoration first converts archive-owned identities and exact-schema Arrow sections
 to a staged native sealed file. That file uses these same begin/chunk/finish requests, preserving
@@ -970,6 +990,10 @@ activate after a later one is committed. The control plane computes the exact fi
 committed schedule before runtime installation and carries it in the complete typed execution
 revision used for activation and reconciliation; a node does not reconstruct it from a second
 schedule view.
+WASM handoff and forced-recovery preparation on a passive revision validate and retain the complete
+checkpoint inventory without running guest callbacks or reading the stopped domain clock. The
+guest validates its saved bytes when `START` installs the active revision, so stopped time is not
+classified as missing checkpoint state.
 Window state also binds to its current window model. A model replacement with unchanged schemas
 therefore addresses a different checkpoint and cannot install rows accumulated under the preceding
 window definition.
@@ -1075,6 +1099,25 @@ segments, synchronizes data before replacing the header, and retains the namespa
 before executor admission. Neither path requires a reservation proportional to container length.
 The synchronous ownership-handoff metadata boundary still admits its resident checkpoint entry
 against the bulk budget; exceeding that admission is a typed checkpoint refusal.
+
+Kafka offset replica catch-up first asks `describe_kafka_offsets` on the Commands pool whether
+the owner's revision advanced. Its typed answer distinguishes an unchanged revision, a newer
+revision, and the shared remote-operation refusal classes. An unchanged checkpoint is neither
+encoded nor transferred. A newer checkpoint uses `sync_kafka_offsets` on Bulk with the Snapshot
+subquota and a thirty-second progress deadline, independently of the replica polling cadence.
+The owner retains the admitted offset topology and reads its conservative revision before the
+offset slots, encodes the current native checkpoint directly into a quota-owned staging file, and
+sends a forty-byte revision/digest header followed by chunks of at most 64 KiB. The declared
+response length bounds the complete native payload. Encoding scratch and native conversion use
+the separate `restore_metadata` admission; bounded file I/O and transport use Bulk. Neither the
+replication message limit nor the bulk memory ceiling bounds the whole checkpoint's length.
+The receiver stages bounded chunks, releases the response stream at EOF, verifies exact length
+and digest, and decodes current archived entries directly into a new table under admitted CPU
+work. Cancellation is checked between file blocks and native entries. Only complete conversion
+reaches the replica's assignment-token installation barrier; a promoted or replaced assignment
+rejects a delayed transfer. The replica acknowledges its installed revision afterward, and the
+existing five-second Kafka commit quorum deadline remains in force. Transfer and admission
+failures preserve their typed causes in the replica diagnostic and retry on a later round.
 
 Runtime-state synchronization replies and materialized-snapshot descriptions carry the shared
 typed remote-operation failure envelope. Rejection, absence, temporary unreadiness, and execution

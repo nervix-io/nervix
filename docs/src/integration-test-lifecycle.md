@@ -76,6 +76,27 @@ scenario accounting requires every selected diagnostic workload to run and pass 
 covers tracked blocking locks reached by those workloads; async waits, capture atomics, dependency
 locks and cross-node waits retain their other concurrency checks.
 
+The measured restore steps sample each node's public bulk and restore-metadata executor gauges
+every 20 milliseconds while the ordinary CLI runs. They also record the harness process's
+jemalloc allocated and resident bytes. The executor measurements separate the fixed checkpoint
+I/O and publication grant from retained archive descriptions, typed native values and planning
+allocations. Process measurements include every in-process node, dependency fixture and harness
+allocation; isolated one-node and three-node runs provide attributable comparisons. Sampled peaks
+are observations, not continuous maxima, and allocator resident bytes exclude mappings outside
+jemalloc. The scenarios also compare bulk refusal counters before and after each restore.
+The large-native-metadata oracle stops the cluster after public restore and exact replay, then
+opens each node's database through the production snapshot reader. It compares every lifecycle
+key, timestamp, incarnation, revision and Kafka topic/partition/offset on primary and replica
+copies. Those complete-value inspection allocations occur outside the restore measurement.
+The runtime's testing-only inspection API returns decoded current metadata; the harness owns all
+archive comparisons and assertions.
+The scenario takes the CLI's execution reference and replays it through the public session before
+and after restart, comparing the complete typed restore report.
+It saves the restored work's public owners and replicas before restarting, requires distributed
+placement in the three-node case, and compares every saved placement after START and after
+receiving isolated output for every tenant. A failover that drops replicas or recreates guest state
+cannot make this oracle pass by moving all execution onto one node.
+
 The command also selects `@paced_simulation_reopen` from the public paced-driver feature. It
 builds the Rust driver in diagnostic mode and supplies its path to the same scenario fixture,
 so the driver installs its own detector before entering its runtime. Both drivers exercise
@@ -223,7 +244,14 @@ The boundary between them is kept in four places.
 - **Ordinary commands.** The NSPL commands a scenario runs go through the production Rust client,
   with its execution identity, redirects, and reconnects. This includes the transaction qualification
   graph's setup commands, which retain each execution reference if leadership changes while setup
-  is applying. The paced simulation's published graph is loaded through one native client so its
+  is applying. When a command document has server statements after a subscription, the harness
+  sends those statements through the client and opens a raw session for the subscription on the
+  node requested by the step. A standalone subscription stays on that requested node, including
+  after failover. The large materialized backup workload submits
+  each graph statement through the production client so a leadership change during its many relay
+  definitions recovers that statement by reference; its Row subscription opens on a raw session
+  after the graph is ready.
+  The paced simulation's published graph is loaded through one native client so its
   BEGIN/COMMIT state and command references survive an interrupted finalization. Raw wire probes
   expose the received dispositions directly for protocol assertions. No harness deadline shortens
   native commands. Only
@@ -774,6 +802,13 @@ first time a scenario needs one and shared by every scenario of the run. The run
 it ends; `NERVIX_TESTCONTAINERS_MODE=reusable`, which `just test-scenarios-reuse` sets, keeps them
 for the next run instead. Scenarios still provision the topics, queues, tables, and other entities
 they use explicitly.
+
+The detached-window Kafka acknowledgement scenario creates its input topic before `START` and
+observes the consumer group's membership and the ingestor's readiness before injecting the output
+failure.
+Its bounded subscription assertion therefore exercises acknowledgement isolation after source
+initialization, without spending that assertion's budget on automatic topic creation and consumer
+discovery.
 
 The Pulsar broker announces a `maxMessageSize` of 1 MiB rather than Pulsar's 5 MiB default, the
 same limit the MQTT and NATS brokers keep, so one scenario message can exceed each broker's limit.

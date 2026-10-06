@@ -1,9 +1,17 @@
+//! Native Kafka offset state and assignment-qualified access.
+//!
+//! Layer: data plane.
+//! - **Owns.** Partition offsets, topic scheduling checkpoints, conservative revisions, native
+//!   capture and conversion, replica installation, persistence state and quorum observation.
+//! - **Depends on.** Placement vocabulary, assignment capabilities and execution primitives.
+//! - **Must not know.** Brokers, graph scheduling, NSPL or transfer framing.
+
 use std::{collections::BTreeMap, num::NonZeroU64, time::Duration};
 
 use ahash::HashMap;
 #[cfg(test)]
 use arch_into::ArchInto as _;
-use error_stack::Report;
+use error_stack::{Report, ResultExt as _};
 use meticulous::OptionExt as _;
 use nervix_checkpoint_replication::{CheckpointReplication, ReplicaProgress};
 use nervix_connector_kafka::KafkaOffsetPosition;
@@ -25,10 +33,10 @@ use super::KafkaDomainOffsetDescribe;
 #[cfg(test)]
 use super::observability::kafka_domain_offset_describe_from_schedule;
 use super::{
-    PersistedRuntimeStateEntry, RuntimePersistenceError, RuntimeStateOperationError,
-    RuntimeStatePlacement, StateAssignmentAuthority, StateAssignmentToken, StateAuthorityError,
-    StateCapability, StateReplicationRoles, lsm_sequence::LsmSequence,
-    state_replication::StateReplicationError,
+    PersistedRuntimeStateEntry, RuntimePersistenceError, RuntimeStateKind,
+    RuntimeStateOperationError, RuntimeStatePlacement, StateAssignmentAuthority,
+    StateAssignmentToken, StateAuthorityError, StateCapability, StateReplicationRoles,
+    lsm_sequence::LsmSequence, state_replication::StateReplicationError,
 };
 
 /// How long a committed or replaced offset waits for the replicas the offsets are assigned to hold
@@ -101,6 +109,14 @@ pub(super) struct ReplicatedKafkaOffsetState {
 #[derive(Debug, Clone)]
 pub struct KafkaOffsetStateRead {
     state: Arc<ReplicatedKafkaOffsetState>,
+}
+
+/// One topology and conservative revision retained while its offsets are streamed. Later commits
+/// may move the shared slots forward; an offset included ahead of this revision is sent again by
+/// the next capture, as it is for an ordinary checkpoint.
+pub(super) struct CapturedKafkaOffsets {
+    pub(super) lsm: u64,
+    table: StdArc<KafkaOffsetTable>,
 }
 
 /// Authoritative access held by the Kafka ingestor for one concrete assignment generation.
@@ -234,6 +250,20 @@ impl KafkaOffsetStateRead {
 
     pub(super) fn current_lsm(&self) -> u64 {
         self.state.current_lsm.current()
+    }
+
+    /// Check the revision before retaining a topology, without encoding an unchanged checkpoint.
+    pub(super) fn capture_after(&self, after_lsm: Option<u64>) -> Option<CapturedKafkaOffsets> {
+        self.state.assignment.serialize(|| {
+            let lsm = self.current_lsm();
+            if after_lsm.is_some_and(|after| lsm <= after) {
+                return None;
+            }
+            Some(CapturedKafkaOffsets {
+                lsm,
+                table: self.state.offsets.load_full(),
+            })
+        })
     }
 
     /// Encode the offsets this state records, stamped with its revision.
@@ -452,12 +482,50 @@ impl KafkaOffsetSnapshotInstaller {
         &self.read
     }
 
-    pub(super) fn install_snapshot(
+    pub(super) fn install_cancellable_snapshot(
         &self,
         lsm: u64,
         payload: &[u8],
-    ) -> Result<(), RuntimeStateOperationError> {
-        let table = KafkaOffsetTable::decode(payload)?;
+        cancellation: &nervix_execution::Cancellation,
+    ) -> error_stack::Result<(), StateReplicationError> {
+        self.install_checked_snapshot(lsm, payload, || {
+            cancellation
+                .check()
+                .change_context(RuntimePersistenceError::Cancelled)
+        })
+    }
+
+    #[cfg_attr(
+        nervix_lint,
+        nervix::dispatch(
+            reason = "the caller supplies the cancellation check between native checkpoint entries"
+        )
+    )]
+    fn install_checked_snapshot(
+        &self,
+        lsm: u64,
+        payload: &[u8],
+        mut check: impl FnMut() -> error_stack::Result<(), RuntimePersistenceError>,
+    ) -> error_stack::Result<(), StateReplicationError> {
+        let table = KafkaOffsetTable::decode_with(payload, &mut check).change_context(
+            StateReplicationError::Capture {
+                placement: self.read.placement().clone(),
+            },
+        )?;
+        check().change_context(StateReplicationError::Capture {
+            placement: self.read.placement().clone(),
+        })?;
+        self.install_table(lsm, table)
+            .change_context(StateReplicationError::Capture {
+                placement: self.read.placement().clone(),
+            })
+    }
+
+    fn install_table(
+        &self,
+        lsm: u64,
+        table: KafkaOffsetTable,
+    ) -> error_stack::Result<(), StateAuthorityError> {
         let state = &self.read.state;
         state.assignment.authorize_exclusive(
             self.assignment,
@@ -585,24 +653,54 @@ impl KafkaOffsetTable {
     }
 
     fn decode(payload: &[u8]) -> Result<Self, RuntimePersistenceError> {
-        let snapshot = rkyv::from_bytes::<KafkaOffsetSnapshot, rkyv::rancor::Error>(payload)
-            .map_err(|error| RuntimePersistenceError::DecodeState(error.to_string()))?;
+        Self::decode_with(payload, || Ok(())).map_err(|error| error.current_context().clone())
+    }
+
+    #[cfg_attr(
+        nervix_lint,
+        nervix::dispatch(
+            reason = "the caller supplies the cancellation check between bounded native entries"
+        )
+    )]
+    fn decode_with(
+        payload: &[u8],
+        mut check: impl FnMut() -> error_stack::Result<(), RuntimePersistenceError>,
+    ) -> error_stack::Result<Self, RuntimePersistenceError> {
+        check()?;
+        let snapshot = rkyv::access::<ArchivedKafkaOffsetSnapshot, rkyv::rancor::Error>(payload)
+            .map_err(|error| {
+                Report::new(RuntimePersistenceError::DecodeState(error.to_string()))
+            })?;
         let mut table = Self::default();
-        for entry in snapshot.offsets {
-            table.record_partition(&entry.topic, entry.partition, entry.next_offset);
+        for entry in snapshot.offsets.iter() {
+            check()?;
+            table.record_partition(
+                entry.topic.as_str(),
+                entry.partition.to_native(),
+                entry.next_offset.to_native(),
+            );
         }
-        for schedule in snapshot.schedules {
+        for schedule in snapshot.schedules.iter() {
+            check()?;
             let mut assignments = HashMap::default();
-            for assignment in schedule.assignments {
-                assignments.insert(assignment.partition, assignment.instance_idx);
+            for assignment in schedule.assignments.iter() {
+                check()?;
+                assignments.insert(
+                    assignment.partition.to_native(),
+                    assignment.instance_idx.to_native(),
+                );
             }
-            let mut observed_partitions = schedule.observed_partitions;
+            let mut observed_partitions = Vec::with_capacity(schedule.observed_partitions.len());
+            for partition in schedule.observed_partitions.iter() {
+                check()?;
+                observed_partitions.push(partition.to_native());
+            }
             observed_partitions.sort_unstable();
             table.schedules.insert(
-                schedule.topic,
+                schedule.topic.as_str().to_owned(),
                 KafkaTopicSchedulingState {
-                    instances: schedule.instances,
-                    rebalance_epoch: schedule.rebalance_epoch,
+                    instances: schedule.instances.to_native(),
+                    rebalance_epoch: schedule.rebalance_epoch.to_native(),
                     observed_partitions,
                     assignments,
                 },
@@ -628,21 +726,203 @@ pub(in crate::runtime) fn backup_offset_positions(
     Ok(offsets)
 }
 
-pub(in crate::runtime) fn restore_offset_payload(
-    offsets: Vec<(String, i32, i64)>,
-) -> error_stack::Result<Vec<u8>, RuntimePersistenceError> {
-    let positions = offsets
-        .into_iter()
-        .map(|(topic, partition, offset)| KafkaOffsetPosition {
-            topic,
-            partition,
-            offset,
-        })
-        .collect();
-    KafkaOffsetTable::from_offsets(positions, HashMap::default())
-        .encode()
-        .map_err(Report::new)
+/// A serialization view of the current archived offset root. Restore carries positions only;
+/// topic scheduling is established by the restored execution plan.
+#[derive(Archive, RkyvSerialize)]
+#[rkyv(as = ArchivedKafkaOffsetSnapshot)]
+#[rkyv(serialize_bounds(__S: rkyv::ser::Writer + rkyv::ser::Allocator, __S::Error: rkyv::rancor::Source))]
+struct StreamingKafkaOffsetSnapshot<
+    'a,
+    I: ExactSizeIterator<Item = KafkaOffsetEntrySnapshot> + Clone,
+> {
+    #[rkyv(with = super::native_checkpoint_encoding::IteratorAsVec<super::native_checkpoint_encoding::CancellableEntry<'a, KafkaOffsetEntrySnapshot>>, omit_bounds)]
+    offsets: super::native_checkpoint_encoding::CancellableIterator<'a, I>,
+    schedules: Vec<KafkaTopicSchedulingSnapshot>,
 }
+
+pub(in crate::runtime) fn write_offset_payload(
+    offsets: impl ExactSizeIterator<Item = (String, i32, i64)> + Clone,
+    writer: &mut dyn std::io::Write,
+    cancellation: &nervix_execution::Cancellation,
+) -> error_stack::Result<(), RuntimePersistenceError> {
+    write_offset_snapshot(offsets, Vec::new(), writer, cancellation)
+}
+
+#[cfg_attr(
+    nervix_lint,
+    nervix::dispatch(
+        reason = "the exact-size caller iterator supplies checkpoint positions; its local bodies \
+                  remain checked and the serializer owns admitted scratch and cancellation"
+    )
+)]
+fn write_offset_snapshot(
+    offsets: impl ExactSizeIterator<Item = (String, i32, i64)> + Clone,
+    schedules: Vec<KafkaTopicSchedulingSnapshot>,
+    writer: &mut dyn std::io::Write,
+    cancellation: &nervix_execution::Cancellation,
+) -> error_stack::Result<(), RuntimePersistenceError> {
+    let nested = schedules
+        .iter()
+        .try_fold(0_usize, |total, schedule| {
+            total.checked_add(
+                128_usize.checked_mul(
+                    schedule
+                        .assignments
+                        .len()
+                        .checked_add(schedule.observed_partitions.len())?
+                        .checked_add(1)?,
+                )?,
+            )
+        })
+        .ok_or_else(|| {
+            Report::new(RuntimePersistenceError::NativeEncoding {
+                state: RuntimeStateKind::KafkaOffset,
+            })
+        })?;
+    let capacity = super::native_checkpoint_encoding::scratch_bytes::<KafkaOffsetEntrySnapshot>(
+        offsets.len(),
+        nested,
+    )
+    .ok_or_else(|| {
+        Report::new(RuntimePersistenceError::NativeEncoding {
+            state: RuntimeStateKind::KafkaOffset,
+        })
+    })?;
+    let mut scratch = vec![std::mem::MaybeUninit::uninit(); capacity];
+    let snapshot = StreamingKafkaOffsetSnapshot {
+        offsets: super::native_checkpoint_encoding::CancellableIterator {
+            cancellation,
+            entries: offsets.map(|(topic, partition, next_offset)| KafkaOffsetEntrySnapshot {
+                topic,
+                partition,
+                next_offset,
+            }),
+        },
+        schedules,
+    };
+    rkyv::api::low::to_bytes_in_with_alloc::<_, _, rkyv::rancor::Error>(
+        &snapshot,
+        rkyv::ser::writer::IoWriter::new(writer),
+        rkyv::ser::allocator::SubAllocator::new(&mut scratch),
+    )
+    .map(|_| ())
+    .map_err(|error| {
+        Report::new(error).change_context(RuntimePersistenceError::NativeEncoding {
+            state: RuntimeStateKind::KafkaOffset,
+        })
+    })
+}
+
+impl CapturedKafkaOffsets {
+    /// Reserve a checked upper bound for the artifact and for native serializer scratch. Neither
+    /// depends on materializing all partition positions or encoded bytes in memory.
+    pub(super) fn bounds(&self) -> error_stack::Result<(u64, u64), RuntimePersistenceError> {
+        let overflow = || {
+            Report::new(RuntimePersistenceError::NativeEncoding {
+                state: RuntimeStateKind::KafkaOffset,
+            })
+        };
+        let mut encoded = 1024_u64;
+        let mut scratch = 64 * 1024_u64;
+        for (topic, partitions) in &self.table.topics {
+            let count = u64::try_from(partitions.len()).map_err(|_| overflow())?;
+            let topic_bytes = u64::try_from(topic.len()).map_err(|_| overflow())?;
+            encoded = encoded
+                .checked_add(
+                    count
+                        .checked_mul(topic_bytes.checked_add(128).ok_or_else(overflow)?)
+                        .ok_or_else(overflow)?,
+                )
+                .ok_or_else(overflow)?;
+            scratch = scratch
+                .checked_add(count.checked_mul(128).ok_or_else(overflow)?)
+                .ok_or_else(overflow)?;
+        }
+        for (topic, schedule) in &self.table.schedules {
+            let entries = schedule
+                .assignments
+                .len()
+                .checked_add(schedule.observed_partitions.len())
+                .ok_or_else(overflow)?;
+            let entries = entries.checked_add(1).ok_or_else(overflow)?;
+            let entries = u64::try_from(entries).map_err(|_| overflow())?;
+            let topic_bytes = u64::try_from(topic.len()).map_err(|_| overflow())?;
+            let bytes = entries.checked_mul(256).ok_or_else(overflow)?;
+            let bytes = bytes.checked_add(topic_bytes).ok_or_else(overflow)?;
+            encoded = encoded.checked_add(bytes).ok_or_else(overflow)?;
+            scratch = scratch.checked_add(bytes).ok_or_else(overflow)?;
+        }
+        Ok((encoded, scratch))
+    }
+
+    pub(super) fn write(
+        &self,
+        writer: &mut dyn std::io::Write,
+        cancellation: &nervix_execution::Cancellation,
+    ) -> error_stack::Result<(), RuntimePersistenceError> {
+        let remaining = self.table.topics.values().map(BTreeMap::len).sum();
+        let offsets = KafkaOffsetEntries {
+            topics: self.table.topics.iter(),
+            partitions: None,
+            remaining,
+        };
+        let schedules = self
+            .table
+            .schedules
+            .iter()
+            .map(|(topic, schedule)| KafkaTopicSchedulingSnapshot {
+                topic: topic.clone(),
+                instances: schedule.instances,
+                rebalance_epoch: schedule.rebalance_epoch,
+                observed_partitions: schedule.observed_partitions.clone(),
+                assignments: schedule
+                    .assignments
+                    .iter()
+                    .map(
+                        |(partition, instance_idx)| KafkaPartitionAssignmentSnapshot {
+                            partition: *partition,
+                            instance_idx: *instance_idx,
+                        },
+                    )
+                    .collect(),
+            })
+            .collect();
+        write_offset_snapshot(offsets, schedules, writer, cancellation)
+    }
+}
+
+#[derive(Clone)]
+struct KafkaOffsetEntries<'a> {
+    topics: std::collections::hash_map::Iter<'a, String, BTreeMap<i32, Arc<AtomicI64>>>,
+    partitions: Option<(
+        &'a str,
+        std::collections::btree_map::Iter<'a, i32, Arc<AtomicI64>>,
+    )>,
+    remaining: usize,
+}
+
+impl Iterator for KafkaOffsetEntries<'_> {
+    type Item = (String, i32, i64);
+
+    fn next(&mut self) -> Option<Self::Item> {
+        loop {
+            if let Some((topic, partitions)) = &mut self.partitions
+                && let Some((partition, slot)) = partitions.next()
+            {
+                self.remaining -= 1;
+                return Some(((*topic).to_owned(), *partition, slot.load(Ordering::SeqCst)));
+            }
+            let (topic, partitions) = self.topics.next()?;
+            self.partitions = Some((topic, partitions.iter()));
+        }
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        (self.remaining, Some(self.remaining))
+    }
+}
+
+impl ExactSizeIterator for KafkaOffsetEntries<'_> {}
 
 #[cfg(test)]
 mod tests {
@@ -653,6 +933,194 @@ mod tests {
 
     use super::*;
     use crate::runtime::{RuntimeState, StateReplicationRoles};
+
+    #[test]
+    fn cancelled_or_invalid_kafka_conversion_keeps_the_installed_checkpoint() {
+        let payload = |positions| {
+            KafkaOffsetTable::from_offsets(positions, HashMap::default())
+                .encode()
+                .assured("current positions encode")
+        };
+        let position = |partition, offset| KafkaOffsetPosition {
+            topic: "events".into(),
+            partition,
+            offset,
+        };
+        let state = Arc::new(
+            ReplicatedKafkaOffsetState::new(
+                offset_placement(),
+                Some(PersistedRuntimeStateEntry {
+                    lsm: 7,
+                    payload: payload(vec![position(0, 9)]),
+                }),
+            )
+            .assured("the initial replica checkpoint loads"),
+        );
+        let owner = ClusterNodeName::parse("node-1").assured("the owner name is valid");
+        let replica = ClusterNodeName::parse("node-2").assured("the replica name is valid");
+        let installer = ReplicatedKafkaOffsetState::bind(
+            &state,
+            StateReplicationRoles::new(Some(owner), vec![replica.clone()], 1),
+            Some(&replica),
+        )
+        .installer
+        .assured("the replica may install snapshots");
+        let next = payload(vec![position(0, 10), position(1, 11)]);
+        for cancel_at in [3, 4] {
+            let mut checked = 0;
+            let cancelled = installer
+                .install_checked_snapshot(8, &next, || {
+                    checked += 1;
+                    if checked == cancel_at {
+                        return Err(Report::new(RuntimePersistenceError::Cancelled));
+                    }
+                    Ok(())
+                })
+                .err()
+                .assured("conversion is cancelled before publishing any positions");
+            assert!(cancelled.contains::<RuntimePersistenceError>());
+            assert_eq!(checked, cancel_at);
+            assert_eq!(installer.read().current_lsm(), 7);
+            assert_eq!(installer.read().next_offset("events", 0), Some(9));
+            assert_eq!(installer.read().next_offset("events", 1), None);
+        }
+        let invalid = installer
+            .install_checked_snapshot(8, &next[..next.len() - 1], || Ok(()))
+            .err()
+            .assured("a truncated current checkpoint is refused");
+        assert!(invalid.contains::<RuntimePersistenceError>());
+        assert_eq!(installer.read().current_lsm(), 7);
+        assert_eq!(installer.read().next_offset("events", 0), Some(9));
+        assert_eq!(installer.read().next_offset("events", 1), None);
+    }
+
+    #[nervix_primitives::test]
+    async fn captured_kafka_offsets_stream_beyond_bulk_memory_with_every_position_and_schedule() {
+        use nervix_execution::{ExecutionConfig, Executor, MemoryClass};
+
+        use crate::runtime::snapshot_staging::{SnapshotStaging, SnapshotStagingLimits};
+
+        let topic = format!("events-{}", "x".repeat(240));
+        let positions = (0..4096)
+            .map(|partition| KafkaOffsetPosition {
+                topic: topic.clone(),
+                partition,
+                offset: i64::from(partition) + 17,
+            })
+            .chain([KafkaOffsetPosition {
+                topic: "other".into(),
+                partition: 7,
+                offset: 99,
+            }])
+            .collect();
+        let state = Arc::new(
+            ReplicatedKafkaOffsetState::new(
+                offset_placement(),
+                Some(PersistedRuntimeStateEntry {
+                    lsm: 7,
+                    payload: KafkaOffsetTable::from_offsets(positions, HashMap::default())
+                        .encode()
+                        .assured("the fixture encodes"),
+                }),
+            )
+            .assured("the recorded positions load"),
+        );
+        let node = ClusterNodeName::parse("node-1").assured("the owner name is valid");
+        let originator = ReplicatedKafkaOffsetState::bind(
+            &state,
+            StateReplicationRoles::new(Some(node.clone()), Vec::new(), 0),
+            Some(&node),
+        )
+        .originator
+        .assured("the owner can originate offsets");
+        assert!(originator.read().capture_after(Some(7)).is_none());
+        originator
+            .apply_committed_offset(&KafkaOffsetPosition {
+                topic: topic.clone(),
+                partition: 0,
+                offset: 71,
+            })
+            .assured("the owner commits a new position");
+        originator
+            .update_partition_schedule(&topic, nonzero_ext::nonzero!(2_u64), vec![0, 1, 2])
+            .assured("the topic schedule is current");
+        let captured = originator
+            .read()
+            .capture_after(Some(7))
+            .assured("the checkpoint advanced");
+        let lsm = captured.lsm;
+        let (maximum, scratch) = captured.bounds().assured("the native encoding is bounded");
+        let mut config = ExecutionConfig::default();
+        config.budgets.bulk = ubyte::ByteUnit::Mebibyte(1);
+        config.limits.snapshot_section_bytes = ubyte::ByteUnit::Kibibyte(64);
+        let executor = Executor::new(config).assured("the small bulk budget is valid");
+        let directory = tempfile::tempdir().assured("the staging directory opens");
+        let staging = SnapshotStaging::new(
+            directory.path().to_path_buf(),
+            executor.clone(),
+            SnapshotStagingLimits::default(),
+        );
+        let metadata = executor
+            .reserve(MemoryClass::RestoreMetadata, scratch)
+            .await
+            .assured("serializer scratch is admitted separately");
+        let working = executor
+            .reserve(MemoryClass::Bulk, 64 * 1024)
+            .await
+            .assured("bounded I/O is admitted");
+        let artifact = staging
+            .stage(maximum)
+            .await
+            .assured("the checkpoint has staging quota")
+            .encode_artifact(working, move |output, cancellation| {
+                let _metadata = metadata;
+                captured
+                    .write(output, cancellation)
+                    .change_context(crate::runtime::SnapshotStagingError::Encode)
+            })
+            .await
+            .assured("the complete native checkpoint streams to disk");
+        assert!(artifact.length() > 1024 * 1024);
+        let mut reader = artifact
+            .open_reader()
+            .await
+            .assured("the staged checkpoint opens");
+        let mut payload = Vec::new();
+        while let Some(chunk) = reader
+            .next_chunk(64 * 1024)
+            .await
+            .assured("one bounded chunk is admitted")
+        {
+            assert!(chunk.len() <= 64 * 1024);
+            payload.extend_from_slice(chunk.as_ref());
+        }
+        assert_eq!(*blake3::hash(&payload).as_bytes(), artifact.digest());
+        let restored = Arc::new(
+            ReplicatedKafkaOffsetState::new(
+                offset_placement(),
+                Some(PersistedRuntimeStateEntry { lsm, payload }),
+            )
+            .assured("the streamed current checkpoint loads"),
+        );
+        let read = ReplicatedKafkaOffsetState::read(&restored);
+        assert_eq!(read.next_offset("other", 7), Some(99));
+        for partition in 0..4096 {
+            assert_eq!(
+                read.next_offset(&topic, partition),
+                Some(if partition == 0 {
+                    71
+                } else {
+                    i64::from(partition) + 17
+                })
+            );
+        }
+        assert_eq!(read.current_lsm(), lsm);
+        assert_eq!(
+            read.describe_topic(&topic),
+            originator.read().describe_topic(&topic)
+        );
+        assert!(read.capture_after(Some(lsm)).is_none());
+    }
 
     #[nervix_primitives::test]
     async fn delayed_replica_snapshot_cannot_overwrite_promoted_state() {
@@ -688,7 +1156,7 @@ mod tests {
             .take()
             .assured("node-2 is assigned as the replica");
         installer
-            .install_snapshot(1, &payload(2))
+            .install_checked_snapshot(1, &payload(2), || Ok(()))
             .assured("the initial replica snapshot is valid");
 
         let delayed_installer = installer.clone();
@@ -700,7 +1168,7 @@ mod tests {
             release_rx
                 .await
                 .assured("the test retains the delayed-response release sender");
-            delayed_installer.install_snapshot(2, &delayed_payload)
+            delayed_installer.install_checked_snapshot(2, &delayed_payload, || Ok(()))
         });
         response_received_rx
             .await
@@ -727,10 +1195,10 @@ mod tests {
             .await
             .assured("the delayed replica response task joins");
 
-        assert!(matches!(
-            delayed_result,
-            Err(RuntimeStateOperationError::Authority(_))
-        ));
+        let rejected = delayed_result
+            .err()
+            .assured("a superseded replica assignment cannot install its checkpoint");
+        assert!(rejected.contains::<StateAuthorityError>());
         assert_eq!(originator.read().next_offset(topic, partition), Some(9));
     }
 
@@ -816,17 +1284,22 @@ mod tests {
                         .apply_committed_offset(&position(2))
                         .assured("the owner assignment is current")
                 });
-                let snapshot = read
-                    .latest_snapshot()
-                    .assured("the recorded offsets encode");
+                let captured = read
+                    .capture_after(None)
+                    .assured("the recorded offset topology is retained");
+                let snapshot_lsm = captured.lsm;
+                let payload = captured
+                    .table
+                    .encode()
+                    .assured("the retained offsets encode outside the assignment barrier");
                 let revision = committing
                     .join()
                     .assured("the committing side only commits one offset");
-                let encoded = KafkaOffsetTable::decode(&snapshot.payload)
+                let encoded = KafkaOffsetTable::decode(&payload)
                     .assured("a snapshot of this state decodes")
                     .next_offset(TOPIC, 0);
                 assert!(
-                    snapshot.lsm < revision || encoded == Some(2),
+                    snapshot_lsm < revision || encoded == Some(2),
                     "a snapshot carried the revision of a commit without its offset"
                 );
             });

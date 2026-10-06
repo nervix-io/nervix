@@ -11,6 +11,9 @@
 //!   read an archive's NSPL.
 //! - **Must not know.** How the server stages, plans or applies a restore.
 
+#[path = "../runtime/native_restore_inspection.rs"]
+mod native_restore_inspection;
+
 use nervix_backup::{
     ArchiveLayout, ArchiveRecord, BackupManifest, BranchLifecycleRecord, SectionDigester,
     SectionPath, WasmStateDescriptor,
@@ -40,6 +43,61 @@ async fn given_restore_uses_remote_placement(world: &mut ScenarioWorld) {
             .run_command(&leader, &world.domain, &format!("CORDON NODE {leader};"))
             .await
             .assured("the multi-node restore coordinator is excluded from execution placement");
+    }
+}
+
+fn restored_work_placements(world: &ScenarioWorld) -> BTreeSet<String> {
+    let status = world
+        .last_command_output
+        .as_deref()
+        .assured("cluster status is read before inspecting restored placements");
+    let mut placements = BTreeSet::new();
+    for placement in scheduled_placements_for_domain(status, &world.domain) {
+        let (owner, mut replicas) = scheduled_node_placement_from_status(
+            status,
+            &world.domain,
+            &placement.kind,
+            &placement.name,
+        )
+        .assured("each scheduled entry has its public placement");
+        replicas.sort_unstable();
+        placements.insert(format!(
+            "kind={} name={} owner={} replicas={}",
+            placement.kind,
+            placement.name,
+            owner,
+            replicas.join(",")
+        ));
+    }
+    placements
+}
+
+#[then(
+    expr = "the last cluster status placements of restored work are saved as placeholder {string}"
+)]
+fn then_save_restored_work_placements(world: &mut ScenarioWorld, placeholder: String) {
+    let placements = restored_work_placements(world);
+    assert!(!placements.is_empty(), "restore installed scheduled work");
+    world.placeholders.insert(
+        placeholder,
+        placements.into_iter().collect::<Vec<_>>().join("\n"),
+    );
+}
+
+#[then(
+    expr = "the last cluster status preserves restored work placements from placeholder {string}"
+)]
+fn then_restored_work_placements_are_preserved(world: &mut ScenarioWorld, placeholder: String) {
+    let current = restored_work_placements(world);
+    let expected = world
+        .placeholders
+        .get(&placeholder)
+        .assured("the restored placements are saved before restart");
+    for placement in expected.lines() {
+        assert!(
+            current.contains(placement),
+            "restart changed restored ownership or replicas: expected {placement}; got {current:?}"
+        );
     }
 }
 
@@ -102,9 +160,10 @@ async fn then_restore_tenants_remain_isolated(
 ) {
     let duration = parse_duration_text(&duration).assured("the scenario duration is valid");
     let deadline = Instant::now() + duration;
-    let mut pending = (0..tenants)
+    let expected = (0..tenants)
         .map(|tenant| format!("restore-tenant-{tenant}"))
         .collect::<BTreeSet<_>>();
+    let mut pending = expected.clone();
     let session = world
         .active_session
         .as_mut()
@@ -119,8 +178,18 @@ async fn then_restore_tenants_remain_isolated(
             .try_next_subscription(deadline.saturating_duration_since(now))
             .await
             .assured("the subscription remains connected")
-            .assured("each restored tenant emits its expected even row");
-        let matched = pending
+            .unwrap_or_else(|| {
+                panic!(
+                    "missing isolated restored rows: {pending:?}; delivered rows: {:?}; frames \
+                     outside subscription lifetime: {:?}",
+                    session.delivered_payloads(),
+                    session.frames_outside_lifetime(),
+                )
+            });
+        world.last_subscription_payload = Some(event.payload.clone());
+        // Domain offsets recover at least once, so a valid row may repeat while another branch
+        // is still pending. Every observed row must still belong to an expected branch.
+        let matched = expected
             .iter()
             .find(|tenant| {
                 event
@@ -128,7 +197,13 @@ async fn then_restore_tenants_remain_isolated(
                     .contains(&format!("key={{\"tenant\":\"{tenant}\"}}"))
             })
             .cloned()
-            .assured("an emitted row belongs to one pending tenant");
+            .unwrap_or_else(|| {
+                panic!(
+                    "an emitted row belongs to an expected tenant: expected={expected:?}, \
+                     payload={}",
+                    event.payload
+                )
+            });
         assert!(
             event.payload.contains(&format!("\"tenant\":\"{matched}\"")),
             "the row's tenant agrees with its branch: {}",
@@ -139,7 +214,7 @@ async fn then_restore_tenants_remain_isolated(
             "the row resumes the saved even batch count: {}",
             event.payload
         );
-        assert!(pending.remove(&matched), "each tenant emits exactly once");
+        pending.retain(|tenant| tenant != &matched);
     }
 }
 
@@ -658,12 +733,15 @@ async fn when_cli_restores_with_memory_measurements(
         let mut peak_heap = initial_heap;
         let mut peak_resident = initial_resident;
         let mut peaks = BTreeMap::<String, f64>::new();
+        let mut metadata_peaks = BTreeMap::<String, f64>::new();
         let mut baseline_rejections = BTreeMap::<String, f64>::new();
         let mut final_rejections = BTreeMap::<String, f64>::new();
         let mut samples = 0_u64;
         let mut ready = Some(ready);
         loop {
+            nervix_primitives::task::consume_budget().await;
             for (node, url) in &urls {
+                nervix_primitives::task::consume_budget().await;
                 let response = client
                     .get(url)
                     .send()
@@ -671,7 +749,8 @@ async fn when_cli_restores_with_memory_measurements(
                     .assured("the restore target's metrics remain reachable");
                 let body = response.text().await.assured("metrics decode as text");
                 for line in body.lines() {
-                    if !line.contains("class=\"bulk\"") {
+                    let is_metadata = line.contains("class=\"restore_metadata\"");
+                    if !line.contains("class=\"bulk\"") && !is_metadata {
                         continue;
                     }
                     let value = line
@@ -681,9 +760,15 @@ async fn when_cli_restores_with_memory_measurements(
                         .parse::<f64>()
                         .assured("the metric value is numeric");
                     if line.starts_with("nervix_execution_memory_reserved_bytes{") {
-                        let peak = peaks.entry(node.clone()).or_default();
+                        let peak = if is_metadata {
+                            metadata_peaks.entry(node.clone()).or_default()
+                        } else {
+                            peaks.entry(node.clone()).or_default()
+                        };
                         *peak = peak.max(value);
-                    } else if line.starts_with("nervix_execution_memory_rejections_total{") {
+                    } else if !is_metadata
+                        && line.starts_with("nervix_execution_memory_rejections_total{")
+                    {
                         baseline_rejections.entry(node.clone()).or_insert(value);
                         final_rejections.insert(node.clone(), value);
                     }
@@ -710,7 +795,7 @@ async fn when_cli_restores_with_memory_measurements(
             baseline_rejections, final_rejections,
             "valid restored state incurs no bulk budget refusal"
         );
-        (peak_heap, peak_resident, peaks, samples)
+        (peak_heap, peak_resident, peaks, metadata_peaks, samples)
     }));
     started
         .await
@@ -719,7 +804,7 @@ async fn when_cli_restores_with_memory_measurements(
     when_cli_restores(world, scope, file.clone(), node).await;
     let elapsed = began.elapsed();
     stop.cancel();
-    let (peak_heap, peak_resident, peaks, samples) =
+    let (peak_heap, peak_resident, peaks, metadata_peaks, samples) =
         sampler.await.assured("the restore memory sampler finishes");
     assert_eq!(peaks.len(), nodes.len(), "each restore target was sampled");
     eprintln!(
@@ -727,7 +812,7 @@ async fn when_cli_restores_with_memory_measurements(
         serde_json::json!({
             "test_id": world.test_id, "nodes": nodes.len(), "archive_bytes": std::fs::metadata(archive_path(world, &file)).assured("the archive remains available").len(),
             "restore_milliseconds": elapsed.as_millis(), "sample_interval_milliseconds": 20, "samples": samples,
-            "sampled_bulk_peaks_bytes": peaks, "harness_heap_before_bytes": initial_heap, "harness_heap_peak_bytes": peak_heap,
+            "sampled_bulk_peaks_bytes": peaks, "sampled_restore_metadata_peaks_bytes": metadata_peaks, "harness_heap_before_bytes": initial_heap, "harness_heap_peak_bytes": peak_heap,
             "harness_allocator_resident_before_bytes": initial_resident, "harness_allocator_resident_peak_bytes": peak_resident,
             "heap_scope": "every in-process cluster and harness allocation; allocator resident excludes mappings outside jemalloc", "storage_working_reservation_bytes": 2 * 1024 * 1024
         })
@@ -744,6 +829,17 @@ fn cli_restore_report(world: &ScenarioWorld) -> serde_json::Value {
         return report;
     }
     document
+}
+
+#[then(expr = "the CLI restore execution reference is saved as placeholder {string}")]
+fn then_cli_restore_reference_is_saved(world: &mut ScenarioWorld, placeholder: String) {
+    let report = cli_restore_report(world);
+    let reference = report["execution_reference"]
+        .as_str()
+        .assured("the CLI restore report carries its exact execution reference");
+    world
+        .placeholders
+        .insert(placeholder, reference.to_string());
 }
 
 fn succeeded_restore(world: &ScenarioWorld) -> serde_json::Value {
@@ -1350,6 +1446,142 @@ fn write_archive(copy: &ArchiveCopy, replaced: &BTreeMap<String, Vec<u8>>, targe
         .unwrap_or_else(|report| panic!("the altered archive is written: {report:?}"));
 }
 
+#[given(
+    expr = "backup archive {string} is copied to {string} with native metadata above the bulk \
+            budget"
+)]
+fn given_large_native_metadata(world: &mut ScenarioWorld, source: String, target: String) {
+    use nervix_backup::{
+        BranchLifecycleEntry, KafkaOffsetsRecord, KafkaPartitionOffset, StateField, StateValue,
+    };
+
+    let copy = copy_of_archive(&archive_path(world, &source));
+    let mut replaced = BTreeMap::new();
+    for (path, bytes) in &copy.sections {
+        if path.contains("/state/branch_lifecycle/ingestor/metric_source/") {
+            let mut record = BranchLifecycleRecord::decode(path, bytes)
+                .assured("the fixture lifecycle is current");
+            let last_ingestion = record
+                .branches
+                .first()
+                .assured("the ingestor captured an active branch")
+                .last_ingestion;
+            for index in 0..1024_u64 {
+                record.branches.push(BranchLifecycleEntry {
+                    key: Some(vec![StateField {
+                        name: "tenant".to_string(),
+                        value: StateValue::String(format!(
+                            "metadata-{index:04}-{}",
+                            "x".repeat(34 * 1024)
+                        )),
+                    }]),
+                    last_ingestion,
+                    incarnation: 1000 + index,
+                });
+            }
+            let encoded = record
+                .encode()
+                .assured("valid large lifecycle metadata encodes");
+            assert!(encoded.len() > 32 * 1024 * 1024);
+            replaced.insert(path.clone(), encoded);
+        }
+        if path.contains("/state/kafka_offset/") {
+            let mut record =
+                KafkaOffsetsRecord::decode(path, bytes).assured("the fixture offsets are current");
+            for partition in 0..350_000_i32 {
+                record.offsets.push(KafkaPartitionOffset {
+                    topic: format!("metadata-{}", "z".repeat(100)),
+                    partition,
+                    next_offset: i64::from(partition) + 17,
+                });
+            }
+            let encoded = record
+                .encode()
+                .assured("valid large offset metadata encodes");
+            assert!(encoded.len() > 32 * 1024 * 1024);
+            replaced.insert(path.clone(), encoded);
+        }
+    }
+    assert_eq!(
+        replaced.len(),
+        2,
+        "both native metadata records were enlarged"
+    );
+    write_archive(&copy, &replaced, &archive_path(world, &target));
+}
+
+#[then(
+    expr = "stopped restored nodes preserve every native metadata value from backup archive \
+            {string}"
+)]
+async fn then_native_metadata_matches(world: &mut ScenarioWorld, source: String) {
+    use nervix_backup::KafkaOffsetsRecord;
+
+    let source = copy_of_archive(&archive_path(world, &source));
+    let mut lifecycles = Vec::new();
+    let mut offsets = None;
+    for (path, bytes) in &source.sections {
+        if path.contains("/state/branch_lifecycle/") {
+            lifecycles.push(
+                BranchLifecycleRecord::decode(path, bytes).assured("source lifecycle verifies"),
+            );
+        }
+        if path.contains("/state/kafka_offset/") {
+            offsets =
+                Some(KafkaOffsetsRecord::decode(path, bytes).assured("source offsets verify"));
+        }
+    }
+    assert!(
+        !lifecycles.is_empty(),
+        "the fixture holds lifecycle records"
+    );
+    let offsets = offsets.assured("the fixture holds Kafka offsets");
+    let domain = scenario_domain(world, &world.domain);
+    let nodes = world.cluster().node_ids();
+    world
+        .cluster_mut()
+        .shutdown()
+        .await
+        .assured("all test node databases close before inspection");
+    let mut lifecycle_copies = vec![0; lifecycles.len()];
+    let mut offset_copies = 0;
+    for node in &nodes {
+        nervix_primitives::task::consume_budget().await;
+        let path = world
+            .cluster()
+            .node_base_dir(node)
+            .assured("the node directory exists")
+            .join("db");
+        let (found, offsets_found) = native_restore_inspection::assert_native_checkpoint_values(
+            &path,
+            &domain,
+            &lifecycles,
+            &offsets,
+        );
+        println!(
+            "Native checkpoint copies on {node}: lifecycles={found:?}, offsets={offsets_found}"
+        );
+        for (copies, found) in lifecycle_copies.iter_mut().zip(found) {
+            *copies += usize::from(found);
+        }
+        offset_copies += usize::from(offsets_found);
+    }
+    let required_copies = if nodes.len() > 1 { 2 } else { 1 };
+    for (lifecycle, copies) in lifecycles.iter().zip(lifecycle_copies) {
+        assert!(
+            copies >= required_copies,
+            "every complete lifecycle exists on its primary and replicas: {} {} has {copies}, \
+             required {required_copies}",
+            lifecycle.owner_kind.as_str(),
+            lifecycle.entity
+        );
+    }
+    assert!(
+        offset_copies >= required_copies,
+        "the complete offset set exists on its primary and replicas"
+    );
+}
+
 #[given(expr = "backup archive {string} is copied to {string} with mismatched WASM state schemas")]
 fn given_archive_with_mismatched_wasm_schemas(
     world: &mut ScenarioWorld,
@@ -1504,4 +1736,33 @@ fn given_archive_with_a_resource_byte_changed(
     let mut bytes = std::fs::read(&source).expect("the archive is readable");
     bytes[offset + length / 2] ^= 0xff;
     std::fs::write(&target, bytes).expect("the altered archive is written");
+}
+
+fn streamed_restore_report(world: &ScenarioWorld) -> &nervix_models::RestoreReport {
+    let end = world
+        .last_restore_end
+        .as_ref()
+        .assured("a preceding step streamed a restore");
+    restore_outcome(end)
+        .restore
+        .as_deref()
+        .assured("the completed outcome carries its full report")
+}
+
+#[then(expr = "the restore stream's complete report is saved as placeholder {string}")]
+fn then_complete_restore_report_is_saved(world: &mut ScenarioWorld, placeholder: String) {
+    let report = serde_json::to_string(streamed_restore_report(world))
+        .assured("the current complete report serializes");
+    world.placeholders.insert(placeholder, report);
+}
+
+#[then(expr = "the restore stream's complete report matches placeholder {string}")]
+fn then_complete_restore_report_matches(world: &mut ScenarioWorld, placeholder: String) {
+    let saved = world
+        .placeholders
+        .get(&placeholder)
+        .assured("a complete report was saved before restart");
+    let expected: nervix_models::RestoreReport =
+        serde_json::from_str(saved).assured("the saved current report decodes");
+    assert_eq!(streamed_restore_report(world), &expected);
 }

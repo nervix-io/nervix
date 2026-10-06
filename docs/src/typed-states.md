@@ -143,6 +143,13 @@ The runtime Kafka offset key remains schema-independent. A backup archive also r
 ingestor's scheduled fingerprint with those offsets, so restore applies them only to the same
 ingestor contract after publishing its target schedule.
 
+Kafka replica catch-up describes revision state as `Current` or `Advanced(revision)`, with typed
+remote-operation failures for refusal. An advanced revision selects a bulk native checkpoint;
+its header must name a revision newer than the replica's request and no earlier than the described
+revision. Length, digest and the current archived shape are verified before a replacement table
+is published through the retained replica assignment token. A cancelled or invalid transfer
+therefore leaves the prior installed checkpoint intact.
+
 The runtime checks a stored state's schema identity against the current scheduled identity before
 accepting it. WASM guest state additionally uses its generation for the concrete branch. A state
 from another schema or generation cannot become current merely because it has a later revision.
@@ -155,6 +162,14 @@ Nervix keeps one current stored and wire shape. Producers and consumers of a cha
 updated together. A previously stored shape that cannot supply required identity fails to load
 clearly and must be recreated; it is not defaulted into the current state. Tests construct the
 current shape and assert its behavior.
+
+## Archive Preparation Admission
+
+Archive preparation reads the first physical tar header into the backup crate's `ManifestHeader`.
+That type carries the regular manifest entry's validated identity and bounded encoded length.
+Restore uses its length to admit manifest decoding before allocating owned archive values. The
+full archive reader uses the same boundary and then verifies the manifest and every section; see
+[Backup And Restore](./backup-and-restore.md).
 
 ## Archived Counts
 

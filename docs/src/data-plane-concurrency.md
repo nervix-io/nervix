@@ -143,11 +143,11 @@ writer.
 
 Restore storage qualification includes the store's cancellation, corruption, snapshot, queued
 writer, active chunk liveness and many-key cleanup regressions in `just test-deloxide` and
-`just test-deloxide-order`, plus the
-public one-node and three-node `@restore_installation` workloads for large saves, many checkpoints,
-active chunk replacement and purge, durable publication failure, restart and delayed coordinators.
-The many-checkpoint three-node case includes one replica per state; its one-MiB saves fit the
-replication operation's limit. Deloxide tracks the installation barrier and other
+`just test-deloxide-order`, plus the public one-node and three-node `@restore_installation`
+workloads for large saves, many checkpoints, native lifecycle and Kafka records above the default
+32 MiB bulk budget, active chunk replacement and purge, durable publication failure, restart and
+delayed coordinators. The many-checkpoint three-node case includes one replica per state; its
+one-MiB saves fit the replication operation's limit. Deloxide tracks the installation barrier and other
 boundary blocking locks; Fjall's internal locks, async authority ordering and memory ordering keep
 their separate ordinary, Shuttle, Loom and Turmoil checks. Measurements and diagnostic artifacts
 are delivered to the owning task.
@@ -169,6 +169,14 @@ ordering in the capture epoch, assignment protocol or relay revision changed. Ex
 models continue to qualify their ordering; new Shuttle checks qualify branch membership capture,
 replica revision races and publication before activation. Paused generators release their
 admitted-work guard after flushing and reacquire it before producing more output.
+
+Native restore conversion retains the immutable verified-description owner and its preparation
+reservation while an admitted storage job streams the current checkpoint encoding into a
+quota-owned file. The job owns the disk permit until its file closes or becomes a completed
+artifact, including cancellation. Entry serialization and 64 KiB writes check cancellation
+between bounded units. Each bounded artifact read also retains its file and quota in the storage
+job until it exits. Local and remote installation retain their exact file source and use
+the existing authority and installation barriers; conversion adds no lock to record paths.
 
 The backup coordinator waits for each node's admitted-work counters to reach zero, then orders one
 confirming force-flush generation across the cluster. The generation's obligations use the same
@@ -606,6 +614,18 @@ revision before clearing its current entries.
 An incoming materialized snapshot releases its response stream at EOF, before local verification
 or Arrow decoding. Those local operations retain their own staging and memory admission; they do
 not keep Snapshot request or connection-stream permits while waiting for executor work.
+
+Kafka offset catch-up checks the revision before retaining or encoding a checkpoint. Capture
+holds the assignment barrier only to select a conservative revision and immutable partition
+topology; encoding retains that topology and reads shared offset slots after the barrier returns.
+A commit included ahead of the captured revision is offered again by the following revision.
+The native encoder writes into quota-owned staging disk with a fixed 64 KiB I/O grant and separately
+admitted serializer scratch. Bulk transfer carries bounded chunks rather than a whole resident
+checkpoint. At EOF the receiver releases its Snapshot stream, verifies the staged file, and admits
+native decoding separately. It builds a replacement table directly from archived entries, checks
+cancellation between entries, and publishes only under the replica's existing assignment token.
+A failed conversion changes no installed offsets; rebinding rejects a delayed installer. No new
+concurrent map, per-record lock, or atomic ordering is introduced by this transfer path.
 
 ### Acknowledgement state
 

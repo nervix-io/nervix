@@ -349,21 +349,19 @@ impl Runtime {
                 }
                 initial_sync_pending = false;
                 let after_lsm = offsets.current_lsm();
-                match runtime
-                    .request_state_sync_with_timeout(
-                        &primary_node,
-                        &placement,
-                        Some(after_lsm),
-                        poll_interval,
-                    )
-                    .await
-                {
-                    Ok(Some(snapshot)) => {
-                        if let Err(error) = state.install_snapshot(snapshot.lsm, &snapshot.payload)
-                        {
-                            warn!(error = %error, "failed to apply replicated kafka offset snapshot");
+                let synchronized = nervix_primitives::select! {
+                    changed = shutdown_rx.changed() => {
+                        if changed.is_err() || *shutdown_rx.borrow() {
                             break;
                         }
+                        continue;
+                    }
+                    synchronized = runtime.install_kafka_offsets_from(
+                        &primary_node, &state, after_lsm,
+                    ) => synchronized,
+                };
+                match synchronized {
+                    Ok(Some(lsm)) => {
                         let dispatcher = runtime.inner.remote_dispatcher.load_full();
                         if let Some(dispatcher) = dispatcher
                             && let Err(error) = dispatcher
@@ -373,7 +371,7 @@ impl Runtime {
                                         nervix_interconnect::ControlEnvelope::StateReplicationAck(
                                             nervix_interconnect::StateReplicationAck {
                                                 placement: placement.to_remote(),
-                                                lsm: snapshot.lsm,
+                                                lsm,
                                             },
                                         ),
                                     ),
@@ -385,7 +383,7 @@ impl Runtime {
                     }
                     Ok(None) => {}
                     Err(error) => {
-                        warn!(error = %error, "failed to sync replicated kafka offsets");
+                        warn!(error = ?error, "failed to sync replicated kafka offsets");
                     }
                 }
             }

@@ -63,6 +63,10 @@ pub enum MemoryClass {
     Commands,
     Relay,
     Bulk,
+    /// Retained archive descriptions, restore planning, native conversion and serializer scratch.
+    /// This reservation follows the description until its last reader exits; bounded I/O and
+    /// generation publication use Bulk independently.
+    RestoreMetadata,
     Credentials,
 }
 
@@ -73,6 +77,7 @@ impl MemoryClass {
             Self::Commands => "commands",
             Self::Relay => "relay",
             Self::Bulk => "bulk",
+            Self::RestoreMetadata => "restore_metadata",
             Self::Credentials => "credentials",
         }
     }
@@ -166,11 +171,13 @@ pub struct MemoryBudgets {
     pub commands: ByteUnit,
     pub relay: ByteUnit,
     pub bulk: ByteUnit,
+    pub restore_metadata: ByteUnit,
     pub credentials: ByteUnit,
 }
 
 impl Default for MemoryBudgets {
-    /// 275 MiB in total: 8 MiB reserved for management, 24 MiB for commands and replication,
+    /// 275 MiB of execution buffers plus 2 GiB of admitted retained restore metadata:
+    /// 8 MiB reserved for management, 24 MiB for commands and replication,
     /// 192 MiB for relay work, 32 MiB for bulk buffers and 19 MiB for the one password hash a node
     /// computes at a time.
     fn default() -> Self {
@@ -179,6 +186,7 @@ impl Default for MemoryBudgets {
             commands: ByteUnit::Mebibyte(24),
             relay: ByteUnit::Mebibyte(192),
             bulk: ByteUnit::Mebibyte(32),
+            restore_metadata: ByteUnit::Gibibyte(2),
             credentials: CREDENTIAL_WORKING_BYTES,
         }
     }
@@ -298,6 +306,7 @@ pub(crate) struct ValidatedBudgets {
     pub(crate) commands: u32,
     pub(crate) relay: u32,
     pub(crate) bulk: u32,
+    pub(crate) restore_metadata: u32,
     pub(crate) credentials: u32,
 }
 
@@ -433,6 +442,12 @@ impl ExecutionConfig {
                     self.budgets.bulk,
                     "sealed snapshot section beside one body chunk",
                     bulk_required,
+                )?,
+                restore_metadata: permits(
+                    MemoryClass::RestoreMetadata.as_str(),
+                    self.budgets.restore_metadata,
+                    "retained archive metadata",
+                    1,
                 )?,
                 credentials: permits(
                     MemoryClass::Credentials.as_str(),

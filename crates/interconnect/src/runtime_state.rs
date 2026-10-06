@@ -16,7 +16,10 @@ use nervix_models::{
 use rkyv::{Archive, Deserialize, Serialize};
 use strum::{FromRepr, IntoStaticStr};
 
-use crate::{InterconnectRequest, PoolClass, RemoteOperationFailure};
+use crate::{
+    InterconnectRequest, InterconnectStreamRequest, PoolClass, RemoteOperationFailure,
+    RequestSubquota,
+};
 
 macro_rules! declare_runtime_state_kinds {
     ($($Kind:ident = $tag:literal,)+) => {
@@ -145,6 +148,44 @@ pub struct StatePlacementEnvelope {
 pub struct StateSnapshotEnvelope {
     pub lsm: u64,
     pub payload: Vec<u8>,
+}
+
+/// Kafka checkpoints may exceed either the replication message or bulk memory ceiling. The
+/// request selects a retained state handle once, and its response streams the current native
+/// checkpoint rather than carrying that checkpoint inside a control response.
+#[derive(Debug, Clone, Archive, Serialize, Deserialize)]
+pub struct SyncKafkaOffsets {
+    pub placement: StatePlacementEnvelope,
+    pub after_lsm: Option<u64>,
+}
+
+/// A typed admission and revision check precedes the bulk transfer. An unchanged checkpoint
+/// requires neither encoding nor a Snapshot stream, and ordinary absence remains distinct from a
+/// failed checkpoint read.
+#[derive(Debug, Clone, Archive, Serialize, Deserialize)]
+pub struct DescribeKafkaOffsets {
+    pub placement: StatePlacementEnvelope,
+    pub after_lsm: u64,
+}
+
+#[derive(Debug, Clone, Archive, Serialize, Deserialize)]
+pub enum KafkaOffsetRevision {
+    Current,
+    Advanced(u64),
+}
+
+impl InterconnectRequest for DescribeKafkaOffsets {
+    type Response = Result<KafkaOffsetRevision, RemoteOperationFailure>;
+    const NAME: &'static str = "describe_kafka_offsets";
+    const CLASS: PoolClass = PoolClass::Commands;
+    const TIMEOUT: Duration = Duration::from_secs(5);
+}
+
+impl InterconnectStreamRequest for SyncKafkaOffsets {
+    const NAME: &'static str = "sync_kafka_offsets";
+    const CLASS: PoolClass = PoolClass::Bulk;
+    const SUBQUOTA: RequestSubquota = RequestSubquota::Snapshot;
+    const TIMEOUT: Duration = Duration::from_secs(30);
 }
 
 #[derive(Debug, Clone, Archive, Serialize, Deserialize, PartialEq)]

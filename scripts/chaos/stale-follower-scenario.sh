@@ -331,6 +331,14 @@ run_stale_follower() {
     "${script_dir}/verify-restart-evidence.sh" stopped "${run_id}" "${project_name}" \
         "${follower_host}" "${image_id}" "${case_dir}/before.json" "${case_dir}/stopped.json" \
         "${case_dir}/shutdown.log"
+    # Both survivors were live voters when the stop began, so the follower had a live replacement
+    # and must have handed its work over through the leader. A drain it did not complete leaves the
+    # catch-up below meaningful, so it is a finding rather than the end of the run.
+    if ! "${script_dir}/verify-drain-evidence.sh" "${follower_host}" "${case_dir}/shutdown.log" \
+        2>"${case_dir}/drain-verdict.txt"; then
+        recovery_finding "${case_dir}" \
+            "${follower_host} did not complete its graceful drain while live replacement nodes existed: $(head -n 1 "${case_dir}/drain-verdict.txt")"
+    fi
     # The follower logs the last index its own log held as it stopped.
     local follower_shutdown_index
     follower_shutdown_index="$(grep -F 'raft transition: state=Shutdown' "${case_dir}/shutdown.log" \

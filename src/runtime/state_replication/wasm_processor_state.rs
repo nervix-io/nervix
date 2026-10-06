@@ -122,6 +122,12 @@ impl Runtime {
                     domain.as_str()
                 ))
             })?;
+            // Passive ownership moves carry the validated checkpoint inventory without running
+            // guest callbacks. A stopped domain has no readable execution clock; START restores
+            // the guest under the newly active clock generation.
+            if execution.passive_only {
+                return Ok(());
+            }
             let processor = execution
                 .revision
                 .processors

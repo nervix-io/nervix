@@ -342,6 +342,15 @@ restart_one_node() {
         "${round_dir}/shutdown.log"
     grep -E 'shutdown (admission|drain-support|terminal-teardown) phase finished' \
         "${round_dir}/shutdown.log" >"${round_dir}/phase-outcomes.txt"
+    if [[ "${node_count}" == "3" ]]; then
+        # The other two nodes were settled, uncordoned voters when the stop began, so the stopped
+        # node had a live replacement and must have handed its work over rather than leaving it
+        # to fail over.
+        if ! "${script_dir}/verify-drain-evidence.sh" "${target}" "${round_dir}/shutdown.log"; then
+            failure_category=product
+            rolling_fail "${target} did not complete its graceful drain while a live replacement node existed"
+        fi
+    fi
     check_support_containers
     check_other_nodes "${target}"
     local observer_id

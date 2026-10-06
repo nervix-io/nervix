@@ -707,6 +707,28 @@ impl InterconnectTestCa {
     }
 }
 
+/// Which nodes of a test cluster start with the default user's initial password.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) enum DefaultUserPasswordSeed {
+    /// Every node starts with it.
+    #[default]
+    EveryNode,
+    /// Only the node that bootstraps the cluster starts with it, as in the documented Docker
+    /// Compose deployment. The other nodes learn the default user from the replicated user records.
+    BootstrapNodeOnly,
+}
+
+impl DefaultUserPasswordSeed {
+    /// The initial password a node starts with, given whether it bootstraps the cluster.
+    fn initial_password(self, bootstraps: bool) -> Option<String> {
+        match self {
+            Self::EveryNode => Some(TEST_AUTH_PASSWORD.to_string()),
+            Self::BootstrapNodeOnly if bootstraps => Some(TEST_AUTH_PASSWORD.to_string()),
+            Self::BootstrapNodeOnly => None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy)]
 pub(crate) enum InterconnectCredentialFault {
     UntrustedClient,
@@ -762,6 +784,7 @@ pub(crate) struct TestClusterConfig {
     /// What every node's name begins with: the n-th node is `<prefix>-<n>`. A scenario that runs a
     /// second cluster names its nodes apart from the first one's.
     pub node_name_prefix: String,
+    pub default_user_password: DefaultUserPasswordSeed,
 }
 
 impl Default for TestClusterConfig {
@@ -791,6 +814,7 @@ impl Default for TestClusterConfig {
             dependencies: DependencyEndpoints::default(),
             peer_addressing: PeerAddressing::default(),
             node_name_prefix: "node".to_string(),
+            default_user_password: DefaultUserPasswordSeed::default(),
         }
     }
 }
@@ -3001,7 +3025,11 @@ impl NodeHandle {
             .interconnect_tls_key(self.spec.interconnect_tls_key.clone())
             .allow_bootstrap(self.spec.allow_bootstrap)
             .default_user(TEST_AUTH_USERNAME.to_string())
-            .init_default_user_password(Some(TEST_AUTH_PASSWORD.to_string()))
+            .init_default_user_password(
+                self.config
+                    .default_user_password
+                    .initial_password(self.spec.allow_bootstrap),
+            )
             .node_unavailability_timeout(TEST_NODE_UNAVAILABILITY_TIMEOUT)
             .raft_heartbeat_interval(TEST_RAFT_HEARTBEAT_INTERVAL)
             .raft_election_timeout_min(self.config.raft_election_timeout_min)

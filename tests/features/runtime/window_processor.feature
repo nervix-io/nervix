@@ -1372,6 +1372,7 @@ Feature: Window processor runtime behavior
     Given Kafka is running
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
+    And Kafka topic "metrics_{{test_id}}" exists with 1 partitions
     And the leader node is configured with these NSPL commands
       """
       CREATE UNPACED DOMAIN {{domain}};
@@ -1433,7 +1434,12 @@ Feature: Window processor runtime behavior
         CREATE SUBSCRIPTION metrics_subscription TO metrics;
         START;
       """
-    And emitter "kafka_forward" enters fault mode
+    Then Kafka consumer group "nervix_cucumber_{{test_id}}" eventually has 1 consumers
+    And within "10s" DESCRIBE INGESTOR "kafka_metrics" on the leader node contains
+      """
+      ready: true
+      """
+    When emitter "kafka_forward" enters fault mode
     And Kafka message is published to topic "metrics_{{test_id}}"
       """
       {"tenant":"acme","latency":10}

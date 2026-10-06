@@ -152,6 +152,14 @@ replica's synchronization task, and it retires with the state, ending its announ
 | a replica's copy of a branch checkpoint | a full payload clone under the `passive_runtime_state_snapshots` write guard | a revision comparison and a move under the guard |
 | `ReplicatedBranchAggregatedState::replica_progress` and its notification | written per acknowledgement and never read | deleted |
 
+Kafka offset replica polling first describes the revision through the immutable published state
+routes. An advancing revision opens one Snapshot stream and resolves its placement once more; an
+unchanged revision opens none. The stream retains that exact admitted state and its quota-owned
+artifact through bounded chunk reads, without consulting a concurrent registry per chunk. The
+replica task retains its assignment-qualified installer and checkpoint progress. These two route
+resolutions add no access to the lifecycle-only `replicated_kafka_offset_states` registry and no
+concurrent map.
+
 ## Replica catch-up: the repair Typed Ratchet 14 makes
 
 Before this repair, a replica's poll task walked every branch its entity's lifecycle named once

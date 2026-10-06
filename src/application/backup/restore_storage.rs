@@ -14,7 +14,7 @@
     )
 )]
 
-use std::io::{self, Cursor, Read, Seek, SeekFrom};
+use std::io::{self, Read, Seek, SeekFrom};
 
 use nervix_execution::{MemoryClass, StorageClass};
 use nervix_interconnect::RemoteOperationFailure;
@@ -28,10 +28,8 @@ use crate::{
     runtime::{RESTORE_STATE_WORKING_BYTES, RestoredRuntimeState, StagedArtifact},
 };
 
-/// Metadata records carry their own conversion reservation. Guest saves are read
-/// directly from the verified archive or the receiver's quota-owned completed upload.
+/// Native checkpoints and guest saves are read from quota-owned files.
 pub(in crate::application) enum RestoredStateSource {
-    Encoded(Vec<u8>),
     Archive {
         artifact: Arc<StagedArtifact>,
         offset: u64,
@@ -40,7 +38,6 @@ pub(in crate::application) enum RestoredStateSource {
 }
 
 enum RestoredStateReader {
-    Encoded(Cursor<Vec<u8>>),
     Archive {
         file: std::fs::File,
         _artifact: Arc<StagedArtifact>,
@@ -54,7 +51,6 @@ enum RestoredStateReader {
 impl Read for RestoredStateReader {
     fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
         match self {
-            Self::Encoded(reader) => reader.read(buffer),
             Self::Archive { file, .. } | Self::Upload { file, .. } => file.read(buffer),
         }
     }
@@ -63,7 +59,6 @@ impl Read for RestoredStateReader {
 impl RestoredStateSource {
     fn open(self) -> io::Result<RestoredStateReader> {
         match self {
-            Self::Encoded(bytes) => Ok(RestoredStateReader::Encoded(Cursor::new(bytes))),
             Self::Archive { artifact, offset } => {
                 let mut file = std::fs::File::open(artifact.path())?;
                 file.seek(SeekFrom::Start(offset))?;
@@ -79,16 +74,6 @@ impl RestoredStateSource {
                     _artifact: artifact,
                 })
             }
-        }
-    }
-
-    fn working_bytes(&self) -> Option<u64> {
-        match self {
-            Self::Encoded(bytes) => u64::try_from(bytes.len())
-                .ok()?
-                .checked_mul(2)?
-                .checked_add(RESTORE_STATE_WORKING_BYTES),
-            Self::Archive { .. } | Self::Upload(_) => Some(RESTORE_STATE_WORKING_BYTES),
         }
     }
 }
@@ -151,14 +136,11 @@ impl SessionServiceImpl {
         source: RestoredStateSource,
     ) -> Result<(), RemoteOperationFailure> {
         let domain = checkpoint.placement.domain.clone();
-        let bytes = source
-            .working_bytes()
-            .ok_or_else(|| failed(&domain, "restore metadata exceeds address space"))?;
         let charge = self
             .inner
             .runtime
             .executor()
-            .reserve(MemoryClass::Bulk, bytes)
+            .reserve(MemoryClass::Bulk, RESTORE_STATE_WORKING_BYTES)
             .await
             .map_err(|error| failed(&domain, &error.to_string()))?;
         let domain_owned = domain.clone();
