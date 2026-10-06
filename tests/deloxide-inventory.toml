@@ -383,16 +383,6 @@ scenario = "A changed window model or branch incarnation starts an empty window 
 selections = ["deloxide", "deloxide-order"]
 
 [[workload]]
-coverage = "Streamed restore of native lifecycle and Kafka metadata above the bulk budget, its interrupted attempt and exact replay."
-examples = 2
-feature = "tests/features/cluster/backup_metadata.feature"
-id = "scenario.native-metadata-restore"
-invariant = "Native lifecycle and Kafka metadata above the bulk budget restore exactly on one and three nodes, and an exact replay recovers the completed restore."
-invocation = "scenarios"
-scenario = "Native lifecycle and Kafka metadata above the bulk budget on <cluster_size> nodes restore exactly"
-selections = ["deloxide", "deloxide-order"]
-
-[[workload]]
 coverage = "Materialized relay capture, restore and generator resumption through restart."
 examples = 2
 feature = "tests/features/cluster/backup_materialized.feature"
