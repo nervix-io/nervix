@@ -9,6 +9,7 @@
 //!   control-plane use cases; this store installs bytes and reports what is installed.
 
 use std::{
+    borrow::Cow,
     collections::BTreeMap,
     fs::{self, OpenOptions},
     io::{self, Read as _, Seek as _, Write as _},
@@ -26,8 +27,8 @@ use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_execution::CpuClass;
 use nervix_execution::{Cancellation, ChargedBytes, Executor, MemoryClass, StorageClass};
 use nervix_models::{
-    ClusterNodeName, ResourceEntryContent, ResourceId, ResourceManifestEntry, ResourceVersion,
-    Timestamp,
+    ClusterNodeName, ResourceEntryContent, ResourceId, ResourceManifestEntry, ResourceName,
+    ResourceVersion, Timestamp,
 };
 use serde::{Deserialize, Serialize};
 use tar::{
@@ -1188,7 +1189,19 @@ impl ResourceStore {
     fn resource_root(&self, id: &ResourceId) -> PathBuf {
         self.root
             .join(id.domain.as_str())
-            .join(id.identifier.as_str())
+            .join(Self::resource_directory(&id.identifier).as_ref())
+    }
+
+    /// The name of the directory that holds a resource's versions. A resource name may begin with
+    /// a dot, and so may name the directory itself or its parent, or be taken for one of the
+    /// staging directories the store names with a leading dot. Such a name's leading dot is
+    /// written `%2E`; `%` is outside the name alphabet, so no other resource's directory has that
+    /// name. A domain name holds no dot, so a domain's directory is its name.
+    fn resource_directory(identifier: &ResourceName) -> Cow<'_, str> {
+        match identifier.as_str().strip_prefix('.') {
+            Some(rest) => Cow::Owned(format!("%2E{rest}")),
+            None => Cow::Borrowed(identifier.as_str()),
+        }
     }
 
     fn version_root(&self, id: &ResourceId) -> PathBuf {
@@ -2207,6 +2220,8 @@ fn encode_hex(bytes: &[u8]) -> String {
     out
 }
 
+#[cfg(test)]
+mod layout_properties;
 #[cfg(test)]
 mod tests {
     use std::{io::Write as _, path::Path, time::Duration};
