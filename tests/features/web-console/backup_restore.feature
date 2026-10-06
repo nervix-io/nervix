@@ -180,6 +180,76 @@ Feature: Web console backup and restore
       | 1            |
       | 3            |
 
+  @console_restore_warnings
+  Scenario Outline: A console restore lists the archived state it skipped beside its result
+    Given a <cluster_size> node nervix cluster is started
+    And the active domain is "{{domain}}"
+    When these NSPL commands are executed on the leader node
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      CREATE SCHEMA metric ( tenant STRING, latency I64 );
+      CREATE WIRE JSON SCHEMA metric_wire MODE STRICT ( tenant string, latency integer );
+      CREATE CODEC metric_codec FROM WIRE JSON SCHEMA metric_wire TO SCHEMA metric;
+      CREATE SCHEMA metric_summary ( tenant STRING, samples I64, latency_p0 F64 OPTIONAL );
+      CREATE SCHEMA tenant_key ( tenant STRING );
+      CREATE BRANCH by_tenant SCHEMA tenant_key TTL 30m;
+      CREATE RELAY metrics SCHEMA metric BRANCHED BY by_tenant;
+      CREATE RELAY metric_summaries SCHEMA metric_summary BRANCHED BY by_tenant;
+      CREATE VHOST edge console-restore-warnings-{{test_id}}.example.com;
+      CREATE ENDPOINT metric_ingress ON edge PATH '/metrics' TYPE HTTP;
+      CREATE INGESTOR metric_source FROM ENDPOINT metric_ingress MODE NO_ACK SEQUENTIAL
+        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING metric_codec
+        TO metrics INHERIT ALL BRANCHED BY by_tenant SET tenant = message.tenant
+          FLUSH IMMEDIATE ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
+      CREATE WINDOW PROCESSOR latency_window FROM metrics
+        WIDTH 2 MESSAGES
+        STEP 1 MESSAGES
+        BRANCHED BY by_tenant
+        TO metric_summaries
+          SET tenant = FIRST(input.tenant), samples = COUNT(input.latency),
+              latency_p0 = PERCENTILE_LINEAR_HISTOGRAM(input.latency, 0, 10, 0, 100, '10m')
+          ON MESSAGE ERROR LOG;
+      START;
+      CREATE SUBSCRIPTION source_summaries TO metric_summaries;
+      """
+    And http payload is posted to host "console-restore-warnings-{{test_id}}.example.com" path "/metrics"
+      """
+      {"tenant":"alpha","latency":10}
+      """
+    And http payload is posted to host "console-restore-warnings-{{test_id}}.example.com" path "/metrics"
+      """
+      {"tenant":"alpha","latency":70}
+      """
+    Then within "30s" the relay subscription receives exactly one payload for each fragment set
+      """
+      key={"tenant":"alpha"} | "samples":2
+      """
+    And the current leader node is saved as placeholder "leader"
+    When the CLI backs up "domain {{domain}}" from node "{{leader}}" into "window.nvxb" reporting JSON
+    Then the CLI backup succeeded with a JSON report naming domain "{{domain}}"
+    Given backup archive "window.nvxb" is copied to "changed-window.nvxb" with "'10m'" replaced by "'11m'" in the models of domain "{{domain}}"
+    And the cluster is replaced by a fresh <cluster_size> node cluster whose nodes are named "restored"
+    When the web console is opened on the leader node
+    Then selector ".topbar-status .pill.ok" contains "CONNECTED"
+    When selector ".backup-menu-button" is clicked
+    And selector ".backup-tab[data-tab='restore']" is clicked
+    And selector ".restore-file" is given backup archive "changed-window.nvxb"
+    And selector ".restore-domain" is filled with "{{domain}}"
+    And selector ".restore-dry-run" is clicked
+    Then selector ".restore-status" contains "dry run planned"
+    When selector ".restore-submit" is clicked
+    Then selector ".restore-status" contains "restored"
+    And selector ".restore-warnings" contains "skipped window_processor state 'latency_window' in domain '{{domain}}'"
+    And selector ".restore-warnings" contains "the archived window model differs from the restored window processor"
+    And selector ".restore-result" contains "apply models of domain '{{domain}}': applied"
+    And selector ".terminal" contains "warning: skipped window_processor state 'latency_window'"
+
+    Examples:
+      | cluster_size |
+      | 1            |
+      | 3            |
+
   @console_backup_shared_session
   Scenario: The REPL and the backup controls share one console session and its leader redirect
     Given a 3 node nervix cluster is started

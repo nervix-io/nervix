@@ -48,7 +48,7 @@ use self::{
     backup_draft::{BackupDraft, BackupScopeChoice, CaptureChoice},
     browser::{PageBrowser, RecordStorage},
     pending_backup::PendingBackup,
-    reports::{restore_report_lines, summary_lines},
+    reports::{restore_report_lines, restore_warnings, summary_lines},
     restore_draft::{RestoreDraft, RestoreDraftError, RestoreScopeChoice},
     restore_stream::{RestoreEnd, RestoreStreamError, RestoreUpload, measure_archive},
 };
@@ -265,23 +265,28 @@ pub(crate) enum RestoreProgress {
     Streaming {
         mode: RestoreMode,
     },
-    /// A dry run planned the restore of the draft revision it names.
+    /// A dry run planned the restore of the draft revision it names. `warnings` name the archived
+    /// state the restore would skip.
     Planned {
         revision: u64,
         report: Box<RestoreReport>,
+        warnings: Vec<String>,
     },
-    /// The restore applied.
+    /// The restore applied. `warnings` name the archived state it skipped.
     Restored {
         report: Box<RestoreReport>,
+        warnings: Vec<String>,
     },
     /// The restore was refused before it changed anything.
     Refused {
         reason: String,
     },
-    /// The restore failed at a step; the steps before it stay applied.
+    /// The restore failed at a step; the steps before it stay applied. `warnings` name the
+    /// archived state it skipped before it failed.
     Failed {
         reason: String,
         report: Box<RestoreReport>,
+        warnings: Vec<String>,
     },
     /// The console could not learn the outcome of the restore its reference names.
     Unknown {
@@ -333,7 +338,7 @@ impl RestoreProgress {
     /// The report of a restore that applied or failed at a step, which the result pane renders.
     fn result(&self) -> Option<&RestoreReport> {
         match self {
-            Self::Restored { report } | Self::Failed { report, .. } => Some(report),
+            Self::Restored { report, .. } | Self::Failed { report, .. } => Some(report),
             Self::Idle
             | Self::AwaitingArchive { .. }
             | Self::Streaming { .. }
@@ -353,6 +358,21 @@ impl RestoreProgress {
             | Self::Refused { .. }
             | Self::Failed { .. }
             | Self::Unknown { .. } => None,
+        }
+    }
+
+    /// The archived state the restore skipped, or for a dry run would skip, as the leader named
+    /// it.
+    fn warnings(&self) -> &[String] {
+        match self {
+            Self::Planned { warnings, .. }
+            | Self::Restored { warnings, .. }
+            | Self::Failed { warnings, .. } => warnings,
+            Self::Idle
+            | Self::AwaitingArchive { .. }
+            | Self::Streaming { .. }
+            | Self::Refused { .. }
+            | Self::Unknown { .. } => &[],
         }
     }
 
@@ -957,7 +977,15 @@ impl RestoreConclusion {
         let completed = matches!(outcome.disposition, CommandDisposition::Completed { .. });
         let report = outcome.restore.clone();
         let message = outcome.message.clone();
-        let lines = command_outcome_lines(outcome, statement);
+        let warnings = restore_warnings(&outcome.diagnostics);
+        let mut lines = command_outcome_lines(outcome, statement);
+        if completed {
+            // A completed command prints only its message; a failed one already prints every
+            // diagnostic it carries.
+            for warning in &warnings {
+                lines.push(TermLine::info(warning.clone()));
+            }
+        }
         let Some(report) = report else {
             // A restore refused before it wrote anything reports no steps.
             return Self {
@@ -972,6 +1000,7 @@ impl RestoreConclusion {
                 progress: RestoreProgress::Failed {
                     reason: message,
                     report,
+                    warnings,
                 },
                 plan_domain: None,
             };
@@ -986,13 +1015,17 @@ impl RestoreConclusion {
                 let plan_domain = planned.map(|domain| domain.domain.clone());
                 Self {
                     lines,
-                    progress: RestoreProgress::Planned { revision, report },
+                    progress: RestoreProgress::Planned {
+                        revision,
+                        report,
+                        warnings,
+                    },
                     plan_domain,
                 }
             }
             RestoreMode::Apply => Self {
                 lines,
-                progress: RestoreProgress::Restored { report },
+                progress: RestoreProgress::Restored { report, warnings },
                 plan_domain: None,
             },
         }
@@ -1421,6 +1454,15 @@ fn RestoreForm(backups: BackupSignals) -> impl IntoView {
             </Show>
             <Show when=move || progress.get().error().is_some() fallback=|| ()>
                 <p class="create-error restore-error" role="alert">{move || progress.get().error().unwrap_or_default()}</p>
+            </Show>
+            <Show when=move || progress.with(|progress| !progress.warnings().is_empty()) fallback=|| ()>
+                <ul class="restore-warnings" role="status">
+                    <For
+                        each=move || progress.get().warnings().to_vec()
+                        key=|warning| warning.clone()
+                        children=|warning| view! { <li>{warning}</li> }
+                    />
+                </ul>
             </Show>
             <Show when=move || progress.with(|progress| progress.plan().is_some()) fallback=|| ()>
                 <ul class="restore-plan">

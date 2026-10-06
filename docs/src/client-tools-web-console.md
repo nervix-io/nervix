@@ -563,6 +563,11 @@ each step as applied, failed, or not attempted: a restore that fails at a step k
 before it, and the dialog names the step. A refusal shows the leader's reason, such as a domain
 that already exists or an archive that is not a valid backup archive, and changes nothing.
 
+A restore that skips archived state says so. The result lists the restore's warnings above its
+report, as `nervix-cli` prints them: the state the restored schedule cannot take, such as a window
+whose model changed, with the reason. The REPL prints the same warnings after the restore's
+message.
+
 A restore runs outside transactions, so the form refuses while the session holds one. Every attempt
 sends the same execution reference, statement, and archive: a lost connection or an unknown outcome
 streams the archive again, from its first byte, until the leader answers. If no answer arrives

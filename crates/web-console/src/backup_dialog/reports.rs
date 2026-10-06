@@ -1,10 +1,17 @@
-//! The text the dialog shows for a completed backup's summary and for a restore's report. Neither
-//! names anything the archive holds beyond what its summary reports: no model, user or secret.
+//! The text the dialog shows for a completed backup's summary and for a restore's report and
+//! warnings. None names anything the archive holds beyond what its summary or the restore reports:
+//! no model, user or secret.
 
+use nervix_client_wire::Diagnostic;
 use nervix_models::{
     BackupArchiveSummary, BackupResources, RestoreMode, RestoreReport, RestoreStepOutcome,
     RestoredDomain,
 };
+
+/// How the leader begins a diagnostic that warns instead of failing the command, which is how a
+/// restore names the archived state it skipped. `nervix-cli` lists a restore's warnings by the
+/// same prefix.
+const WARNING_PREFIX: &str = "warning:";
 
 /// The lines of a completed backup's summary.
 pub(crate) fn summary_lines(summary: &BackupArchiveSummary) -> Vec<String> {
@@ -38,6 +45,17 @@ pub(crate) fn summary_lines(summary: &BackupArchiveSummary) -> Vec<String> {
         ));
     }
     lines
+}
+
+/// The warnings among a restore outcome's diagnostics, each as the leader wrote it.
+pub(crate) fn restore_warnings(diagnostics: &[Diagnostic]) -> Vec<String> {
+    let mut warnings = Vec::new();
+    for diagnostic in diagnostics {
+        if diagnostic.message.starts_with(WARNING_PREFIX) {
+            warnings.push(diagnostic.message.clone());
+        }
+    }
+    warnings
 }
 
 /// The lines of a restore's report: what it restored, or for a dry run what it would restore, and

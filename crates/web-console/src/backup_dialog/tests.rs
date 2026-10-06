@@ -11,8 +11,8 @@ use std::num::NonZeroU64;
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_client_wire::{
     BackupArchiveStart, BackupDownloadFailed, BackupDownloadFailure, BackupDownloadMessage,
-    CommandDisposition, CommandOutcome, LeaderEndpoints, LeaderRedirect, OutcomeOrigin, RequestId,
-    RestoreDisposition, RestoreReply, RestoreUploadFailure, UnknownOutcomeCause,
+    CommandDisposition, CommandOutcome, Diagnostic, LeaderEndpoints, LeaderRedirect, OutcomeOrigin,
+    RequestId, RestoreDisposition, RestoreReply, RestoreUploadFailure, UnknownOutcomeCause,
 };
 use nervix_models::{
     ArchiveDigest, Backup, BackupArchiveSummary, BackupCapture, BackupCut, BackupDomainSummary,
@@ -720,6 +720,98 @@ fn restore_outcome(disposition: CommandDisposition, report: Option<RestoreReport
 
 const DRY_RUN: &str = "RESTORE DOMAIN tenant AS tenant_copy FROM 'tenant.nvxb' DRY RUN;";
 
+/// A warning as the leader writes it for archived window state a restore skips.
+const SKIPPED_WINDOW: &str = "warning: skipped window_processor state 'latency_window' in domain \
+                              'tenant_copy': the archived window model differs from the restored \
+                              window processor";
+
+/// A restore outcome that carries the skipped-window warning beside a diagnostic that warns of
+/// nothing.
+fn restore_outcome_with_a_warning(
+    disposition: CommandDisposition,
+    report: RestoreReport,
+) -> RestoreEnd {
+    let mut outcome = outcome(disposition);
+    outcome.restore = Some(Box::new(report));
+    outcome.diagnostics = vec![
+        Diagnostic {
+            message: SKIPPED_WINDOW.to_string(),
+            span: None,
+        },
+        Diagnostic {
+            message: "restore step 'apply models of domain 'tenant_copy'' failed".to_string(),
+            span: None,
+        },
+    ];
+    RestoreEnd::Outcome(Box::new(outcome))
+}
+
+#[test]
+fn a_restore_names_the_state_it_skipped_in_its_plan_its_result_and_the_terminal() {
+    let warnings = vec![SKIPPED_WINDOW.to_string()];
+    let planned = RestoreConclusion::of(
+        restore_outcome_with_a_warning(
+            CommandDisposition::Completed {
+                already_existed: false,
+            },
+            restore_report(RestoreMode::DryRun, [RestoreStepOutcome::Planned; 3]),
+        ),
+        DRY_RUN,
+        RestoreMode::DryRun,
+        7,
+    );
+    assert_eq!(planned.progress.warnings(), warnings.as_slice());
+    assert_eq!(
+        planned.lines.len(),
+        2,
+        "a completed restore prints its message and then the state it skipped"
+    );
+    assert_eq!(planned.lines[1].text, SKIPPED_WINDOW);
+
+    let restored = RestoreConclusion::of(
+        restore_outcome_with_a_warning(
+            CommandDisposition::Completed {
+                already_existed: false,
+            },
+            restore_report(RestoreMode::Apply, [RestoreStepOutcome::Applied; 3]),
+        ),
+        DRY_RUN,
+        RestoreMode::Apply,
+        7,
+    );
+    assert_eq!(restored.progress.warnings(), warnings.as_slice());
+
+    // A failed restore already prints every diagnostic it carries, so its warnings are not
+    // printed a second time.
+    let failed = RestoreConclusion::of(
+        restore_outcome_with_a_warning(
+            CommandDisposition::Failed,
+            restore_report(
+                RestoreMode::Apply,
+                [
+                    RestoreStepOutcome::Applied,
+                    RestoreStepOutcome::Applied,
+                    RestoreStepOutcome::Failed,
+                ],
+            ),
+        ),
+        DRY_RUN,
+        RestoreMode::Apply,
+        7,
+    );
+    assert_eq!(failed.progress.warnings(), warnings.as_slice());
+    assert_eq!(failed.lines.len(), 3);
+
+    assert!(RestoreProgress::Idle.warnings().is_empty());
+    assert!(
+        RestoreProgress::Refused {
+            reason: "the archive is not a backup".to_string()
+        }
+        .warnings()
+        .is_empty()
+    );
+}
+
 #[test]
 fn a_dry_run_plans_the_draft_revision_it_ran_and_draws_its_first_planned_domain() {
     let planned = restore_report(RestoreMode::DryRun, [RestoreStepOutcome::Planned; 3]);
@@ -736,7 +828,8 @@ fn a_dry_run_plans_the_draft_revision_it_ran_and_draws_its_first_planned_domain(
         conclusion.progress,
         RestoreProgress::Planned {
             revision: 7,
-            report: Box::new(planned)
+            report: Box::new(planned),
+            warnings: Vec::new(),
         }
     );
     assert_eq!(conclusion.plan_domain, Some(domain("tenant_copy")));
@@ -766,7 +859,8 @@ fn a_restore_shows_its_applied_report_its_failed_step_or_its_refusal() {
     assert_eq!(
         conclusion.progress,
         RestoreProgress::Restored {
-            report: Box::new(applied.clone())
+            report: Box::new(applied.clone()),
+            warnings: Vec::new(),
         }
     );
     assert_eq!(conclusion.progress.result(), Some(&applied));
@@ -1049,6 +1143,7 @@ fn the_restore_form_renders_its_previews_plan_and_result() {
                 RestoreMode::DryRun,
                 [RestoreStepOutcome::Planned; 3],
             )),
+            warnings: vec![SKIPPED_WINDOW.to_string()],
         });
         backups.plan_domain.set(Some(domain("tenant_copy")));
         backups.restore_transfer.set(Some(TransferProgress {
@@ -1059,6 +1154,11 @@ fn the_restore_form_renders_its_previews_plan_and_result() {
         let markup = dialog_markup(backups, Vec::new());
         assert!(markup.contains("FROM 'tenant.nvxb' DRY RUN;"));
         assert!(markup.contains("dry run planned"));
+        assert!(markup.contains("restore-warnings"));
+        assert!(
+            markup.contains("skipped window_processor state"),
+            "the plan lists the state the restore would skip: {markup}"
+        );
         assert!(markup.contains("uploaded 34 of 34 bytes"));
         assert!(markup.contains("create domain 'tenant_copy': planned"));
         assert!(markup.contains("restore-impact"));
@@ -1077,6 +1177,7 @@ fn the_restore_form_renders_its_previews_plan_and_result() {
                     RestoreStepOutcome::Failed,
                 ],
             )),
+            warnings: Vec::new(),
         });
         let markup = dialog_markup(backups, Vec::new());
         assert!(

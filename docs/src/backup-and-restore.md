@@ -682,7 +682,8 @@ describes the dialog itself.
   streams it with the `RestoreBackup` call over a console WebSocket to the leader. The dialog runs
   the `DRY RUN` form first: its report, and each domain's planned model run drawn as an impact
   report, must plan the current options and file before the restore itself can run. The restore's
-  report lists each step as applied, failed, or not attempted.
+  report lists each step as applied, failed, or not attempted, and the result lists the warnings
+  for the state the restore skipped.
 - **Retries.** Every attempt of a restore sends the same execution reference, statement, and
   archive. A redirect streams it again to the leader, and a lost connection or an unknown outcome
   streams it again from its first byte, for about ten minutes; after that the console reports the

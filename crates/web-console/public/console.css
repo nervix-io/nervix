@@ -3724,6 +3724,20 @@ button {
   overflow-wrap: anywhere;
 }
 
+.restore-warnings {
+  display: grid;
+  gap: 4px;
+  margin: 0;
+  padding: 8px 12px;
+  border: 1px solid #f59e0b;
+  border-radius: 6px;
+  color: #f59e0b;
+  font-size: 11px;
+  line-height: 1.5;
+  list-style: none;
+  overflow-wrap: anywhere;
+}
+
 .restore-impact-domains {
   display: flex;
   flex-wrap: wrap;
