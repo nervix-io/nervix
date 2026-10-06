@@ -408,6 +408,12 @@ text it rejected, and the last typed failure it saw. The meaning of the `connect
 status these waits read belongs to [Cluster
 Interconnect](./interconnect.md#application-health-and-availability).
 
+The stopped-voter `DROP NODE` scenario waits for the public unavailable verdict before removing
+the voter, then requires the exact remaining voter set. The verdict may name gossip or application
+health: the retained health target can end after gossip observes the stop, so that diagnostic source
+is not a stable precondition for membership removal. Scenarios that exercise application-health
+failure classification assert that source under their own controlled health fault.
+
 A scenario step can also read status inside a window of its own, passing that window as the phase
 deadline. Where the window bounds how long something is watched rather than how long one read may
 take, every read keeps a full request timeout instead.
