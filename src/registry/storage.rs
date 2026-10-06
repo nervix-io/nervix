@@ -1414,16 +1414,13 @@ impl ModelStorage {
                 .into_inner()
                 .change_context(RegistryError::ReadValue)?;
 
-            let key: ModelKeyOwned =
-                storekey::deserialize(&raw_key).change_context(RegistryError::DecodeKey)?;
+            let StoredModelKey {
+                domain,
+                kind,
+                identifier,
+            } = decode_key(&raw_key)?;
 
             let model = deserialize_value(raw_value.as_ref())?;
-
-            let domain = DomainName::parse(&key.domain).change_context(RegistryError::DecodeKey)?;
-            let kind = ModelKind::from_str(&key.kind)
-                .map_err(|_| Report::new(RegistryError::DecodeKey))?;
-            let identifier =
-                ModelName::parse(&key.identifier).change_context(RegistryError::DecodeKey)?;
 
             // Every model is written under the key it reports, so a stored pair that disagrees is
             // corrupt storage. Checking it once here is what lets every reader below take the node
@@ -1473,6 +1470,31 @@ fn encode_key(
     .change_context(RegistryError::EncodeKey)
 }
 
+/// The domain, kind and name one stored key holds.
+struct StoredModelKey {
+    domain: DomainName,
+    kind: ModelKind,
+    identifier: ModelName,
+}
+
+/// The domain, kind and name a stored key holds. Only the exact encoding a commit writes holds
+/// them: a name spelled other than canonically, or bytes after the key, would let a second stored
+/// record claim the same Model.
+fn decode_key(raw: &[u8]) -> Result<StoredModelKey, Report<RegistryError>> {
+    let key: ModelKeyOwned = storekey::deserialize(raw).change_context(RegistryError::DecodeKey)?;
+    let domain = DomainName::decode(&key.domain).change_context(RegistryError::DecodeKey)?;
+    let kind = ModelKind::from_str(&key.kind).map_err(|_| Report::new(RegistryError::DecodeKey))?;
+    let identifier = ModelName::decode(&key.identifier).change_context(RegistryError::DecodeKey)?;
+    if encode_key(&domain, kind, identifier.clone())? != raw {
+        return Err(Report::new(RegistryError::DecodeKey));
+    }
+    Ok(StoredModelKey {
+        domain,
+        kind,
+        identifier,
+    })
+}
+
 fn serialize_value(model: &Model) -> Result<Vec<u8>, Report<RegistryError>> {
     let archive = rkyv::to_bytes::<rkyv::rancor::Error>(model)
         .change_context(RegistryError::SerializeValue)?;
@@ -1500,6 +1522,9 @@ fn deserialize_value(bytes: &[u8]) -> Result<Model, Report<RegistryError>> {
 
 // The header identifies the current persisted Model shape before archive decoding.
 const MODEL_ARCHIVE_HEADER: &[u8; 16] = b"NERVIX MODEL U64";
+
+#[cfg(test)]
+mod properties;
 
 #[cfg(test)]
 mod tests {
