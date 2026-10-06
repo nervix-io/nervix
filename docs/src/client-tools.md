@@ -10,7 +10,7 @@ entirely through NSPL, whatever submits it.
 | Client | Where it runs | Use it for |
 | --- | --- | --- |
 | [Command Line Client](client-tools-cli.md) | your terminal, installed separately | interactive work, scripting, shell completions, streaming a relay to stdout, node administration |
-| [Web Console](client-tools-web-console.md) | your browser, served by every node | reading a running graph, exploring an unfamiliar domain, guided subscriptions, uploading resources |
+| [Web Console](client-tools-web-console.md) | your browser, served by every node | reading a running graph, exploring an unfamiliar domain, guided subscriptions, uploading resources, taking and restoring backups |
 | [Rust Client Library](client-library.md) | your own program | embedding Nervix control and subscriptions in a Rust application |
 
 One further tool is not a client at all: [`nervix-nspl-format`](client-tools-nspl-format.md) formats
@@ -19,10 +19,12 @@ saved `.nspl` files and checks that they are formatted. It never opens a session
 The console is the better tool for understanding a graph you did not write, because it draws one.
 The command line client is the better tool for repeating yourself, because it can be scripted.
 
-Only three things differ. Uploading a resource version names a local directory in the command line
-client and uses a file picker in the console; only the command line client follows a domain clock
-with `ATTACH DOMAIN CLOCK`; the console additionally offers guided actions — clicking a graph item or
-an entity — that simply type NSPL for you.
+Only a few things differ. Uploading a resource version, and restoring a backup archive, name a local
+path in the command line client and use a file picker in the console; a backup's archive is written
+to a local file by the command line client and saved as a browser download by the console, and only
+the command line client reads an archive with `DESCRIBE BACKUP`; only the command line client follows
+a domain clock with `ATTACH DOMAIN CLOCK`; the console additionally offers guided actions — clicking
+a graph item or an entity — that simply type NSPL for you.
 
 ## What Every Client Shares
 

@@ -343,6 +343,14 @@ impl Runtime {
     }
 
     #[cfg(feature = "testing")]
+    pub(crate) async fn pause_backup_download_if_armed(&self, node_id: &ClusterNodeName) {
+        self.inner
+            .fault_injection
+            .pause_backup_download_if_armed(node_id)
+            .await;
+    }
+
+    #[cfg(feature = "testing")]
     pub(crate) async fn pause_backup_cut_if_armed(&self, domain: &DomainName) {
         self.inner
             .fault_injection

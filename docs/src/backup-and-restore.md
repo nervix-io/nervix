@@ -41,11 +41,11 @@ BACKUP CLUSTER TO './cluster-config.nvxb' WITHOUT STATE;
   quiesced capture. The CLI's `--timeout` also extends its request and retry deadlines by that
   duration, leaving the ordinary request budget for command admission, capture and the reply.
 - The path names a file on the client's machine. A leading `~/` refers to the client user's home
-  directory.
+  directory. In the web console it names the file the browser saves the archive as.
 
-`BACKUP` runs in `nervix-cli` and in the Rust and C clients. It must be sent alone: not in a batch
-with other statements and not while a transaction is open. The web console refuses it, because a
-browser session has no file to write.
+`BACKUP` runs in `nervix-cli`, in the Rust and C clients, and in the web console, which saves the
+archive as a browser download; see [From The Web Console](#from-the-web-console). It must be sent
+alone: not in a batch with other statements and not while a transaction is open.
 
 Each domain records the applied configuration revision and Raft log entry of its own capture.
 Before reading state, each owner waits up to five seconds to apply the selected log revision,
@@ -153,7 +153,8 @@ could not be written to standard output.
 
 The leader assembles the archive in its staging area and retains it under the backup's execution
 reference. The client then downloads it through the session service's `DownloadBackup` streaming
-call; [Sessions](sessions.md#backup-downloads) describes the call.
+call, which the web console reaches through a console WebSocket of its own;
+[Sessions](sessions.md#backup-downloads) describes the call.
 
 - The archive is retained until a download receives all of it, or until the retry validity of the
   backup's execution reference ends, 15 minutes by default; see
@@ -256,16 +257,16 @@ RESTORE DOMAIN payments FROM './payments.nvxb' WITHOUT SOURCE OFFSETS;
   with a warning. The archive reader still rejects malformed records of a supported kind, and
   always validates section lengths and digests.
 - The path names a file on the client's machine. A leading `~/` refers to the client user's home
-  directory.
+  directory. In the web console it names the archive file the operator chose.
 
 A fresh cluster already has the user its configuration creates when the cluster starts, and a
 cluster archive holds that user too, so restoring a cluster archive into a fresh cluster takes
 `ON EXISTING USER SKIP` to keep the fresh cluster's password, or `ON EXISTING USER REPLACE` to take
 the archived one.
 
-`RESTORE` runs in `nervix-cli` and in the Rust and C clients. It must be sent alone: not in a batch
-with other statements and not while a transaction is open. The web console refuses it, because a
-browser session has no file to read.
+`RESTORE` runs in `nervix-cli`, in the Rust and C clients, and in the web console, which streams an
+archive file the operator chooses; see [From The Web Console](#from-the-web-console). It must be
+sent alone: not in a batch with other statements and not while a transaction is open.
 
 ### What A Restore Recreates
 
@@ -656,6 +657,42 @@ A failure prints `{"error": {"code": "...", "message": "..."}}` instead. The cod
 `RESTORE_REFUSED` for a restore refused before it changed anything, and `RESTORE_INCOMPLETE` for a
 restore that failed at a step. A `RESTORE_INCOMPLETE` error carries the restore's report as
 `report`, in the shape above.
+
+## From The Web Console
+
+The web console's **Backups** dialog takes a backup as a browser download and restores an archive
+the operator uploads, with the same statements, options, reports, and failures as `nervix-cli`.
+It runs on the console's own session and follows its leader redirect; a `BACKUP` or `RESTORE` typed
+in the console's REPL runs through the same dialog. [Web Console](client-tools-web-console.md#backing-up-and-restoring)
+describes the dialog itself.
+
+- **Backup.** The console sends `BACKUP` as a command under an execution reference, then downloads
+  the archive with the `DownloadBackup` call over a console WebSocket, from the node that reported
+  the backup. It hands the archive to the browser as a download only once its size and BLAKE3
+  digest match the backup's summary, under the last component of the file the statement names.
+  A download that fails in transport starts again from the first byte while the archive is
+  retained. A download the leader refuses ends with its reason, and the backup itself completed.
+- **A reload resumes a backup.** The browser tab records the backup's execution reference, query
+  text, and domain until its archive is downloaded. A reloaded page sends the backup again under
+  that reference, which returns the recorded outcome instead of running the backup twice, and
+  downloads the archive again while it is retained, unless the download the reload interrupted had
+  already collected it by queuing its last bytes. Closing the tab or signing in as another user
+  forgets the record.
+- **Restore.** The console reads the chosen file once to measure its size and BLAKE3 digest, and
+  streams it with the `RestoreBackup` call over a console WebSocket to the leader. The dialog runs
+  the `DRY RUN` form first: its report, and each domain's planned model run drawn as an impact
+  report, must plan the current options and file before the restore itself can run. The restore's
+  report lists each step as applied, failed, or not attempted.
+- **Retries.** Every attempt of a restore sends the same execution reference, statement, and
+  archive. A redirect streams it again to the leader, and a lost connection or an unknown outcome
+  streams it again from its first byte, for about ten minutes; after that the console reports the
+  outcome as unknown and names the reference.
+- **What the browser shows.** The dialog shows the summary a backup reports and the report a
+  restore returns, and never what an archive holds beyond them. `DESCRIBE BACKUP` runs only in
+  `nervix-cli`.
+- **Sensitivity.** The browser saves an archive with its downloads directory's permissions, not the
+  owner-only file `nervix-cli` writes. A downloaded archive holds password hashes, client secrets,
+  and TLS private keys; keep it where only its owner can read it.
 
 ## Archive Format
 

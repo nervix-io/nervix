@@ -2,11 +2,12 @@
 //!
 //! Layer: edges.
 //!
-//! - **Owns.** The console asset routes, authenticating and upgrading the console WebSocket, and
-//!   the multipart resource upload path.
-//! - **Depends on.** The session engine, which serves the upgraded WebSocket, and the resource
+//! - **Owns.** The console asset routes, authenticating and upgrading the console WebSockets — the
+//!   session, one backup download, and one restore stream — and the multipart resource upload path.
+//! - **Depends on.** The session engine, which serves each upgraded WebSocket, and the resource
 //!   installation the upload path shares with every other upload.
-//! - **Must not know.** What a session request does once the WebSocket carries it.
+//! - **Must not know.** What a session request, a download or a restore does once the WebSocket
+//!   carries it.
 
 use std::{
     convert::Infallible,
@@ -31,7 +32,10 @@ use hyper::{
 };
 use hyper_util::rt::TokioIo;
 use meticulous::ResultExt as _;
-use nervix_client_wire::SessionLimits;
+use nervix_client_wire::{
+    SessionLimits,
+    websocket::{CONSOLE_BACKUP_DOWNLOAD_PATH, CONSOLE_RESTORE_PATH, CONSOLE_SESSION_PATH},
+};
 use nervix_consensus::ConsensusError;
 use nervix_models::{
     DomainName, NodeEndpoint, NodeServiceUrl, NodeServiceUrlParseError, ResourceName,
@@ -73,7 +77,6 @@ const WEB_CONSOLE_WASM: &[u8] =
 
 const WEB_CONSOLE_ICON: &[u8] = include_bytes!("../../crates/web-console/dist/nervix-icon.svg");
 
-const WEB_CONSOLE_WS_PATH: &str = "/console/ws";
 const WEB_CONSOLE_AUTH_CHECK_PATH: &str = "/console/auth";
 
 const WEB_CONSOLE_RESOURCE_UPLOAD_PATH: &str = "/console/resources/upload";
@@ -97,6 +100,25 @@ fn web_console_upload_text_response(
         )
 }
 
+/// The call an upgraded console WebSocket carries, which its path names.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ConsoleCall {
+    Session,
+    BackupDownload,
+    Restore,
+}
+
+impl ConsoleCall {
+    fn of_path(path: &str) -> Option<Self> {
+        match path {
+            CONSOLE_SESSION_PATH => Some(Self::Session),
+            CONSOLE_BACKUP_DOWNLOAD_PATH => Some(Self::BackupDownload),
+            CONSOLE_RESTORE_PATH => Some(Self::Restore),
+            _ => None,
+        }
+    }
+}
+
 fn redirect_response(location: &'static str) -> HyperResponse<Full<Bytes>> {
     HyperResponse::builder()
         .status(StatusCode::PERMANENT_REDIRECT)
@@ -110,7 +132,7 @@ fn redirect_response(location: &'static str) -> HyperResponse<Full<Bytes>> {
 
 async fn handle_web_console_request(
     service: SessionServiceImpl,
-    mut request: HyperRequest<HyperIncoming>,
+    request: HyperRequest<HyperIncoming>,
 ) -> Result<HyperResponse<Full<Bytes>>, Infallible> {
     if request.method() == Method::GET && request.uri().path() == WEB_CONSOLE_AUTH_CHECK_PATH {
         let Some(credentials) = credentials_from_web_console_request(&request) else {
@@ -130,80 +152,10 @@ async fn handle_web_console_request(
         );
     }
 
-    if request.method() == Method::GET && request.uri().path() == WEB_CONSOLE_WS_PATH {
-        let Some(credentials) = credentials_from_web_console_request(&request) else {
-            return Ok(unauthorized_basic_response());
-        };
-        let authenticated_user = match service.authenticate_basic_credentials(&credentials).await {
-            Ok(user) => user,
-            Err(CredentialRejection::Failed) => return Ok(unauthorized_basic_response()),
-            Err(CredentialRejection::Busy) => return Ok(busy_authentication_response()),
-        };
-
-        if !is_websocket_upgrade_request(&request) {
-            return Ok(response_with_bytes(
-                StatusCode::UPGRADE_REQUIRED,
-                Bytes::new(),
-                "text/plain; charset=utf-8",
-            ));
-        }
-
-        let Some(sec_websocket_key) = request.headers().get(SEC_WEBSOCKET_KEY) else {
-            return Ok(text_response(
-                StatusCode::BAD_REQUEST,
-                "missing websocket key",
-            ));
-        };
-        let Ok(sec_websocket_key) = sec_websocket_key.to_str() else {
-            return Ok(text_response(
-                StatusCode::BAD_REQUEST,
-                "missing websocket key",
-            ));
-        };
-        let sec_websocket_key = sec_websocket_key.to_owned();
-
-        let response = HyperResponse::builder()
-            .status(StatusCode::SWITCHING_PROTOCOLS)
-            .header(CONNECTION, "Upgrade")
-            .header(UPGRADE, "websocket")
-            .header(
-                SEC_WEBSOCKET_ACCEPT,
-                derive_accept_key(sec_websocket_key.as_bytes()),
-            )
-            .body(Full::new(Bytes::new()))
-            .assured(
-                "the status and header values are typed constants or generated ASCII, which the \
-                 http builder always accepts",
-            );
-
-        let on_upgrade = upgrade::on(&mut request);
-        let service_tasks = service.inner.service_tasks.clone();
-        service_tasks.spawn(async move {
-            let upgraded = nervix_primitives::select! {
-                _ = service.inner.admission_shutdown.cancelled() => return,
-                upgraded = on_upgrade => upgraded,
-            };
-            let upgraded = match upgraded {
-                Ok(upgraded) => upgraded,
-                Err(error) => {
-                    warn!(error = %error, "web console websocket upgrade failed");
-                    return;
-                }
-            };
-            let limits = SessionLimits::DEFAULT;
-            let config = console_websocket_config(&limits);
-            let websocket = WebSocketStream::from_raw_socket(
-                TokioIo::new(upgraded),
-                Role::Server,
-                Some(config),
-            )
-            .await;
-            service
-                .serve_console_session(authenticated_user, limits, websocket)
-                .await;
-        });
-
-        return Ok(response);
+    if request.method() == Method::GET
+        && let Some(call) = ConsoleCall::of_path(request.uri().path())
+    {
+        return Ok(upgrade_console_websocket(service, request, call).await);
     }
 
     if request.method() == Method::OPTIONS
@@ -263,6 +215,92 @@ async fn handle_web_console_request(
     };
 
     Ok(response)
+}
+
+/// Authenticates a console WebSocket request and upgrades it to serve `call`.
+async fn upgrade_console_websocket(
+    service: SessionServiceImpl,
+    mut request: HyperRequest<HyperIncoming>,
+    call: ConsoleCall,
+) -> HyperResponse<Full<Bytes>> {
+    let Some(credentials) = credentials_from_web_console_request(&request) else {
+        return unauthorized_basic_response();
+    };
+    let authenticated_user = match service.authenticate_basic_credentials(&credentials).await {
+        Ok(user) => user,
+        Err(CredentialRejection::Failed) => return unauthorized_basic_response(),
+        Err(CredentialRejection::Busy) => return busy_authentication_response(),
+    };
+
+    if !is_websocket_upgrade_request(&request) {
+        return response_with_bytes(
+            StatusCode::UPGRADE_REQUIRED,
+            Bytes::new(),
+            "text/plain; charset=utf-8",
+        );
+    }
+
+    let Some(sec_websocket_key) = request.headers().get(SEC_WEBSOCKET_KEY) else {
+        return text_response(StatusCode::BAD_REQUEST, "missing websocket key");
+    };
+    let Ok(sec_websocket_key) = sec_websocket_key.to_str() else {
+        return text_response(StatusCode::BAD_REQUEST, "missing websocket key");
+    };
+    let sec_websocket_key = sec_websocket_key.to_owned();
+
+    let response = HyperResponse::builder()
+        .status(StatusCode::SWITCHING_PROTOCOLS)
+        .header(CONNECTION, "Upgrade")
+        .header(UPGRADE, "websocket")
+        .header(
+            SEC_WEBSOCKET_ACCEPT,
+            derive_accept_key(sec_websocket_key.as_bytes()),
+        )
+        .body(Full::new(Bytes::new()))
+        .assured(
+            "the status and header values are typed constants or generated ASCII, which the http \
+             builder always accepts",
+        );
+
+    let on_upgrade = upgrade::on(&mut request);
+    let service_tasks = service.inner.service_tasks.clone();
+    service_tasks.spawn(async move {
+        let upgraded = nervix_primitives::select! {
+            _ = service.inner.admission_shutdown.cancelled() => return,
+            upgraded = on_upgrade => upgraded,
+        };
+        let upgraded = match upgraded {
+            Ok(upgraded) => upgraded,
+            Err(error) => {
+                warn!(error = %error, call = ?call, "web console websocket upgrade failed");
+                return;
+            }
+        };
+        let limits = SessionLimits::DEFAULT;
+        let config = console_websocket_config(&limits);
+        let websocket =
+            WebSocketStream::from_raw_socket(TokioIo::new(upgraded), Role::Server, Some(config))
+                .await;
+        match call {
+            ConsoleCall::Session => {
+                service
+                    .serve_console_session(authenticated_user, limits, websocket)
+                    .await;
+            }
+            ConsoleCall::BackupDownload => {
+                service
+                    .serve_console_download(authenticated_user, limits, websocket)
+                    .await;
+            }
+            ConsoleCall::Restore => {
+                service
+                    .serve_console_restore(authenticated_user, limits, websocket)
+                    .await;
+            }
+        }
+    });
+
+    response
 }
 
 pub(in crate::application) fn web_console_query_param(

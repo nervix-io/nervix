@@ -300,6 +300,7 @@ enum CommandPausePoint {
         step: RestoreStep,
     },
     BackupCut(DomainName),
+    BackupDownload(ClusterNodeName),
     RestoreStatePublication {
         domain: DomainName,
         coordinator: ClusterNodeName,
@@ -1326,6 +1327,21 @@ impl FaultInjection {
         self.release_command_pause(&CommandPausePoint::BackupCut(domain.clone()));
     }
 
+    /// Holds the next backup archive download on `node_id`, once, after the node opened the
+    /// retained archive and before it streams any frame of it, so the archive is not collected.
+    pub fn pause_backup_download_on(&self, node_id: ClusterNodeName) {
+        self.arm_command_pause(CommandPausePoint::BackupDownload(node_id));
+    }
+
+    pub async fn wait_for_backup_download_pause(&self, node_id: &ClusterNodeName) {
+        self.wait_for_command_pause(&CommandPausePoint::BackupDownload(node_id.clone()))
+            .await;
+    }
+
+    pub fn release_backup_download_pause(&self, node_id: &ClusterNodeName) {
+        self.release_command_pause(&CommandPausePoint::BackupDownload(node_id.clone()));
+    }
+
     pub fn pause_transaction_commit_after(
         &self,
         node_id: ClusterNodeName,
@@ -2087,6 +2103,11 @@ impl FaultInjection {
             step: step.clone(),
         })
         .await;
+    }
+
+    pub(crate) async fn pause_backup_download_if_armed(&self, node_id: &ClusterNodeName) {
+        self.pause_command_if_armed(CommandPausePoint::BackupDownload(node_id.clone()))
+            .await;
     }
 
     pub(crate) async fn pause_backup_cut_if_armed(&self, domain: &DomainName) {
