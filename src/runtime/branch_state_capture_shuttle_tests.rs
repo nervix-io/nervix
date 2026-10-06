@@ -268,18 +268,15 @@ async fn window_branch(
 fn a_forced_window_publication_racing_steps() {
     shuttle::future::block_on(async {
         let (_window, state) = retained_window();
-        let replicated = Arc::new(
-            ReplicatedWindowProcessorState::new(
-                placement(
-                    ModelKind::WindowProcessor,
-                    RuntimeState::WindowProcessor {
-                        schema: SchemaFingerprint::from_digest([8; 32]),
-                    },
-                ),
-                None,
-            )
-            .assured("an unpublished window needs no checkpoint"),
-        );
+        let replicated = Arc::new(ReplicatedWindowProcessorState::new(
+            placement(
+                ModelKind::WindowProcessor,
+                RuntimeState::WindowProcessor {
+                    schema: SchemaFingerprint::from_digest([8; 32]),
+                },
+            ),
+            None,
+        ));
         let (changes, change_requests) = mpsc::channel(1);
         let (checkpoints, checkpoint_requests) = mpsc::channel(1);
         let acknowledged = Arc::new(AtomicUsize::new(0));

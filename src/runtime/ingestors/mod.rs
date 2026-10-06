@@ -48,8 +48,7 @@ pub(crate) enum IngestorStartError {
         ingestor: IngestorName,
     },
     #[error(
-        "failed to build domain execution for '{domain}': domain execution is unavailable while \
-         starting ingestor '{ingestor}'"
+        "the execution of domain '{domain}' is not installed while starting ingestor '{ingestor}'"
     )]
     DomainExecutionUnavailable {
         domain: DomainName,
@@ -272,12 +271,9 @@ mod tests {
             ),
             "{report:?}"
         );
-        let message = "failed to build domain execution for 'sales': domain execution is \
-                       unavailable while starting ingestor 'source'";
+        let message =
+            "the execution of domain 'sales' is not installed while starting ingestor 'source'";
         assert_eq!(format!("{report:#}"), message);
-        // A runtime caller that still returns a runtime error keeps the report and its message.
-        let error = RuntimeError::IngestorStart { report };
-        assert_eq!(error.to_string(), message);
     }
 
     #[test]

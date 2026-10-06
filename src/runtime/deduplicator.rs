@@ -12,7 +12,7 @@ use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 
 use super::{
     KeyProjectionKind, PersistedRuntimeStateEntry, ProcessorCompileError, ReorderKeyPart,
-    RuntimePersistenceError, RuntimeStatePlacement, UdfExecutor,
+    RuntimePersistenceError, RuntimeStatePlacement, StoredStateIssue, UdfExecutor,
     branch_checkpoint_catalog::{BranchCheckpointCatalog, CatalogRegistration},
     checked_add_duration_to_timestamp, compile_key_projection_program,
     published_generation::{Generation, PublishedGenerations},
@@ -212,7 +212,7 @@ impl ReplicatedDeduplicatorState {
     pub(super) fn new(
         placement: RuntimeStatePlacement,
         initial: Option<PersistedRuntimeStateEntry>,
-    ) -> Result<Self, RuntimePersistenceError> {
+    ) -> error_stack::Result<Self, RuntimePersistenceError> {
         let generations = match initial {
             Some(initial) => {
                 let recent_keys = decode_deduplicator_snapshot(&initial.payload)?;
@@ -370,7 +370,7 @@ impl DeduplicatorKeyspace {
 
 pub(super) fn encode_deduplicator_snapshot(
     keys: &[PublishedDeduplicatorKey],
-) -> Result<Vec<u8>, RuntimePersistenceError> {
+) -> error_stack::Result<Vec<u8>, RuntimePersistenceError> {
     let mut entries = Vec::with_capacity(keys.len());
     for published in keys {
         entries.push(DeduplicatorEntrySnapshot {
@@ -379,7 +379,7 @@ pub(super) fn encode_deduplicator_snapshot(
         });
     }
     let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&DeduplicatorSnapshot { entries })
-        .map_err(|error| RuntimePersistenceError::EncodeState(error.to_string()))?;
+        .change_context(RuntimePersistenceError::EncodeState)?;
     let capacity = SNAPSHOT_HEADER
         .len()
         .checked_add(bytes.len())
@@ -392,18 +392,16 @@ pub(super) fn encode_deduplicator_snapshot(
 
 pub(super) fn decode_deduplicator_snapshot(
     payload: &[u8],
-) -> Result<ExpiryMap<DeduplicatorKey, Timestamp>, RuntimePersistenceError> {
+) -> error_stack::Result<ExpiryMap<DeduplicatorKey, Timestamp>, RuntimePersistenceError> {
     let archive = payload
         .strip_prefix(SNAPSHOT_HEADER)
-        .ok_or(RuntimePersistenceError::InvalidDeduplicatorSnapshotHeader)?;
+        .ok_or_else(|| Report::new(RuntimePersistenceError::InvalidDeduplicatorSnapshotHeader))?;
     let snapshot = rkyv::from_bytes::<DeduplicatorSnapshot, rkyv::rancor::Error>(archive)
-        .map_err(|error| RuntimePersistenceError::DecodeState(error.to_string()))?;
+        .change_context(RuntimePersistenceError::DecodeState)?;
     let mut recent_keys = ExpiryMap::new();
     for entry in snapshot.entries {
         if !recent_keys.insert(entry.key.into(), entry.seen_at) {
-            return Err(RuntimePersistenceError::DecodeState(
-                "deduplicator snapshot contains a duplicate key".to_string(),
-            ));
+            return Err(StoredStateIssue::DuplicateDeduplicatorKey.decode_failure());
         }
     }
     Ok(recent_keys)
@@ -495,9 +493,9 @@ pub(in crate::runtime) fn assert_key_payload_decodes_typed(payload: &[u8]) {
         }
         Err(error) => assert!(
             matches!(
-                error,
+                error.current_context(),
                 RuntimePersistenceError::InvalidDeduplicatorSnapshotHeader
-                    | RuntimePersistenceError::DecodeState(_)
+                    | RuntimePersistenceError::DecodeState
             ),
             "{error:?}"
         ),

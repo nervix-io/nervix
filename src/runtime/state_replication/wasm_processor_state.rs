@@ -393,7 +393,7 @@ impl Runtime {
     pub(in crate::runtime) fn replicated_wasm_processor_state(
         &self,
         placement: RuntimeStatePlacement,
-    ) -> Result<Arc<ReplicatedWasmProcessorState>, RuntimePersistenceError> {
+    ) -> error_stack::Result<Arc<ReplicatedWasmProcessorState>, RuntimePersistenceError> {
         let transferred = self.take_transferred_runtime_state_snapshot(&placement);
         if transferred.is_none()
             && let Some(existing) = self.inner.replicated_wasm_processor_states.get(&placement)
@@ -402,9 +402,7 @@ impl Runtime {
         }
         let initial = match transferred {
             Some(snapshot) => Some(snapshot),
-            None => self
-                .stored_runtime_state_snapshot(&placement)
-                .map_err(|error| error.current_context().clone())?,
+            None => self.stored_runtime_state_snapshot(&placement)?,
         };
         let catalog = self.branch_checkpoint_catalog(&placement);
         let assignment = self.state_assignment(&DomainNodeRef::node_in(

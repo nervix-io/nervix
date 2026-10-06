@@ -189,13 +189,13 @@ impl Runtime {
         &self,
         domain: &DomainName,
         ingestor: &IngestorName,
-    ) -> Result<(), RuntimeError> {
+    ) -> error_stack::Result<(), RuntimeError> {
         let key = DomainNodeRef::node_in(domain.clone(), ModelKind::Ingestor, ingestor.clone());
         let Some((_, runtime)) = self.inner.ingestors.remove(&key) else {
-            return Err(RuntimeError::IngestorNotRunning {
-                domain: domain.as_str().to_string(),
-                ingestor: ingestor.as_str().to_string(),
-            });
+            return Err(Report::new(RuntimeError::IngestorNotRunning {
+                domain: domain.clone(),
+                ingestor: ingestor.clone(),
+            }));
         };
 
         let IngestorRuntime {
@@ -739,7 +739,14 @@ mod tests {
             .await;
 
         let error = result.expect_err("invalid ACK timeout must fail schedule application");
-        let start_error = error.to_string();
+        assert!(
+            matches!(
+                error.current_context(),
+                RuntimeError::BuildDomainExecution { domain: failed } if failed == &domain
+            ),
+            "{error:?}"
+        );
+        let start_error = format!("{error:#}");
         assert!(
             start_error.contains("invalid ack timeout 'oops'"),
             "unexpected start error: {start_error}"
@@ -767,6 +774,24 @@ mod tests {
         assert_eq!(
             describe.transient_error.as_deref(),
             Some(start_error.as_str())
+        );
+    }
+
+    #[nervix_primitives::test]
+    async fn stopping_an_ingestor_that_is_not_running_names_it() {
+        let runtime = Runtime::default();
+
+        let error = runtime
+            .stop_ingestor(
+                &domain("default"),
+                &named::<IngestorName>("mqtt_notifications"),
+            )
+            .await
+            .expect_err("no ingestor runs before one starts");
+
+        assert_eq!(
+            format!("{error:#}"),
+            "ingestor 'mqtt_notifications' in domain 'default' is not running"
         );
     }
 }

@@ -9,7 +9,7 @@
 
 use std::time::Duration;
 
-use error_stack::Report;
+use error_stack::ResultExt as _;
 use meticulous::ResultExt as _;
 use nervix_consensus::{ConsensusRuntimeState, Observer};
 use nervix_models::{ClusterNodeName, ClusterSchedule};
@@ -67,12 +67,7 @@ impl RuntimeAdmission {
             applied.as_ref().map(|(_, schedule)| schedule),
             &state.schedule,
         )
-        .map_err(|error| {
-            Report::new(RuntimeError::BuildDomainExecution {
-                domain: "cluster".to_string(),
-                reason: format!("failed to plan committed schedule revision: {error:#}"),
-            })
-        })?;
+        .change_context(RuntimeError::PlanScheduleRevision)?;
         runtime
             .apply_planned_cluster_state(
                 local_node_id,
@@ -81,8 +76,7 @@ impl RuntimeAdmission {
                 &state.domain_clock_authorities,
                 planned,
             )
-            .await
-            .map_err(Report::new)?;
+            .await?;
         *applied = Some((state.revision, state.schedule.clone()));
         Ok(())
     }

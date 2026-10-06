@@ -183,7 +183,7 @@ impl SessionServiceImpl {
         if let Err(error) = self.apply_current_cluster_state().await {
             return command_error(format!(
                 "failed to prepare the current runtime schedule for relocation in domain '{}': \
-                 {error}",
+                 {error:#}",
                 domain.as_str()
             ));
         }
@@ -289,7 +289,7 @@ impl SessionServiceImpl {
         if let Some(error) = local_activation_error {
             return command_error(format!(
                 "relocated {moved} runtime node(s) onto node '{}', but failed to activate the \
-                 updated schedule for domain '{}': {error}",
+                 updated schedule for domain '{}': {error:#}",
                 plan.destination,
                 domain.as_str()
             ));
@@ -297,7 +297,7 @@ impl SessionServiceImpl {
         if let Some(error) = handoff_activation_error {
             return command_error(format!(
                 "relocated {moved} runtime node(s) onto node '{}', but ownership state activation \
-                 did not complete for domain '{}': {error}",
+                 did not complete for domain '{}': {error:#}",
                 plan.destination,
                 domain.as_str()
             ));

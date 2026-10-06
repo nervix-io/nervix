@@ -239,7 +239,7 @@ fn bolero_malformed_runtime_state_identity_records_fail_typed() {
             let is_decode_failure = |report: &Report<RuntimePersistenceError>| {
                 matches!(
                     report.current_context(),
-                    RuntimePersistenceError::DecodeState(_)
+                    RuntimePersistenceError::DecodeState
                 )
             };
             match RuntimeStateStore::decode_handoff_preparation(bytes) {
