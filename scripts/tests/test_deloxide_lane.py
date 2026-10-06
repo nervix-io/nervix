@@ -402,6 +402,15 @@ class InventoryTests(unittest.TestCase):
             },
         )
         self.assertTrue(all(chunk.expected == 1 for chunk in order if chunk.example_tag))
+        named = next(chunk for chunk in order if chunk.name_filter is not None)
+        named_arguments = deloxide_lane.scenario_arguments(named, invocation.concurrency)
+        self.assertEqual(named_arguments.count("--name"), 1)
+        self.assertNotIn("--tags", named_arguments)
+        self.assertIn("--retry", named_arguments)
+        tagged = next(chunk for chunk in order if chunk.example_tag is not None)
+        tagged_arguments = deloxide_lane.scenario_arguments(tagged, invocation.concurrency)
+        self.assertEqual(tagged_arguments.count("--tags"), 1)
+        self.assertNotIn("--name", tagged_arguments)
         remote = [chunk for chunk in order if chunk.inputs == ("tests/features/runtime/remote_ack_owners.feature",)]
         self.assertEqual(len(remote), 1)
         self.assertEqual(remote[0].expected, 2)

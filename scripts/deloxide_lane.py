@@ -736,6 +736,21 @@ def scenario_chunks(
     return chunks
 
 
+def scenario_arguments(chunk: ScenarioChunk, concurrency: int | None) -> list[str]:
+    """Select a chunk with one Cucumber filter; its CLI excludes combining tags and names."""
+    arguments: list[str] = []
+    for pattern in chunk.inputs:
+        arguments.extend(["--input", pattern])
+    if chunk.name_filter is not None:
+        arguments.extend(["--name", f"^{re.escape(chunk.name_filter)}$"])
+    else:
+        arguments.extend(["--tags", " or ".join(chunk.tags)])
+    arguments.extend(["--retry", "0"])
+    if concurrency is not None:
+        arguments.extend(["--concurrency", str(concurrency)])
+    return arguments
+
+
 def test_problems(
     invocation: Invocation,
     registered: Sequence[Workload],
@@ -1794,14 +1809,7 @@ class Lane:
                 directory = Path(chunk_environment[EVIDENCE_VARIABLE]) / chunk.name
                 directory.mkdir(parents=True, exist_ok=True)
                 chunk_environment[EVIDENCE_VARIABLE] = str(directory)
-            arguments: list[str] = []
-            for pattern in chunk.inputs:
-                arguments.extend(["--input", pattern])
-            arguments.extend(["--tags", " or ".join(chunk.tags), "--retry", "0"])
-            if chunk.name_filter is not None:
-                arguments.extend(["--name", f"^{re.escape(chunk.name_filter)}$"])
-            if invocation.concurrency is not None:
-                arguments.extend(["--concurrency", str(invocation.concurrency)])
+            arguments = scenario_arguments(chunk, invocation.concurrency)
             launch = Launch(
                 name=chunk.name,
                 argv=self.command(executable, arguments),
