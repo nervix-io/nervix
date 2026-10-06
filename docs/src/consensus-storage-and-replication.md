@@ -338,8 +338,20 @@ and snapshot installation therefore retain their complete magnitudes. See
 [Archived Counts](./typed-states.md#archived-counts).
 
 This layout has one current shape. A consensus database containing an unknown keyspace, a malformed
-current archive, or incomplete current state fails with `invalid consensus record storage; recreate
-the node's stored state`. Recreate the node's stored state and let it rejoin from the cluster.
+current archive, or incomplete or inconsistent current state fails with `invalid consensus record
+storage; recreate the node's stored state`. Recreate the node's stored state and let it rejoin from
+the cluster.
+
+Recovery accepts exactly the records the state writer stores. Each state record sits under the
+canonical encoding of its key, so a key spelled another way, or one with bytes after its encoding,
+is refused instead of being read as a neighbouring record. A record whose value names its own
+identity must name the key it is stored under: a domain, a schedule's domain and each of its nodes,
+a user, a resource version, node status or upload, a transaction, its commit plan header or impact
+report header, and a command execution. The state keyspace holds those records and the metadata and
+nothing else, so a record no family owns is refused as well. Recovered resource records hold at
+most one upload for each resource version, and an expired command execution's reference carries
+the issue time its expiry is ordered by. Every log read checks that a log record is stored under
+its own entry's index.
 
 ## Shutdown And Forced Endings
 

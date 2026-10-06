@@ -186,6 +186,7 @@ impl TransactionStepResult {
     pub fn statement_count(&self) -> usize {
         self.operation_range().operation_count().get()
     }
+
 }
 
 #[cfg(test)]
@@ -422,6 +423,12 @@ pub struct ReplicatedTransaction {
     mutation_owner: DomainMutationOwner,
 }
 
+impl crate::records::StoredUnder<String> for ReplicatedTransaction {
+    fn is_stored_under(&self, id: &String) -> bool {
+        self.id == *id
+    }
+}
+
 impl ReplicatedTransaction {
     pub fn open(
         id: String,
@@ -468,6 +475,31 @@ impl ReplicatedTransaction {
             latest_preview: None,
             commit_plan: None,
             mutation_owner,
+        }
+    }
+
+    /// The transaction `opened` began as, at a later point of its life, for generated storage
+    /// states: in `state`, still queuing `statements` of `queued_source_bytes` source bytes after
+    /// queuing `statement_count` statements in all, with the latest preview and commit plan header
+    /// its admissions recorded. Opening fixed its identity, creation instant and mutation owner.
+    #[cfg(test)]
+    pub(crate) fn generated(
+        opened: Self,
+        state: TransactionState,
+        statement_count: usize,
+        queued_source_bytes: u64,
+        statements: Vec<TransactionStatement>,
+        latest_preview: Option<TransactionPreviewIdentity>,
+        commit_plan: Option<TransactionCommitPlanHeader>,
+    ) -> Self {
+        Self {
+            state,
+            statement_count,
+            queued_source_bytes,
+            statements,
+            latest_preview,
+            commit_plan,
+            ..opened
         }
     }
 
