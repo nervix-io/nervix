@@ -3,20 +3,30 @@ set -euo pipefail
 
 usage() {
     cat >&2 <<'EOF'
-usage: cleanup.sh --run-id RUN_ID [--quiet]
+usage: cleanup.sh --run-id RUN_ID [--evidence DIR] [--quiet]
 
 Remove only Docker containers, networks, and volumes carrying the exact
-io.nervix.chaos.run label for RUN_ID.
+io.nervix.chaos.run label for RUN_ID, then confirm that none is left.
+
+--evidence DIR first captures what the run left behind into DIR: the listing
+and inspection of every such resource and the last 2 MiB of each container's
+log. Nothing is captured, and DIR is not created, when the run left nothing.
 EOF
 }
 
 run_id=""
 quiet=false
+evidence_dir=""
 while [[ "$#" -gt 0 ]]; do
     case "$1" in
         --run-id)
             [[ "$#" -ge 2 ]] || { usage; exit 2; }
             run_id="$2"
+            shift 2
+            ;;
+        --evidence)
+            [[ "$#" -ge 2 ]] || { usage; exit 2; }
+            evidence_dir="$2"
             shift 2
             ;;
         --quiet)
@@ -50,6 +60,10 @@ if ! command -v docker >/dev/null 2>&1; then
 fi
 if ! command -v timeout >/dev/null 2>&1; then
     printf '%s\n' 'GNU timeout is required for chaos cleanup' >&2
+    exit 2
+fi
+if [[ -n "${evidence_dir}" ]] && ! command -v jq >/dev/null 2>&1; then
+    printf '%s\n' 'jq is required to record chaos cleanup evidence' >&2
     exit 2
 fi
 
@@ -95,6 +109,41 @@ if ((${#containers[@]} > 0)); then
         done
     done
 fi
+
+# Captures what the run left behind before anything is removed. Every Docker call is bounded, and
+# each container keeps at most the last 2 MiB of its log.
+capture_evidence() {
+    mkdir -p "${evidence_dir}/logs"
+    timeout --foreground --kill-after=5s 30s docker container ls --all --no-trunc \
+        --filter "label=${label}" --format '{{json .}}' >"${evidence_dir}/containers.ndjson" 2>&1 || true
+    local inspected=(${containers[@]+"${containers[@]}"} ${sidecars[@]+"${sidecars[@]}"})
+    if ((${#inspected[@]} > 0)); then
+        timeout --foreground --kill-after=5s 30s docker inspect "${inspected[@]}" \
+            >"${evidence_dir}/containers.json" 2>&1 || true
+        local container_id container_name
+        for container_id in "${inspected[@]}"; do
+            container_name="$(timeout --foreground --kill-after=5s 20s \
+                docker inspect --format '{{.Name}}' "${container_id}" 2>/dev/null || true)"
+            container_name="${container_name#/}"
+            timeout --foreground --kill-after=5s 30s docker logs --timestamps "${container_id}" 2>&1 \
+                | tail -c 2097152 >"${evidence_dir}/logs/${container_name:-${container_id:0:12}}.log" || true
+        done
+    fi
+    if ((${#networks[@]} > 0)); then
+        timeout --foreground --kill-after=5s 30s docker network inspect "${networks[@]}" \
+            >"${evidence_dir}/networks.json" 2>&1 || true
+    fi
+    if ((${#volumes[@]} > 0)); then
+        timeout --foreground --kill-after=5s 30s docker volume inspect "${volumes[@]}" \
+            >"${evidence_dir}/volumes.json" 2>&1 || true
+    fi
+}
+
+left_behind=$((${#containers[@]} + ${#sidecars[@]} + ${#networks[@]} + ${#volumes[@]}))
+if [[ -n "${evidence_dir}" ]] && ((left_behind > 0)); then
+    capture_evidence
+fi
+
 if ((${#sidecars[@]} > 0)); then
     timeout --foreground --kill-after=5s 60s docker container rm --force "${sidecars[@]}" \
         >/dev/null || status=$?
@@ -118,6 +167,43 @@ fi
 if ((${#volumes[@]} > 0)); then
     timeout --foreground --kill-after=5s 30s docker volume rm "${volumes[@]}" \
         >/dev/null || status=$?
+fi
+
+# The removal is confirmed by listing the label again, so a resource that survived it fails the
+# cleanup however its removal reported.
+remaining_containers=0
+remaining_networks=0
+remaining_volumes=0
+if ((left_behind > 0)); then
+    remaining_containers="$(timeout --foreground --kill-after=5s 30s \
+        docker container ls --all --quiet --filter "label=${label}" | wc -l)" || status=1
+    remaining_networks="$(timeout --foreground --kill-after=5s 30s \
+        docker network ls --quiet --filter "label=${label}" | wc -l)" || status=1
+    remaining_volumes="$(timeout --foreground --kill-after=5s 30s \
+        docker volume ls --quiet --filter "label=${label}" | wc -l)" || status=1
+    if ((remaining_containers + remaining_networks + remaining_volumes > 0)); then
+        printf 'chaos cleanup left run=%s containers=%d networks=%d volumes=%d\n' \
+            "${run_id}" "${remaining_containers}" "${remaining_networks}" "${remaining_volumes}" >&2
+        status=1
+    fi
+fi
+
+if [[ -n "${evidence_dir}" ]] && ((left_behind > 0)); then
+    jq -n \
+        --arg run_id "${run_id}" \
+        --argjson containers "${#containers[@]}" \
+        --argjson sidecars "${#sidecars[@]}" \
+        --argjson networks "${#networks[@]}" \
+        --argjson volumes "${#volumes[@]}" \
+        --argjson remaining_containers "${remaining_containers}" \
+        --argjson remaining_networks "${remaining_networks}" \
+        --argjson remaining_volumes "${remaining_volumes}" \
+        --argjson exit_code "${status}" \
+        '{run_id: $run_id, containers: $containers, pumba_sidecars: $sidecars, networks: $networks,
+          volumes: $volumes,
+          remaining: {containers: $remaining_containers, networks: $remaining_networks,
+                      volumes: $remaining_volumes},
+          exit_code: $exit_code}' >"${evidence_dir}/cleanup.json"
 fi
 
 if [[ "${quiet}" != true ]]; then

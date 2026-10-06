@@ -682,6 +682,39 @@ if docker inspect "${cleanup_container}" >/dev/null 2>&1; then
     fail 'external cleanup left the paused target behind'
 fi
 
+# Cleanup after a controller that never ran its exit trap captures what the run left behind before
+# it removes anything, then confirms that nothing carries the run's label.
+cleanup_run_id="evidence-cleanup-$$-${RANDOM}"
+evidence_container="$(docker run --detach --rm \
+    --label "io.nervix.chaos.run=${cleanup_run_id}" \
+    --label io.nervix.chaos.role=node "${chaos_probe_image}" sh -c 'echo left-behind-marker; sleep 60')"
+docker network create --label "io.nervix.chaos.run=${cleanup_run_id}" "${cleanup_run_id}" >/dev/null
+marker_logged=false
+for _ in $(seq 1 50); do
+    if docker logs "${evidence_container}" 2>&1 | grep -q left-behind-marker; then
+        marker_logged=true
+        break
+    fi
+    sleep 0.2
+done
+[[ "${marker_logged}" == true ]] || fail 'the evidence exercise container logged nothing'
+docker pause "${evidence_container}" >/dev/null
+"${chaos_dir}/cleanup.sh" --run-id "${cleanup_run_id}" --evidence "${tmp_dir}/evidence" --quiet \
+    || fail 'cleanup with evidence did not remove what the run left behind'
+jq -e --arg run_id "${cleanup_run_id}" '. == {run_id: $run_id, containers: 1, pumba_sidecars: 0, networks: 1,
+    volumes: 0, remaining: {containers: 0, networks: 0, volumes: 0}, exit_code: 0}' \
+    "${tmp_dir}/evidence/cleanup.json" >/dev/null || fail 'cleanup did not record what it found and removed'
+jq -e 'length == 1 and .[0].State.Paused == true' "${tmp_dir}/evidence/containers.json" >/dev/null \
+    || fail 'cleanup did not inspect the container before removing it'
+grep -q left-behind-marker "${tmp_dir}/evidence/logs/"*.log \
+    || fail 'cleanup did not capture the log of the container it removed'
+[[ -s "${tmp_dir}/evidence/networks.json" ]] || fail 'cleanup did not inspect the network before removing it'
+if docker inspect "${evidence_container}" >/dev/null 2>&1 || docker network inspect "${cleanup_run_id}" >/dev/null 2>&1; then
+    fail 'cleanup with evidence left a run-owned resource behind'
+fi
+"${chaos_dir}/cleanup.sh" --run-id "${cleanup_run_id}" --evidence "${tmp_dir}/evidence-none" --quiet
+[[ ! -e "${tmp_dir}/evidence-none" ]] || fail 'cleanup recorded evidence for a run that left nothing'
+
 cleanup_run_id="pause-injector-failure-$$-${RANDOM}"
 cleanup_container="$(docker run --detach --rm \
     --label "io.nervix.chaos.run=${cleanup_run_id}" \
@@ -784,3 +817,4 @@ printf 'chaos harness self-test passed\n'
 "${script_dir}/stateful-self-test.sh"
 "${script_dir}/load-self-test.sh"
 "${script_dir}/mixed-self-test.sh"
+"${script_dir}/suite-self-test.sh"

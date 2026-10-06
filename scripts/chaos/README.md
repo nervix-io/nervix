@@ -1291,12 +1291,123 @@ after the run's timeout. To remove the run's resources in that case, use:
 
 ```bash
 just chaos cleanup --run-id <run-id>
+just chaos cleanup --run-id <run-id> --evidence target/chaos/<run-id>-leftovers
 ```
 
-`--keep` retains resources for interactive diagnosis and prints the same cleanup command.
+`--evidence DIR` first captures what the run left behind: the listing and inspection of every
+container, network and volume carrying its label, and the last 2 MiB of each container's log. Only
+then does cleanup remove them, and it lists the label again to confirm that nothing survived. A run
+that left nothing gets no evidence directory. `--keep` retains resources for interactive diagnosis
+and prints the same cleanup command.
 
 Run the external verifier, pinned tool image and Compose contract checks directly with:
 
 ```bash
 just chaos self-test
 ```
+
+## Suites and CI
+
+A suite is a named selection of runs from `suites.json`, which CI and a developer start with the
+same command against an already built image:
+
+```bash
+just chaos suite list
+just chaos suite smoke --image ghcr.io/nervix-io/nervix@sha256:<digest>
+just chaos suite soak --image ghcr.io/nervix-io/nervix@sha256:<digest> --shard 6
+just chaos suite soak --image nervix:debian --entry partition-leader --entry stale-follower
+```
+
+Each entry of a suite is one `just chaos run` command, listed with its arguments, and a budget in
+minutes that the suite passes to it as `--timeout`, so a run that overruns fails by its own bound
+with its own diagnostics. An entry also names its shard, the unit one CI job runs, and may carry a
+note. `--shard` runs one shard and `--entry` the named entries; together they select both. The
+entries run one after another, every one of them even after another fails, and a suite never
+retries a failed run.
+
+The `smoke` suite runs the three-node baseline, a leader crash with its explicit restart, and the
+partition and recovery of the follower that owns execution. The `soak` suite runs every delivered
+scenario: both topologies of the baseline, backup, rolling-restart, leader-crash and
+cluster-restart scenarios, every other crash role, the pause cases, each partition case and each
+degradation profile on its own, stale-follower and former-owner-restart, and every fault of the
+stateful and domain-time scenarios. Its mixed-instability runs last 30 minutes each: the fixed
+seeds 42 under `preserve-quorum` and 45 under `temporary-quorum-loss`, the failure seed 136, and
+two rotating seeds, one per policy, that every run draws and records. Seed 136 crashes a voter
+inside the crash of the bootstrap node, and it fails whenever node-1 holds that step's role until
+[Cluster Chaos 56](https://app.clickup.com/t/86bcdk4tn) is fixed.
+
+Before its first run the suite checks its own verdict logic with `tests/suite-self-test.sh`, which
+`just chaos self-test` runs too. It resolves the image once: a digest reference stays as given, and
+any other reference runs as the local image ID it resolves to, so every run of the suite uses one
+immutable image. A suite writes `ARTIFACTS/SUITE_ID/` (by default `target/chaos/<suite>-<time>-<pid>/`):
+
+- one run directory per entry, named `<suite-id>-<entry>`, exactly as `just chaos run` writes it;
+- `logs/<entry>.log`, the console output of each run;
+- `suite.json`, the machine-readable record: the suite and shard, the requested image with its
+  resolved image ID and repository digests, the worker's kernel, Docker and Compose versions, CPUs
+  and memory, and for every entry its command, run ID, verdict, exit status, failure category, final
+  phase, duration, timeout and teardown, seed and policy, reproducer, the delivery ledger
+  (expected, observed, duplicate, missing, unexpected and incorrect records), the headline recovery
+  timings its result records (election, placement, returning listeners, settlement, resumed delivery,
+  and the slowest settle, output and drain after a heal of a mixed run), a mixed run's peak node
+  memory, backlog and output stall, and the result files it wrote;
+- `summary.md`, the same verdicts rendered for a reader, which the suite also prints at the end.
+
+An entry passes only when its command exits 0 and its manifest records a passing run of the
+suite's image. The suite fails an entry as a controller failure when the run left no manifest, when
+the manifest's exit status contradicts the command's, or when the run resolved another image. A
+failed entry takes the category of its `results/finding.json`, `setup` when the run refused before
+creating its directory or recorded a setup error, and is listed as unclassified otherwise, which is
+the case of a failed baseline, backup or rolling-restart run until [Cluster Chaos
+33](https://app.clickup.com/t/86bc9dkk2) classifies them. An interrupted entry carries no category,
+because the category a run held when a signal ended it names no cause. Its reproducer is the run's
+own when it recorded one and otherwise the entry's command. The suite exits 0 when every entry passed, 1 when
+any failed or did not run, 2 for a setup error before any run, such as an unknown entry or an image
+that is neither local nor pullable, and 128 plus the signal's number when a signal ended it.
+
+A run executes in the background, so an interrupt or termination reaches the suite at once. The
+suite passes one TERM to the run, whose own exit trap then heals, captures and cleans up as on any
+exit, records it as interrupted, and starts no later entry. When the controller itself was killed
+before that, `just chaos suite cleanup SUITE_DIRECTORY` ends what the suite left behind: for every
+run the suite started it runs `just chaos cleanup --evidence` into `cleanup/<run-id>/`, removes the
+private keys of any run whose exit trap never ran, keeps the verdict of a run that finished before
+its controller was killed, records the entries that never reported an exit status as interrupted
+and those never started as not-started, and renders the summary again.
+
+`just chaos suite shards SUITE` prints the budgets CI applies to each shard. Its execution budget is
+the sum of its entries' budgets. Its step budget adds one 15-minute run teardown reserve, the bound
+within which a run that reached its own timeout finishes its teardown. Its job budget adds
+`ci_reserve_minutes` for the steps that follow the suite: cleanup, the summary and the uploads.
+`just chaos suite report [--expect-shards N] SUITE_JSON...` renders one summary of several shards
+and fails unless each passed and N of them are present.
+
+The `Chaos` workflow, `.github/workflows/chaos.yaml`, runs a suite on CI. The `Docker Build`
+workflow calls it with the image its build job published,
+`ghcr.io/nervix-io/nervix:<build-id>-debian-amd64`:
+
+- a pull request labeled `chaos` runs the smoke suite against the image built from it;
+- a pull request labeled `chaos-soak` runs the soak suite against that image;
+- the nightly build of `main` at 02:00 UTC runs the soak suite, and publishes neither a manifest nor
+  the book.
+
+A manual run of the `Chaos` workflow names the suite and an immutable image,
+`REPOSITORY@sha256:DIGEST`, and builds nothing. The workflow's plan job resolves the image to its
+digest, so every shard runs the same image, and reads the shards and their budgets from
+`just chaos suite shards`. Each shard then runs on its own Linux Docker worker,
+`blacksmith-4vcpu-ubuntu-2404`. The job installs `just` and `toml`, removes every Rust toolchain
+directory from the `PATH` the suite runs with and fails if `cargo`, `rustc` or `rustup` is still
+reachable, pulls the image and logs out of the registry, and runs
+`just chaos suite <suite> --shard <n> --image <digest> --artifacts <dir> --suite-id ci-<run>-<attempt>-<suite>-<n>`.
+The suite step ends at the shard's step budget and the job at its job budget. A cancellation sends
+the step SIGINT, then SIGTERM, then SIGKILL within about ten seconds, which can cut a run's exit trap
+short, so the job always runs `just chaos suite cleanup` afterwards as a second witness. It then
+publishes the shard summary and uploads two artifacts for 14 days: `chaos-verdict-<suite>-<n>-<run>-<attempt>`
+with `suite.json` and `summary.md`, and `chaos-<suite>-<n>-<run>-<attempt>` with the whole suite
+directory. The run attempt is part of each name, so a rerun never replaces the artifacts of the
+attempt it repeats. The verdict job publishes `just chaos suite report` over every shard's verdict
+and fails when a shard did not pass or recorded no verdict.
+
+To investigate a CI failure, download the shard's evidence artifact and read its `summary.md`: each
+failed entry names its category, phase, reproducer, finding and run directory. A reproducer pins the
+image by digest, and `just chaos replay <run-directory>` reconstructs a mixed-instability run from
+its downloaded directory with the recorded images.
