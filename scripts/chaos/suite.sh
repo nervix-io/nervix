@@ -13,6 +13,9 @@ source "${script_dir}/require-jq.sh"
 # A run's teardown after its own --timeout is bounded on its own and fits this reserve, the
 # runner's teardown_reserve_seconds; a shard's step budget keeps it for the last run.
 teardown_reserve_minutes=15
+# How long cleanup waits by default for a suite controller or run that still executes to finish its
+# exit work, within the CI cleanup step's bound, before it kills what remains.
+cleanup_wait_seconds=300
 
 usage() {
     cat <<'EOF'
@@ -20,23 +23,26 @@ Usage:
   just chaos suite list
   just chaos suite SUITE --image IMAGE [--shard N] [--entry ID]... [--artifacts DIR] [--suite-id ID]
   just chaos suite shards SUITE
-  just chaos suite cleanup SUITE_DIRECTORY
+  just chaos suite cleanup [--wait SECONDS] SUITE_DIRECTORY
   just chaos suite report [--expect-shards N] SUITE_JSON...
 
 SUITE names a suite of suites.json, such as smoke or soak. Each entry runs as its own
 `just chaos run` command with the entry's budget as --timeout, and every entry runs even after one
 fails. --shard runs one shard of the suite and --entry the named entries; both may be combined.
-The suite writes ARTIFACTS/SUITE_ID/suite.json, summary.md, one directory per run and one console
-log per entry under logs/. It exits 0 when every entry passed, 1 when any failed or did not run,
-2 for a setup error before any run, and 128 plus the signal number when it was interrupted.
+The suite writes ARTIFACTS/SUITE_ID/suite.json, summary.md, suite.log with its whole console, one
+directory per run and one console log per entry under logs/. It exits 0 when every entry passed,
+1 when any failed or did not run, 2 for a setup error before any run, and 128 plus the signal
+number when it was interrupted.
 
 shards prints the CI matrix of a suite: each shard's entries, its execution budget, the step
 budget that adds one run teardown reserve, and the job budget that adds the CI reserve for evidence,
 cleanup and upload.
 
-cleanup ends what a suite left behind once its controller has stopped: for every run of the suite
-it captures bounded evidence of the Docker resources still carrying the run's label and removes
-them, then records the entries that never reported a verdict as interrupted.
+cleanup ends what a suite left behind. A suite controller that still executes receives one TERM,
+and a run whose controller is gone receives one itself; each has --wait seconds, 300 by default,
+to finish its exit work before cleanup kills what remains of the suite's processes. Then, for every
+run of the suite, cleanup captures bounded evidence of the Docker resources still carrying the
+run's label and removes them, and records the entries that never reported a verdict as interrupted.
 
 report renders the summary of one or more suite.json files, such as every shard of a suite, and
 exits nonzero when any of them did not pass or fewer than --expect-shards were given.
@@ -55,6 +61,40 @@ done
 
 now() {
     date -u +%Y-%m-%dT%H:%M:%SZ
+}
+
+# Prints the state of process PID and when it started, in clock ticks after boot, or nothing when no
+# process has that number. The start time tells a process apart from any later one given its number.
+process_stat() {
+    local pid="$1"
+    [[ "${pid}" =~ ^[1-9][0-9]*$ ]] || return 0
+    local stat=""
+    stat="$(cat "/proc/${pid}/stat" 2>/dev/null)" || return 0
+    # The command name in the second field may hold spaces and parentheses, so the fields are read
+    # after its closing parenthesis: the state first and the start time twentieth.
+    local fields=()
+    read -r -a fields <<<"${stat##*) }"
+    printf '%s %s' "${fields[0]:-}" "${fields[19]:-}"
+}
+
+# Prints when process PID started, as process_executes compares it, or nothing when no process has
+# that number.
+process_start_ticks() {
+    local stat
+    stat="$(process_stat "$1")"
+    if [[ -n "${stat}" ]]; then
+        printf '%s' "${stat#* }"
+    fi
+}
+
+# True when process PID executes, not as a zombie, and is the process that started at START_TICKS.
+process_executes() {
+    local pid="$1"
+    local start_ticks="$2"
+    [[ -n "${start_ticks}" ]] || return 1
+    local stat
+    stat="$(process_stat "${pid}")"
+    [[ -n "${stat}" && "${stat% *}" != Z && "${stat#* }" == "${start_ticks}" ]]
 }
 
 # Refuses a definitions file that would give a suite an ambiguous selection, an unbounded run or an
@@ -367,6 +407,18 @@ finish_suite() {
     printf 'suite artifacts: %s\n' "${suite_dir}"
 }
 
+# Closes the console and gives its tee five seconds to write the rest, so the caller has the whole
+# console when the suite exits.
+console_pid=""
+close_console() {
+    exec >&- 2>&-
+    local attempt
+    for ((attempt = 0; attempt < 50; attempt++)); do
+        kill -0 "${console_pid}" 2>/dev/null || return 0
+        sleep 0.1
+    done
+}
+
 # A signal ends the run that is executing through its own exit trap, and no later entry starts. The
 # run receives one TERM: a second one would end its exit trap while it heals and captures evidence.
 suite_signal=""
@@ -450,7 +502,7 @@ run_suite() {
     # Every run id is the suite id and the entry id, within the runner's 96 characters.
     [[ "${suite_id}" =~ ^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,47}$ ]] \
         || suite_error '--suite-id must be 1 to 48 letters, numbers, dots, underscores or hyphens'
-    for command_name in docker openssl; do
+    for command_name in docker openssl setsid tee; do
         command -v "${command_name}" >/dev/null 2>&1 \
             || suite_error "required command is unavailable: ${command_name}"
     done
@@ -463,6 +515,14 @@ run_suite() {
     [[ ! -e "${suite_dir}" ]] || suite_error "the suite directory already exists: ${suite_dir}"
     mkdir -p "${suite_dir}/logs"
 
+    # The console reaches the caller through a tee that also writes suite.log. The tee ignores the
+    # interrupts and hangups a terminal sends its whole process group, and goes on writing the log
+    # when the caller stops reading, as a CI runner does once it has killed the step that started
+    # the suite, so the suite outlives its console and still records every verdict.
+    exec > >(trap '' INT HUP; exec tee -p "${suite_dir}/suite.log") 2>&1
+    console_pid=$!
+    trap close_console EXIT
+
     local started_epoch
     started_epoch="$(date +%s)"
     jq -n \
@@ -473,11 +533,15 @@ run_suite() {
         --arg requested "${image_ref}" \
         --arg started_at "$(now)" \
         --argjson started_epoch "${started_epoch}" \
+        --argjson controller_pid "$$" \
+        --arg controller_start "$(process_start_ticks "$$")" \
         --argjson selection "${selection}" \
         '{suite: $suite, suite_id: $suite_id,
           shard: (if $shard == "" then null else ($shard | tonumber) end),
           description: $description, status: "preparing",
           started_at: $started_at, started_epoch: $started_epoch,
+          controller: {pid: $controller_pid,
+                       start_ticks: (if $controller_start == "" then null else ($controller_start | tonumber) end)},
           image: {requested: $requested},
           entries: [$selection[] | {id, shard, budget_minutes, note: (.note // null), run,
                                    run_id: "\($suite_id)-\(.id)", status: "pending"}]}' \
@@ -573,13 +637,24 @@ run_suite() {
             --argjson index "${entry_index}" --arg started_at "$(now)" --arg epoch "$(date +%s)"
         # The run executes in the background so that a signal reaches the suite at once; the suite
         # passes it on, and the run's own exit trap heals, captures and cleans up as on any exit.
+        # The run leads its own session, so an interrupt a terminal sends to the suite's process
+        # group never reaches it beside the suite's TERM, and cleanup finds every process it left.
+        # A background child of a shell without job control never leads a process group, so
+        # setsid makes it a session leader in place and $! stays the run's process. Its log's tee
+        # ignores the terminal's signals as the console's does.
         local exit_status=0
         child_signalled=false
-        bash "${script_dir}/chaos.sh" run "${run_arguments[@]}" \
+        setsid bash "${script_dir}/chaos.sh" run "${run_arguments[@]}" \
             --image "${run_image}" --artifacts "${suite_dir}" --run-id "${run_id}" \
             --timeout "${budget_seconds}" \
-            > >(tee "${suite_dir}/logs/${entry_id}.log") 2>&1 &
+            > >(trap '' INT HUP; exec tee -p "${suite_dir}/logs/${entry_id}.log") 2>&1 &
         child_pid=$!
+        # The dollars in this jq filter are jq variables, not shell expansion.
+        # shellcheck disable=SC2016
+        update_record '.entries[$index].process = {pid: $pid,
+                start_ticks: (if $start == "" then null else ($start | tonumber) end)}' \
+            --argjson index "${entry_index}" --argjson pid "${child_pid}" \
+            --arg start "$(process_start_ticks "${child_pid}")"
         # A signal that arrived before the run's process was known still reaches it.
         if [[ -n "${suite_signal}" ]]; then
             on_suite_signal "${suite_signal}"
@@ -620,16 +695,142 @@ run_suite() {
     exit 1
 }
 
-# Ends what a suite left behind after its controller stopped, possibly without its exit traps.
+# Kills what remains of the session that a run led as process PID, started at START_TICKS, and
+# prints how many processes it killed. A session's number stays reserved while any process belongs
+# to it, so once its leader is gone every process left in the session is the run's; a leader number
+# that now names another process means nothing of the run remains.
+kill_run_session() {
+    local pid="$1"
+    local start_ticks="$2"
+    local current_start
+    current_start="$(process_start_ticks "${pid}")"
+    if [[ -n "${current_start}" && "${current_start}" != "${start_ticks}" ]]; then
+        printf '0'
+        return 0
+    fi
+    local -A killed=()
+    local round member state
+    for ((round = 0; round < 10; round++)); do
+        local members=()
+        while read -r member state; do
+            if [[ -n "${member}" && "${state}" != Z* ]]; then
+                members+=("${member}")
+            fi
+        done < <(ps -o pid=,stat= -s "${pid}" 2>/dev/null || true)
+        ((${#members[@]} > 0)) || break
+        kill -KILL "${members[@]}" 2>/dev/null || true
+        for member in "${members[@]}"; do
+            killed["${member}"]=1
+        done
+        sleep 0.2
+    done
+    printf '%d' "${#killed[@]}"
+}
+
+# Ends the processes a suite left executing. A controller that still executes receives one TERM,
+# which it passes to its run as on any signal, and a run whose controller is gone receives one TERM
+# itself. Each has until WAIT_SECONDS have passed to finish its exit work; then the controller and
+# whatever remains of each run's session are killed. Sets cleanup_controller to absent, finished
+# or killed, and records in run_terminated and run_killed which runs cleanup signalled and how many
+# processes of each it killed.
+cleanup_controller=absent
+declare -A run_terminated=()
+declare -A run_killed=()
+end_suite_processes() {
+    local wait_seconds="$1"
+    local deadline=$((SECONDS + wait_seconds))
+    local controller_pid controller_start
+    controller_pid="$(jq -r '.controller.pid // empty' "${suite_dir}/suite.json")"
+    controller_start="$(jq -r '.controller.start_ticks // empty' "${suite_dir}/suite.json")"
+    local runs=()
+    mapfile -t runs < <(jq -r '.entries[] | select(.process.pid != null)
+        | "\(.run_id) \(.process.pid) \(.process.start_ticks // "")"' "${suite_dir}/suite.json")
+    local run run_id pid start_ticks
+    local controller_executed=false
+    if process_executes "${controller_pid}" "${controller_start}"; then
+        controller_executed=true
+        printf 'chaos suite cleanup: the suite controller %s still executes; it receives TERM and ends its run\n' \
+            "${controller_pid}"
+        kill -TERM "${controller_pid}" 2>/dev/null || true
+    else
+        for run in ${runs[@]+"${runs[@]}"}; do
+            read -r run_id pid start_ticks <<<"${run}"
+            if process_executes "${pid}" "${start_ticks}"; then
+                printf 'chaos suite cleanup: run %s outlived its controller; it receives TERM\n' "${run_id}"
+                kill -TERM "${pid}" 2>/dev/null || true
+                run_terminated["${run_id}"]=true
+            fi
+        done
+    fi
+    while ((SECONDS < deadline)); do
+        local executing=false
+        if [[ "${controller_executed}" == true ]] && process_executes "${controller_pid}" "${controller_start}"; then
+            executing=true
+        fi
+        for run in ${runs[@]+"${runs[@]}"}; do
+            read -r run_id pid start_ticks <<<"${run}"
+            if process_executes "${pid}" "${start_ticks}"; then
+                executing=true
+            fi
+        done
+        if [[ "${executing}" == false ]]; then
+            break
+        fi
+        sleep 1
+    done
+    if [[ "${controller_executed}" == true ]]; then
+        cleanup_controller=finished
+        if process_executes "${controller_pid}" "${controller_start}"; then
+            printf 'chaos suite cleanup: the suite controller %s did not finish within %d seconds; killing it\n' \
+                "${controller_pid}" "${wait_seconds}"
+            kill -KILL "${controller_pid}" 2>/dev/null || true
+            cleanup_controller=killed
+        fi
+    fi
+    for run in ${runs[@]+"${runs[@]}"}; do
+        read -r run_id pid start_ticks <<<"${run}"
+        local killed_count
+        killed_count="$(kill_run_session "${pid}" "${start_ticks}")"
+        run_killed["${run_id}"]="${killed_count}"
+        if ((killed_count > 0)); then
+            printf 'chaos suite cleanup: killed %d processes left of run %s\n' "${killed_count}" "${run_id}"
+        fi
+    done
+}
+
+# Ends what a suite left behind, waiting for a controller or run that still executes before it
+# kills them, and then removes what remains of every run it started.
 cleanup_suite() {
-    [[ "$#" -eq 1 ]] || suite_error 'cleanup requires one suite directory'
-    suite_dir="$1"
+    local wait_seconds="${cleanup_wait_seconds}"
+    local directories=()
+    while [[ "$#" -gt 0 ]]; do
+        case "$1" in
+            --wait)
+                [[ "$#" -ge 2 ]] || suite_error '--wait requires a number of seconds'
+                wait_seconds="$2"
+                shift 2
+                ;;
+            -*)
+                suite_error "unknown cleanup argument: $1"
+                ;;
+            *)
+                directories+=("$1")
+                shift
+                ;;
+        esac
+    done
+    [[ "${#directories[@]}" -eq 1 ]] || suite_error 'cleanup requires one suite directory'
+    [[ "${wait_seconds}" =~ ^(0|[1-9][0-9]{0,3})$ ]] \
+        || suite_error '--wait must be a whole number of seconds from 0 through 9999'
+    command -v ps >/dev/null 2>&1 || suite_error 'required command is unavailable: ps'
+    suite_dir="${directories[0]}"
     if [[ ! -s "${suite_dir}/suite.json" ]]; then
         printf 'chaos suite cleanup: %s holds no suite record, so the suite started no run\n' "${suite_dir}"
         exit 0
     fi
     suite_dir="$(cd "${suite_dir}" && pwd)"
     suite_name="$(jq -r '.suite' "${suite_dir}/suite.json")"
+    end_suite_processes "${wait_seconds}"
     local cleanup_failed=false
     local cleanups='[]'
     local run_id
@@ -647,8 +848,11 @@ cleanup_suite() {
             cleanup_record="$(jq -c --arg run_id "${run_id}" '. + {evidence: "cleanup/\($run_id)"}' "${evidence_dir}/cleanup.json")"
         fi
         cleanups="$(jq -c --arg run_id "${run_id}" --argjson status "${cleanup_status}" \
+            --argjson terminated "${run_terminated[${run_id}]:-false}" \
+            --argjson killed "${run_killed[${run_id}]:-0}" \
             --argjson record "${cleanup_record}" \
-            '. + [{run_id: $run_id, exit_code: $status, leftovers: $record}]' <<<"${cleanups}")"
+            '. + [{run_id: $run_id, exit_code: $status, terminated: $terminated,
+                   killed_processes: $killed, leftovers: $record}]' <<<"${cleanups}")"
         # A run ended before its exit trap ran still holds the private keys of its TLS material.
         if [[ -d "${suite_dir}/${run_id}/tls" ]]; then
             rm -f "${suite_dir}/${run_id}/tls/ca-key.pem" "${suite_dir}/${run_id}/tls/"*-key.pem \
@@ -670,11 +874,19 @@ cleanup_suite() {
             then . + {status: "not-started", reason: "the suite ended before this entry started"}
             else . end)
         | if .status == "preparing" or .status == "running" then .status = "interrupted" else . end
-        | .cleanup = {at: $at, runs: $runs}' \
-        --arg at "$(now)" --argjson runs "${cleanups}"
+        | .cleanup = {at: $at, controller: $controller, runs: $runs}' \
+        --arg at "$(now)" --arg controller "${cleanup_controller}" --argjson runs "${cleanups}"
     render_summary
     printf 'chaos suite cleanup: %s\n' "${suite_dir}"
-    jq -r '.cleanup.runs[] | "  \(.run_id): exit \(.exit_code)\(if .leftovers then ", removed \(.leftovers.containers) containers, \(.leftovers.networks) networks and \(.leftovers.volumes) volumes after capturing \(.leftovers.evidence)" else ", nothing left" end)"' \
+    jq -r '
+        (if .cleanup.controller == "finished" then "  suite controller: finished after its TERM"
+         elif .cleanup.controller == "killed" then "  suite controller: killed after the wait"
+         else empty end),
+        (.cleanup.runs[]
+         | "  \(.run_id): exit \(.exit_code)"
+           + (if .terminated then ", ended by TERM" else "" end)
+           + (if .killed_processes > 0 then ", \(.killed_processes) processes killed" else "" end)
+           + (if .leftovers then ", removed \(.leftovers.containers) containers, \(.leftovers.networks) networks and \(.leftovers.volumes) volumes after capturing \(.leftovers.evidence)" else ", nothing left" end))' \
         "${suite_dir}/suite.json"
     if [[ "${cleanup_failed}" == true ]]; then
         exit 1

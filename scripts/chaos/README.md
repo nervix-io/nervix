@@ -1304,9 +1304,12 @@ just chaos cleanup --run-id <run-id> --evidence target/chaos/<run-id>-leftovers
 
 `--evidence DIR` first captures what the run left behind: the listing and inspection of every
 container, network and volume carrying its label, and the last 2 MiB of each container's log. Only
-then does cleanup remove them, and it lists the label again to confirm that nothing survived. A run
-that left nothing gets no evidence directory. `--keep` retains resources for interactive diagnosis
-and prints the same cleanup command.
+then does cleanup remove them, and it lists the label again to confirm that nothing survived. A
+container that was exiting while its removal ran can still hold the network it was attached to, so
+cleanup removes again whatever that listing still finds, in at most three rounds two seconds apart,
+and fails only when the last listing still finds something; `cleanup.json` in DIR records what it
+removed, the rounds it took and what remained. A run that left nothing gets no evidence directory.
+`--keep` retains resources for interactive diagnosis and prints the same cleanup command.
 
 Run the external verifier, pinned tool image and Compose contract checks directly with:
 
@@ -1359,28 +1362,40 @@ immutable image. A suite writes `ARTIFACTS/SUITE_ID/` (by default `target/chaos/
   timings its result records (election, placement, returning listeners, settlement, resumed delivery,
   and the slowest settle, output and drain after a heal of a mixed run), a mixed run's peak node
   memory, backlog and output stall, and the result files it wrote;
-- `summary.md`, the same verdicts rendered for a reader, which the suite also prints at the end.
+- `summary.md`, the same verdicts rendered for a reader, which the suite also prints at the end;
+- `suite.log`, the suite's whole console, which it goes on writing when its caller stops reading.
 
-An entry passes only when its command exits 0 and its manifest records a passing run of the
-suite's image. The suite fails an entry as a controller failure when the run left no manifest, when
-the manifest's exit status contradicts the command's, or when the run resolved another image. A
-failed entry takes the category of its `results/finding.json`, `setup` when the run refused before
-creating its directory or recorded a setup error, and is listed as unclassified otherwise, which is
-the case of a failed baseline, backup or rolling-restart run until [Cluster Chaos
+An entry passes only when its command exits 0 and its manifest records a passing run of the suite's
+image. The suite fails an entry as a controller failure when the run left no manifest, when the
+manifest's exit status contradicts the command's, or when the run resolved another image. A failed
+entry takes the category of its `results/finding.json`, `setup` when the run refused before creating
+its directory or recorded a setup error, and is listed as unclassified otherwise, which is the case
+of a failed baseline, backup or rolling-restart run until [Cluster Chaos
 33](https://app.clickup.com/t/86bc9dkk2) classifies them. An interrupted entry carries no category,
 because the category a run held when a signal ended it names no cause. Its reproducer is the run's
-own when it recorded one and otherwise the entry's command. The suite exits 0 when every entry passed, 1 when
-any failed or did not run, 2 for a setup error before any run, such as an unknown entry or an image
-that is neither local nor pullable, and 128 plus the signal's number when a signal ended it.
+own when it recorded one and otherwise the entry's command. The suite exits 0 when every entry
+passed, 1 when any failed or did not run, 2 for a setup error before any run, such as an unknown
+entry or an image that is neither local nor pullable, and 128 plus the signal's number when a signal
+ended it.
 
-A run executes in the background, so an interrupt or termination reaches the suite at once. The
-suite passes one TERM to the run, whose own exit trap then heals, captures and cleans up as on any
-exit, records it as interrupted, and starts no later entry. When the controller itself was killed
-before that, `just chaos suite cleanup SUITE_DIRECTORY` ends what the suite left behind: for every
-run the suite started it runs `just chaos cleanup --evidence` into `cleanup/<run-id>/`, removes the
-private keys of any run whose exit trap never ran, keeps the verdict of a run that finished before
-its controller was killed, records the entries that never reported an exit status as interrupted
-and those never started as not-started, and renders the summary again.
+A run executes in the background and leads a session of its own, so an interrupt, termination or
+hangup reaches the suite at once and never reaches the run beside it, even when a terminal signals
+the suite's whole process group. The suite passes one TERM to the run, whose own exit trap then
+heals, captures and cleans up as on any exit, records it as interrupted, and starts no later entry.
+The suite's console reaches its caller through a tee that ignores a terminal's interrupts and
+hangups and goes on writing `suite.log` when the caller stops reading, so the suite outlives its
+console and still records every verdict.
+
+`just chaos suite cleanup [--wait SECONDS] SUITE_DIRECTORY` ends what a suite left behind. The
+suite records the process of its controller and of every run it starts. A controller that still
+executes receives one TERM, which it passes to its run as on any signal, and a run whose controller
+is gone receives one TERM itself. Each has `--wait` seconds, 300 by default, to finish its exit
+work; cleanup then kills the controller if it still executes and every process left in the session
+of each run. For every run the suite started it runs `just chaos cleanup --evidence` into
+`cleanup/<run-id>/`, removes the private keys of any run whose exit trap never ran, keeps the
+verdict of a run that finished before its controller ended, records the entries that never reported
+an exit status as interrupted and those never started as not-started, records how the controller
+ended and which runs cleanup signalled or killed, and renders the summary again.
 
 `just chaos suite shards SUITE` prints the budgets CI applies to each shard. Its execution budget is
 the sum of its entries' budgets. Its step budget adds one 15-minute run teardown reserve, the bound
@@ -1411,9 +1426,14 @@ carries Ubuntu's jq 1.7. It removes every Rust toolchain directory from the `PAT
 with and fails if `cargo`, `rustc` or `rustup` is still reachable, pulls the image and logs out of
 the registry, and runs
 `just chaos suite <suite> --shard <n> --image <digest> --artifacts <dir> --suite-id ci-<run>-<attempt>-<suite>-<n>`.
-The suite step ends at the shard's step budget and the job at its job budget. A cancellation sends
-the step SIGINT, then SIGTERM, then SIGKILL within about ten seconds, which can cut a run's exit trap
-short, so the job always runs `just chaos suite cleanup` afterwards as a second witness. It then
+The suite step ends at the shard's step budget and the job at its job budget. When the step is
+cancelled or reaches its budget, the runner sends SIGINT to the step's process, `just`, which does
+not pass it on, then SIGTERM 7.5 seconds later, which `just` passes to the suite that its recipe
+`exec`s, and 2.5 seconds after that SIGKILL to `just` alone; shortly afterwards it stops reading the
+step's output. The suite and its run outlive the step, so the job always runs
+`just chaos suite cleanup` next: it waits up to five minutes for the controller to finish its run's
+exit work and record it, kills whatever still executes, and captures and removes what any run left
+behind as a second witness. It then
 publishes the shard summary and uploads two artifacts for 14 days: `chaos-verdict-<suite>-<n>-<run>-<attempt>`
 with `suite.json` and `summary.md`, and `chaos-<suite>-<n>-<run>-<attempt>` with the whole suite
 directory. The run attempt is part of each name, so a rerun never replaces the artifacts of the
@@ -1424,3 +1444,142 @@ To investigate a CI failure, download the shard's evidence artifact and read its
 failed entry names its category, phase, reproducer, finding and run directory. A reproducer pins the
 image by digest, and `just chaos replay <run-directory>` reconstructs a mixed-instability run from
 its downloaded directory with the recorded images.
+
+### Suite qualification on the CI worker
+
+Every shard ran alone on a GitHub-hosted `ubuntu-24.04` worker: Linux 6.17.0-1022-azure, Docker 28.0.4
+with Compose 2.38.2, 4 CPUs and 15.6 GiB. Each push of the pull request that introduced the suites
+built its own official AMD64 image, and the plan job resolved it to its digest. Two earlier runs set
+the worker's requirements:
+
+- on `blacksmith-4vcpu-ubuntu-2404` workers, Linux 6.6.141, Pumba's `tc` exited with status 2 when it
+  added the `prio`, `sfq` and `netem` queueing disciplines. Every network scenario stopped in its
+  preflight with `Pumba netem installed nothing on the canary`, and every other run in the healing
+  exercise of its verifier self-check;
+- on `ubuntu-24.04` with the worker's own jq 1.7.1, every run's self-check stopped at a jq compile
+  error in the recovery verifier. The job now installs jq 1.8.1, and the scripts refuse an older jq.
+
+The qualification run found a defect of the runner itself: the certificate authority of a run named
+the whole run ID in its subject, which holds at most 64 characters, so every run whose ID exceeded
+48 characters failed in `TLS generation`. Suite run IDs reach 53 characters in CI. The authority now
+names a digest of the run ID, and a baseline with a 96-character run ID, the longest the runner
+accepts, passed.
+
+The suites then ran twice there, in Docker Build runs 37497979884 and 37505248763 against
+`ghcr.io/nervix-io/nervix@sha256:ab41fb2c40252d04c0e47154cc6117f03660dcf99a1b574b8881f5cc5c005133`
+and `ghcr.io/nervix-io/nervix@sha256:0058679f650d69f44028069fba977453f03ef34f118b6d028ed88ef1707c8241`,
+both built from the product source of main `8a8a3986`. In the second run the smoke shard passed with
+401 seconds of runs in a 7-minute 18-second job, and its verdict came 8 minutes 20 seconds after the
+image build finished. The soak's shards took 17 to 36 minutes of runs. A shard whose 30-minute
+mixed-instability run reaches its end takes 36 to 38 minutes, and the three shards whose mixed runs
+failed early took 17 to 21. The table lists every entry's duration in seconds, with the category of a
+failed run, against its budget in minutes. A budget is about two and a half times the duration first
+measured on this worker, rounded up and at least three minutes, and 60 minutes, the runner's own
+default bound, for a 30-minute mixed run. Entries whose first run stopped in `TLS generation` took
+their budget from earlier runs on a developer worker, and the second run confirmed every one of them.
+
+Setting up a shard took under a minute: the checkout 3 seconds, installing `just` and `toml` 14 to 18
+seconds, loading the queueing disciplines a second, pulling the image 7 to 14 seconds. After the
+suite, cleanup, the summary and both uploads took 3 to 6 seconds, well inside the 10-minute reserve:
+the cleanup step's own 8-minute bound, which holds its five-minute wait for a controller that still
+executes, and 2 minutes for the summary and the uploads.
+
+| Suite | Entry | Shard | Budget (min) | Run 37497979884 (s) | Run 37505248763 (s) |
+| --- | --- | ---: | ---: | ---: | ---: |
+| smoke | `baseline-3` | 1 | 4 | 82 | 68 |
+| smoke | `leader-crash-3` | 1 | 7 | 143 | 135 |
+| smoke | `partition-follower` | 1 | 9 | 205 | 195 |
+| soak | `mixed-seed-42` | 1 | 60 | 1811, product | 1283, observation |
+| soak | `baseline-1` | 1 | 3 | 62 | 60 |
+| soak | `baseline-3` | 1 | 4 | 69 | 64 |
+| soak | `cluster-restart-1` | 1 | 6 | 137 | 134 |
+| soak | `cluster-restart-3` | 1 | 7 | 166 | 163, product |
+| soak | `mixed-seed-45` | 2 | 60 | 1786 | 1784, product |
+| soak | `leader-crash-1` | 2 | 6 | 123 | 120 |
+| soak | `leader-crash-3` | 2 | 7 | 148 | 144 |
+| soak | `follower-crash` | 2 | 5 | 119 | 118 |
+| soak | `mixed-seed-136` | 3 | 60 | 343, product | 352, product |
+| soak | `ingestor-owner-crash` | 3 | 6 | 125 | 150 |
+| soak | `emitter-owner-crash` | 3 | 5 | 101 | 130 |
+| soak | `stale-follower` | 3 | 4 | 90 | 114 |
+| soak | `former-owner-restart` | 3 | 10 | 239 | 241 |
+| soak | `mixed-rotating-preserve` | 4 | 60 | 1813, product | 556, observation |
+| soak | `rolling-restart-1` | 4 | 5 | 97 | 96 |
+| soak | `rolling-restart-3` | 4 | 7 | 168 | 182 |
+| soak | `backup-1` | 4 | 4 | 78 | 80 |
+| soak | `backup-3` | 4 | 4 | 87 | 88 |
+| soak | `mixed-rotating-temporary` | 5 | 60 | 406, product | 948, product |
+| soak | `pause-resume` | 5 | 14 | 327 | 315 |
+| soak | `partition-follower` | 6 | 9 | 190 | 217 |
+| soak | `partition-asymmetric` | 6 | 7 | 160 | 186 |
+| soak | `partition-leader` | 6 | 7 | 168 | 191 |
+| soak | `partition-quorum-loss` | 6 | 8 | 169 | 193 |
+| soak | `degraded-delay` | 6 | 10 | 205 | 199 |
+| soak | `degraded-jitter` | 6 | 10 | 206 | 201 |
+| soak | `degraded-random-loss` | 6 | 10 | 202 | 200 |
+| soak | `degraded-burst-loss` | 6 | 10 | 213 | 202 |
+| soak | `degraded-rate-limit` | 6 | 10 | 210 | 208 |
+| soak | `degraded-combined` | 6 | 10 | 220 | 214 |
+| soak | `domain-time-1` | 7 | 7 | 148 | 162 |
+| soak | `domain-time-1-cluster-restart` | 7 | 8 | — | 180 |
+| soak | `domain-time-3` | 7 | 7 | 157 | 158 |
+| soak | `domain-time-3-cluster-restart` | 7 | 10 | — | 190 |
+| soak | `domain-time-3-voter-crash` | 7 | 12 | — | 202 |
+| soak | `domain-time-3-voter-pause` | 7 | 20 | — | 267 |
+| soak | `domain-time-3-voter-stop` | 7 | 15 | — | 202 |
+| soak | `stateful-1` | 8 | 20 | 474 | 464 |
+| soak | `stateful-1-cluster-restart` | 8 | 22 | — | 456 |
+| soak | `stateful-3` | 8 | 20 | 472 | 473 |
+| soak | `stateful-3-owner-crash` | 8 | 20 | 470 | 472 |
+| soak | `stateful-3-owner-pause` | 9 | 20 | 472 | 476 |
+| soak | `stateful-3-owner-partition` | 9 | 25 | — | 477 |
+| soak | `stateful-3-cluster-restart` | 9 | 22 | — | 470, product |
+| soak | `domain-time-3-voter-partition` | 9 | 25 | — | 357 |
+
+Every failure of the two runs is a product defect or a harness limitation with its own task:
+
+- seed 136 under `temporary-quorum-loss` failed in both runs, and so did both rotating
+  `temporary-quorum-loss` seeds, 1048352328 and 349485620. Each time a voter restarted during a double
+  outage and exited with `resolving 'nervix-1' failed: the name does not exist`, which [Cluster Chaos
+  56](https://app.clickup.com/t/86bcdk4tn) owns;
+- seed 42 and the rotating `preserve-quorum` seed 600180860 in the first run, and seed 45 in the
+  second, failed because a stopping node's Kafka ingestor stayed quiesced for its ownership handoff
+  until the 30-second drain timeout, so the drain was abandoned. [Cluster Chaos
+  60](https://app.clickup.com/t/86bcdwr9y) owns that, and Cluster Chaos 52 owns the other cause of the
+  same `outcome=Abandoned` record;
+- in the second run, seed 42 and the rotating `preserve-quorum` seed 696031281 ended as `observation`
+  failures, because the rate probe of a `combined` degradation gave up on a transfer that loss had
+  stalled for a second. [Cluster Chaos 61](https://app.clickup.com/t/86bcdxk5q) owns the probe;
+- in the second run, the three-node `cluster-restart` and `stateful --fault cluster-restart` moved
+  owners within the voter observation grace and lost processor state, which [Cluster Chaos
+  39](https://app.clickup.com/t/86bcd4hzv) and [Cluster Chaos 50](https://app.clickup.com/t/86bcdg8uu)
+  own.
+
+Seed 45 passed its full 30 minutes in the first run, and every other entry passed in every run that
+the TLS defect did not stop.
+
+The temporary qualification entry of the first run, a mixed-instability plan under an impossible
+1 MiB memory limit, failed its smoke job as a product failure with one memory finding per node and
+printed its replay command. Its run directory, downloaded from the shard's evidence artifact,
+replayed on a developer host with Docker 29's containerd image store and failed the same way, with
+the same three findings; the replay recorded `replay_image_match` as the repository digest. Before
+replays accepted repository digests, the same replay stopped in preflight, because the probe image
+ID the CI worker recorded is the config digest of its classic store and differs from the index digest
+the containerd store names it by.
+
+Cancellation was qualified against the runner's own sequence. On Linux the runner sends SIGINT to
+the step's process, SIGTERM 7.5 seconds later and SIGKILL to that process alone 2.5 seconds after
+that, and stops reading the step's output about five seconds after the process ended. The first
+cancellation, of the second attempt of run 37505248763 during the smoke suite's leader crash, showed
+two defects. The recipe's shell died of the TERM `just` forwarded, so the suite never received a
+signal and went on with its run after the step had ended, and the cleanup step raced that run,
+failed to remove a container the run was removing and the network it still held, and failed. The
+runner's code showed a third: once the runner stops reading, the tee of a run's log dies at its next
+write, and the run with it at the run's next one. The recipe now `exec`s the controller, every run
+leads its own session, the tees outlive their caller, and cleanup waits for a controller that still
+executes. A local reproduction of the sequence against
+`just chaos suite smoke --entry leader-crash-3`, interrupted during the failover observations, then
+ended as intended: the run received the suite's TERM, healed, captured and tore down in 6 seconds,
+after `just` had been killed, and recorded its interruption; the suite wrote its verdict and summary
+into `suite.log` after its console had closed; and the cleanup that followed found the controller
+still executing, waited 4 seconds for it to finish and found nothing left.

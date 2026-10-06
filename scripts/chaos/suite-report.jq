@@ -89,6 +89,15 @@ def section($heading):
     (if .cleanup == null then empty
      else [.cleanup.runs[] | select(.leftovers != null)] as $left
           | "",
+            (if .cleanup.controller == "finished"
+             then "The suite controller still executed at cleanup and finished after its TERM."
+             elif .cleanup.controller == "killed"
+             then "**The suite controller was killed:** it still executed at cleanup and did not finish within the wait."
+             else empty end),
+            (.cleanup.runs[] | select(.terminated)
+             | "Cleanup passed TERM to " + (.run_id | code) + ", which outlived its controller."),
+            (.cleanup.runs[] | select(.killed_processes > 0)
+             | "Cleanup killed \(.killed_processes | counted("process"; "processes")) left by " + (.run_id | code) + "."),
             (if ($left | length) == 0
              then "Cleanup found nothing left by any run."
              else "Cleanup removed what \($left | length | counted("run"; "runs")) left behind, after capturing it under " + ([$left[].leftovers.evidence | code] | join(", ")) + "."

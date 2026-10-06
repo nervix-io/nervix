@@ -169,22 +169,54 @@ if ((${#volumes[@]} > 0)); then
         >/dev/null || status=$?
 fi
 
-# The removal is confirmed by listing the label again, so a resource that survived it fails the
-# cleanup however its removal reported.
+# The removal is confirmed by listing the label again. A container that was exiting while its
+# removal ran, such as one started with --rm by a controller that has just stopped, can still hold
+# the network it was attached to, so whatever is left is removed again, in at most three rounds two
+# seconds apart. Only what the last listing finds fails the cleanup; a removal error in an earlier
+# round does not, when nothing is left.
 remaining_containers=0
 remaining_networks=0
 remaining_volumes=0
+removal_rounds=0
 if ((left_behind > 0)); then
-    remaining_containers="$(timeout --foreground --kill-after=5s 30s \
-        docker container ls --all --quiet --filter "label=${label}" | wc -l)" || status=1
-    remaining_networks="$(timeout --foreground --kill-after=5s 30s \
-        docker network ls --quiet --filter "label=${label}" | wc -l)" || status=1
-    remaining_volumes="$(timeout --foreground --kill-after=5s 30s \
-        docker volume ls --quiet --filter "label=${label}" | wc -l)" || status=1
-    if ((remaining_containers + remaining_networks + remaining_volumes > 0)); then
+    listing_failed=false
+    for removal_rounds in 1 2 3; do
+        left_containers="$(timeout --foreground --kill-after=5s 30s \
+            docker container ls --all --quiet --filter "label=${label}")" || listing_failed=true
+        left_networks="$(timeout --foreground --kill-after=5s 30s \
+            docker network ls --quiet --filter "label=${label}")" || listing_failed=true
+        left_volumes="$(timeout --foreground --kill-after=5s 30s \
+            docker volume ls --quiet --filter "label=${label}")" || listing_failed=true
+        remaining_containers="$(grep -c . <<<"${left_containers}" || true)"
+        remaining_networks="$(grep -c . <<<"${left_networks}" || true)"
+        remaining_volumes="$(grep -c . <<<"${left_volumes}" || true)"
+        if ((remaining_containers + remaining_networks + remaining_volumes == 0 || removal_rounds == 3)); then
+            break
+        fi
+        sleep 2
+        if ((remaining_containers > 0)); then
+            mapfile -t leftover_ids <<<"${left_containers}"
+            timeout --foreground --kill-after=5s 60s docker container rm --force "${leftover_ids[@]}" \
+                >/dev/null 2>&1 || true
+        fi
+        if ((remaining_networks > 0)); then
+            mapfile -t leftover_ids <<<"${left_networks}"
+            timeout --foreground --kill-after=5s 30s docker network rm "${leftover_ids[@]}" \
+                >/dev/null 2>&1 || true
+        fi
+        if ((remaining_volumes > 0)); then
+            mapfile -t leftover_ids <<<"${left_volumes}"
+            timeout --foreground --kill-after=5s 30s docker volume rm "${leftover_ids[@]}" \
+                >/dev/null 2>&1 || true
+        fi
+    done
+    if [[ "${listing_failed}" == true ]] \
+        || ((remaining_containers + remaining_networks + remaining_volumes > 0)); then
         printf 'chaos cleanup left run=%s containers=%d networks=%d volumes=%d\n' \
             "${run_id}" "${remaining_containers}" "${remaining_networks}" "${remaining_volumes}" >&2
         status=1
+    else
+        status=0
     fi
 fi
 
@@ -198,9 +230,10 @@ if [[ -n "${evidence_dir}" ]] && ((left_behind > 0)); then
         --argjson remaining_containers "${remaining_containers}" \
         --argjson remaining_networks "${remaining_networks}" \
         --argjson remaining_volumes "${remaining_volumes}" \
+        --argjson removal_rounds "${removal_rounds}" \
         --argjson exit_code "${status}" \
         '{run_id: $run_id, containers: $containers, pumba_sidecars: $sidecars, networks: $networks,
-          volumes: $volumes,
+          volumes: $volumes, removal_rounds: $removal_rounds,
           remaining: {containers: $remaining_containers, networks: $remaining_networks,
                       volumes: $remaining_volumes},
           exit_code: $exit_code}' >"${evidence_dir}/cleanup.json"

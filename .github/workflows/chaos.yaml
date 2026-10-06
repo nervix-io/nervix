@@ -194,7 +194,9 @@ jobs:
           exec just chaos suite "${CHAOS_SUITE}" --shard "${CHAOS_SHARD}" --image "${CHAOS_IMAGE}" \
             --artifacts "${RUNNER_TEMP}/chaos" --suite-id "${CHAOS_SUITE_ID}"
 
-      # A second witness after the runs' own exit traps, which a cancellation can cut short: it
+      # A cancelled or timed-out suite step ends with the runner killing only `just`, so the suite
+      # and its run may still be finishing their exit work. Cleanup waits up to five minutes for
+      # them and kills what remains, then, as a second witness after the runs' own exit traps,
       # captures what any run of this suite left behind, removes it and confirms nothing remains.
       - name: Remove the suite's Docker resources
         if: always()

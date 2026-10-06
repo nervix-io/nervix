@@ -26,7 +26,7 @@ Usage:
   just chaos suite list
   just chaos suite smoke|soak --image IMAGE [--shard N] [--entry ID]... [--artifacts DIR] [--suite-id ID]
   just chaos suite shards SUITE
-  just chaos suite cleanup SUITE_DIRECTORY
+  just chaos suite cleanup [--wait SECONDS] SUITE_DIRECTORY
   just chaos suite report [--expect-shards N] SUITE_JSON...
   just chaos cleanup --run-id RUN_ID [--evidence DIR]
   just chaos self-test

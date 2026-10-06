@@ -23,9 +23,18 @@ expect_json() {
 
 tmp_dir="$(mktemp -d)"
 suite_test_cleanup() {
-    local pid
+    local pid pid_file
     for pid in ${background_pids[@]+"${background_pids[@]}"}; do
         kill -KILL "${pid}" 2>/dev/null || true
+    done
+    # Each run stand-in leads its own process group, which outlives a suite killed above. Its
+    # number names another group only once nothing of it remains and the number was reused.
+    for pid_file in "${tmp_dir}"/runs/*/*.pid; do
+        [[ -s "${pid_file}" ]] || continue
+        pid="$(cat "${pid_file}")"
+        if [[ ! -e "/proc/${pid}" ]] || grep -Fq "${tmp_dir}/bundle/chaos.sh" "/proc/${pid}/cmdline" 2>/dev/null; then
+            kill -KILL -- "-${pid}" 2>/dev/null || true
+        fi
     done
     rm -rf "${tmp_dir}"
 }
@@ -174,11 +183,25 @@ case "\${scenario}" in
             >"\${run_dir}/results/mixed-resources.json"
         ;;
     slow)
-        # Holds until the suite passes on a signal, then records an interrupted run.
+        # Holds until the suite passes on a signal, then records an interrupted run. It records
+        # every signal it receives and the session it executes in.
         manifest running null 'slow phase'
-        trap 'manifest interrupted 143 signal-term; exit 143' TERM
+        trap 'printf "TERM\n" >>"\${run_dir}.signals"; printf "slow run ends\n"; manifest interrupted 143 signal-term; exit 143' TERM
+        trap 'printf "HUP\n" >>"\${run_dir}.signals"' HUP
+        ps -o sid= -p "\$\$" | tr -d ' ' >"\${run_dir}.session"
         printf '%s\n' "\$\$" >"\${run_dir}.pid"
         : >"\${run_dir}/tls/ca-key.pem"
+        while true; do
+            sleep 0.1
+        done
+        ;;
+    stubborn)
+        # Ignores the TERM the suite passes on and leaves a process of its own in its session.
+        manifest running null 'stubborn phase'
+        trap 'printf "TERM\n" >>"\${run_dir}.signals"' TERM
+        sleep 600 >/dev/null 2>&1 &
+        printf '%s\n' "\$!" >"\${run_dir}.stray"
+        printf '%s\n' "\$\$" >"\${run_dir}.pid"
         while true; do
             sleep 0.1
         done
@@ -263,7 +286,9 @@ write_definitions '{ci_reserve_minutes: 10, suites: {
         {id: "second", shard: 1, budget_minutes: 2, run: ["mixed"]}]},
     slow: {description: "a run that holds", entries: [
         {id: "slow", shard: 1, budget_minutes: 2, run: ["slow"]},
-        {id: "after", shard: 1, budget_minutes: 2, run: ["pass"]}]}}}'
+        {id: "after", shard: 1, budget_minutes: 2, run: ["pass"]}]},
+    stubborn: {description: "a run that ignores its TERM", entries: [
+        {id: "stubborn", shard: 1, budget_minutes: 2, run: ["stubborn"]}]}}}'
 
 suite shards outcomes >"${tmp_dir}/shards.json"
 expect_json "${tmp_dir}/shards.json" '
@@ -442,6 +467,22 @@ wait_for_file() {
     done
     fail "nothing wrote ${path} within ten seconds"
 }
+wait_for_record() {
+    local path="$1"
+    local filter="$2"
+    for _ in $(seq 1 100); do
+        jq -e "${filter}" "${path}" >/dev/null 2>&1 && return 0
+        sleep 0.1
+    done
+    fail "${path} did not record ${filter} within ten seconds"
+}
+# True when no process has number PID or only its zombie remains.
+process_gone() {
+    local stat
+    stat="$(cat "/proc/$1/stat" 2>/dev/null)" || return 0
+    stat="${stat##*) }"
+    [[ "${stat:0:1}" == Z ]]
+}
 # The suite starts directly, so the signal reaches the suite and not a shell around it.
 PATH="${bundle}/bin:${PATH}" "${bundle}/suite.sh" slow --image nervix:local --artifacts "${tmp_dir}/runs" \
     --suite-id slow-1 >"${tmp_dir}/slow.txt" 2>&1 &
@@ -457,34 +498,144 @@ expect_json "${tmp_dir}/runs/slow-1/suite.json" '.status == "interrupted" and .s
                                                    {id: "after", status: "not-started", exit_code: null}]
     and (.entries[0].run_status == "interrupted")' \
     'a signal did not interrupt the executing run and keep the next entry from starting'
+slow_pid="$(cat "${tmp_dir}/runs/slow-1/slow-1-slow.pid")"
+jq -e --argjson suite "${suite_pid}" --argjson run "${slow_pid}" \
+    '.controller.pid == $suite and (.controller.start_ticks | type) == "number"
+     and .entries[0].process.pid == $run and (.entries[0].process.start_ticks | type) == "number"' \
+    "${tmp_dir}/runs/slow-1/suite.json" >/dev/null \
+    || fail 'the suite did not record its controller and the process of its run'
+[[ "$(cat "${tmp_dir}/runs/slow-1/slow-1-slow.session")" == "${slow_pid}" ]] \
+    || fail 'the run did not lead its own session'
+[[ "$(cat "${tmp_dir}/runs/slow-1/slow-1-slow.signals")" == TERM ]] \
+    || fail "the run received $(tr '\n' ' ' <"${tmp_dir}/runs/slow-1/slow-1-slow.signals"), not one TERM"
+grep -Fq 'chaos suite slow interrupted' "${tmp_dir}/runs/slow-1/suite.log" \
+    || fail 'suite.log does not hold the end of the console'
+grep -Fq 'slow run ends' "${tmp_dir}/runs/slow-1/logs/slow.log" \
+    || fail 'the log of the run does not hold its last output'
 
-# A suite whose controller and run were killed leaves resources for cleanup to capture and remove;
-# the entry that never reported becomes interrupted and the one that never started not-started.
+# A signal a terminal sends to the suite's whole process group, here the hangup of a closed
+# terminal, reaches the run only as the suite's one TERM, and the tees of the console and of the
+# run's log go on copying. An interrupt takes the same path, but a shell without job control starts
+# its background commands with interrupts ignored, so this test cannot send one.
+setsid env PATH="${bundle}/bin:${PATH}" "${bundle}/suite.sh" slow --image nervix:local \
+    --artifacts "${tmp_dir}/runs" --suite-id group-1 >"${tmp_dir}/group.txt" 2>&1 &
+suite_pid=$!
+background_pids+=("${suite_pid}")
+wait_for_file "${tmp_dir}/runs/group-1/group-1-slow.pid"
+kill -HUP -- "-${suite_pid}"
+status=0
+wait "${suite_pid}" || status=$?
+[[ "${status}" -eq 129 ]] || fail "a suite whose process group hung up returned ${status}, expected 129"
+expect_json "${tmp_dir}/runs/group-1/suite.json" '.status == "interrupted" and .signal == "HUP"
+    and .entries[0].status == "interrupted" and .entries[0].exit_code == 143' \
+    'a hangup of the process group did not interrupt the run through the suite'
+[[ "$(cat "${tmp_dir}/runs/group-1/group-1-slow.signals")" == TERM ]] \
+    || fail "the run received $(tr '\n' ' ' <"${tmp_dir}/runs/group-1/group-1-slow.signals"), not one TERM"
+grep -Fq 'chaos suite slow interrupted' "${tmp_dir}/group.txt" \
+    || fail 'the console tee did not outlive the hangup'
+grep -Fq 'slow run ends' "${tmp_dir}/runs/group-1/logs/slow.log" \
+    || fail 'the tee of the run log did not outlive the hangup'
+
+# A suite whose caller stops reading its console, as a CI runner does once it has killed the step
+# that started it, still runs every entry and records its verdict, and suite.log keeps the console.
+status=0
+PATH="${bundle}/bin:${PATH}" "${bundle}/suite.sh" green --image nervix:local --artifacts "${tmp_dir}/runs" \
+    --suite-id console-1 2>&1 | head -c 1 >/dev/null || status=$?
+[[ "${status}" -eq 0 ]] || fail "a suite whose console was closed returned ${status}, expected 0"
+expect_json "${tmp_dir}/runs/console-1/suite.json" '.status == "passed"' \
+    'a suite whose console was closed did not record its verdict'
+grep -Fq 'chaos suite green passed' "${tmp_dir}/runs/console-1/suite.log" \
+    || fail 'suite.log does not hold the end of a console that was closed'
+
+# Cleanup of a suite whose controller still executes passes the controller one TERM and waits for
+# it to end its run, so the run records its own interruption.
+PATH="${bundle}/bin:${PATH}" "${bundle}/suite.sh" slow --image nervix:local --artifacts "${tmp_dir}/runs" \
+    --suite-id live-1 >"${tmp_dir}/live.txt" 2>&1 &
+suite_pid=$!
+background_pids+=("${suite_pid}")
+wait_for_file "${tmp_dir}/runs/live-1/live-1-slow.pid"
+suite cleanup --wait 60 "${tmp_dir}/runs/live-1" >"${tmp_dir}/cleanup-live.txt" 2>&1 \
+    || fail "cleanup of a suite that still executes failed: $(cat "${tmp_dir}/cleanup-live.txt")"
+status=0
+wait "${suite_pid}" || status=$?
+[[ "${status}" -eq 143 ]] || fail "a suite ended by cleanup returned ${status}, expected 143"
+expect_json "${tmp_dir}/runs/live-1/suite.json" '.status == "interrupted" and .signal == "TERM"
+    and [.entries[] | {id, status, exit_code}] == [{id: "slow", status: "interrupted", exit_code: 143},
+                                                   {id: "after", status: "not-started", exit_code: null}]
+    and .cleanup.controller == "finished"
+    and [.cleanup.runs[] | {run_id, terminated, killed_processes}]
+        == [{run_id: "live-1-slow", terminated: false, killed_processes: 0}]' \
+    'cleanup did not let the controller that still executed end its run'
+[[ "$(cat "${tmp_dir}/runs/live-1/live-1-slow.signals")" == TERM ]] \
+    || fail "the run of a live suite received $(tr '\n' ' ' <"${tmp_dir}/runs/live-1/live-1-slow.signals"), not one TERM"
+grep -Fq 'The suite controller still executed at cleanup and finished after its TERM.' \
+    "${tmp_dir}/runs/live-1/summary.md" || fail 'the summary did not report the controller cleanup waited for'
+
+# A controller that does not finish within the wait is killed, and so is every process left in the
+# session of its run, including one the run started; the entry never reported its exit status.
+PATH="${bundle}/bin:${PATH}" "${bundle}/suite.sh" stubborn --image nervix:local --artifacts "${tmp_dir}/runs" \
+    --suite-id stubborn-1 >"${tmp_dir}/stubborn.txt" 2>&1 &
+suite_pid=$!
+background_pids+=("${suite_pid}")
+# Cleanup kills this controller while the test waits for cleanup, so the shell would report the job.
+disown "${suite_pid}"
+wait_for_file "${tmp_dir}/runs/stubborn-1/stubborn-1-stubborn.pid"
+wait_for_record "${tmp_dir}/runs/stubborn-1/suite.json" '.entries[0].process.pid != null'
+suite cleanup --wait 2 "${tmp_dir}/runs/stubborn-1" >"${tmp_dir}/cleanup-stubborn.txt" 2>&1 \
+    || fail "cleanup of a stubborn suite failed: $(cat "${tmp_dir}/cleanup-stubborn.txt")"
+expect_json "${tmp_dir}/runs/stubborn-1/suite.json" '.status == "interrupted"
+    and .entries[0].status == "interrupted"
+    and (.entries[0].reason | test("before the run reported its exit status"))
+    and .cleanup.controller == "killed"
+    and .cleanup.runs[0].terminated == false and .cleanup.runs[0].killed_processes >= 2' \
+    'cleanup did not kill the controller and the run that outlasted the wait'
+process_gone "$(cat "${tmp_dir}/runs/stubborn-1/stubborn-1-stubborn.pid")" \
+    || fail 'cleanup left the stubborn run executing'
+process_gone "$(cat "${tmp_dir}/runs/stubborn-1/stubborn-1-stubborn.stray")" \
+    || fail 'cleanup left a process the run started executing'
+[[ "$(cat "${tmp_dir}/runs/stubborn-1/stubborn-1-stubborn.signals")" == TERM ]] \
+    || fail 'the stubborn run did not receive exactly the one TERM its controller passed on'
+grep -Fq '**The suite controller was killed:** it still executed at cleanup and did not finish within the wait.' \
+    "${tmp_dir}/runs/stubborn-1/summary.md" || fail 'the summary did not report the killed controller'
+grep -Fq "processes left by \`stubborn-1-stubborn\`." "${tmp_dir}/runs/stubborn-1/summary.md" \
+    || fail 'the summary did not report the processes cleanup killed'
+status=0
+suite cleanup --wait soon "${tmp_dir}/runs/stubborn-1" >"${tmp_dir}/cleanup-wait.txt" 2>&1 || status=$?
+[[ "${status}" -eq 2 ]] || fail "cleanup with an invalid wait returned ${status}, expected 2"
+
+# A run whose controller was killed outlives it in its own session; cleanup passes it one TERM, so
+# it records its own interruption, then captures and removes what it left behind.
 PATH="${bundle}/bin:${PATH}" "${bundle}/suite.sh" slow --image nervix:local --artifacts "${tmp_dir}/runs" \
     --suite-id killed-1 >"${tmp_dir}/killed.txt" 2>&1 &
 suite_pid=$!
 background_pids+=("${suite_pid}")
 wait_for_file "${tmp_dir}/runs/killed-1/killed-1-slow.pid"
-kill -KILL "${suite_pid}" "$(cat "${tmp_dir}/runs/killed-1/killed-1-slow.pid")"
-wait "${suite_pid}" 2>/dev/null || true
+wait_for_record "${tmp_dir}/runs/killed-1/suite.json" '.entries[0].process.pid != null'
+kill -KILL "${suite_pid}"
+{ wait "${suite_pid}" || true; } 2>/dev/null
 expect_json "${tmp_dir}/runs/killed-1/suite.json" '.status == "running" and .entries[0].status == "running"' \
     'a killed suite did not leave its executing entry recorded as running'
-suite cleanup "${tmp_dir}/runs/killed-1" >"${tmp_dir}/cleanup.txt" 2>&1 \
+suite cleanup --wait 60 "${tmp_dir}/runs/killed-1" >"${tmp_dir}/cleanup.txt" 2>&1 \
     || fail "cleanup of a killed suite failed: $(cat "${tmp_dir}/cleanup.txt")"
 expect_json "${tmp_dir}/runs/killed-1/suite.json" '.status == "interrupted"
     and [.entries[] | {id, status}] == [{id: "slow", status: "interrupted"}, {id: "after", status: "not-started"}]
-    and (.entries[0].reason | test("before the run reported its exit status"))
-    and .cleanup.runs == [{run_id: "killed-1-slow", exit_code: 0,
+    and .entries[0].reason == "a signal ended the run" and .entries[0].exit_code == 143
+    and .cleanup.controller == "absent"
+    and .cleanup.runs == [{run_id: "killed-1-slow", exit_code: 0, terminated: true, killed_processes: 0,
                            leftovers: {run_id: "killed-1-slow", containers: 2, pumba_sidecars: 1, networks: 1,
                                        volumes: 3, remaining: {containers: 0, networks: 0, volumes: 0},
                                        exit_code: 0, evidence: "cleanup/killed-1-slow"}}]' \
     'cleanup did not finish the record of a killed suite'
+[[ "$(cat "${tmp_dir}/runs/killed-1/killed-1-slow.signals")" == TERM ]] \
+    || fail 'the run of a killed controller did not receive exactly one TERM from cleanup'
 [[ "$(cat "${tmp_dir}/runs/killed-1/cleanup-calls.txt")" == killed-1-slow ]] \
     || fail 'cleanup did not visit exactly the runs the suite started'
 [[ ! -e "${tmp_dir}/runs/killed-1/killed-1-slow/tls/ca-key.pem" ]] \
-    || fail 'cleanup kept the private key of a run that ended before its exit trap'
+    || fail 'cleanup kept the private key of a run whose exit trap did not remove it'
 grep -Fq "Cleanup removed what 1 run left behind, after capturing it under \`cleanup/killed-1-slow\`." \
     "${tmp_dir}/runs/killed-1/summary.md" || fail 'the summary did not report what cleanup removed'
+grep -Fq "Cleanup passed TERM to \`killed-1-slow\`, which outlived its controller." \
+    "${tmp_dir}/runs/killed-1/summary.md" || fail 'the summary did not report the run cleanup ended'
 suite cleanup "${tmp_dir}/runs/outcomes-1" >"${tmp_dir}/cleanup-passed.txt" 2>&1 \
     || fail 'cleanup after a finished suite failed'
 expect_json "${tmp_dir}/runs/outcomes-1/suite.json" '.status == "failed" and all(.cleanup.runs[]; .leftovers == null)
