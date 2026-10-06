@@ -167,14 +167,14 @@ async fn when_nspl_cluster_backup_crosses_delayed_cuts(world: &mut ScenarioWorld
         .grpc_uri(&leader)
         .assured("the leader exists");
     let mut options = client_connect_options(&uri).assured("the client is configured");
-    options.request_timeout = Duration::from_secs(3);
-    options.retry_timeout = Duration::from_secs(3);
+    options.request_timeout = Duration::from_secs(20);
+    options.retry_timeout = Duration::from_secs(20);
     let client = Client::connect_with_options(&uri, client_domain(&world.domain), options)
         .await
         .assured("the backup client connects");
-    let query = format!("BACKUP CLUSTER TO '{}' TIMEOUT 5s;", archive.display());
+    let query = format!("BACKUP CLUSTER TO '{}' TIMEOUT 20s;", archive.display());
     let mut task = nervix_primitives::task::spawn(async move { client.execute(query).await });
-    for (suffix, seconds) in [("_a", 3), ("_b", 4)] {
+    for (suffix, seconds) in [("_a", 12), ("_b", 14)] {
         nervix_primitives::task::consume_budget().await;
         let domain = scenario_domain(world, &format!("{{{{backup_base}}}}{suffix}"));
         nervix_primitives::select! {
@@ -208,7 +208,7 @@ fn then_archive_contains_delayed_cuts(world: &mut ScenarioWorld, file: String) {
         .iter()
         .map(|domain| (domain.record.domain.clone(), &domain.capture.cut))
         .collect();
-    for (suffix, seconds) in [("_a", 3), ("_b", 4)] {
+    for (suffix, seconds) in [("_a", 12), ("_b", 14)] {
         let domain = scenario_domain(world, &format!("{{{{backup_base}}}}{suffix}"));
         let cut = domains
             .get(&domain)

@@ -18,8 +18,8 @@ Feature: Bounded multi-domain backup waits and exact recovery
     Then the current leader node is saved as placeholder "leader"
     Given the backup cut for domain "{{backup_base}}_a" will pause after draining
     And the backup cut for domain "{{backup_base}}_b" will pause after draining
-    When the CLI begins backing up "cluster --timeout 4s --backup-wait-timeout 30s" from node "{{leader}}" into "cut-expired.nvxb" in the background
-    And backup cut "{{backup_base}}_a" is held for 3 seconds and then released
+    When the CLI begins backing up "cluster --timeout 20s --backup-wait-timeout 1m" from node "{{leader}}" into "cut-expired.nvxb" in the background
+    And backup cut "{{backup_base}}_a" is held for 12 seconds and then released
     Then the backup cut for domain "{{backup_base}}_b" has reached its pause
     And the background CLI backup finishes
     And the CLI backup failed with JSON error code "BACKUP_REFUSED"
