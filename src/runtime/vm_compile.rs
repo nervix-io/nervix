@@ -22,7 +22,7 @@ pub(in crate::runtime) enum KeyProjectionKind {
 }
 
 impl KeyProjectionKind {
-    const fn clause(self) -> &'static str {
+    pub(in crate::runtime) const fn clause(self) -> &'static str {
         match self {
             Self::Deduplicator => "DEDUPLICATE ON",
             Self::Reorderer => "BY",
@@ -115,6 +115,23 @@ pub(in crate::runtime) enum RuntimeVmCompileError {
     NullConstantExpression,
     #[error("reorderer '{processor}' requires at least one BY expression")]
     MissingReordererOrder { processor: ModelName },
+    #[error("filter for '{node}' is invalid")]
+    InvalidFilter { node: ModelName },
+    #[error("filter compile failed for '{node}'")]
+    CompileFilter { node: ModelName },
+    #[error("output construction for '{node}' is invalid")]
+    InvalidOutputConstruction { node: ModelName },
+    #[error("FILTER-MAP compile failed for '{node}'")]
+    CompileFilterMap { node: ModelName },
+    #[error("output branch compile failed for '{node}'")]
+    CompileOutputBranch { node: ModelName },
+    #[error("WASM output construction for '{node}' is invalid")]
+    InvalidWasmOutputConstruction { node: ModelName },
+    #[error("generator '{generator}' output '{relay}' compile failed")]
+    CompileGeneratorOutput {
+        generator: GeneratorName,
+        relay: RelayName,
+    },
 }
 
 pub(in crate::runtime) type RuntimeVmCompileResult<T> =
@@ -261,12 +278,6 @@ pub(crate) struct RuntimeVmCompileContext<'a> {
     pub(crate) available_lookups: &'a HashMap<LookupName, Arc<LookupRuntime>>,
     pub(crate) current_branching: &'a ResolvedBranching,
     pub(crate) udfs: Option<&'a UdfExecutor>,
-}
-
-#[derive(Debug, Clone, Copy)]
-pub(super) struct RuntimeCompileTarget<'a> {
-    pub(super) domain: &'a DomainName,
-    pub(super) identifier: &'a ModelName,
 }
 
 #[derive(Debug, Clone)]
@@ -648,19 +659,17 @@ pub(super) fn compile_message_error_set_program(
     )?;
     bindings.extend(materialized_bindings);
     let (parsed, pending_lookup_calls) =
-        rewrite_lookup_hash_map_program(program, context.available_lookups).map_err(|reason| {
-            Report::new(RuntimeVmCompileError::RewriteMessageErrorLookups { node: node.clone() })
-                .attach_printable(reason)
-        })?;
+        rewrite_lookup_hash_map_program(program, context.available_lookups).change_context_lazy(
+            || RuntimeVmCompileError::RewriteMessageErrorLookups { node: node.clone() },
+        )?;
     let (lookup_hash_maps, lookup_binding) = compile_lookup_hash_map_calls(
         pending_lookup_calls,
         "error_output",
         &bindings,
         context.udfs,
     )
-    .map_err(|reason| {
-        Report::new(RuntimeVmCompileError::CompileMessageErrorLookups { node: node.clone() })
-            .attach_printable(reason)
+    .change_context_lazy(|| RuntimeVmCompileError::CompileMessageErrorLookups {
+        node: node.clone(),
     })?;
     if let Some(lookup_binding) = lookup_binding {
         bindings.push(lookup_binding);
@@ -688,15 +697,14 @@ pub(super) fn compile_message_error_set_program(
 }
 
 pub(super) fn compile_finalized_output_filter_program(
-    domain: &DomainName,
-    identifier: &ModelName,
+    node: &ModelName,
     filter: Option<&nervix_models::Expression>,
     output_schema: StdArc<arrow_schema::Schema>,
     output_sensitivity: VmSchemaSensitivity,
     context: RuntimeVmCompileContext<'_>,
-) -> Result<Option<CompiledProgramWithMaterializedInterest>, RuntimeError> {
+) -> RuntimeVmCompileResult<Option<CompiledProgramWithMaterializedInterest>> {
     compile_scoped_filter_program(
-        RuntimeCompileTarget { domain, identifier },
+        node,
         filter,
         RuntimeVmSchema {
             schema: output_schema,
@@ -744,14 +752,13 @@ impl RuntimeFilterScope {
 }
 
 pub(super) fn compile_scoped_filter_program(
-    target: RuntimeCompileTarget<'_>,
+    node: &ModelName,
     filter: Option<&nervix_models::Expression>,
     input: RuntimeVmSchema,
     filter_operation: MessageErrorOperation,
     context: RuntimeVmCompileContext<'_>,
     scope: RuntimeFilterScope,
-) -> Result<Option<CompiledProgramWithMaterializedInterest>, RuntimeError> {
-    let RuntimeCompileTarget { domain, identifier } = target;
+) -> RuntimeVmCompileResult<Option<CompiledProgramWithMaterializedInterest>> {
     let Some(filter) = filter else {
         return Ok(None);
     };
@@ -767,35 +774,27 @@ pub(super) fn compile_scoped_filter_program(
             lower_finalized_output_filter(filter, input.schema.as_ref())
         }
     }
-    .map_err(|reason| RuntimeError::BuildDomainExecution {
-        domain: domain.as_str().to_string(),
-        reason: format!("filter for '{}' is invalid: {reason}", identifier.as_str()),
-    })?;
-    bind_scoped_filter_program(target, &parsed, input, filter_operation, context, scope).map(Some)
+    .change_context_lazy(|| RuntimeVmCompileError::InvalidFilter { node: node.clone() })?;
+    bind_scoped_filter_program(node, &parsed, input, filter_operation, context, scope).map(Some)
 }
 
 /// Binds a lowered predicate over one input message to this node's schemas, state, lookups and
 /// UDFs.
 pub(super) fn bind_scoped_filter_program(
-    target: RuntimeCompileTarget<'_>,
+    node: &ModelName,
     parsed: &nervix_vm::program::SpannedNode<nervix_vm::program::Program>,
     input: RuntimeVmSchema,
     filter_operation: MessageErrorOperation,
     context: RuntimeVmCompileContext<'_>,
     scope: RuntimeFilterScope,
-) -> Result<CompiledProgramWithMaterializedInterest, RuntimeError> {
-    let RuntimeCompileTarget { domain, identifier } = target;
+) -> RuntimeVmCompileResult<CompiledProgramWithMaterializedInterest> {
+    let failure = || RuntimeVmCompileError::CompileFilter { node: node.clone() };
     let RuntimeVmSchema {
         schema,
         sensitivity,
     } = input;
-    let error_sites =
-        compiled_message_error_sites(parsed, &[], Some(filter_operation)).map_err(|reason| {
-            RuntimeError::BuildDomainExecution {
-                domain: domain.as_str().to_string(),
-                reason: format!("{reason:#}"),
-            }
-        })?;
+    let error_sites = compiled_message_error_sites(parsed, &[], Some(filter_operation))
+        .change_context_lazy(failure)?;
     let mut local_namespaces =
         HashSet::from_iter([scope.namespace().to_string(), BRANCH_NAMESPACE.to_string()]);
     if scope.allow_metadata() {
@@ -814,34 +813,18 @@ pub(super) fn bind_scoped_filter_program(
         context.available_materialized_streams,
         context.current_branching,
     )
-    .map_err(|reason| RuntimeError::BuildDomainExecution {
-        domain: domain.as_str().to_string(),
-        reason: format!("{reason:#}"),
-    })?;
+    .change_context_lazy(failure)?;
     bindings.extend(materialized_bindings);
     let (parsed, pending_lookup_calls) =
-        rewrite_lookup_hash_map_program(parsed, context.available_lookups).map_err(|reason| {
-            RuntimeError::BuildDomainExecution {
-                domain: domain.as_str().to_string(),
-                reason: format!(
-                    "filter compile failed for '{}': {reason}",
-                    identifier.as_str()
-                ),
-            }
-        })?;
+        rewrite_lookup_hash_map_program(parsed, context.available_lookups)
+            .change_context_lazy(failure)?;
     let (lookup_hash_maps, lookup_binding) = compile_lookup_hash_map_calls(
         pending_lookup_calls,
         scope.namespace(),
         &bindings,
         context.udfs,
     )
-    .map_err(|reason| RuntimeError::BuildDomainExecution {
-        domain: domain.as_str().to_string(),
-        reason: format!(
-            "filter compile failed for '{}': {reason}",
-            identifier.as_str()
-        ),
-    })?;
+    .change_context_lazy(failure)?;
     if let Some(lookup_binding) = lookup_binding {
         bindings.push(lookup_binding);
     }
@@ -855,15 +838,7 @@ pub(super) fn bind_scoped_filter_program(
             ..VmCompileOptions::default()
         }),
     )
-    .map_err(|error| RuntimeError::VmCompile {
-        domain: domain.as_str().to_string(),
-        reason: format!(
-            "filter compile failed for '{}': {}",
-            identifier.as_str(),
-            error.current_context().message
-        ),
-        report: error,
-    })?;
+    .change_context_lazy(failure)?;
     Ok(CompiledProgramWithMaterializedInterest {
         compiled: Arc::new(compiled),
         materialized_interest,
@@ -877,15 +852,14 @@ pub(super) fn bind_scoped_filter_program(
 }
 
 pub(super) fn compile_processor_output_filter_map_program(
-    target: RuntimeCompileTarget<'_>,
+    node: &ModelName,
     input_relays: &[RelayName],
     output_relay: &RelayName,
     construction: &RouteConstruction,
     schemas: RuntimeVmSchemaPair,
     inferencer_tensors: Option<InferencerFilterMapTensors<'_>>,
     context: RuntimeVmCompileContext<'_>,
-) -> Result<Option<CompiledProgramWithMaterializedInterest>, RuntimeError> {
-    let RuntimeCompileTarget { domain, identifier } = target;
+) -> RuntimeVmCompileResult<Option<CompiledProgramWithMaterializedInterest>> {
     let RuntimeVmSchemaPair {
         input: input_schema,
         input_sensitivity,
@@ -901,12 +875,8 @@ pub(super) fn compile_processor_output_filter_map_program(
     } else {
         lower_transforming_route(construction, &input_schema, &output_schema)
     }
-    .map_err(|reason| RuntimeError::BuildDomainExecution {
-        domain: domain.as_str().to_string(),
-        reason: format!(
-            "output construction for '{}' is invalid: {reason}",
-            identifier
-        ),
+    .change_context_lazy(|| RuntimeVmCompileError::InvalidOutputConstruction {
+        node: node.clone(),
     })?;
     let inherited_count = if inferencer_tensors.is_some() {
         0
@@ -931,7 +901,7 @@ pub(super) fn compile_processor_output_filter_map_program(
         })
         .collect::<Vec<_>>();
     bind_processor_output_filter_map_program(
-        target,
+        node,
         input_relays,
         output_relay,
         RouteProgram {
@@ -959,15 +929,15 @@ pub(super) struct RouteProgram<'a> {
 
 /// Binds a lowered processor or reingestor route to this node's schemas, state, lookups and UDFs.
 pub(super) fn bind_processor_output_filter_map_program(
-    target: RuntimeCompileTarget<'_>,
+    node: &ModelName,
     input_relays: &[RelayName],
     output_relay: &RelayName,
     route: RouteProgram<'_>,
     schemas: RuntimeVmSchemaPair,
     inferencer_tensors: Option<InferencerFilterMapTensors<'_>>,
     context: RuntimeVmCompileContext<'_>,
-) -> Result<CompiledProgramWithMaterializedInterest, RuntimeError> {
-    let RuntimeCompileTarget { domain, identifier } = target;
+) -> RuntimeVmCompileResult<CompiledProgramWithMaterializedInterest> {
+    let failure = || RuntimeVmCompileError::CompileFilterMap { node: node.clone() };
     let RuntimeVmSchemaPair {
         input: input_schema,
         input_sensitivity,
@@ -983,10 +953,7 @@ pub(super) fn bind_processor_output_filter_map_program(
         set_operations,
         Some(MessageErrorOperation::RouteWhere),
     )
-    .map_err(|reason| RuntimeError::BuildDomainExecution {
-        domain: domain.as_str().to_string(),
-        reason: format!("{reason:#}"),
-    })?;
+    .change_context_lazy(failure)?;
     let mut bindings = vec![
         VmCompileBinding::writable("output", output_schema.clone())
             .with_sensitivity(output_sensitivity.clone()),
@@ -1028,32 +995,14 @@ pub(super) fn bind_processor_output_filter_map_program(
         context.available_materialized_streams,
         context.current_branching,
     )
-    .map_err(|reason| RuntimeError::BuildDomainExecution {
-        domain: domain.as_str().to_string(),
-        reason: format!("{reason:#}"),
-    })?;
+    .change_context_lazy(failure)?;
     bindings.extend(materialized_bindings);
     let (parsed, pending_lookup_calls) =
-        rewrite_lookup_hash_map_program(parsed, context.available_lookups).map_err(|reason| {
-            RuntimeError::BuildDomainExecution {
-                domain: domain.as_str().to_string(),
-                reason: format!(
-                    "FILTER-MAP compile failed for '{}': {}",
-                    identifier.as_str(),
-                    reason
-                ),
-            }
-        })?;
+        rewrite_lookup_hash_map_program(parsed, context.available_lookups)
+            .change_context_lazy(failure)?;
     let (lookup_hash_maps, lookup_binding) =
         compile_lookup_hash_map_calls(pending_lookup_calls, "output", &bindings, context.udfs)
-            .map_err(|reason| RuntimeError::BuildDomainExecution {
-                domain: domain.as_str().to_string(),
-                reason: format!(
-                    "FILTER-MAP compile failed for '{}': {}",
-                    identifier.as_str(),
-                    reason
-                ),
-            })?;
+            .change_context_lazy(failure)?;
     if let Some(lookup_binding) = lookup_binding {
         bindings.push(lookup_binding);
     }
@@ -1068,15 +1017,7 @@ pub(super) fn bind_processor_output_filter_map_program(
             ..VmCompileOptions::default()
         }),
     )
-    .map_err(|error| RuntimeError::VmCompile {
-        domain: domain.as_str().to_string(),
-        reason: format!(
-            "FILTER-MAP compile failed for '{}': {}",
-            identifier.as_str(),
-            error.current_context().message
-        ),
-        report: error,
-    })?;
+    .change_context_lazy(failure)?;
     Ok(CompiledProgramWithMaterializedInterest {
         compiled: Arc::new(compiled),
         materialized_interest,
@@ -1089,23 +1030,20 @@ pub(super) fn bind_processor_output_filter_map_program(
 /// Binds a lowered branch construction, which writes the outgoing branch key of one route's
 /// records, to this node's schemas, state, lookups and UDFs.
 pub(super) fn bind_output_branch_program(
-    target: RuntimeCompileTarget<'_>,
+    node: &ModelName,
     parsed: &nervix_vm::program::SpannedNode<nervix_vm::program::Program>,
     input: RuntimeVmSchema,
     output: RuntimeVmSchema,
     branch_schema: RuntimeVmSchema,
     context: RuntimeVmCompileContext<'_>,
-) -> Result<CompiledBranchProgram, RuntimeError> {
-    let RuntimeCompileTarget { domain, identifier } = target;
+) -> RuntimeVmCompileResult<CompiledBranchProgram> {
+    let failure = || RuntimeVmCompileError::CompileOutputBranch { node: node.clone() };
     let error_sites = compiled_message_error_sites(
         parsed,
         &vec![MessageErrorOperation::Set; parsed.inner.set.len()],
         None,
     )
-    .map_err(|reason| RuntimeError::BuildDomainExecution {
-        domain: domain.as_str().to_string(),
-        reason: format!("{reason:#}"),
-    })?;
+    .change_context_lazy(failure)?;
     let mut bindings = vec![
         VmCompileBinding::readonly("input", input.schema.clone())
             .with_sensitivity(input.sensitivity),
@@ -1127,36 +1065,18 @@ pub(super) fn bind_output_branch_program(
         context.available_materialized_streams,
         context.current_branching,
     )
-    .map_err(|reason| RuntimeError::BuildDomainExecution {
-        domain: domain.as_str().to_string(),
-        reason: format!("{reason:#}"),
-    })?;
+    .change_context_lazy(failure)?;
     bindings.extend(materialized_bindings);
     let (parsed, pending_lookup_calls) =
-        rewrite_lookup_hash_map_program(parsed, context.available_lookups).map_err(|reason| {
-            RuntimeError::BuildDomainExecution {
-                domain: domain.as_str().to_string(),
-                reason: format!(
-                    "output branch compile failed for '{}': {}",
-                    identifier.as_str(),
-                    reason
-                ),
-            }
-        })?;
+        rewrite_lookup_hash_map_program(parsed, context.available_lookups)
+            .change_context_lazy(failure)?;
     let (lookup_hash_maps, lookup_binding) = compile_lookup_hash_map_calls(
         pending_lookup_calls,
         BRANCH_NAMESPACE,
         &bindings,
         context.udfs,
     )
-    .map_err(|reason| RuntimeError::BuildDomainExecution {
-        domain: domain.as_str().to_string(),
-        reason: format!(
-            "output branch compile failed for '{}': {}",
-            identifier.as_str(),
-            reason
-        ),
-    })?;
+    .change_context_lazy(failure)?;
     if let Some(lookup_binding) = lookup_binding {
         bindings.push(lookup_binding);
     }
@@ -1170,15 +1090,7 @@ pub(super) fn bind_output_branch_program(
             ..VmCompileOptions::default()
         }),
     )
-    .map_err(|error| RuntimeError::VmCompile {
-        domain: domain.as_str().to_string(),
-        reason: format!(
-            "output branch compile failed for '{}': {}",
-            identifier.as_str(),
-            error.current_context().message
-        ),
-        report: error,
-    })?;
+    .change_context_lazy(failure)?;
     Ok(CompiledBranchProgram {
         program: CompiledProgramWithMaterializedInterest {
             compiled: Arc::new(compiled),
@@ -1191,41 +1103,25 @@ pub(super) fn bind_output_branch_program(
 }
 
 pub(super) fn compile_wasm_output_filter_map_program(
-    domain: &DomainName,
-    identifier: &ModelName,
+    node: &ModelName,
     construction: &RouteConstruction,
     output_schema: StdArc<arrow_schema::Schema>,
     output_sensitivity: VmSchemaSensitivity,
     context: RuntimeVmCompileContext<'_>,
-) -> Result<Option<CompiledProgramWithMaterializedInterest>, RuntimeError> {
+) -> RuntimeVmCompileResult<Option<CompiledProgramWithMaterializedInterest>> {
+    let failure = || RuntimeVmCompileError::CompileFilterMap { node: node.clone() };
     let parsed =
         lower_generated_route(construction, output_schema.as_ref(), output_schema.as_ref())
-            .map_err(|reason| RuntimeError::BuildDomainExecution {
-                domain: domain.as_str().to_string(),
-                reason: format!(
-                    "WASM output construction for '{}' is invalid: {reason}",
-                    identifier
-                ),
+            .change_context_lazy(|| RuntimeVmCompileError::InvalidWasmOutputConstruction {
+                node: node.clone(),
             })?;
-    if !parsed.inner.invoke.is_empty() {
-        return Err(RuntimeError::BuildDomainExecution {
-            domain: domain.as_str().to_string(),
-            reason: format!(
-                "WASM processor '{}' TO clauses may use SET and WHERE, but not INVOKE",
-                identifier.as_str()
-            ),
-        });
-    }
     let set_operations = vec![MessageErrorOperation::Set; parsed.inner.set.len()];
     let error_sites = compiled_message_error_sites(
         &parsed,
         &set_operations,
         Some(MessageErrorOperation::RouteWhere),
     )
-    .map_err(|reason| RuntimeError::BuildDomainExecution {
-        domain: domain.as_str().to_string(),
-        reason: format!("{reason:#}"),
-    })?;
+    .change_context_lazy(failure)?;
 
     let original_parsed = parsed.clone();
     let mut bindings = vec![
@@ -1248,32 +1144,14 @@ pub(super) fn compile_wasm_output_filter_map_program(
         context.available_materialized_streams,
         context.current_branching,
     )
-    .map_err(|reason| RuntimeError::BuildDomainExecution {
-        domain: domain.as_str().to_string(),
-        reason: format!("{reason:#}"),
-    })?;
+    .change_context_lazy(failure)?;
     bindings.extend(materialized_bindings);
     let (parsed, pending_lookup_calls) =
-        rewrite_lookup_hash_map_program(&parsed, context.available_lookups).map_err(|reason| {
-            RuntimeError::BuildDomainExecution {
-                domain: domain.as_str().to_string(),
-                reason: format!(
-                    "FILTER-MAP compile failed for '{}': {}",
-                    identifier.as_str(),
-                    reason
-                ),
-            }
-        })?;
+        rewrite_lookup_hash_map_program(&parsed, context.available_lookups)
+            .change_context_lazy(failure)?;
     let (lookup_hash_maps, lookup_binding) =
         compile_lookup_hash_map_calls(pending_lookup_calls, "output", &bindings, context.udfs)
-            .map_err(|reason| RuntimeError::BuildDomainExecution {
-                domain: domain.as_str().to_string(),
-                reason: format!(
-                    "FILTER-MAP compile failed for '{}': {}",
-                    identifier.as_str(),
-                    reason
-                ),
-            })?;
+            .change_context_lazy(failure)?;
     if let Some(lookup_binding) = lookup_binding {
         bindings.push(lookup_binding);
     }
@@ -1288,15 +1166,7 @@ pub(super) fn compile_wasm_output_filter_map_program(
             ..VmCompileOptions::default()
         }),
     )
-    .map_err(|error| RuntimeError::VmCompile {
-        domain: domain.as_str().to_string(),
-        reason: format!(
-            "FILTER-MAP compile failed for '{}': {}",
-            identifier.as_str(),
-            error.current_context().message
-        ),
-        report: error,
-    })?;
+    .change_context_lazy(failure)?;
     Ok(Some(CompiledProgramWithMaterializedInterest {
         compiled: Arc::new(compiled),
         materialized_interest,
@@ -1307,15 +1177,15 @@ pub(super) fn compile_wasm_output_filter_map_program(
 }
 
 pub(in crate::runtime) fn compile_emitter_filter_map_program(
-    domain: &DomainName,
     emitter: &EmitterName,
     route: Option<&EmitterRoutePlan>,
     schemas: RuntimeVmSchemaPair,
     context: RuntimeVmCompileContext<'_>,
-) -> Result<Option<CompiledEmitterFilterMapProgram>, RuntimeError> {
+) -> RuntimeVmCompileResult<Option<CompiledEmitterFilterMapProgram>> {
     let Some(route) = route else {
         return Ok(None);
     };
+    let node = ModelName::from(emitter);
     let parsed = route.program.clone();
     let set_operations = (0..parsed.inner.set.len())
         .map(|index| {
@@ -1331,16 +1201,10 @@ pub(in crate::runtime) fn compile_emitter_filter_map_program(
         &set_operations,
         Some(MessageErrorOperation::RouteWhere),
     )
-    .map_err(|reason| RuntimeError::BuildDomainExecution {
-        domain: domain.as_str().to_string(),
-        reason: format!("{reason:#}"),
-    })?;
+    .change_context_lazy(|| RuntimeVmCompileError::CompileFilterMap { node: node.clone() })?;
 
     let body = compile_emitter_filter_map_part(
-        RuntimeCompileTarget {
-            domain,
-            identifier: &ModelName::from(emitter),
-        },
+        &node,
         parsed,
         schemas,
         route.codec_route,
@@ -1354,14 +1218,14 @@ pub(in crate::runtime) fn compile_emitter_filter_map_program(
 }
 
 pub(super) fn compile_emitter_filter_map_part(
-    target: RuntimeCompileTarget<'_>,
+    node: &ModelName,
     parsed: nervix_vm::program::SpannedNode<nervix_vm::program::Program>,
     schemas: RuntimeVmSchemaPair,
     codec_route: bool,
     error_sites: CompiledMessageErrorSites,
     context: RuntimeVmCompileContext<'_>,
-) -> Result<CompiledProgramWithMaterializedInterest, RuntimeError> {
-    let RuntimeCompileTarget { domain, identifier } = target;
+) -> RuntimeVmCompileResult<CompiledProgramWithMaterializedInterest> {
+    let failure = || RuntimeVmCompileError::CompileFilterMap { node: node.clone() };
     let RuntimeVmSchemaPair {
         input: input_schema,
         input_sensitivity,
@@ -1393,22 +1257,11 @@ pub(super) fn compile_emitter_filter_map_part(
         context.available_materialized_streams,
         context.current_branching,
     )
-    .map_err(|reason| RuntimeError::BuildDomainExecution {
-        domain: domain.as_str().to_string(),
-        reason: format!("{reason:#}"),
-    })?;
+    .change_context_lazy(failure)?;
     bindings.extend(materialized_bindings);
     let (parsed, pending_lookup_calls) =
-        rewrite_lookup_hash_map_program(&parsed, context.available_lookups).map_err(|reason| {
-            RuntimeError::BuildDomainExecution {
-                domain: domain.as_str().to_string(),
-                reason: format!(
-                    "FILTER-MAP compile failed for '{}': {}",
-                    identifier.as_str(),
-                    reason
-                ),
-            }
-        })?;
+        rewrite_lookup_hash_map_program(&parsed, context.available_lookups)
+            .change_context_lazy(failure)?;
     let lookup_output_namespace = if codec_route { "output" } else { "input" };
     let (lookup_hash_maps, lookup_binding) = compile_lookup_hash_map_calls(
         pending_lookup_calls,
@@ -1416,14 +1269,7 @@ pub(super) fn compile_emitter_filter_map_part(
         &bindings,
         context.udfs,
     )
-    .map_err(|reason| RuntimeError::BuildDomainExecution {
-        domain: domain.as_str().to_string(),
-        reason: format!(
-            "FILTER-MAP compile failed for '{}': {}",
-            identifier.as_str(),
-            reason
-        ),
-    })?;
+    .change_context_lazy(failure)?;
     if let Some(lookup_binding) = lookup_binding {
         bindings.push(lookup_binding);
     }
@@ -1443,15 +1289,7 @@ pub(super) fn compile_emitter_filter_map_part(
             ..VmCompileOptions::default()
         }),
     )
-    .map_err(|error| RuntimeError::VmCompile {
-        domain: domain.as_str().to_string(),
-        reason: format!(
-            "FILTER-MAP compile failed for '{}': {}",
-            identifier.as_str(),
-            error.current_context().message
-        ),
-        report: error,
-    })?;
+    .change_context_lazy(failure)?;
     Ok(CompiledProgramWithMaterializedInterest {
         compiled: Arc::new(compiled),
         materialized_interest,
@@ -1673,24 +1511,21 @@ pub(super) fn compile_reorderer_program(
 /// Binds a lowered ingestor route, which reads the decoded message and the source's metadata, to
 /// this node's schemas, state, lookups and UDFs.
 pub(super) fn bind_ingestor_filter_map_program(
-    target: RuntimeCompileTarget<'_>,
+    node: &ModelName,
     metadata_kind: IngestMetadataKind,
     allow_header_reads: bool,
     construction: &LoweredConstruction,
     schemas: RuntimeVmSchemaPair,
     context: RuntimeVmCompileContext<'_>,
-) -> Result<CompiledProgramWithMaterializedInterest, RuntimeError> {
-    let RuntimeCompileTarget { domain, identifier } = target;
+) -> RuntimeVmCompileResult<CompiledProgramWithMaterializedInterest> {
+    let failure = || RuntimeVmCompileError::CompileFilterMap { node: node.clone() };
     let parsed = construction.program();
     let error_sites = compiled_message_error_sites(
         parsed,
         &construction.set_operations(),
         Some(MessageErrorOperation::RouteWhere),
     )
-    .map_err(|reason| RuntimeError::BuildDomainExecution {
-        domain: domain.as_str().to_string(),
-        reason: format!("{reason:#}"),
-    })?;
+    .change_context_lazy(failure)?;
 
     let mut bindings = vec![
         VmCompileBinding::readonly("input", schemas.input.clone())
@@ -1711,32 +1546,14 @@ pub(super) fn bind_ingestor_filter_map_program(
         context.available_materialized_streams,
         context.current_branching,
     )
-    .map_err(|reason| RuntimeError::BuildDomainExecution {
-        domain: domain.as_str().to_string(),
-        reason: format!("{reason:#}"),
-    })?;
+    .change_context_lazy(failure)?;
     bindings.extend(materialized_bindings);
     let (parsed, pending_lookup_calls) =
-        rewrite_lookup_hash_map_program(parsed, context.available_lookups).map_err(|reason| {
-            RuntimeError::BuildDomainExecution {
-                domain: domain.as_str().to_string(),
-                reason: format!(
-                    "FILTER-MAP compile failed for '{}': {}",
-                    identifier.as_str(),
-                    reason
-                ),
-            }
-        })?;
+        rewrite_lookup_hash_map_program(parsed, context.available_lookups)
+            .change_context_lazy(failure)?;
     let (lookup_hash_maps, lookup_binding) =
         compile_lookup_hash_map_calls(pending_lookup_calls, "output", &bindings, context.udfs)
-            .map_err(|reason| RuntimeError::BuildDomainExecution {
-                domain: domain.as_str().to_string(),
-                reason: format!(
-                    "FILTER-MAP compile failed for '{}': {}",
-                    identifier.as_str(),
-                    reason
-                ),
-            })?;
+            .change_context_lazy(failure)?;
     if let Some(lookup_binding) = lookup_binding {
         bindings.push(lookup_binding);
     }
@@ -1752,15 +1569,7 @@ pub(super) fn bind_ingestor_filter_map_program(
             ..VmCompileOptions::default()
         }),
     )
-    .map_err(|error| RuntimeError::VmCompile {
-        domain: domain.as_str().to_string(),
-        reason: format!(
-            "FILTER-MAP compile failed for '{}': {}",
-            identifier.as_str(),
-            error.current_context().message
-        ),
-        report: error,
-    })?;
+    .change_context_lazy(failure)?;
     Ok(CompiledProgramWithMaterializedInterest {
         compiled: Arc::new(compiled),
         materialized_interest,
@@ -1779,13 +1588,16 @@ pub(super) struct GeneratorSetProgramSchemas {
 }
 
 pub(super) fn compile_generator_set_program(
-    domain: &DomainName,
     generator: &GeneratorName,
     source_relay: &RelayName,
     route: &GeneratorRoutePlan,
     schemas: GeneratorSetProgramSchemas,
     udfs: Option<&UdfExecutor>,
-) -> Result<CompiledProgramWithMaterializedInterest, RuntimeError> {
+) -> RuntimeVmCompileResult<CompiledProgramWithMaterializedInterest> {
+    let failure = || RuntimeVmCompileError::CompileGeneratorOutput {
+        generator: generator.clone(),
+        relay: route.relay.clone(),
+    };
     let GeneratorSetProgramSchemas {
         output: output_schema,
         source: source_schema,
@@ -1797,10 +1609,7 @@ pub(super) fn compile_generator_set_program(
         &vec![MessageErrorOperation::Set; parsed.inner.set.len()],
         Some(MessageErrorOperation::RouteWhere),
     )
-    .map_err(|reason| RuntimeError::BuildDomainExecution {
-        domain: domain.as_str().to_string(),
-        reason: format!("{reason:#}"),
-    })?;
+    .change_context_lazy(failure)?;
     let mut bindings = vec![
         VmCompileBinding::writable("output", output_schema.schema.clone())
             .with_sensitivity(output_schema.sensitivity.clone()),
@@ -1826,16 +1635,7 @@ pub(super) fn compile_generator_set_program(
             },
         ),
     )
-    .map_err(|error| RuntimeError::VmCompile {
-        domain: domain.as_str().to_string(),
-        reason: format!(
-            "generator '{}' output '{}' compile failed: {}",
-            generator,
-            route.relay,
-            error.current_context().message
-        ),
-        report: error,
-    })?;
+    .change_context_lazy(failure)?;
     Ok(CompiledProgramWithMaterializedInterest {
         compiled: Arc::new(compiled),
         materialized_interest: MaterializedProgramInterest::default(),
@@ -1843,20 +1643,6 @@ pub(super) fn compile_generator_set_program(
         lookup_hash_maps: Vec::new(),
         error_sites,
     })
-}
-
-pub(super) fn relay_schema_for_runtime(
-    runtime: &Runtime,
-    domain: &DomainName,
-    relay: &RelayName,
-) -> Result<Arc<CompiledSchema>, Report<DomainRoutingError>> {
-    let Some(routing) = runtime.domain_routing(domain) else {
-        return Err(Report::new(DomainRoutingError::DomainNotInstantiated {
-            domain: domain.clone(),
-        }));
-    };
-    let routing = routing.load();
-    relay_schema_for_routing(&routing, domain, relay)
 }
 
 pub(super) fn relay_schema_for_routing(
@@ -2086,10 +1872,7 @@ mod tests {
     fn filter_map_rejects_branch_namespace_without_branch_schema() {
         let schema = test_schema(&[("tenant", ParseAsType::String)]);
         let error = compile_processor_output_filter_map_program(
-            RuntimeCompileTarget {
-                domain: &domain("default"),
-                identifier: &named("project_notifications"),
-            },
+            &named("project_notifications"),
             &[named("notifications")],
             &named("projected_notifications"),
             &construction("INHERIT ALL WHERE branch.tenant = output.tenant"),
@@ -2108,7 +1891,7 @@ mod tests {
             },
         )
         .expect_err("branch namespace must require a branch schema");
-        let error = error.to_string();
+        let error = format!("{error:#}");
 
         assert!(
             error.contains("branch.tenant") || error.contains("namespace 'branch'"),
@@ -2118,7 +1901,6 @@ mod tests {
 
     #[test]
     fn route_type_failures_keep_the_vm_report_at_each_runtime_binding() {
-        let domain = domain("default");
         let identifier = named::<ModelName>("invalid_mapping");
         let relay = named::<RelayName>("mapped");
         let schema = test_schema(&[("value", ParseAsType::I64)]).arrow_schema();
@@ -2145,10 +1927,7 @@ mod tests {
             (
                 "processor",
                 compile_processor_output_filter_map_program(
-                    RuntimeCompileTarget {
-                        domain: &domain,
-                        identifier: &identifier,
-                    },
+                    &identifier,
                     &[named("source")],
                     &relay,
                     &route,
@@ -2161,7 +1940,6 @@ mod tests {
             (
                 "WASM processor",
                 compile_wasm_output_filter_map_program(
-                    &domain,
                     &identifier,
                     &route,
                     schema.clone(),
@@ -2173,10 +1951,7 @@ mod tests {
             (
                 "ingestor",
                 bind_ingestor_filter_map_program(
-                    RuntimeCompileTarget {
-                        domain: &domain,
-                        identifier: &identifier,
-                    },
+                    &identifier,
                     IngestMetadataKind::Headers,
                     true,
                     &lowered,
@@ -2187,19 +1962,21 @@ mod tests {
             ),
         ];
         for (kind, error) in failures {
-            let RuntimeError::VmCompile {
-                domain: actual_domain,
-                reason,
-                report,
-            } = &error
-            else {
+            let RuntimeVmCompileError::CompileFilterMap { node } = error.current_context() else {
+                panic!("{kind} must name its FILTER-MAP compile failure: {error:#}");
+            };
+            assert_eq!(node, &identifier, "{kind}");
+            let Some(compile_error) = error.downcast_ref::<nervix_vm::CompileError>() else {
                 panic!("{kind} lost its VM compile report: {error:#}");
             };
-            assert_eq!(actual_domain, domain.as_str());
-            assert!(reason.contains(identifier.as_str()), "{kind}: {reason}");
+            let rendered = format!("{error:#}");
             assert!(
-                reason.contains(&report.current_context().message),
-                "{kind} lost the VM's safe message: {error:#}"
+                rendered.starts_with("FILTER-MAP compile failed for 'invalid_mapping': "),
+                "{kind}: {rendered}"
+            );
+            assert!(
+                rendered.contains(&compile_error.message),
+                "{kind} lost the VM's safe message: {rendered}"
             );
         }
     }
@@ -2246,7 +2023,6 @@ mod tests {
             ],
         }));
         let program = bind_ingestor_route_for_test(
-            &domain("default"),
             &named::<ModelName>("logic_ingestor"),
             IngestMetadataKind::Headers,
             true,
@@ -2293,7 +2069,6 @@ mod tests {
         let output_schema =
             test_schema(&[("tenant", ParseAsType::String), ("total", ParseAsType::I64)]);
         let program = compile_finalized_output_filter_program(
-            &domain("default"),
             &named("aggregate_route"),
             Some(&expression("output.total >= 100 AND tenant = \"acme\"")),
             output_schema.arrow_schema(),
@@ -2349,7 +2124,6 @@ mod tests {
         );
 
         let unavailable_input = compile_finalized_output_filter_program(
-            &domain("default"),
             &named("aggregate_route"),
             Some(&expression("input.total >= 100")),
             output_schema.arrow_schema(),
@@ -2366,6 +2140,83 @@ mod tests {
         assert!(
             rendered.contains("input is unavailable after set-only output finalization"),
             "unexpected finalized-output scope error: {rendered}"
+        );
+    }
+
+    #[test]
+    fn a_wasm_output_route_cannot_invoke_a_header_writer() {
+        let schema = test_schema(&[("value", ParseAsType::I64)]);
+        let available_materialized_streams = HashMap::default();
+        let available_lookups = HashMap::default();
+        let branching = ResolvedBranching::unbranched();
+        let error = compile_wasm_output_filter_map_program(
+            &named("enrich"),
+            &construction("SET value = 1 INVOKE write_header('tenant', 'acme')"),
+            schema.arrow_schema(),
+            VmSchemaSensitivity::default(),
+            RuntimeVmCompileContext {
+                available_materialized_streams: &available_materialized_streams,
+                available_lookups: &available_lookups,
+                current_branching: &branching,
+                udfs: None,
+            },
+        )
+        .expect_err("a WASM output route has no header to write");
+        assert!(matches!(
+            error.current_context(),
+            RuntimeVmCompileError::InvalidWasmOutputConstruction { node } if node.as_str() == "enrich"
+        ));
+        let rendered = format!("{error:#}");
+        assert!(
+            rendered.starts_with("WASM output construction for 'enrich' is invalid: "),
+            "{rendered}"
+        );
+        assert!(
+            rendered.contains("INVOKE is not valid for internal generated routes"),
+            "the frontend's refusal must stay beneath the construction: {rendered}"
+        );
+    }
+
+    #[test]
+    fn a_route_that_sets_a_field_its_relay_lacks_is_an_invalid_construction() {
+        let schema = test_schema(&[("value", ParseAsType::I64)]).arrow_schema();
+        let available_materialized_streams = HashMap::default();
+        let available_lookups = HashMap::default();
+        let branching = ResolvedBranching::unbranched();
+
+        let error = compile_processor_output_filter_map_program(
+            &named("enrich"),
+            &[named("source")],
+            &named("mapped"),
+            &construction("SET missing = 1"),
+            RuntimeVmSchemaPair {
+                input: schema.clone(),
+                input_sensitivity: VmSchemaSensitivity::default(),
+                output: schema,
+                output_sensitivity: VmSchemaSensitivity::default(),
+            },
+            None,
+            RuntimeVmCompileContext {
+                available_materialized_streams: &available_materialized_streams,
+                available_lookups: &available_lookups,
+                current_branching: &branching,
+                udfs: None,
+            },
+        )
+        .expect_err("a route cannot set a field its relay does not have");
+
+        assert!(matches!(
+            error.current_context(),
+            RuntimeVmCompileError::InvalidOutputConstruction { node } if node.as_str() == "enrich"
+        ));
+        let rendered = format!("{error:#}");
+        assert!(
+            rendered.starts_with("output construction for 'enrich' is invalid: "),
+            "{rendered}"
+        );
+        assert!(
+            rendered.contains("SET targets unknown output field 'missing'"),
+            "the frontend's refusal must stay beneath the construction: {rendered}"
         );
     }
 }

@@ -599,11 +599,11 @@ A delivery proceeds as follows:
 6. The application lane validates the exact schema, metadata, branch, and record-acknowledgement
    count, then resolves the configured concrete runtime branch. Work for one channel remains ordered,
    while other channels continue independently. A payload that fails this validation never reaches
-   the branch. The receiver keeps the failure as `RuntimeError::DecodeRemoteRelay`, whose typed
-   `RemoteRelayDecodeError` names what the payload got wrong with the decoder's own failure
-   beneath it, and answers the payload's admission registration negatively with that report
-   rendered as the reason. A payload that carries no admission registration is refused the same
-   way, with no registration to answer.
+   the branch. The receiver keeps the failure as a report of `RuntimeError::DecodeRemoteRelay`
+   with the typed `RemoteRelayDecodeError` beneath it, which names what the payload got wrong and
+   keeps the decoder's own failure beneath that, and answers the payload's admission registration
+   negatively with the whole chain rendered as the reason. A payload that carries no admission
+   registration is refused the same way, with no registration to answer.
 7. When the concrete runtime branch accepts the batch, the receiver sends a terminal admission
    outcome over the reserved management capacity. The sender can then release the channel for the
    next batch.
@@ -625,7 +625,7 @@ and fails one the receiver reports nothing about for fifteen seconds, as
 [Acknowledgement Registrations](#acknowledgement-registrations) describes. Progress keeps a live
 attempt from being mistaken for a disconnected one; it does not change the delivery outcome.
 For an attached acknowledgement, progress also carries a monotonic sequence and whether all of its
-remaining handoff shares are parked on `REQUIRED WAIT`. Each upstream node parks or reactivates its
+remaining handoff shares are parked, on `REQUIRED WAIT` or in a window that retains their rows. Each upstream node parks or reactivates its
 own attached share in sequence order, so a domain drain excludes a parked chain across relay hops.
 The eventual terminal acknowledgement still resolves every share; parking does not acknowledge the
 source or persist an acknowledgement. Admission progress carries no parked state.

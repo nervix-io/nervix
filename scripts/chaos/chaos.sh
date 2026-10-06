@@ -20,6 +20,9 @@ Usage:
   just chaos run cluster-restart --image IMAGE [--nodes 1|3] [--outage-seconds N] [--records N]
   just chaos run stateful --image IMAGE [--nodes 1|3] [--fault FAULT] [--outage-seconds N]
   just chaos run domain-time --image IMAGE [--nodes 1|3] [--fault FAULT] [--outage-seconds N]
+  just chaos run mixed-instability --image IMAGE [--seed N] [--duration 30m] [--policy POLICY]
+      [--coverage LIST] [--plan FILE] [--max-memory-bytes N] [--max-recovery-backlog N] [--max-pending N]
+  just chaos replay RUN_DIRECTORY [--artifacts DIR] [--run-id ID] [--timeout SECONDS] [--keep]
   just chaos cleanup --run-id RUN_ID
   just chaos self-test
 
@@ -29,6 +32,7 @@ Run `just chaos run pause-resume --help` for pause-resume options.
 Run `just chaos run partition-recovery --help` for partition-recovery options.
 Run `just chaos run degraded-links --help` for degradation profiles and thresholds.
 Run `just chaos run stateful --help` for stateful and domain-time faults.
+Run `just chaos run mixed-instability --help` for seeded plans, quorum policies and coverage.
 EOF
 }
 
@@ -63,6 +67,10 @@ domain-time  A paced domain's clock, authority and logical deadlines followed by
              faults: none (default), voter-crash, voter-pause, voter-partition, voter-stop,
              cluster-restart
              topologies: one-node (--nodes 1: none, cluster-restart), three-node (--nodes 3, default)
+mixed-instability  A seeded, finite plan of restarts, crashes, pauses, partitions and link degradation,
+                   some combined, against public roles under a quorum policy, with continuous
+                   traffic and resource samples (three-node)
+                   policies: preserve-quorum (default), temporary-quorum-loss
 EOF
 }
 
@@ -111,7 +119,7 @@ case "${command_name}" in
             stale-follower | former-owner-restart | cluster-restart)
                 exec "${script_dir}/run-recovery.sh" --scenario "${scenario}" "$@"
                 ;;
-            stateful | domain-time)
+            stateful | domain-time | mixed-instability)
                 exec "${script_dir}/run-baseline.sh" --scenario "${scenario}" "$@"
                 ;;
             *)
@@ -120,6 +128,20 @@ case "${command_name}" in
                 exit 2
                 ;;
         esac
+        ;;
+    replay)
+        if [[ "${1:-}" == -h || "${1:-}" == --help ]]; then
+            usage
+            exit 0
+        fi
+        if [[ "$#" -eq 0 || "$1" == -* ]]; then
+            printf '%s\n' 'a run directory to replay is required' >&2
+            usage >&2
+            exit 2
+        fi
+        run_directory="$1"
+        shift
+        exec "${script_dir}/run-baseline.sh" --scenario mixed-instability --replay "${run_directory}" "$@"
         ;;
     cleanup)
         exec "${script_dir}/cleanup.sh" "$@"

@@ -12,10 +12,10 @@ use meticulous::{OptionExt as _, ResultExt as _};
 use strum::IntoEnumIterator as _;
 
 use crate::{
-    ArchiveReadError, ArchiveRecord, BackupManifest, BranchLifecycleRecord, DomainRecord,
-    KafkaOffsetsRecord, MaterializedIdentitiesRecord, MaterializedRelayDescriptor, RecordKind,
-    ResourceVersionRecord, SectionContent, SectionDigester, SectionPath, UsersRecord,
-    WasmStateDescriptor,
+    ArchiveReadError, ArchiveRecord, BackupManifest, BranchLifecycleRecord,
+    DeduplicatorStateDescriptor, DomainRecord, KafkaOffsetsRecord, MaterializedIdentitiesRecord,
+    MaterializedRelayDescriptor, RecordKind, ResourceVersionRecord, SectionContent,
+    SectionDigester, SectionPath, UsersRecord, WasmStateDescriptor, WindowStateDescriptor,
     archive_properties::assert_record,
     archive_values::{Case, Section, Values},
     read_archive_contents,
@@ -45,6 +45,8 @@ fn validate_kind(kind: RecordKind, bytes: &[u8]) -> Result<(), Report<ArchiveRea
         RecordKind::BranchLifecycle => validate::<BranchLifecycleRecord>(bytes),
         RecordKind::MaterializedRelayDescriptor => validate::<MaterializedRelayDescriptor>(bytes),
         RecordKind::MaterializedIdentities => validate::<MaterializedIdentitiesRecord>(bytes),
+        RecordKind::DeduplicatorStateDescriptor => validate::<DeduplicatorStateDescriptor>(bytes),
+        RecordKind::WindowStateDescriptor => validate::<WindowStateDescriptor>(bytes),
     }
 }
 
@@ -59,6 +61,8 @@ fn current_version(kind: RecordKind) -> u16 {
         RecordKind::BranchLifecycle => BranchLifecycleRecord::VERSION,
         RecordKind::MaterializedRelayDescriptor => MaterializedRelayDescriptor::VERSION,
         RecordKind::MaterializedIdentities => MaterializedIdentitiesRecord::VERSION,
+        RecordKind::DeduplicatorStateDescriptor => DeduplicatorStateDescriptor::VERSION,
+        RecordKind::WindowStateDescriptor => WindowStateDescriptor::VERSION,
     }
 }
 
@@ -203,6 +207,8 @@ impl Case {
                 }
                 crate::archive_values::State::Wasm { .. } => {}
                 crate::archive_values::State::Materialized(value) => value.assert_invalid_fields(),
+                crate::archive_values::State::Deduplicator(value) => value.assert_invalid_fields(),
+                crate::archive_values::State::Window(value) => value.assert_invalid_fields(),
             }
         }
         let mut manifest = ManifestWire::from(&self.manifest);
@@ -328,6 +334,7 @@ fn bolero_corrupt_archives_fail_before_restore_contents_are_returned() {
             let original = case.export();
             read_archive_contents(original.as_slice()).assured("the unmodified archive validates");
             case.assert_materialized_faults();
+            case.assert_branch_state_faults();
             for fault in 0..7 {
                 let mut manifest = case.manifest.clone();
                 let mut sections = case.sections.clone();

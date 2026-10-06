@@ -711,14 +711,12 @@ impl Runtime {
 
         for generator in resource_plans.generators.values() {
             let spec = GeneratorTaskSpec::bind(domain, generator, &relay_services, &udf_executor)
-                .map_err(|report| RuntimeError::BuildDomainExecution {
-                domain: domain.as_str().to_string(),
-                reason: format!("generator binding failed: {report:#}"),
-            })?;
+                .map_err(|report| RuntimeError::GeneratorStart { report })?;
             let entity = NodeRef::new(ModelKind::Generator, &generator.name);
             generator_tasks.insert(
                 entity,
-                self.spawn_generator_task(domain, &shutdown_tx, spec)?,
+                self.spawn_generator_task(domain, &shutdown_tx, spec)
+                    .map_err(|report| RuntimeError::GeneratorStart { report })?,
             );
         }
 
@@ -734,11 +732,14 @@ impl Runtime {
                         domain,
                         shutdown_tx: &shutdown_tx,
                         codecs: &codecs,
-                        deps: self.emitter_task_deps(execution_build_deps, &emitter)?,
+                        deps: self
+                            .emitter_task_deps(execution_build_deps, &emitter)
+                            .map_err(|report| RuntimeError::EmitterStart { report })?,
                     },
                     emitter,
                     inputs,
-                )?,
+                )
+                .map_err(|report| RuntimeError::EmitterStart { report })?,
             );
         }
 

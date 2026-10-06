@@ -36,6 +36,12 @@ The resource store keeps each version under `<db-path>/resources`, in one direct
 resource, and version number. It installs bytes and reports what it holds. It does not know how a
 version was uploaded, which node sent it, or which models use it.
 
+Every resource keeps a directory of its own. A resource name may begin with a dot, as `.` and `..`
+do, and the store names its own staging directories with a leading dot, so such a name's directory
+writes that dot as `%2E`: the versions of a resource named `..` sit in `%2E.`. `%` is outside the
+name alphabet, so no other resource's directory has that name. A domain name holds no dot, and its
+directory is its name.
+
 Registry validation and the transaction planner decide from the catalog inputs captured with a plan:
 the declared resources of the domain and its completed versions. Before a plan commits, the leader
 also checks three kinds of content against its own copy of a version: a VHOST's TLS bundle must

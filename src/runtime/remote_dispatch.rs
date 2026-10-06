@@ -812,11 +812,10 @@ impl Runtime {
         routing: &mut DomainRoutingCache,
     ) -> Result<(), Report<RuntimeError>> {
         let Some(admission) = payload.admission.clone() else {
-            return Err(Report::new(RuntimeError::decode_remote_relay(
-                &payload.domain,
-                &payload.relay,
-                Report::new(RemoteRelayDecodeError::MissingAdmission),
-            )));
+            let error = Report::new(RemoteRelayDecodeError::MissingAdmission).change_context(
+                RuntimeError::decode_remote_relay(&payload.domain, &payload.relay),
+            );
+            return Err(error);
         };
         let branch = match BranchKey::from_remote_key(payload.key.clone()) {
             Ok(Some(branch)) => Some(branch.as_str().to_string()),
@@ -870,7 +869,7 @@ impl Runtime {
         if !admitted && let Err(error) = &result {
             self.send_remote_relay_admission_outcome(
                 &admission,
-                RemoteAckOutcome::NoAck(error.to_string()),
+                RemoteAckOutcome::NoAck(format!("{error:#}")),
             )
             .await;
         }
@@ -907,24 +906,16 @@ impl Runtime {
         routing: &DomainRoutingSnapshot,
         domain: &DomainName,
         relay: &RelayName,
-    ) -> Result<RemoteRelayTarget, RuntimeError> {
+    ) -> error_stack::Result<RemoteRelayTarget, RuntimeError> {
+        let not_instantiated = || Report::new(RuntimeError::relay_not_instantiated(domain, relay));
         if routing.passive_only {
-            return Err(RuntimeError::RelayNotInstantiated {
-                domain: domain.as_str().to_string(),
-                relay: relay.as_str().to_string(),
-            });
+            return Err(not_instantiated());
         }
         let Some(services) = routing.relay_services.get(relay).cloned() else {
-            return Err(RuntimeError::RelayNotInstantiated {
-                domain: domain.as_str().to_string(),
-                relay: relay.as_str().to_string(),
-            });
+            return Err(not_instantiated());
         };
         let Some(schema) = routing.relay_schemas.get(relay).cloned() else {
-            return Err(RuntimeError::RelayNotInstantiated {
-                domain: domain.as_str().to_string(),
-                relay: relay.as_str().to_string(),
-            });
+            return Err(not_instantiated());
         };
         Ok(RemoteRelayTarget { services, schema })
     }
@@ -934,7 +925,7 @@ impl Runtime {
         routing: &mut DomainRoutingCache,
         domain: &DomainName,
         relay: &RelayName,
-    ) -> Result<RemoteRelayTarget, RuntimeError> {
+    ) -> error_stack::Result<RemoteRelayTarget, RuntimeError> {
         let deadline = Instant::now()
             .checked_add(REMOTE_RELAY_INSTANTIATION_WAIT)
             .assured("the fixed relay-instantiation wait fits the monotonic clock");
@@ -957,13 +948,13 @@ impl Runtime {
         &self,
         remote: RelayPayload,
         owner_ingress: bool,
-    ) -> Result<(), RuntimeError> {
-        let mut routing = self.domain_routing_cache(&remote.domain).ok_or_else(|| {
-            RuntimeError::RelayNotInstantiated {
-                domain: remote.domain.as_str().to_string(),
-                relay: remote.relay.as_str().to_string(),
-            }
-        })?;
+    ) -> error_stack::Result<(), RuntimeError> {
+        let Some(mut routing) = self.domain_routing_cache(&remote.domain) else {
+            return Err(Report::new(RuntimeError::relay_not_instantiated(
+                &remote.domain,
+                &remote.relay,
+            )));
+        };
         self.handle_remote_stream_payload_with_admission(remote, owner_ingress, &mut routing, None)
             .await
     }
@@ -1003,24 +994,23 @@ impl Runtime {
         owner_ingress: bool,
         routing: &mut DomainRoutingCache,
         admission: Option<RemoteRelayAdmissionContext<'_>>,
-    ) -> Result<(), RuntimeError> {
+    ) -> error_stack::Result<(), RuntimeError> {
         let RemoteRelayTarget { services, schema } = self
             .wait_for_remote_stream_target(routing, &remote.domain, &remote.relay)
             .await?;
         if owner_ingress && !self.owns_relay(&services) {
-            return Err(RuntimeError::RelayNotInstantiated {
-                domain: remote.domain.as_str().to_string(),
-                relay: remote.relay.as_str().to_string(),
-            });
+            return Err(Report::new(RuntimeError::relay_not_instantiated(
+                &remote.domain,
+                &remote.relay,
+            )));
         }
         let decoded = match self.decode_remote_rows(&schema, &mut remote).await {
             Ok(decoded) => decoded,
             Err(report) => {
-                return Err(RuntimeError::decode_remote_relay(
+                return Err(report.change_context(RuntimeError::decode_remote_relay(
                     &remote.domain,
                     &remote.relay,
-                    report,
-                ));
+                )));
             }
         };
         let mut acks = Vec::with_capacity(remote.acks.len());
@@ -1053,11 +1043,12 @@ impl Runtime {
             acks,
         )
         .map_err(|error| {
-            RuntimeError::decode_remote_relay(
-                &remote.domain,
-                &remote.relay,
-                error.change_context(RemoteRelayDecodeError::Batch),
-            )
+            error
+                .change_context(RemoteRelayDecodeError::Batch)
+                .change_context(RuntimeError::decode_remote_relay(
+                    &remote.domain,
+                    &remote.relay,
+                ))
         })?;
         let dispatch = async {
             let dispatch = if owner_ingress {
@@ -1081,10 +1072,10 @@ impl Runtime {
             for ack in batch.acks.iter() {
                 ack.no_ack("failed to dispatch remote relay message through local runtime");
             }
-            Err(RuntimeError::DispatchRemoteRelay {
+            Err(Report::new(RuntimeError::DispatchRemoteRelay {
                 domain: remote.domain.clone(),
                 relay: remote.relay.clone(),
-            })
+            }))
         };
         if let Some(admission) = admission {
             if admission.transport.admit() == RelayAdmissionDecision::Cancelled {
@@ -1107,44 +1098,39 @@ impl Runtime {
         mut remote: RelayPayload,
         routing: &mut DomainRoutingCache,
         admission: Option<RemoteRelayAdmissionContext<'_>>,
-    ) -> Result<(), RuntimeError> {
+    ) -> error_stack::Result<(), RuntimeError> {
         let (services, schema) = {
             let snapshot = routing.load();
+            let not_instantiated = || {
+                Report::new(RuntimeError::relay_not_instantiated(
+                    &remote.domain,
+                    &remote.relay,
+                ))
+            };
             if snapshot.passive_only {
-                return Err(RuntimeError::RelayNotInstantiated {
-                    domain: remote.domain.as_str().to_string(),
-                    relay: remote.relay.as_str().to_string(),
-                });
+                return Err(not_instantiated());
             }
             let Some(services) = snapshot.relay_services.get(&remote.relay).cloned() else {
-                return Err(RuntimeError::RelayNotInstantiated {
-                    domain: remote.domain.as_str().to_string(),
-                    relay: remote.relay.as_str().to_string(),
-                });
+                return Err(not_instantiated());
             };
             let Some(schema) = snapshot.relay_schemas.get(&remote.relay).cloned() else {
-                return Err(RuntimeError::RelayNotInstantiated {
-                    domain: remote.domain.as_str().to_string(),
-                    relay: remote.relay.as_str().to_string(),
-                });
+                return Err(not_instantiated());
             };
             (services, schema)
         };
         if remote.acks.iter().any(Option::is_some) {
-            return Err(RuntimeError::decode_remote_relay(
-                &remote.domain,
-                &remote.relay,
-                Report::new(RemoteRelayDecodeError::SubscriptionAcks),
-            ));
+            let error = Report::new(RemoteRelayDecodeError::SubscriptionAcks).change_context(
+                RuntimeError::decode_remote_relay(&remote.domain, &remote.relay),
+            );
+            return Err(error);
         }
         let decoded = match self.decode_remote_rows(&schema, &mut remote).await {
             Ok(decoded) => decoded,
             Err(report) => {
-                return Err(RuntimeError::decode_remote_relay(
+                return Err(report.change_context(RuntimeError::decode_remote_relay(
                     &remote.domain,
                     &remote.relay,
-                    report,
-                ));
+                )));
             }
         };
         let ack_count = remote.acks.len();
@@ -1156,11 +1142,12 @@ impl Runtime {
             vec![AckSet::empty(); ack_count],
         )
         .map_err(|error| {
-            RuntimeError::decode_remote_relay(
-                &remote.domain,
-                &remote.relay,
-                error.change_context(RemoteRelayDecodeError::Batch),
-            )
+            error
+                .change_context(RemoteRelayDecodeError::Batch)
+                .change_context(RuntimeError::decode_remote_relay(
+                    &remote.domain,
+                    &remote.relay,
+                ))
         })?;
         let dispatch = services.fanout_local_subscriptions(&batch);
         if let Some(admission) = admission {
@@ -1182,15 +1169,14 @@ impl Runtime {
         &self,
         remote: RelayPayload,
     ) -> Result<(), Report<RuntimeError>> {
-        let mut routing = self.domain_routing_cache(&remote.domain).ok_or_else(|| {
-            Report::new(RuntimeError::RelayNotInstantiated {
-                domain: remote.domain.as_str().to_string(),
-                relay: remote.relay.as_str().to_string(),
-            })
-        })?;
+        let Some(mut routing) = self.domain_routing_cache(&remote.domain) else {
+            return Err(Report::new(RuntimeError::relay_not_instantiated(
+                &remote.domain,
+                &remote.relay,
+            )));
+        };
         self.handle_remote_subscription_payload_with_admission(remote, &mut routing, None)
             .await
-            .map_err(Report::new)
     }
 
     /// Resolves the admission or record acknowledgement that `resolution` names.

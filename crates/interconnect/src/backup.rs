@@ -122,6 +122,11 @@ pub enum CapturedStateSectionKind {
     MaterializedDescriptor,
     MaterializedIdentities,
     MaterializedColumns,
+    DeduplicatorDescriptor,
+    DeduplicatorKeys,
+    WindowDescriptor,
+    WindowInputRows,
+    WindowArgumentColumns,
 }
 
 impl InterconnectRequest for CaptureInventoryRequest {

@@ -805,7 +805,6 @@ mod tests {
             ("raw", ParseAsType::String),
         ]);
         let program = bind_ingestor_route_for_test(
-            &domain("default"),
             &named::<ModelName>("logic_ingestor"),
             IngestMetadataKind::Kafka,
             true,
@@ -1049,7 +1048,6 @@ mod tests {
             quiesce: nervix_models::IngestQuiesceMode::Suspend,
         };
         let program = bind_ingestor_route_for_test(
-            &domain("default"),
             &named::<ModelName>("header_ingestor"),
             IngestMetadataKind::Kafka,
             source.reads_headers(),
@@ -1190,10 +1188,7 @@ mod tests {
         );
 
         let top_filter = compile_scoped_filter_program(
-            RuntimeCompileTarget {
-                domain: &domain("default"),
-                identifier: &named("header_ingestor"),
-            },
+            &named("header_ingestor"),
             Some(&expression(
                 "read_header(lower(input.header_name)) = \"primary\" AND \
                  count(read_headers(\"missing\")) = 0",

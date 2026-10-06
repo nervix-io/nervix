@@ -142,7 +142,10 @@ impl SectionVisitor for MetadataMeasure<'_> {
                 SectionContent::Nspl => MODEL_WORKING_MULTIPLIER,
                 SectionContent::ResourceArchive
                 | SectionContent::WasmGuestBlob
-                | SectionContent::MaterializedColumns => 0,
+                | SectionContent::MaterializedColumns
+                | SectionContent::DeduplicatorKeys
+                | SectionContent::WindowInputRows
+                | SectionContent::WindowArgumentColumns => 0,
             };
             bytes = bytes.and_then(|bytes| {
                 section

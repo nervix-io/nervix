@@ -13,8 +13,8 @@ use meticulous::{OptionExt as _, ResultExt as _};
 use crate::{
     ArchiveContents, ArchiveDescription, ArchiveLayout, ArchiveReadError, ArchiveRecord,
     BackupManifest, DescribedDomain, DescribedMaterializedGroup, DescribedResourceVersion,
-    DescribedRuntimeState, DescribedSection, SectionEntry, SectionPath, SectionReader,
-    SectionVisitor,
+    DescribedRuntimeState, DescribedSection, DescribedWindowGroup, SectionEntry, SectionPath,
+    SectionReader, SectionVisitor,
     archive_values::{Case, Section, State, Values},
     describe_archive, read_archive, read_archive_contents,
 };
@@ -96,6 +96,8 @@ impl Case {
                             assert_record(&group.identities);
                         }
                     }
+                    State::Deduplicator(value) => assert_record(&value.descriptor),
+                    State::Window(value) => assert_record(&value.descriptor),
                 }
             }
         }
@@ -238,6 +240,60 @@ impl Case {
                             })
                             .collect(),
                     },
+                    State::Deduplicator(value) => {
+                        let descriptor = &value.descriptor;
+                        let branch = descriptor.branch_fingerprint.as_ref();
+                        let mut groups = Vec::with_capacity(value.groups.len());
+                        for index in 0..value.groups.len() {
+                            let group = u32::try_from(index).assured("bounded group counts fit");
+                            groups.push(location(SectionPath::deduplicator_keys(
+                                &descriptor.domain,
+                                &descriptor.entity,
+                                branch,
+                                group,
+                            )));
+                        }
+                        DescribedRuntimeState::Deduplicator {
+                            descriptor: descriptor.clone(),
+                            record: location(SectionPath::deduplicator_descriptor(
+                                &descriptor.domain,
+                                &descriptor.entity,
+                                branch,
+                            )),
+                            groups,
+                        }
+                    }
+                    State::Window(value) => {
+                        let descriptor = &value.descriptor;
+                        let branch = descriptor.branch_fingerprint.as_ref();
+                        let mut groups = Vec::with_capacity(value.groups.len());
+                        for index in 0..value.groups.len() {
+                            let group = u32::try_from(index).assured("bounded group counts fit");
+                            groups.push(DescribedWindowGroup {
+                                input: location(SectionPath::window_input_rows(
+                                    &descriptor.domain,
+                                    &descriptor.entity,
+                                    branch,
+                                    group,
+                                )),
+                                arguments: location(SectionPath::window_argument_columns(
+                                    &descriptor.domain,
+                                    &descriptor.entity,
+                                    branch,
+                                    group,
+                                )),
+                            });
+                        }
+                        DescribedRuntimeState::Window {
+                            descriptor: descriptor.clone(),
+                            record: location(SectionPath::window_descriptor(
+                                &descriptor.domain,
+                                &descriptor.entity,
+                                branch,
+                            )),
+                            groups,
+                        }
+                    }
                 });
             }
             domains.push(DescribedDomain {

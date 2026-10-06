@@ -19,9 +19,24 @@ use nervix_primitives::sync::CancellationToken;
 
 use super::*;
 
-/// Every way a generator task fails to prepare or run one route for its branch.
+/// Every way a generator fails to start on this node, or its task fails to prepare or run one
+/// route for its branch. A failure to start reports its step beneath
+/// [`GeneratorError::Start`], which names the generator and its domain.
 #[derive(Debug, thiserror::Error)]
-pub(super) enum GeneratorError {
+pub(crate) enum GeneratorError {
+    #[error("failed to start generator '{generator}' in domain '{domain}'")]
+    Start {
+        domain: DomainName,
+        generator: GeneratorName,
+    },
+    #[error("output relay '{relay}' is not instantiated on this node")]
+    MissingOutputRelay { relay: RelayName },
+    #[error("could not bind the generator's cadence")]
+    Cadence,
+    #[error("the flush policy of output relay '{relay}' is invalid")]
+    FlushPolicy { relay: RelayName },
+    #[error("source relay '{relay}' has no dispatch gate on this node")]
+    MissingSourceGate { relay: RelayName },
     #[error("failed to project the generator context")]
     ProjectContext,
     #[error("failed to read generator materialized field '{field}'")]
@@ -73,18 +88,21 @@ impl GeneratorTaskSpec {
         plan: &GeneratorExecutionPlan,
         services: &HashMap<RelayName, Arc<RelayBoundaryServices>>,
         udfs: &UdfExecutor,
-    ) -> error_stack::Result<Self, RuntimeError> {
+    ) -> error_stack::Result<Self, GeneratorError> {
+        let start = || GeneratorError::Start {
+            domain: domain.clone(),
+            generator: plan.name.clone(),
+        };
         let source_branch_schema = RuntimeVmSchema::from_branching(&plan.source_branching);
         let mut routes = Vec::with_capacity(plan.routes.len());
         for route in &plan.routes {
             let Some(output_services) = services.get(&route.relay).cloned() else {
-                return Err(Report::new(RuntimeError::BuildDomainExecution {
-                    domain: domain.as_str().to_string(),
-                    reason: format!("missing generator output relay '{}'", route.relay),
-                }));
+                let error = Report::new(GeneratorError::MissingOutputRelay {
+                    relay: route.relay.clone(),
+                });
+                return Err(error.change_context(start()));
             };
             let program = compile_generator_set_program(
-                domain,
                 &plan.name,
                 &plan.source_relay,
                 route,
@@ -101,7 +119,7 @@ impl GeneratorTaskSpec {
                 },
                 Some(udfs),
             )
-            .map_err(Report::new)?;
+            .change_context_lazy(start)?;
             routes.push(GeneratorTaskRouteSpec::new(route, program, output_services));
         }
         Ok(Self::new(plan, routes))
@@ -479,7 +497,7 @@ impl Runtime {
         domain: &DomainName,
         shutdown_tx: &watch::Sender<bool>,
         spec: GeneratorTaskSpec,
-    ) -> Result<JoinHandle<()>, RuntimeError> {
+    ) -> error_stack::Result<JoinHandle<()>, GeneratorError> {
         let GeneratorTaskSpec {
             name,
             each,
@@ -488,29 +506,40 @@ impl Runtime {
             context_projection,
             routes,
         } = spec;
-        let cadence = self
-            .bind_domain_cadence(domain, each, DomainCadenceStart::Immediate)
-            .map_err(|error| RuntimeError::BuildDomainExecution {
-                domain: domain.as_str().to_string(),
-                reason: format!(
-                    "generator '{}' could not bind its cadence: {error}",
-                    name.as_str(),
-                ),
-            })?;
+        let start = || GeneratorError::Start {
+            domain: domain.clone(),
+            generator: name.clone(),
+        };
+        let cadence = match self.bind_domain_cadence(domain, each, DomainCadenceStart::Immediate) {
+            Ok(cadence) => cadence,
+            Err(error) => {
+                return Err(error
+                    .change_context(GeneratorError::Cadence)
+                    .change_context(start()));
+            }
+        };
         let domain_clock = cadence.clock().clone();
         let ack_tracker = self.domain_ack_root_tracker(domain);
-        let routes = routes
-            .into_iter()
-            .map(|route| {
-                let flush_policy = Self::parse_runtime_node_flush_policy(
-                    domain,
-                    "generator",
-                    &name,
-                    &route.flush_policy,
-                )?;
-                Ok((route, flush_policy))
-            })
-            .collect::<Result<Vec<_>, RuntimeError>>()?;
+        let mut flushed_routes = Vec::with_capacity(routes.len());
+        for route in routes {
+            let flush_policy = match Self::parse_runtime_node_flush_policy(
+                domain,
+                "generator",
+                &name,
+                &route.flush_policy,
+            ) {
+                Ok(flush_policy) => flush_policy,
+                Err(error) => {
+                    return Err(Report::new(error)
+                        .change_context(GeneratorError::FlushPolicy {
+                            relay: route.relay.clone(),
+                        })
+                        .change_context(start()));
+                }
+            };
+            flushed_routes.push((route, flush_policy));
+        }
+        let routes = flushed_routes;
         let task_domain = domain.clone();
         let task_generator = name.clone();
         let source_gate = self
@@ -523,13 +552,10 @@ impl Runtime {
             ))
             .map(|fanout| fanout.dispatch_gate());
         let Some(source_gate) = source_gate else {
-            return Err(RuntimeError::BuildDomainExecution {
-                domain: domain.as_str().to_string(),
-                reason: format!(
-                    "missing generator source relay gate '{}'",
-                    source_relay.as_str()
-                ),
+            let error = Report::new(GeneratorError::MissingSourceGate {
+                relay: source_relay.clone(),
             });
+            return Err(error.change_context(start()));
         };
         let quiesce_counters =
             self.node_quiesce_counters(domain, NodeRef::new(ModelKind::Generator, &name));
@@ -556,7 +582,7 @@ impl Runtime {
                 Err(error) => {
                     task_events.report_error(format!(
                         "generator '{}' in domain '{}' could not bind its routing snapshot: \
-                         {error}",
+                         {error:#}",
                         task_generator.as_str(),
                         task_domain.as_str(),
                     ));
@@ -723,7 +749,8 @@ impl Runtime {
                             Err(error) => {
                                 task_events.report_error(format!(
                                     "generator '{}' in domain '{}' could not obtain its fresh \
-                                     execution time for the occurrence due at '{due_at}': {error}",
+                                     execution time for the occurrence due at '{due_at}': \
+                                     {error:#}",
                                     task_generator.as_str(),
                                     task_domain.as_str(),
                                 ));
@@ -949,7 +976,7 @@ impl Runtime {
                     Err(error) => {
                         task_events.report_error(format!(
                             "generator '{}' in domain '{}' could not inspect route flush \
-                             deadlines: {error}",
+                             deadlines: {error:#}",
                             task_generator.as_str(),
                             task_domain.as_str(),
                         ));
@@ -967,7 +994,7 @@ impl Runtime {
                             Err(error) => {
                                 task_events.report_error(format!(
                                     "generator '{}' in domain '{}' could not inspect route '{}' \
-                                     flush deadline: {error}",
+                                     flush deadline: {error:#}",
                                     task_generator.as_str(),
                                     task_domain.as_str(),
                                     route.relay.as_str(),
@@ -1026,7 +1053,7 @@ impl Runtime {
                             Err(error) => {
                                 task_events.report_error(format!(
                                     "generator '{}' in domain '{}' could not advance its \
-                                     cadence: {error}",
+                                     cadence: {error:#}",
                                     task_generator.as_str(),
                                     task_domain.as_str(),
                                 ));
@@ -1040,7 +1067,7 @@ impl Runtime {
                         if let Err(error) = result {
                             task_events.report_error(format!(
                                 "generator '{}' in domain '{}' could not wait for a route flush \
-                                 deadline: {error}",
+                                 deadline: {error:#}",
                                 task_generator.as_str(),
                                 task_domain.as_str(),
                             ));
@@ -1184,7 +1211,6 @@ mod tests {
         let route = planned_route(output, output_schema.clone());
 
         let program = compile_generator_set_program(
-            &domain("default"),
             &named("synth_notifications"),
             &named("notifications"),
             &route,
@@ -1303,7 +1329,6 @@ mod tests {
         let route = planned_route(output, output_schema.clone());
 
         let error = compile_generator_set_program(
-            &domain("default"),
             &named("synth_notifications"),
             &named("notifications"),
             &route,
@@ -1325,6 +1350,65 @@ mod tests {
         )
         .expect_err("a sensitive branch value cannot initialize a non-sensitive output");
 
-        assert!(error.to_string().contains("sensitive"), "{error}");
+        assert!(
+            matches!(
+                error.current_context(),
+                RuntimeVmCompileError::CompileGeneratorOutput { generator, relay }
+                    if generator.as_str() == "synth_notifications"
+                        && relay.as_str() == "generated_notifications"
+            ),
+            "the compile failure must name the generator and its output: {error:#}"
+        );
+        assert!(
+            error.downcast_ref::<nervix_vm::CompileError>().is_some(),
+            "the VM's own compile failure must stay beneath: {error:#}"
+        );
+        let rendered = format!("{error:#}");
+        assert!(rendered.contains("sensitive"), "{rendered}");
+    }
+
+    #[nervix_primitives::test]
+    async fn a_generator_that_cannot_start_names_itself_its_domain_and_the_step() {
+        let runtime = Runtime::default();
+        let edge = domain("edge");
+        let (shutdown_tx, _shutdown_rx) = nervix_primitives::sync::watch::channel(false);
+        let source_schema = test_schema(&[("value", ParseAsType::String)]);
+        let spec = || GeneratorTaskSpec {
+            name: named("synth_notifications"),
+            each: "1s".parse().assured("one second is a valid cadence"),
+            source_relay: named("notifications"),
+            source_branching: ResolvedBranching::unbranched(),
+            context_projection: GeneratorContextProjection {
+                source_namespace: "relay_state.notifications".to_string(),
+                schema: source_schema.arrow_schema(),
+            },
+            routes: Vec::new(),
+        };
+
+        let without_domain = match runtime.spawn_generator_task(&edge, &shutdown_tx, spec()) {
+            Ok(_) => {
+                panic!("a generator cannot bind the cadence of a domain this node does not run")
+            }
+            Err(error) => error,
+        };
+        assert!(matches!(
+            without_domain.current_context(),
+            GeneratorError::Start { generator, .. } if generator.as_str() == "synth_notifications"
+        ));
+        assert!(without_domain.frames().any(|frame| matches!(
+            frame.downcast_ref::<GeneratorError>(),
+            Some(GeneratorError::Cadence)
+        )));
+
+        install_unpaced_test_domain(&runtime, &edge);
+        let without_gate = match runtime.spawn_generator_task(&edge, &shutdown_tx, spec()) {
+            Ok(_) => panic!("a generator cannot read a source relay without its dispatch gate"),
+            Err(error) => error,
+        };
+        assert_eq!(
+            format!("{without_gate:#}"),
+            "failed to start generator 'synth_notifications' in domain 'edge': source relay \
+             'notifications' has no dispatch gate on this node"
+        );
     }
 }

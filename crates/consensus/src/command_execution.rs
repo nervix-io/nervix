@@ -289,6 +289,12 @@ pub struct CommandExecution {
     pub state: CommandExecutionState,
 }
 
+impl crate::records::StoredUnder<CommandExecutionReference> for CommandExecution {
+    fn is_stored_under(&self, reference: &CommandExecutionReference) -> bool {
+        self.reference == *reference
+    }
+}
+
 impl CommandExecution {
     pub fn applying(
         reference: CommandExecutionReference,
@@ -736,6 +742,14 @@ impl CommandExecutionRecords {
     ) -> io::Result<Self> {
         let entries: Records<CommandExecutionReference, CommandExecution> =
             Records::load(b'e', keyspace)?;
+        Self::from_entries(entries, retry_fence)
+    }
+
+    /// The executions `entries` holds under `retry_fence`, with the indexes derived from them.
+    fn from_entries(
+        entries: Records<CommandExecutionReference, CommandExecution>,
+        retry_fence: Option<Timestamp>,
+    ) -> io::Result<Self> {
         let mut applying = OrdSet::new();
         let mut finished = OrdSet::new();
         let mut expired = OrdSet::new();
@@ -751,10 +765,10 @@ impl CommandExecutionRecords {
                     });
                 }
                 CommandExecutionState::Expired => {
-                    let issued_at = execution
-                        .reference
-                        .retry_issued_at()
-                        .map_err(io::Error::other)?;
+                    // Only a retry identity whose issue time reads back is ever expired.
+                    let issued_at = execution.reference.retry_issued_at().map_err(|_| {
+                        io::Error::other(crate::durable_batch::StorageFailure::InvalidState)
+                    })?;
                     expired.insert(ExpiredCommandExecutionKey {
                         issued_at,
                         reference: execution.reference.clone(),
@@ -771,6 +785,27 @@ impl CommandExecutionRecords {
         })
     }
 
+    /// `executions`, each keyed by its reference, under `retry_fence`, for generated storage
+    /// states. It refuses what recovery refuses: an expired execution whose reference holds no
+    /// issue time.
+    #[cfg(test)]
+    pub(crate) fn generated(
+        executions: impl IntoIterator<Item = CommandExecution>,
+        retry_fence: Option<Timestamp>,
+    ) -> io::Result<Self> {
+        let mut entries = Records::default();
+        for execution in executions {
+            entries.insert(execution.reference.clone(), execution);
+        }
+        Self::from_entries(entries, retry_fence)
+    }
+
+    /// Every retained execution, in reference order.
+    #[cfg(test)]
+    pub(crate) fn executions(&self) -> impl Iterator<Item = &CommandExecution> {
+        self.entries.values()
+    }
+
     pub(crate) fn write_changes(
         &self,
         preceding: &Self,
@@ -783,6 +818,11 @@ impl CommandExecutionRecords {
 
     pub(crate) fn retry_fence(&self) -> Option<Timestamp> {
         self.retry_fence
+    }
+
+    /// How many keyed records the executions store.
+    pub(crate) fn stored_records(&self) -> usize {
+        self.entries.len()
     }
 
     pub(crate) fn get(&self, reference: &CommandExecutionReference) -> Option<&CommandExecution> {

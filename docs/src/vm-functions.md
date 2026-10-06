@@ -52,7 +52,11 @@ The VM compiler, batch constructors, runtime, and `FunctionInjector` return `err
 reports with their semantic `CompileError` or `RuntimeError` context. A compile error retains a
 typed code, its existing stable code spelling through `code()`, the operation span, and a safe
 message. Registry validation adds the owning model and route while retaining the VM report.
-Runtime plan binding likewise adds its operation above the original VM report. Roto UDF setup
+Runtime plan binding likewise adds its operation above the original VM report: a
+`RuntimeVmCompileError` names the program and its node, such as a filter, a FILTER-MAP route, an
+output branch construction or a generator output, and its caller names the domain above that. A
+lowering, `LOOKUP_HASH_MAP` or materialized-state binding failure stays beneath the same program
+context instead of being rendered into its text. Roto UDF setup
 returns `UdfError` reports; its injected calls return VM runtime reports, retaining an underlying
 Arrow failure when one caused the call to fail. Jaq compilation, evaluation, and format conversion
 return their own typed reports to the codec or signaling caller. These reports are batch or setup
@@ -450,6 +454,7 @@ All paths are relative to the repository root.
 | `src/runtime/ingest_metadata.rs`, `lookup_hash_map.rs` | The header injector and hash-map lookup calls |
 | `src/runtime/message_error.rs` | Structured message errors, the rows whose required outputs are missing, and execution of prepared error-record programs |
 | `src/runtime/window_processor.rs`, `window_accumulator/`, `window_state.rs` | Branch-local windows, their aggregate structures, and their snapshots |
+| `src/runtime/window_archive.rs` | A captured window as bounded archive Arrow groups, and the window snapshot rebuilt from them |
 | `src/runtime/subscription_predicate.rs` | Session subscription filters |
 
 Window checkpoints nest bounded resident Arrow containers from the shared snapshot codec under
@@ -732,8 +737,8 @@ bodies are encoded and decoded on, their whole capacity.
 
 Admission can refuse. A class whose wait queue is full refuses the execution with
 `RuntimeError::ExecutionNotAdmitted`, and a job that panics on its worker returns
-`RuntimeError::ExecutionPanicked`. Both are batch errors, which a processor's general error policy
-handles like any other.
+`RuntimeError::ExecutionPanicked`. Both are batch errors, which reach the node's error policy as
+the report of the planned step that ran the program, like any other batch failure.
 
 An inline execution never yields and has no cancellation point: it runs every instruction over
 its batch to completion, and the batch's size and the limits above bound that work. An admitted
@@ -1221,12 +1226,27 @@ that every row belongs to this branch. It then re-admits every row in order. Tha
 exact structure and every sketch pane from the rows themselves, then reapplies any delayed
 removals.
 
+The argument columns of a snapshot have one schema, which the window compiler derives from the
+route's aggregate demands: one nullable column per argument of every demand, in demand order.
+Native snapshots and backup archives both use it, and a reader opens a sealed snapshot only
+against that schema and the window's input relay schema.
+
+A [backup](./backup-and-restore.md) archives the same publication in a public form. Each window
+branch becomes an rkyv descriptor holding the retained rows' admission sequences and watermarks,
+the branch incarnation, the window model digest and every histogram's delayed removals, together
+with bounded groups of the retained input rows and their argument columns as Arrow IPC. A restore
+converts those groups back into a native snapshot, which the branch task restores as it restores
+any other: every row is re-admitted in order, and the histograms take their delayed removals back.
+The window model digest is the BLAKE3 hash of the window processor's canonical NSPL, so a window
+whose `WIDTH`, `STEP`, state limit or aggregates changed starts empty instead.
+
 How each ending treats the window:
 
 | Ending | Effect on the window |
 | --- | --- |
 | Handoff or detach | Flushes a window whose width is met, then publishes what remains. |
 | Eviction | Resets the window first, so its final publication is empty and a later branch with the same key starts fresh. |
+| Quiesced backup cut | Publishes any change since the window's last publication when the cut's lifecycle checkpoint asks. The retained rows' acknowledgement shares stay parked, so they do not hold the cut open; the cut captures them as window state. |
 | A task aborted after its shutdown grace period | Loses the changes made after its last publication. |
 
 Snapshot transfer between nodes follows the bulk transfer rules of the [Cluster
