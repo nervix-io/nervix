@@ -35,6 +35,8 @@ pub(super) mod generation;
 mod maintenance;
 
 #[cfg(test)]
+mod key_properties;
+#[cfg(test)]
 mod wasm_properties;
 
 use durability::DurabilityBarrier;
@@ -2087,9 +2089,17 @@ fn stored_placement(key: &[u8]) -> Result<StoredPlacement, Report<RuntimePersist
             "runtime state key has an invalid state kind".to_string(),
         )));
     };
-    let kind_start = state_offset
-        .checked_add(2)
+    let separator = state_offset
+        .checked_add(1)
         .verified("the state-kind byte position is an index into this key");
+    if key.get(separator) != Some(&0) {
+        return Err(Report::new(RuntimePersistenceError::DecodeState(
+            "runtime state key has no state-kind separator".to_string(),
+        )));
+    }
+    let kind_start = separator
+        .checked_add(1)
+        .verified("the state-kind separator read above is inside this key");
     let kind_end = key
         .get(kind_start..)
         .and_then(|rest| rest.iter().position(|byte| *byte == 0));
@@ -2126,7 +2136,7 @@ fn stored_placement(key: &[u8]) -> Result<StoredPlacement, Report<RuntimePersist
             "runtime state key has an invalid identifier".to_string(),
         )
     })?;
-    let identifier = ModelName::parse(identifier).map_err(|_| {
+    let identifier = ModelName::decode(identifier).map_err(|_| {
         RuntimePersistenceError::DecodeState(
             "runtime state key has an invalid identifier".to_string(),
         )

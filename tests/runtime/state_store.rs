@@ -731,21 +731,28 @@ fn forced_recovery_publishes_staged_guest_state_in_the_committed_generation() {
     );
 }
 
-/// A stored key is bytes read back from the database, so decoding one that ends inside the
-/// state-kind prefix must report a decode error rather than index past the key.
+/// A stored key is bytes read back from the database, so decoding one that ends where the
+/// separator after its state kind or after its Model kind belongs must report a decode error
+/// rather than index past the key.
 #[test]
 fn truncated_state_key_reports_a_decode_error() {
     let mut key = b"acme".to_vec();
     key.push(0);
     key.push(u8::from(RuntimeStateKind::Deduplicator));
+    assert_truncated_key_names(&key, "state-kind separator");
 
-    let error = stored_placement(&key)
+    key.push(0);
+    key.extend_from_slice(b"deduplicator");
+    assert_truncated_key_names(&key, "model-kind separator");
+}
+
+fn assert_truncated_key_names(key: &[u8], missing: &str) {
+    let error = stored_placement(key)
         .err()
-        .expect("a key that ends inside the state-kind prefix must not decode");
-
+        .expect("a key that ends inside its state-kind prefix must not decode");
     assert!(
         matches!(error.current_context(), RuntimePersistenceError::DecodeState(message)
-            if message.contains("model-kind separator")),
+            if message.contains(missing)),
         "unexpected error for a truncated state key: {error:?}"
     );
 }
