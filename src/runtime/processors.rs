@@ -131,6 +131,9 @@ pub(super) enum RelayProcessorOperationTemplate {
     },
     WindowProcessor {
         output_routes: RelayProcessorOutputsTemplate,
+        /// The schema every input relay of the processor shares. The aggregates are compiled
+        /// against it, and a branch restores the rows its open window retains under it.
+        input_schema: Arc<CompiledSchema>,
         width_messages: Option<usize>,
         step_messages: Option<usize>,
         width_duration: Option<Duration>,

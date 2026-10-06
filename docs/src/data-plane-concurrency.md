@@ -368,8 +368,11 @@ branch task's final publication. The published generation is empty, so a later a
 same branch key cannot inherit the evicted window or its sketch panes. After the final checkpoint,
 the owner releases the evicted branch's in-memory publication. A branch that appears without a
 restored lifecycle entry also publishes an empty initial window, even if a previous lifetime of its
-key left a checkpoint behind. Stopping a branch for an ownership handoff follows the normal
-finalization path and publishes its retained window instead.
+key left a checkpoint behind. A processor task therefore installs every branch its lifecycle names
+before it dequeues any input, and a restore the bulk executor refuses installs none of them and is
+attempted again; see [Restoring Processor Branches](./shutdown.md#restoring-processor-branches).
+Stopping a branch for an ownership handoff follows the normal finalization path and publishes its
+retained window instead.
 The branch lifecycle and window checkpoint carry the same incarnation, assigned when the concrete
 branch appears. A restore whose incarnations differ begins with empty window state and marks it
 for publication, so a delayed checkpoint from the preceding lifetime cannot restore its panes.
