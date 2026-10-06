@@ -500,7 +500,8 @@ the connector prepared them. A preparation that breaks any of these fails the at
 retry and retains nothing, because the same connector would prepare the same rows the same way
 again. The host
 applies the answers to the corresponding ACK roots and error policy. The emitter task owns its buffer, maximum batch size, flush cadence,
-retry schedule, fault injection, stop deadline, and metrics. The connector owns the external
+the commit cadence of the rows a staging sink holds, retry schedule, fault injection, stop deadline,
+and metrics. The connector owns the external
 operation and its completion point. A receiver-requested delay, which a connector attaches to the
 attempt's failure, can extend, but cannot shorten, the host's retry backoff; the backoff sequence
 advances as it would without it. The host ignores a delay whose end its monotonic clock cannot
@@ -719,13 +720,19 @@ fields, any other text, a number beyond 64 bits, a date after 2262, or a delay t
 waits for the longer of this delay and its backoff on its monotonic clock, so the domain's
 `TIME RATE` never shortens it.
 
-For a sink that stages writes, the lifecycle exposes a domain or physical commit deadline,
-staged-message count, pending ACKs, and a commit operation. The host includes that deadline in
-the emitter wake and forces a commit during drain. It keeps retained ACKs alive during commit and
-retry, and reports sent metrics only after the commit reports publication. A failed commit retries
-on the emitter's declared backoff until it succeeds or the stop deadline ends the attempt. See
-[ACK Semantics And Effective Delivery](./emitters.md#ack-semantics-and-effective-delivery) for
-the user-visible delivery consequences.
+For a sink that stages writes, the lifecycle reports what it holds for its next commit, either rows
+that wait for a domain-logical commit cadence or rows that reached its maximum commit size, together
+with a staged-message count, pending ACKs, and a commit operation. The host owns the cadence. It
+arms the cadence's logical deadline at the first cadence check that finds rows staged, which follows
+the write that staged them, so rows that waited in the emitter buffer still wait the whole cadence
+after they are staged, and rows that later writes stage join that commit without moving it. The host
+includes the deadline in the emitter wake and commits once it is reached or the sink reports its
+size boundary. A retry and a drain force the commit without reading the domain clock, which a
+stopped domain no longer has. The host keeps retained ACKs alive during commit and retry, and
+reports sent metrics only after the commit reports publication. A failed commit retries on the
+emitter's declared backoff until it succeeds or the stop deadline ends the attempt. See
+[ACK Semantics And Effective Delivery](./emitters.md#ack-semantics-and-effective-delivery) for the
+user-visible delivery consequences.
 
 ```mermaid
 sequenceDiagram
@@ -739,7 +746,7 @@ sequenceDiagram
     Sink->>External: Write records or mapped rows
     Sink-->>Host: Delivered, rejected, and attempt failure
     opt Sink retains staged ACKs
-        Host->>Sink: Commit at deadline or drain
+        Host->>Sink: Commit on cadence, size boundary or drain
         Sink->>External: Publish staged data
         Sink-->>Host: Commit report and resolved ACKs
     end
@@ -795,8 +802,8 @@ sequenceDiagram
   the same character classifier. The OTEL sink decodes trace and span identifiers with
   `faster-hex` after checking their exact length.
 - **Iceberg sink.** It stages Arrow data locally on the node's filesystem storage workers,
-  prepares data files, and publishes a catalog update on its explicit commit cadence or maximum
-  size. Staging does not complete an ACK; successful catalog commit does. The sink retains ACKs and its client while a failed commit is
+  prepares data files, and publishes a catalog update once its `COMMIT EACH` cadence, which the
+  host measures from staging, ends or its staged files reach the maximum commit size. Staging does not complete an ACK; successful catalog commit does. The sink retains ACKs and its client while a failed commit is
   retried. [Iceberg emission](./emitters.md#iceberg) defines the external commit and duplicate
   limits.
 - **RabbitMQ sink.** The broker answers no `NO_ACK` message itself, so the sink ends a `NO_ACK`

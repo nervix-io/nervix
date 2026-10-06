@@ -590,9 +590,10 @@ the publish itself is the completion point.
 
 A sink that stages what it accepts and publishes it later reaches its completion point at its
 commit instead. After the buffered batches are written into such a sink, the drain calls the sink
-contract's commit hook and forces it, so the commit runs whatever the sink's own commit deadline
-says. Until that commit succeeds the sink holds the acknowledgements of every row it staged, and
-the drain counts those rows as work the node still owes. A commit that fails is retried on the
+contract's commit hook and forces it, so the commit runs whatever its commit cadence says and
+without reading the domain clock, which a stopped domain no longer has. Until that commit succeeds
+the sink holds the acknowledgements of every row it staged, and the drain counts those rows as work
+the node still owes. A commit that fails is retried on the
 emitter's declared backoff, reported as the emitter's commit retry, and a shutdown that cuts the
 backoff short fails the drain.
 
@@ -843,6 +844,9 @@ installations and generations ahead of catch-up; without an applied log it retai
 Terminal or superseded applied attempts are reclaimed in bounded deletion batches, including
 chunks without receipts. Terminal teardown cancels the maintenance caller, and its storage job
 checks cancellation between bounded units. A later startup resumes from the remaining keys.
+The same owner reclaims selected-namespace chunks made unreachable by ordinary or replica
+checkpoint replacement, ownership recovery or purge, including after restart. It keeps the
+selected publication and every currently referenced segmented revision.
 Reclamation preserves snapshot readers and never completes an installation or opens its `START`
 gate. See [restore checkpoint storage](backup-and-restore.md#restore-checkpoint-storage-quota-and-metrics)
 for quotas, metrics and physical storage limits.

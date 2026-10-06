@@ -209,7 +209,10 @@ emitters exactly as in every other flush-based node. A paced domain's `TIME RATE
 accelerates or slows them, and a stopped clock cannot silently turn any of them into a wall-clock
 wait. Each source relay and concrete branch owns its collection deadline; each concrete output
 branch owns its route deadline. A deadline starts only when data enters an empty buffer and is
-cleared when that buffer is released by time, size, force flush, shutdown, or error handling.
+cleared when that buffer is released by time, size, force flush, shutdown, or error handling. For
+`COMMIT EACH` that buffer is the Iceberg emitter's staged files: its deadline starts when a flush
+stages rows while none are staged, not at the domain time those rows' batch was accepted at, and a
+retry or drain commits them without reading the clock.
 
 `FLUSH IMMEDIATE` instead uses a physical 100 µs minimum on the process monotonic clock, regardless
 of domain rate. The ingestor source-group bound of 1,024 messages and 5 ms idle close are also

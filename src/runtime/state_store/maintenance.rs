@@ -1,4 +1,4 @@
-//! Reclamation and accounting of unpublished restore generations.
+//! Reclamation and accounting of unpublished generations and unreferenced active chunks.
 //!
 //! Layer: infrastructure.
 //! - **Owns.** Bounded namespace deletion, current key/value accounting and checkpoint admission.
@@ -18,6 +18,31 @@ use crate::metrics::RestoreStagingObservation;
 
 pub(crate) const DEFAULT_RESTORE_STAGING_MAX_BYTES: u64 = 128 * 1024 * 1024 * 1024;
 
+#[derive(Clone, Copy)]
+enum MaintenanceKeyspace {
+    Latest,
+    Index,
+    Chunks,
+    Receipts,
+}
+
+impl MaintenanceKeyspace {
+    const ALL: [Self; 4] = [Self::Latest, Self::Index, Self::Chunks, Self::Receipts];
+
+    fn keyspace(self, store: &RuntimeStateStore) -> &Keyspace {
+        match self {
+            Self::Latest => &store.latest,
+            Self::Index => &store.lsm_index,
+            Self::Chunks => &store.checkpoint_chunks,
+            Self::Receipts => &store.restore_staging,
+        }
+    }
+
+    fn is_receipt(self) -> bool {
+        matches!(self, Self::Receipts)
+    }
+}
+
 impl RuntimeStateStore {
     /// Measure unpublished key and value sizes from one view, seeking past selected namespaces.
     #[cfg_attr(
@@ -35,12 +60,8 @@ impl RuntimeStateStore {
             limit_bytes: self.restore_staging_max_bytes,
             ..RestoreStagingObservation::default()
         };
-        for (keyspace, receipts) in [
-            (&self.latest, false),
-            (&self.lsm_index, false),
-            (&self.checkpoint_chunks, false),
-            (&self.restore_staging, true),
-        ] {
+        for kind in MaintenanceKeyspace::ALL {
+            let keyspace = kind.keyspace(self);
             observation.disk_bytes = observation
                 .disk_bytes
                 .checked_add(keyspace.disk_space())
@@ -50,7 +71,9 @@ impl RuntimeStateStore {
                 check()?;
                 cursor = next;
                 let active = backup::active_namespace(&view, &self.restore_publications, &domain)?;
-                if namespace == StateNamespace::Initial || (!receipts && namespace == active) {
+                if namespace == StateNamespace::Initial
+                    || (!kind.is_receipt() && namespace == active)
+                {
                     continue;
                 }
                 for item in view.prefix(keyspace, namespace.prefix(&domain)) {
@@ -110,38 +133,48 @@ impl RuntimeStateStore {
     ) -> error_stack::Result<RestoreStagingObservation, RuntimePersistenceError> {
         self.latest_snapshot_writer().with_installation(|| {
             check()?;
-            let before = self.restore_staging_observation(&mut check)?;
             let view = self.db.snapshot();
-            for (keyspace, receipts) in [
-                (&self.latest, false),
-                (&self.lsm_index, false),
-                (&self.checkpoint_chunks, false),
-                (&self.restore_staging, true),
-            ] {
+            let mut reclaimed = 0_u64;
+            for kind in MaintenanceKeyspace::ALL {
+                let keyspace = kind.keyspace(self);
                 let mut cursor = Vec::new();
                 while let Some((namespace, domain, next)) =
                     next_namespace(&view, keyspace, &cursor)?
                 {
                     check()?;
                     cursor = next;
+                    let active =
+                        backup::active_namespace(&view, &self.restore_publications, &domain)?;
+                    if namespace == active
+                        && let MaintenanceKeyspace::Chunks = kind
+                    {
+                        let bytes = self.reclaim_active_checkpoint_chunks(
+                            &view, &domain, namespace, &mut check,
+                        )?;
+                        reclaimed = reclaimed
+                            .checked_add(bytes)
+                            .ok_or(RuntimePersistenceError::RestoreStagingSize)?;
+                        continue;
+                    }
                     let StateNamespace::Restored(generation) = namespace else {
                         continue;
                     };
-                    let active =
-                        backup::active_namespace(&view, &self.restore_publications, &domain)?;
                     let reclaim = if namespace == active {
-                        receipts
+                        kind.is_receipt()
                     } else {
                         !retains(&domain, generation)
                     };
                     if reclaim {
-                        remove_bounded(
+                        let bytes = remove_bounded(
                             &self.db,
                             keyspace,
                             &namespace.prefix(&domain),
                             |_| Ok(true),
                             &mut check,
                         )?;
+                        reclaimed = reclaimed
+                            .checked_add(bytes)
+                            .ok_or(RuntimePersistenceError::RestoreStagingSize)?;
                     }
                 }
             }
@@ -149,10 +182,7 @@ impl RuntimeStateStore {
             // readers retain their own complete snapshots through Fjall's retention mechanism.
             drop(view);
             let mut after = self.restore_staging_observation(&mut check)?;
-            after.reclaimed_bytes = before
-                .staged_bytes
-                .checked_sub(after.staged_bytes)
-                .ok_or(RuntimePersistenceError::RestoreStagingSize)?;
+            after.reclaimed_bytes = reclaimed;
             if after.reclaimed_bytes > 0 {
                 self.db
                     .persist(PersistMode::SyncAll)
@@ -160,6 +190,54 @@ impl RuntimeStateStore {
             }
             Ok(after)
         })
+    }
+
+    #[cfg_attr(
+        nervix_lint,
+        nervix::dispatch(reason = "the admitted maintenance owner checks cancellation between \
+                                   segment sets and bounded deletion batches")
+    )]
+    fn reclaim_active_checkpoint_chunks(
+        &self,
+        view: &fjall::Snapshot,
+        domain: &DomainName,
+        namespace: StateNamespace,
+        check: &mut impl FnMut() -> error_stack::Result<(), RuntimePersistenceError>,
+    ) -> error_stack::Result<u64, RuntimePersistenceError> {
+        let prefix = namespace.prefix(domain);
+        let mut cursor = prefix.clone();
+        let mut reclaimed = 0_u64;
+        loop {
+            check()?;
+            let Some(item) = view
+                .range::<&[u8], _>(&self.checkpoint_chunks, cursor.as_slice()..)
+                .next()
+            else {
+                break;
+            };
+            let key = item
+                .key()
+                .change_context(RuntimePersistenceError::ReadValue)?;
+            if !key.starts_with(&prefix) {
+                break;
+            }
+            let chunks = CheckpointChunkSet::try_from(key.as_ref())?;
+            cursor = chunks.exclusive_end();
+            if chunks.is_selected(view, &self.latest)? {
+                continue;
+            }
+            let bytes = remove_bounded(
+                &self.db,
+                &self.checkpoint_chunks,
+                &chunk_prefix(chunks.placement_key, chunks.lsm),
+                |_| Ok(true),
+                check,
+            )?;
+            reclaimed = reclaimed
+                .checked_add(bytes)
+                .ok_or(RuntimePersistenceError::RestoreStagingSize)?;
+        }
+        Ok(reclaimed)
     }
 
     pub(super) fn admit_restore_checkpoint(
@@ -172,7 +250,9 @@ impl RuntimeStateStore {
     ) -> error_stack::Result<(), RuntimePersistenceError> {
         let key_bytes = u64::try_from(placement_key.len()).verified("bounded keys fit u64");
         let chunk_key_bytes = key_bytes
-            .checked_add(18)
+            .checked_add(
+                u64::try_from(CHUNK_COORDINATE_BYTES).verified("fixed chunk coordinates fit u64"),
+            )
             .ok_or(RuntimePersistenceError::RestoreStagingSize)?;
         let chunks = metadata.length.div_ceil(
             u64::try_from(RESTORE_STATE_CHUNK_BYTES).verified("the chunk policy fits u64"),
@@ -247,12 +327,16 @@ fn next_namespace(
 }
 
 #[cfg(test)]
+#[path = "../../../tests/runtime/active_restore_chunks.rs"]
+mod active_chunk_tests;
+
+#[cfg(test)]
 pub(in crate::runtime::state_store) mod tests {
     use nervix_interconnect::backup::RestoreStateInventory;
 
     use super::*;
 
-    fn store(path: &std::path::Path, limit: u64) -> RuntimeStateStore {
+    pub(super) fn store(path: &std::path::Path, limit: u64) -> RuntimeStateStore {
         RuntimeStateStore::from_database(
             Database::builder(path)
                 .open()
@@ -263,7 +347,7 @@ pub(in crate::runtime::state_store) mod tests {
         .assured("the current store opens")
     }
 
-    fn placement(domain: &str) -> RuntimeStatePlacement {
+    pub(super) fn placement(domain: &str) -> RuntimeStatePlacement {
         RuntimeStatePlacement {
             domain: DomainName::parse(domain).assured("the test domain is valid"),
             kind: ModelKind::Ingestor,
@@ -273,7 +357,7 @@ pub(in crate::runtime::state_store) mod tests {
         }
     }
 
-    fn authority(generation: u64) -> nervix_models::RestoreStateAuthority {
+    pub(super) fn authority(generation: u64) -> nervix_models::RestoreStateAuthority {
         nervix_models::RestoreStateAuthority {
             leader: ClusterNodeName::parse("node-1").assured("the test node is valid"),
             term: 4,
@@ -284,7 +368,7 @@ pub(in crate::runtime::state_store) mod tests {
         }
     }
 
-    fn stage(
+    pub(super) fn stage(
         store: &RuntimeStateStore,
         generation: u64,
         placement: &RuntimeStatePlacement,
@@ -587,6 +671,7 @@ pub(in crate::runtime::state_store) mod tests {
         interrupted_bounded_reclamation_resumes_from_remaining_keys_after_restart();
         cancelled_maintenance_and_unrepresentable_admission_preserve_the_store();
         maintenance_work_tracks_namespaces_in_a_published_store();
+        super::active_chunk_tests::diagnostic_active_chunk_reclamation();
     }
 
     #[test]

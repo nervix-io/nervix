@@ -363,6 +363,11 @@ failure remains a storage failure beneath the admitted restore step and leaves i
 gate closed. Node-local maintenance logs admission, cancellation or storage failure and retries
 on its next sweep without changing the command outcome or gate. Metrics are updated only for a
 completed sweep, so a partial cancelled deletion cannot claim a completed reclamation count.
+Maintenance treats an absent or inline selected header, or another selected checkpoint revision,
+as ordinary chunk unreachability. Malformed chunk coordinates or bounded checkpoint headers keep
+their typed storage errors. Bounded deletion may already have committed earlier batches before
+cancellation or a later error; restart or the next successful sweep resumes from remaining keys.
+Completed reclamation counts include unreachable active chunks as well as unpublished staging.
 Staging or publication failure leaves the durable start gate in place, including a failure after
 the complete generation's pointer became durable but before runtime handles were cleared. Exact
 publication retry completes durability and bounded cleanup under the same authority and inventory. The steps before it stay
