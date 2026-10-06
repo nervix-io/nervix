@@ -8,7 +8,9 @@
 //! leaves no finding, a finding that leaves no evidence, and a child that never ends all fail.
 //!
 //! The workloads deadlock on purpose and only here, in a test binary of this crate; no product
-//! binary has a way to deadlock on request.
+//! binary has a way to deadlock on request. The diagnostic lane's supervision qualification also
+//! starts the `workload` entry point directly, with workloads that must fail its supervisor in each
+//! of the ways a diagnostic process can fail.
 
 use std::{
     env,
@@ -105,6 +107,12 @@ fn workload() {
         "a_condition_handed_between_threads" => a_condition_handed_between_threads(),
         "readers_sharing_a_lock" => readers_sharing_a_lock(),
         "quiet_standard_output" => println!("probe output after the detector started"),
+        // The diagnostic lane's supervision qualification starts these two directly: a process
+        // that never ends on a wait the detector does not track, and one a signal ends.
+        "an_untracked_wait_that_never_ends" => loop {
+            thread::park();
+        },
+        "an_aborted_process" => std::process::abort(),
         "a_second_run" => {
             let refused = DiagnosticRun::start(None);
             let Err(refusal) = refused else {

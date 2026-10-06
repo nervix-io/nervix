@@ -1,7 +1,8 @@
 //! Local diagnostic evidence inspection and review.
 //!
 //! Layer: edges.
-//! - **Owns.** CLI selection, export, explicit review and qualification exit status.
+//! - **Owns.** CLI selection, export, explicit review, and qualification with its summary line and
+//!   exit status.
 //! - **Depends on.** The diagnostic evidence owner and Clap.
 //! - **Must not know.** Application state, detector internals or a running node.
 
@@ -65,6 +66,7 @@ impl Action {
                     original.scope(),
                     original.qualifies()
                 );
+                println!("evidence summary: {}", original.summary());
                 for (index, finding) in original.findings().iter().enumerate() {
                     if source.includes(finding) {
                         print!("finding {index}: {}", render_finding(finding));
@@ -95,6 +97,7 @@ impl Action {
             }
             Self::Qualify { evidence } => {
                 let evidence = DeadlockEvidence::read_file(&evidence)?;
+                println!("evidence summary: {}", evidence.summary());
                 if evidence.qualifies() {
                     println!("diagnostic evidence qualifies");
                     Ok(0)

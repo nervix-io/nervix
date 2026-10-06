@@ -168,6 +168,7 @@ class InventoryTests(unittest.TestCase):
             "deadlock-order-bounds",
             "deadlock-evidence-malformed",
             "deadlock-evidence-bounds",
+            "deadlock-evidence-summary",
             "wasm-protocol-malformed",
             "wasm-branch-metadata",
             "wasm-envelopes",
