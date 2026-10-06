@@ -412,123 +412,56 @@ test-primitives-compile:
     cargo test --package nervix-primitives --features 'deloxide-order native' --doc
     cargo check --package nervix-primitives --lib --target wasm32-unknown-unknown
 
-# Run the diagnostic mode's checks in builds of their own under target/deloxide, so the diagnostic
-# server binary never replaces the ordinary one. The deadlock probes run every workload in a
-# disposable process: a real two-lock, self, read-write and condition-variable cycle must each be
-# reported, recorded as evidence and end its process with the active deadlock status; the
-# consistent-order controls must end cleanly with evidence that records no finding; and the
-# start-up, quiet-output and recording-failure cases end as their contract says. A child that never
-# ends is killed by its probe's watchdog and fails it. The diagnostic node smoke then runs the
-# `@deadlock_diagnostics`, `@restore_installation`, `@client_ingestor_alter_drain`,
-# `@deadlock_reports`, `@memory_pressure_pause`, `@client_io_03_consumer_restore` and
-# `@client_io_03_generation` scenarios, without retries, in a scenario binary built for the mode:
-# in-process nodes, real
-# diagnostic server processes on one and three nodes, buffered client alterations, interrupted
-# restore installation and stale publication after leadership transfer, the memory-pressure pause
-# of starting and running ingestors, and Rust client consumers restored after a session restart and
-# closed by a domain restart. Each
-# contract-change scenario also runs the diagnostic Rust paced driver; the Python application's
-# locks remain outside the detector while its diagnostic nodes are tracked. Each
-# invocation's output stays under target/deloxide/test-deloxide, and the scenario binary's own
-# evidence under its evidence directory there. State-store owner tests also exercise staging,
-# snapshot views, queued writers, interrupted publication and multi-batch cleanup under tracked
-# installation locks. An invocation that executed no check fails the run, and so does a smoke
-# whose scenarios did not all run and pass. Diagnostic compilation and execution share
-# `budget_seconds` and exit with 124 when it expires; prerequisites run first.
-test-deloxide budget_seconds="2400": (test-deloxide-selection "deloxide" budget_seconds)
+# Run the Deloxide diagnostic lane in its active-only selection: every workload
+# tests/deloxide-inventory.toml registers for the `deloxide` build, after the prerequisites. The lane
+# builds each invocation for the selection under target/deloxide, so the diagnostic server binary
+# never replaces the ordinary one, and refuses a registered workload that is missing or ignored and a
+# probe, owner test or tagged scenario that is not registered. The probes of nervix-deadlock run
+# every workload in a disposable child that must report its cycle, record its evidence and end as
+# its contract says; the diagnostic owner tests each install their detector in a fresh process; and
+# the scenario binary runs the `@deadlock_diagnostics`, `@restore_installation`,
+# `@client_ingestor_alter_drain`, `@deadlock_reports`, `@memory_pressure_pause`,
+# `@client_io_03_consumer_restore` and `@client_io_03_generation` scenarios and then the
+# `@paced_simulation_reopen` scenarios with the diagnostic Rust paced driver, without retries, on
+# in-process nodes and real diagnostic server processes of one and three nodes. Every process runs in
+# a session of its own within its bound and the inventory's budget, and the lane fails on an active
+# deadlock (status 3), a diagnostic failure (4), a signal, a timeout or an expired budget (124), a
+# leftover process, incomplete accounting, and missing, partly written or nonqualifying evidence. A
+# fresh attempt under target/deloxide/test-deloxide/deloxide keeps every log, artifact, evidence file
+# and finding description, and lane.json with the exact commands, bounds and outcomes. Under the
+# native coverage collector the same lane builds instrumented and records its completion there.
+test-deloxide: tests-deps test-deloxide-workloads
 
-# Historical order instrumentation, with the same active probes and real node workloads.
-test-deloxide-order budget_seconds="2400": (test-deloxide-selection "deloxide-order" budget_seconds)
+# The same lane in the `deloxide-order` selection, whose builds add historical lock-order
+# instrumentation and run the order-only probes.
+test-deloxide-order: tests-deps test-deloxide-order-workloads
 
-[private]
-test-deloxide-selection selection budget_seconds: tests-deps
-    #!/usr/bin/env bash
-    set -euo pipefail
-    export CARGO_TARGET_DIR={{ quote(cargo_target_dir + "/deloxide") }}
-    export NERVIX_TEST_CLI_PATH={{ quote(cargo_target_dir + "/debug/nervix-cli") }}
-    root="${CARGO_TARGET_DIR}/test-deloxide/{{ selection }}"
-    mkdir -p "${root}"
-    logs="$(mktemp -d "${root}/run.XXXXXX")"
-    mkdir -p "${logs}/evidence"
-    export NERVIX_DEADLOCK_PROBE_ARTIFACTS="${logs}/probes"
-    export NERVIX_DEADLOCK_REPORT_TOOL={{ quote(cargo_target_dir + "/debug/nervix-deadlock-report") }}
-    git rev-parse HEAD >"${logs}/revision"
-    deadline=$(( $(date +%s) + {{ budget_seconds }} ))
-    within_budget() {
-        local name="$1"
-        shift
-        local remaining=$(( deadline - $(date +%s) ))
-        if (( remaining <= 0 )); then
-            echo "test-deloxide: the budget expired before ${name}" >&2
-            exit 124
-        fi
-        local status=0
-        timeout --kill-after=30 "${remaining}" "$@" >"${logs}/${name}.log" 2>&1 || status=$?
-        tail -n 40 "${logs}/${name}.log"
-        if (( status == 124 || status == 137 )); then
-            echo "test-deloxide: ${name} outlived the budget" >&2
-            exit 124
-        fi
-        if (( status != 0 )); then
-            echo "test-deloxide: ${name} failed with status ${status}; see ${logs}/${name}.log" >&2
-            exit "${status}"
-        fi
-    }
-    within_budget probes-build \
-        cargo test --no-run --package nervix-deadlock --features {{ quote(selection) }} --test active_cycles
-    within_budget probes \
-        cargo test --package nervix-deadlock --features {{ quote(selection) }} --test active_cycles
-    python3 -m scripts.libtest_accounting deloxide "${logs}/probes.log"
-    export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
-    export NERVIX_DEADLOCK_EVIDENCE="${logs}/evidence"
-    within_budget restore-storage-build \
-        cargo test --no-run --features {{ quote("testing " + selection) }} --lib
-    within_budget restore-storage \
-        cargo test --features {{ quote("testing " + selection) }} --lib -- \
-            runtime::state_store::backup::tests::deloxide_restore_storage --exact
-    python3 -m scripts.libtest_accounting deloxide "${logs}/restore-storage.log"
-    within_budget materialized-publication \
-        cargo test --features {{ quote("testing " + selection) }} --lib -- \
-            runtime::materialized_state::publication_tests::deloxide_materialized_publications --exact
-    python3 -m scripts.libtest_accounting deloxide "${logs}/materialized-publication.log"
-    within_budget scenarios-build \
-        cargo test --no-run --features {{ quote("testing " + selection) }} --test scenarios
-    within_budget scenarios \
-        cargo test --features {{ quote("testing " + selection) }} --test scenarios -- \
-            --input 'tests/features/**/*.feature' \
-            --tags '@deadlock_diagnostics or @restore_installation or @client_ingestor_alter_drain or @deadlock_reports or @memory_pressure_pause or @client_io_03_consumer_restore or @client_io_03_generation' \
-            --retry 0
-    summary="$(grep -E '^[0-9]+ scenarios? \(' "${logs}/scenarios.log" | tail -n 1 || true)"
-    if [[ ! "${summary}" =~ ^([1-9][0-9]*)\ scenarios?\ \(([0-9]+)\ passed\)$ ]] \
-        || [[ "${BASH_REMATCH[1]}" != "${BASH_REMATCH[2]}" ]]; then
-        echo "test-deloxide: the diagnostic node smoke did not run and pass every scenario: ${summary:-no summary}" >&2
-        exit 1
-    fi
-    echo "test-deloxide: probes accounted for and ${summary}"
-    within_budget paced-driver-build \
-        cargo build --package nervix-paced-simulation --features {{ quote(selection) }}
-    export NERVIX_PACED_SIMULATION_PATH="${CARGO_TARGET_DIR}/debug/nervix-paced-simulation"
-    export NERVIX_CLIENT_LIBRARY={{ quote(cargo_target_dir + "/debug/libnervix_client_ffi.so") }}
-    within_budget paced-simulation \
-        cargo test --features {{ quote("testing " + selection) }} --test scenarios -- \
-            --input tests/features/runtime/paced_simulation.feature \
-            --tags @paced_simulation_reopen --retry 0
-    summary="$(grep -E '^[0-9]+ scenarios? \(' "${logs}/paced-simulation.log" | tail -n 1 || true)"
-    if [[ ! "${summary}" =~ ^([1-9][0-9]*)\ scenarios?\ \(([0-9]+)\ passed\)$ ]] \
-        || [[ "${BASH_REMATCH[1]}" != "${BASH_REMATCH[2]}" ]]; then
-        echo "test-deloxide: the paced driver scenarios did not all run and pass: ${summary:-no summary}" >&2
-        exit 1
-    fi
-    echo "test-deloxide: paced driver ${summary}"
-    mapfile -d '' -t evidence_files < <(find "${logs}/evidence" -type f -name 'deadlock-*.rkyv' -print0)
-    if (( ${#evidence_files[@]} == 0 )); then
-        echo "test-deloxide: no process evidence was retained" >&2
-        exit 1
-    fi
-    for index in "${!evidence_files[@]}"; do
-        within_budget "evidence-${index}" "${NERVIX_DEADLOCK_REPORT_TOOL}" qualify "${evidence_files[index]}"
-    done
-    echo "test-deloxide: ${#evidence_files[@]} process observations qualified"
+# The part of each selection's lane that executes Nervix code. It has no dependencies, so the native
+# coverage collector runs exactly the lane inside its instrumentation.
+test-deloxide-workloads:
+    python3 -m scripts.deloxide_lane --target-dir {{ quote(cargo_target_dir) }} run deloxide
+
+test-deloxide-order-workloads:
+    python3 -m scripts.deloxide_lane --target-dir {{ quote(cargo_target_dir) }} run deloxide-order
+
+# Prove the lane's supervision on real failing processes: probe workloads that deadlock, fail their
+# diagnostics, hang on an untracked wait, abort, retain an unreviewed potential cycle or overflow
+# their retention must each fail the lane with its own class, keep their output and evidence, and
+# leave no process behind; a clean control must pass; and the recorded deadlock must replay. The
+# order-only cases run in the `deloxide-order` selection.
+test-deloxide-qualification selection="deloxide-order": build-deadlock-report
+    python3 -m scripts.deloxide_lane --target-dir {{ quote(cargo_target_dir) }} qualify {{ quote(selection) }}
+
+# Run one launch a lane attempt recorded again, with exactly its command, environment and bound, in a
+# fresh attempt: `just test-deloxide-replay target/deloxide/test-deloxide/deloxide/run.XXXX/lane.json scenarios`.
+# Schedules and timing are not recorded, so a replay can take another interleaving.
+test-deloxide-replay record launch:
+    python3 -m scripts.deloxide_lane --target-dir {{ quote(cargo_target_dir) }} replay {{ quote(record) }} {{ quote(launch) }}
+
+# Hold every source file that acquires a tracked blocking lock in a diagnostic build to its owner
+# record in tests/deloxide-inventory.toml, using the compiler catalog `just ratchet` writes.
+validate-deloxide-applicability: ratchet
+    python3 -m scripts.deloxide_lane applicability --catalog {{ quote(cargo_target_dir + "/typed-ratchet/gate.json") }}
 
 # Focused disposable-process reproducer and diagnostic checks, preserving configured kache.
 test-deadlock-probes features="deloxide" *args:
@@ -1550,14 +1483,20 @@ coverage-native-extras *producers:
 test-native-coverage:
     NERVIX_NATIVE_COVERAGE_TOOLCHAIN_TESTS=required python3 -m unittest --quiet scripts.tests.test_native_coverage scripts.tests.test_model_coverage
 
-# Line coverage of collection and canonical runner changes, with actual command/artifact fixtures.
+# Exercise the Deloxide lane runner: its inventory, discovery, supervision of real processes,
+# accounting, record, replay, qualification classes, applicability check and CI contract.
+test-deloxide-lane-runner:
+    python3 -m unittest --quiet scripts.tests.test_deloxide_lane
+
+# Line coverage of collection and canonical runner changes, with actual command/artifact fixtures,
+# including the Deloxide lane's supervision of real processes.
 coverage-model-runner:
     #!/usr/bin/env bash
     set -euo pipefail
     mkdir -p target/model-coverage
     coverage=(uvx --from coverage==7.11.0 coverage)
     export COVERAGE_FILE="{{ cargo_target_dir }}/model-coverage/python.coverage"
-    NERVIX_NATIVE_COVERAGE_TOOLCHAIN_TESTS=required "${coverage[@]}" run --branch --source=scripts.native_coverage,scripts.model_evidence,scripts.shuttle_checks,scripts.loom_models -m unittest scripts.tests.test_native_coverage scripts.tests.test_model_coverage scripts.tests.test_shuttle_checks scripts.tests.test_loom_models
+    NERVIX_NATIVE_COVERAGE_TOOLCHAIN_TESTS=required "${coverage[@]}" run --branch --source=scripts.native_coverage,scripts.coverage_workspace_wrapper,scripts.model_evidence,scripts.shuttle_checks,scripts.loom_models,scripts.deloxide_lane -m unittest scripts.tests.test_native_coverage scripts.tests.test_model_coverage scripts.tests.test_shuttle_checks scripts.tests.test_loom_models scripts.tests.test_deloxide_lane
     "${coverage[@]}" lcov -o "{{ cargo_target_dir }}/model-coverage/python.lcov"
     "${coverage[@]}" report
 
@@ -2081,7 +2020,7 @@ coverage-typed-ratchet-python: test-typed-ratchet-compiler test-typed-ratchet-mo
 validate jobs=default_jobs: (run-with-jobs "validate-targets" jobs)
 
 [private]
-validate-targets: fmt lint-targets validate-skill validate-nspl-docs validate-clock-boundaries validate-typed-errors validate-primitive-boundary validate-execution-mode-dependencies validate-execution-mode-conflicts validate-dns-dependencies ratchet
+validate-targets: fmt lint-targets validate-skill validate-nspl-docs validate-clock-boundaries validate-typed-errors validate-primitive-boundary validate-execution-mode-dependencies validate-execution-mode-conflicts validate-dns-dependencies ratchet validate-deloxide-applicability
 
 # Check each connector as a consumer root. Cargo tree limits feature unification to that root;
 # the full workspace build alone can hide a missing resolver feature in a leaf connector.
@@ -2182,7 +2121,7 @@ validate-dns-dependencies:
 validate-ci jobs=default_jobs: (run-with-jobs "validate-ci-targets" jobs)
 
 [private]
-validate-ci-targets: fmt-check lint-targets validate-skill validate-nspl-docs validate-clock-boundaries validate-typed-errors validate-primitive-boundary validate-execution-mode-dependencies validate-execution-mode-conflicts validate-dns-dependencies ratchet
+validate-ci-targets: fmt-check lint-targets validate-skill validate-nspl-docs validate-clock-boundaries validate-typed-errors validate-primitive-boundary validate-execution-mode-dependencies validate-execution-mode-conflicts validate-dns-dependencies ratchet validate-deloxide-applicability
 
 # Hold every governed primitive to nervix-primitives and every mode feature to its owner. The check
 # rejects a direct, renamed, grouped, qualified, glob, alias or macro path to another backend's
