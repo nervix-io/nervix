@@ -571,8 +571,10 @@ publication milestone of deduplicator, window or materialized relay state, so th
 verdicts rest on this drained and held boundary rather than on an observed publication, and the
 result says so.
 
-The load then resumes, version 3 is published, and four more records arrive before the fault. Records
-are classified by sequence: before the milestone, the volatile interval from the milestone until the
+The load then resumes for four more records, holds again, and version 3 is published. The runner reads
+the fault's boundaries, which takes several broker round trips, while the load holds, and releases it
+as the fault begins, so the window rows open at the milestone are still open when the fault strikes.
+Records are classified by sequence: before the milestone, the volatile interval from the milestone until the
 end of the fault's recovery, and after recovery. `--fault` selects the fault:
 
 - `none` holds no fault and allows no deviation at all;

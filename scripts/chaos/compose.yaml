@@ -228,9 +228,6 @@ services:
       CHAOS_LOAD_EACH: "1"
       CHAOS_LOAD_STOP_FILE: stop-state-load
       CHAOS_LOAD_HOLD_FILE: hold-state-load
-      # Holding after 24n + 4 records leaves two rows of each branch in an open 12-row window.
-      CHAOS_LOAD_HOLD_MODULUS: "24"
-      CHAOS_LOAD_HOLD_REMAINDER: "4"
     volumes:
       - ${CHAOS_SCRIPT_DIR:?CHAOS_SCRIPT_DIR is required}/continuous-load.sh:/opt/chaos/continuous-load.sh:ro
       - ${CHAOS_STATE_LOAD_FILE:?CHAOS_STATE_LOAD_FILE is required}:/opt/chaos/input.ndjson:ro

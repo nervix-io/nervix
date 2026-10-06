@@ -23,7 +23,8 @@ stateful_ingestors=('INGESTOR chaos_state_ingestor' 'INGESTOR chaos_profile_inge
 stateful_output_topics=(chaos_unique_output chaos_window_output chaos_enriched_output chaos_counted_output)
 
 # The stateful fixture, its phases and the profile versions the runner publishes. The load holds
-# before record 24n + 4, so at the milestone every branch holds two rows in an open 12-row window.
+# after the milestone's records, when every branch holds two rows in an open 12-row window, and
+# again after the volatile records until the fault begins, so those rows are still open then.
 stateful_fixture_records=1000
 stateful_milestone_records=100
 stateful_profile_milestone_at=40
@@ -149,6 +150,15 @@ stateful_source_reached() {
     [[ "${current}" =~ ^[0-9]+$ ]] && ((current >= count))
 }
 
+# Holds the stateful load once it has produced COUNT records. The hold file is replaced in one
+# rename, so the load never reads a partly written count.
+stateful_hold_after() {
+    local count="$1"
+    local hold_file="${artifact_dir}/traffic/hold-state-load"
+    printf '%s\n' "${count}" >"${hold_file}.next"
+    mv -f "${hold_file}.next" "${hold_file}"
+}
+
 # True when consumer group GROUP has committed TOPIC up to its end offset EXPECTED with no lag.
 stateful_group_committed() {
     local group="$1"
@@ -239,7 +249,7 @@ stateful_load_running() {
         || { failure_category=setup; stateful_fail setup 'the stateful load ended before the run stopped it; increase its fixture'; }
 }
 
-# Holds the stateful source at its next hold boundary once it reached the milestone size, drains
+# Holds the stateful source after the milestone's records once it passed the hold request, drains
 # every stateful consumer, and records the milestone the durability verdicts cite.
 stateful_milestone() {
     local case_dir="$1"
@@ -248,7 +258,7 @@ stateful_milestone() {
     phase 'stateful: durability milestone'
     wait_for "stateful source past ${stateful_hold_requested_at} records" "${stateful_phase_bound}" \
         stateful_source_reached "${stateful_hold_requested_at}"
-    touch "${artifact_dir}/traffic/hold-state-load"
+    stateful_hold_after "${stateful_milestone_records}"
     wait_for "stateful source holding at ${stateful_milestone_records} records" 60 \
         stateful_source_reached "${stateful_milestone_records}"
     local held_end=""
@@ -355,9 +365,12 @@ stateful_failover() {
         || recovery_finding "${case_dir}" 'stateful outputs did not advance on the survivors during the fault'
 }
 
-# Runs as the faults' BEFORE hook, immediately before anything is injected.
+# Runs as the faults' BEFORE hook, immediately before anything is injected. The load holds after
+# the volatile records while the boundaries are read, which takes several broker round trips, so
+# the windows open at the milestone are still open when the fault begins; it resumes then.
 stateful_before_fault() {
     stateful_record_fault_start "${stateful_case_dir}"
+    rm -f "${artifact_dir}/traffic/hold-state-load"
 }
 
 # Waits until the cluster has settled after the fault, the stateful work is owned and running, and
@@ -535,9 +548,9 @@ run_stateful() {
     stateful_milestone "${case_dir}"
 
     phase 'stateful: volatile interval'
-    rm -f "${artifact_dir}/traffic/hold-state-load"
+    stateful_hold_after "$((stateful_milestone_records_observed + stateful_volatile_records))"
     stateful_publish_profiles "${stateful_profile_volatile}" "${case_dir}/profiles-volatile"
-    wait_for "stateful source ${stateful_volatile_records} records past the milestone" 60 \
+    wait_for "stateful source holding ${stateful_volatile_records} records past the milestone" 60 \
         stateful_source_reached "$((stateful_milestone_records_observed + stateful_volatile_records))"
     check_support_containers
     stateful_load_running
