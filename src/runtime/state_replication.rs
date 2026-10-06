@@ -38,6 +38,32 @@ pub(crate) struct StateSyncAck {
     pub(crate) placement: RuntimeStatePlacement,
     pub(crate) lsm: u64,
 }
+
+/// A branch lifecycle checkpoint a task restores its branches from, read and not yet released.
+#[derive(Debug)]
+pub(in crate::runtime) struct RestorableBranchLifecycle {
+    snapshot: PersistedRuntimeStateEntry,
+    /// The placement of the prepared checkpoint this is, when a transfer left it for the owner to
+    /// install once. The lifecycle this node holds or stores is not consumed by a restore.
+    transferred: Option<RuntimeStatePlacement>,
+}
+
+impl RestorableBranchLifecycle {
+    pub(in crate::runtime) fn lsm(&self) -> u64 {
+        self.snapshot.lsm
+    }
+
+    /// The branches the lifecycle names, least recently active first.
+    pub(in crate::runtime) fn branches(
+        &self,
+    ) -> error_stack::Result<
+        Vec<BranchInstanceSnapshotEntry<Option<BranchKey>>>,
+        BranchLruSnapshotError,
+    > {
+        decode_branch_lru_snapshot(&self.snapshot.payload)
+    }
+}
+
 mod handoff;
 mod preparation;
 mod published_branch_state;
@@ -90,22 +116,62 @@ impl Runtime {
         self.announce_checkpoint(&placement, lifecycle.replication(), lsm);
     }
 
-    pub(super) fn take_restorable_branch_lru_snapshot(
+    /// The branch lifecycle a task restoring `placement` installs: the checkpoint an ownership
+    /// transfer left for this node, else the lifecycle this node holds, else the one its storage
+    /// keeps. Reading it releases nothing, so a restore that fails reads it again.
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            lifecycle,
+            reason = "each attempt to restore an entity's branches reads its lifecycle once"
+        )
+    )]
+    pub(super) fn restorable_branch_lru_snapshot(
         &self,
         placement: &RuntimeStatePlacement,
-    ) -> Result<Option<PersistedRuntimeStateEntry>, Report<RuntimePersistenceError>> {
-        if let Some(snapshot) = nervix_primitives::expect_lint!(
-            nervix::lifecycle_call,
-            "one placement installation consumes the snapshot transferred for its concrete state \
-             lifetime",
-            self.take_transferred_runtime_state_snapshot(placement)
-        ) {
-            return Ok(Some(snapshot));
+    ) -> Result<Option<RestorableBranchLifecycle>, Report<RuntimePersistenceError>> {
+        // A transfer leaves a branch lifecycle as a prepared checkpoint when its owner starts at
+        // once, and publishes it as the lifecycle this node holds otherwise.
+        if let Some(prepared) = self.inner.prepared_runtime_state_snapshots.get(placement) {
+            return Ok(Some(RestorableBranchLifecycle {
+                snapshot: prepared.snapshot.clone(),
+                transferred: Some(placement.clone()),
+            }));
         }
         if let Some(held) = self.held_branch_lifecycle(placement) {
-            return Ok(Some(held.snapshot().clone()));
+            return Ok(Some(RestorableBranchLifecycle {
+                snapshot: held.snapshot().clone(),
+                transferred: None,
+            }));
         }
-        self.stored_runtime_state_snapshot(placement)
+        let Some(stored) = self.stored_runtime_state_snapshot(placement)? else {
+            return Ok(None);
+        };
+        Ok(Some(RestorableBranchLifecycle {
+            snapshot: stored,
+            transferred: None,
+        }))
+    }
+
+    /// Release `restored` once its task has installed every branch it names. A checkpoint a
+    /// transfer left is consumed then, unless a later transfer replaced it since it was read.
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            lifecycle,
+            reason = "a restore releases its entity's lifecycle once, after installing its \
+                      branches"
+        )
+    )]
+    pub(super) fn release_restored_branch_lru_snapshot(&self, restored: RestorableBranchLifecycle) {
+        let Some(placement) = restored.transferred else {
+            return;
+        };
+        self.inner
+            .prepared_runtime_state_snapshots
+            .remove_if(&placement, |_, prepared| {
+                prepared.snapshot == restored.snapshot
+            });
     }
 
     /// The branch lifecycle this node holds for `placement`, created empty the first time an owner
@@ -2457,12 +2523,9 @@ impl Runtime {
                 response_timeout,
             )
             .await
-            .map_err(|reason| {
-                Report::new(StateReplicationError::Request {
-                    target: target_node_id.clone(),
-                    placement: placement.clone(),
-                })
-                .attach_printable(reason)
+            .change_context_lazy(|| StateReplicationError::Request {
+                target: target_node_id.clone(),
+                placement: placement.clone(),
             })?;
         let snapshot = response.result.map_err(|failure| {
             Report::new(StateReplicationError::RemoteFailure {

@@ -1460,3 +1460,243 @@ random_iterations = 256
 source = "crates/backup/src/malformed_properties.rs"
 test = "malformed_properties::bolero_corrupt_archives_fail_before_restore_contents_are_returned"
 test_target = "lib"
+
+[[target]]
+case_timeout_seconds = 10
+corpus = "crates/consensus/src/storage/__fuzz__/storage__properties__bolero_consensus_state_records_recover_every_stored_value/corpus"
+domain_version = 1
+features = []
+id = "consensus-state-records"
+invariant = "A generated replicated state holding records of every family, stored by the consensus state writer into a real keyspace, and a second revision stored as the changes from it each recover with complete equality of every record, index and metadata field."
+manifest = "Cargo.toml"
+max_input_bytes = 65536
+package = "nervix-consensus"
+random_iterations = 128
+source = "crates/consensus/src/storage/properties.rs"
+test = "storage::properties::bolero_consensus_state_records_recover_every_stored_value"
+test_target = "lib"
+
+[[target]]
+case_timeout_seconds = 10
+corpus = "crates/consensus/src/storage/__fuzz__/storage__properties__bolero_corrupt_consensus_state_records_fail_typed_or_recover_canonically/corpus"
+domain_version = 1
+features = []
+id = "consensus-state-corruption"
+invariant = "Flipped, truncated, extended, rekeyed, copied, unknown and missing consensus state records either fail recovery with the typed invalid-state failure or recover a state stored under its own canonical keys whose readers' invariants hold and which recovers again unchanged."
+manifest = "Cargo.toml"
+max_input_bytes = 65600
+package = "nervix-consensus"
+random_iterations = 256
+source = "crates/consensus/src/storage/properties.rs"
+test = "storage::properties::bolero_corrupt_consensus_state_records_fail_typed_or_recover_canonically"
+test_target = "lib"
+
+[[target]]
+case_timeout_seconds = 10
+corpus = "crates/consensus/src/storage/__fuzz__/storage__raft_properties__bolero_consensus_raft_records_round_trip_through_the_storage_codec/corpus"
+domain_version = 1
+features = []
+id = "consensus-raft-records"
+invariant = "Votes, log positions, log entries of every consensus command, state metadata, snapshot manifests and sections restore with complete equality through the storage codec, and every log and section key names exactly the position or section it was built for."
+manifest = "Cargo.toml"
+max_input_bytes = 4096
+package = "nervix-consensus"
+random_iterations = 256
+source = "crates/consensus/src/storage/raft_properties.rs"
+test = "storage::raft_properties::bolero_consensus_raft_records_round_trip_through_the_storage_codec"
+test_target = "lib"
+
+[[target]]
+case_timeout_seconds = 10
+corpus = "crates/consensus/src/storage/__fuzz__/storage__raft_properties__bolero_malformed_consensus_raft_records_fail_typed/corpus"
+domain_version = 1
+features = []
+id = "consensus-raft-records-malformed"
+invariant = "Arbitrary bytes read as any Raft record, log key or section key fail with the typed storage failure or name a value that stores back to the same record."
+manifest = "Cargo.toml"
+max_input_bytes = 4096
+package = "nervix-consensus"
+random_iterations = 256
+source = "crates/consensus/src/storage/raft_properties.rs"
+test = "storage::raft_properties::bolero_malformed_consensus_raft_records_fail_typed"
+test_target = "lib"
+
+[[target]]
+case_timeout_seconds = 10
+corpus = "src/registry/storage/__fuzz__/registry__storage__properties__bolero_registry_stored_models_list_back_from_memory_and_tables/corpus"
+domain_version = 1
+features = []
+id = "registry-stored-models"
+invariant = "Committed Models named across the whole name rule list back complete and in key order, and read back by their own keys, from a reopened registry serving them from its journal or from the on-disk table a flush moved them into."
+manifest = "Cargo.toml"
+max_input_bytes = 4096
+package = "nervix-server"
+random_iterations = 64
+source = "src/registry/storage/properties.rs"
+test = "registry::storage::properties::bolero_registry_stored_models_list_back_from_memory_and_tables"
+test_target = "lib"
+
+[[target]]
+case_timeout_seconds = 10
+corpus = "src/registry/storage/__fuzz__/registry__storage__properties__bolero_corrupt_registry_records_fail_typed_or_list_canonically/corpus"
+domain_version = 1
+features = []
+id = "registry-stored-models-corruption"
+invariant = "Damaged registry records and keys either fail the listing with the registry's typed storage failure or list Models whose own keys are exactly the stored keys."
+manifest = "Cargo.toml"
+max_input_bytes = 4096
+package = "nervix-server"
+random_iterations = 128
+source = "src/registry/storage/properties.rs"
+test = "registry::storage::properties::bolero_corrupt_registry_records_fail_typed_or_list_canonically"
+test_target = "lib"
+
+[[target]]
+case_timeout_seconds = 10
+corpus = "src/runtime/state_store/__fuzz__/runtime__state_store__key_properties__bolero_runtime_state_keys_decode_their_placement_and_stay_apart/corpus"
+domain_version = 1
+features = []
+id = "runtime-state-keys"
+invariant = "Every placement's physical key decodes to its namespace, state, schema, generation, Model kind and name and the fingerprint of its branch's canonical text, and lies under its own domain and namespace prefixes, index and chunk keys and no other placement's."
+manifest = "Cargo.toml"
+max_input_bytes = 2048
+package = "nervix-server"
+random_iterations = 256
+source = "src/runtime/state_store/key_properties.rs"
+test = "runtime::state_store::key_properties::bolero_runtime_state_keys_decode_their_placement_and_stay_apart"
+test_target = "lib"
+
+[[target]]
+case_timeout_seconds = 10
+corpus = "src/runtime/state_store/__fuzz__/runtime__state_store__key_properties__bolero_malformed_runtime_state_keys_fail_typed_or_decode_canonically/corpus"
+domain_version = 1
+features = []
+id = "runtime-state-keys-malformed"
+invariant = "Damaged or arbitrary runtime-state keys fail with the store's typed storage failure or decode to a placement whose own key is exactly the stored key."
+manifest = "Cargo.toml"
+max_input_bytes = 2048
+package = "nervix-server"
+random_iterations = 256
+source = "src/runtime/state_store/key_properties.rs"
+test = "runtime::state_store::key_properties::bolero_malformed_runtime_state_keys_fail_typed_or_decode_canonically"
+test_target = "lib"
+
+[[target]]
+case_timeout_seconds = 10
+corpus = "src/runtime/state_store/__fuzz__/runtime__state_store__identity_properties__bolero_runtime_state_identity_records_round_trip/corpus"
+domain_version = 1
+features = []
+id = "runtime-state-identity-records"
+invariant = "Handoff preparations, forced-recovery preparations and completions restore every identity, incarnation, fingerprint and checkpoint, branch values bit for bit, and two transitions share a stored key exactly when they name the same handoff or recovered entity."
+manifest = "Cargo.toml"
+max_input_bytes = 4096
+package = "nervix-server"
+random_iterations = 256
+source = "src/runtime/state_store/identity_properties.rs"
+test = "runtime::state_store::identity_properties::bolero_runtime_state_identity_records_round_trip"
+test_target = "lib"
+
+[[target]]
+case_timeout_seconds = 10
+corpus = "src/runtime/state_store/__fuzz__/runtime__state_store__identity_properties__bolero_malformed_runtime_state_identity_records_fail_typed/corpus"
+domain_version = 1
+features = []
+id = "runtime-state-identity-records-malformed"
+invariant = "Arbitrary bytes read as a handoff or forced-recovery record fail with the store's typed decode failure or restore a record whose placements convert back and which stores back unchanged."
+manifest = "Cargo.toml"
+max_input_bytes = 4096
+package = "nervix-server"
+random_iterations = 256
+source = "src/runtime/state_store/identity_properties.rs"
+test = "runtime::state_store::identity_properties::bolero_malformed_runtime_state_identity_records_fail_typed"
+test_target = "lib"
+
+[[target]]
+case_timeout_seconds = 10
+corpus = "src/runtime/state_store/__fuzz__/runtime__state_store__snapshot_properties__bolero_runtime_state_snapshots_restore_every_stored_value/corpus"
+domain_version = 1
+features = []
+id = "runtime-state-snapshots"
+invariant = "Kafka offsets and schedules, branch lifecycles with activity and incarnations, deduplicator keyspaces bit for bit in arrival order, and branch-aggregated metrics restore every stored value through their codecs and the inline checkpoint envelope."
+manifest = "Cargo.toml"
+max_input_bytes = 4096
+package = "nervix-server"
+random_iterations = 256
+source = "src/runtime/state_store/snapshot_properties.rs"
+test = "runtime::state_store::snapshot_properties::bolero_runtime_state_snapshots_restore_every_stored_value"
+test_target = "lib"
+
+[[target]]
+case_timeout_seconds = 10
+corpus = "src/runtime/state_store/__fuzz__/runtime__state_store__snapshot_properties__bolero_malformed_runtime_state_snapshots_fail_typed/corpus"
+domain_version = 1
+features = []
+id = "runtime-state-snapshots-malformed"
+invariant = "Arbitrary bytes read as any snapshot payload fail with that kind's typed decode failure or restore a value that stores back to the same payload."
+manifest = "Cargo.toml"
+max_input_bytes = 4096
+package = "nervix-server"
+random_iterations = 256
+source = "src/runtime/state_store/snapshot_properties.rs"
+test = "runtime::state_store::snapshot_properties::bolero_malformed_runtime_state_snapshots_fail_typed"
+test_target = "lib"
+
+[[target]]
+case_timeout_seconds = 10
+corpus = "src/runtime/state_store/__fuzz__/runtime__state_store__store_properties__bolero_runtime_state_checkpoints_read_back_from_the_store/corpus"
+domain_version = 1
+features = []
+id = "runtime-state-store-checkpoints"
+invariant = "Checkpoints of any placement stored inline or as chunked streams at, beside and between the chunk boundaries read back byte for byte at their revision through the latest-snapshot read and the streaming reader, before and after the database reopens."
+manifest = "Cargo.toml"
+max_input_bytes = 2048
+package = "nervix-server"
+random_iterations = 64
+source = "src/runtime/state_store/store_properties.rs"
+test = "runtime::state_store::store_properties::bolero_runtime_state_checkpoints_read_back_from_the_store"
+test_target = "lib"
+
+[[target]]
+case_timeout_seconds = 10
+corpus = "src/runtime/__fuzz__/runtime__window_state__tests__bolero_window_snapshots_restore_every_retained_row_and_typed_state/corpus"
+domain_version = 1
+features = []
+id = "runtime-window-snapshots"
+invariant = "A sealed window restores every retained row's sequence, ingestion time, branch bits and argument values, its next sequence, branch lifetime and typed aggregate state, and a snapshot of another branch lifetime restores nothing."
+manifest = "Cargo.toml"
+max_input_bytes = 2048
+package = "nervix-server"
+random_iterations = 128
+source = "src/runtime/window_state.rs"
+test = "runtime::window_state::tests::bolero_window_snapshots_restore_every_retained_row_and_typed_state"
+test_target = "lib"
+
+[[target]]
+case_timeout_seconds = 10
+corpus = "src/resource/__fuzz__/resource__layout_properties__bolero_resource_versions_keep_their_own_directories/corpus"
+domain_version = 1
+features = []
+id = "resource-store-layout"
+invariant = "Resource versions named across the whole name rule, including names spelled like the store's own directories, read back their complete manifests and archives after every installation, staging cleanup and the removal of another version."
+manifest = "Cargo.toml"
+max_input_bytes = 512
+package = "nervix-server"
+random_iterations = 64
+source = "src/resource/layout_properties.rs"
+test = "resource::layout_properties::bolero_resource_versions_keep_their_own_directories"
+test_target = "lib"
+
+[[target]]
+case_timeout_seconds = 10
+corpus = "src/runtime/__fuzz__/runtime__window_state__tests__bolero_malformed_window_snapshots_fail_typed/corpus"
+domain_version = 1
+features = []
+id = "runtime-window-snapshots-malformed"
+invariant = "A sealed window damaged once, and arbitrary bytes behind the snapshot magic, fail to open with the snapshot's typed failure, open nothing for the branch lifetime, or open a window that seals to a payload which opens and seals back to the same bytes."
+manifest = "Cargo.toml"
+max_input_bytes = 4096
+package = "nervix-server"
+random_iterations = 256
+source = "src/runtime/window_state.rs"
+test = "runtime::window_state::tests::bolero_malformed_window_snapshots_fail_typed"
+test_target = "lib"

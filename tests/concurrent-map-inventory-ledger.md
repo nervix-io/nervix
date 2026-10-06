@@ -159,6 +159,10 @@ artifact through bounded chunk reads, without consulting a concurrent registry p
 replica task retains its assignment-qualified installer and checkpoint progress. These two route
 resolutions add no access to the lifecycle-only `replicated_kafka_offset_states` registry and no
 concurrent map.
+Each successful poll sends the held revision back, including when no checkpoint advanced. The
+acknowledgement resolves the owner's immutable replication route once per poll and uses the
+retained replica assignment for its report; it neither opens the Kafka state registry nor adds a
+lookup per partition or transport chunk. Repeating this progress recovers a lost acknowledgement.
 
 ## Replica catch-up: the repair Typed Ratchet 14 makes
 

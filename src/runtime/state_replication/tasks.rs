@@ -356,12 +356,12 @@ impl Runtime {
                         }
                         continue;
                     }
-                    synchronized = runtime.install_kafka_offsets_from(
+                    synchronized = runtime.sync_kafka_offsets_from(
                         &primary_node, &state, after_lsm,
                     ) => synchronized,
                 };
                 match synchronized {
-                    Ok(Some(lsm)) => {
+                    Ok(lsm) => {
                         let dispatcher = runtime.inner.remote_dispatcher.load_full();
                         if let Some(dispatcher) = dispatcher
                             && let Err(error) = dispatcher
@@ -381,7 +381,6 @@ impl Runtime {
                             warn!(node_id = %dispatcher.local_node_id(), error = %error, "failed to acknowledge replicated kafka offset snapshot");
                         }
                     }
-                    Ok(None) => {}
                     Err(error) => {
                         warn!(error = ?error, "failed to sync replicated kafka offsets");
                     }
@@ -435,7 +434,7 @@ impl Runtime {
             if let Err(error) = runtime.restore_replica_branch_lifecycle(&branch_lru, &lifecycle) {
                 warn!(error = %error, "failed to read the stored replicated branch lifecycle");
             }
-            let owner = RemoteStateOwner::new(runtime.clone(), primary_node, poll_interval);
+            let owner = RemoteStateOwner::new(runtime.clone(), primary_node);
             let mut checkpoints = ReplicaBranchCheckpoints::default();
             let mut initial_sync_pending = true;
             loop {
@@ -562,7 +561,7 @@ impl Runtime {
                         &primary_node,
                         &state.placement,
                         Some(after_lsm),
-                        poll_interval,
+                        nervix_interconnect::StateSyncRequest::TIMEOUT,
                     )
                     .await
                 {

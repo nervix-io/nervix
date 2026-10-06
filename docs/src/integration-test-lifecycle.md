@@ -97,6 +97,22 @@ placement in the three-node case, and compares every saved placement after START
 receiving isolated output for every tenant. A failover that drops replicas or recreates guest state
 cannot make this oracle pass by moving all execution onto one node.
 
+The complete-generation fixture allows 120 seconds for every post-restore input to reach its raw
+relay. Its forty one-mebibyte guest saves exercise sequential source acknowledgements and durable
+replica checkpoints beside the other diagnostic workloads. The full active diagnostic selection
+reached 77 of 80 inputs at the former 30-second bound, while the exact same binary reached all
+inputs and preserved every branch in the focused four-case replay. This condition ends as soon as
+the exact expected count is observed; it retains the complete output, state and branch assertions.
+
+The large materialized restore fixture prepares its rows through an acknowledged client producer.
+One round has a 120-second budget and one in-flight batch, including explicit replays of reported
+processing failures. Each replay replaces the same materialized keys with the same complete values,
+so partial effects retain the fixture's value oracle. Every attempt and terminal result is logged;
+an unknown outcome, final admission refusal or expired round fails preparation. The producer closes
+after every tenant's batch has completed, before the scenario checks all generator rows and takes
+the backup cut. Source admission, input delivery and the final archive and restore assertions remain
+separate observable steps.
+
 The command also selects `@paced_simulation_reopen` from the public paced-driver feature. It
 builds the Rust driver in diagnostic mode and supplies its path to the same scenario fixture,
 so the driver installs its own detector before entering its runtime. Both drivers exercise

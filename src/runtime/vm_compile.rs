@@ -1845,20 +1845,6 @@ pub(super) fn compile_generator_set_program(
     })
 }
 
-pub(super) fn relay_schema_for_runtime(
-    runtime: &Runtime,
-    domain: &DomainName,
-    relay: &RelayName,
-) -> Result<Arc<CompiledSchema>, Report<DomainRoutingError>> {
-    let Some(routing) = runtime.domain_routing(domain) else {
-        return Err(Report::new(DomainRoutingError::DomainNotInstantiated {
-            domain: domain.clone(),
-        }));
-    };
-    let routing = routing.load();
-    relay_schema_for_routing(&routing, domain, relay)
-}
-
 pub(super) fn relay_schema_for_routing(
     routing: &DomainRoutingSnapshot,
     domain: &DomainName,

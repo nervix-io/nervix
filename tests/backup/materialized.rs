@@ -1,12 +1,15 @@
-//! Public materialized restore workloads with bounded input rows and small observable outputs.
+//! Public materialized restore workloads with acknowledged input rows and small observable outputs.
 //!
 //! Layer: test harness.
-//! - **Owns.** NSPL graphs, HTTP inputs, archive inventory assertions and generator subscriptions
+//! - **Owns.** NSPL graphs, client inputs, archive inventory assertions and generator subscriptions
 //!   that qualify many containers and a single container larger than the bulk memory budget.
-//! - **Depends on.** Public commands, HTTP intake, Row subscriptions and the public archive reader.
+//! - **Depends on.** Public commands, acknowledged client producers, Row subscriptions and the
+//!   public archive reader.
 //! - **Must not know.** Runtime maps, checkpoint storage keys or private restore installation.
 
 use nervix_backup::DescribedRuntimeState;
+use nervix_client_core::ProducerOutcome;
+use nervix_models::{ClientProducerLimits, IngestorName};
 
 use super::*;
 
@@ -14,19 +17,13 @@ use super::*;
 async fn when_materialized_workload_is_created(world: &mut ScenarioWorld, relays: usize) {
     assert!((1..=40).contains(&relays));
     let domain = &world.domain;
-    let host = expand_placeholders(world, "backup-large-{{test_id}}.example.com");
     let mut commands = format!(
         "CREATE UNPACED DOMAIN {domain};
          CREATE SCHEMA event ( tenant STRING, value STRING, round I64 );
-         CREATE WIRE JSON SCHEMA event_wire MODE STRICT ( tenant string, value string, round \
-         integer );
-         CREATE CODEC event_codec FROM WIRE JSON SCHEMA event_wire TO SCHEMA event;
          CREATE SCHEMA tenant_key ( tenant STRING );
          CREATE BRANCH by_tenant SCHEMA tenant_key TTL 30m;
          CREATE SCHEMA summary ( tenant STRING, relay STRING, length I64, round I64 );
-         CREATE RELAY summaries SCHEMA summary BRANCHED BY by_tenant;
-         CREATE VHOST edge {host};
-         CREATE ENDPOINT ingress ON edge PATH '/large' TYPE HTTP;"
+         CREATE RELAY summaries SCHEMA summary BRANCHED BY by_tenant;"
     );
     for index in 0..relays {
         commands.push_str(&format!(
@@ -41,8 +38,8 @@ async fn when_materialized_workload_is_created(world: &mut ScenarioWorld, relays
         ));
     }
     commands.push_str(
-        "CREATE INGESTOR source FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL ON QUIESCE BUFFER \
-         MAX SIZE 2MiB DECODE USING event_codec ",
+        "CREATE INGESTOR source FROM CLIENT SCHEMA event MODE ACK SEQUENTIAL ACK TIMEOUT 30s \
+         RETRY POLICY BACKOFF 100ms MAX 1s ON QUIESCE SUSPEND ",
     );
     for index in 0..relays {
         commands.push_str(&format!(
@@ -88,8 +85,8 @@ async fn when_materialized_workload_is_created(world: &mut ScenarioWorld, relays
     world.active_session_has_subscription = true;
 }
 
-#[when(expr = "round {int} of {int} KiB materialized rows is posted for {int} tenants")]
-async fn when_large_materialized_round_is_posted(
+#[when(expr = "round {int} of {int} KiB materialized rows is submitted for {int} tenants")]
+async fn when_large_materialized_round_is_submitted(
     world: &mut ScenarioWorld,
     round: u32,
     kibibytes: usize,
@@ -102,21 +99,77 @@ async fn when_large_materialized_round_is_posted(
             .checked_mul(1024)
             .assured("bounded row length fits"),
     );
-    let host = expand_placeholders(world, "backup-large-{{test_id}}.example.com");
-    let node = world
+    let leader = current_leader_node(world).await;
+    let grpc_uri = world
         .cluster()
-        .node_ids()
-        .first()
-        .assured("one node is live")
-        .clone();
+        .grpc_uri(&leader)
+        .assured("the input producer has a public gRPC endpoint");
+    let domain = DomainName::parse(&world.domain).assured("the fixture domain name is valid");
+    let client = Client::connect_with_options(
+        &grpc_uri,
+        Some(domain.clone()),
+        client_connect_options(&grpc_uri).assured("the input client is configured"),
+    )
+    .await
+    .assured("the input client connects");
+    let producer = client
+        .open_ingestor(
+            domain,
+            IngestorName::parse("source").assured("the fixture ingestor name is valid"),
+            crate::client_producers::expected_fields("tenant STRING, value STRING, round I64"),
+            ClientProducerLimits {
+                batches: std::num::NonZeroU32::new(1).assured("one batch is nonzero"),
+                bytes: NonZeroU64::new(2 * 1024 * 1024)
+                    .assured("the bounded row and IPC envelope fit two MiB"),
+            },
+        )
+        .await
+        .assured("the materialized input producer opens");
+    let deadline = Instant::now() + Duration::from_secs(120);
     for tenant in 0..tenants {
-        let payload = serde_json::json!({"tenant": format!("restore-tenant-{tenant}"), "value": &value, "round": round}).to_string();
-        world
-            .cluster()
-            .publish_http(&node, &host, "/large", &payload)
-            .await
-            .assured("the bounded input row is accepted");
+        let rows = RecordBatch::try_new(
+            StdArc::new(producer.arrow_schema()),
+            vec![
+                StdArc::new(StringArray::from(vec![format!("restore-tenant-{tenant}")])),
+                StdArc::new(StringArray::from(vec![value.as_str()])),
+                StdArc::new(Int64Array::from(vec![i64::from(round)])),
+            ],
+        )
+        .assured("the bounded row has the producer's exact input schema");
+        let body = producer.batch(&rows).assured("the fixture row encodes");
+        let mut attempts = 0_u32;
+        loop {
+            let remaining = deadline
+                .checked_duration_since(Instant::now())
+                .assured("the materialized input round completes within its bounded budget");
+            attempts += 1;
+            let outcome = nervix_primitives::time::timeout(remaining, producer.send(body.clone()))
+                .await
+                .assured("the input producer reports a terminal outcome within the round budget")
+                .assured("the acknowledged input exchange succeeds");
+            match outcome {
+                ProducerOutcome::Completed => {
+                    println!(
+                        "materialized input round {round}, tenant {tenant}: completed after \
+                         {attempts} attempts"
+                    );
+                    break;
+                }
+                ProducerOutcome::ProcessingFailed { failure, message } => {
+                    // The fixture replaces the same materialized keys with the same values.
+                    // Replaying a reported failed attempt preserves its complete value oracle;
+                    // an unknown outcome or a final admission refusal remains a setup failure.
+                    println!(
+                        "materialized input round {round}, tenant {tenant}, attempt {attempts}: \
+                         replaying reported processing failure {failure:?}: {message}"
+                    );
+                    nervix_primitives::time::sleep(Duration::from_millis(100)).await;
+                }
+                outcome => panic!("materialized input round {round}, tenant {tenant}: {outcome:?}"),
+            }
+        }
     }
+    producer.close().await.assured("the input producer closes");
 }
 
 #[then(

@@ -934,4 +934,392 @@ mod tests {
             "a truncated typed section must fail to load"
         );
     }
+
+    /// The plan and schemas of a window that counts `input.latency`, shared by the window snapshot
+    /// properties.
+    struct WindowSnapshotFixture {
+        plan: WindowAccumulatorPlan,
+        input_schema: Arc<crate::runtime_schema::CompiledSchema>,
+        argument_schema: StdArc<ArrowSchema>,
+        argument_nullable: bool,
+    }
+
+    /// A generated window, the argument value each of its rows holds, and the branch lifetime and
+    /// revision it is sealed at.
+    struct GeneratedWindow {
+        snapshot: WindowProcessorStateSnapshot,
+        argument_values: Vec<Option<i64>>,
+        incarnation: u64,
+        revision: u64,
+    }
+
+    impl WindowSnapshotFixture {
+        fn new() -> Self {
+            let plan = window_plan(
+                "SET count = COUNT(input.latency)",
+                ParseAsType::I64,
+                &[("count", ParseAsType::I64)],
+            );
+            let input_schema = test_schema(&[("latency", ParseAsType::I64)]);
+            let argument_schema = WindowArgumentColumns::snapshot_schema(&plan);
+            let argument_nullable = argument_schema.field(0).is_nullable();
+            Self {
+                plan,
+                input_schema,
+                argument_schema,
+                argument_nullable,
+            }
+        }
+
+        /// A window of up to three rows with consecutive sequences and typed aggregate state.
+        fn generated(&self, arbitrary: &mut nervix_arbitrary::Arbitrary<'_>) -> GeneratedWindow {
+            use meticulous::{OptionExt as _, ResultExt as _};
+
+            // A window belongs to one branch, so every row it retains carries the same key.
+            let key = crate::runtime::BranchKey::generated_scope(arbitrary);
+            let count = arbitrary.entropy().between(0..=3);
+            let first = arbitrary.entropy().boundary_biased(0..=u64::MAX - 3);
+            let mut entries = Vec::new();
+            let mut argument_values = Vec::new();
+            for index in 0..count {
+                let low = arbitrary.timestamp();
+                let high = arbitrary.timestamp();
+                let metadata = RuntimeRecordMetadata::from_ingested_at_watermarks(low, high);
+                let latency = arbitrary.entropy().any_i64();
+                let record = crate::runtime_schema::test_runtime_row([(
+                    "latency".to_string(),
+                    RuntimeValue::I64(latency),
+                )])
+                .with_metadata(metadata.clone());
+                let argument = if self.argument_nullable && arbitrary.entropy().flag() {
+                    None
+                } else {
+                    Some(arbitrary.entropy().any_i64())
+                };
+                argument_values.push(argument);
+                let argument_array: ArrayRef = StdArc::new(Int64Array::from(vec![argument]));
+                let argument_batch =
+                    RecordBatch::try_new(self.argument_schema.clone(), vec![argument_array])
+                        .assured("the argument column matches its plan's schema");
+                let argument_batch = RuntimeRecordBatch::from_record_batch(
+                    self.argument_schema.clone(),
+                    argument_batch,
+                )
+                .assured("the argument batch has its declared schema");
+                let arguments = RuntimeRow::new(Arc::new(argument_batch), 0, metadata)
+                    .assured("the argument batch has one row");
+                entries.push(WindowEntrySnapshot {
+                    sequence: first
+                        .checked_add(index)
+                        .verified("the first sequence leaves room for three rows"),
+                    // A window orders its rows by the time each was ingested.
+                    timestamp: low,
+                    key: key.clone(),
+                    record,
+                    arguments,
+                });
+            }
+            let next_sequence = if count == 0 {
+                arbitrary.entropy().any_u64()
+            } else {
+                first
+                    .checked_add(count)
+                    .verified("the first sequence leaves room for three rows")
+            };
+            let incarnation = arbitrary.entropy().any_u64();
+            let accumulators = arbitrary.records(|arbitrary| {
+                if arbitrary.entropy().flag() {
+                    return WindowAccumulatorSnapshot::Retained;
+                }
+                let delayed_removals =
+                    arbitrary.records(|arbitrary| LinearHistogramDelayedRemovalSnapshot {
+                        expires_at: arbitrary.timestamp(),
+                        bucket: usize::try_from(arbitrary.entropy().any_u64())
+                            .assured("the native test and fuzz targets address 64 bits"),
+                    });
+                WindowAccumulatorSnapshot::LinearHistogram { delayed_removals }
+            });
+            let snapshot = WindowProcessorStateSnapshot {
+                entries,
+                next_sequence,
+                incarnation: Some(incarnation),
+                accumulators,
+            };
+            GeneratedWindow {
+                snapshot,
+                argument_values,
+                incarnation,
+                revision: arbitrary.entropy().any_u64(),
+            }
+        }
+
+        async fn open(
+            &self,
+            payload: &[u8],
+            executor: &Executor,
+            incarnation: u64,
+        ) -> Result<Option<WindowProcessorStateSnapshot>, Report<WindowSnapshotError>> {
+            decode_window_processor_snapshot(
+                payload,
+                executor,
+                &self.plan,
+                &self.input_schema,
+                incarnation,
+            )
+            .await
+        }
+
+        /// Asserts that `payload` fails to open with the snapshot's typed failure, opens nothing
+        /// for this branch lifetime, or opens a window that seals to a payload which opens and
+        /// seals back to the same bytes.
+        async fn assert_opens_typed_or_canonically(
+            &self,
+            payload: &[u8],
+            executor: &Executor,
+            incarnation: u64,
+            revision: u64,
+        ) {
+            use meticulous::{OptionExt as _, ResultExt as _};
+
+            let restored = match self.open(payload, executor, incarnation).await {
+                Ok(Some(restored)) => restored,
+                Ok(None) => return,
+                Err(report) => {
+                    assert!(
+                        matches!(
+                            report.current_context(),
+                            WindowSnapshotError::Decode { .. }
+                                | WindowSnapshotError::Invalid { .. }
+                        ),
+                        "{report:?}"
+                    );
+                    return;
+                }
+            };
+            let sealed = encode_window_processor_snapshot(&restored, revision, executor)
+                .await
+                .assured("a window that opened seals again");
+            let reopened = self
+                .open(&sealed, executor, incarnation)
+                .await
+                .assured("a sealed window opens")
+                .verified("it was sealed for this branch lifetime");
+            let resealed = encode_window_processor_snapshot(&reopened, revision, executor)
+                .await
+                .assured("a reopened window seals again");
+            assert_eq!(resealed, sealed);
+        }
+    }
+
+    /// `payload` damaged once at a generated position: a flipped bit, a cut, appended bytes, or a
+    /// four-byte little-endian length overwritten with a boundary value.
+    fn damaged(arbitrary: &mut nervix_arbitrary::Arbitrary<'_>, mut payload: Vec<u8>) -> Vec<u8> {
+        use meticulous::{OptionExt as _, ResultExt as _};
+
+        let length = u64::try_from(payload.len()).assured("a payload length fits in u64");
+        let position = arbitrary.entropy().up_to(length);
+        let position = usize::try_from(position).verified("a position at most the payload length");
+        match arbitrary.entropy().byte() % 4 {
+            0 => {
+                let bit = arbitrary.entropy().byte() % 8;
+                if let Some(byte) = payload.get_mut(position) {
+                    *byte ^= 1_u8 << bit;
+                }
+            }
+            1 => payload.truncate(position),
+            2 => {
+                let added = arbitrary.entropy().count(16);
+                for _ in 0..added {
+                    payload.push(arbitrary.entropy().byte());
+                }
+            }
+            _ => {
+                let whole =
+                    u32::try_from(payload.len()).assured("a sealed test window is far below 4 GiB");
+                let value = arbitrary.entropy().pick([0, 1, whole, u32::MAX]);
+                for (offset, byte) in value.to_le_bytes().into_iter().enumerate() {
+                    let index = position.checked_add(offset).verified(
+                        "a position at most a test payload's length is far below usize::MAX",
+                    );
+                    if let Some(slot) = payload.get_mut(index) {
+                        *slot = byte;
+                    }
+                }
+            }
+        }
+        payload
+    }
+
+    /// A sealed window restores every retained row: its sequence, its ingestion time, its branch
+    /// bit for bit, its input and argument values with their metadata, and the window's next
+    /// sequence, branch lifetime and every aggregate's typed state. A snapshot of another branch
+    /// lifetime restores nothing.
+    #[test]
+    fn bolero_window_snapshots_restore_every_retained_row_and_typed_state() {
+        use meticulous::{OptionExt as _, ResultExt as _};
+        use nervix_arbitrary::{Arbitrary, Domain};
+
+        let fixture = WindowSnapshotFixture::new();
+        bolero::check!()
+            .with_iterations(128)
+            .with_max_len(2048)
+            .for_each(|bytes: &[u8]| {
+                let runtime = nervix_primitives::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .assured("a property runtime opens");
+                let executor = Executor::default();
+                let mut arbitrary = Arbitrary::new(bytes, Domain::Vocabulary);
+                let generated = fixture.generated(&mut arbitrary);
+                runtime.block_on(async {
+                    let payload = encode_window_processor_snapshot(
+                        &generated.snapshot,
+                        generated.revision,
+                        &executor,
+                    )
+                    .await
+                    .assured("a bounded generated window seals");
+                    let restored = fixture
+                        .open(&payload, &executor, generated.incarnation)
+                        .await
+                        .assured("a sealed window opens")
+                        .verified("the branch lifetime is the one it was sealed for");
+                    assert_window_snapshots_match(
+                        &restored,
+                        &generated.snapshot,
+                        &generated.argument_values,
+                    );
+                    let other = fixture
+                        .open(&payload, &executor, generated.incarnation ^ 1)
+                        .await
+                        .assured("a sealed window header opens");
+                    assert!(other.is_none(), "another branch lifetime restores nothing");
+                });
+            });
+    }
+
+    /// A sealed window damaged once, and arbitrary bytes behind the snapshot's magic, either fail
+    /// to open with the snapshot's typed failure, open nothing for the branch lifetime, or open a
+    /// window that seals to a payload which opens and seals back to the same bytes.
+    #[test]
+    fn bolero_malformed_window_snapshots_fail_typed() {
+        use meticulous::ResultExt as _;
+        use nervix_arbitrary::{Arbitrary, Domain};
+
+        let fixture = WindowSnapshotFixture::new();
+        bolero::check!()
+            .with_iterations(256)
+            .with_max_len(4096)
+            .for_each(|bytes: &[u8]| {
+                let runtime = nervix_primitives::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .assured("a property runtime opens");
+                let executor = Executor::default();
+                let mut arbitrary = Arbitrary::new(bytes, Domain::Vocabulary);
+                let generated = fixture.generated(&mut arbitrary);
+                runtime.block_on(async {
+                    let payload = encode_window_processor_snapshot(
+                        &generated.snapshot,
+                        generated.revision,
+                        &executor,
+                    )
+                    .await
+                    .assured("a bounded generated window seals");
+                    let payload = damaged(&mut arbitrary, payload);
+                    fixture
+                        .assert_opens_typed_or_canonically(
+                            &payload,
+                            &executor,
+                            generated.incarnation,
+                            generated.revision,
+                        )
+                        .await;
+
+                    let mut framed = WINDOW_SNAPSHOT_MAGIC.to_vec();
+                    framed.extend_from_slice(bytes);
+                    fixture
+                        .assert_opens_typed_or_canonically(
+                            &framed,
+                            &executor,
+                            generated.incarnation,
+                            generated.revision,
+                        )
+                        .await;
+                });
+            });
+    }
+
+    /// Asserts that `restored` holds exactly the rows, sequences and typed state of `expected`.
+    fn assert_window_snapshots_match(
+        restored: &WindowProcessorStateSnapshot,
+        expected: &WindowProcessorStateSnapshot,
+        arguments: &[Option<i64>],
+    ) {
+        use meticulous::ResultExt as _;
+
+        let key_bits = |key: &Option<crate::runtime::BranchKey>| {
+            rkyv::to_bytes::<rkyv::rancor::Error>(&crate::runtime::BranchKey::to_remote_key(key))
+                .assured("a remote branch key archives")
+                .to_vec()
+        };
+        assert_eq!(restored.entries.len(), expected.entries.len());
+        for ((restored, expected), argument) in restored
+            .entries
+            .iter()
+            .zip(&expected.entries)
+            .zip(arguments)
+        {
+            assert_eq!(restored.sequence, expected.sequence);
+            assert_eq!(restored.timestamp, expected.timestamp);
+            assert_eq!(key_bits(&restored.key), key_bits(&expected.key));
+            assert_eq!(
+                restored
+                    .record
+                    .value("latency")
+                    .assured("the restored row reads"),
+                expected
+                    .record
+                    .value("latency")
+                    .assured("the generated row reads")
+            );
+            for (restored, expected) in [
+                (restored.record.metadata(), expected.record.metadata()),
+                (restored.arguments.metadata(), expected.arguments.metadata()),
+            ] {
+                assert_eq!(
+                    restored.ingested_at_low_watermark(),
+                    expected.ingested_at_low_watermark()
+                );
+                assert_eq!(
+                    restored.ingested_at_high_watermark(),
+                    expected.ingested_at_high_watermark()
+                );
+            }
+            assert_eq!(
+                restored
+                    .arguments
+                    .value("argument_0")
+                    .assured("the restored argument reads"),
+                argument.map(RuntimeValue::I64)
+            );
+        }
+        assert_eq!(restored.next_sequence, expected.next_sequence);
+        assert_eq!(restored.incarnation, expected.incarnation);
+        assert_eq!(restored.accumulators.len(), expected.accumulators.len());
+        for (restored, expected) in restored.accumulators.iter().zip(&expected.accumulators) {
+            match (restored, expected) {
+                (WindowAccumulatorSnapshot::Retained, WindowAccumulatorSnapshot::Retained) => {}
+                (
+                    WindowAccumulatorSnapshot::LinearHistogram {
+                        delayed_removals: restored,
+                    },
+                    WindowAccumulatorSnapshot::LinearHistogram {
+                        delayed_removals: expected,
+                    },
+                ) => assert_eq!(restored, expected),
+                (restored, expected) => panic!("{restored:?} restored as {expected:?}"),
+            }
+        }
+    }
 }

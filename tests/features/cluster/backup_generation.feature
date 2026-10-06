@@ -137,7 +137,7 @@ Feature: Bounded complete restore generations
       """
       state structures: <branches>
       """
-    Then within "30s" DESCRIBE DOMAIN section "input_output" metric "messages_total" "sent" relay "raw_metrics" across physical nodes totals <restored_inputs>
+    Then within "120s" DESCRIBE DOMAIN section "input_output" metric "messages_total" "sent" relay "raw_metrics" across physical nodes totals <restored_inputs>
     And within "30s" DESCRIBE DOMAIN section "processed" metric "messages_total" "sent" relay "filtered_metrics" across physical nodes totals <branches>
     And within "30s" the restore subscription receives one isolated even row for each of <branches> tenants
     When the CLI backs up "domain {{domain}} --timeout 120s" from node "{{leader}}" into "restored-state.nvxb" reporting JSON

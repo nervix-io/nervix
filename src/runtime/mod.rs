@@ -264,6 +264,7 @@ mod observability;
 mod ownership_handoff_error;
 mod planning;
 mod pooled_sink_clients;
+mod processor_branch_restore;
 mod processor_branch_task;
 mod processor_output;
 mod processor_plan_binding;
@@ -491,8 +492,10 @@ use planning::{
     ProcessorPlanBindingContext, bind_published_processor_plans,
     materialize_ingestor_route_template, parse_branch_flush_policy, parse_input_collect_policy,
 };
+use processor_branch_restore::PendingProcessorBranchRestore;
 use processor_branch_task::{
-    PROCESSOR_BRANCH_TASK_SHUTDOWN_GRACE, ProcessorBranchHandoff, ProcessorNodeCommand,
+    PROCESSOR_BRANCH_TASK_SHUTDOWN_GRACE, PreparedProcessorBranch, ProcessorBranchHandoff,
+    ProcessorBranchLifetime, ProcessorBranchTask, ProcessorBranchTaskError, ProcessorNodeCommand,
     ProcessorSnapshotRequest, SpawnedSnapshotTask,
 };
 pub(in crate::runtime) use processor_branch_task::{
@@ -563,6 +566,7 @@ use state_replication::{
     ActivatedRuntimeStateHandoff, DEFAULT_STATE_REPLICATION_POLL_INTERVAL,
     DEFAULT_STATE_SNAPSHOT_INTERVAL, PreparedForcedRuntimeStateRecovery,
     PreparedRuntimeStateHandoff, PreparedRuntimeStateSnapshot, PublishedBranchState,
+    RestorableBranchLifecycle,
 };
 pub(in crate::runtime) use state_store::{
     ForcedRuntimeStateRecoveryAuthorization, ForcedRuntimeStateRecoveryIdentity,
@@ -610,8 +614,7 @@ use vm_compile::{
     compile_reorderer_program, compile_scoped_filter_program,
     compile_wasm_output_filter_map_program, compiled_message_error_sites,
     evaluate_constant_expression_vm, referenced_materialized_stream_bindings,
-    relay_schema_for_routing, relay_schema_for_runtime, runtime_udf_compile_options,
-    runtime_udf_signatures,
+    relay_schema_for_routing, runtime_udf_compile_options, runtime_udf_signatures,
 };
 use vm_input::{
     SharedBatchColumns, VmInputProjectionSources, compute_lookup_hash_map_columns,

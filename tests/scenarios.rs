@@ -11448,6 +11448,28 @@ async fn when_the_cluster_is_restarted(world: &mut ScenarioWorld) {
         .expect("failed to restart cluster");
 }
 
+/// Every node stops with its stored state moved from memtables into on-disk tables, so the restart
+/// reads each stored record back from a table, as a node does once journal rotation has flushed
+/// it. A node that did not perform the move fails the step rather than restarting from memory.
+#[when("the cluster is restarted from state its nodes moved into on-disk tables")]
+async fn when_the_cluster_restarts_from_on_disk_tables(world: &mut ScenarioWorld) {
+    let nodes = world.cluster().node_ids();
+    for node in &nodes {
+        world
+            .fault_injection
+            .flush_node_database_on_stop(crate::common::cluster::node_name(node));
+    }
+    when_the_cluster_is_restarted(world).await;
+    for node in &nodes {
+        assert!(
+            world
+                .fault_injection
+                .node_database_flushed(&crate::common::cluster::node_name(node)),
+            "node '{node}' stopped without moving its node database into on-disk tables"
+        );
+    }
+}
+
 #[then(expr = "the last cluster operation completes within {string}")]
 async fn then_last_cluster_operation_completes_within(world: &mut ScenarioWorld, duration: String) {
     let max_duration =

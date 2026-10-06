@@ -1053,6 +1053,15 @@ round synchronizes the lifecycle, reads the catalog's changes, and requests only
 the branches that changed or were announced, so a round in which no branch changed sends two
 requests however many branches the entity has.
 
+Checkpoint synchronization and catalog listing each use their operation's five-second deadline,
+including admission, connection capacity, the answer and decoding. The one-second replication poll
+interval schedules the next idle round; it does not shorten an in-flight request's deadline. A
+branch-aggregated replica uses the same checkpoint operation deadline. Polls and announcements retry
+a failed exchange, while the owner's checkpoint completion deadline remains independent and may
+fail if a replica cannot confirm in time. Replica request diagnostics retain the typed transport
+cause beneath the target and placement context, so a timeout can be distinguished from capacity,
+connection and framing failures without inspecting checkpoint bytes.
+
 The owner of a placement offers its newest checkpoint to the replicas the committed schedule
 assigns, and repeats the offer every 100 milliseconds to each replica that has not acknowledged
 that revision, until every one of them has, the node stops being the placement's primary, the
@@ -1118,6 +1127,10 @@ reaches the replica's assignment-token installation barrier; a promoted or repla
 rejects a delayed transfer. The replica acknowledges its installed revision afterward, and the
 existing five-second Kafka commit quorum deadline remains in force. Transfer and admission
 failures preserve their typed causes in the replica diagnostic and retry on a later round.
+Every successful poll also repeats the replica's held revision when the checkpoint is unchanged,
+so a lost acknowledgement does not strand the owner's quorum wait or require another transfer.
+The replica checks its installation assignment before reporting that revision; promotion or
+replacement fences a retained poll's acknowledgement as well as its delayed installation.
 
 Runtime-state synchronization replies and materialized-snapshot descriptions carry the shared
 typed remote-operation failure envelope. Rejection, absence, temporary unreadiness, and execution

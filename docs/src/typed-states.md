@@ -58,7 +58,11 @@ only after installation, preserving early startup spans.
 and resolved schema together. The schema supplies the branch fields and their sensitivity, so a
 runtime plan cannot pair a present branch schema with an independently missing sensitivity set.
 Unbranched execution has no branch key; a concrete key has a nonempty declared shape. An empty
-field list or synthetic root identifier does not select a branch. Materialized-state reads use the
+field list or synthetic root identifier does not select a branch. A concrete key holds only finite
+floats, because the VM turns a non-finite float result into a row error and a non-finite float has
+no canonical text to key a branch by. A key read from a stored checkpoint or a peer that holds one
+fails with `BranchKeyError::NonFiniteFloat`, and one holding a datetime that is not RFC 3339 text
+fails with `BranchKeyError::RemoteFieldValue`; both name the field. Materialized-state reads use the
 incoming concrete branch, or the actual unbranched state, and reporting keeps the optional branch
 identity until the display boundary. The structural ASCII graph projection is domain-free; a
 serialized graph retains its real typed domain.
@@ -148,7 +152,10 @@ remote-operation failures for refusal. An advanced revision selects a bulk nativ
 its header must name a revision newer than the replica's request and no earlier than the described
 revision. Length, digest and the current archived shape are verified before a replacement table
 is published through the retained replica assignment token. A cancelled or invalid transfer
-therefore leaves the prior installed checkpoint intact.
+leaves the installed state intact. Every successful synchronization returns the held revision,
+including a `Current` answer, after validating replica authority. It is acknowledged again so
+lost progress reports recover without another transfer; a promoted or replaced assignment rejects
+reports through a retained token.
 
 The runtime checks a stored state's schema identity against the current scheduled identity before
 accepting it. WASM guest state additionally uses its generation for the concrete branch. A state

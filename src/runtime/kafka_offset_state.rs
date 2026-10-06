@@ -482,6 +482,20 @@ impl KafkaOffsetSnapshotInstaller {
         &self.read
     }
 
+    /// Report the installed revision only while this assignment still grants replica authority.
+    /// A poll reuses this report when no transfer is needed, so a lost acknowledgement is retried.
+    pub(super) fn acknowledged_revision(&self) -> error_stack::Result<u64, StateReplicationError> {
+        self.read
+            .state
+            .assignment
+            .authorize(self.assignment, StateCapability::InstallSnapshot, || {
+                self.read.current_lsm()
+            })
+            .change_context(StateReplicationError::Capture {
+                placement: self.read.placement().clone(),
+            })
+    }
+
     pub(super) fn install_cancellable_snapshot(
         &self,
         lsm: u64,
@@ -924,6 +938,145 @@ impl Iterator for KafkaOffsetEntries<'_> {
 
 impl ExactSizeIterator for KafkaOffsetEntries<'_> {}
 
+/// What one Kafka offset table records, read out of its slots: every topic's partitions with
+/// their next offsets, and every topic's schedule, each in key order.
+#[cfg(test)]
+#[derive(Debug, PartialEq, Eq)]
+struct KafkaOffsetView {
+    offsets: BTreeMap<String, BTreeMap<i32, i64>>,
+    schedules: BTreeMap<String, KafkaScheduleView>,
+}
+
+/// One topic's recorded schedule with its assignments in partition order.
+#[cfg(test)]
+#[derive(Debug, PartialEq, Eq)]
+struct KafkaScheduleView {
+    instances: NonZeroU64,
+    rebalance_epoch: u64,
+    observed_partitions: Vec<i32>,
+    assignments: BTreeMap<i32, u64>,
+}
+
+#[cfg(test)]
+impl KafkaOffsetTable {
+    fn view(&self) -> KafkaOffsetView {
+        let mut offsets = BTreeMap::new();
+        for (topic, partitions) in &self.topics {
+            let mut positions = BTreeMap::new();
+            for (partition, slot) in partitions {
+                positions.insert(*partition, slot.load(Ordering::SeqCst));
+            }
+            offsets.insert(topic.clone(), positions);
+        }
+        let mut schedules = BTreeMap::new();
+        for (topic, schedule) in &self.schedules {
+            let assignments = schedule.assignments.iter().map(|(p, i)| (*p, *i)).collect();
+            schedules.insert(
+                topic.clone(),
+                KafkaScheduleView {
+                    instances: schedule.instances,
+                    rebalance_epoch: schedule.rebalance_epoch,
+                    observed_partitions: schedule.observed_partitions.clone(),
+                    assignments,
+                },
+            );
+        }
+        KafkaOffsetView { offsets, schedules }
+    }
+
+    /// Up to three recorded partitions of up to three topics at any offset, and up to three topic
+    /// schedules with their observed partitions in the sorted order a rebalance records them.
+    fn generated(arbitrary: &mut nervix_arbitrary::Arbitrary<'_>) -> Self {
+        let mut positions = Vec::new();
+        for _ in 0..arbitrary.entropy().count(3) {
+            let topic = arbitrary.string();
+            for _ in 0..arbitrary.entropy().count(3) {
+                positions.push(KafkaOffsetPosition {
+                    topic: topic.clone(),
+                    partition: generated_partition(arbitrary),
+                    offset: arbitrary.entropy().any_i64(),
+                });
+            }
+        }
+        let mut schedules = HashMap::default();
+        for _ in 0..arbitrary.entropy().count(3) {
+            let mut observed = std::collections::BTreeSet::new();
+            for _ in 0..arbitrary.entropy().count(3) {
+                observed.insert(generated_partition(arbitrary));
+            }
+            let mut assignments = HashMap::default();
+            for partition in &observed {
+                assignments.insert(*partition, arbitrary.entropy().any_u64());
+            }
+            schedules.insert(
+                arbitrary.string(),
+                KafkaTopicSchedulingState {
+                    instances: arbitrary.positive_u64(),
+                    rebalance_epoch: arbitrary.entropy().any_u64(),
+                    observed_partitions: observed.into_iter().collect(),
+                    assignments,
+                },
+            );
+        }
+        Self::from_offsets(positions, schedules)
+    }
+}
+
+/// A Kafka partition number, landing on zero and the extremes as often as elsewhere.
+#[cfg(test)]
+fn generated_partition(arbitrary: &mut nervix_arbitrary::Arbitrary<'_>) -> i32 {
+    use meticulous::ResultExt as _;
+
+    match arbitrary.entropy().byte() % 4 {
+        0 => 0,
+        1 => i32::MIN,
+        2 => i32::MAX,
+        _ => {
+            let bits = u32::try_from(arbitrary.entropy().up_to(u64::from(u32::MAX)))
+                .verified("the draw ends at u32::MAX");
+            bits.cast_signed()
+        }
+    }
+}
+
+/// A generated offset table stores through `stored`, the checkpoint envelope a node keeps it in,
+/// and restores every partition offset and topic schedule.
+#[cfg(test)]
+pub(in crate::runtime) fn assert_generated_offsets_survive(
+    arbitrary: &mut nervix_arbitrary::Arbitrary<'_>,
+    stored: impl FnOnce(Vec<u8>) -> Vec<u8>,
+) {
+    use meticulous::ResultExt as _;
+
+    let table = KafkaOffsetTable::generated(arbitrary);
+    let payload = table
+        .encode()
+        .assured("a bounded generated offset table encodes");
+    let restored = KafkaOffsetTable::decode(&stored(payload))
+        .assured("a stored offset table decodes from its own encoding");
+    assert_eq!(restored.view(), table.view());
+}
+
+/// Arbitrary bytes read as a stored offset table either fail with the typed decode failure or
+/// restore a table that stores back unchanged.
+#[cfg(test)]
+pub(in crate::runtime) fn assert_offset_payload_decodes_typed(payload: &[u8]) {
+    use meticulous::ResultExt as _;
+
+    match KafkaOffsetTable::decode(payload) {
+        Ok(table) => {
+            let encoded = table.encode().assured("a decoded offset table encodes");
+            let again =
+                KafkaOffsetTable::decode(&encoded).assured("a re-encoded offset table decodes");
+            assert_eq!(again.view(), table.view());
+        }
+        Err(error) => assert!(
+            matches!(error, RuntimePersistenceError::DecodeState(_)),
+            "{error:?}"
+        ),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use ahash::HashMap;
@@ -933,6 +1086,60 @@ mod tests {
 
     use super::*;
     use crate::runtime::{RuntimeState, StateReplicationRoles};
+
+    #[test]
+    fn a_current_kafka_replica_recovers_a_lost_progress_report_without_another_snapshot() {
+        let owner = ClusterNodeName::parse("node-1").assured("the owner name is valid");
+        let replica = ClusterNodeName::parse("node-2").assured("the replica name is valid");
+        let roles = StateReplicationRoles::new(Some(owner.clone()), vec![replica.clone()], 1);
+        let primary = Arc::new(
+            ReplicatedKafkaOffsetState::new(offset_placement(), None)
+                .assured("an empty primary initializes"),
+        );
+        let originator = ReplicatedKafkaOffsetState::bind(&primary, roles.clone(), Some(&owner))
+            .originator
+            .assured("the primary may commit offsets");
+        let revision = originator
+            .apply_committed_offset(&KafkaOffsetPosition {
+                topic: "events".into(),
+                partition: 0,
+                offset: 9,
+            })
+            .assured("the first offset is committed");
+        let snapshot = originator
+            .read()
+            .latest_snapshot()
+            .assured("the committed checkpoint captures");
+        let secondary = Arc::new(
+            ReplicatedKafkaOffsetState::new(offset_placement(), Some(snapshot))
+                .assured("the replica already holds the checkpoint"),
+        );
+        let installer = ReplicatedKafkaOffsetState::bind(&secondary, roles, Some(&replica))
+            .installer
+            .assured("the secondary retains replica authority");
+        let first_report = installer
+            .acknowledged_revision()
+            .assured("the installed replica can report progress");
+        assert_eq!(first_report, revision);
+        // The first report is lost before the primary receives it. A later poll asks for only
+        // changes, so the primary has no checkpoint to send back.
+        assert!(!originator.read().replica_quorum_holds(revision));
+        assert!(
+            originator
+                .read()
+                .capture_after(Some(installer.read().current_lsm()))
+                .is_none()
+        );
+        let repeated_report = installer
+            .acknowledged_revision()
+            .assured("an unchanged replica repeats its held revision");
+        originator
+            .read()
+            .replication()
+            .record(&replica, repeated_report);
+        assert!(originator.read().replica_quorum_holds(revision));
+        assert_eq!(installer.read().next_offset("events", 0), Some(9));
+    }
 
     #[test]
     fn cancelled_or_invalid_kafka_conversion_keeps_the_installed_checkpoint() {
@@ -1158,6 +1365,18 @@ mod tests {
         installer
             .install_checked_snapshot(1, &payload(2), || Ok(()))
             .assured("the initial replica snapshot is valid");
+        assert_eq!(
+            installer
+                .acknowledged_revision()
+                .assured("an unchanged replica reports the revision it holds"),
+            1
+        );
+        assert_eq!(
+            installer
+                .acknowledged_revision()
+                .assured("a lost acknowledgement can be repeated without a transfer"),
+            1
+        );
 
         let delayed_installer = installer.clone();
         let delayed_payload = payload(3);
@@ -1190,6 +1409,11 @@ mod tests {
                 offset: 9,
             })
             .assured("the promoted owner assignment is current");
+        let refused_acknowledgement = installer
+            .acknowledged_revision()
+            .err()
+            .assured("promotion fences acknowledgements from the prior replica assignment");
+        assert!(refused_acknowledgement.contains::<StateAuthorityError>());
         let _ = release_tx.send(());
         let delayed_result = delayed_install
             .await

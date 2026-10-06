@@ -52,10 +52,6 @@ pub(super) enum ProcessorTemplateError {
         processor: ModelName,
         branch: Option<BranchKey>,
     },
-    #[error("window processor '{}' requires an input relay", .processor.as_str())]
-    WindowInputRelay { processor: ModelName },
-    #[error("failed to resolve window processor '{}' input schema", .processor.as_str())]
-    WindowInputSchema { processor: ModelName },
     #[error(
         "failed to restore window processor '{}' state for branch '{}'",
         .processor.as_str(),
@@ -510,6 +506,7 @@ impl RelayProcessorTemplate {
                 }
                 RelayProcessorOperationTemplate::WindowProcessor {
                     output_routes,
+                    input_schema,
                     width_messages,
                     step_messages,
                     width_duration,
@@ -538,17 +535,8 @@ impl RelayProcessorTemplate {
                             processor: self.processor.clone(),
                             branch: key.clone(),
                         })?;
-                    let input_relay = self.input_relays.first().ok_or_else(|| {
-                        Report::new(ProcessorTemplateError::WindowInputRelay {
-                            processor: self.processor.clone(),
-                        })
-                    })?;
-                    let input_schema = relay_schema_for_runtime(runtime, domain, input_relay)
-                        .change_context_lazy(|| ProcessorTemplateError::WindowInputSchema {
-                            processor: self.processor.clone(),
-                        })?;
                     let state = replicated_state
-                        .restore_state(plan, &input_schema, incarnation, &runtime.inner.executor)
+                        .restore_state(plan, input_schema, incarnation, &runtime.inner.executor)
                         .await
                         .change_context_lazy(|| ProcessorTemplateError::WindowRestore {
                             processor: self.processor.clone(),

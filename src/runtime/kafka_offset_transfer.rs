@@ -207,12 +207,12 @@ impl Runtime {
         Ok(StreamingResponse::new(length, chunks))
     }
 
-    pub(in crate::runtime) async fn install_kafka_offsets_from(
+    pub(in crate::runtime) async fn sync_kafka_offsets_from(
         &self,
         target: &ClusterNodeName,
         installer: &KafkaOffsetSnapshotInstaller,
         after_lsm: u64,
-    ) -> error_stack::Result<Option<u64>, StateReplicationError> {
+    ) -> error_stack::Result<u64, StateReplicationError> {
         let placement = installer.read().placement();
         let failure = || StateReplicationError::Request {
             target: target.clone(),
@@ -243,7 +243,9 @@ impl Runtime {
                 })
             })?;
         let KafkaOffsetRevision::Advanced(described_lsm) = described else {
-            return Ok(None);
+            // The owner may still be waiting for an acknowledgement this replica already sent.
+            // Report held progress again without encoding or transferring another checkpoint.
+            return installer.acknowledged_revision();
         };
         let mut body = dispatcher
             .request_stream(
@@ -258,7 +260,7 @@ impl Runtime {
         if body.content_length() == 0 {
             // Read EOF too: an empty declaration does not excuse unexpected response bytes.
             body.next_chunk().await.change_context_lazy(failure)?;
-            return Ok(None);
+            return installer.acknowledged_revision();
         }
         let length = match body.content_length().checked_sub(HEADER_BYTES.arch_into()) {
             Some(length) if length > 0 => length,
@@ -344,7 +346,7 @@ impl Runtime {
             .await
             .change_context_lazy(failure)?
             .change_context_lazy(failure)?;
-        Ok(Some(lsm))
+        Ok(lsm)
     }
 }
 

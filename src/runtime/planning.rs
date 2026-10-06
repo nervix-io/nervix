@@ -324,6 +324,15 @@ fn materialize_nodes(
                         demand_offset += route_aggregate.demands().len();
                     }
 
+                    // Every input relay shares the schema each route above compiled against. A
+                    // restored branch reads the rows its open window retains under it.
+                    let input_relay = node.input_relays.first().verified(
+                        "each route compiled above read the processor's first input relay",
+                    );
+                    let input_schema = relay_schemas.get(input_relay).verified(
+                        "each route compiled above read the schema of the first input relay",
+                    );
+
                     // The shared accumulator plan the branch-local window state is built from,
                     // whose demands follow the same written route order as the offsets above.
                     let aggregate =
@@ -376,6 +385,7 @@ fn materialize_nodes(
 
                     RelayProcessorOperationTemplate::WindowProcessor {
                         output_routes: materialized_outputs,
+                        input_schema: input_schema.clone(),
                         width_messages,
                         step_messages,
                         width_duration,
