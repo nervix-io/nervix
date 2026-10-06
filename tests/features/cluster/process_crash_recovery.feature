@@ -86,6 +86,127 @@ Feature: Real process crash recovery
     When the server process receives SIGTERM
     Then the server process exits with status 0
 
+  Scenario: SIGKILL restores every open window of a window processor that restarts beside other processors
+    Given Postgres is running
+    And a nervix-server process is started with state snapshot interval "50ms"
+    And Postgres table "process_open_windows_{{test_id}}" exists
+    And the server process is configured with these NSPL commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      CREATE SCHEMA reading (tenant STRING, value I64);
+      CREATE SCHEMA reading_window (tenant STRING, samples I64, total I64);
+      CREATE WIRE JSON SCHEMA reading_wire MODE STRICT (tenant string, value integer);
+      CREATE CODEC reading_codec FROM WIRE JSON SCHEMA reading_wire TO SCHEMA reading;
+      CREATE SCHEMA reading_tenant (tenant STRING);
+      CREATE BRANCH by_reading_tenant SCHEMA reading_tenant TTL 5m;
+      CREATE RELAY readings SCHEMA reading BRANCHED BY by_reading_tenant;
+      CREATE RELAY reading_windows SCHEMA reading_window BRANCHED BY by_reading_tenant;
+      CREATE RELAY unique_readings SCHEMA reading BRANCHED BY by_reading_tenant;
+      CREATE RELAY copied_readings SCHEMA reading BRANCHED BY by_reading_tenant;
+      CREATE VHOST reading_edge readings-{{test_id}}.example.com;
+      CREATE ENDPOINT reading_ingress ON reading_edge PATH '/events' TYPE HTTP;
+      CREATE INGESTOR reading_source
+        FROM ENDPOINT reading_ingress MODE NO_ACK SEQUENTIAL
+        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING reading_codec
+        TO readings INHERIT ALL BRANCHED BY by_reading_tenant
+        SET tenant = message.tenant
+        FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+      CREATE WINDOW PROCESSOR aggregate_readings FROM readings
+        WIDTH 3 MESSAGES STEP 3 MESSAGES BRANCHED BY by_reading_tenant
+        TO reading_windows
+          SET tenant = FIRST(input.tenant), samples = COUNT(input.value), total = SUM(input.value)
+          ON MESSAGE ERROR LOG;
+      CREATE JUNCTION copy_reading FROM readings BRANCHED BY by_reading_tenant
+        TO copied_readings INHERIT ALL FLUSH IMMEDIATE ON MESSAGE ERROR LOG;
+      CREATE DEDUPLICATOR unique_reading FROM readings
+        DEDUPLICATE ON input.value
+        MAX TIME 10m
+        BRANCHED BY by_reading_tenant
+        TO unique_readings INHERIT ALL FLUSH IMMEDIATE ON MESSAGE ERROR LOG;
+      CREATE CLIENT reading_postgres TYPE POSTGRES
+        POOL SIZE MIN 1 MAX 4
+        CONFIG {
+          'addr' = '{{postgres_addr}}'
+        };
+      CREATE EMITTER copied_output FROM copied_readings
+        TO POSTGRES reading_postgres INSERT TO TABLE process_open_windows_{{test_id}}
+        VALUES {
+          "postgres_user_id" = input.value,
+          "postgres_now" = NOW() AS STRING,
+          "postgres_action" = concat('copied:', input.tenant)
+        }
+        MODE ACK RETRY POLICY BACKOFF 100ms MAX 5s
+        BATCH MAX MESSAGES 64 MAX SIZE 1MiB
+        FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+      CREATE EMITTER unique_output FROM unique_readings
+        TO POSTGRES reading_postgres INSERT TO TABLE process_open_windows_{{test_id}}
+        VALUES {
+          "postgres_user_id" = input.value,
+          "postgres_now" = NOW() AS STRING,
+          "postgres_action" = concat('unique:', input.tenant)
+        }
+        MODE ACK RETRY POLICY BACKOFF 100ms MAX 5s
+        BATCH MAX MESSAGES 64 MAX SIZE 1MiB
+        FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+      CREATE EMITTER window_output FROM reading_windows
+        TO POSTGRES reading_postgres INSERT TO TABLE process_open_windows_{{test_id}}
+        VALUES {
+          "postgres_user_id" = input.total,
+          "postgres_now" = NOW() AS STRING,
+          "postgres_action" = concat('window:', input.tenant)
+        }
+        MODE ACK RETRY POLICY BACKOFF 100ms MAX 5s
+        BATCH MAX MESSAGES 64 MAX SIZE 1MiB
+        FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+      START;
+      """
+    When http payload is posted to the server process with host "readings-{{test_id}}.example.com" path "/events"
+      """
+      {"tenant":"alpha","value":10}
+      """
+    And http payload is posted to the server process with host "readings-{{test_id}}.example.com" path "/events"
+      """
+      {"tenant":"beta","value":100}
+      """
+    Then the Postgres table eventually contains a row
+      """
+      {"postgres_user_id":10,"postgres_action":"unique:alpha"}
+      """
+    And the Postgres table eventually contains a row
+      """
+      {"postgres_user_id":100,"postgres_action":"unique:beta"}
+      """
+    When physical time passes for "3s"
+    And the server process receives SIGKILL
+    Then the server process is terminated by SIGKILL within "10s" of the last signal
+    When the server process is restarted from its existing database
+    And the server process eventually accepts http payload with host "readings-{{test_id}}.example.com" path "/events"
+      """
+      {"tenant":"alpha","value":20}
+      """
+    And http payload is posted to the server process with host "readings-{{test_id}}.example.com" path "/events"
+      """
+      {"tenant":"beta","value":200}
+      """
+    And http payload is posted to the server process with host "readings-{{test_id}}.example.com" path "/events"
+      """
+      {"tenant":"alpha","value":30}
+      """
+    And http payload is posted to the server process with host "readings-{{test_id}}.example.com" path "/events"
+      """
+      {"tenant":"beta","value":300}
+      """
+    Then the Postgres table eventually contains a row
+      """
+      {"postgres_user_id":60,"postgres_action":"window:alpha"}
+      """
+    And the Postgres table eventually contains a row
+      """
+      {"postgres_user_id":600,"postgres_action":"window:beta"}
+      """
+    When the server process receives SIGTERM
+    Then the server process exits with status 0
+
   Scenario: SIGKILL during interleaved traffic preserves only checkpoints durable before the crash
     Given Postgres is running
     And a nervix-server process is started with state snapshot interval "50ms"
