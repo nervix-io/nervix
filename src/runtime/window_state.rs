@@ -1109,7 +1109,14 @@ mod tests {
             executor: &Executor,
             incarnation: u64,
         ) -> Result<Option<WindowProcessorStateSnapshot>, Report<WindowSnapshotError>> {
-            decode_for_branch(payload, executor, &self.plan, &self.input_schema, incarnation).await
+            decode_for_branch(
+                payload,
+                executor,
+                &self.plan,
+                &self.input_schema,
+                incarnation,
+            )
+            .await
         }
 
         /// Asserts that `payload` fails to open with the snapshot's typed failure, opens nothing
