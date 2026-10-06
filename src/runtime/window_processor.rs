@@ -96,6 +96,16 @@ pub(super) enum WindowProcessorError {
     PaneLimitExceeded { panes: usize, limit: u64 },
     #[error("approximate distinct estimate exceeds I64")]
     SketchEstimateOverflow,
+    #[error("{aggregates} compiled aggregate programs do not match {routes} output routes")]
+    AggregateProgramCount { routes: usize, aggregates: usize },
+    #[error("cannot emit the window aggregate")]
+    EmitAggregate,
+    #[error("the aggregate of output route '{relay}' failed")]
+    RouteAggregate { relay: RelayName },
+    #[error("failed to construct the output row of route '{relay}'")]
+    OutputRow { relay: RelayName },
+    #[error("failed to build the output batch of route '{relay}'")]
+    OutputBatch { relay: RelayName },
 }
 
 /// One row the window retains, with the message it arrived in.
@@ -207,12 +217,10 @@ pub(super) async fn flush_ready_window_processor(
             processor,
             error_policies,
             state.entries.iter().map(|entry| &entry.message.acks),
-            format!(
-                "window processor '{}' has {} output routes but {} compiled aggregate programs",
-                processor.as_str(),
-                output_routes.routes.len(),
-                compiled_aggregates.len()
-            ),
+            &Report::new(WindowProcessorError::AggregateProgramCount {
+                routes: output_routes.routes.len(),
+                aggregates: compiled_aggregates.len(),
+            }),
         );
         state.clear(plan);
         return true;
@@ -231,10 +239,7 @@ pub(super) async fn flush_ready_window_processor(
                     processor,
                     error_policies,
                     state.entries.iter().map(|entry| &entry.message.acks),
-                    format!(
-                        "window processor '{}' cannot emit aggregate: {error:#}",
-                        processor.as_str(),
-                    ),
+                    &error.change_context(WindowProcessorError::EmitAggregate),
                 );
                 state.clear(plan);
                 changed = true;
@@ -253,7 +258,7 @@ pub(super) async fn flush_ready_window_processor(
                         processor,
                         error_policies,
                         state.entries.iter().map(|entry| &entry.message.acks),
-                        error.to_string(),
+                        &error,
                     );
                     route_failed = true;
                     break;
@@ -276,11 +281,9 @@ pub(super) async fn flush_ready_window_processor(
                         processor,
                         error_policies,
                         state.entries.iter().map(|entry| &entry.message.acks),
-                        format!(
-                            "window processor '{}' output route '{}' aggregate failed: {error:#}",
-                            processor.as_str(),
-                            output_relay.as_str(),
-                        ),
+                        &error.change_context(WindowProcessorError::RouteAggregate {
+                            relay: output_relay.clone(),
+                        }),
                     );
                     route_failed = true;
                     break;
@@ -297,13 +300,9 @@ pub(super) async fn flush_ready_window_processor(
                             processor,
                             error_policies,
                             state.entries.iter().map(|entry| &entry.message.acks),
-                            format!(
-                                "window processor '{}' failed to construct output route '{}' row: \
-                                 {}",
-                                processor.as_str(),
-                                output_relay.as_str(),
-                                error
-                            ),
+                            &error.change_context(WindowProcessorError::OutputRow {
+                                relay: output_relay.clone(),
+                            }),
                         );
                         route_failed = true;
                         break;
@@ -326,12 +325,9 @@ pub(super) async fn flush_ready_window_processor(
                             processor,
                             error_policies,
                             state.entries.iter().map(|entry| &entry.message.acks),
-                            format!(
-                                "window processor '{}' failed to build output route '{}' batch: {}",
-                                processor.as_str(),
-                                output_relay.as_str(),
-                                error
-                            ),
+                            &error.change_context(WindowProcessorError::OutputBatch {
+                                relay: output_relay.clone(),
+                            }),
                         );
                         route_failed = true;
                         break;

@@ -32,6 +32,15 @@ pub(super) enum ProcessorBranchTaskError {
     ReadLruSnapshot,
     #[error("failed to decode the persisted processor branch LRU snapshot")]
     DecodeLruSnapshot,
+    #[error(
+        "could not read the domain time of accepted input for branch '{}'",
+        branch_key_display(.branch)
+    )]
+    AcceptedInputClock { branch: Option<BranchKey> },
+    #[error("the task of branch '{}' is unavailable", branch_key_display(.branch))]
+    Unavailable { branch: Option<BranchKey> },
+    #[error("the processor has not restored its branches")]
+    RestorePending,
     #[error("the branch lifecycle the handed-over processor branches belong to is unavailable")]
     HandedOffLifecycleUnavailable,
     #[error(
@@ -239,7 +248,7 @@ pub(super) async fn run_processor_node_runtime(
         Ok(clock) => clock,
         Err(error) => {
             runtime_handle.events().report_error(format!(
-                "processor '{}' in domain '{}' could not bind its clock: {error}",
+                "processor '{}' in domain '{}' could not bind its clock: {error:#}",
                 processor.as_str(),
                 domain.as_str(),
             ));
@@ -302,7 +311,7 @@ pub(super) async fn run_processor_node_runtime(
             Ok(snapshot) => snapshot,
             Err(error) => {
                 runtime_handle.events().report_error(format!(
-                    "processor '{}' in domain '{}' lost its clock: {error}",
+                    "processor '{}' in domain '{}' lost its clock: {error:#}",
                     processor.as_str(),
                     domain.as_str(),
                 ));
@@ -413,7 +422,7 @@ pub(super) async fn run_processor_node_runtime(
             Err(error) => {
                 runtime_handle.events().report_error(format!(
                     "processor '{}' in domain '{}' could not schedule its next maintenance scan: \
-                     {error}",
+                     {error:#}",
                     processor.as_str(),
                     domain.as_str(),
                 ));
@@ -426,17 +435,14 @@ pub(super) async fn run_processor_node_runtime(
             .await
         {
             Ok(work) => work,
-            Err(error) => {
+            Err(failure) => {
                 runtime_handle.handle_internal_processor_error_for_acks(
                     &domain,
                     template.source_kind,
                     &processor,
                     &template.error_policies,
-                    error.acks(),
-                    format!(
-                        "processor '{}' relay interaction failed: {error}",
-                        processor.as_str()
-                    ),
+                    [&failure.acks],
+                    &failure.error,
                 );
                 continue;
             }
@@ -456,10 +462,7 @@ pub(super) async fn run_processor_node_runtime(
                         &processor,
                         &template.error_policies,
                         batch.acks.iter(),
-                        format!(
-                            "processor '{}' has not restored its branches",
-                            processor.as_str()
-                        ),
+                        &Report::new(ProcessorBranchTaskError::RestorePending),
                     );
                     drop(work);
                     continue;
@@ -1157,12 +1160,9 @@ pub(super) async fn dispatch_processor_node_input(
                 &template.source,
                 &template.error_policies,
                 batch.acks.iter(),
-                format!(
-                    "processor '{}' could not read the domain time of accepted input for branch \
-                     '{}': {error}",
-                    template.source.as_str(),
-                    branch_key_display(&key),
-                ),
+                &error.change_context(ProcessorBranchTaskError::AcceptedInputClock {
+                    branch: key.clone(),
+                }),
             );
             return;
         }
@@ -1197,7 +1197,7 @@ pub(super) async fn dispatch_processor_node_input(
                     &template.source,
                     &template.error_policies,
                     batch.acks.iter(),
-                    format!("{error:#}"),
+                    &error,
                 );
                 return;
             }
@@ -1262,10 +1262,9 @@ pub(super) async fn dispatch_processor_node_input(
             &template.source,
             &template.error_policies,
             input.batch.acks.iter(),
-            format!(
-                "processor branch task '{}' is unavailable",
-                branch_key_display(&key)
-            ),
+            &Report::new(ProcessorBranchTaskError::Unavailable {
+                branch: key.clone(),
+            }),
         );
         if let Some(entry) = instances.remove(&key) {
             nervix_primitives::expect_lint!(
@@ -1546,7 +1545,7 @@ async fn run_processor_branch_task(
             Ok(snapshot) => snapshot,
             Err(error) => {
                 runtime_handle.events().report_error(format!(
-                    "processor branch '{}' in domain '{}' lost its clock: {error}",
+                    "processor branch '{}' in domain '{}' lost its clock: {error:#}",
                     processor.as_str(),
                     domain.as_str(),
                 ));
@@ -1560,7 +1559,7 @@ async fn run_processor_branch_task(
             Err(error) => {
                 runtime_handle.events().report_error(format!(
                     "processor branch '{}' in domain '{}' could not inspect a buffer deadline: \
-                     {error}",
+                     {error:#}",
                     processor.as_str(),
                     domain.as_str(),
                 ));
@@ -1627,7 +1626,7 @@ async fn run_processor_branch_task(
                                 Err(error) => {
                                     runtime_handle.events().report_error(format!(
                                         "processor branch '{}' in domain '{}' lost its clock: \
-                                         {error}",
+                                         {error:#}",
                                         processor.as_str(),
                                         domain.as_str(),
                                     ));
@@ -1699,7 +1698,7 @@ async fn run_processor_branch_task(
                     Ok(snapshot) => snapshot,
                     Err(error) => {
                         runtime_handle.events().report_error(format!(
-                            "processor branch '{}' in domain '{}' lost its clock: {error}",
+                            "processor branch '{}' in domain '{}' lost its clock: {error:#}",
                             processor.as_str(),
                             domain.as_str(),
                         ));
@@ -1727,7 +1726,7 @@ async fn run_processor_branch_task(
                 if let Err(error) = result {
                     runtime_handle.events().report_error(format!(
                         "processor branch '{}' in domain '{}' could not wait for a buffer \
-                         deadline: {error}",
+                         deadline: {error:#}",
                         processor.as_str(),
                         domain.as_str(),
                     ));
@@ -1741,7 +1740,7 @@ async fn run_processor_branch_task(
                 if let Err(error) = result {
                     runtime_handle.events().report_error(format!(
                         "processor branch '{}' in domain '{}' could not wait for a branch \
-                         deadline: {error}",
+                         deadline: {error:#}",
                         processor.as_str(),
                         domain.as_str(),
                     ));
@@ -1771,7 +1770,7 @@ async fn run_processor_branch_task(
             Err(error) => {
                 runtime_handle.events().report_error(format!(
                     "processor branch '{}' in domain '{}' stopped without its clock and cannot \
-                     publish its accepted output: {error}",
+                     publish its accepted output: {error:#}",
                     processor.as_str(),
                     domain.as_str(),
                 ));
@@ -2084,6 +2083,10 @@ pub(super) async fn shutdown_all_processor_branch_instances(
         );
     }
 }
+
+#[cfg(test)]
+#[path = "processor_branch_dispatch_tests.rs"]
+mod dispatch_tests;
 
 #[cfg(test)]
 mod tests {

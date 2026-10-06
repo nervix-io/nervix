@@ -47,6 +47,49 @@ pub(super) enum CorrelatorError {
     MaterializedColumn { field: String },
     #[error("failed to build the correlator input batch")]
     InputBatch,
+    #[error("received input from relay '{relay}', which is on neither of its sides")]
+    UnexpectedRelay { relay: RelayName },
+    #[error("the CORRELATE WHERE program is not prepared")]
+    MissingMatchProgram,
+    #[error("failed to build the batched {side} CORRELATE WHERE input")]
+    MatchInput { side: CorrelatorSide },
+    #[error("failed to project the CORRELATE WHERE input batch")]
+    ProjectMatchInput,
+    #[error("failed to evaluate CORRELATE WHERE")]
+    EvaluateMatch,
+    #[error("CORRELATE WHERE selected row {row} outside its {candidates} candidate pairs")]
+    MatchRowOutOfRange { row: usize, candidates: usize },
+    #[error("{programs} output programs do not match {routes} output routes")]
+    OutputProgramCount { programs: usize, routes: usize },
+    #[error("an output program is not prepared")]
+    OutputProgramUnavailable,
+    #[error("failed to build the matched Arrow batches")]
+    MatchedBatch,
+    #[error(
+        "correlator output has {rows} Arrow rows, {keys} branch keys, {metadata} metadata rows, \
+         {materialized} materialized-state rows, and {acks} ACK sets"
+    )]
+    OutputShape {
+        rows: usize,
+        keys: usize,
+        metadata: usize,
+        materialized: usize,
+        acks: usize,
+    },
+    #[error("failed to build the output batch")]
+    OutputBatch,
+    #[error("failed to build the timeout batch for relay '{relay}'")]
+    TimeoutBatch { relay: RelayName },
+    #[error("failed to forward the timeout message to relay '{relay}'")]
+    ForwardTimeout { relay: RelayName },
+}
+
+/// A correlation that failed as a whole, together with the acknowledgements of every message it
+/// held. The correlator reports it under its node policy, which resolves them.
+#[derive(Debug)]
+pub(super) struct CorrelatorFailure {
+    pub(super) error: Report<CorrelatorError>,
+    pub(super) acks: Vec<AckSet>,
 }
 
 pub(super) fn compile_correlator_where_program(
@@ -194,9 +237,11 @@ impl CorrelatorOutputCompileContext<'_> {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, strum::Display)]
 pub(super) enum CorrelatorSide {
+    #[strum(serialize = "LEFT")]
     Left,
+    #[strum(serialize = "RIGHT")]
     Right,
 }
 
@@ -420,13 +465,12 @@ pub(super) fn store_correlator_unmatched_incoming(
 
 pub(super) async fn correlate_incoming_message(
     run: ProgramRun<'_>,
-    processor: &ModelName,
     program: &CompiledCorrelatorWhereProgram,
     incoming_side: CorrelatorSide,
     match_policy: CorrelatorMatchPolicy,
     state: &mut CorrelatorBranchState,
     incoming: CorrelatorPendingMessage,
-) -> Result<Option<(CorrelatorPendingMessage, CorrelatorPendingMessage)>, (String, Vec<AckSet>)> {
+) -> Result<Option<(CorrelatorPendingMessage, CorrelatorPendingMessage)>, CorrelatorFailure> {
     let opposite_pending = take_correlator_opposite_pending(state, incoming_side);
     if opposite_pending.is_empty() {
         store_correlator_unmatched_incoming(state, incoming_side, incoming, opposite_pending);
@@ -434,7 +478,6 @@ pub(super) async fn correlate_incoming_message(
     }
     let evaluated = evaluate_correlator_where_matches(
         run.executor,
-        processor,
         program,
         incoming_side,
         &incoming,
@@ -483,21 +526,21 @@ pub(super) async fn correlate_incoming_message(
 )]
 pub(super) async fn evaluate_correlator_where_matches(
     executor: &Executor,
-    processor: &ModelName,
     program: &CompiledCorrelatorWhereProgram,
     incoming_side: CorrelatorSide,
     incoming: &CorrelatorPendingMessage,
     candidates: &[CorrelatorPendingMessage],
     execution_now: Timestamp,
-) -> Result<BooleanBuffer, (String, Vec<AckSet>)> {
-    let error_acks = || {
-        vec![AckSet::merged(
+) -> Result<BooleanBuffer, CorrelatorFailure> {
+    let failure = |error: Report<CorrelatorError>| CorrelatorFailure {
+        error,
+        acks: vec![AckSet::merged(
             std::iter::once(incoming.message.acks.attached()).chain(
                 candidates
                     .iter()
                     .map(|candidate| candidate.message.acks.attached()),
             ),
-        )]
+        )],
     };
     let incoming_rows =
         std::iter::repeat_n(&incoming.message.record, candidates.len()).collect::<Vec<_>>();
@@ -515,14 +558,9 @@ pub(super) async fn evaluate_correlator_where_matches(
     let left =
         RuntimeRecordBatch::from_rows(first_left.batch().schema(), left_rows.iter().copied())
             .map_err(|error| {
-                (
-                    format!(
-                        "correlator '{}' failed to build batched LEFT CORRELATE WHERE input: {}",
-                        processor.as_str(),
-                        error
-                    ),
-                    error_acks(),
-                )
+                failure(error.change_context(CorrelatorError::MatchInput {
+                    side: CorrelatorSide::Left,
+                }))
             })?;
     let Some(first_right) = right_rows.first() else {
         return Ok(BooleanBuffer::new_unset(0));
@@ -530,14 +568,9 @@ pub(super) async fn evaluate_correlator_where_matches(
     let right =
         RuntimeRecordBatch::from_rows(first_right.batch().schema(), right_rows.iter().copied())
             .map_err(|error| {
-                (
-                    format!(
-                        "correlator '{}' failed to build batched RIGHT CORRELATE WHERE input: {}",
-                        processor.as_str(),
-                        error
-                    ),
-                    error_acks(),
-                )
+                failure(error.change_context(CorrelatorError::MatchInput {
+                    side: CorrelatorSide::Right,
+                }))
             })?;
     let keys = match incoming_side {
         CorrelatorSide::Left => vec![incoming.message.key.clone(); candidates.len()],
@@ -562,16 +595,7 @@ pub(super) async fn evaluate_correlator_where_matches(
         },
         None,
     )
-    .map_err(|error| {
-        (
-            format!(
-                "correlator '{}' failed to project CORRELATE WHERE input batch: {}",
-                processor.as_str(),
-                error
-            ),
-            error_acks(),
-        )
-    })?;
+    .map_err(|error| failure(error.change_context(CorrelatorError::ProjectMatchInput)))?;
     #[cfg(test)]
     CORRELATOR_WHERE_VM_EXECUTIONS.with(|executions| executions.set(executions.get() + 1));
     let result = execute_program_with_selection_in_context(
@@ -584,30 +608,15 @@ pub(super) async fn evaluate_correlator_where_matches(
         },
     )
     .await
-    .map_err(|error| {
-        (
-            format!(
-                "correlator '{}' failed to evaluate CORRELATE WHERE: {}",
-                processor.as_str(),
-                error
-            ),
-            error_acks(),
-        )
-    })?;
+    .map_err(|error| failure(error.change_context(CorrelatorError::EvaluateMatch)))?;
     let mut matching = BooleanBufferBuilder::new(candidates.len());
     matching.append_n(candidates.len(), false);
     for row in result.selected_rows.iter() {
         if row >= candidates.len() {
-            return Err((
-                format!(
-                    "correlator '{}' CORRELATE WHERE selected row {} outside its {} candidate \
-                     pairs",
-                    processor.as_str(),
-                    row,
-                    candidates.len()
-                ),
-                error_acks(),
-            ));
+            return Err(failure(Report::new(CorrelatorError::MatchRowOutOfRange {
+                row,
+                candidates: candidates.len(),
+            })));
         }
         matching.set_bit(row, true);
     }
@@ -730,24 +739,21 @@ pub(super) async fn evaluate_correlator_output_batch(
     matched: &CorrelatorMatchedBatch,
     acks: Vec<AckSet>,
     execution_now: Timestamp,
-) -> Result<Vec<CorrelatorOutputOutcome>, (String, Vec<AckSet>)> {
+) -> Result<Vec<CorrelatorOutputOutcome>, CorrelatorFailure> {
     let row_count = matched.row_count();
     if matched.keys.len() != row_count
         || matched.metadata.len() != row_count
         || matched.materialized_state.len() != row_count
         || acks.len() != row_count
     {
-        return Err((
-            format!(
-                "correlator output has {row_count} Arrow rows, {} branch keys, {} metadata rows, \
-                 {} materialized-state rows, and {} ACK sets",
-                matched.keys.len(),
-                matched.metadata.len(),
-                matched.materialized_state.len(),
-                acks.len()
-            ),
-            acks,
-        ));
+        let error = Report::new(CorrelatorError::OutputShape {
+            rows: row_count,
+            keys: matched.keys.len(),
+            metadata: matched.metadata.len(),
+            materialized: matched.materialized_state.len(),
+            acks: acks.len(),
+        });
+        return Err(CorrelatorFailure { error, acks });
     }
     let side_inputs = HashMap::default();
     let lookup_columns = match compute_lookup_hash_map_columns(
@@ -1102,11 +1108,7 @@ pub(super) async fn enqueue_correlator_output(
                 processor,
                 error_policies,
                 failure.preserved.iter(),
-                format!(
-                    "correlator '{}' failed to build output batch: {}",
-                    processor.as_str(),
-                    failure.error
-                ),
+                &failure.error.change_context(CorrelatorError::OutputBatch),
             );
             return;
         }
@@ -1121,11 +1123,7 @@ pub(super) async fn enqueue_correlator_output(
                 processor,
                 error_policies,
                 batch.acks.iter(),
-                format!(
-                    "correlator '{}' could not read the domain clock while buffering output: \
-                     {error}",
-                    processor.as_str(),
-                ),
+                &error.change_context(RouteOutputError::BufferClock),
             );
             return;
         }
@@ -1144,10 +1142,9 @@ pub(super) async fn enqueue_correlator_output(
                 processor,
                 error_policies,
                 acks.iter(),
-                format!(
-                    "correlator '{}' could not start an output flush deadline: {error}",
-                    processor.as_str(),
-                ),
+                &error.change_context(RouteOutputError::StartFlushDeadline {
+                    relay: output_relay.clone(),
+                }),
             );
             return;
         }
@@ -1169,12 +1166,9 @@ pub(super) async fn enqueue_correlator_output(
                 processor,
                 error_policies,
                 pending_acks.iter(),
-                format!(
-                    "correlator '{}' failed to concatenate output for relay '{}': {}",
-                    processor.as_str(),
-                    output_relay.as_str(),
-                    error
-                ),
+                &error.change_context(RouteOutputError::Concatenate {
+                    relay: output_relay.clone(),
+                }),
             );
             return;
         }
@@ -1199,11 +1193,9 @@ pub(super) async fn enqueue_correlator_output(
             processor,
             error_policies,
             forwarded.acks.iter(),
-            format!(
-                "correlator '{}' failed to forward output to relay '{}'",
-                processor.as_str(),
-                output_relay.as_str()
-            ),
+            &Report::new(RouteOutputError::Forward {
+                relay: output_relay.clone(),
+            }),
         );
     }
 }
@@ -1275,11 +1267,9 @@ pub(super) async fn handle_correlator_timeout_action(
                         processor,
                         error_policies,
                         std::iter::empty::<&AckSet>(),
-                        format!(
-                            "correlator '{}' failed to build timeout batch: {}",
-                            processor.as_str(),
-                            error
-                        ),
+                        &error.change_context(CorrelatorError::TimeoutBatch {
+                            relay: relay.clone(),
+                        }),
                     );
                     return;
                 }
@@ -1304,10 +1294,9 @@ pub(super) async fn handle_correlator_timeout_action(
                     processor,
                     error_policies,
                     batch.acks.iter(),
-                    format!(
-                        "correlator '{}' failed to forward timeout message",
-                        processor.as_str()
-                    ),
+                    &Report::new(CorrelatorError::ForwardTimeout {
+                        relay: relay.clone(),
+                    }),
                 );
             }
         }
@@ -1322,7 +1311,7 @@ mod tests {
 
     use super::*;
     use crate::{
-        runtime_ack::AckSet,
+        runtime_ack::{AckOutcome, AckSet},
         runtime_schema::{
             RuntimeRecordBatch, RuntimeRecordMetadata, RuntimeRow, RuntimeValue, test_runtime_row,
         },
@@ -1408,7 +1397,6 @@ mod tests {
                 executor: &Executor::default(),
                 now,
             },
-            &processor,
             &program,
             CorrelatorSide::Right,
             nervix_models::CorrelatorMatchPolicy::Latest,
@@ -1449,7 +1437,6 @@ mod tests {
 
         let matching = evaluate_correlator_where_matches(
             &Executor::default(),
-            &processor,
             &program,
             CorrelatorSide::Left,
             &incoming_left,
@@ -1615,6 +1602,30 @@ mod tests {
             Arc::ptr_eq(&relay_batch.batch, &output_batch),
             "relay batching must preserve the correlator's shared output allocation"
         );
+
+        let (held, held_completion) = AckSet::root();
+        let Err(shape) = evaluate_correlator_output_batch(
+            &Executor::default(),
+            &named("join_profiles"),
+            &program,
+            &matched,
+            vec![held],
+            now,
+        )
+        .await
+        else {
+            panic!("one acknowledgement set cannot answer for two matched pairs");
+        };
+        assert_eq!(
+            shape.error.current_context().to_string(),
+            "correlator output has 2 Arrow rows, 2 branch keys, 2 metadata rows, 2 \
+             materialized-state rows, and 1 ACK sets"
+        );
+        let reason = format!("{:#}", shape.error);
+        for acks in shape.acks {
+            acks.no_ack(reason.clone());
+        }
+        assert_eq!(held_completion.wait().await, AckOutcome::NoAck(reason));
     }
 
     /// The message a failed operation reports to the processor that called it.

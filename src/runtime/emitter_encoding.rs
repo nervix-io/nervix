@@ -505,7 +505,7 @@ async fn pack_batch_records(
                 let batch = batches
                     .get(first.batch_index)
                     .assured("packing positions refer to the source batches it received");
-                let shared = container_failure(context, &codec, batch, rows.len(), error);
+                let shared = container_failure(context, &codec, batch, rows.len(), &error);
                 for position in rows {
                     let batch = batches
                         .get(position.batch_index)
@@ -535,13 +535,16 @@ async fn pack_batch_records(
 /// The one error every member of a candidate whose container failed is rejected with.
 ///
 /// It names the emitter, the codec, the cause and the member count, and never a payload value.
+/// The message error is a fixed public outcome, so only the report's typed reason reaches it: the
+/// evaluation failure beneath that reason can quote the payload it evaluated, and is not rendered.
 fn container_failure(
     context: &EmitterSinkContext,
     codec: &CompiledCodec,
     batch: &EmitterPublishBatch,
     member_count: usize,
-    error: BatchContainerError,
+    error: &Report<BatchContainerError>,
 ) -> StructuredMessageError {
+    let error = *error.current_context();
     let code = match error {
         BatchContainerError::NoOutput
         | BatchContainerError::MultipleOutputs

@@ -1,0 +1,782 @@
+# The workloads of the Deloxide diagnostic lane, and the owners of tracked locks they reach.
+#
+# `just test-deloxide` and `just test-deloxide-order` build every invocation below for their
+# selection and run it supervised: each process in a session of its own, within its bound and the
+# lane's budget, with its output, evidence and exit kept in a fresh attempt directory. A selection
+# runs every workload that lists it. The lane fails when a registered workload is missing, ignored
+# or did not complete; when a discovered test or tagged scenario is not registered; when an
+# invocation selects or executes nothing; when a process deadlocks, fails its diagnostics, is killed
+# by a signal, outlives its bound or leaves a process behind; and when evidence is missing, partly
+# written, or does not qualify. A renamed or moved workload is renamed here in the same change, and
+# a new probe, owner test or tagged scenario joins its invocation's workloads.
+#
+# Every `[[owner]]` names a source file in which the compiler finds a tracked blocking acquisition
+# in a diagnostic configuration, and records which workloads reach those locks, what path the lane
+# does not reach and why, or both. `just validate-deloxide-applicability` holds these records to
+# the compiler's catalog: a new owner of tracked locks needs a record, and a record whose file no
+# longer acquires one is removed.
+
+[lane]
+# The real-time budget of one selection's diagnostic compilation and execution, after its
+# prerequisites. Expiry ends the lane with status 124. CI bounds the prerequisites, this budget and
+# the coverage export together at 95 minutes.
+budget_seconds = 4800
+# How long a process gets to end on SIGTERM before the lane kills it.
+stop_grace_seconds = 30
+# How long the scenario binary's own teardown may take after its suite budget expires. The lane
+# starts the binary with its invocation bound less this reserve as the suite budget, so a suite that
+# runs out of time reports its unfinished scenarios before the lane has to kill it.
+suite_teardown_reserve_seconds = 360
+
+[[selection]]
+name = "deloxide"
+recorded = "ActiveOnly"
+
+[[selection]]
+name = "deloxide-order"
+recorded = "OrderAnalysis"
+
+[[invocation]]
+artifacts = true
+bound_seconds = 900
+id = "probes"
+ignored = ["workload"]
+kind = "libtest"
+package = "nervix-deadlock"
+target = "test:active_cycles"
+
+[[invocation]]
+bound_seconds = 600
+evidence = true
+features = ["testing"]
+id = "owner-tests"
+kind = "libtest-each"
+marker = "deloxide_"
+package = "nervix-server"
+target = "lib"
+
+# The scenario binary runs four scenarios at once in each scenario invocation, on any machine, so a
+# local run and CI's 16-vCPU runner put the same load on the diagnostic nodes.
+[[invocation]]
+bound_seconds = 2400
+concurrency = 4
+evidence = true
+features = ["testing"]
+id = "scenarios"
+inputs = ["tests/features/**/*.feature"]
+kind = "cucumber"
+package = "nervix-server"
+tags = [
+  "@deadlock_diagnostics",
+  "@restore_installation",
+  "@client_ingestor_alter_drain",
+  "@deadlock_reports",
+  "@memory_pressure_pause",
+  "@client_io_03_consumer_restore",
+  "@client_io_03_generation",
+]
+target = "test:scenarios"
+
+[[invocation]]
+bound_seconds = 1200
+concurrency = 4
+driver = "nervix-paced-simulation"
+evidence = true
+features = ["testing"]
+id = "paced-simulation"
+inputs = ["tests/features/runtime/paced_simulation.feature"]
+kind = "cucumber"
+package = "nervix-server"
+tags = ["@paced_simulation_reopen"]
+target = "test:scenarios"
+
+[[workload]]
+coverage = "Tracked mutex acquisitions waiting in a two-thread wait-for cycle."
+id = "probe.opposite-order-mutexes"
+invariant = "Two named threads that each hold one mutex and want the other's report one active cycle naming both threads, both locks and where each waits, record it, and end the child with status 3."
+invocation = "probes"
+selections = ["deloxide", "deloxide-order"]
+test = "two_threads_locking_two_mutexes_in_opposite_orders_report_one_cycle"
+
+[[workload]]
+coverage = "A mutex acquisition by the thread that already holds its guard."
+id = "probe.self-relock"
+invariant = "A thread that locks a mutex it holds reports a cycle of one naming the construction and waiting lines, and ends the child with status 3."
+invocation = "probes"
+selections = ["deloxide", "deloxide-order"]
+test = "a_thread_relocking_its_own_mutex_reports_a_cycle_of_one"
+
+[[workload]]
+coverage = "A write acquisition by the thread holding a read guard of the same lock."
+id = "probe.read-upgrade"
+invariant = "A thread that asks for write access to a read-write lock it reads reports a cycle of one with exclusive access and ends the child with status 3."
+invocation = "probes"
+selections = ["deloxide", "deloxide-order"]
+test = "a_thread_upgrading_its_own_read_lock_reports_a_cycle_of_one"
+
+[[workload]]
+coverage = "Shared and exclusive acquisitions of a read-write lock and a mutex in one cycle."
+id = "probe.writer-reader"
+invariant = "A writer and a reader that each hold one lock the other wants report one cycle with the reader's shared and the writer's exclusive access and end the child with status 3."
+invocation = "probes"
+selections = ["deloxide", "deloxide-order"]
+test = "a_writer_and_a_reader_across_two_locks_report_one_cycle"
+
+[[workload]]
+coverage = "A condition variable waiter reacquiring its mutex while its notifier holds that mutex."
+id = "probe.notified-waiter"
+invariant = "A notified waiter and a notifier that holds the waiter's mutex while it wants the waiter's lock report one cycle and end the child with status 3."
+invocation = "probes"
+selections = ["deloxide", "deloxide-order"]
+test = "a_notified_waiter_and_a_notifier_holding_its_mutex_report_one_cycle"
+
+[[workload]]
+coverage = "Repeated nested mutex acquisitions in one consistent order."
+id = "probe.consistent-order"
+invariant = "Two threads that take two mutexes in one order for many rounds end cleanly with evidence that records no finding."
+invocation = "probes"
+selections = ["deloxide", "deloxide-order"]
+test = "threads_taking_two_mutexes_in_one_order_complete_without_findings"
+
+[[workload]]
+coverage = "A condition variable handing values between two threads through wait and notify_all."
+id = "probe.condition-handoff"
+invariant = "A value handed between two threads through a condition variable for many rounds ends cleanly with evidence that records no finding."
+invocation = "probes"
+selections = ["deloxide", "deloxide-order"]
+test = "a_condition_handed_between_threads_completes_without_findings"
+
+[[workload]]
+coverage = "Concurrent shared acquisitions of one read-write lock."
+id = "probe.shared-readers"
+invariant = "Three readers that share a read-write lock across a barrier end cleanly with evidence that records no finding."
+invocation = "probes"
+selections = ["deloxide", "deloxide-order"]
+test = "readers_sharing_a_read_write_lock_complete_without_findings"
+
+[[workload]]
+coverage = "Detector installation and the process's standard streams."
+id = "probe.quiet-start"
+invariant = "Installing the detector writes nothing of its own to standard output or standard error, and the process's later output still arrives."
+invocation = "probes"
+selections = ["deloxide", "deloxide-order"]
+test = "the_detector_keeps_its_start_up_output_off_standard_output"
+
+[[workload]]
+coverage = "The once-per-process diagnostic run."
+id = "probe.one-run"
+invariant = "A second diagnostic run in one process is refused as an installation failure and the first run stays current."
+invocation = "probes"
+selections = ["deloxide", "deloxide-order"]
+test = "a_process_starts_one_run"
+
+[[workload]]
+coverage = "A tracked lock constructed before installation."
+id = "probe.lock-before-run"
+invariant = "A process that constructs a tracked lock before its diagnostic run fails with the configuration error instead of running untracked."
+invocation = "probes"
+selections = ["deloxide", "deloxide-order"]
+test = "a_tracked_lock_before_the_run_fails_the_process"
+
+[[workload]]
+coverage = "Starting a run whose evidence directory does not exist."
+id = "probe.missing-directory"
+invariant = "A run refuses an evidence directory that does not exist with a typed start failure and creates nothing."
+invocation = "probes"
+selections = ["deloxide", "deloxide-order"]
+test = "a_run_refuses_an_evidence_directory_that_does_not_exist"
+
+[[workload]]
+coverage = "Recording an active finding into a directory that can no longer hold evidence."
+id = "probe.unrecordable-evidence"
+invariant = "An active cycle whose evidence cannot be written is still described on standard error and ends the child with the diagnostic failure status 4."
+invocation = "probes"
+selections = ["deloxide", "deloxide-order"]
+test = "a_deadlock_whose_evidence_cannot_be_recorded_fails_the_diagnostic_run"
+
+[[workload]]
+coverage = "A run without an evidence directory."
+id = "probe.standard-error-only"
+invariant = "A run without an evidence directory describes an active cycle on standard error alone and ends the child with status 3."
+invocation = "probes"
+selections = ["deloxide", "deloxide-order"]
+test = "a_run_without_an_evidence_directory_reports_on_standard_error"
+
+[[workload]]
+coverage = "Historical order edges of two mutexes taken serially in both orders."
+id = "probe.serial-inversion"
+invariant = "One thread taking A then B and later B then A retains one unreviewed potential cycle with complete source context while the workload continues and ends cleanly."
+invocation = "probes"
+selections = ["deloxide-order"]
+test = "serial_inverse_order_retains_potential_evidence_and_the_workload_continues"
+
+[[workload]]
+coverage = "The order history's witness budget across many short-lived worker threads."
+id = "probe.worker-contexts"
+invariant = "A historical edge retains every one of 512 distinct worker thread contexts, each once, with its exclusive modes and source sites."
+invocation = "probes"
+selections = ["deloxide-order"]
+test = "a_historical_edge_retains_every_distinct_worker_context"
+
+[[workload]]
+coverage = "Opposite read-only orders of two read-write locks."
+id = "probe.shared-read-order"
+invariant = "Opposite orders of shared acquisitions only end cleanly without an order finding."
+invocation = "probes"
+selections = ["deloxide-order"]
+test = "shared_read_orders_complete_without_an_order_finding"
+
+[[workload]]
+coverage = "Mixed shared and exclusive historical order with recursive reads."
+id = "probe.mixed-order"
+invariant = "A mixed reader/writer inversion retains its modes and read multiplicity, refuses a shared-reader proof and qualifies only after a specific non-overlap review."
+invocation = "probes"
+selections = ["deloxide-order"]
+test = "mixed_order_history_retains_modes_multiplicity_and_a_serial_non_overlap_proof"
+
+[[workload]]
+coverage = "Lock instances constructed at one source site in separate lifetimes."
+id = "probe.separate-lifetimes"
+invariant = "Inverse orders of distinct lock instances built at the same construction sites in separate lifetimes record no finding."
+invocation = "probes"
+selections = ["deloxide-order"]
+test = "reused_construction_sites_keep_separate_lock_lifetimes"
+
+[[workload]]
+coverage = "An order-instrumented build whose order checking is disabled at run time."
+id = "probe.runtime-active-only"
+invariant = "An order build started active-only records the OrderInstrumentedActiveOnly selection, retains no order finding and still reports an active self wait."
+invocation = "probes"
+selections = ["deloxide-order"]
+test = "runtime_active_only_reports_the_instrumented_selection"
+
+[[workload]]
+coverage = "Held-guard, witness, history and retention bounds of order analysis."
+id = "probe.order-overload"
+invariant = "Exceeding any order or retention bound records explicit overload evidence that cannot qualify and ends the child with status 4."
+invocation = "probes"
+selections = ["deloxide-order"]
+test = "order_context_and_retention_overload_leave_failure_evidence"
+
+[[workload]]
+coverage = "Finding descriptions written to a failing or blocked standard error."
+id = "probe.output-failure"
+invariant = "A finding whose description cannot be written, or whose standard error stays blocked past the recording budget, ends the child with status 4 and nonqualifying evidence."
+invocation = "probes"
+selections = ["deloxide-order"]
+test = "diagnostic_output_failure_and_a_blocked_descriptor_end_with_failure"
+
+[[workload]]
+coverage = "State-store staging, publication, snapshot readers, queued checkpoint writers, cleanup and restore reclamation under tracked installation locks."
+id = "owner.restore-storage"
+invariant = "One fresh diagnostic process runs the state store's restore staging, publication, cancellation, reader, writer, cleanup and reclamation regressions with its detector installed first, and records no finding."
+invocation = "owner-tests"
+selections = ["deloxide", "deloxide-order"]
+test = "runtime::state_store::backup::tests::deloxide_restore_storage"
+
+[[workload]]
+coverage = "Materialized relay publications, eviction, rebinding and routing-epoch installation under tracked locks."
+id = "owner.materialized-publications"
+invariant = "One fresh diagnostic process runs the materialized publication lifetime regressions with its detector installed first, and records no finding."
+invocation = "owner-tests"
+selections = ["deloxide", "deloxide-order"]
+test = "runtime::materialized_state::publication_tests::deloxide_materialized_publications"
+
+[[workload]]
+coverage = "Every tracked lock of in-process nodes, their clients and the scenario process while a workload runs and is altered."
+examples = 2
+feature = "tests/features/cluster/deadlock_diagnostics.feature"
+id = "scenario.diagnostic-nodes"
+invariant = "In-process diagnostic nodes on one and three nodes ingest, route, alter a filter and deliver a message error while the scenario process records no finding."
+invocation = "scenarios"
+scenario = "In-process diagnostic nodes run a workload with every blocking lock tracked on a <nodes> node cluster"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
+coverage = "Start-up, configuration and graceful SIGTERM shutdown of real diagnostic server processes."
+examples = 2
+feature = "tests/features/cluster/deadlock_diagnostics.feature"
+id = "scenario.diagnostic-server-processes"
+invariant = "Real diagnostic server processes on one and three nodes stop gracefully with status 0, keep the detector's start-up output out of their logs, and record a running detector with no findings."
+invocation = "scenarios"
+scenario = "Diagnostic server processes record a running detector and stop gracefully on a <nodes> node cluster"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
+coverage = "The local report tool's selection, export, review and qualification."
+examples = 1
+feature = "tests/features/cluster/deadlock_reports.feature"
+id = "scenario.local-report-triage"
+invariant = "Exported potential findings name their lock instances, modes and sites, do not qualify before review, and qualify with the complete cycle after an explicit non-overlap proof and retained regression."
+invocation = "scenarios"
+scenario = "Export potential findings and retain an explicit non-overlap review"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
+coverage = "The applied-state authority guard and restore publication across a leadership transfer."
+examples = 1
+feature = "tests/features/cluster/backup.feature"
+id = "scenario.stale-restore-coordinator"
+invariant = "A delayed restore coordinator cannot republish after a new leader resumes the archived lifecycle."
+invocation = "scenarios"
+scenario = "A stale restore coordinator cannot republish after a new leader resumes the archived lifecycle"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
+coverage = "Quiesced capture and restore of WASM guest state and Kafka source offsets."
+examples = 2
+feature = "tests/features/cluster/backup.feature"
+id = "scenario.wasm-kafka-restore"
+invariant = "A quiesced backup restores two WASM branches and the domain's Kafka offsets on one and three nodes."
+invocation = "scenarios"
+scenario = "A quiesced backup restores two WASM branches and Kafka domain offsets"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
+coverage = "Bounded restore generations of large and many guest saves, staging, publication and cluster restart."
+examples = 4
+feature = "tests/features/cluster/backup_generation.feature"
+id = "scenario.restore-generation"
+invariant = "A complete restore generation of two 20 MiB or forty 1 MiB saves on one and three nodes preserves branches and source offsets through publication and restart."
+invocation = "scenarios"
+scenario = "A complete restore generation with <branches> saves of <save_mib> MiB on <cluster_size> nodes preserves branches and source offsets"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
+coverage = "Capture, archive and restore of deduplicator keys and half-filled window rows, and their per-branch continuation."
+examples = 2
+feature = "tests/features/cluster/backup_branch_state.feature"
+id = "scenario.branch-state-resume"
+invariant = "Deduplicator keys and half-filled windows captured at a quiesced cut continue per branch after RESUME on one node and on three nodes with a replica."
+invocation = "scenarios"
+scenario = "Deduplicator keys and half-filled windows captured at a quiesced cut continue per branch after RESUME"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
+coverage = "Re-export of stopped restores, interrupted installation of deduplicator and window state, and WITHOUT STATE restores."
+examples = 2
+feature = "tests/features/cluster/backup_branch_state.feature"
+id = "scenario.branch-state-reexport"
+invariant = "A stopped restore re-exports identical deduplicator and window sections, an interrupted installation keeps START gated, and WITHOUT STATE installs neither, on one and three nodes."
+invocation = "scenarios"
+scenario = "A stopped restore re-exports identical deduplicator and window sections, an interrupted installation keeps START gated, and WITHOUT STATE installs neither"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
+coverage = "The applied-state authority guard for resumed deduplicator and window state across a leadership transfer."
+examples = 1
+feature = "tests/features/cluster/backup_branch_state.feature"
+id = "scenario.branch-state-stale-coordinator"
+invariant = "A delayed restore coordinator cannot replace deduplicator keys and windows a new leader resumed."
+invocation = "scenarios"
+scenario = "A delayed coordinator cannot replace resumed deduplicator keys and windows"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
+coverage = "Restore of window state against a changed window model or branch incarnation."
+examples = 2
+feature = "tests/features/cluster/backup_branch_state.feature"
+id = "scenario.branch-state-model-change"
+invariant = "A changed window model or branch incarnation starts an empty window with a restore warning on one and three nodes."
+invocation = "scenarios"
+scenario = "A changed window model or branch incarnation starts an empty window with a restore warning"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
+coverage = "Materialized relay capture, restore and generator resumption through restart."
+examples = 2
+feature = "tests/features/cluster/backup_materialized.feature"
+id = "scenario.materialized-cut"
+invariant = "A resumed materialized cut preserves interleaved branches and generators through restart."
+invocation = "scenarios"
+scenario = "A resumed materialized cut preserves interleaved branches and generators through restart"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
+coverage = "Materialized generations transferred in bulk to owners and replicas."
+examples = 4
+feature = "tests/features/cluster/backup_materialized.feature"
+id = "scenario.materialized-bulk-generations"
+invariant = "Materialized generations larger than the bulk budget resume on every assigned owner and replica."
+invocation = "scenarios"
+scenario = "Materialized generations larger than the bulk budget resume on every assigned owner and replica"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
+coverage = "A delayed restore coordinator racing a resumed materialized generation."
+examples = 2
+feature = "tests/features/cluster/backup_materialized.feature"
+id = "scenario.materialized-delayed-coordinator"
+invariant = "A delayed coordinator cannot replace a resumed materialized generation larger than the bulk budget."
+invocation = "scenarios"
+scenario = "A delayed coordinator cannot replace a resumed materialized generation larger than the bulk budget"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
+coverage = "Domain clock mapping and paced admission after an archived lifecycle resumes."
+examples = 2
+feature = "tests/features/cluster/backup_materialized.feature"
+id = "scenario.paced-resume"
+invariant = "A paced RESUME retains its clock mapping and admits TIMESTAMP AT in the projected window."
+invocation = "scenarios"
+scenario = "A paced RESUME retains its mapping and admits TIMESTAMP AT in the projected window"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
+coverage = "Restore staging quota, reclamation and retry across restart."
+examples = 2
+feature = "tests/features/cluster/backup_staging.feature"
+id = "scenario.restore-staging-quota"
+invariant = "Restore quota failures reclaim storage across restart and preserve an active retry on one and three nodes."
+invocation = "scenarios"
+scenario = "Restore quota failures reclaim storage across restart and preserve an active retry on <cluster_size> nodes"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
+coverage = "Buffered client admission, entity holds and drains during an alteration."
+examples = 4
+feature = "tests/features/runtime/client_ingestors.feature"
+id = "scenario.client-alter-drain"
+invariant = "An alteration drains buffered branches on a shared relay before replacing a client ingestor's contract."
+invocation = "scenarios"
+scenario = "An alteration drains buffered branches on a shared relay before replacing its client contract"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
+coverage = "Failed drains, rejected engagements and released client admission during an alteration."
+examples = 8
+feature = "tests/features/runtime/client_ingestors.feature"
+id = "scenario.client-alter-rejection"
+invariant = "A rejected alteration releases buffered client admission and retains the committed contract."
+invocation = "scenarios"
+scenario = "A rejected <failure> releases buffered client admission and retains its committed contract"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
+coverage = "Memory backpressure pausing a scheduled ingestor that starts and runs above the high watermark."
+examples = 2
+feature = "tests/features/runtime/memory_pressure.feature"
+id = "scenario.memory-pressure-pause"
+invariant = "An HTTP ingestor started above the memory high watermark on one and three nodes is quiesced by memory pressure with backpressure active, rejects posted intake and counts the rejection."
+invocation = "scenarios"
+scenario = "Memory high watermark pauses scheduled ingestors"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
+coverage = "Rust client consumers, producers and the attached domain clock resuming across a cluster restart."
+examples = 2
+feature = "tests/features/runtime/client_emitters.feature"
+id = "scenario.client-consumer-restore"
+invariant = "After a cluster restart on one and three nodes, a Rust client's producer and consumer resume their unchanged endpoint: the consumer reports its attachment interruption and delivers the batch submitted after the restart, and the attached domain clock reports its interruption and ticks again."
+invocation = "scenarios"
+scenario = "A producer and consumer resume their unchanged endpoint after a session restart"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
+coverage = "Rust client and WebSocket consumers closed by a domain stop and reopened after its restart."
+examples = 2
+feature = "tests/features/runtime/client_emitters.feature"
+id = "scenario.client-consumer-generation"
+invariant = "Stopping a domain ends its consumers, refuses new ones while it is stopped, and requires an explicit new open after START, on one and three nodes."
+invocation = "scenarios"
+scenario = "Stopping and restarting a domain closes the consumer and creates a new endpoint"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
+coverage = "The Rust client library in a diagnostic paced driver, and the nodes it drives, across a reopen."
+examples = 4
+feature = "tests/features/runtime/paced_simulation.feature"
+id = "paced.reopen-generation"
+invariant = "The Rust and Python drivers drain buffered routes and reopen their consumers and producer within one START generation on one and three nodes."
+invocation = "paced-simulation"
+scenario = "The <driver> driver drains buffered routes and reopens its consumers and producer within one START generation on <cluster_size> nodes"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
+coverage = "Refused ticks retained across a producer contract change."
+examples = 4
+feature = "tests/features/runtime/paced_simulation.feature"
+id = "paced.refused-tick-replay"
+invariant = "The drivers retain a refused tick across a producer contract change and explicitly replay it on one and three nodes."
+invocation = "paced-simulation"
+scenario = "The <driver> driver retains a refused tick across a producer contract change and explicitly replays it on <cluster_size> nodes"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
+coverage = "A delayed refusal while a driver awaits its final outcome."
+examples = 4
+feature = "tests/features/runtime/paced_simulation.feature"
+id = "paced.delayed-refusal"
+invariant = "The drivers report a delayed refusal while awaiting their final outcome on one and three nodes."
+invocation = "paced-simulation"
+scenario = "The <driver> driver reports a delayed refusal while awaiting its final outcome on <cluster_size> nodes"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
+coverage = "Reopen failures of every changed endpoint kind."
+examples = 20
+feature = "tests/features/runtime/paced_simulation.feature"
+id = "paced.reopen-failure"
+invariant = "The drivers fail clearly, naming the refusal, when reopening a removed or schema-mismatched consumer or producer, or a credit-mismatched consumer, on one and three nodes."
+invocation = "paced-simulation"
+scenario = "The <driver> driver fails clearly when reopening a <change_kind> <endpoint> on <cluster_size> nodes"
+selections = ["deloxide", "deloxide-order"]
+
+[[owner]]
+path = "crates/checkpoint-replication/src/replication.rs"
+workloads = [
+  "scenario.materialized-bulk-generations",
+  "scenario.materialized-delayed-coordinator",
+]
+
+[[owner]]
+path = "crates/client-core/src/client.rs"
+workloads = ["paced.reopen-generation", "paced.delayed-refusal"]
+
+[[owner]]
+path = "crates/client-core/src/consumer.rs"
+workloads = [
+  "scenario.client-consumer-restore",
+  "scenario.client-consumer-generation",
+  "paced.reopen-generation",
+  "paced.reopen-failure",
+]
+
+[[owner]]
+path = "crates/client-core/src/domain_clock.rs"
+workloads = ["scenario.paced-resume", "paced.reopen-generation"]
+
+[[owner]]
+path = "crates/client-core/src/exchange.rs"
+workloads = ["scenario.client-alter-drain", "paced.reopen-generation"]
+
+[[owner]]
+path = "crates/client-core/src/producer.rs"
+workloads = [
+  "scenario.client-alter-drain",
+  "scenario.client-alter-rejection",
+  "paced.reopen-generation",
+]
+
+[[owner]]
+path = "crates/client-core/src/producer/slots.rs"
+workloads = ["scenario.client-alter-drain", "paced.refused-tick-replay"]
+
+[[owner]]
+path = "crates/client-core/src/restoration.rs"
+workloads = ["paced.reopen-generation"]
+
+[[owner]]
+path = "crates/client-core/src/subscriptions.rs"
+workloads = ["scenario.diagnostic-nodes"]
+
+[[owner]]
+path = "crates/consensus/src/lib.rs"
+workloads = [
+  "scenario.diagnostic-nodes",
+  "scenario.diagnostic-server-processes",
+]
+
+[[owner]]
+path = "crates/consensus/src/restore.rs"
+workloads = [
+  "scenario.restore-generation",
+  "scenario.stale-restore-coordinator",
+  "scenario.restore-staging-quota",
+]
+
+[[owner]]
+path = "crates/consensus/src/snapshot.rs"
+workloads = ["scenario.restore-generation", "scenario.wasm-kafka-restore"]
+
+[[owner]]
+path = "crates/consensus/src/storage.rs"
+workloads = [
+  "scenario.diagnostic-nodes",
+  "scenario.diagnostic-server-processes",
+]
+
+[[owner]]
+path = "crates/interconnect/src/connection.rs"
+workloads = [
+  "scenario.diagnostic-nodes",
+  "scenario.diagnostic-server-processes",
+]
+
+[[owner]]
+gap = "Roto user-defined function calls; no lane workload calls a Roto function."
+path = "crates/nervix-roto/src/lib.rs"
+
+[[owner]]
+gap = "The adapters' own acquisitions are their non-blocking Debug formatting; the primitive conformance checks of `just test-primitives-deloxide` cover it and no lane workload formats a tracked lock."
+path = "crates/primitives/src/sync/blocking/tracked.rs"
+
+[[owner]]
+path = "examples/paced-simulation/rust/src/report.rs"
+workloads = [
+  "paced.reopen-generation",
+  "paced.refused-tick-replay",
+  "paced.delayed-refusal",
+  "paced.reopen-failure",
+]
+
+[[owner]]
+path = "examples/paced-simulation/rust/src/simulation.rs"
+workloads = [
+  "paced.reopen-generation",
+  "paced.refused-tick-replay",
+  "paced.delayed-refusal",
+  "paced.reopen-failure",
+]
+
+[[owner]]
+path = "src/application/backup/retained.rs"
+workloads = ["scenario.wasm-kafka-restore", "scenario.restore-generation"]
+
+[[owner]]
+path = "src/application/model_mutation.rs"
+workloads = ["scenario.diagnostic-nodes", "scenario.client-alter-drain"]
+
+[[owner]]
+path = "src/application/restore/archives.rs"
+workloads = [
+  "scenario.wasm-kafka-restore",
+  "scenario.restore-generation",
+  "scenario.restore-staging-quota",
+]
+
+[[owner]]
+path = "src/application/session/consumers.rs"
+workloads = ["paced.reopen-generation", "paced.reopen-failure"]
+
+[[owner]]
+path = "src/application/session/mod.rs"
+workloads = [
+  "scenario.diagnostic-nodes",
+  "scenario.client-alter-drain",
+  "paced.reopen-generation",
+]
+
+[[owner]]
+path = "src/application/session/outbound.rs"
+workloads = ["scenario.diagnostic-nodes", "paced.reopen-generation"]
+
+[[owner]]
+path = "src/application/session/producers.rs"
+workloads = [
+  "scenario.client-alter-drain",
+  "scenario.client-alter-rejection",
+  "paced.reopen-generation",
+]
+
+[[owner]]
+gap = "HTTPS listener TLS configuration for TLS VHOSTs; no lane workload configures a TLS VHOST."
+path = "src/application/tls.rs"
+
+[[owner]]
+path = "src/application/tracing_setup.rs"
+workloads = ["scenario.diagnostic-nodes"]
+
+[[owner]]
+path = "src/application/transaction.rs"
+workloads = ["scenario.diagnostic-nodes", "scenario.client-alter-rejection"]
+
+[[owner]]
+path = "src/application/transaction/impact.rs"
+workloads = ["scenario.client-alter-drain", "scenario.client-alter-rejection"]
+
+[[owner]]
+path = "src/cluster.rs"
+workloads = [
+  "scenario.diagnostic-nodes",
+  "scenario.diagnostic-server-processes",
+]
+
+[[owner]]
+path = "src/metrics.rs"
+workloads = [
+  "scenario.diagnostic-nodes",
+  "scenario.diagnostic-server-processes",
+]
+
+[[owner]]
+path = "src/metrics/interconnection.rs"
+workloads = [
+  "scenario.diagnostic-nodes",
+  "scenario.diagnostic-server-processes",
+]
+
+[[owner]]
+path = "src/registry/storage.rs"
+workloads = [
+  "scenario.diagnostic-nodes",
+  "scenario.diagnostic-server-processes",
+]
+
+[[owner]]
+path = "src/runtime/branch_aggregated_state.rs"
+workloads = ["scenario.client-alter-drain"]
+
+[[owner]]
+gap = "Replica announcements of branch lifecycle checkpoints; the lane's WASM restore scenarios run without replicas."
+path = "src/runtime/branch_lifecycle_state.rs"
+
+[[owner]]
+path = "src/runtime/branch_runtime.rs"
+workloads = ["scenario.client-alter-drain", "scenario.wasm-kafka-restore"]
+
+[[owner]]
+path = "src/runtime/entity_gate.rs"
+workloads = ["scenario.client-alter-drain", "scenario.client-alter-rejection"]
+
+[[owner]]
+path = "src/runtime/force_flush.rs"
+workloads = ["scenario.client-alter-drain"]
+
+[[owner]]
+gap = "ONNX inferencer sessions; no lane workload runs an inferencer."
+path = "src/runtime/inferencer.rs"
+
+[[owner]]
+path = "src/runtime/ingestor_quiesce.rs"
+workloads = [
+  "scenario.client-alter-drain",
+  "scenario.diagnostic-nodes",
+  "scenario.memory-pressure-pause",
+]
+
+[[owner]]
+path = "src/runtime/materialized_state.rs"
+workloads = [
+  "owner.materialized-publications",
+  "scenario.materialized-cut",
+  "scenario.materialized-bulk-generations",
+]
+
+[[owner]]
+path = "src/runtime/message_error_delivery.rs"
+workloads = ["scenario.diagnostic-nodes"]
+
+[[owner]]
+path = "src/runtime/processor_branch_task.rs"
+workloads = ["scenario.wasm-kafka-restore", "scenario.client-alter-drain"]
+
+[[owner]]
+path = "src/runtime/relay_boundary.rs"
+workloads = ["scenario.diagnostic-nodes"]
+
+[[owner]]
+path = "src/runtime/relay_channel.rs"
+workloads = ["scenario.diagnostic-nodes"]
+
+[[owner]]
+path = "src/runtime/state_store.rs"
+workloads = [
+  "owner.restore-storage",
+  "scenario.restore-generation",
+  "scenario.restore-staging-quota",
+]
+
+[[owner]]
+path = "src/runtime_ack.rs"
+workloads = ["scenario.client-alter-drain", "scenario.wasm-kafka-restore"]

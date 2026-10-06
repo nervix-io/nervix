@@ -996,12 +996,7 @@ mod tests {
             "a 30 second retry backoff must not hide a 40 millisecond drain deadline"
         );
         assert!(
-            failed
-                .into_task()
-                .expect("the failed drain must retain the old task")
-                .stop_signal
-                .borrow()
-                .is_none(),
+            failed.into_task().stop_signal.borrow().is_none(),
             "a recoverable stop failure must clear its stop signal"
         );
     }

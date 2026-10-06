@@ -90,7 +90,16 @@ fn local_report_selection_preserves_evidence_and_review_requires_complete_proof(
     original
         .write_file(&path)
         .assured("fixture evidence is written");
-    run(&path, "qualify", &[], 5);
+    let refused = run(&path, "qualify", &[], 5);
+    assert!(
+        String::from_utf8_lossy(&refused.stdout).contains(
+            "evidence summary: scope=whole-process findings=1 active=0 potential=1 unreviewed=1 \
+             nonqualifying=1 repeated-deliveries=0 lost-handoff=0 lost-order-history=0 \
+             lost-retention=0\n"
+        ),
+        "{}",
+        String::from_utf8_lossy(&refused.stdout)
+    );
     for source in ["all", "active", "potential"] {
         let export = root.path().join(format!("{source}.rkyv"));
         let output = run(
@@ -117,7 +126,15 @@ fn local_report_selection_preserves_evidence_and_review_requires_complete_proof(
     let output_path = reviewed.to_str().assured("test path is UTF-8");
     for basis in ["correction", "non-overlap", "lifecycle"] {
         run(&path, "triage", &["--finding", "0", "--basis", basis, "--reason", "Owner review supplies the disposition; evidence is retained", "--regression", "report_cli::local_report_selection_preserves_evidence_and_review_requires_complete_proof", "--output", output_path], 0);
-        run(&reviewed, "qualify", &[], 0);
+        let qualified = run(&reviewed, "qualify", &[], 0);
+        assert!(
+            String::from_utf8_lossy(&qualified.stdout).contains(
+                "evidence summary: scope=whole-process findings=1 active=0 potential=1 \
+                 unreviewed=0 nonqualifying=0 repeated-deliveries=0"
+            ),
+            "{}",
+            String::from_utf8_lossy(&qualified.stdout)
+        );
     }
     run(&path, "triage", &["--finding", "0", "--basis", "shared-readers", "--reason", "exclusive access is present", "--regression", "report_cli::local_report_selection_preserves_evidence_and_review_requires_complete_proof", "--output", output_path], 4);
     run(
