@@ -63,7 +63,7 @@ pub(super) struct BranchRuntimeMetrics {
 pub(super) struct PendingMaterializedBatch {
     pub(super) input_relay: RelayName,
     pub(super) batch: Option<RelayRecordBatch>,
-    pub(super) required_wait: Option<AckRequiredWaitGuard>,
+    pub(super) required_wait: Option<AckParkGuard>,
 }
 
 pub(super) struct MaterializedBatchWaitContext<'a> {
@@ -85,7 +85,7 @@ pub(super) struct MaterializedDomainHandles<'a> {
 
 impl PendingMaterializedBatch {
     pub(super) fn new(input_relay: RelayName, batch: RelayRecordBatch) -> Self {
-        let required_wait = AckRequiredWaitGuard::new(batch.acks.iter());
+        let required_wait = AckParkGuard::new(batch.acks.iter());
         Self {
             input_relay,
             batch: Some(batch),
@@ -2533,7 +2533,7 @@ mod tests {
             tracker.clone(),
         );
         let (acks, _completion) = AckSet::tracked_root(tracker);
-        let _required_wait = acks.required_wait_guard();
+        let _required_wait = acks.park_guard();
         let affected = [NodeRef {
             kind: ModelKind::Ingestor,
             identifier: ModelName::from(&ingestor),

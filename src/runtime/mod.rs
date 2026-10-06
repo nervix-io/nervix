@@ -174,9 +174,7 @@ use crate::{
         ZeroMqIngestorStartPlan,
     },
     resource::ResourceStore,
-    runtime_ack::{
-        AckCompletion, AckOutcome, AckProgress, AckRequiredWaitGuard, AckRootTracker, AckSet,
-    },
+    runtime_ack::{AckCompletion, AckOutcome, AckParkGuard, AckProgress, AckRootTracker, AckSet},
     runtime_schema::{
         CodecError, CompiledCodec, CompiledSchema, JsonDecoder, ProtobufCodecDescriptors,
         ProtobufDescriptorPool, RuntimeProjectionComponent, RuntimeRecordBatch,
@@ -204,6 +202,7 @@ mod client_emitter;
 mod client_ingestor;
 mod correlator;
 mod deduplicator;
+mod deduplicator_archive;
 mod domain_clock;
 mod domain_execution;
 mod domain_rebuild;
@@ -307,11 +306,11 @@ mod subscription_predicate;
 mod test_fixtures;
 
 pub(crate) use backup_state::{
-    BackupBranchLifecycleEntry, CapturedDomainState, CapturedMaterializedRelay,
-    CapturedMaterializedState, CapturedRuntimeState, CapturedStoredMaterializedRelay,
-    RESTORE_STATE_CHUNK_BYTES, RESTORE_STATE_WORKING_BYTES, RestoredRuntimeState,
-    decode_backup_branch_lifecycle, decode_backup_kafka_offsets, write_restored_branch_lifecycle,
-    write_restored_kafka_offsets,
+    BackupBranchLifecycleEntry, CapturedBranchState, CapturedBranchStateKind, CapturedDomainState,
+    CapturedMaterializedRelay, CapturedMaterializedState, CapturedRuntimeState,
+    CapturedStoredMaterializedRelay, RESTORE_STATE_CHUNK_BYTES, RESTORE_STATE_WORKING_BYTES,
+    RestoredRuntimeState, decode_backup_branch_lifecycle, decode_backup_kafka_offsets,
+    write_restored_branch_lifecycle, write_restored_kafka_offsets,
 };
 use branch_aggregated_state::{
     BranchAggregatedRuntimeStateSnapshot, ReplicatedBranchAggregatedState,
@@ -352,8 +351,9 @@ use correlator::{
 };
 use deduplicator::{
     CompiledDeduplicatorKeyProgram, DeduplicatorKey, DeduplicatorKeyspace,
-    ReplicatedDeduplicatorState, compile_deduplicator_key_program,
+    PublishedDeduplicatorKey, ReplicatedDeduplicatorState, compile_deduplicator_key_program,
 };
+pub(crate) use deduplicator_archive::{ArchivedDeduplicatorKeys, CapturedDeduplicatorKeyspace};
 use domain_clock::{
     DomainCadenceOccurrence, DomainCadenceStart, DomainClockAccessResult, LogicalDeadline,
     checked_add_duration_to_timestamp, wait_for_branch_deadline,
@@ -579,14 +579,14 @@ pub(in crate::runtime) use test_fixtures::STUPID_CHANNEL_CAPACITY_REMOVE_ME;
 #[cfg(test)]
 use test_fixtures::{
     EntrypointTestDomain, OptionalTestField, TOO_LONG_DURATION_TEXT,
-    TWO_ITEM_TEST_CHANNEL_CAPACITY, TestIngestHeaders, attach_loopback_cluster, batch_value,
-    bind_ingestor_route_for_test, branch_lifecycle_snapshot, branch_model, branched_by,
-    concrete_branch_key, construction, domain, execute_filter_map_for_test, expression,
-    ingest_metadata_for_test, install_test_domain_execution, install_unpaced_test_domain,
-    junction_branch_template, key_label, named, nonzero_capacity, paced_domain_state,
-    planned_entrypoints_for_test, processor_branched_by, publish_state_identity,
-    quiesce_test_batch, row_value, scheduled_model, string_branch_key, test_branching,
-    test_domain_clock, test_domain_clock_authority, test_execution_revision,
+    TWO_ITEM_TEST_CHANNEL_CAPACITY, TestIngestHeaders, TestWindow, attach_loopback_cluster,
+    batch_value, bind_ingestor_route_for_test, branch_lifecycle_snapshot, branch_model,
+    branched_by, concrete_branch_key, construction, domain, execute_filter_map_for_test,
+    expression, ingest_metadata_for_test, install_test_domain_execution,
+    install_unpaced_test_domain, junction_branch_template, key_label, named, nonzero_capacity,
+    paced_domain_state, planned_entrypoints_for_test, processor_branched_by,
+    publish_state_identity, quiesce_test_batch, row_value, scheduled_model, string_branch_key,
+    test_branching, test_domain_clock, test_domain_clock_authority, test_execution_revision,
     test_ingestor_quiesce_control, test_named_branching, test_optional_schema,
     test_relay_boundary_services, test_schema, u32_branch_key, unbranched_subscription_definition,
     unpaced_domain_state, validate_wasm_test_output_groups, validate_wasm_test_outputs,
@@ -648,6 +648,10 @@ use wasm_state_reset::{
 use window_accumulator::{
     RetainedWindowRows, WindowAccumulator, WindowAccumulatorPlan, WindowArgumentColumns, WindowRow,
 };
+pub(crate) use window_archive::{
+    ArchivedWindow, CapturedWindow, WindowAccumulatorState, WindowCheckpointBuilder,
+    WindowDelayedRemoval,
+};
 use window_processor::{
     WindowAdmission, WindowProcessorError, WindowProcessorState, evaluate_window_arguments,
     flush_ready_window_processor, message_timestamp, snapshot_window_processor_live_state,
@@ -677,6 +681,7 @@ mod wasm_state;
 mod wasm_state_recovery;
 mod wasm_state_reset;
 mod window_accumulator;
+mod window_archive;
 mod window_processor;
 mod window_state;
 

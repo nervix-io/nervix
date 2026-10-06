@@ -21,7 +21,10 @@ use crate::{
     DeclaredResource, DomainCapture, DomainRecord, KafkaOffsetsRecord, KafkaPartitionOffset,
     PublishedResourceVersion, RaftLogPosition, ResourceVersionRecord, ResourceVersionState,
     SectionContent, SectionDigester, SectionEntry, SectionPath, UserRecord, UsersRecord,
-    WasmStateDescriptor, materialized_values::Materialized, wasm_properties::Descriptors,
+    WasmStateDescriptor,
+    branch_state_values::{Deduplicator, Window},
+    materialized_values::Materialized,
+    wasm_properties::Descriptors,
 };
 
 pub(super) struct Values<'a>(pub(super) Arbitrary<'a>);
@@ -67,12 +70,16 @@ pub(super) enum State {
     Kafka(KafkaOffsetsRecord),
     Lifecycle(BranchLifecycleRecord),
     Materialized(Materialized),
+    Deduplicator(Deduplicator),
+    Window(Window),
 }
 
 impl State {
     pub fn sections(&self, output: &mut Vec<Section>) {
         match self {
             Self::Materialized(value) => value.sections(output),
+            Self::Deduplicator(value) => value.sections(output),
+            Self::Window(value) => value.sections(output),
             Self::Wasm { descriptor, bytes } => {
                 output.push(Section::record(
                     SectionPath::wasm_state_descriptor(
@@ -460,6 +467,10 @@ impl<'a> Values<'a> {
                 state.push(State::Kafka(self.offsets(domain.clone())));
                 for shape in 0..3 {
                     state.push(State::Materialized(self.materialized(&domain, shape)));
+                }
+                for shape in 0..2 {
+                    state.push(State::Deduplicator(self.deduplicator(&domain, shape)));
+                    state.push(State::Window(self.window(&domain, shape)));
                 }
                 state.push(State::Lifecycle(self.lifecycle(domain.clone())));
             }

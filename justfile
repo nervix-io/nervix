@@ -1187,6 +1187,24 @@ coverage-backup-archives output="target/backup-archives.lcov": tests-deps
     cargo llvm-cov report --no-default-ignore-filename-regex --lcov --output-path {{ quote(output) }} \
         --package nervix-backup --package nervix-nspl --package nervix-server
 
+# Deduplicator and window archive coverage: their records and Arrow groups, capture, restore
+# conversion and installation, and the public scenarios that resume, re-export and skip them.
+coverage-backup-branch-state output="target/backup-branch-state.lcov": tests-deps
+    #!/usr/bin/env bash
+    set -euo pipefail
+    export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
+    cargo llvm-cov clean --workspace
+    just coverage-cli-binary
+    export NERVIX_TEST_CLI_PATH={{ quote(cargo_target_dir + "/llvm-cov-target/debug/nervix-cli") }}
+    cargo llvm-cov --no-report --lib --package nervix-backup
+    cargo llvm-cov --no-report --lib --package nervix-models -- window_model_digest
+    cargo llvm-cov --no-report --features testing --package nervix-server --lib -- \
+        deduplicator window_ backup restore branch_state runtime_ack
+    cargo llvm-cov --no-report --features testing --package nervix-server --test scenarios -- \
+        --input tests/features/cluster/backup_branch_state.feature --concurrency 2 --retry 0
+    cargo llvm-cov report --no-default-ignore-filename-regex --lcov --output-path {{ quote(output) }} \
+        --package nervix-backup --package nervix-models --package nervix-server --package nervix-cli
+
 # Append current checkpoint-reader and backup ownership tests to retained archive profiles.
 coverage-backup-archives-state-append output="target/backup-archives.lcov":
     #!/usr/bin/env bash

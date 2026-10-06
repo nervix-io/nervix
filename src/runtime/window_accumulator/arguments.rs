@@ -772,17 +772,7 @@ impl WindowArgumentColumns {
 
     /// The column layout a saved argument batch must declare for this compiled window plan.
     pub(in crate::runtime) fn snapshot_schema(plan: &WindowAccumulatorPlan) -> StdArc<ArrowSchema> {
-        let mut fields = Vec::new();
-        for demand in plan.demands() {
-            for column in demand.arguments.iter() {
-                fields.push(ArrowField::new(
-                    format!("argument_{}", fields.len()),
-                    column.data_type.clone(),
-                    true,
-                ));
-            }
-        }
-        StdArc::new(ArrowSchema::new(fields))
+        StdArc::new(nervix_vm::window::argument_snapshot_schema(plan.demands()))
     }
 
     /// Reuse the decoded Arrow columns directly as one validated argument batch.

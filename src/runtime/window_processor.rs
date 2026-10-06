@@ -103,6 +103,31 @@ pub(super) enum WindowProcessorError {
 pub(super) struct WindowEntry {
     pub(super) row: WindowRow,
     pub(super) message: RelayMessage,
+    /// The message's acknowledgement shares, parked while the window retains the row: only
+    /// further input releases them, so neither a drain nor a backup cut waits for them.
+    parked: AckParkGuard,
+}
+
+impl WindowEntry {
+    /// Retains `row` of `message`, parking the message's acknowledgement shares.
+    pub(super) fn retained(row: WindowRow, message: RelayMessage) -> Self {
+        let parked = AckParkGuard::new([&message.acks]);
+        Self {
+            row,
+            message,
+            parked,
+        }
+    }
+
+    /// Releases a row the window stepped past: its shares become active again before they are
+    /// acknowledged, so the acknowledgement removes the share this row owns.
+    fn acknowledge(self) {
+        let Self {
+            message, parked, ..
+        } = self;
+        drop(parked);
+        message.acks.ack_success();
+    }
 }
 
 /// A row of an evaluated batch that the window admits.
@@ -453,19 +478,19 @@ impl WindowProcessorState {
                 argument_batches.insert(source, arguments.clone());
                 arguments
             };
-            entries.push_back(WindowEntry {
-                row: WindowRow {
+            entries.push_back(WindowEntry::retained(
+                WindowRow {
                     sequence: entry.sequence,
                     timestamp: entry.timestamp,
                     arguments,
                     row: entry.arguments.row_index(),
                 },
-                message: RelayMessage {
+                RelayMessage {
                     key: entry.key.clone(),
                     record: entry.record.clone(),
                     acks: AckSet::empty(),
                 },
-            });
+            ));
         }
         if let Some(last) = previous_sequence
             && last >= snapshot.next_sequence
@@ -672,15 +697,15 @@ impl WindowProcessorState {
                 Some(latest) => Some(latest.max(timestamp)),
                 None => Some(timestamp),
             };
-            self.entries.push_back(WindowEntry {
-                row: WindowRow {
+            self.entries.push_back(WindowEntry::retained(
+                WindowRow {
                     sequence: self.next_sequence,
                     timestamp,
                     arguments: arguments.clone(),
                     row: admission.row,
                 },
-                message: admission.message,
-            });
+                admission.message,
+            ));
             self.next_sequence = self
                 .next_sequence
                 .checked_add(1)
@@ -1011,7 +1036,7 @@ pub(super) fn advance_window(
 ) {
     let by_messages = step_messages.unwrap_or(0);
     for entry in state.retract_oldest(by_messages, removed_at) {
-        entry.message.acks.ack_success();
+        entry.acknowledge();
     }
     let Some(step_duration) = step_duration else {
         return;
@@ -1026,7 +1051,7 @@ pub(super) fn advance_window(
         .take_while(|entry| entry.row.timestamp < cutoff)
         .count();
     for entry in state.retract_oldest(by_duration, removed_at) {
-        entry.message.acks.ack_success();
+        entry.acknowledge();
     }
 }
 
@@ -1361,131 +1386,6 @@ mod tests {
             matches!(short, Err(error) if matches!(error.current_context(), nervix_vm::RuntimeError::InvalidBatch { .. })),
             "a batch of another size than the evaluated output rows is refused"
         );
-    }
-
-    /// One compiled single-route window processor state, driven the way its branch task drives it.
-    struct TestWindow {
-        plan: WindowAccumulatorPlan,
-        compiled: CompiledWindowAggregateProgram,
-        input_schema: Arc<CompiledSchema>,
-        output_schema: Arc<CompiledSchema>,
-        state: WindowProcessorState,
-    }
-
-    impl TestWindow {
-        fn new(set: &str, input: &[OptionalTestField], output: &[OptionalTestField]) -> Self {
-            let input_schema = test_optional_schema(input);
-            let output_schema = test_optional_schema(output);
-            let input_relay = named::<RelayName>("events");
-            let output_relay = named::<RelayName>("summary");
-            let relay_schemas = HashMap::from_iter([
-                (input_relay.clone(), input_schema.clone()),
-                (output_relay.clone(), output_schema.clone()),
-            ]);
-            let compiled = CompiledWindowAggregateProgram::compile(
-                &window_aggregate(set),
-                &[input_relay],
-                &output_relay,
-                &relay_schemas,
-                None,
-            )
-            .expect("the test window route should compile");
-            let sketch_layout = compiled
-                .route
-                .demands
-                .iter()
-                .any(|demand| demand.sketch.is_some())
-                .then(|| {
-                    WindowPaneLayout::for_width_and_step(
-                        Duration::from_secs(2),
-                        Duration::from_secs(1),
-                    )
-                    .verified("the test window has valid duration panes")
-                });
-            let max_state_bytes = sketch_layout.and_then(|_| NonZeroU64::new(1_048_576));
-            let plan =
-                WindowAccumulatorPlan::new([&compiled.route], sketch_layout, max_state_bytes);
-            let state = WindowProcessorState::new(&plan, 1);
-            Self {
-                plan,
-                compiled,
-                input_schema,
-                output_schema,
-                state,
-            }
-        }
-
-        /// Evaluate one batch of `columns`, in input schema order, whose rows carry `timestamps`
-        /// as watermarks, admit every admissible row, and answer why the others were refused.
-        async fn admit(&mut self, columns: Vec<ArrayRef>, timestamps: &[i64]) -> Vec<String> {
-            let schema = self.input_schema.arrow_schema();
-            let batch = RecordBatch::try_new(StdArc::clone(&schema), columns)
-                .expect("the test columns should match the input schema");
-            let carrier = Arc::new(
-                RuntimeRecordBatch::from_record_batch(schema, batch)
-                    .expect("the test batch should be a valid relay batch"),
-            );
-            let mut evaluated = evaluate_window_arguments(
-                &Executor::default(),
-                &self.plan,
-                std::slice::from_ref(&self.compiled),
-                &carrier,
-                at(1),
-            )
-            .await
-            .expect("the test batch's arguments should evaluate");
-            let mut refused = Vec::new();
-            let mut run = Vec::new();
-            for (row, timestamp) in timestamps.iter().enumerate() {
-                if let Some(refusal) = evaluated.take_refusal(row) {
-                    refused.push(refusal.current_context().to_string());
-                    continue;
-                }
-                let metadata = RuntimeRecordMetadata::from_ingested_at_watermarks(
-                    at(*timestamp),
-                    at(*timestamp),
-                );
-                let record = RuntimeRow::new(carrier.clone(), row, metadata)
-                    .expect("every test row is inside its batch");
-                let message = RelayMessage {
-                    key: None,
-                    record,
-                    acks: AckSet::empty(),
-                };
-                run.push(WindowAdmission { message, row });
-            }
-            if let Err(error) =
-                self.state
-                    .check_admission(&self.plan, Some(&evaluated.columns), &run)
-            {
-                refused.push(error.current_context().to_string());
-            } else {
-                self.state.admit(&evaluated.columns, run);
-            }
-            refused
-        }
-
-        fn step(&mut self, count: usize, removed_at: i64) {
-            let removed = self.state.retract_oldest(count, at(removed_at));
-            assert_eq!(removed.len(), count, "a test steps only over retained rows");
-        }
-
-        async fn emit(&self) -> error_stack::Result<RuntimeRecordBatch, WindowProcessorError> {
-            evaluate_window_aggregate(
-                &Executor::default(),
-                &self.compiled,
-                &self.state,
-                &self.output_schema,
-                at(42),
-            )
-            .await
-        }
-
-        async fn emitted(&self) -> RuntimeRecordBatch {
-            self.emit()
-                .await
-                .expect("the window aggregate should evaluate")
-        }
     }
 
     fn int64(values: impl IntoIterator<Item = Option<i64>>) -> ArrayRef {
@@ -2236,6 +2136,54 @@ mod tests {
     }
 
     #[nervix_primitives::test]
+    async fn retained_rows_park_their_acknowledgements_until_the_window_steps_past_them() {
+        let mut window = TestWindow::new(
+            "SET total = SUM(input.latency)",
+            &[field("latency", ParseAsType::I64)],
+            &[optional("total", ParseAsType::I64)],
+        );
+        let tracker = Arc::new(AckRootTracker::default());
+        let (first, first_outcome) = AckSet::tracked_root(Arc::clone(&tracker));
+        let (second, second_outcome) = AckSet::tracked_root(Arc::clone(&tracker));
+        let refused = window
+            .admit_acknowledged(
+                vec![int64([Some(1), Some(2)])],
+                &[1, 2],
+                vec![first, second],
+            )
+            .await;
+        assert!(refused.is_empty(), "{refused:?}");
+        assert_eq!(
+            tracker.outstanding(),
+            2,
+            "a retained row is not acknowledged yet"
+        );
+        assert_eq!(
+            tracker.outstanding_for_ownership_handoff(),
+            0,
+            "a retained row parks its share, so neither a drain nor a handoff waits for it"
+        );
+
+        advance_window(&mut window.state, Some(1), None, at(3));
+        assert_eq!(
+            first_outcome.wait().await,
+            AckOutcome::Ack,
+            "stepping past a row acknowledges it"
+        );
+        assert_eq!(tracker.outstanding(), 1);
+        assert_eq!(tracker.outstanding_for_ownership_handoff(), 0);
+
+        // A branch that ends drops the rows it still retains without acknowledging them.
+        window.state = WindowProcessorState::new(&window.plan, 1);
+        assert_eq!(
+            second_outcome.wait().await,
+            AckOutcome::NoAck("ack completion sender dropped".to_string())
+        );
+        assert_eq!(tracker.outstanding(), 0);
+        assert_eq!(tracker.outstanding_for_ownership_handoff(), 0);
+    }
+
+    #[nervix_primitives::test]
     async fn restored_windows_answer_every_aggregate_as_before_they_were_published() {
         let set = "SET count = COUNT(input.latency), total = SUM(input.latency), first_latency = \
                    FIRST(input.latency), highest = MAX(input.latency), mean_latency = \
@@ -2475,12 +2423,15 @@ mod tests {
             super::super::window_state::encode_window_processor_snapshot(&published, 7, &executor)
                 .await
                 .assured("the histogram state fits a bounded snapshot section");
+        let arguments = WindowArgumentColumns::snapshot_schema(&window.plan);
         let restored = super::super::window_state::decode_window_processor_snapshot(
             &sealed,
             &executor,
-            &window.plan,
-            window.input_schema.as_ref(),
-            window.state.incarnation,
+            super::super::window_state::WindowSnapshotSchemas {
+                input: &window.input_schema.arrow_schema(),
+                arguments: &arguments,
+            },
+            super::super::window_state::WindowSnapshotLifetime::Branch(window.state.incarnation),
         )
         .await
         .assured("the same histogram plan opens its sealed state")

@@ -32,10 +32,12 @@ use nervix_backup::{
 use nervix_consensus::{RestoredResource, UserCredentials};
 use nervix_models::{
     BackupResources, DomainConfig, DomainName, DomainState, DomainStatus, ExistingUserPolicy,
-    Model, ModelName, RequestedResourceVersion, ResourceId, ResourceName, ResourceVersion, Restore,
-    RestoreLifecycle, RestoreScope, RestoreStep, RestoredUsers, UserName,
+    Model, ModelIndex, ModelName, RequestedResourceVersion, ResourceId, ResourceName,
+    ResourceVersion, Restore, RestoreLifecycle, RestoreScope, RestoreStep, RestoredUsers, UserName,
 };
 use thiserror::Error;
+
+use crate::registry::BranchStateSchemas;
 
 /// Why a restore was refused before it changed anything. No variant carries archive contents: an
 /// archive holds secrets and password hashes, and a refusal names only where the problem is.
@@ -127,6 +129,11 @@ pub(crate) enum RestorePlanError {
         resource: ResourceName,
         version: u64,
     },
+    #[error(
+        "the models of domain '{domain}' do not give its deduplicator and window state an archive \
+         shape"
+    )]
+    BranchStateShapes { domain: DomainName },
 }
 
 /// What a restore reads from its archive: the verified description, and each domain's models,
@@ -190,6 +197,9 @@ pub(crate) struct PlannedDomain {
     /// Exact Arrow schemas resolved once from the archived relay and schema Models.
     pub(crate) materialized_schemas:
         BTreeMap<ModelName, nervix_primitives::sync::StdArc<arrow_schema::Schema>>,
+    /// The shapes the archived deduplicator keys and window rows must have under the restored
+    /// models, resolved once from them.
+    pub(crate) branch_state_schemas: BranchStateSchemas,
 }
 
 /// One completed resource version a restore imports.
@@ -402,6 +412,15 @@ fn plan_domain(
             );
         }
     }
+    let mut index = ModelIndex::new();
+    for model in &pinned {
+        index.insert(model.clone());
+    }
+    let branch_state_schemas = BranchStateSchemas::resolve(&source, &index).map_err(|error| {
+        error.change_context(RestorePlanError::BranchStateShapes {
+            domain: source.clone(),
+        })
+    })?;
     let state = DomainState {
         id: target.clone(),
         config: DomainConfig {
@@ -433,6 +452,7 @@ fn plan_domain(
         versions,
         models: pinned,
         materialized_schemas,
+        branch_state_schemas,
     })
 }
 

@@ -285,6 +285,14 @@ archive without connecting to a server, whether it is typed in the REPL or passe
 nervix-cli --command "DESCRIBE BACKUP 'cluster.nvxb' FORMAT JSON;"
 ```
 
+The description lists every runtime state section of each domain under `runtime_state`. A
+deduplicator line names its keyspace's branch fingerprint, key count, groups, revision and schema
+fingerprint; a window processor line names its branch fingerprint, retained rows, groups, branch
+incarnation, next admission sequence, pending delayed histogram removals, revision, schema
+fingerprint and window model digest. JSON reports the same values with `kind` `deduplicator` or
+`window_processor`, together with the length and digest of every section. Neither form prints
+branch-key values or deduplicator keys.
+
 See [Backup And Restore](backup-and-restore.md) for what an archive holds and how long the server
 retains it.
 
@@ -303,8 +311,10 @@ nervix-cli restore domain payments --input payments.nvxb --resume --format json
 ```
 
 `--resume` starts the complete restored domain at its archived generation and mapping, preserving
-materialized rows. The default leaves it stopped; a subsequent normal `START` advances its
-generation and clears materialized state. Text and JSON reports include each domain's status and
+materialized rows, deduplicator keys and windows. The default leaves it stopped; a subsequent
+normal `START` advances its generation and clears materialized state, while deduplicator keys and
+windows continue. A window whose model or branch incarnation changed starts empty, and the report
+lists it among its warnings. Text and JSON reports include each domain's status and
 start generation, including the planned lifecycle of a dry run.
 
 `--dry-run` verifies the archive and plans the restore without changing anything, and `--format

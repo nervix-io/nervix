@@ -52,6 +52,7 @@ mod timestamp;
 mod udf;
 mod wasm_state_generation;
 mod wasm_state_inspection;
+mod window_model_digest;
 
 pub use archived_count::{ArchivedCountError, CountAsU64};
 pub use backup::{
@@ -245,3 +246,4 @@ pub use wasm_state_inspection::{
     WasmCheckpointCounts, WasmCheckpointInspection, WasmCheckpointStage, WasmRecoveryInspection,
     WasmStateInspection, WasmStateResetInspection, WasmStateResetReadiness,
 };
+pub use window_model_digest::WindowModelDigest;
