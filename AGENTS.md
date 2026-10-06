@@ -945,8 +945,9 @@ build and the existing tests, and nothing in it changes behavior.
 - A change that adds or alters thread-blocking synchronization, a `sync::blocking` lock or
   condition variable, the order in which tracked locks are acquired, or a shutdown, drain, restore,
   cancellation, handoff or other lifecycle or ownership path that uses tracked locks runs
-  `just test-deloxide` and `just test-deloxide-order`, and the required `deloxide` CI job runs both
-  on every pull request. Where the lane's workloads do not yet reach the changed path, the change
+  `just test-deloxide` and `just test-deloxide-order` and carries the `deloxide` label, so that CI's
+  `deloxide` job, which runs only for a pull request with that label, runs both. Where the lane's
+  workloads do not yet reach the changed path, the change
   extends its probes, owner tests or tagged scenarios and registers each in
   `tests/deloxide-inventory.toml` with a stable identity, the invariant it owns, its selections and
   the coverage it declares. A source file that starts acquiring tracked blocking locks gets an

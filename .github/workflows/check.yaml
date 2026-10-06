@@ -266,13 +266,14 @@ jobs:
             target/native-coverage/test-deadlock-*/**/export.log
           if-no-files-found: warn
 
-  # The required Deloxide diagnostic lane: every workload tests/deloxide-inventory.toml registers,
-  # in each selection's own build under the native coverage collector, then the qualification of
-  # the lane's supervision on deliberately failing processes. The selections share no compilation,
-  # so they run side by side. Diagnostic coverage stays in this job's artifact, apart from ordinary
-  # coverage and the CRAP gate.
+  # The Deloxide diagnostic lane, only for a pull request labeled `deloxide`: every workload
+  # tests/deloxide-inventory.toml registers, in each selection's own build under the native
+  # coverage collector, then the qualification of the lane's supervision on deliberately failing
+  # processes. The selections share no compilation, so they run side by side. Diagnostic coverage
+  # stays in this job's artifact, apart from ordinary coverage and the CRAP gate.
   deloxide:
     name: deloxide (${{ matrix.selection }})
+    if: contains(github.event.pull_request.labels.*.name, 'deloxide')
     runs-on: blacksmith-16vcpu-ubuntu-2404
     # Setup, then at most the lane's bound, the qualification's bound and the reserve the uploads
     # and the kache report keep after them.

@@ -182,7 +182,7 @@ The CI jobs divide the work at the scenario boundary:
 | `shuttle` | Only for a pull request labeled `shuttle`: modeled in-process concurrency checks, uncontrolled-nondeterminism rechecks, and failure schedules |
 | `loom` | Only for a pull request labeled `loom`: exhaustive memory-ordering models and failure checkpoints |
 | `loom-qualification` | Only for a pull request labeled `loom`: two shards of the Loom weakening qualifications, one weakened server build for each, and the runs of a failed qualification |
-| `deloxide` | The [diagnostic lane](#diagnostic-lane) of each Deloxide selection side by side: its diagnostic builds, probes, owner tests and tagged one- and three-node scenarios under the native coverage collector, the supervision qualification, and every attempt's record and evidence |
+| `deloxide` | Only for a pull request labeled `deloxide`: the [diagnostic lane](#diagnostic-lane) of each Deloxide selection side by side: its diagnostic builds, probes, owner tests and tagged one- and three-node scenarios under the native coverage collector, the supervision qualification, and every attempt's record and evidence |
 
 The `tests` and `scenarios` jobs also sample runner CPU utilization and steal time every five
 seconds. Every kache-backed job uses kache 0.28.1, records `doctor` output without making it a
@@ -1144,7 +1144,8 @@ spare. A bound that expires anyway ends the binary with `SIGTERM` and, after the
 `SIGKILL` for its whole group; Ryuk removes the containers the binary started when its connection
 closes.
 
-In CI the `deloxide` job runs each selection on its own 16-vCPU runner through
+In CI the `deloxide` job, which runs only for a pull request labeled `deloxide`, runs each
+selection on its own 16-vCPU runner through
 `just coverage-native-extras test-deloxide` or `test-deloxide-order`, then
 `just test-deloxide-qualification` for the same selection, and uploads every attempt whatever the
 verdict.

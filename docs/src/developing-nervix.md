@@ -512,9 +512,10 @@ invariant it owns, its selections and the coverage it declares; a renamed one is
 the same change. A source file that starts acquiring tracked blocking locks needs an `[[owner]]`
 record naming the workloads that reach them or the path the lane does not reach and why:
 `just validate-deloxide-applicability`, part of `just validate`, holds the records to the compiler's
-acquisition catalog. CI's `deloxide` job runs both selections through the native coverage collector
-on every pull request, as `just coverage-native-extras test-deloxide test-deloxide-order` does
-locally, and keeps their attempts, completion records and diagnostic coverage reports as artifacts.
+acquisition catalog. For a pull request labeled `deloxide`, which every change the Deloxide rule
+applies to carries, CI's `deloxide` job runs both selections through the native coverage collector,
+as `just coverage-native-extras test-deloxide test-deloxide-order` does locally, and keeps their
+attempts, completion records and diagnostic coverage reports as artifacts.
 The ordinary report tool also exports selected artifacts, records explicit proofs in reviewed
 copies and qualifies whole-process evidence. `just coverage-deadlock` measures the diagnostic
 implementation and the ordinary report command in separate instrumented builds through the native

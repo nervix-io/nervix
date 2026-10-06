@@ -1535,8 +1535,9 @@ checks, the run selection, pending-callback limit, revision and declared coverag
 copies separate from files a live recorder replaces. The operator's workload is not ended merely
 because an unreviewed historical cycle exists.
 
-**The diagnostic lane.** `just test-deloxide` and `just test-deloxide-order` run the required lane
-of each selection, and CI's `deloxide` job runs both side by side on every pull request.
+**The diagnostic lane.** `just test-deloxide` and `just test-deloxide-order` run the lane of each
+selection, and CI's `deloxide` job runs both side by side for every pull request labeled
+`deloxide`, the label each change the Deloxide rule applies to carries.
 `tests/deloxide-inventory.toml` is the lane's bounded inventory. It registers every workload a
 selection runs, each with a stable identity, the invariant it owns, the selections that must run it
 and the coverage it declares: the disposable-process probes of `nervix-deadlock`, the diagnostic
