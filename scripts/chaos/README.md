@@ -647,8 +647,10 @@ itself for a graceful stop, and the cluster must be settled and connected:
 - `voter-crash` SIGKILLs the voter and starts it again after `--outage-seconds` (default 8);
 - `voter-pause` pauses it for `--outage-seconds` (default 30) under the pause deployment;
 - `voter-partition` isolates it with peer-side rules for at least `--outage-seconds` (default 30);
-- `voter-stop` stops it gracefully with a 60-second grace, requires a completed shutdown, and starts
-  it again after `--outage-seconds` (default 8);
+- `voter-stop` stops it gracefully with a 60-second grace, requires a completed shutdown whose
+  drain-support phase completed, so the voter handed the paced graph to another node through the
+  leader before it exited, and starts it again after `--outage-seconds` (default 8). A drain that
+  does not complete is a product finding;
 - `cluster-restart` SIGKILLs every node and starts each from its own volume;
 - `none` observes the healthy domain without a fault.
 
@@ -656,9 +658,9 @@ While a fault holds away from the graph, its windows must keep closing; after ea
 must settle, every observer must tick again, and windows must close again. `verify-clock-evidence.sh`
 then judges what the observers recorded. Every attach and every state report after a reconnection must
 carry the first report's generation and mapping; no `START` follows the first, so the generation
-never changes. Every tick must lie on the mapping's period grid, its boundary `logical origin + (id -
-1) * period`, in that generation and no later than the serving node's own logical time. Tick ids must
-increase within each attachment. A tick stall longer than two physical seconds on an observer whose
+never changes. Every tick must lie on the mapping's period grid, with its boundary at
+`logical origin + (id - 1) * period`, in that generation and no later than the serving node's own
+logical time. Tick ids must increase within each attachment. A tick stall longer than two physical seconds on an observer whose
 node stayed up must fall inside a fault and end within 60 physical seconds, the authority bound the
 result records beside the deployed `NERVIX_NODE_UNAVAILABILITY_TIMEOUT`. From the start of each fault
 until recovery, a sampler in one administration container reads every node's own `SHOW CLUSTER
@@ -680,6 +682,73 @@ time. `domain-time/` keeps each round's fault evidence, the observers'
 transcripts, the window output with Kafka timestamps and both verdicts, and
 `results/domain-time-progress.json` summarizes them, with each round's availability samples under
 its own directory.
+
+### Stateful and domain-time qualification on the selected worker
+
+The worker and image were those of the restart qualification above: Ubuntu 26.04.1, Linux
+7.0.0-34-generic, Docker 29.8.1 with Compose 5.5.1, 24 CPUs and 66.7 GB of memory, shared with other
+workloads, and the image
+`ghcr.io/nervix-io/nervix@sha256:0b39e7ab59ccbf22c8b6293c715affda49948d48c8ef4dc6d73ef89b6867677b`,
+built from main `0913fddf`. Up to five runs shared the worker at once. Every stateful run uploaded the
+7,261-byte guest with SHA-256 `f8ecaf481938bac803d44aa2ec914f92f34ebfd6a7fa8c2bc5ee38ab7d75377d`.
+
+Three-node `stateful` passed without a fault and with `owner-crash`, `owner-pause` and
+`owner-partition`. node-3 owned the stateful entities with one replica, and node-1 ran both stateful
+ingestors. The work left the faulted owner 15.2, 21.2 and 27.8 seconds after the fault began, and
+stateful output advanced again after 34.3, 55.8 and 93.8 seconds. In each fault run the deduplicator
+dropped every later duplicate of a milestone key (8, 6 and 4 of them), the four window rows open at
+the milestone were aggregated exactly once, every record after recovery carried profile version 3,
+and every guest count equaled its branch index. No record was replayed, and the only permitted
+deviation any run used was one window row of the crash's volatile interval, which was lost. The run
+without a fault matched every output exactly.
+
+Three-node `cluster-restart` passed once and failed twice. In `cc08-s3-restart`
+every owner kept its work and every verdict passed. In `cc08-f-s3-restart` the leader moved all 14
+stateful entities off node-3 0.69 seconds after its own start, inside the ten-second whole-cluster
+grace and before its gossip had heard from either peer; [Cluster Chaos 39: Keep a restarted voter's
+work when gossip hears of it before observing it live](https://app.clickup.com/t/86bcd4hzv) owns
+that. The leader promoted its own replicas of the deduplicator and the WASM processor but published
+every recovery with recreated state, because it had not yet installed the domain's schedule; [Cluster
+Chaos 50: Keep a promoted replica's state when forced recovery is prepared before the destination
+installs its schedule](https://app.clickup.com/t/86bcdg8uu) owns that. All four verdicts failed as
+they should: 6 of 8 later duplicates of milestone keys passed, no open window row was aggregated,
+all 168 records after recovery carried the profile default, and the guest counts started again from
+zero. `cc08-f-s3-restart2` failed the same way: the leader moved the same 14 entities 0.66 seconds
+after its own start, with the same losses.
+
+One-node `stateful` passed without a fault. Its `cluster-restart` failed both runs,
+`cc08-s1-restart` and `cc08-f-s1-restart`, with one finding each. On start the window processor took
+its branch lifecycle snapshot, then failed to restore it with `domain 'chaos_baseline' is not
+instantiated`, so both branches began new windows and the four rows open at the milestone were never
+aggregated. [Cluster Chaos 43: Restore a restarted window owner's open windows instead of discarding
+its branch lifecycle snapshot](https://app.clickup.com/t/86bcdg30p) owns the fix. In both runs the
+deduplicator, the materialized relay and the WASM guest kept their state. The three-node owner in
+`cc08-s3-restart` logged the same warning for one branch, yet its rows survived.
+
+Three-node `domain-time` passed every fault and the run without one. In each rotation the third
+round, nervix-3, removed the authority. When that voter crashed, the survivors' ticks stalled 8.5 and
+8.6 seconds and resumed as it returned, 8.9 seconds after the kill. During a 30.9-second pause they
+stalled 17.0 seconds and resumed 4.4 seconds before the survivors' status reported nervix-3
+unavailable, 21.5 seconds into the pause. Isolated, it stopped their ticks 3.1 and 6.6 seconds into
+the isolation; both resumed 15.0 seconds in, 0.3 seconds after the survivors reported it unavailable.
+A graceful stop of the authority stalled them 9.5 seconds, until shortly after the voter returned.
+Throughout each of these stalls the paced windows kept closing on their logical deadlines, 7 to 16 of
+them per stall. A whole-cluster restart stalled every observer 10.1 to 10.6 seconds and changed
+neither the generation nor the mapping. Every tick of every run lay on the period grid of the
+first generation. Away from moves and outages, windows closed at most 404 logical milliseconds after
+their eight-second width, and never before it.
+
+The first three-node `voter-stop` run failed on a verdict defect that has since been corrected. Its
+image predates the node-authenticated drain of [Cluster Chaos 40: Drain a stopping follower through
+the leader without a user password](https://app.clickup.com/t/86bcd8q49), so node-3's drain request
+was refused as unauthenticated and its paced graph failed over only 11.5 seconds after the stop. The
+windows verdict blamed the clock for the windows that graph could not close. A stall whose round
+takes the graph's own node down is now exempt, and the drain verdict now reports such a refused drain
+as a product finding instead. The rerun, in which every drain completed, passed.
+
+One-node `domain-time` passed without a fault and across a whole-cluster restart. The scenarios
+delivered before still passed on the same worker and image: `baseline` on one and three nodes,
+`follower-crash`, and one-node `cluster-restart`.
 
 The controller resolves the supplied reference to its immutable local image ID before Compose
 starts. If the reference is not local, it performs one bounded pull and then resolves the result.

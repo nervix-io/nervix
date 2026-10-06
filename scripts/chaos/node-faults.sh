@@ -158,6 +158,15 @@ node_fault_stop() {
     grep -E 'shutdown (admission|drain-support|terminal-teardown) phase finished' \
         "${case_dir}/shutdown.log" >"${case_dir}/phase-outcomes.txt" || true
     failure_category=product
+    # Every other node is a settled live voter when the stop begins, so the stopped node has a live
+    # replacement and must hand its work over through the leader before it exits. A drain it did
+    # not complete leaves its work to fail over as after a crash; the round stays meaningful, so it
+    # is a finding rather than the end of the run.
+    if ((node_count > 1)) && ! "${script_dir}/verify-drain-evidence.sh" "${host}" \
+        "${case_dir}/shutdown.log" 2>"${case_dir}/drain-verdict.txt"; then
+        recovery_finding "${case_dir}" \
+            "${host} did not complete its graceful drain while live replacement nodes existed: $(head -n 1 "${case_dir}/drain-verdict.txt")"
+    fi
     if [[ -n "${during_hook}" ]]; then
         "${during_hook}"
     fi
