@@ -25,7 +25,7 @@ pub(super) const REMOTE_RELAY_INSTANTIATION_WAIT: Duration = Duration::from_secs
 
 pub(super) const REMOTE_RELAY_INSTANTIATION_POLL: Duration = Duration::from_millis(25);
 
-pub(super) const REMOTE_ACK_ALIVE_INTERVAL: Duration = Duration::from_millis(100);
+pub(super) const REMOTE_ACK_ALIVE_INTERVAL: Duration = Duration::from_secs(1);
 
 /// How long a node that forwarded a record acknowledgement with an admitted relay delivery waits
 /// without a report about it from the receiver before it fails the acknowledgement.
@@ -163,6 +163,25 @@ struct RemoteRelayAdmissionContext<'a> {
     registration: &'a RemoteAckRegistration,
     transport: &'a RelayAdmission,
     admitted: &'a mut bool,
+}
+
+/// One row's receiver-side acknowledgement, owned by the batch that admitted it. The batch
+/// multiplexes progress and keepalive polls so a wide relay frame does not create a task per row.
+struct RemoteAckWatch {
+    completion: AckCompletion,
+    registration: RemoteAckRegistration,
+    discovery_deadline: Instant,
+    observed_registrar: bool,
+}
+
+async fn wait_remote_ack_progress(
+    mut watch: RemoteAckWatch,
+) -> (RemoteAckWatch, Option<AckProgress>) {
+    let progress = nervix_primitives::select! {
+        _ = sleep(REMOTE_ACK_ALIVE_INTERVAL) => None,
+        progress = watch.completion.wait_for_progress() => Some(progress),
+    };
+    (watch, progress)
 }
 
 fn remote_ack_progress(completion: &AckCompletion) -> RemoteAckOutcome {
@@ -1013,6 +1032,14 @@ impl Runtime {
                 )));
             }
         };
+        let watch_count = remote.acks.iter().flatten().count();
+        let watcher_owner = self
+            .reserve_remote_ack_watcher_memory(watch_count)
+            .map_err(|report| RuntimeError::RemoteAckAdmission {
+                domain: remote.domain.clone(),
+                report,
+            })?;
+        let mut watches = Vec::with_capacity(watch_count);
         let mut acks = Vec::with_capacity(remote.acks.len());
         for registration in remote.acks {
             let Some(registration) = registration else {
@@ -1021,20 +1048,18 @@ impl Runtime {
             };
             let (record_acks, completion) =
                 AckSet::tracked_root(services.domain_ack_tracker.clone());
-            if let Err(report) =
-                self.spawn_remote_ack_watcher(remote.domain.clone(), completion, Some(registration))
-            {
-                record_acks.no_ack("remote acknowledgement owner could not reserve relay memory");
-                for pending in &acks {
-                    pending.no_ack("remote acknowledgement owner could not reserve relay memory");
-                }
-                return Err(RuntimeError::RemoteAckAdmission {
-                    domain: remote.domain,
-                    report,
-                }
-                .into());
-            }
+            watches.push(RemoteAckWatch {
+                completion,
+                registration,
+                discovery_deadline: Instant::now()
+                    .checked_add(REMOTE_RELAY_INSTANTIATION_WAIT)
+                    .assured("the bounded registrar discovery grace fits the monotonic clock"),
+                observed_registrar: false,
+            });
             acks.push(record_acks);
+        }
+        if let Some((dispatcher, memory)) = watcher_owner {
+            self.spawn_remote_ack_watchers(remote.domain.clone(), dispatcher, watches, memory);
         }
         let batch = RelayRecordBatch::from_runtime_batch(
             schema,
@@ -1232,6 +1257,33 @@ impl Runtime {
         }
     }
 
+    fn reserve_remote_ack_watcher_memory(
+        &self,
+        count: usize,
+    ) -> error_stack::Result<
+        Option<(StdArc<RemoteDispatcher>, nervix_execution::Reservation)>,
+        nervix_execution::AdmissionError,
+    > {
+        if count == 0 {
+            return Ok(None);
+        }
+        let Some(dispatcher) = self.inner.remote_dispatcher.load_full() else {
+            return Ok(None);
+        };
+        // A row's poll future, queue node, ACK root, and registration fit within this charge.
+        // One batch owns one task and its scheduler allocation, even for a wide relay frame.
+        let bytes = count
+            .checked_mul(1024)
+            .and_then(|bytes| bytes.checked_add(4096))
+            .assured("one bounded relay frame's ACK watchers fit in usize");
+        let memory = dispatcher.executor.try_reserve(
+            nervix_execution::MemoryClass::Relay,
+            u64::try_from(bytes).assured("one relay frame's watcher allocation fits in u64"),
+        )?;
+        Ok(Some((dispatcher, memory)))
+    }
+
+    #[cfg(test)]
     pub(in crate::runtime) fn spawn_remote_ack_watcher(
         &self,
         domain: DomainName,
@@ -1241,130 +1293,94 @@ impl Runtime {
         let Some(ack) = ack else {
             return Ok(());
         };
-        let Some(dispatcher) = self.inner.remote_dispatcher.load_full() else {
+        let Some((dispatcher, memory)) = self.reserve_remote_ack_watcher_memory(1)? else {
             return Ok(());
         };
+        self.spawn_remote_ack_watchers(
+            domain,
+            dispatcher,
+            vec![RemoteAckWatch {
+                completion,
+                registration: ack,
+                discovery_deadline: Instant::now()
+                    .checked_add(REMOTE_RELAY_INSTANTIATION_WAIT)
+                    .assured("the bounded registrar discovery grace fits the monotonic clock"),
+                observed_registrar: false,
+            }],
+            memory,
+        );
+        Ok(())
+    }
+
+    #[cfg_attr(
+        nervix_lint,
+        nervix::dispatch(reason = "the receiver batch owns the bounded set of row progress \
+                                   futures that this stream polls")
+    )]
+    fn spawn_remote_ack_watchers(
+        &self,
+        domain: DomainName,
+        dispatcher: StdArc<RemoteDispatcher>,
+        watches: Vec<RemoteAckWatch>,
+        memory: nervix_execution::Reservation,
+    ) {
         let fault_injection = self.inner.fault_injection.clone();
-        let executor = dispatcher.executor.clone();
         let watcher = async move {
-            let mut completion = completion;
-            let discovery_deadline = Instant::now()
-                .checked_add(REMOTE_RELAY_INSTANTIATION_WAIT)
-                .assured("the bounded registrar discovery grace fits the monotonic clock");
-            let mut observed_registrar = false;
-            loop {
+            let _memory = memory;
+            let mut pending = FuturesUnordered::new();
+            for watch in watches {
+                pending.push(wait_remote_ack_progress(watch));
+            }
+            while let Some((mut watch, progress)) = pending.next().await {
+                let ack = &watch.registration;
                 match dispatcher
                     .cluster
                     .live_node_incarnation(ack.registrar.node_id())
                 {
-                    Some(incarnation) if incarnation != ack.registrar.incarnation() => break,
-                    Some(_) => observed_registrar = true,
-                    None if observed_registrar || Instant::now() >= discovery_deadline => break,
+                    Some(incarnation) if incarnation != ack.registrar.incarnation() => continue,
+                    Some(_) => watch.observed_registrar = true,
+                    None if watch.observed_registrar
+                        || Instant::now() >= watch.discovery_deadline =>
+                    {
+                        continue;
+                    }
                     None => {}
                 }
-                nervix_primitives::select! {
-                    _ = sleep(REMOTE_ACK_ALIVE_INTERVAL) => {
-                        trace!(
-                            domain = domain.as_str(),
-                            ack_id = ack.ack_id,
-                            target_node = %ack.registrar,
-                            "sending remote ack alive"
-                        );
-                        if let Err(error) = dispatcher
-                            .dispatch(
-                                ack.registrar.node_id(),
-                                Envelope::Ack(ack.resolution(remote_ack_progress(&completion))),
-                            )
-                            .await
-                        {
-                            warn!(
-                                domain = domain.as_str(),
-                                ack_id = ack.ack_id,
-                                target_node = %ack.registrar,
-                                error = %error,
-                                "failed to return remote ack alive"
-                            );
-                        }
+                let terminal = matches!(progress, Some(AckProgress::Complete(_)));
+                let outcome = match progress {
+                    Some(AckProgress::Complete(AckOutcome::Ack)) => RemoteAckOutcome::Ack,
+                    Some(AckProgress::Complete(AckOutcome::NoAck(error))) => {
+                        RemoteAckOutcome::NoAck(error)
                     }
-                    progress = completion.wait_for_progress() => {
-                        match progress {
-                            AckProgress::Alive => {
-                                trace!(
-                                    domain = domain.as_str(),
-                                    ack_id = ack.ack_id,
-                                    target_node = %ack.registrar,
-                                    "forwarding remote ack alive"
-                                );
-                                if let Err(error) = dispatcher
-                                    .dispatch(
-                                        ack.registrar.node_id(),
-                                        Envelope::Ack(ack.resolution(remote_ack_progress(&completion))),
-                                    )
-                                    .await
-                                {
-                                    warn!(
-                                        domain = domain.as_str(),
-                                        ack_id = ack.ack_id,
-                                        target_node = %ack.registrar,
-                                        error = %error,
-                                        "failed to forward remote ack alive"
-                                    );
-                                }
-                            }
-                            AckProgress::Complete(outcome) => {
-                                trace!(
-                                    domain = domain.as_str(),
-                                    ack_id = ack.ack_id,
-                                    target_node = %ack.registrar,
-                                    outcome = ?outcome,
-                                    "sending remote ack resolution"
-                                );
-                                let outcome = match outcome {
-                                    AckOutcome::Ack => RemoteAckOutcome::Ack,
-                                    AckOutcome::NoAck(error) => RemoteAckOutcome::NoAck(error),
-                                };
-                                if fault_injection.loses_remote_acknowledgement(
-                                    dispatcher.local_node_id(),
-                                    ack.registrar.node_id(),
-                                ) {
-                                    break;
-                                }
-                                if let Err(error) = dispatcher
-                                    .dispatch(
-                                        ack.registrar.node_id(),
-                                        Envelope::Ack(ack.resolution(outcome)),
-                                    )
-                                    .await
-                                {
-                                    warn!(
-                                        domain = domain.as_str(),
-                                        ack_id = ack.ack_id,
-                                        target_node = %ack.registrar,
-                                        error = %error,
-                                        "failed to return remote ack resolution"
-                                    );
-                                }
-                                break;
-                            }
-                        }
-                    }
+                    Some(AckProgress::Alive) | None => remote_ack_progress(&watch.completion),
+                };
+                trace!(domain = domain.as_str(), ack_id = ack.ack_id, target_node = %ack.registrar,
+                    terminal, "sending remote ack progress");
+                if terminal
+                    && fault_injection.loses_remote_acknowledgement(
+                        dispatcher.local_node_id(),
+                        ack.registrar.node_id(),
+                    )
+                {
+                    continue;
+                }
+                if let Err(error) = dispatcher
+                    .dispatch(
+                        ack.registrar.node_id(),
+                        Envelope::Ack(ack.resolution(outcome)),
+                    )
+                    .await
+                {
+                    warn!(domain = domain.as_str(), ack_id = ack.ack_id,
+                        target_node = %ack.registrar, error = %error,
+                        "failed to return remote ack progress");
+                }
+                if !terminal {
+                    pending.push(wait_remote_ack_progress(watch));
                 }
             }
         };
-        // Charge the actual stored future plus the ACK root and task scheduler allocation. The
-        // reservation follows the task through completion, registrar retirement and shutdown.
-        let bytes = std::mem::size_of_val(&watcher)
-            .checked_add(1024)
-            .assured("one ACK watcher and its root fit in usize");
-        let memory = executor.try_reserve(
-            nervix_execution::MemoryClass::Relay,
-            u64::try_from(bytes).assured("one watcher allocation fits in u64"),
-        )?;
-        self.spawn_remote_ack_watcher_task(async move {
-            let _memory = memory;
-            watcher.await;
-        });
-        Ok(())
+        self.spawn_remote_ack_watcher_task(watcher);
     }
 
     fn spawn_remote_ack_watcher_task(
@@ -1673,6 +1689,48 @@ mod tests {
         );
         acks.ack_success();
         runtime.shutdown().await;
+    }
+
+    #[nervix_primitives::test]
+    async fn wide_remote_ack_batch_owns_one_charged_task_and_releases_it_on_shutdown() {
+        let (runtime, dispatcher) = joined_runtime().await;
+        let count = 8192;
+        let mut roots = Vec::with_capacity(count);
+        let mut watches = Vec::with_capacity(count);
+        for _ in 0..count {
+            let (root, completion) = AckSet::root();
+            roots.push(root);
+            watches.push(RemoteAckWatch {
+                completion,
+                registration: dispatcher.registration(1),
+                discovery_deadline: Instant::now()
+                    .checked_add(REMOTE_RELAY_INSTANTIATION_WAIT)
+                    .assured("the fixture discovery grace fits the clock"),
+                observed_registrar: false,
+            });
+        }
+        let (dispatcher, memory) = runtime
+            .reserve_remote_ack_watcher_memory(count)
+            .assured("the wide batch fits its relay budget")
+            .assured("the runtime has joined its cluster");
+        let executor = dispatcher.executor.clone();
+        let expected_bytes = u64::try_from(count * 1024 + 4096)
+            .assured("the fixture's watcher allocation fits in u64");
+        assert_eq!(memory.bytes(), expected_bytes);
+        runtime.spawn_remote_ack_watchers(
+            named::<DomainName>("watcher"),
+            dispatcher,
+            watches,
+            memory,
+        );
+        assert_eq!(runtime.inner.remote_ack_watcher_tasks.len(), 2);
+        assert_eq!(
+            executor.snapshot().relay_memory.reserved_bytes,
+            expected_bytes,
+        );
+        runtime.shutdown().await;
+        assert_eq!(executor.snapshot().relay_memory.reserved_bytes, 0,);
+        drop(roots);
     }
 
     #[nervix_primitives::test]
