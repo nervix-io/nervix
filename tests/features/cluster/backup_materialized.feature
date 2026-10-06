@@ -244,11 +244,24 @@ Feature: Materialized backup and archived lifecycle resumption
       """
     Then within "60s" the materialized generators report round 2, <row_kib> KiB, <relays> relays and <tenants> tenants
 
+    @order_resume_fanout_single
     Examples:
       | cluster_size | replica_count | relays | row_kib | tenants |
       | 1            | 0             | 40     | 512     | 2       |
+
+    @order_resume_fanout_cluster
+    Examples:
+      | cluster_size | replica_count | relays | row_kib | tenants |
       | 3            | 1             | 40     | 512     | 2       |
+
+    @order_resume_tenants_single
+    Examples:
+      | cluster_size | replica_count | relays | row_kib | tenants |
       | 1            | 0             | 1      | 1024    | 40      |
+
+    @order_resume_tenants_cluster
+    Examples:
+      | cluster_size | replica_count | relays | row_kib | tenants |
       | 3            | 1             | 1      | 1024    | 40      |
 
   @restore_installation
@@ -294,9 +307,14 @@ Feature: Materialized backup and archived lifecycle resumption
     Then the CLI backup succeeded with a JSON report naming domain "{{domain}}"
     And backup archives "large-before-stale.nvxb" and "large-after-stale.nvxb" have identical materialized generations
 
+    @order_materialized_fanout
     Examples:
       | relays | row_kib | tenants |
       | 40     | 512     | 2       |
+
+    @order_materialized_tenants
+    Examples:
+      | relays | row_kib | tenants |
       | 1      | 1024    | 40      |
 
   @restore_installation

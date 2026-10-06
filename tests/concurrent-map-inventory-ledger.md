@@ -33,7 +33,7 @@ immutable tables and retained lifetimes described below.
 `nervix-primitives::deadlock::OrderHistory::edges` is a diagnostic-only
 `DashMap<EdgeKey, EdgeRecord>`. An order-enabled attempted nested acquisition reaches it once per
 held source context; the findings owner reads it when correlating a historical cycle. It retains
-at most 8,192 directed run-local instance edges and 1,024 contexts per edge until process exit,
+at most 16,384 directed run-local instance edges and 1,024 contexts per edge until process exit,
 including ended locks. Refusal is explicit overload. No borrowed shard crosses a tracked lock
 acquisition. Runtime-disabled order checking skips edge access; the compiled instrumentation and
 actual-guard tracking still remain. Ordinary execution contains neither the map nor its access.

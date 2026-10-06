@@ -438,12 +438,13 @@ test-primitives-compile:
 # At most four scenarios run together: large restore fixtures and tracked lock instrumentation
 # share the host's CPU and memory with other builds. The bound applies to both diagnostic modes.
 # Historical order edges survive retired locks, so order mode starts a fresh scenario process for
-# each tagged feature, or each tagged outline in the large materialized restore feature, and
-# accounts for every selected case across those processes.
+# each tagged feature, or each tagged outline in the large materialized restore feature. The four
+# large resume examples and two delayed-coordinator examples each get a fresh process as well.
+# Every selected case is accounted for across those processes.
 test-deloxide budget_seconds="2400": (test-deloxide-selection "deloxide" budget_seconds)
 
 # Historical order instrumentation, with the same active probes and real node workloads.
-test-deloxide-order budget_seconds="2400": (test-deloxide-selection "deloxide-order" budget_seconds)
+test-deloxide-order budget_seconds="7200": (test-deloxide-selection "deloxide-order" budget_seconds)
 
 [private]
 test-deloxide-selection selection budget_seconds: tests-deps
@@ -546,7 +547,21 @@ test-deloxide-selection selection budget_seconds: tests-deps
                     exit 1
                 fi
                 for scenario_index in "${!scenario_names[@]}"; do
-                    run_scenario_chunk "scenarios-${index}-${scenario_index}" "${feature}" --name "^${scenario_names[scenario_index]}$"
+                    case "${scenario_names[scenario_index]}" in
+                        'Materialized generations larger than the bulk budget resume on every assigned owner and replica')
+                            for case_tag in order_resume_fanout_single order_resume_fanout_cluster order_resume_tenants_single order_resume_tenants_cluster; do
+                                run_scenario_chunk "scenarios-${index}-${scenario_index}-${case_tag}" "${feature}" --tags "@restore_installation and @${case_tag}"
+                            done
+                            ;;
+                        'A delayed coordinator cannot replace a resumed materialized generation larger than the bulk budget')
+                            for case_tag in order_materialized_fanout order_materialized_tenants; do
+                                run_scenario_chunk "scenarios-${index}-${scenario_index}-${case_tag}" "${feature}" --tags "@restore_installation and @${case_tag}"
+                            done
+                            ;;
+                        *)
+                            run_scenario_chunk "scenarios-${index}-${scenario_index}" "${feature}" --name "^${scenario_names[scenario_index]}$"
+                            ;;
+                    esac
                 done
             else
                 run_scenario_chunk "scenarios-${index}" "${feature}"
@@ -1347,11 +1362,17 @@ coverage-remote-owners output="target/remote-owners.lcov": build-web-console was
     set -euo pipefail
     export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
     just coverage-clean-workspace
+    stages="$(mktemp -d {{ quote(cargo_target_dir + "/remote-owner-coverage.XXXXXX") }})"
     cargo llvm-cov --no-report --package nervix-server --features testing --lib -- remote_
-    cargo llvm-cov --no-report --package nervix-server --features testing --lib -- cluster::tests
-    cargo llvm-cov --no-report --package nervix-interconnect --lib
-    cargo llvm-cov --no-report --package nervix-server --features testing --lib -- remote_ack_owner_cost --ignored --nocapture
-    cargo llvm-cov --no-report --package nervix-interconnect --lib -- remote_relay_frame_cost --ignored --nocapture
+    # Later invocations retain the first profile; --no-report and --no-clean cannot be combined.
+    cargo llvm-cov --no-clean --lcov --output-path "${stages}/cluster.lcov" \
+        --package nervix-server --features testing --lib -- cluster::tests
+    cargo llvm-cov --no-clean --lcov --output-path "${stages}/interconnect.lcov" \
+        --package nervix-interconnect --lib
+    cargo llvm-cov --no-clean --lcov --output-path "${stages}/ack-cost.lcov" \
+        --package nervix-server --features testing --lib -- remote_ack_owner_cost --ignored --nocapture
+    cargo llvm-cov --no-clean --lcov --output-path "${stages}/frame-cost.lcov" \
+        --package nervix-interconnect --lib -- remote_relay_frame_cost --ignored --nocapture
     cargo llvm-cov report --no-default-ignore-filename-regex --lcov --output-path {{ quote(output) }}
 
 # Measure selected public scenarios with the same arguments as `test-scenarios`.

@@ -1519,7 +1519,7 @@ line was reused.
 
 **Bounds and handoff.** The live registry owns the live lock, waiting attempt and thread records;
 none of its shard guards cross a tracked acquisition. Order instrumentation adds a run-bounded
-history of at most 8,192 directed instance edges, 1,024 source witnesses per edge, and 64 guard
+history of at most 16,384 directed instance edges, 1,024 source witnesses per edge, and 64 guard
 leases per thread. Ending a lock does not reclaim the historical edge budget. Refused history or
 count overflow becomes an explicit overload finding. The witness budget retains distinct storage
 worker identities across checkpoint staging. Its process regression retains all 512 worker
@@ -1589,8 +1589,9 @@ because an unreviewed historical cycle exists.
 
 **Verification.** `just test-deloxide` and `just test-deloxide-order` run in separate selections and
 fresh retained attempt directories below `target/deloxide/test-deloxide`. After prerequisites,
-diagnostic compilation and execution share the default forty-minute budget. Every active workload
-runs in a disposable subprocess and must record its typed active cycle and exit `3`. Order probes add
+diagnostic compilation and execution share a forty-minute budget in active mode and a two-hour
+budget in order mode. Every active workload runs in a disposable subprocess and must record its
+typed active cycle and exit `3`. Order probes add
 successful serial inversion, mixed modes and recursive read multiplicity, reused construction
 sites in separate lifetimes, read-only/consistent-order controls, runtime-disabled instrumentation,
 context/retention overload and failed/blocked output. The commands also run one-/three-node
@@ -1600,11 +1601,12 @@ context/retention overload and failed/blocked output. The commands also run one-
 scenario invocation admits at most four scenarios at once, bounding the competing large restore
 fixtures and tracked-lock instrumentation on a shared build host. Order mode runs each tagged
 feature in a fresh process, and each tagged outline of the large materialized restore feature in
-its own process, because historical edges remain after lock retirement. It accounts for all
-selected scenarios across those processes and qualifies every process artifact. The commands
-also run
-`@paced_simulation_reopen` on
-one and three nodes: the Rust driver uses the selected diagnostic capability, while Python runs
+its own process. The four large resume examples and two delayed-coordinator examples each use a
+fresh process so concurrent fixtures and their combined historical edges cannot exhaust the
+16,384-edge recorder before each protocol completes. It accounts for all selected scenarios across
+those processes and qualifies every process artifact. The commands also run
+`@paced_simulation_reopen` on one and three nodes: the Rust driver uses the selected diagnostic
+capability, while Python runs
 against diagnostic nodes with its ordinary shared binding. Python locks and condition variables
 remain outside the detector. Zero probes or incomplete scenario accounting fail. After successful process outcomes,
 every retained scenario/child-process observation must qualify; missing evidence or an unreviewed,

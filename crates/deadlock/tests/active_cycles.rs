@@ -465,7 +465,8 @@ fn witness_overload() {
 }
 
 fn history_overload() {
-    let locks: Vec<_> = (0..129).map(|_| Mutex::new(())).collect();
+    // 182 choose 2 yields 16,471 directed pairs, exceeding the bounded 16,384-edge history.
+    let locks: Vec<_> = (0..182).map(|_| Mutex::new(())).collect();
     for (index, first) in locks.iter().enumerate() {
         for second in &locks[index + 1..] {
             let _first = first.lock();

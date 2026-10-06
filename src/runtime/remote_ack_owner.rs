@@ -82,7 +82,7 @@ struct PendingRemoteAck {
     receiver: ClusterNodeName,
     acks: AckSet,
     phase: RemoteAckPhase,
-    required_wait: Option<AckRequiredWaitGuard>,
+    required_wait: Option<AckParkGuard>,
     progress_sequence: Option<u64>,
 }
 
@@ -116,7 +116,7 @@ impl PendingRemoteAck {
         self.progress_sequence = Some(sequence);
         if parked {
             if self.required_wait.is_none() {
-                self.required_wait = Some(AckRequiredWaitGuard::new([&self.acks]));
+                self.required_wait = Some(AckParkGuard::new([&self.acks]));
             }
         } else {
             self.required_wait = None;

@@ -1031,7 +1031,8 @@ impl Runtime {
                 return Err(RuntimeError::RemoteAckAdmission {
                     domain: remote.domain,
                     report,
-                });
+                }
+                .into());
             }
             acks.push(record_acks);
         }
