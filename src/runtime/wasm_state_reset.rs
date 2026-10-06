@@ -27,6 +27,11 @@ pub(crate) enum WasmStateResetRuntimeError {
     GateNotHeld { processor: ModelName },
     #[error("WASM processor '{}' is not running on this node", .processor.as_str())]
     ProcessorUnavailable { processor: ModelName },
+    #[error(
+        "WASM processor '{}' has not restored the branches its lifecycle checkpoint names yet",
+        .processor.as_str()
+    )]
+    BranchesUnrestored { processor: ModelName },
     #[error("processor '{}' is not a WASM processor", .processor.as_str())]
     NotWasmProcessor { processor: ModelName },
     #[error(

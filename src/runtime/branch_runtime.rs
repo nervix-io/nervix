@@ -2094,29 +2094,46 @@ pub(super) async fn restore_branch_instance_lru_snapshot(
     template: &BranchInstanceTemplate,
     instances: &mut BranchInstanceRegistry<Option<BranchKey>, Mutex<BranchRuntime>>,
 ) -> error_stack::Result<u64, BranchLruSnapshotError> {
+    /// One branch the lifecycle names, built and not installed yet.
+    struct RestoredBranch {
+        lifetime: BranchInstanceSnapshotEntry<Option<BranchKey>>,
+        state: Mutex<BranchRuntime>,
+    }
+
     let placement = branch_lru_placement(runtime, domain, template)
         .change_context(BranchLruSnapshotError::Unplaced)?;
-    let snapshot = runtime
-        .take_restorable_branch_lru_snapshot(&placement)
+    let lifecycle = runtime
+        .restorable_branch_lru_snapshot(&placement)
         .change_context(BranchLruSnapshotError::Read)?;
-    let Some(snapshot) = snapshot else {
+    let Some(lifecycle) = lifecycle else {
         return Ok(0);
     };
-    let entries = decode_branch_lru_snapshot(&snapshot.payload)?;
-    for (entry, restored) in entries.into_iter().enumerate() {
+    // Every branch is built before any is installed, and the lifecycle is released only once all
+    // of them are, so a failed restore leaves both as they were.
+    let lifetimes = lifecycle.branches()?;
+    let mut restored = Vec::with_capacity(lifetimes.len());
+    for (entry, lifetime) in lifetimes.into_iter().enumerate() {
         nervix_primitives::task::consume_budget().await;
-        let key = restored.key;
-        let last_ingestion = restored.last_ingestion;
-        let incarnation = restored.incarnation;
         let state = template
-            .instantiate(runtime, domain, key.clone(), incarnation)
+            .instantiate(runtime, domain, lifetime.key.clone(), lifetime.incarnation)
             .await
             .change_context(BranchLruSnapshotError::Restore { entry })?;
-        runtime.observe_branch_instance_created(domain, template.branch.as_ref(), &key);
-        instances.insert_restored(key, last_ingestion, incarnation, state);
+        restored.push(RestoredBranch { lifetime, state });
     }
-    instances.set_version(snapshot.lsm);
-    Ok(snapshot.lsm)
+    for branch in restored {
+        let lifetime = branch.lifetime;
+        runtime.observe_branch_instance_created(domain, template.branch.as_ref(), &lifetime.key);
+        instances.insert_restored(
+            lifetime.key,
+            lifetime.last_ingestion,
+            lifetime.incarnation,
+            branch.state,
+        );
+    }
+    let lsm = lifecycle.lsm();
+    instances.set_version(lsm);
+    runtime.release_restored_branch_lru_snapshot(lifecycle);
+    Ok(lsm)
 }
 
 /// Persist the branch lifecycle checkpoint `instances` form now and hand it to the ownership

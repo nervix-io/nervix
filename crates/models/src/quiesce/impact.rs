@@ -12,7 +12,7 @@ use error_stack::Report;
 use meticulous::OptionExt as _;
 use rkyv::{
     Archive, Deserialize as RkyvDeserialize, Place, Serialize as RkyvSerialize,
-    rancor::Fallible,
+    rancor::{Fallible, Source},
     ser::{Allocator, Writer},
     vec::{ArchivedVec, VecResolver},
     with::{ArchiveWith, DeserializeWith, SerializeWith},
@@ -124,6 +124,10 @@ impl TransactionPosition {
 }
 
 /// The inclusive, consecutive operation range executed as one atomic step.
+///
+/// Its last operation is never before its first. Every form of the range is read through that
+/// check: the serde form through `TryFrom` its fields, the archived form through the same
+/// conversion.
 #[derive(
     Debug,
     Clone,
@@ -137,11 +141,44 @@ impl TransactionPosition {
     Deserialize,
     Archive,
     RkyvSerialize,
-    RkyvDeserialize,
 )]
+#[serde(try_from = "TransactionOperationRangeFields")]
 pub struct TransactionOperationRange {
     first: TransactionOperationNumber,
     last: TransactionOperationNumber,
+}
+
+/// The two ends of a range as its serde form names them, before their order is checked.
+#[derive(Deserialize)]
+struct TransactionOperationRangeFields {
+    first: TransactionOperationNumber,
+    last: TransactionOperationNumber,
+}
+
+impl TryFrom<TransactionOperationRangeFields> for TransactionOperationRange {
+    type Error = ImpactReportError;
+
+    /// The range from the first field through the last, unless the last comes before the first.
+    fn try_from(fields: TransactionOperationRangeFields) -> Result<Self, Self::Error> {
+        let TransactionOperationRangeFields { first, last } = fields;
+        if last < first {
+            return Err(ImpactReportError::OperationRangeReversed { first, last });
+        }
+        Ok(Self { first, last })
+    }
+}
+
+impl<D> RkyvDeserialize<TransactionOperationRange, D> for ArchivedTransactionOperationRange
+where
+    D: Fallible + ?Sized,
+    D::Error: Source,
+{
+    fn deserialize(&self, deserializer: &mut D) -> Result<TransactionOperationRange, D::Error> {
+        let first: TransactionOperationNumber = self.first.deserialize(deserializer)?;
+        let last: TransactionOperationNumber = self.last.deserialize(deserializer)?;
+        let fields = TransactionOperationRangeFields { first, last };
+        TransactionOperationRange::try_from(fields).map_err(D::Error::new)
+    }
 }
 
 impl TransactionOperationRange {
@@ -149,13 +186,8 @@ impl TransactionOperationRange {
         first: TransactionOperationNumber,
         last: TransactionOperationNumber,
     ) -> Result<Self, Report<ImpactReportError>> {
-        if last < first {
-            return Err(Report::new(ImpactReportError::OperationRangeReversed {
-                first,
-                last,
-            }));
-        }
-        Ok(Self { first, last })
+        let fields = TransactionOperationRangeFields { first, last };
+        Self::try_from(fields).map_err(Report::new)
     }
 
     pub fn from_index_and_count(
@@ -1891,6 +1923,25 @@ mod impact_report_tests {
         for<'a> <N as TryFrom<&'a str>>::Error: std::fmt::Debug,
     {
         N::try_from(raw).assured("the test passes a valid Nervix name")
+    }
+
+    /// A stored or transmitted operation range whose last operation comes before its first is
+    /// refused as it is read, so no reader counts the operations of a reversed range.
+    #[test]
+    fn a_reversed_operation_range_is_refused_as_it_is_read() {
+        let second = TransactionOperationNumber::from_index(1).assured("a small index fits");
+        let third = TransactionOperationNumber::from_index(2).assured("a small index fits");
+        let range = TransactionOperationRange::new(second, third).assured("the range is ordered");
+        // An archived range holds its first and then its last number in eight bytes each, so
+        // swapping the halves reverses it.
+        let mut archived = to_bytes::<Error>(&range).assured("an operation range archives");
+        assert_eq!(archived.len(), 16);
+        archived.rotate_left(8);
+        let reversed = from_bytes::<TransactionOperationRange, Error>(&archived);
+        assert!(reversed.is_err(), "{reversed:?}");
+
+        let reversed = serde_json::from_str::<TransactionOperationRange>(r#"{"first":3,"last":2}"#);
+        assert!(reversed.is_err(), "{reversed:?}");
     }
 
     fn operation(number: usize, step: TransactionOperationRange) -> OperationImpactReport {

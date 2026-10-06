@@ -79,6 +79,22 @@ own Cucumber, Shuttle, Loom, Turmoil and external Chaos evidence.
 | `backup-corrupt-archives` | `nervix-backup` rejection before verified restore contents are returned | changed lengths/digests/kinds, reordered/missing/extra sections, invalid records and materialized group metadata/membership, damaged Arrow sections, truncation and bounded arbitrary tar inputs, v2 | 256 | 4096 bytes |
 | `restore-installation-wire` | `nervix-interconnect` complete installation request wire equality | all actions, authority, placement, payload and inventory, v1 | 256 | 128 bytes |
 | `restore-installation-storage` | `nervix-server` complete staged checkpoint and publication record equality | authority, placement, revision, payload and inventory, v1 | 256 | 128 bytes |
+| `consensus-state-records` | `nervix-consensus` complete recovered state equality through the state writer, a real keyspace and recovery, for a first revision and a second stored as changes | every record family with replaced and removed records, every transaction, outcome and command execution state, names across the whole name rule and boundary counts and times, v1 | 128 | 65536 bytes |
+| `consensus-state-corruption` | `nervix-consensus` typed `InvalidState` recovery failure or a canonical state its readers can rely on | flipped, truncated, extended, rekeyed, copied, unknown and missing records of a stored revision, drawn from bytes of their own, v1 | 256 | 65600 bytes |
+| `consensus-raft-records` | `nervix-consensus` complete Raft record equality through the storage codec, and keys that name their position or section | votes, log positions, entries of every command, state metadata, snapshot manifests and sections, v1 | 256 | 4096 bytes |
+| `consensus-raft-records-malformed` | `nervix-consensus` typed storage failure or a value that stores back to the same record | arbitrary bytes as every Raft record, log key and section key, v1 | 256 | 4096 bytes |
+| `registry-stored-models` | `nervix-server` complete Model equality through listing and keyed reads of a reopened registry, from its journal and from flushed tables | Models of every family in domains and with names across the whole name rule, v1 | 64 | 4096 bytes |
+| `registry-stored-models-corruption` | `nervix-server` typed registry storage failure or Models whose own keys are exactly the stored keys | flipped, truncated, extended, recased, extended-key, copied and unknown records, v1 | 128 | 4096 bytes |
+| `runtime-state-keys` | `nervix-server` exact decoded placement projection, and prefixes, index and chunk keys that reach no other placement | every state kind with schema, generation, Model kind and name and branch key, names across the whole name rule, v1 | 256 | 2048 bytes |
+| `runtime-state-keys-malformed` | `nervix-server` typed storage failure or a placement whose own key is the stored key | damaged and arbitrary keys, v1 | 256 | 2048 bytes |
+| `runtime-state-identity-records` | `nervix-server` complete handoff and forced-recovery record equality with branch values by archived bits, and key identity | transitions with checkpoints of every placement kind, v1 | 256 | 4096 bytes |
+| `runtime-state-identity-records-malformed` | `nervix-server` typed decode failure or a record that stores back unchanged | arbitrary bytes as every identity record, v1 | 256 | 4096 bytes |
+| `runtime-state-snapshots` | `nervix-server` every owner's complete restored snapshot through its codec and the inline checkpoint envelope | Kafka offsets, branch lifecycles, deduplicator keyspaces with float bits and branch-aggregated metrics, v1 | 256 | 4096 bytes |
+| `runtime-state-snapshots-malformed` | `nervix-server` each kind's typed decode failure or a value that stores back to the same payload | arbitrary bytes as every snapshot payload, v1 | 256 | 4096 bytes |
+| `runtime-state-store-checkpoints` | `nervix-server` byte equality at the stored revision through both readers, before and after the database reopens | inline and chunked checkpoints of every placement at, beside and between the chunk boundaries, v1 | 64 | 2048 bytes |
+| `runtime-window-snapshots` | `nervix-server` complete sealed window equality, and nothing for another branch lifetime | up to three rows of one branch with boundary sequences, nullable arguments and typed aggregate state, v1 | 128 | 2048 bytes |
+| `runtime-window-snapshots-malformed` | `nervix-server` typed window snapshot failure or a window that seals back to the same bytes | sealed windows damaged once and arbitrary bytes behind the magic, v1 | 256 | 4096 bytes |
+| `resource-store-layout` | `nervix-server` complete manifest and archive read-back for every installed version | names across the whole name rule and those spelled like the store's own directories, staging cleanup and removal of another version, v1 | 64 | 512 bytes |
 | `simd-checked-lanes` | `nervix-simd-kernels` checked integer arithmetic equals scalar overflowing arithmetic at every SIMD level | all integer widths, runs and shared operands, v1 | 256 | 128 bytes |
 | `simd-constant-division` | `nervix-simd-kernels` constant quotients and remainders equal checked operations at every SIMD level | all integer widths, divisors, scalar fallback and tails, with full-range signed overflow, v1 | 256 | 128 bytes |
 | `deadlock-evidence` | `nervix-deadlock` complete evidence encode/decode equality | every finding variant, cycles up to the thread bound with omitted threads, texts cut inside multi-byte characters, absent context and extreme identities and times, v1 | 256 | 4096 bytes |
@@ -120,6 +136,13 @@ current-domain boundary seeds. Generated fuzz corpus and crash files live in ret
 under `target/bolero/runs`. Promote a verified minimized failure to the checked-in corpus
 when it remains a meaningful regression for the current domain. Breaking shape changes replace
 obsolete seeds.
+
+The [storage representation coverage map](https://github.com/nervix-io/nervix/blob/main/tests/storage-representation-coverage.md)
+ties the consensus, registry, runtime-state and resource store targets to the stored shapes they
+cover, their complete oracles, the projections their keys make and their corruption boundaries.
+A filter selects every target whose ID or test name contains it, so `just test-bolero runtime-state`
+runs the runtime-state store targets and `just test-bolero storage::` the consensus and registry
+storage targets.
 
 The [client representation coverage map](https://github.com/nervix-io/nervix/blob/main/tests/client-representation-coverage.md)
 ties the client targets to current schema families, complete oracles, ownership and malformed-input

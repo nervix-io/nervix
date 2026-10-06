@@ -193,6 +193,17 @@ jq '.[0].Config.Env = [
 ] | .[0].State.Paused = false' "${inspection_before}" >"${pause_before}"
 jq '.[0].State.Paused = true' "${pause_before}" >"${pause_active}"
 cp "${pause_before}" "${pause_resumed}"
+# These fixtures run the pause deployment, so the verifier checks them against its settings.
+pause_deployment=(CHAOS_RAFT_HEARTBEAT_INTERVAL CHAOS_RAFT_ELECTION_TIMEOUT_MIN
+    CHAOS_RAFT_ELECTION_TIMEOUT_MAX CHAOS_NODE_UNAVAILABILITY_TIMEOUT)
+declare -A deployed_liveness=()
+for setting in "${pause_deployment[@]}"; do
+    if [[ -n "${!setting+set}" ]]; then
+        deployed_liveness["${setting}"]="${!setting}"
+    fi
+done
+export CHAOS_RAFT_HEARTBEAT_INTERVAL=250ms CHAOS_RAFT_ELECTION_TIMEOUT_MIN=10s \
+    CHAOS_RAFT_ELECTION_TIMEOUT_MAX=12s CHAOS_NODE_UNAVAILABILITY_TIMEOUT=15s
 printf '%s\n' \
     "$(jq -nc --arg id "${test_container_id}" '{Type:"container",Action:"pause",Actor:{ID:$id},timeNano:1800000000000000000}')" \
     "$(jq -nc --arg id "${test_container_id}" '{Type:"container",Action:"unpause",Actor:{ID:$id},timeNano:1800000006000000000}')" \
@@ -250,6 +261,22 @@ jq '.[0].Config.Env |= map(select(. != "NERVIX_NODE_UNAVAILABILITY_TIMEOUT=15s")
     "${pause_before}" >"${tmp_dir}/pause-wrong-threshold.json"
 expect_pause_failure 'wrong configured threshold' before "${test_run_id}" "${test_project}" nervix-1 \
     "${test_image_id}" "${tmp_dir}/pause-wrong-threshold.json" "${tmp_dir}/pause-wrong-threshold.json"
+# A run that passes no liveness settings deploys the Compose defaults, and its pauses are judged
+# against those defaults instead of the pause deployment's.
+unset "${pause_deployment[@]}"
+jq '.[0].Config.Env = [
+    "NERVIX_RAFT_HEARTBEAT_INTERVAL=250ms",
+    "NERVIX_RAFT_ELECTION_TIMEOUT_MIN=1500ms",
+    "NERVIX_RAFT_ELECTION_TIMEOUT_MAX=3000ms",
+    "NERVIX_NODE_UNAVAILABILITY_TIMEOUT=10s"
+]' "${pause_before}" >"${tmp_dir}/pause-default-deployment.json"
+"${pause_verifier}" before "${test_run_id}" "${test_project}" nervix-1 \
+    "${test_image_id}" "${tmp_dir}/pause-default-deployment.json" "${tmp_dir}/pause-default-deployment.json"
+expect_pause_failure 'settings other than the deployed ones' before "${test_run_id}" "${test_project}" \
+    nervix-1 "${test_image_id}" "${pause_before}" "${pause_before}"
+for setting in "${!deployed_liveness[@]}"; do
+    export "${setting}=${deployed_liveness[${setting}]}"
+done
 
 expected="${tmp_dir}/expected.ndjson"
 observed="${tmp_dir}/observed.ndjson"
@@ -749,3 +776,4 @@ printf 'chaos harness self-test passed\n'
 "${script_dir}/docker-events-self-test.sh"
 "${script_dir}/recovery-self-test.sh"
 "${script_dir}/stateful-self-test.sh"
+"${script_dir}/mixed-self-test.sh"

@@ -291,7 +291,8 @@ An ownership handoff publishes the remaining window for the destination to resto
 concrete branch has a different endpoint: it drops the branch's retained rows and aggregate state
 before the final checkpoint, so a later branch with the same key begins with an empty window.
 The lifecycle checkpoint carries each branch incarnation; window restore accepts retained state
-only from that same incarnation.
+only from that same incarnation. A restarted owner resumes those incarnations before it accepts any
+input; see [Restoring Processor Branches](#restoring-processor-branches).
 
 Draining ends with a confirmation pass. After a flush generation observes nothing outstanding, one
 more generation must also observe nothing, so work that an upstream node publishes after a
@@ -786,6 +787,35 @@ Each owner that returns in that time keeps its work and restores it from its own
 replicas, instead of having it failed over without its state. See
 [Planned Ownership Handoffs And Failover](./control-plane.md#planned-ownership-handoffs-and-failover).
 
+### Restoring Processor Branches
+
+A processor task restores the branches its branch lifecycle checkpoint names before it takes any
+input. It reads the checkpoint an ownership transfer left for the node, else the lifecycle the node
+holds, else the one its storage keeps, and each branch resumes the incarnation the checkpoint
+records. A window branch therefore reopens the window its retained rows hold, and a deduplicator or
+WASM branch resumes the state it checkpointed. The restore reads only the node's state and the
+processor's execution plan, which carries the schema a window's retained rows are read under, so it
+does not wait for the domain's routing, which installation publishes after it starts the tasks.
+
+A restore installs every branch or none. It builds each branch and opens its retained state first,
+starts the branch tasks only once all of them are built, and releases a transferred checkpoint only
+after that. When a branch cannot be built, because storage cannot be read, a checkpoint does not
+decode, or the bounded executor refuses the decode, the task installs nothing and logs `failed to
+restore processor branches; their input waits for the next attempt` at `warn` with the cause. It
+tries again after a backoff that starts at a quarter of a second and doubles up to thirty seconds.
+Until an attempt succeeds:
+
+- The processor dequeues no input. Its relays keep their records and apply backpressure upstream,
+  so no record starts a new lifetime for a branch the restore resumes and discards its retained
+  state. Input a drain still delivers is negatively acknowledged.
+- A lifecycle checkpoint request is refused, so a backup capture or an ownership handoff that needs
+  one fails instead of recording a lifecycle without the processor's branches. A WASM guest-state
+  reset is refused the same way.
+- A task that replaces it receives the branches it never installed, and restores them itself.
+
+A failure that persists, such as a checkpoint written in a shape the node no longer reads, keeps
+the processor waiting and repeats its warning on every attempt.
+
 ### Checkpoint Identity
 
 A restart reopens a runtime-state checkpoint only under the identity the committed schedule
@@ -806,7 +836,9 @@ Recovery also validates the current representation before decoding its counts. R
 frames and the dedicated consensus database identify their fixed-width 64-bit count shape;
 unrecognized stored state fails with an instruction to recreate it. Window checkpoints use the
 current runtime-state kind and `NVXWIN64` frame signature. Native decoding of an archived count is
-checked and cannot truncate it to fit the target. See
+checked and cannot truncate it to fit the target. Consensus recovery accepts only the records its
+state writer stores, each under its own canonical key and in a state its transitions reach, and
+fails on anything else with the same instruction. See
 [Archived Counts](./typed-states.md#archived-counts) and
 [Storage Layout And Compatibility](./consensus-storage-and-replication.md#storage-layout-and-compatibility).
 
@@ -835,7 +867,10 @@ and starts no further lifetime.
 
 A new leader reconciles durable handoff preparations after a coordinator or participant is lost, as
 described above. Resource uploads that were staged but never promoted are removed at startup, so an
-upload interrupted by a forced ending leaves no partial version behind.
+upload interrupted by a forced ending leaves no partial version behind. Only the store's own staging
+directories begin with a dot: a resource whose name does keeps a directory whose name writes that
+dot as `%2E`, so startup never removes its versions. See
+[Resource Versions And Bindings](./resource-versions.md).
 
 A backup archive a node retains for download is a temporary file in its staging area and is never
 durable. Stopping the node, gracefully or not, loses it: a later download is refused, while the

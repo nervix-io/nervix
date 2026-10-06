@@ -18,9 +18,11 @@
 
 mod client;
 mod codec;
+mod control;
 mod emitter;
 mod entropy;
 mod expression;
+mod impact;
 mod infrastructure;
 mod ingestor;
 mod model;
@@ -28,6 +30,7 @@ mod processor;
 mod route;
 mod schema;
 mod statement;
+mod stored;
 mod text;
 mod wasm;
 

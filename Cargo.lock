@@ -6518,6 +6518,7 @@ dependencies = [
  "meticulous",
  "nervix-models",
  "nervix-wasm-protocol",
+ "rkyv",
  "strum 0.26.3",
 ]
 

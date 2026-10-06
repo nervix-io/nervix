@@ -258,9 +258,12 @@ uses Pumba's four-state model (`p13=20`, `p31=15`); rate is 256 kbit/s. The comb
 one Pumba `netem combine` configuration with 180 ms delay, 60 ms jitter, 20% loss and a
 256 kbit/s rate. Each profile targets only the fixed address of `nervix-3` on `nervix-2`'s egress.
 The suite refuses any preexisting qdisc or INPUT rule, checks Pumba's exact selected container,
-inspects the single owned netem qdisc and peer filter, and tests the affected link with ICMP and a
-prebuilt Alpine netcat transfer. The transfer counts all bytes at the receiver and times their
-arrival. It records a healthy ICMP and transfer baseline before any fault.
+inspects the single owned netem qdisc and peer filter, requires the broker and every node's
+listeners to keep answering while the profile holds, and tests the affected link with ICMP and a
+prebuilt Alpine netcat transfer. A node's readiness is not part of that check, because loss on a
+leader's link can start an election, during which a node can report no leader for a moment. The
+transfer counts all bytes at the receiver and times their arrival. It records a healthy ICMP and
+transfer baseline before any fault.
 Loss, delay, jitter and rate must also show their expected measured effect; an installed qdisc alone
 cannot pass. SIGTERM heals each injector, after which the qdisc and ICMP delay must return to the
 healthy state. The exit trap heals all run-owned faults even with `--keep` or an interrupted run.
@@ -771,6 +774,259 @@ delivered before still passed on the earlier image: `baseline` on one and three 
 `follower-crash`, and one-node `cluster-restart`. Three-node `baseline` passed on the newer image
 too.
 
+Run a seeded experiment of mixed disturbances, and replay one:
+
+```bash
+just chaos run mixed-instability --image nervix:debian --seed 42 --duration 30m
+just chaos run mixed-instability --image nervix:debian --seed 7 --duration 40m --policy temporary-quorum-loss
+just chaos run mixed-instability --image nervix:debian --duration 10m --coverage kill:leader,degrade:follower
+just chaos run mixed-instability --image nervix:debian --plan my-plan.json
+just chaos replay target/chaos/<run-id>
+```
+
+A mixed-instability run executes a finite action plan on three nodes under continuous Kafka traffic.
+The plan is a sequence of steps, and each step holds one fault or a combination of faults from the
+delivered families: `stop` restarts a node gracefully as in `rolling-restart`, `kill` crashes it as in
+the crash scenarios, `pause` pauses it for a second or two or for 20 to 40 seconds as in
+`pause-resume`, `partition` isolates a node, drops the packets one node sends another or leaves no two
+nodes able to communicate as in `partition-recovery`, and `degrade` applies one of the
+`degraded-links` profiles to a directed link. Besides single faults, a step can degrade the link
+between the two other nodes around a node's outage, restart a node inside its own isolation, or, under
+the temporary-quorum-loss policy, take a second voter out inside the first one's outage, partition
+every link, or crash every node.
+
+`--seed N` selects the plan. With the same seed, `--duration` (default 30 minutes), `--policy` and
+`--coverage`, the generator in `mixed-plan.sh` selects the same plan on every host, because it draws
+from its own arithmetic generator rather than the shell's. It first plans a step for every required
+coverage item that no earlier step covers, then adds steps while the planned timeline still fits the
+duration, shuffles them, and lays them out with quiet gaps of 10 to 30 seconds. Each step records its
+earliest start in the timeline and an estimate of how long it takes; a step starts no earlier than
+its offset and no earlier than the end of the step before it, so a slow recovery delays later steps
+instead of overlapping them. A seed omitted from the command is drawn and recorded. `--plan FILE`
+runs an explicit plan instead; it carries its own seed, duration, policy and coverage, and its
+estimates, from which the run sizes its fixture, are held to the generator's. Either way the
+run writes the plan to `mixed/plan.json` and validates it before it creates a container, and the plan
+stays unchanged while it executes.
+
+A plan never names a concrete node. Each step names a role, `leader`, `follower`, `ingestor-owner`,
+`relay-owner`, `emitter-owner` or `cluster`, and its actions name logical references that the step
+resolves from public observations when it runs: `target` is the node holding the role, choosing the
+follower the step's pick selects in node order; `peer` is the leader when the target is not, and
+otherwise the lowest-numbered follower; `other` is the remaining node; `cluster` is every node. Before
+the first fault, the step requires two settled public observations in a row to resolve these
+references identically. Each observation reads every node's own `SHOW CLUSTER STATUS` and the owners
+of the ingestor, relay and emitter through every node, and is settled when every node is connected and
+free of warnings and all of them agree on leader, term, log position and owners.
+
+The plan's quorum policy decides which combinations a run may hold. A kill, stop, pause or isolation
+takes its node out of a quorum, a quorum-loss partition takes every node, and a degraded link takes
+none. One-way loss takes out whichever of its two nodes is not the leader, because the leader keeps
+leading and loses either its way to the receiver or the sender's acknowledgements. Validation judges
+each step under every reference that can lead it: the target of a `leader` step, the peer of a
+`follower` step, and either of them for an owner. `preserve-quorum`, the default, never lets two of
+the three voters be out at once; `temporary-quorum-loss` allows it, for at most 120 seconds in a step.
+Validation in `mixed-plan.sh validate` refuses a plan whose faults break its policy, whose network
+faults overlap, since each interface carries at most one owned netem configuration, whose node fault
+targets a node that carries another fault's rules, whose network fault is installed or healed while a
+node is out of the link checks, whose holds leave their bounds, whose actions carry a field their
+family does not take or an id other than lowercase letters and digits, whose step is estimated shorter
+than its longest hold plus what the generator plans beyond the holds of its kind, or whose required
+coverage no action plans; `quorum-loss` counts as planned only when two voters are out at once. Such a
+run fails with exit status 2 in the phase `action plan and fixtures`, before preflight
+and before any container exists, and `mixed/plan-validation.json` lists every reason. While it runs,
+each fault is judged again immediately before it is injected, against the current state: the nodes
+Docker reports stopped or paused, the link faults the step installed, and the fault itself. A fault
+that would break the policy is refused as an injection failure before it alters a container.
+
+Before each step every node container must be running and not paused, no run-owned injector may exist,
+every node interface must carry its default state, and the public view must be settled, within 150
+seconds. Each fault is injected and verified as in the scenario it comes from: a Pumba dry run that
+selects exactly the resolved container, Docker inspection and the live event recording for kills,
+stops and pauses, the graceful drain of a stop while live replacements exist, installed rules and the
+measured link matrix for partitions, and for degradation installed rules, the broker and every node's
+listeners still answering, and a measured ping and transfer effect. A node restarted inside an
+isolation must come back still isolated. While the faults
+hold, a quorum that can still communicate must agree on a caught-up leader within 90 seconds and
+acknowledge a `CREATE RESOURCE` canary through that leader within 30 seconds, or 60 under a
+degraded link. Random or burst loss on the one link left between the remaining quorum can stall
+commits until the loss heals, so such a step records these checks without requiring them. With no
+quorum able to communicate, a canary through every running node is bounded at 20 seconds and none may
+be acknowledged, and a node cut off from every quorum may neither apply an entry
+past the boundary recorded when the partition was verified nor, in quorum loss, advance its term. A
+pause bounds these checks by its own end. Each hold is a minimum: a fault heals once its hold has
+passed since it was verified and its checks have finished.
+
+After the last heal of a step, every node must settle within 150 seconds, output must advance within
+90 seconds, the source may run at most `--max-recovery-backlog` records (default 20) ahead of the sink
+within 120 seconds, a canary through every faulted node must be acknowledged, the public metrics may
+report at most `--max-pending` pending interconnect operations (default 128), and each node's Docker
+lifecycle events from the step's start must be exactly those of its planned faults. At the end, the
+events of the whole fault phase must again be exactly the planned ones, which also covers the quiet
+gaps between steps, every canary of the run must be present through every node when it was
+acknowledged and absent when it was refused, and the exact ledger must pass with replay duplicates
+counted separately.
+
+A background sampler records the source and sink end offsets and every node's Docker state, memory
+and CPU every 10 seconds for the whole fault phase in `mixed/samples.ndjson`. A node whose memory
+exceeds `--max-memory-bytes` (default 1 GiB) is a product finding, and two samples more than 120
+seconds apart fail the run because the continuous observation had a gap.
+`results/mixed-resources.json` summarizes each node's first, last and peak memory, the peak backlog,
+and the longest source and sink stalls; `results/mixed-instability-progress.json` records every step's
+nodes, timings and recovery, with the distribution of settle, delivery and drain times across the
+run.
+
+`mixed/actions.ndjson` is the action trace. It records when each step started and ended and how late
+it started against its plan, the nodes it selected with the roles each held, and for each action
+what it intended, the node, container and roles it met, the conditions its policy check judged — every
+node's Docker state, the faults already holding and the voters left out of a quorum — and when it was
+started, verified and healed, together with every hold check and every moment two voters were out of
+a quorum. At the end
+`verify-mixed-evidence.sh trace` requires the trace to be complete and ordered and the plan's coverage
+to be met. `--coverage` lists `FAMILY:ROLE` items, where the family is `kill`, `stop`, `pause`,
+`partition` or `degrade` and the role one of the step roles, plus `quorum-loss`. The default is every
+family against the leader and against a follower, and under temporary-quorum-loss also `quorum-loss`.
+An item is covered by a verified action whose node held the role when its step selected it, so an
+action can cover several items; `quorum-loss` is covered when a step left two voters out of a quorum.
+A plan whose required coverage does not fit the duration is refused as a setup error that names the
+duration it needs. An incomplete trace, missing coverage or a gap in the samples fails the run as a
+controller failure in `results/mixed-instability.json`; product findings fail it as product failures
+after the final ledger. A run that fails inside its fault phase still writes
+`results/mixed-trace.json`, whose verdict is then incomplete and names the records it never reached,
+and `results/mixed-resources.json` for the samples it took.
+
+The fixture holds twice the planned timeline plus 15 minutes of records, produced one a second, unless
+`--records` asks for more, and the run is bounded by its duration plus the larger of that duration and
+20 minutes, at most six hours, unless `--timeout` sets a bound from the duration plus 10 minutes
+through six hours. Every step of the teardown that follows is bounded on its own, and together they
+fit a 15-minute reserve after that bound, which the live event subscriber also outlives it by; the
+manifest records the bound as `timeout_seconds`, the reserve as `teardown_reserve_seconds` and the
+measured teardown as `teardown_seconds`. The deployment uses the standard 250 ms Raft heartbeat, 1.5
+to 3 second election window and 10-second node unavailability timeout, and the manifest records them
+as Compose renders them.
+
+`just chaos replay <run-directory>` reconstructs a mixed-instability experiment from what its run
+directory recorded. The replay starts the recorded Nervix image by its image ID, pulling it through a
+recorded repository digest only when that resolves to the same ID, and the tool images by their
+recorded digest references, whose image IDs must match the recorded ones, rather than the pins checked
+in now. It copies the recorded plan, input fixture and NSPL graph, each of which must still match the
+digest the manifest records, deploys the recorded node settings and load interval and refuses to
+start when Compose renders anything else, and applies the recorded limits. It runs in a new Compose
+project with a new run identifier, network, TLS material and volumes, and resolves every logical node
+reference against the new cluster's own public observations. A directory that is not a mixed-instability
+run, lacks any of these records, or holds a plan or fixture that no longer matches fails before the
+replay creates anything, and an image that is unavailable fails it in preflight with exit status 2,
+before the replay records a Docker event. `--artifacts`, `--run-id`, `--timeout` and `--keep` are the
+only options a replay accepts. Its manifest names the run it replays under `replay_of`. Once a run's
+manifest records its deployment, the last part of the experiment a replay needs, a failure prints the
+replay command and records it as the reproducer in `results/finding.json`. A run that fails earlier
+records the run command instead, with its plan when it has one and otherwise with the seed, duration,
+policy and coverage that select it, together with any `--records`, `--timeout` and limits it was given,
+and a replay that fails earlier records the replay of its source.
+
+A replay reproduces the experiment's inputs and its sequence of actions, not its timing. The images,
+deployment, workload records and their pacing, plan, steps, roles, logical references, parameters and
+policy are identical. Linux scheduling, container start times, Raft elections, failure detection,
+Kafka rebalances and the outcomes of random and burst packet loss are not, so the node that holds a
+role when a step selects it, how many records the producer has sent by then, how long each recovery
+takes and how a step's late start shifts the steps after it can all differ between a run and its
+replay. Each run's trace records what it actually met.
+
+### Mixed-instability qualification on the selected worker
+
+The worker was the one of the qualifications above, shared with other workloads at load averages of
+9 to 49, and every run used the image of the stateful qualification,
+`ghcr.io/nervix-io/nervix@sha256:56ef9ee5108dbc28c6569268431c434167152b3b70f5cb4451c41c36161fa2bc`,
+built on main `9b75a6cb`.
+
+Seed 42 under `preserve-quorum` and seed 45 under `temporary-quorum-loss` each selected 14 steps for 30
+minutes, and both passed, in 30 minutes 20 seconds and 30 minutes 16 seconds of their 60-minute bound.
+Seed 42 paused a follower, the emitter owner and the leader; crashed the leader on its own and while 30%
+random loss held between the other two nodes; crashed a follower under the combined degradation between
+the other two, and the ingestor owner; stopped the leader and a follower; isolated a follower and the
+leader; dropped the packets a follower sent the leader; and degraded the leader's link with random loss
+and a follower's with the rate limit. Seed 45 degraded links from the leader, the ingestor owner and a
+follower with the rate limit, random loss and delay; isolated the relay owner; crashed a follower inside
+its own isolation; paused a follower and crashed the leader inside that pause; crashed every node;
+partitioned every link; dropped the packets the leader sent a follower; paused the leader and the
+ingestor owner; stopped a follower and the leader; and crashed the leader under a rate limit between the
+other two nodes. Every step started within 28 milliseconds of its planned offset, every fault was
+verified and healed, and both traces were complete. Through the roles their nodes held, the verified
+actions covered 25 and 24 items: in seed 42 every family against the leader, a follower and each owner,
+and in seed 45 all of those but a stop of each owner and a partition of the ingestor owner, together
+with `quorum-loss`, `kill:cluster` and `partition:cluster`. Without a quorum no canary was
+acknowledged, neither through the node left running in the double outage nor through any of the three
+in the partition. After every step the cluster settled within 0.8 to 4.4 seconds of the last heal,
+output advanced within 2.2 to 21.1 seconds, and the backlog was back within its limit within 4.9 to
+27.2 seconds; the slowest followed crashes. The exact ledgers matched 1,726 records with no duplicate
+and 1,720 records with one replay duplicate. Docker memory grew from 54 to 59 MB a node to peaks of 65
+to 87 MB, the backlog never exceeded 43 records, and consecutive samples lay at most 17.2 seconds apart.
+
+The first run of seed 42 failed its third step, 30% random loss on the leader's link to a follower, as an
+injection failure. The loss let that follower's election timer expire, it won the election, and for 0.4
+seconds the former leader knew no leader, so its `/readyz` refused the check that the fault left every
+node's endpoints answering. That check now requires the listeners, as the degraded-links section
+describes, and the rerun above passed the same plan.
+
+Seed 136 under `temporary-quorum-loss` failed as a product failure in its second step, a double outage
+of the ingestor owner. The runner crashed the leader nervix-1, crashed nervix-2 six seconds later and
+observed the lost quorum as the policy requires. Started again while nervix-1 was still stopped, nervix-2
+exited at startup with `failed to start cluster membership … resolving 'nervix-1' failed: the name does
+not exist`: Docker's DNS does not resolve a stopped container, and a node fails startup when its
+bootstrap host does not resolve, although its recovered Raft members would let it rejoin. [Cluster Chaos
+56: Start a restarting voter from its recovered Raft members when its bootstrap host does not
+resolve](https://app.clickup.com/t/86bcdk4tn) owns that. An explicit one-step plan, a crash of the leader
+with a crash of its peer inside it, reproduced the failure on its first run, within four and a half
+minutes. That run, which ended inside its fault phase, still wrote its incomplete trace verdict and its
+resource summary. Seed 45's double outage paused its first node, whose name stays resolvable, so it did
+not meet the defect.
+
+An explicit plan with one step of every kind ran for 43 minutes under temporary-quorum-loss: a leader
+crash, a follower stop, a 25-second pause of the relay owner and a one-second pause of the leader, the
+isolation of a follower, one-way loss from the leader, the combined degradation of the emitter owner's
+link, a leader crash under burst loss between the survivors, a follower crashed and restarted inside its
+isolation, a quorum-loss partition, a follower crash with a pause of the leader inside it, a
+whole-cluster crash, and a stop of the ingestor owner and a pause of a follower, each under jitter or
+delay between the other two nodes. Every fault was verified and healed, the trace was complete and its
+verified actions covered 26 items through the roles their nodes held, and the exact ledger matched
+2,476 records with no duplicate. With no quorum able to communicate, every canary stayed unacknowledged
+within its bound: through all three nodes in the partition, and through the one node left running in
+the double outage, bounded at 9 seconds by the pause. The node restarted inside its isolation answered
+its own status route, its peers' rules and the link matrix still matched the plan, and it never applied
+past the boundary. After every step the cluster settled within 1.3 seconds of the last heal and output
+advanced within 30 seconds; the slowest were the leader crash and the whole-cluster crash, which waited
+for the broker to release the killed consumer's partition. Docker memory grew from 55 to 61 MB a node to
+at most 81 MB, the backlog never exceeded 41 records, and consecutive samples lay at most 16 seconds
+apart. Beyond their holds the steps took 17 to 55 seconds, apart from 106 seconds for the step whose
+canary waited out its bound, and the plan estimates are about one and a half times these. The run's one
+finding came from an
+expectation since corrected: with the leader crashed and the survivors' only link dropping half its
+packets in bursts, a canary through the new leader stayed unacknowledged for 60 seconds. Loss on the
+last link of a quorum can stall commits until it heals, and such a step now records availability without
+requiring it; 0.8 seconds after that heal every node had settled.
+
+A three-step plan, a leader crash, a 20-second delay on a follower's link to the leader and a two-second
+pause of a follower, passed with 314 of 314 records, and its replay passed with 303 of 303. The replay
+used the same plan and fixture digests, image and tool identities and deployment, and each step
+resolved its references to the same nodes, while each step took between 9 seconds less and 3 seconds
+more than in the original run. A run of a
+two-step plan with the deliberately impossible `--max-memory-bytes 1048576` failed as a product failure,
+with one memory finding per node, peaking at 59.7 to 68.4 MB, and `just chaos replay` of its directory
+as the reproducer. Its replay applied the recorded limit and failed the same way, with the same three
+findings, its own replay command and the same evidence.
+
+A plan holding a double outage under preserve-quorum and two overlapping network faults exited with
+status 2 within one second, in the phase `action plan and fixtures`, before preflight: its validation
+report named both reasons, and no container, network or Docker event recording existed for the run.
+Replays of copies of a run directory failed the same way when the recorded Nervix image was neither
+local nor pullable, in preflight within 2 seconds, when the input fixture was missing, and when the plan
+no longer matched its digest; and seed 42 with a five-minute duration failed as a setup error that named
+the 1,546-second plan its required coverage needed. The refactored fault and link primitives kept the
+single scenarios passing: `degraded-links --profile combined`, `stateful` with `owner-pause`,
+`owner-crash` and `cluster-restart`, and `domain-time --fault voter-stop` each passed twice, except that
+the second three-node `stateful` `cluster-restart` lost the window rows open at the milestone with the
+restore error Cluster Chaos 43 owns, while its deduplicator, materialized relay and WASM guest kept their
+state.
+
 The controller resolves the supplied reference to its immutable local image ID before Compose
 starts. If the reference is not local, it performs one bounded pull and then resolves the result.
 The Compose file has no build directives. Every Nervix node and every disposable administration
@@ -835,7 +1091,9 @@ diagnostics and remove the labeled resources. Pause cleanup first unpauses every
 container, including when Pumba fails or the controller receives a supported signal. Partition
 runs first stop their injectors and remove any Pumba-owned qdisc or INPUT rule left on a node.
 Restart and recovery runs heal a former owner's isolation the same way and then start every node
-container they still hold stopped. A
+container they still hold stopped. A mixed-instability run first stops its sampler and every pause it
+still waits for, then unpauses every node, heals every network fault and starts every node it holds
+stopped. A
 controller killed before its trap runs leaves its event subscriber to exit on its own 15 minutes
 after the run's timeout. To remove the run's resources in that case, use:
 

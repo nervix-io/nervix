@@ -25,7 +25,7 @@ delivery can fail during schedule application.
 | Arrow record and batch layer | Schema, field, column, row, and batch construction or decoding failures | Reject a malformed batch or a field operation without inventing a replacement value. |
 | Bounded execution | A memory charge a class could not grant (`AdmissionError`), a job refused because its class's wait queue is full, a closed pool, a job that panicked on its worker (`ExecutionError`), and a job that stopped at a `Cancelled` check because its caller stopped waiting | The job's owner maps each to its own typed outcome. A refusal judged nothing, so it stays retryable: an emitter keeps its rows, an ingested payload fails its dispatch rather than its decode and an endpoint answers it as a retryable rejection, and a credential check answers `UNAVAILABLE` rather than failing authentication. The unfolding of a payload a quiesce buffer retained, or of a poll a paced source handed over, is not refused at all: nothing could present it again, so it waits for a place. So does a payload a source handed over without an acknowledgement, when its transport survives a held loop; any other such payload is refused, reported as an ingestor error and counted in `nervix_ingestor_unfolding_refused_total`. A panic is the job's own defect. |
 | Expression VM frontend and runtime bridge | Invalid expression scopes, types, sensitivity, compiled program inputs, and evaluation failures | Refuse a model during validation, or classify an affected row or batch during execution. [VM Functions](./vm-functions.md) owns execution detail. |
-| Stateful processors | Branch-local deduplication, ordering, window, correlation, inference, and WASM execution or state failures | Apply the processor's message or node policy, or fail a checkpoint and its held acknowledgements. |
+| Stateful processors | Branch-local deduplication, ordering, window, correlation, inference, and WASM execution or state failures, and a processor task's restore of the branches its lifecycle checkpoint names (`ProcessorBranchTaskError`) | Apply the processor's message or node policy, or fail a checkpoint and its held acknowledgements. A restore that fails installs no branch and stays pending: the task retries it after a backoff, holds its input, and refuses a lifecycle checkpoint or guest-state reset with `BranchesUnrestored` until an attempt succeeds. [Shutdown And Recovery](./shutdown.md#restoring-processor-branches) owns that sequence. |
 | Connector crates and host | Integration-specific configuration, decoding, external source and sink outcomes; host-owned routing, retry, flush, and acknowledgement failures | Separate a record rejection from a source or sink failure and follow the configured retry or acknowledgement contract. [Connector Crates And The Connector Contract](./connector-contract.md) owns those contracts. |
 | Materialized state and lookups | Dependency resolution, field and schema checks, defaults, lookup evaluation, snapshot opening, and state exchange | Use a declared absence policy only for unavailable state; report a genuine failed read or invalid state. |
 | Ingest grouping and relay batching | Route grouping, branch-key construction, Arrow batch assembly, relay admission, and delivery failures | Keep the affected concrete branch and fail or retry the correct in-memory attempt. |
@@ -140,9 +140,11 @@ failure when the pinned file is decoded. Neither failure silently selects anothe
 The vocabulary's `ArchivedCountError` reports a fixed-width archived count that the receiving
 target's `usize` cannot represent. Archive decoding retains it beneath the owning storage or
 transport failure. Registry Model records validate their current frame signature and report
-`RegistryError::InvalidModelArchive` with a recreation instruction for an unrecognized shape.
-Consensus validates its complete current keyspace namespace and state encoding and reports
-`StorageFailure::InvalidState` with a recreation instruction. Window snapshot decoding reports
+`RegistryError::InvalidModelArchive` with a recreation instruction for an unrecognized shape. A
+record's key holds its domain, Model kind and name exactly as a commit encodes them; a key spelling
+a name another way or holding bytes after its encoding is `RegistryError::DecodeKey`, so no stored
+record is read as another Model. Consensus validates its complete current keyspace namespace and
+state encoding and reports `StorageFailure::InvalidState` with a recreation instruction. Window snapshot decoding reports
 `WindowSnapshotIssue::Header` with a recreation instruction for an invalid current frame signature.
 These boundaries reject unrecognized data before its counts can be reinterpreted; none clamps,
 truncates, or supplies a replacement value. See [Archived Counts](./typed-states.md#archived-counts).
@@ -761,8 +763,8 @@ Each failure reports its owner's typed context above the cause it kept:
   step a planned batch reports, and the callback whose output did not forward is named by its kind.
 - `ProcessorBranchTaskError`, `BranchEntrypointError` and `ReingestorError` for the concrete branch
   work of a processor, a branched entrypoint and a reingestor: the domain time of accepted input
-  that cannot be read, a branch that cannot be instantiated, and a branch task that is gone or
-  whose dispatch task failed.
+  that cannot be read, a branch that cannot be instantiated, a branch task that is gone or whose
+  dispatch task failed, and input a processor receives before it has restored its branches.
 - `EmitterRuntimeError` for an emitter's own processing: a publish batch whose rows stopped
   agreeing, a source filter that failed for its named input relay, and a batch whose publish failed
   but which cannot be split into the messages its message-error policy decides, which keeps the

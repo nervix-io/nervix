@@ -2255,7 +2255,7 @@ fn window_route_demands_are_offset_by_the_routes_written_before_them() {
         },
     };
     let mut relay_schemas = HashMap::default();
-    relay_schemas.insert(input_relay, metric_schema);
+    relay_schemas.insert(input_relay, metric_schema.clone());
     relay_schemas.insert(totals_relay.clone(), totals_schema);
     relay_schemas.insert(extremes_relay.clone(), extremes_schema);
 
@@ -2265,6 +2265,7 @@ fn window_route_demands_are_offset_by_the_routes_written_before_them() {
     let template = templates.pop().expect("one template per spec");
     let RelayProcessorOperationTemplate::WindowProcessor {
         output_routes,
+        input_schema,
         aggregate,
         compiled_aggregates,
         ..
@@ -2272,6 +2273,10 @@ fn window_route_demands_are_offset_by_the_routes_written_before_them() {
     else {
         panic!("expected a window processor template");
     };
+
+    // The plan carries the input schema the routes compiled against, so a branch restores its
+    // retained rows without reading the domain's routing.
+    assert!(Arc::ptr_eq(input_schema, &metric_schema));
 
     // The routes keep their written order, and each compiled program stays aligned with the
     // route it was compiled for.
