@@ -452,11 +452,18 @@ text it rejected, and the last typed failure it saw. The meaning of the `connect
 status these waits read belongs to [Cluster
 Interconnect](./interconnect.md#application-health-and-availability).
 
-The stopped-voter `DROP NODE` scenario waits for the public unavailable verdict before removing
-the voter, then requires the exact remaining voter set. The verdict may name gossip or application
-health: the retained health target can end after gossip observes the stop, so that diagnostic source
-is not a stable precondition for membership removal. Scenarios that exercise application-health
+The stopped-voter `DROP NODE` scenario waits for the public status report to show that the voter
+is no longer visible in gossip before removing it, then requires the exact remaining voter set.
+Application health can report an unavailable voter while gossip still sees it live, so an unavailable
+verdict does not establish membership-removal readiness. Scenarios that exercise application-health
 failure classification assert that source under their own controlled health fault.
+
+The correlator match-policy scenario observes each left input's received counter on the correlator
+owner before posting the next independent input. An HTTP acceptance alone does not order execution
+across ingestors. Its two-minute correlation window accommodates those bounded readiness waits
+without expiring the records whose match policy it asserts. The Kafka handoff scenario that pauses
+after entity-gate engagement uses a test-configured two-minute gate lease so its broker-delivery
+assertions and pause release fit inside the handoff budget under concurrent suite load.
 
 A scenario step can also read status inside a window of its own, passing that window as the phase
 deadline. Where the window bounds how long something is watched rather than how long one read may

@@ -473,6 +473,12 @@ container, which must keep its image and named volume; the volumes' names, creat
 points are compared before and after. A sampler started before the restart reads every node's own
 `SHOW CLUSTER STATUS` several times a second for 40 seconds.
 
+Final accepted-input ledger capture gives the disposable Kafka administration command 60 seconds,
+independently of the shorter live-probe budget. Its exit status and bound are retained in
+`traffic/source-boundary-query.json`; a failed query is a controller failure and cannot qualify
+delivery. This accounts for administration JVM startup under concurrent compiler load while keeping
+the source-offset and exact delivery assertions intact.
+
 Listeners must return within 120 seconds, the cluster must settle within 150 seconds and output must
 resume within 90 seconds. Ownership is then judged against the voter observation grace of the
 control-plane chapter: a leader waits ten seconds from its own process start for gossip to observe
