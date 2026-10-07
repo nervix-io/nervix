@@ -2,7 +2,7 @@ use std::{collections::VecDeque, num::NonZeroUsize, time::Duration};
 
 use ahash::HashMap;
 use error_stack::{Report, ResultExt as _};
-use meticulous::OptionExt as _;
+use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_models::{
     Assignment, AssignmentTarget, BranchName, CorrelationTimeoutPolicy, CorrelatorMatchPolicy,
     ErrorPolicies, FieldName, InferencerTensorDeclaration, InferencerTensorMapping,
@@ -928,6 +928,26 @@ pub(super) enum ReorderKeyPart {
     Utf8(String),
     Bytes(Vec<u8>),
     Datetime(i64),
+}
+
+impl ReorderKeyPart {
+    /// The bytes of the text or byte value this part owns on the heap, and nothing for a part held
+    /// inline.
+    pub(super) fn value_bytes(&self) -> u64 {
+        match self {
+            Self::Utf8(value) => {
+                u64::try_from(value.len()).assured("an addressable string's length fits 64 bits")
+            }
+            Self::Bytes(value) => u64::try_from(value.len())
+                .assured("an addressable byte string's length fits 64 bits"),
+            Self::Null
+            | Self::Boolean(_)
+            | Self::Int64(_)
+            | Self::UInt64(_)
+            | Self::Float64(_)
+            | Self::Datetime(_) => 0,
+        }
+    }
 }
 
 #[derive(Debug, Default)]

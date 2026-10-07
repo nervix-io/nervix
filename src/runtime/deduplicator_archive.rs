@@ -8,7 +8,7 @@
 //!   Arrow.
 //! - **Must not know.** Archive records or paths, capture fencing, or restore placement.
 
-use std::ops::Range;
+use std::{io::Write, ops::Range};
 
 use arrow_array::{
     Array, ArrayRef, RecordBatch, TimestampNanosecondArray,
@@ -21,8 +21,9 @@ use arrow_array::{
 };
 use arrow_schema::{DataType, Schema as ArrowSchema, TimeUnit};
 use error_stack::{Report, ResultExt as _};
+use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_approx_into::ApproxInto as _;
-use nervix_execution::{ChargedBytes, Executor};
+use nervix_execution::{Cancellation, ChargedBytes, Executor, MemoryClass, Reservation};
 use nervix_expiry_map::ExpiryMap;
 use nervix_models::Timestamp;
 use nervix_primitives::sync::StdArc;
@@ -31,7 +32,7 @@ use ordered_float::OrderedFloat;
 use super::{
     DeduplicatorKey, PublishedDeduplicatorKey, ReorderKeyPart, ReplicatedDeduplicatorState,
     VmTypedArray,
-    deduplicator::{decode_deduplicator_snapshot, encode_deduplicator_snapshot},
+    deduplicator::{decode_deduplicator_snapshot, write_deduplicator_snapshot},
     published_generation::Generation,
     reorder_key_part,
 };
@@ -60,6 +61,8 @@ pub(crate) enum DeduplicatorArchiveError {
     Encode,
     #[error("the persisted keyspace checkpoint could not be decoded")]
     Decode,
+    #[error("rebuilding the keyspace was cancelled")]
+    Cancelled,
 }
 
 /// The keys one deduplicator branch held at a backup cut, oldest first, and their revision.
@@ -348,19 +351,83 @@ fn key_column<'a>(
     }
 }
 
+/// The share of its restore conversion each archived key takes whatever its values: its entry in
+/// the resident keyspace and its resolver in the streamed checkpoint's serializer scratch. The
+/// archive description admits this share for every key its deduplicator descriptors count.
+pub(crate) fn restored_key_fixed_bytes() -> u64 {
+    let bytes = ExpiryMap::<DeduplicatorKey, Timestamp>::ENTRY_BYTES
+        .checked_add(super::deduplicator::STREAMED_KEY_RESOLVER_BYTES)
+        .assured("an entry and a resolver are a few hundred bytes");
+    u64::try_from(bytes).assured("a few hundred bytes fit 64 bits")
+}
+
+/// How far the keyspace's restore metadata charge grows at a time, so that admitting keys asks the
+/// budget once per mebibyte rather than once per key.
+const RESIDENT_GROWTH_BYTES: u64 = 1024 * 1024;
+
 /// A keyspace rebuilt from archived key groups, oldest key first.
-#[derive(Debug, Default)]
+///
+/// Every key is held as the runtime holds a restored keyspace, normalized in an expiry map, so a
+/// key the archive holds twice is refused. Each key's parts and values, which follow the archived
+/// Arrow columns rather than the descriptor, are charged to the restore metadata budget as its
+/// group is admitted; the fixed share of every key was admitted with the archive description.
+#[derive(Debug)]
 pub(crate) struct ArchivedDeduplicatorKeys {
     recent_keys: ExpiryMap<DeduplicatorKey, Timestamp>,
+    /// The restore metadata charge, at least `charged_bytes`.
+    charge: Reservation,
+    /// What the admitted keys' parts and values occupy.
+    charged_bytes: u64,
+    /// The most parts and the most part and value bytes of one key, which the streamed encoding
+    /// converts one entry at a time.
+    largest_parts: usize,
+    largest_key_bytes: u64,
+    /// The most the native checkpoint of the admitted keys can occupy.
+    encoded_bound: u64,
 }
 
 impl ArchivedDeduplicatorKeys {
-    pub(crate) fn new() -> Self {
-        Self::default()
+    pub(crate) fn new(executor: &Executor) -> error_stack::Result<Self, DeduplicatorArchiveError> {
+        let charge = executor
+            .try_reserve(MemoryClass::RestoreMetadata, RESIDENT_GROWTH_BYTES)
+            .change_context(DeduplicatorArchiveError::Admission)?;
+        Ok(Self {
+            recent_keys: ExpiryMap::new(),
+            charge,
+            charged_bytes: 0,
+            largest_parts: 0,
+            largest_key_bytes: 0,
+            encoded_bound: super::deduplicator::ENCODED_SNAPSHOT_BYTES,
+        })
     }
 
     pub(crate) fn len(&self) -> usize {
         self.recent_keys.len()
+    }
+
+    /// The most the native checkpoint of the admitted keys can occupy.
+    pub(crate) fn encoded_bound(&self) -> u64 {
+        self.encoded_bound
+    }
+
+    /// Charge `bytes` more to the restore metadata budget before they are allocated. Growth the
+    /// budget cannot back now is refused rather than awaited, because the keys already held cannot
+    /// free it.
+    fn charge_more(&mut self, bytes: u64) -> error_stack::Result<(), DeduplicatorArchiveError> {
+        let target = self
+            .charged_bytes
+            .checked_add(bytes)
+            .ok_or_else(|| Report::new(DeduplicatorArchiveError::Admission))?;
+        if target > self.charge.bytes() {
+            let grown = target
+                .checked_add(RESIDENT_GROWTH_BYTES)
+                .ok_or_else(|| Report::new(DeduplicatorArchiveError::Admission))?;
+            self.charge
+                .grow_to(grown)
+                .change_context(DeduplicatorArchiveError::Admission)?;
+        }
+        self.charged_bytes = target;
+        Ok(())
     }
 
     /// Admits one group's keys in row order, normalizing each column exactly as a branch task
@@ -368,6 +435,7 @@ impl ArchivedDeduplicatorKeys {
     pub(crate) fn admit_group(
         &mut self,
         batch: &RecordBatch,
+        cancellation: &Cancellation,
     ) -> error_stack::Result<(), DeduplicatorArchiveError> {
         let Some((seen_at, key_columns)) = batch.columns().split_last() else {
             return Err(Report::new(DeduplicatorArchiveError::SeenAtColumn));
@@ -382,6 +450,9 @@ impl ArchivedDeduplicatorKeys {
             typed.push(array);
         }
         for row in 0..batch.num_rows() {
+            cancellation
+                .check()
+                .change_context(DeduplicatorArchiveError::Cancelled)?;
             if !seen_at.is_valid(row) {
                 return Err(Report::new(DeduplicatorArchiveError::MissingSeenAt));
             }
@@ -390,6 +461,14 @@ impl ArchivedDeduplicatorKeys {
                 parts.push(reorder_key_part(array, row));
             }
             let key = DeduplicatorKey::new(parts);
+            let key_bytes = key.resident_bytes();
+            self.charge_more(key_bytes)?;
+            self.largest_parts = self.largest_parts.max(key.parts().len());
+            self.largest_key_bytes = self.largest_key_bytes.max(key_bytes);
+            self.encoded_bound = self
+                .encoded_bound
+                .checked_add(key.encoded_bound())
+                .ok_or_else(|| Report::new(DeduplicatorArchiveError::Encode))?;
             let seen = Timestamp::from_unix_nanos(seen_at.value(row));
             if !self.recent_keys.insert(key, seen) {
                 return Err(Report::new(DeduplicatorArchiveError::DuplicateKey));
@@ -398,10 +477,34 @@ impl ArchivedDeduplicatorKeys {
         Ok(())
     }
 
-    /// The native keyspace checkpoint a deduplicator branch restores from.
-    pub(crate) fn encode(&self) -> error_stack::Result<Vec<u8>, DeduplicatorArchiveError> {
-        let published = ReplicatedDeduplicatorState::published_keys(&self.recent_keys);
-        encode_deduplicator_snapshot(&published).change_context(DeduplicatorArchiveError::Encode)
+    /// Charge what streaming the checkpoint adds beside the resident keys: the parts and values of
+    /// the one entry it converts at a time, and that entry's part resolvers.
+    pub(crate) fn admit_encoding(&mut self) -> error_stack::Result<(), DeduplicatorArchiveError> {
+        let nested = super::deduplicator::streamed_snapshot_scratch_bytes(0, self.largest_parts)
+            .ok_or_else(|| Report::new(DeduplicatorArchiveError::Admission))?;
+        let nested =
+            u64::try_from(nested).map_err(|_| Report::new(DeduplicatorArchiveError::Admission))?;
+        let conversion = self
+            .largest_key_bytes
+            .checked_add(nested)
+            .ok_or_else(|| Report::new(DeduplicatorArchiveError::Admission))?;
+        self.charge_more(conversion)
+    }
+
+    /// Stream the native keyspace checkpoint a deduplicator branch restores from into `output`,
+    /// converting one entry at a time.
+    pub(crate) fn write_checkpoint(
+        &self,
+        output: &mut dyn Write,
+        cancellation: &Cancellation,
+    ) -> error_stack::Result<(), DeduplicatorArchiveError> {
+        write_deduplicator_snapshot(
+            self.recent_keys.iter(),
+            self.largest_parts,
+            output,
+            cancellation,
+        )
+        .change_context(DeduplicatorArchiveError::Encode)
     }
 }
 
@@ -413,7 +516,6 @@ mod tests {
         types::Int64Type,
     };
     use arrow_schema::Field;
-    use meticulous::{OptionExt as _, ResultExt as _};
     use nervix_arbitrary::Entropy;
     use nervix_execution::ExecutionConfig;
     use nonzero_ext::nonzero;
@@ -646,13 +748,69 @@ mod tests {
         keys
     }
 
+    /// `keys` with `batch` admitted in one bulk job, as restore conversion admits a key group,
+    /// and what admitting it returned.
+    async fn admit_into(
+        executor: &Executor,
+        mut keys: ArchivedDeduplicatorKeys,
+        batch: RecordBatch,
+    ) -> (
+        ArchivedDeduplicatorKeys,
+        error_stack::Result<(), DeduplicatorArchiveError>,
+    ) {
+        let charge = executor
+            .reserve(MemoryClass::Bulk, 1)
+            .await
+            .assured("a one-byte test charge is admitted");
+        executor
+            .run_cpu(
+                nervix_execution::CpuClass::Bulk,
+                charge,
+                move |_charge, cancellation| {
+                    let admitted = keys.admit_group(&batch, cancellation);
+                    (keys, admitted)
+                },
+            )
+            .await
+            .assured("the admission job runs")
+    }
+
+    /// The checkpoint `keys` streams in one bulk job.
+    async fn streamed(executor: &Executor, mut keys: ArchivedDeduplicatorKeys) -> Vec<u8> {
+        keys.admit_encoding()
+            .assured("a bounded keyspace's conversion is admitted");
+        let charge = executor
+            .reserve(MemoryClass::Bulk, 1)
+            .await
+            .assured("a one-byte test charge is admitted");
+        executor
+            .run_cpu(
+                nervix_execution::CpuClass::Bulk,
+                charge,
+                move |_charge, cancellation| {
+                    let mut checkpoint = Vec::new();
+                    keys.write_checkpoint(&mut checkpoint, cancellation)
+                        .assured("a restored keyspace streams");
+                    assert!(
+                        u64::try_from(checkpoint.len()).assured("a test checkpoint fits 64 bits")
+                            <= keys.encoded_bound(),
+                        "the checkpoint stays within the disk bound reserved for it"
+                    );
+                    checkpoint
+                },
+            )
+            .await
+            .assured("the encoding job runs")
+    }
+
     async fn archived_and_restored(
         executor: &Executor,
         keyspace: &CapturedDeduplicatorKeyspace,
         schema: &StdArc<ArrowSchema>,
         limit: u64,
     ) -> ArchivedDeduplicatorKeys {
-        let mut restored = ArchivedDeduplicatorKeys::new();
+        let mut restored =
+            ArchivedDeduplicatorKeys::new(executor).assured("the restore metadata budget has room");
         for group in keyspace.groups(limit) {
             let bytes = keyspace
                 .encode_group(executor, schema, group)
@@ -665,9 +823,9 @@ mod tests {
             )
             .await
             .assured("an encoded key group decodes under its exact schema");
-            restored
-                .admit_group(decoded.batch())
-                .assured("archived keys of the keyspace's own shape are admitted");
+            let (keys, admitted) = admit_into(executor, restored, decoded.batch().clone()).await;
+            admitted.assured("archived keys of the keyspace's own shape are admitted");
+            restored = keys;
         }
         restored
     }
@@ -723,16 +881,31 @@ mod tests {
                 assert_eq!(next, keys.len(), "groups cover every key");
 
                 let schema = key_schema(&key_types);
-                let restored =
-                    runtime.block_on(archived_and_restored(&executor, &keyspace, &schema, limit));
-                assert_eq!(restored.len(), keys.len());
-                let checkpoint = restored.encode().assured("a restored keyspace encodes");
+                let checkpoint = runtime.block_on(async {
+                    let restored =
+                        archived_and_restored(&executor, &keyspace, &schema, limit).await;
+                    assert_eq!(restored.len(), keys.len());
+                    streamed(&executor, restored).await
+                });
+                assert_eq!(
+                    executor.snapshot().restore_metadata_memory.reserved_bytes,
+                    0,
+                    "the resident keyspace's charge ends with its conversion"
+                );
                 let decoded = decode_deduplicator_snapshot(&checkpoint)
                     .assured("a restored checkpoint decodes as a keyspace");
                 assert_eq!(
                     exact_keys(&ReplicatedDeduplicatorState::published_keys(&decoded)),
                     exact_keys(&keyspace.generation.value),
                     "every key, its order, its exact parts and its seen_at survive the archive"
+                );
+                assert_eq!(
+                    checkpoint,
+                    super::super::deduplicator::encode_deduplicator_snapshot(
+                        &keyspace.generation.value
+                    )
+                    .assured("the published keys encode"),
+                    "streaming writes exactly the ordinary checkpoint of the same keys"
                 );
             });
     }
@@ -821,15 +994,21 @@ mod tests {
         RecordBatch::try_new(schema, vec![keys, seen_at]).assured("the test columns align")
     }
 
-    #[test]
-    fn restoring_keys_refuses_repeated_keys_and_missing_seen_at_times() {
+    #[nervix_primitives::test]
+    async fn restoring_keys_refuses_repeated_keys_and_missing_seen_at_times() {
+        let executor = executor();
+        let fresh = || ArchivedDeduplicatorKeys::new(&executor).assured("the budget has room");
         let seen_at: ArrayRef = StdArc::new(
             TimestampNanosecondArray::from(vec![Some(1), Some(2)]).with_timezone("+00:00"),
         );
         let repeated: ArrayRef = StdArc::new(Int32Array::from(vec![Some(4), Some(4)]));
-        let error = ArchivedDeduplicatorKeys::new()
-            .admit_group(&archived_batch(repeated, StdArc::clone(&seen_at)))
-            .expect_err("a keyspace holds every key once");
+        let (_, admitted) = admit_into(
+            &executor,
+            fresh(),
+            archived_batch(repeated, StdArc::clone(&seen_at)),
+        )
+        .await;
+        let error = admitted.expect_err("a keyspace holds every key once");
         assert_eq!(
             error.current_context(),
             &DeduplicatorArchiveError::DuplicateKey
@@ -839,31 +1018,32 @@ mod tests {
         let missing: ArrayRef = StdArc::new(
             TimestampNanosecondArray::from(vec![Some(1), None]).with_timezone("+00:00"),
         );
-        let error = ArchivedDeduplicatorKeys::new()
-            .admit_group(&archived_batch(StdArc::clone(&keys), missing))
-            .expect_err("every archived key was seen at some time");
+        let (_, admitted) = admit_into(
+            &executor,
+            fresh(),
+            archived_batch(StdArc::clone(&keys), missing),
+        )
+        .await;
+        let error = admitted.expect_err("every archived key was seen at some time");
         assert_eq!(
             error.current_context(),
             &DeduplicatorArchiveError::MissingSeenAt
         );
 
         let not_a_time: ArrayRef = StdArc::new(Int64Array::from(vec![Some(1), Some(2)]));
-        let error = ArchivedDeduplicatorKeys::new()
-            .admit_group(&archived_batch(keys, not_a_time))
-            .expect_err("seen_at is a nanosecond timestamp");
+        let (_, admitted) = admit_into(&executor, fresh(), archived_batch(keys, not_a_time)).await;
+        let error = admitted.expect_err("seen_at is a nanosecond timestamp");
         assert_eq!(
             error.current_context(),
             &DeduplicatorArchiveError::SeenAtColumn
         );
 
-        let mut restored = ArchivedDeduplicatorKeys::new();
         let keys: ArrayRef = StdArc::new(Int32Array::from(vec![Some(4), None]));
-        restored
-            .admit_group(&archived_batch(keys, seen_at))
-            .assured("distinct keys with their times are admitted");
-        let decoded =
-            decode_deduplicator_snapshot(&restored.encode().assured("a restored keyspace encodes"))
-                .assured("a restored checkpoint decodes");
+        let (restored, admitted) =
+            admit_into(&executor, fresh(), archived_batch(keys, seen_at)).await;
+        admitted.assured("distinct keys with their times are admitted");
+        let decoded = decode_deduplicator_snapshot(&streamed(&executor, restored).await)
+            .assured("a restored checkpoint decodes");
         let published = ReplicatedDeduplicatorState::published_keys(&decoded);
         assert_eq!(
             exact_keys(&published),
@@ -878,6 +1058,52 @@ mod tests {
                 },
             ],
             "a 32-bit key widens as a branch task widens it, and a null stays a null part"
+        );
+    }
+
+    /// The resident keyspace is charged to the restore metadata budget as its keys arrive, and a
+    /// keyspace that budget cannot hold is refused instead of growing uncharged.
+    #[nervix_primitives::test]
+    async fn the_resident_keyspace_is_charged_to_restore_metadata_and_refused_when_full() {
+        let config = ExecutionConfig::default();
+        let budget = config.budgets.restore_metadata.as_u64();
+        let executor = Executor::new(config).assured("default bounds are valid");
+        let keys: ArrayRef = StdArc::new(StringArray::from(vec![
+            Some("a".repeat(3 * 1024 * 1024)),
+            Some("b".repeat(1024)),
+        ]));
+        let seen_at: ArrayRef = StdArc::new(
+            TimestampNanosecondArray::from(vec![Some(1), Some(2)]).with_timezone("+00:00"),
+        );
+        let batch = archived_batch(keys, seen_at);
+        let restored = ArchivedDeduplicatorKeys::new(&executor).assured("the budget has room");
+        let (restored, admitted) = admit_into(&executor, restored, batch.clone()).await;
+        admitted.assured("two keys fit the restore metadata budget");
+        let charged = executor.snapshot().restore_metadata_memory.reserved_bytes;
+        assert!(
+            charged > 3 * 1024 * 1024,
+            "the resident key values are charged: {charged}"
+        );
+        drop(restored);
+        assert_eq!(
+            executor.snapshot().restore_metadata_memory.reserved_bytes,
+            0
+        );
+
+        let occupied = executor
+            .try_reserve(MemoryClass::RestoreMetadata, budget - 2 * 1024 * 1024)
+            .assured("the test occupies most of the restore metadata budget");
+        let restored = ArchivedDeduplicatorKeys::new(&executor).assured("one growth step fits");
+        let (_, admitted) = admit_into(&executor, restored, batch).await;
+        let error = admitted.expect_err("a keyspace the budget cannot hold is refused");
+        assert_eq!(
+            error.current_context(),
+            &DeduplicatorArchiveError::Admission
+        );
+        drop(occupied);
+        assert_eq!(
+            executor.snapshot().restore_metadata_memory.reserved_bytes,
+            0
         );
     }
 }

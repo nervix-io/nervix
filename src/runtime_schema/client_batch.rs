@@ -2,11 +2,11 @@
 //!
 //! Layer: engines and infrastructure.
 //!
-//! - **Owns.** Checking the framing of a submitted stream before any column is allocated, its exact
-//!   schema, its row and byte limits, and decoding its one record batch off the async workers
-//!   under the relay budget.
-//! - **Depends on.** The executor that admits and charges the work, Arrow's IPC codec, and the
-//!   vocabulary's batch defects.
+//! - **Owns.** What a submitted stream may hold, checked before any column is allocated: the
+//!   messages it carries, its exact schema and its row and byte limits; and decoding its one
+//!   record batch off the async workers under the relay budget.
+//! - **Depends on.** The executor that admits and charges the work, the IPC framing walk, Arrow's
+//!   IPC codec, and the vocabulary's batch defects.
 //! - **Must not know.** Producers, sessions, ingestors, or what happens to the batch afterwards.
 //!
 //! A client batch is one uncompressed Arrow IPC stream: its schema message, exactly one record
@@ -21,23 +21,20 @@ use std::{
 };
 
 use arch_into::ArchInto as _;
-use arrow_ipc::{MessageHeader, reader::StreamReader, root_as_message};
+use arrow_ipc::{MessageHeader, reader::StreamReader};
 use arrow_schema::{DataType as ArrowDataType, Schema as ArrowSchema};
 use bytes::Bytes;
 use error_stack::{Report, ResultExt as _};
-use meticulous::{OptionExt as _, ResultExt as _};
+use meticulous::OptionExt as _;
 use nervix_execution::{CpuClass, ExecutionError, Executor, MemoryClass};
 use nervix_models::ClientBatchDefect;
 use nervix_primitives::sync::StdArc;
 use thiserror::Error;
 
-use super::{CompiledSchema, RuntimeRecordBatch, batch_payload_bytes};
-
-/// The marker that opens every message of a canonical Arrow IPC stream.
-const CONTINUATION_MARKER: [u8; 4] = [0xff; 4];
-
-/// The width of the continuation marker and of the metadata length that follows it.
-const FRAME_WORD: usize = 4;
+use super::{
+    CompiledSchema, RuntimeRecordBatch, batch_payload_bytes,
+    ipc_stream::{IpcFramingDefect, IpcMessages},
+};
 
 /// What one client batch may carry, as its producer's grant decides.
 #[derive(Debug, Clone, Copy)]
@@ -90,6 +87,12 @@ impl ClientBatchError {
         Report::new(Self::Malformed {
             reason: reason.to_string(),
         })
+    }
+
+    /// A stream that is not framed within its body is malformed, for the reason its framing gives.
+    fn misframed(defect: Report<IpcFramingDefect>) -> Report<Self> {
+        let reason = defect.current_context().to_string();
+        defect.change_context(Self::Malformed { reason })
     }
 
     fn invalid_data(reason: impl ToString) -> Report<Self> {
@@ -211,30 +214,24 @@ impl fmt::Display for ClientSchemaDifference {
     }
 }
 
-/// The messages of an Arrow IPC stream, read one at a time without decoding their bodies, so a
-/// client batch's framing is checked before any column is allocated.
-struct IpcMessages<'a> {
-    body: &'a [u8],
-    offset: usize,
-}
-
 /// The messages one scanned stream carried.
 struct ScannedStream {
     record_batches: usize,
 }
 
-impl<'a> IpcMessages<'a> {
-    fn new(body: &'a [u8]) -> Self {
-        Self { body, offset: 0 }
-    }
-
-    /// Checks that the stream is one schema message, record batch messages within `max_rows`
-    /// and without compression, and the end-of-stream marker ending the body.
-    fn scan(mut self, max_rows: NonZeroUsize) -> Result<ScannedStream, Report<ClientBatchError>> {
+impl ScannedStream {
+    /// Checks that `body` is one schema message, record batch messages within `max_rows` and
+    /// without compression, and the end-of-stream marker ending the body, before any column is
+    /// allocated.
+    fn of(body: &[u8], max_rows: NonZeroUsize) -> Result<Self, Report<ClientBatchError>> {
+        let mut messages = IpcMessages::new(body);
         let mut schema_seen = false;
         let mut record_batches = 0_usize;
         loop {
-            let Some(message) = self.next_message()? else {
+            let next = messages
+                .next_message()
+                .map_err(ClientBatchError::misframed)?;
+            let Some(message) = next else {
                 break;
             };
             let header = message.header_type();
@@ -279,62 +276,7 @@ impl<'a> IpcMessages<'a> {
                 "the stream ends before its schema message",
             ));
         }
-        Ok(ScannedStream { record_batches })
-    }
-
-    /// The next message's header, or `None` at the end-of-stream marker, which must end the body.
-    fn next_message(&mut self) -> Result<Option<arrow_ipc::Message<'a>>, Report<ClientBatchError>> {
-        let marker = self.take(FRAME_WORD)?;
-        if marker != CONTINUATION_MARKER {
-            return Err(ClientBatchError::malformed(
-                "a message does not open with the continuation marker",
-            ));
-        }
-        let length_bytes = self.take(FRAME_WORD)?;
-        let length = i32::from_le_bytes(
-            length_bytes
-                .try_into()
-                .verified("take returned exactly the four bytes it was asked for"),
-        );
-        if length == 0 {
-            if self.offset != self.body.len() {
-                return Err(ClientBatchError::malformed(
-                    "bytes follow the end-of-stream marker",
-                ));
-            }
-            return Ok(None);
-        }
-        let Ok(length) = usize::try_from(length) else {
-            return Err(ClientBatchError::malformed(
-                "a message declares a negative metadata length",
-            ));
-        };
-        let metadata = self.take(length)?;
-        let message = root_as_message(metadata).map_err(ClientBatchError::malformed)?;
-        let Ok(body_length) = usize::try_from(message.bodyLength()) else {
-            return Err(ClientBatchError::malformed(
-                "a message declares a body length outside this body",
-            ));
-        };
-        self.take(body_length)?;
-        Ok(Some(message))
-    }
-
-    /// The next `length` bytes of the body.
-    fn take(&mut self, length: usize) -> Result<&'a [u8], Report<ClientBatchError>> {
-        let body: &'a [u8] = self.body;
-        let Some(end) = self.offset.checked_add(length) else {
-            return Err(ClientBatchError::malformed(
-                "the stream ends inside a message",
-            ));
-        };
-        let Some(bytes) = body.get(self.offset..end) else {
-            return Err(ClientBatchError::malformed(
-                "the stream ends inside a message",
-            ));
-        };
-        self.offset = end;
-        Ok(bytes)
+        Ok(Self { record_batches })
     }
 }
 
@@ -410,7 +352,7 @@ impl RuntimeRecordBatch {
         max_rows: NonZeroUsize,
         decoded_limit: u64,
     ) -> Result<Self, Report<ClientBatchError>> {
-        let scanned = IpcMessages::new(body).scan(max_rows)?;
+        let scanned = ScannedStream::of(body, max_rows)?;
         let mut reader =
             StreamReader::try_new(Cursor::new(body), None).map_err(ClientBatchError::malformed)?;
         let schema = reader.schema();

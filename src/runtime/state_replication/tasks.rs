@@ -111,7 +111,14 @@ impl Runtime {
                                     "failed to publish branch state during shutdown"
                                 );
                             }
-                            match state.persist_published(&store, &runtime.inner.executor).await {
+                            match state
+                                .persist_published(
+                                    &store,
+                                    &runtime.inner.executor,
+                                    &runtime.inner.snapshot_staging,
+                                )
+                                .await
+                            {
                                 Ok(Some(lsm)) => runtime.announce_checkpoint(
                                     state.placement(), state.replication(), lsm,
                                 ),
@@ -137,7 +144,14 @@ impl Runtime {
                             continue;
                         }
                         next_persist = Instant::now() + snapshot_interval;
-                        match state.persist_published(&store, &runtime.inner.executor).await {
+                        match state
+                            .persist_published(
+                                &store,
+                                &runtime.inner.executor,
+                                &runtime.inner.snapshot_staging,
+                            )
+                            .await
+                        {
                             Ok(Some(lsm)) => runtime.announce_checkpoint(
                                 state.placement(), state.replication(), lsm,
                             ),
@@ -189,41 +203,9 @@ impl Runtime {
                     };
                     let revision = sealed.descriptor.revision;
                     let placement = state.read().placement().clone();
-                    let writer = store.checkpoint_stream_writer();
-                    // Publishing a generation is filesystem work with a durability barrier, so it
-                    // runs on the storage workers rather than on the async worker this task holds.
-                    let reservation = executor
-                        .reserve(
-                            nervix_execution::MemoryClass::Bulk,
-                            super::super::RESTORE_STATE_WORKING_BYTES,
-                        )
-                        .await
-                        .change_context(RuntimePersistenceError::StorageAdmission)?;
-                    executor
-                        .run_storage(
-                            nervix_execution::StorageClass::Filesystem,
-                            reservation,
-                            move |_charge, cancellation| {
-                                let file = std::fs::File::open(sealed.artifact.path())
-                                    .change_context(RuntimePersistenceError::EncodeState)?;
-                                writer.publish_checkpoint_stream(
-                                    &placement,
-                                    super::super::state_store::generation::CheckpointMetadata {
-                                        lsm: revision,
-                                        length: sealed.descriptor.length,
-                                        digest: sealed.descriptor.digest,
-                                    },
-                                    file,
-                                    || {
-                                        cancellation
-                                            .check()
-                                            .change_context(RuntimePersistenceError::RestoreRead)
-                                    },
-                                )
-                            },
-                        )
-                        .await
-                        .change_context(RuntimePersistenceError::StorageExecution)??;
+                    store
+                        .publish_checkpoint_artifact(&placement, revision, sealed.artifact)
+                        .await?;
                     state.record_persisted(revision);
                     Ok::<Option<u64>, Report<RuntimePersistenceError>>(Some(revision))
                 };
