@@ -1678,6 +1678,11 @@ failure after durable publication, cluster restart, branch isolation, saved sour
 positive reclamation after resumed checkpoints and the state purge from module rebinding.
 The three-node many-save case retains one replica per state and observes reclamation of both
 owner and replica chunks.
+The large branch-state scenario restores a 40 MiB deduplicator keyspace and a 40 MiB window beside
+24 small branches on one node, through a failure after durable publication, a stopped restore and a
+resumed one. Once the resumed domain runs, the window persists as a segmented checkpoint under the
+installation barrier and reopens from it after a cluster restart. Its three-node example runs in
+the ordinary suite only.
 Restore workload setup sends durable mutations and activation through the Rust client, which
 recovers the same execution reference when leadership moves; the raw subscription session keeps
 its own row stream. Large-generation and staging archive captures use a two-minute command budget

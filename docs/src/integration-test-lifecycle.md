@@ -1172,6 +1172,11 @@ lane instrumenting workspace crates only and running four scenarios at once. The
 both selections passed, on 2026-10-06 with 97 and 105 workloads and 49 scenario runs, took 30m27s
 and 23m18s in the lane's step. The six scenario runs and seven conformance checks added since fit
 inside the variation between runs, so the inventory's bounds and the job's bounds stay as they were.
+One more scenario run joined after those measurements: the one-node restore of a deduplicator
+keyspace and a window above the bulk budget. A `deloxide-order` run of 2026-10-07 that carried it
+together with its three-node example, with 107 workloads and 51 scenario runs before the six
+scenario runs and seven conformance checks above were added, took 21m47s in the lane's step, so the
+bounds stay as they were.
 
 When a step's `timeout` expires it sends `SIGTERM` to the step's process group. The collector
 records its attempt as interrupted and forwards the signal to the lane, which ends the process it is
