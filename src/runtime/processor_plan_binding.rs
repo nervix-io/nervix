@@ -37,13 +37,13 @@ impl Runtime {
             })
             .cloned()
             .collect::<Vec<_>>();
+        let build = || RuntimeError::build_domain_execution(domain);
         let routing = {
             let Some(execution) = self.inner.executions.get(domain) else {
-                return Err(Report::new(RuntimeError::BuildDomainExecution {
-                    domain: domain.as_str().to_string(),
-                    reason: "domain execution is unavailable while binding processor plans"
-                        .to_string(),
-                }));
+                return Err(Report::new(ExecutionBuildError::ExecutionUnavailable {
+                    step: ExecutionStep::ProcessorPlanBinding,
+                })
+                .change_context(build()));
             };
             (*execution.routing).clone()
         };
@@ -62,10 +62,8 @@ impl Runtime {
             },
         )
         .await
-        .change_context(RuntimeError::BuildDomainExecution {
-            domain: domain.as_str().to_string(),
-            reason: "failed to bind published processor plans".to_string(),
-        })
+        .change_context(ExecutionBuildError::BindProcessorPlans)
+        .change_context_lazy(build)
     }
 
     pub(in crate::runtime) async fn bind_installed_processor_plan(
@@ -73,13 +71,13 @@ impl Runtime {
         domain: &DomainName,
         spec: &BranchedProcessorNodeSpec,
     ) -> error_stack::Result<StdArc<PublishedProcessorPlan>, RuntimeError> {
+        let build = || RuntimeError::build_domain_execution(domain);
         let routing = {
             let Some(execution) = self.inner.executions.get(domain) else {
-                return Err(Report::new(RuntimeError::BuildDomainExecution {
-                    domain: domain.as_str().to_string(),
-                    reason: "domain execution is unavailable while binding a processor plan"
-                        .to_string(),
-                }));
+                return Err(Report::new(ExecutionBuildError::ExecutionUnavailable {
+                    step: ExecutionStep::ProcessorPlanBinding,
+                })
+                .change_context(build()));
             };
             (*execution.routing).clone()
         };
@@ -98,20 +96,14 @@ impl Runtime {
             },
         )
         .await
-        .change_context(RuntimeError::BuildDomainExecution {
-            domain: domain.as_str().to_string(),
-            reason: "failed to bind published processor plan".to_string(),
-        })?;
+        .change_context(ExecutionBuildError::BindProcessorPlans)
+        .change_context_lazy(build)?;
         let identity = NodeRef::new(spec.spec.kind, spec.spec.processor.clone());
         let Some(plan) = plans.remove(&identity) else {
-            return Err(Report::new(RuntimeError::BuildDomainExecution {
-                domain: domain.as_str().to_string(),
-                reason: format!(
-                    "processor plan binder omitted {} '{}'",
-                    identity.kind.as_str(),
-                    identity.identifier.as_str()
-                ),
-            }));
+            return Err(
+                Report::new(ExecutionBuildError::UnboundProcessorPlan { node: identity })
+                    .change_context(build()),
+            );
         };
         Ok(plan)
     }

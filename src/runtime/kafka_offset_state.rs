@@ -147,7 +147,7 @@ impl ReplicatedKafkaOffsetState {
     pub(super) fn new(
         placement: RuntimeStatePlacement,
         initial: Option<PersistedRuntimeStateEntry>,
-    ) -> Result<Self, RuntimePersistenceError> {
+    ) -> error_stack::Result<Self, RuntimePersistenceError> {
         let mut offsets = KafkaOffsetTable::default();
         let mut current_lsm = 0;
         if let Some(initial) = initial {
@@ -269,7 +269,7 @@ impl KafkaOffsetStateRead {
     /// ahead of it, and a later snapshot carries it again.
     pub(super) fn latest_snapshot(
         &self,
-    ) -> Result<PersistedRuntimeStateEntry, RuntimePersistenceError> {
+    ) -> error_stack::Result<PersistedRuntimeStateEntry, RuntimePersistenceError> {
         self.state.assignment.serialize(|| {
             let lsm = self.state.current_lsm.current();
             let payload = self.state.offsets.load().encode()?;
@@ -365,20 +365,19 @@ impl KafkaOffsetStateOriginator {
     pub(super) fn replace_offsets(
         &self,
         offsets: Vec<KafkaOffsetPosition>,
-    ) -> Result<(u64, Vec<u8>), RuntimeStateOperationError> {
+    ) -> error_stack::Result<(u64, Vec<u8>), RuntimeStateOperationError> {
         let state = &self.read.state;
-        let result = state.assignment.authorize_exclusive(
-            self.assignment,
-            StateCapability::Originate,
-            || {
+        let encoded = state
+            .assignment
+            .authorize_exclusive(self.assignment, StateCapability::Originate, || {
                 let schedules = state.offsets.load().schedules.clone();
                 let table = StdArc::new(KafkaOffsetTable::from_offsets(offsets, schedules));
                 state.offsets.store(table.clone());
                 let lsm = state.current_lsm.advance();
                 table.encode().map(|payload| (lsm, payload))
-            },
-        )?;
-        Ok(result?)
+            })
+            .change_context(RuntimeStateOperationError::Authority)?;
+        encoded.change_context(RuntimeStateOperationError::Persistence)
     }
 
     /// Record `next_offset` as where `partition` of `topic` resumes, returning the revision the
@@ -415,12 +414,11 @@ impl KafkaOffsetStateOriginator {
         topic: &str,
         instances: NonZeroU64,
         observed_partitions: Vec<i32>,
-    ) -> Result<Option<(u64, Vec<u8>)>, RuntimeStateOperationError> {
+    ) -> error_stack::Result<Option<(u64, Vec<u8>)>, RuntimeStateOperationError> {
         let state = &self.read.state;
-        let result = state.assignment.authorize_exclusive(
-            self.assignment,
-            StateCapability::Originate,
-            || {
+        let encoded = state
+            .assignment
+            .authorize_exclusive(self.assignment, StateCapability::Originate, || {
                 let current = state.offsets.load();
                 let existing = current.schedules.get(topic);
                 let rebalance_epoch = match existing {
@@ -468,9 +466,9 @@ impl KafkaOffsetStateOriginator {
                 state.offsets.store(table.clone());
                 let lsm = state.current_lsm.advance();
                 table.encode().map(|payload| Some((lsm, payload)))
-            },
-        )?;
-        Ok(result?)
+            })
+            .change_context(RuntimeStateOperationError::Authority)?;
+        encoded.change_context(RuntimeStateOperationError::Persistence)
     }
 }
 
@@ -536,17 +534,15 @@ impl KafkaOffsetSnapshotInstaller {
         &self,
         lsm: u64,
         table: KafkaOffsetTable,
-    ) -> error_stack::Result<(), StateAuthorityError> {
+    ) -> error_stack::Result<(), RuntimeStateOperationError> {
         let state = &self.read.state;
-        state.assignment.authorize_exclusive(
-            self.assignment,
-            StateCapability::InstallSnapshot,
-            || {
+        state
+            .assignment
+            .authorize_exclusive(self.assignment, StateCapability::InstallSnapshot, || {
                 state.offsets.store(StdArc::new(table));
                 state.current_lsm.adopt(lsm);
-            },
-        )?;
-        Ok(())
+            })
+            .change_context(RuntimeStateOperationError::Authority)
     }
 }
 
@@ -614,7 +610,7 @@ impl KafkaOffsetTable {
         }
     }
 
-    fn encode(&self) -> Result<Vec<u8>, RuntimePersistenceError> {
+    fn encode(&self) -> error_stack::Result<Vec<u8>, RuntimePersistenceError> {
         let mut entries = Vec::new();
         for (topic, partitions) in &self.topics {
             for (partition, slot) in partitions {
@@ -660,11 +656,11 @@ impl KafkaOffsetTable {
             schedules: schedule_entries,
         })
         .map(|bytes| bytes.to_vec())
-        .map_err(|error| RuntimePersistenceError::EncodeState(error.to_string()))
+        .change_context(RuntimePersistenceError::EncodeState)
     }
 
-    fn decode(payload: &[u8]) -> Result<Self, RuntimePersistenceError> {
-        Self::decode_with(payload, || Ok(())).map_err(|error| error.current_context().clone())
+    fn decode(payload: &[u8]) -> error_stack::Result<Self, RuntimePersistenceError> {
+        Self::decode_with(payload, || Ok(()))
     }
 
     #[cfg_attr(
@@ -679,9 +675,7 @@ impl KafkaOffsetTable {
     ) -> error_stack::Result<Self, RuntimePersistenceError> {
         check()?;
         let snapshot = rkyv::access::<ArchivedKafkaOffsetSnapshot, rkyv::rancor::Error>(payload)
-            .map_err(|error| {
-                Report::new(RuntimePersistenceError::DecodeState(error.to_string()))
-            })?;
+            .change_context(RuntimePersistenceError::DecodeState)?;
         let mut table = Self::default();
         for entry in snapshot.offsets.iter() {
             check()?;
@@ -726,7 +720,7 @@ impl KafkaOffsetTable {
 pub(in crate::runtime) fn backup_offset_positions(
     payload: &[u8],
 ) -> error_stack::Result<Vec<(String, i32, i64)>, RuntimePersistenceError> {
-    let table = KafkaOffsetTable::decode(payload).map_err(Report::new)?;
+    let table = KafkaOffsetTable::decode(payload)?;
     let mut offsets = Vec::new();
     for (topic, partitions) in table.topics {
         for (partition, slot) in partitions {
@@ -1068,7 +1062,10 @@ pub(in crate::runtime) fn assert_offset_payload_decodes_typed(payload: &[u8]) {
             assert_eq!(again.view(), table.view());
         }
         Err(error) => assert!(
-            matches!(error, RuntimePersistenceError::DecodeState(_)),
+            matches!(
+                error.current_context(),
+                RuntimePersistenceError::DecodeState
+            ),
             "{error:?}"
         ),
     }
@@ -1192,7 +1189,25 @@ mod tests {
             .install_checked_snapshot(8, &next[..next.len() - 1], || Ok(()))
             .err()
             .assured("a truncated current checkpoint is refused");
-        assert!(invalid.contains::<RuntimePersistenceError>());
+        assert!(matches!(
+            invalid.downcast_ref::<RuntimePersistenceError>(),
+            Some(RuntimePersistenceError::DecodeState)
+        ));
+        assert!(invalid.contains::<rkyv::rancor::Error>());
+        let invalid_load = ReplicatedKafkaOffsetState::new(
+            offset_placement(),
+            Some(PersistedRuntimeStateEntry {
+                lsm: 8,
+                payload: next[..next.len() - 1].to_vec(),
+            }),
+        )
+        .err()
+        .assured("loading a truncated current checkpoint preserves its decode failure");
+        assert!(matches!(
+            invalid_load.current_context(),
+            RuntimePersistenceError::DecodeState
+        ));
+        assert!(invalid_load.contains::<rkyv::rancor::Error>());
         assert_eq!(installer.read().current_lsm(), 7);
         assert_eq!(installer.read().next_offset("events", 0), Some(9));
         assert_eq!(installer.read().next_offset("events", 1), None);
@@ -1420,6 +1435,14 @@ mod tests {
             .err()
             .assured("a superseded replica assignment cannot install its checkpoint");
         assert!(rejected.contains::<StateAuthorityError>());
+        assert!(matches!(
+            rejected.downcast_ref::<RuntimeStateOperationError>(),
+            Some(RuntimeStateOperationError::Authority)
+        ));
+        assert!(matches!(
+            rejected.current_context(),
+            StateReplicationError::Capture { .. }
+        ));
         assert_eq!(originator.read().next_offset(topic, partition), Some(9));
     }
 

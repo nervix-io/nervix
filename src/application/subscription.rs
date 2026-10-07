@@ -1246,7 +1246,6 @@ impl SessionServiceImpl {
             Some(expression) => {
                 let udfs = self.inner.runtime.udf_executor(domain);
                 let compiled_predicate = compile_subscription_predicate(
-                    domain,
                     &subscription.name,
                     expression,
                     SubscriptionPredicateCompileContext::new(
@@ -1259,7 +1258,7 @@ impl SessionServiceImpl {
                     Ok(predicate) => Some(predicate),
                     Err(err) => {
                         return Err(Box::new(command_error(format!(
-                            "failed to compile session subscription '{}': {err}",
+                            "failed to compile session subscription '{}': {err:#}",
                             subscription.name
                         ))));
                     }
@@ -1338,7 +1337,9 @@ impl SessionServiceImpl {
             .await;
         let receiver = match attached {
             Ok(receiver) => receiver,
-            Err(RuntimeError::RelayRedefined { .. }) => {
+            Err(error)
+                if matches!(error.current_context(), RuntimeError::RelayRedefined { .. }) =>
+            {
                 lease.release().await;
                 return Err(Box::new(command_error(format!(
                     "failed to subscribe to relay '{}': it was redefined while the subscription \
@@ -1349,7 +1350,7 @@ impl SessionServiceImpl {
             Err(err) => {
                 lease.release().await;
                 return Err(Box::new(command_error(format!(
-                    "failed to subscribe to relay '{}': {err}",
+                    "failed to subscribe to relay '{}': {err:#}",
                     relay.as_str()
                 ))));
             }

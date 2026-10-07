@@ -1465,6 +1465,9 @@ from local ones.
 
 Metric labels are bounded dimensions such as traffic class, direction, operation, outcome, and
 reason. They do not include peer, domain, relay, branch, delivery identity, or payload values.
+An owner-delivery admission failure logs its domain, relay, non-sensitive branch fingerprint and
+target, together with the transport report's retained cancellation and rejection causes. The
+undelivered batch and branch field values stay out of that diagnostic.
 Per-batch and payload-bearing logs use debug or trace levels and do not expose sensitive field
 values. See [Metrics And Observability](./metrics-and-observability.md) for the metric and logging
 contract.

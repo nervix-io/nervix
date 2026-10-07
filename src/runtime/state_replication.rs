@@ -23,7 +23,8 @@ use nervix_interconnect::{
 
 use super::{
     branch_checkpoint_catalog::BranchCheckpointCatalog,
-    branch_lifecycle_state::AnnouncedCheckpoint, *,
+    branch_lifecycle_state::AnnouncedCheckpoint, materialized_snapshot::MaterializedSnapshotError,
+    *,
 };
 
 pub(super) const DEFAULT_STATE_SNAPSHOT_INTERVAL: Duration = Duration::from_secs(30);
@@ -436,14 +437,12 @@ impl Runtime {
                 let installed = store
                     .persist_replica_snapshot_if_newer(placement, snapshot)
                     .await
-                    .map_err(|error| {
-                        RuntimeStateOperationError::persistence(error.current_context().clone())
-                    })?;
+                    .change_context(RuntimeStateOperationError::Persistence)?;
                 let Some(installed) = installed else {
                     // The storage already holds this revision or a newer one.
-                    let stored = self.stored_replica_checkpoint(placement).map_err(|error| {
-                        RuntimeStateOperationError::persistence(error.current_context().clone())
-                    })?;
+                    let stored = self
+                        .stored_replica_checkpoint(placement)
+                        .change_context(RuntimeStateOperationError::Persistence)?;
                     if let Held::Revision(stored_lsm) = stored {
                         self.acknowledge_durable_state_replica(owner, placement, stored_lsm)
                             .await?;
@@ -493,14 +492,12 @@ impl Runtime {
                 let installed = store
                     .persist_replica_snapshot_if_newer(placement, snapshot)
                     .await
-                    .map_err(|error| {
-                        RuntimeStateOperationError::persistence(error.current_context().clone())
-                    })?;
+                    .change_context(RuntimeStateOperationError::Persistence)?;
                 let Some(installed) = installed else {
                     // The storage already holds this revision or a newer one.
                     let stored = store
                         .latest_snapshot(placement)
-                        .map_err(RuntimeStateOperationError::persistence)?;
+                        .change_context(RuntimeStateOperationError::Persistence)?;
                     let Some(stored) = stored else {
                         return Ok(());
                     };
@@ -546,9 +543,10 @@ impl Runtime {
         let Some(store) = self.inner.state_store.as_ref() else {
             return Ok(());
         };
-        store.synchronize().await.map_err(|error| {
-            RuntimeStateOperationError::persistence(error.current_context().clone())
-        })?;
+        store
+            .synchronize()
+            .await
+            .change_context(RuntimeStateOperationError::Persistence)?;
         self.acknowledge_state_replica_install(source, placement, lsm);
         Ok(())
     }
@@ -726,9 +724,9 @@ impl Runtime {
             }
         }
         for (placement, state) in deduplicators {
-            let snapshot = state.latest_snapshot().map_err(|error| {
-                OwnershipHandoffError::persistence(error.current_context().clone())
-            })?;
+            let snapshot = state
+                .latest_snapshot()
+                .change_context(OwnershipHandoffError::Persistence)?;
             checkpoints.push((placement, snapshot));
         }
         for state in self.inner.replicated_kafka_offset_states.iter() {
@@ -737,7 +735,7 @@ impl Runtime {
                     state.key().clone(),
                     ReplicatedKafkaOffsetState::read(state.value())
                         .latest_snapshot()
-                        .map_err(OwnershipHandoffError::persistence)?,
+                        .change_context(OwnershipHandoffError::Persistence)?,
                 ));
             }
         }
@@ -783,9 +781,7 @@ impl Runtime {
             let snapshot = state
                 .latest_snapshot(&self.inner.executor)
                 .await
-                .map_err(|error| {
-                    OwnershipHandoffError::persistence(error.current_context().clone())
-                })?;
+                .change_context(OwnershipHandoffError::Persistence)?;
             checkpoints.push((placement, snapshot));
         }
         let mut wasm_processors = Vec::new();
@@ -803,7 +799,7 @@ impl Runtime {
                     state.key().clone(),
                     state
                         .latest_snapshot(&self.inner.metrics)
-                        .map_err(OwnershipHandoffError::persistence)?,
+                        .change_context(OwnershipHandoffError::Persistence)?,
                 ));
             }
         }
@@ -828,7 +824,7 @@ impl Runtime {
                     } else if let Some(store) = self.inner.state_store.as_ref()
                         && let Some(snapshot) = store
                             .latest_snapshot(&branch_lru)
-                            .map_err(OwnershipHandoffError::persistence)?
+                            .change_context(OwnershipHandoffError::Persistence)?
                     {
                         checkpoints.push((branch_lru.clone(), snapshot));
                     }
@@ -861,7 +857,7 @@ impl Runtime {
             let stored = match self.inner.state_store.as_ref() {
                 Some(store) => store
                     .latest_snapshot(placement)
-                    .map_err(OwnershipHandoffError::persistence)?,
+                    .change_context(OwnershipHandoffError::Persistence)?,
                 None => None,
             };
             let snapshot = if let Some(snapshot) = stored {
@@ -897,13 +893,11 @@ impl Runtime {
             }
             if placement.state.kind() == RuntimeStateKind::BranchLru {
                 self.persist_branch_lru_snapshot(placement.clone(), snapshot.clone())
-                    .map_err(|error| {
-                        OwnershipHandoffError::persistence(error.current_context().clone())
-                    })?;
+                    .change_context(OwnershipHandoffError::Persistence)?;
             } else if let Some(store) = self.inner.state_store.as_ref() {
                 store
                     .persist_latest_snapshot(placement, snapshot.lsm, &snapshot.payload)
-                    .map_err(OwnershipHandoffError::persistence)?;
+                    .change_context(OwnershipHandoffError::Persistence)?;
                 self.announce_stored_checkpoint(placement, snapshot.lsm);
             }
         }
@@ -930,16 +924,16 @@ impl Runtime {
                 encode_branch_aggregated_snapshot(&BranchAggregatedRuntimeStateSnapshot {
                     metrics: RuntimeMetricsSnapshot::default(),
                 })
-                .map_err(OwnershipHandoffError::persistence)?
+                .change_context(OwnershipHandoffError::Persistence)?
             }
             RuntimeStateKind::KafkaOffset => {
                 let state = Arc::new(
                     ReplicatedKafkaOffsetState::new(placement.clone(), None)
-                        .map_err(OwnershipHandoffError::persistence)?,
+                        .change_context(OwnershipHandoffError::Persistence)?,
                 );
                 ReplicatedKafkaOffsetState::read(&state)
                     .latest_snapshot()
-                    .map_err(OwnershipHandoffError::persistence)?
+                    .change_context(OwnershipHandoffError::Persistence)?
                     .payload
             }
             RuntimeStateKind::MaterializedRelay => empty_sealed_container()
@@ -1129,9 +1123,7 @@ impl Runtime {
         if let Some(store) = self.inner.state_store.as_ref() {
             store
                 .persist_forced_recovery_preparation(&transition, &checkpoints)
-                .map_err(|error| {
-                    OwnershipHandoffError::persistence(error.current_context().clone())
-                })?;
+                .change_context(OwnershipHandoffError::Persistence)?;
         }
         let recovery = transition.identity();
         self.inner.prepared_forced_runtime_state_recoveries.insert(
@@ -1213,20 +1205,15 @@ impl Runtime {
         match placement.state.kind() {
             RuntimeStateKind::Deduplicator => {
                 ReplicatedDeduplicatorState::new(placement.clone(), None)
-                    .map_err(OwnershipHandoffError::persistence)?
+                    .change_context(OwnershipHandoffError::Persistence)?
                     .latest_snapshot()
-                    .map_err(|error| {
-                        OwnershipHandoffError::persistence(error.current_context().clone())
-                    })
+                    .change_context(OwnershipHandoffError::Persistence)
             }
             RuntimeStateKind::WindowProcessor => {
                 ReplicatedWindowProcessorState::new(placement.clone(), None)
-                    .map_err(OwnershipHandoffError::persistence)?
                     .latest_snapshot(&self.inner.executor)
                     .await
-                    .map_err(|error| {
-                        OwnershipHandoffError::persistence(error.current_context().clone())
-                    })
+                    .change_context(OwnershipHandoffError::Persistence)
             }
             RuntimeStateKind::WasmProcessor => Ok(PersistedRuntimeStateEntry {
                 lsm: 0,
@@ -1741,9 +1728,7 @@ impl Runtime {
                             &replacement_transition,
                             &replacement.checkpoints,
                         )
-                        .map_err(|error| {
-                            OwnershipHandoffError::persistence(error.current_context().clone())
-                        })?;
+                        .change_context(OwnershipHandoffError::Persistence)?;
                 }
                 entry.insert(replacement);
             }
@@ -1762,9 +1747,7 @@ impl Runtime {
                     };
                     store
                         .persist_handoff_preparation(&transition, &replacement.checkpoints)
-                        .map_err(|error| {
-                            OwnershipHandoffError::persistence(error.current_context().clone())
-                        })?;
+                        .change_context(OwnershipHandoffError::Persistence)?;
                 }
                 entry.insert(replacement);
             }
@@ -1780,7 +1763,7 @@ impl Runtime {
         match placement.state.kind() {
             RuntimeStateKind::BranchAggregated => {
                 decode_branch_aggregated_snapshot(&snapshot.payload)
-                    .map_err(|error| OwnershipHandoffError::state(error.to_string()))?;
+                    .map_err(|error| OwnershipHandoffError::state(format!("{error:#}")))?;
             }
             RuntimeStateKind::Correlator => {
                 return Err(OwnershipHandoffError::state(
@@ -1789,11 +1772,11 @@ impl Runtime {
             }
             RuntimeStateKind::Deduplicator => {
                 ReplicatedDeduplicatorState::new(placement.clone(), Some(snapshot.clone()))
-                    .map_err(|error| OwnershipHandoffError::state(error.to_string()))?;
+                    .map_err(|error| OwnershipHandoffError::state(format!("{error:#}")))?;
             }
             RuntimeStateKind::KafkaOffset => {
                 ReplicatedKafkaOffsetState::new(placement.clone(), Some(snapshot.clone()))
-                    .map_err(|error| OwnershipHandoffError::state(error.to_string()))?;
+                    .map_err(|error| OwnershipHandoffError::state(format!("{error:#}")))?;
             }
             RuntimeStateKind::MaterializedRelay => {
                 inspect_sealed_container(
@@ -1802,11 +1785,8 @@ impl Runtime {
                 )
                 .map_err(|error| OwnershipHandoffError::state(error.to_string()))?;
             }
-            RuntimeStateKind::WasmProcessor => {}
-            RuntimeStateKind::WindowProcessor => {
-                ReplicatedWindowProcessorState::new(placement.clone(), Some(snapshot.clone()))
-                    .map_err(|error| OwnershipHandoffError::state(error.to_string()))?;
-            }
+            // A sealed window snapshot is opened only when its branch restores the window.
+            RuntimeStateKind::WasmProcessor | RuntimeStateKind::WindowProcessor => {}
             RuntimeStateKind::BranchLru => {
                 decode_branch_lru_snapshot(&snapshot.payload)
                     .map_err(|error| OwnershipHandoffError::state(error.to_string()))?;
@@ -2049,9 +2029,7 @@ impl Runtime {
                     transition.entity.kind,
                     &transition.entity.identifier,
                 )
-                .map_err(|error| {
-                    OwnershipHandoffError::persistence(error.current_context().clone())
-                })?
+                .change_context(OwnershipHandoffError::Persistence)?
                 .is_some_and(|activated| {
                     activated.coordination == *transition.coordination
                         && activated.operation_id == transition.operation_id
@@ -2157,7 +2135,7 @@ impl Runtime {
                     true,
                 )
                 .await
-                .map_err(|error| OwnershipHandoffError::state(error.to_string()))?;
+                .map_err(|error| OwnershipHandoffError::state(format!("{error:#}")))?;
             }
             activation
         };
@@ -2268,7 +2246,7 @@ impl Runtime {
         let Some(store) = self.inner.state_store.as_ref() else {
             return Ok(None);
         };
-        Ok(store.latest_snapshot(placement)?)
+        store.latest_snapshot(placement)
     }
 
     pub(crate) fn discard_prepared_ownership_handoff_state(
@@ -2374,7 +2352,6 @@ impl Runtime {
                 ReplicatedState::KafkaOffset(state) => {
                     let snapshot = ReplicatedKafkaOffsetState::read(state)
                         .latest_snapshot()
-                        .map_err(Report::new)
                         .change_context_lazy(capture)?;
                     return Ok(snapshot.after(after_lsm));
                 }
@@ -2394,7 +2371,6 @@ impl Runtime {
                          placement revision outside record execution",
                         state.latest_snapshot(&self.inner.metrics)
                     )
-                    .map_err(Report::new)
                     .change_context_lazy(capture)?;
                     return Ok(snapshot.after(after_lsm));
                 }
@@ -2415,7 +2391,6 @@ impl Runtime {
         };
         let stored = store
             .latest_snapshot(placement)
-            .map_err(Report::new)
             .change_context_lazy(capture)?;
         let Some(stored) = stored else {
             return Ok(None);
@@ -2552,7 +2527,6 @@ impl Runtime {
         if let Some(store) = &self.inner.state_store {
             store
                 .persist_latest_snapshot(offsets.placement(), lsm, payload)
-                .map_err(Report::new)
                 .change_context(StateReplicationError::Persist {
                     placement: offsets.placement().clone(),
                     lsm,
@@ -2601,12 +2575,11 @@ impl Runtime {
         offsets: Vec<KafkaOffsetPosition>,
     ) -> error_stack::Result<(), StateReplicationError> {
         let _publication = self.backup_publication(&state.placement().domain);
-        let (lsm, payload) = state
-            .replace_offsets(offsets)
-            .map_err(Report::new)
-            .change_context_lazy(|| StateReplicationError::ReplaceKafkaOffsets {
+        let (lsm, payload) = state.replace_offsets(offsets).change_context_lazy(|| {
+            StateReplicationError::ReplaceKafkaOffsets {
                 placement: state.placement().clone(),
-            })?;
+            }
+        })?;
         self.persist_kafka_offset_snapshot(&state.persistence(), lsm, &payload)
             .await
     }
@@ -2667,7 +2640,7 @@ impl Runtime {
     pub(in crate::runtime) fn replicated_deduplicator_state(
         &self,
         placement: RuntimeStatePlacement,
-    ) -> Result<Arc<ReplicatedDeduplicatorState>, RuntimePersistenceError> {
+    ) -> error_stack::Result<Arc<ReplicatedDeduplicatorState>, RuntimePersistenceError> {
         let transferred = self.take_transferred_runtime_state_snapshot(&placement);
         if transferred.is_none()
             && let Some(existing) = self.inner.replicated_deduplicator_states.get(&placement)
@@ -2676,9 +2649,7 @@ impl Runtime {
         }
         let initial = match transferred {
             Some(snapshot) => Some(snapshot),
-            None => self
-                .stored_runtime_state_snapshot(&placement)
-                .map_err(|error| error.current_context().clone())?,
+            None => self.stored_runtime_state_snapshot(&placement)?,
         };
         let catalog = self.branch_checkpoint_catalog(&placement);
         let state = Arc::new(
@@ -2701,7 +2672,7 @@ impl Runtime {
         replica_nodes: Vec<ClusterNodeName>,
         required_replica_acks: usize,
         local_node: Option<&ClusterNodeName>,
-    ) -> Result<KafkaOffsetStateAssignment, RuntimePersistenceError> {
+    ) -> error_stack::Result<KafkaOffsetStateAssignment, RuntimePersistenceError> {
         let roles = StateReplicationRoles::new(primary_node, replica_nodes, required_replica_acks);
         let transferred = self.take_transferred_runtime_state_snapshot(&placement);
         let state = if transferred.is_none()
@@ -2711,9 +2682,7 @@ impl Runtime {
         } else {
             let initial = match transferred {
                 Some(snapshot) => Some(snapshot),
-                None => self
-                    .stored_runtime_state_snapshot(&placement)
-                    .map_err(|error| error.current_context().clone())?,
+                None => self.stored_runtime_state_snapshot(&placement)?,
             };
             let state = Arc::new(ReplicatedKafkaOffsetState::new(placement.clone(), initial)?);
             self.inner
@@ -2746,7 +2715,7 @@ impl Runtime {
         &self,
         placement: &RuntimeStatePlacement,
         schema: &StdArc<arrow_schema::Schema>,
-    ) -> Result<(), RuntimePersistenceError> {
+    ) -> error_stack::Result<(), RuntimePersistenceError> {
         if self
             .inner
             .restored_materialized_stream_states
@@ -2761,7 +2730,7 @@ impl Runtime {
                     .executor
                     .charge_owned(nervix_execution::MemoryClass::Bulk, snapshot.payload)
                     .await
-                    .map_err(|error| RuntimePersistenceError::DecodeState(error.to_string()))?;
+                    .change_context(RuntimePersistenceError::StorageAdmission)?;
                 SealedSource::memory(sealed)
             }
             None => {
@@ -2785,7 +2754,7 @@ impl Runtime {
                         crate::runtime::RESTORE_STATE_WORKING_BYTES,
                     )
                     .await
-                    .map_err(|error| RuntimePersistenceError::DecodeState(error.to_string()))?;
+                    .change_context(RuntimePersistenceError::StorageAdmission)?;
                 let reader = self
                     .inner
                     .executor
@@ -2800,18 +2769,31 @@ impl Runtime {
                         },
                     )
                     .await
-                    .map_err(|error| RuntimePersistenceError::DecodeState(error.to_string()))?
-                    .map_err(|error| error.current_context().clone())?;
+                    .change_context(RuntimePersistenceError::StorageExecution)??;
                 let Some(reader) = reader else {
                     return Ok(());
                 };
                 SealedSource::stored(self.inner.executor.clone(), reader)
             }
         };
-        let restored =
-            RestoredMaterializedSnapshot::open_relay(&self.inner.executor, schema, source)
-                .await
-                .map_err(|error| RuntimePersistenceError::DecodeState(error.to_string()))?;
+        let opened =
+            RestoredMaterializedSnapshot::open_relay(&self.inner.executor, schema, source).await;
+        let restored = match opened {
+            Ok(restored) => restored,
+            Err(error) => {
+                // A refusal of the work that reads the snapshot judged nothing about its bytes.
+                let failure = match error.current_context() {
+                    MaterializedSnapshotError::Admission => {
+                        RuntimePersistenceError::StorageAdmission
+                    }
+                    MaterializedSnapshotError::Execution => {
+                        RuntimePersistenceError::StorageExecution
+                    }
+                    _ => RuntimePersistenceError::DecodeState,
+                };
+                return Err(error.change_context(failure));
+            }
+        };
         self.inner
             .restored_materialized_stream_states
             .insert(placement.clone(), restored);
@@ -2833,7 +2815,7 @@ impl Runtime {
         primary_node: Option<ClusterNodeName>,
         replica_nodes: Vec<ClusterNodeName>,
         local_node: Option<&ClusterNodeName>,
-    ) -> Result<MaterializedRelayStateAssignment, RuntimePersistenceError> {
+    ) -> MaterializedRelayStateAssignment {
         let roles = StateReplicationRoles::new(primary_node, replica_nodes, 0);
         let restored = self
             .inner
@@ -2862,9 +2844,7 @@ impl Runtime {
             );
             state
         };
-        Ok(ReplicatedMaterializedRelayState::bind(
-            &state, roles, local_node,
-        ))
+        ReplicatedMaterializedRelayState::bind(&state, roles, local_node)
     }
 
     #[cfg_attr(
@@ -2878,7 +2858,7 @@ impl Runtime {
     pub(in crate::runtime) fn replicated_window_processor_state(
         &self,
         placement: RuntimeStatePlacement,
-    ) -> Result<Arc<ReplicatedWindowProcessorState>, RuntimePersistenceError> {
+    ) -> error_stack::Result<Arc<ReplicatedWindowProcessorState>, RuntimePersistenceError> {
         let transferred = self.take_transferred_runtime_state_snapshot(&placement);
         if transferred.is_none()
             && let Some(existing) = self
@@ -2890,13 +2870,11 @@ impl Runtime {
         }
         let initial = match transferred {
             Some(snapshot) => Some(snapshot),
-            None => self
-                .stored_runtime_state_snapshot(&placement)
-                .map_err(|error| error.current_context().clone())?,
+            None => self.stored_runtime_state_snapshot(&placement)?,
         };
         let catalog = self.branch_checkpoint_catalog(&placement);
         let state = Arc::new(
-            ReplicatedWindowProcessorState::new(placement.clone(), initial)?.cataloged(&catalog),
+            ReplicatedWindowProcessorState::new(placement.clone(), initial).cataloged(&catalog),
         );
         self.inner
             .replicated_window_processor_states
@@ -2913,7 +2891,7 @@ impl Runtime {
         placement: RuntimeStatePlacement,
         primary_node: Option<ClusterNodeName>,
         physical_node_id: ClusterNodeName,
-    ) -> Result<Arc<ReplicatedBranchAggregatedState>, RuntimePersistenceError> {
+    ) -> error_stack::Result<Arc<ReplicatedBranchAggregatedState>, RuntimePersistenceError> {
         let transferred = self.take_transferred_runtime_state_snapshot(&placement);
         if transferred.is_none()
             && let Some(existing) = self
@@ -2936,9 +2914,7 @@ impl Runtime {
         }
         let initial = match transferred {
             Some(snapshot) => Some(snapshot),
-            None => self
-                .stored_runtime_state_snapshot(&placement)
-                .map_err(|error| error.current_context().clone())?,
+            None => self.stored_runtime_state_snapshot(&placement)?,
         };
         let state = Arc::new(ReplicatedBranchAggregatedState::new(
             placement.clone(),

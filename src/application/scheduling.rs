@@ -497,7 +497,7 @@ impl SessionServiceImpl {
         if let Err(error) = self.apply_current_cluster_state().await {
             return command_error(format!(
                 "dropped node '{node_id}', but the resulting schedules failed to become usable: \
-                 {error}"
+                 {error:#}"
             ));
         }
         if let Err(error) = self.wait_for_authoritative_visibility().await {
@@ -763,7 +763,7 @@ impl SessionServiceImpl {
                         failed_domains.insert(domain.clone());
                         outcomes.push(format!(
                             "- domain={} owner={node_id} failed: could not activate initial \
-                             schedule: {error}",
+                             schedule: {error:#}",
                             domain.as_str()
                         ));
                     }
@@ -886,11 +886,11 @@ impl SessionServiceImpl {
                         .finish_planned_ownership_handoff(&domain, handoff, None)
                         .await
                     {
-                        handoff_activation_error = Some(error.to_string());
+                        handoff_activation_error = Some(format!("{error:#}"));
                     }
                 }
                 let activation_error = match local_activation_error {
-                    Some(error) => Some(error.to_string()),
+                    Some(error) => Some(format!("{error:#}")),
                     None => handoff_activation_error,
                 };
                 for ownership_move in &planned_moves {

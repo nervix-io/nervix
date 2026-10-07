@@ -85,7 +85,6 @@ impl CapturedDeduplicatorKeyspace {
         payload: &[u8],
     ) -> error_stack::Result<Self, DeduplicatorArchiveError> {
         let recent_keys = decode_deduplicator_snapshot(payload)
-            .map_err(Report::new)
             .change_context(DeduplicatorArchiveError::Decode)?;
         Ok(Self {
             generation: StdArc::new(Generation {
@@ -402,9 +401,7 @@ impl ArchivedDeduplicatorKeys {
     /// The native keyspace checkpoint a deduplicator branch restores from.
     pub(crate) fn encode(&self) -> error_stack::Result<Vec<u8>, DeduplicatorArchiveError> {
         let published = ReplicatedDeduplicatorState::published_keys(&self.recent_keys);
-        encode_deduplicator_snapshot(&published)
-            .map_err(Report::new)
-            .change_context(DeduplicatorArchiveError::Encode)
+        encode_deduplicator_snapshot(&published).change_context(DeduplicatorArchiveError::Encode)
     }
 }
 

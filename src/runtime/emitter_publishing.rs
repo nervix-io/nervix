@@ -988,15 +988,16 @@ mod tests {
             .await
             .expect_err("the active infrastructure retry must fail the bounded drain");
         assert_eq!(
-            failed.reason(),
-            "infrastructure retry exceeded drain deadline"
+            failed.drain_description().as_deref(),
+            Some("infrastructure retry exceeded drain deadline")
         );
         assert!(
             started.elapsed() < Duration::from_secs(1),
             "a 30 second retry backoff must not hide a 40 millisecond drain deadline"
         );
+        let (_, retained) = failed.into_parts();
         assert!(
-            failed.into_task().stop_signal.borrow().is_none(),
+            retained.stop_signal.borrow().is_none(),
             "a recoverable stop failure must clear its stop signal"
         );
     }

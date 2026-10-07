@@ -277,15 +277,13 @@ fn every_acknowledgement_reaches_the_replication_of_the_state_it_names() {
         None,
     );
     publish_current_assignment(&runtime, &materialized);
-    let materialized_state = runtime
-        .replicated_materialized_stream_state(
-            materialized.clone(),
-            StdArc::new(arrow_schema::Schema::empty()),
-            None,
-            Vec::new(),
-            None,
-        )
-        .expect("materialized state initializes");
+    let materialized_state = runtime.replicated_materialized_stream_state(
+        materialized.clone(),
+        StdArc::new(arrow_schema::Schema::empty()),
+        None,
+        Vec::new(),
+        None,
+    );
     acknowledge(&runtime, &replica, &materialized);
     assert_eq!(
         held_by(

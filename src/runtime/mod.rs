@@ -225,6 +225,7 @@ mod entity_gate;
 mod entrypoint_routes;
 mod error;
 mod events;
+mod execution_build_error;
 mod fault_injection;
 mod filter_map;
 mod force_flush;
@@ -425,7 +426,7 @@ use force_flush::{
     DomainForceFlush, DomainForceFlushCompletion, DomainForceFlushParticipant,
     IngestorAckRootTrackers,
 };
-use generator::{GeneratorError, GeneratorTaskSpec};
+use generator::GeneratorTaskSpec;
 use http_request_fields::{
     AcceptedHttpRequests, AdmittedHttpRequests, CompiledHttpRequestFields, HttpRequestFields,
     HttpRequestInput, HttpRequestSchemas, SourceRecords,
@@ -571,7 +572,7 @@ pub(in crate::runtime) use state_store::{
     ForcedRuntimeStateRecoveryTransition, RuntimeState, RuntimeStateHandoffTransition,
     RuntimeStateKind, RuntimeStateOperationError, RuntimeStateResult, RuntimeStateStore,
     ScheduledStateIdentity, StateAssignmentAuthority, StateAssignmentToken, StateAuthorityError,
-    StateCapability, StateIdentityError, StateReplicationRoles,
+    StateCapability, StateIdentityError, StateReplicationRoles, StoredStateIssue,
 };
 #[cfg(test)]
 pub(in crate::runtime) use test_fixtures::STUPID_CHANNEL_CAPACITY_REMOVE_ME;
@@ -906,6 +907,7 @@ pub(crate) use entity_gate::{
 };
 pub(crate) use error::RuntimeError;
 pub(crate) use events::RuntimeEvent;
+use execution_build_error::{ExecutionBuildError, ExecutionStep};
 pub(crate) use ingest_metadata::IngestFilterMapMetadata;
 use ingest_task_handles::IngestTaskHandles;
 pub(crate) use ingestor_quiesce::IngestorQuiesceCounters;

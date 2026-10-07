@@ -644,7 +644,7 @@ impl EmitterBatchBuffer {
         buffered_messages: Arc<EmitterBufferedMessages>,
     ) -> Self {
         Self {
-            flush_policy: context.parse_flush_policy("emitter", flush_policy),
+            flush_policy: context.parse_flush_policy(flush_policy),
             pending: Vec::new(),
             payloads: PreparedPayloads::default(),
             client_payloads: PreparedPayloads::default(),
@@ -673,7 +673,7 @@ impl EmitterBatchBuffer {
         context: &EmitterSinkContext,
         flush_policy: &FlushPolicy,
     ) -> EmitterRuntimeResult<()> {
-        self.flush_policy = context.parse_flush_policy("emitter", flush_policy);
+        self.flush_policy = context.parse_flush_policy(flush_policy);
         self.cadence.clear();
         if self.pending.is_empty() {
             return Ok(());
