@@ -674,6 +674,7 @@ Feature: Cluster scheduling
   @planned-ingestor-handoff
   Scenario: A planned Kafka ingestor handoff drains attached ACKs from two branches
     Given Kafka is running
+    And entity gate deadline is configured as "120s"
     And the production sticky scheduler is configured
     And a 3 node nervix cluster is started
     And the leader node is configured with these NSPL commands

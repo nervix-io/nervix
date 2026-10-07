@@ -1,6 +1,7 @@
 Feature: Large native restore metadata
   Restoring a complete state set publishes one durable generation before START.
 
+  @restore_installation
   Scenario Outline: Native lifecycle and Kafka metadata above the bulk budget on <cluster_size> nodes restore exactly
     Given Kafka is running
     And runtime replication is configured with replica count 1 and snapshot interval "10m"
@@ -87,6 +88,12 @@ Feature: Large native restore metadata
     Then the CLI restore succeeded, restoring domain "{{domain}}_copy" with 1 resource versions and 11 models
     And the CLI restore execution reference is saved as placeholder "native_restore_reference"
     Given the active domain is "{{domain}}_copy"
+    When these NSPL commands are executed on the leader node
+      """
+      SHOW CLUSTER STATUS;
+      """
+    Then the last cluster status schedules nodes on at least <restore_owners> distinct owners
+    And the last cluster status placements of restored work are saved as placeholder "native_restore_placements"
     When restore "DOMAIN {{source_domain}} AS {{domain}}" of backup archive "native.nvxb" is streamed to node "{{leader}}" under execution reference "{{native_restore_reference}}"
     Then the restore stream's outcome is "completed" as "recovered"
     And the restore stream's report shows every step applied
@@ -120,6 +127,11 @@ Feature: Large native restore metadata
       """
     When these NSPL commands are executed on the leader node
       """
+      SHOW CLUSTER STATUS;
+      """
+    Then the last cluster status preserves restored work placements from placeholder "native_restore_placements"
+    When these NSPL commands are executed on the leader node
+      """
       CREATE SUBSCRIPTION filtered_metrics_subscription TO filtered_metrics;
       """
     Then the relay subscription does not receive a payload within "2s"
@@ -133,8 +145,13 @@ Feature: Large native restore metadata
     Then within "30s" DESCRIBE DOMAIN section "input_output" metric "messages_total" "sent" relay "raw_metrics" across physical nodes totals <restored_inputs>
     And within "30s" DESCRIBE DOMAIN section "processed" metric "messages_total" "sent" relay "filtered_metrics" across physical nodes totals <branches>
     And within "30s" the restore subscription receives one isolated even row for each of <branches> tenants
+    When these NSPL commands are executed on the leader node
+      """
+      SHOW CLUSTER STATUS;
+      """
+    Then the last cluster status preserves restored work placements from placeholder "native_restore_placements"
 
     Examples:
-      | cluster_size | save_mib | branches | restored_inputs |
-      | 1            | 1        | 2        | 4               |
-      | 3            | 1        | 2        | 4               |
+      | cluster_size | save_mib | branches | restored_inputs | restore_owners |
+      | 1            | 1        | 2        | 4               | 1              |
+      | 3            | 1        | 2        | 4               | 2              |

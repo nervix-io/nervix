@@ -64,6 +64,49 @@ mkdir -p "${artifact_dir}/results"
 # shellcheck source=../recovery-scenario.sh
 source "${chaos_dir}/recovery-scenario.sh"
 
+# The final ledger query owns a budget separate from live probes and preserves a controller
+# failure before any accepted-input ledger is constructed. These commands stand in for Docker;
+# the real loaded-JVM boundary is exercised by the immutable-image restart experiments.
+(
+    artifact_dir="${tmp_dir}/final-boundary"
+    mkdir -p "${artifact_dir}/traffic"
+    scenario=cluster-restart
+    record_count=100
+    compose_call_timeout=20
+    phase() { :; }
+    owned_service_container() { printf '%s\n' load-container; }
+    wait_for() { :; }
+    run_bounded() {
+        if [[ "$3" == inspect ]]; then
+            printf '0\n'
+        fi
+    }
+    trim_file() { :; }
+    topic_end_offset() {
+        ((compose_call_timeout >= 30)) || return 124
+        printf '1\n'
+    }
+    kcat() { printf '{"id":1}\n'; }
+    recovery_final_boundary || fail 'final source-boundary query inherited the live-probe budget'
+    [[ "${compose_call_timeout}" -eq 20 ]] || fail 'final query changed later live-probe budgets'
+    jq -e '.exit_code == 0 and .timeout_seconds == 60' \
+        "${artifact_dir}/traffic/source-boundary-query.json" >/dev/null \
+        || fail 'final query did not retain its successful boundary'
+    [[ "$(wc -l <"${artifact_dir}/traffic/accepted-input.ndjson")" -eq 1 ]] \
+        || fail 'successful final query did not build the accepted ledger'
+    rm "${artifact_dir}/traffic/accepted-input.ndjson"
+    topic_end_offset() { return 124; }
+    if recovery_final_boundary >"${tmp_dir}/final-query-failure.txt" 2>&1; then
+        fail 'an expired final source query was accepted'
+    fi
+    [[ "${failure_category}" == controller ]] || fail 'a source-query timeout was a product failure'
+    jq -e '.exit_code == 124 and .timeout_seconds == 60' \
+        "${artifact_dir}/traffic/source-boundary-query.json" >/dev/null \
+        || fail 'final query timeout evidence was lost'
+    [[ ! -f "${artifact_dir}/traffic/accepted-input.ndjson" ]] \
+        || fail 'failed final query constructed an accepted ledger'
+)
+
 batch_dir="${tmp_dir}/batch"
 mkdir -p "${batch_dir}"
 cat >"${tmp_dir}/transcript.log" <<'EOF'
