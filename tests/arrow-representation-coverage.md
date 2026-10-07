@@ -21,10 +21,10 @@ An ordinary randomized run hands a property at most 64 bytes, and a choice read 
 takes its first option. Every property here therefore reads what shapes its case before the case:
 the damage and the share of the encoding where it lands, the defect a payload carries, the message
 damaged bytes are read as, how a stream ends, whether the batch is branched and which rows are
-registered, and the format and first damaged payload of a payload group. What can wait is read after
-the case, so that it takes none of the bytes an ordinary run has for a schema and its rows: the
-further damaged payloads of a group. The batch is generated from the bytes that remain, and the
-`boundaries` and `ordered` seeds of every corpus carry a case of full size.
+registered, and the format, row count and first damaged payload of a payload group. What can wait
+is read after the case, so that it takes none of the bytes an ordinary run has for a schema and its
+values: the further damaged payloads of a group. The batch is generated from the bytes that remain,
+and the `boundaries` and `ordered` seeds of every corpus carry a case of full size.
 
 Arrow's Rust writer writes every generated stream here, and it takes none of the freedoms the Arrow
 format leaves a writer: it writes a validity bitmap for every column with rows and exactly one

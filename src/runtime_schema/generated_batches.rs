@@ -172,9 +172,22 @@ impl GeneratedDomain {
         arbitrary: &mut Arbitrary<'_>,
         schema: &GeneratedSchema,
     ) -> RecordBatch {
-        let before = arbitrary.entropy().count(MARGIN);
-        let rows = arbitrary.entropy().count(ROWS);
-        let after = arbitrary.entropy().count(MARGIN);
+        let rows = BatchRows::draw(arbitrary.entropy());
+        self.batch_of(arbitrary, schema, rows)
+    }
+
+    /// A batch of `schema` holding the rows `shape` counts, their values drawn from `arbitrary`.
+    pub(crate) fn batch_of(
+        self,
+        arbitrary: &mut Arbitrary<'_>,
+        schema: &GeneratedSchema,
+        shape: BatchRows,
+    ) -> RecordBatch {
+        let BatchRows {
+            before,
+            rows,
+            after,
+        } = shape;
         let through_view = before.checked_add(rows).verified("two small counts add up");
         let total = through_view
             .checked_add(after)
@@ -414,6 +427,29 @@ impl GeneratedSchema {
     pub(crate) fn runtime_batch(&self, batch: RecordBatch) -> RuntimeRecordBatch {
         RuntimeRecordBatch::from_record_batch(self.compiled.arrow_schema(), batch)
             .assured("a generated batch carries its compiled schema")
+    }
+}
+
+/// How many rows a generated batch holds, and how many rows of the larger batch it is cut from lie
+/// before and after them. A property whose subject needs rows reads this before the schema, so
+/// that an ordinary run's few bytes are not gone before the rows are counted.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct BatchRows {
+    before: usize,
+    rows: usize,
+    after: usize,
+}
+
+impl BatchRows {
+    pub(crate) fn draw(entropy: &mut Entropy<'_>) -> Self {
+        let before = entropy.count(MARGIN);
+        let rows = entropy.count(ROWS);
+        let after = entropy.count(MARGIN);
+        Self {
+            before,
+            rows,
+            after,
+        }
     }
 }
 

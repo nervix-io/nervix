@@ -26,7 +26,7 @@ use super::{CodecError, CompiledCodec, JsonDecoder, compile_codec, decode_with_c
 use crate::runtime_schema::{
     RuntimeRecordBatch,
     generated_batches::{
-        Damage, GeneratedDomain, GeneratedSchema, LogicalValue, Place, assert_same_batch,
+        BatchRows, Damage, GeneratedDomain, GeneratedSchema, LogicalValue, Place, assert_same_batch,
     },
 };
 
@@ -544,16 +544,20 @@ fn bolero_damaged_payloads_leave_a_group_as_its_payloads_decode_alone() {
         .with_max_len(CASE_BYTES)
         .for_each(|input| {
             let mut arbitrary = Arbitrary::new(input, Domain::Vocabulary);
-            // The format and one damaged payload are read before the schema and its rows: an
-            // ordinary run's few bytes run out while those are generated, and a damaged payload
-            // read after them would be the same truncation to nothing in nearly every group. The
-            // other damaged payloads are read after the rows, so that they take none of the bytes
-            // an ordinary run has for them.
+            // The format, the number of rows and one damaged payload are read before the schema
+            // and its values: an ordinary run's few bytes run out while those are generated, and a
+            // group read after them would hold no row and the same truncation to nothing as its
+            // damaged payload. The other damaged payloads are read after the values, so that they
+            // take none of the bytes an ordinary run has for them.
             let format = arbitrary.entropy().pick(SchemafulFormat::ALL);
+            let shape = BatchRows::draw(arbitrary.entropy());
             let mut damaged_members = vec![DamagedMember::draw(arbitrary.entropy(), format)];
             let schema = format.domain().schema(&mut arbitrary);
             let case = CodecCase::with_schema(&mut arbitrary, format, schema);
-            let rows = case.format.domain().batch(&mut arbitrary, &case.schema);
+            let rows = case
+                .format
+                .domain()
+                .batch_of(&mut arbitrary, &case.schema, shape);
             let further = arbitrary.entropy().count(FURTHER_DAMAGED_PAYLOADS);
             for _ in 0..further {
                 damaged_members.push(DamagedMember::draw(arbitrary.entropy(), format));
