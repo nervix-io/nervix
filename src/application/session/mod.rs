@@ -30,6 +30,7 @@
 
 pub(in crate::application) mod admission;
 mod clock_attachments;
+mod console_calls;
 mod consumers;
 #[cfg(test)]
 pub(crate) use clock_attachments::{ClockDeliveryOrder, NextClockFrame};

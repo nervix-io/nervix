@@ -46,8 +46,8 @@ The console is one screen with three regions:
 - the **execution graph** in the upper right
 - the **REPL** below it, which also hosts any relay subscriptions you open
 
-The top bar carries the websocket connection state, the global **Create** menu, the domain
-lifecycle button, the selected clock state, and the theme picker. The clock panel below the domain
+The top bar carries the websocket connection state, the global **Create** menu, the **Backups**
+button, the domain lifecycle button, the selected clock state, and the theme picker. The clock panel below the domain
 selector shows the selected domain's clock in detail.
 
 Sidebar entries are counted per kind and each group collapses. Selecting an endpoint runs its
@@ -380,6 +380,12 @@ The console sends a statement whether or not a domain is selected, and the serve
 it needs one: `SHOW CLUSTER STATUS` or `CREATE DOMAIN` runs with no domain selected, while a
 statement that acts on a domain fails with `no active domain selected`.
 
+A typed `BACKUP` runs through the [Backups](#backing-up-and-restoring) dialog, which opens to show
+its progress and downloads its archive. A typed `RESTORE` opens the dialog's restore form with the
+statement's options, because the browser cannot read the path the statement names. `BACKUP`,
+`RESTORE`, and `DESCRIBE BACKUP` must each be sent on their own, and `DESCRIBE BACKUP`, which reads
+an archive file on the client's machine, runs only in `nervix-cli`.
+
 The console event log renders attachment outcomes, domain-clock state and tick frames, and
 attachment ends. Tick entries include the id, boundary, authority UTC observation, and serving
 node's logical reading. `ATTACH DOMAIN CLOCK` and `DETACH DOMAIN CLOCK` typed into the REPL use the
@@ -440,6 +446,10 @@ its session delivers, and says where it left something out:
   rather than an empty list.
 - The execution graph and sidebar keep only the latest snapshot of the selected domain. Selecting
   another domain replaces it with that domain's snapshot, which the server sends at once.
+- A backup's download moves each 256 KiB chunk of the archive into the browser's own blob storage
+  as it arrives, and the page holds one chunk at a time. A restore reads its archive file one slice
+  at a time, at most 4 MiB while it digests the file and 256 KiB while it streams it, and keeps at
+  most 1 MiB queued on its connection.
 
 ## Inspecting a transaction
 
@@ -490,6 +500,82 @@ the selected domain. The successful upload result arrives after every current li
 verified and installed the version. An upload moves no binding: models keep the version they pin
 until [`REBIND RESOURCE`](resources.md#rebinding-existing-models) moves them. Version contents and
 how nodes consume them are covered in [Resources](resources.md).
+
+## Backing Up And Restoring
+
+The top bar's **Backups** button opens a dialog with two forms, **Back up** and **Restore**. They
+run the same `BACKUP` and `RESTORE` statements as `nervix-cli`, on the console's own session: they
+follow its leader redirect, and a statement typed in the REPL runs through the same dialog. Each
+form is bound to the statement's options and shows the canonical NSPL it sends before you submit
+it. [Backup And Restore](backup-and-restore.md) describes what the statements capture and restore.
+
+### Taking A Backup
+
+The **Back up** form backs up the cluster or one domain, the selected domain by default, into the
+archive file you name. It captures runtime state quiesced, optionally with a drain timeout, live
+(`WITHOUT PAUSE`), or not at all (`WITHOUT STATE`), and can leave resource bytes out (`WITHOUT
+RESOURCES`). **Back up and download** sends the `BACKUP` as a command. Once it completes, the
+dialog lists the summary the backup reported: the archive's size and BLAKE3 digest, when it was
+captured and until when it can be downloaded, the users, and each domain with its cut, revision,
+and sections. The REPL prints the outcome as it prints any command's.
+
+The console then downloads the archive from the leader that assembled it, and checks it as it
+arrives. It accepts the archive only once every byte arrived and the size and BLAKE3 digest match
+the summary, and only then hands it to the browser as a download, saved under the last component of
+the file the statement names; the browser chooses the directory. A partial or altered archive never
+reaches the browser's downloads. The first complete download releases the archive on the leader.
+
+A download that fails in transport, stalls, or ends early starts again from the first byte while
+the leader retains the archive, and **Download again** retries one that stopped for such a reason.
+A download the leader refuses, because the archive expired, a download already collected it, or the
+node that assembled it restarted, ends with that reason; the backup itself completed, and running
+it again assembles a new archive.
+
+The console records each backup it sends in the browser tab's session storage until the archive is
+downloaded. Reloading the page while the backup runs or downloads sends the same backup again under
+its execution reference: the leader answers with the backup's recorded outcome instead of running
+it twice, and the console downloads the archive again from its first byte. The node collects an
+archive once it has queued the archive's last bytes for a download, so a reload that comes after
+that moment finds the archive collected, and the backup must run again. Closing the tab or signing
+in as another user forgets the record. An archive stays downloadable only while it is
+retained, by default for 15 minutes from the moment the console sent the backup.
+
+The browser saves the archive with the permissions of its downloads directory. An archive holds
+password hashes, client secrets, and TLS private keys, so keep a downloaded archive where only its
+owner can read it.
+
+### Restoring An Archive
+
+The **Restore** form restores one domain of an archive, under its archived name or a new one, or a
+whole cluster archive with its policy for users the cluster already has. It can resume the restored
+domains at their archived lifecycle, and leave out source offsets or all runtime state.
+
+Choose the archive file, set the options, and select **Dry run**. The console reads the file once to
+measure its size and BLAKE3 digest, then streams it to the leader with the statement's `DRY RUN`
+form, showing how many bytes it has read and sent. The dry run reports what the restore would
+create: each domain under the name it would have, with its status, start version, models, and
+resource versions, and every step it would apply. The planned model run of each domain is drawn
+with the [transaction inspector's](#inspecting-a-transaction) view.
+
+**Restore** streams the archive again and runs the same statement without `DRY RUN`. It stays
+disabled until a dry run of the current options and file has planned the restore. The result lists
+each step as applied, failed, or not attempted: a restore that fails at a step keeps the steps
+before it, and the dialog names the step. A refusal shows the leader's reason, such as a domain
+that already exists or an archive that is not a valid backup archive, and changes nothing.
+
+A restore that skips archived state says so. The result lists the restore's warnings above its
+report, as `nervix-cli` prints them: the state the restored schedule cannot take, such as a window
+whose model changed, with the reason. The REPL prints the same warnings after the restore's
+message.
+
+A restore runs outside transactions, so the form refuses while the session holds one. Every attempt
+sends the same execution reference, statement, and archive: a lost connection or an unknown outcome
+streams the archive again, from its first byte, until the leader answers. If no answer arrives
+within about ten minutes, the dialog reports the restore's outcome as unknown and names its
+execution reference.
+
+The console never renders what an archive holds beyond the summary a backup reports and the report
+a restore returns.
 
 ## Domain Lifecycle
 

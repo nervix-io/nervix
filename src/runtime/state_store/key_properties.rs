@@ -180,7 +180,7 @@ fn bolero_malformed_runtime_state_keys_fail_typed_or_decode_canonically() {
                         matches!(
                             report.current_context(),
                             RuntimePersistenceError::InvalidStorageFormat
-                                | RuntimePersistenceError::DecodeState(_)
+                                | RuntimePersistenceError::DecodeState
                         ),
                         "{report:?}"
                     );

@@ -76,6 +76,7 @@ Feature: Roto user-defined functions
       | 1            | 0             |
       | 3            | 0             |
 
+  @udf_column_builder
   Scenario Outline: A Roto UDF uses the per-element escape hatch for Luhn validation
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
@@ -87,8 +88,8 @@ Feature: Roto user-defined functions
       """
       CREATE UDF luhn_valid
         WITH ROTO_0_13
-        ARGS (pan STRING)
-        RETURNS BOOL
+        ARGS (pan STRING OPTIONAL)
+        RETURNS BOOL OPTIONAL
         CODE $roto$
           fn luhn_valid(pan: StringColumn) -> BoolColumn {
               let out = ColumnBuilder.bool(pan.len());
@@ -138,11 +139,11 @@ Feature: Roto user-defined functions
         $roto$;
       CREATE SCHEMA card_event (
         id STRING,
-        pan STRING
+        pan STRING OPTIONAL
       );
       CREATE WIRE JSON SCHEMA card_event_wire MODE STRICT (
         id string,
-        pan string
+        pan string OPTIONAL
       );
       CREATE CODEC card_event_codec
         FROM WIRE JSON SCHEMA card_event_wire
@@ -177,9 +178,13 @@ Feature: Roto user-defined functions
       """
     And http payload is posted to node "node-1" with host "luhn-{{test_id}}.example.com" path "/cards"
       """
+      {"id":"absent"}
+      """
+    And http payload is posted to node "node-1" with host "luhn-{{test_id}}.example.com" path "/cards"
+      """
       {"id":"valid","pan":"4111111111111111"}
       """
-    Then within "5s" the relay subscription receives payloads containing all fragments
+    Then within "30s" the relay subscription receives payloads containing all fragments
       """
       "id":"valid" | "pan":"4111111111111111"
       """

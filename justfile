@@ -413,22 +413,25 @@ test-primitives-compile:
     cargo check --package nervix-primitives --lib --target wasm32-unknown-unknown
 
 # Run the Deloxide diagnostic lane in its active-only selection: every workload
-# tests/deloxide-inventory.toml registers for the `deloxide` build, after the prerequisites. The lane
-# builds each invocation for the selection under target/deloxide, so the diagnostic server binary
-# never replaces the ordinary one, and refuses a registered workload that is missing or ignored and a
-# probe, owner test or tagged scenario that is not registered. The probes of nervix-deadlock run
-# every workload in a disposable child that must report its cycle, record its evidence and end as
-# its contract says; the diagnostic owner tests each install their detector in a fresh process; and
-# the scenario binary runs the `@deadlock_diagnostics`, `@restore_installation`,
+# tests/deloxide-inventory.toml registers for the `deloxide` build, after the prerequisites. The
+# lane builds each invocation for the selection under target/deloxide, so the diagnostic server
+# binary never replaces the ordinary one, and refuses a registered workload that is missing or
+# ignored and a probe, conformance check, owner test or tagged scenario that is not registered. The
+# probes of nervix-deadlock run every workload in a disposable child that must report its cycle,
+# record its evidence and end as its contract says; the tracked locks' conformance checks of
+# nervix-primitives and the diagnostic owner tests each install their detector in a fresh process;
+# and the scenario binary runs the `@deadlock_diagnostics`, `@restore_installation`,
 # `@client_ingestor_alter_drain`, `@deadlock_reports`, `@memory_pressure_pause`,
-# `@client_io_03_consumer_restore` and `@client_io_03_generation` scenarios and then the
+# `@client_io_03_consumer_restore`, `@client_io_03_generation`, `@remote_ack_owners`, `@udf_column_builder`,
+# `@vhost_tls_rebinding` and `@inferencer_branch_batches` scenarios and then the
 # `@paced_simulation_reopen` scenarios with the diagnostic Rust paced driver, without retries, on
-# in-process nodes and real diagnostic server processes of one and three nodes. Every process runs in
-# a session of its own within its bound and the inventory's budget, and the lane fails on an active
-# deadlock (status 3), a diagnostic failure (4), a signal, a timeout or an expired budget (124), a
-# leftover process, incomplete accounting, and missing, partly written or nonqualifying evidence. A
-# fresh attempt under target/deloxide/test-deloxide/deloxide keeps every log, artifact, evidence file
-# and finding description, and lane.json with the exact commands, bounds and outcomes. Under the
+# in-process nodes and real diagnostic server processes of one and three nodes. Every process runs
+# in a session of its own within its bound and the inventory's budget, and the lane fails on an
+# active deadlock (status 3), a diagnostic failure (4), a signal, a timeout or an expired budget
+# (124), a leftover process, incomplete accounting, and missing, partly written or nonqualifying
+# evidence. A fresh attempt under target/deloxide/test-deloxide/deloxide keeps every log, artifact,
+# evidence file and finding description, and lane.json with the exact commands, bounds and
+# outcomes. Under the
 # native coverage collector the same lane builds instrumented and records its completion there.
 test-deloxide: tests-deps test-deloxide-workloads
 
@@ -2395,8 +2398,10 @@ deps-down:
     docker compose down --remove-orphans --volumes
 
 # Run black-box cluster scenarios against an explicitly supplied, already-built Nervix image.
+# The script replaces the recipe's shell, so the TERM that just passes on when it is cancelled
+# reaches the controller, whose exit trap heals, captures evidence and cleans up.
 chaos *args:
-    bash scripts/chaos/chaos.sh {{ args }}
+    exec bash scripts/chaos/chaos.sh {{ args }}
 
 # Regenerate the prebuilt WASM guest the stateful chaos scenarios upload, after a guest ABI change.
 # The chaos runner itself never builds guest code; `cargo test --package nervix-wasm` checks that

@@ -258,7 +258,7 @@ impl SessionServiceImpl {
             {
                 Ok(local_exists) => exists |= local_exists,
                 Err(error) => {
-                    return command_error(error.to_string());
+                    return command_error(format!("{error:#}"));
                 }
             }
         }
@@ -369,10 +369,17 @@ impl SessionServiceImpl {
             .describe_local_stream_exists(&request.domain, &request.relay, &key)
         {
             Ok(exists) => Ok(exists),
-            Err(crate::runtime::RuntimeError::RelayNotInstantiated { .. }) => Ok(false),
+            Err(error)
+                if matches!(
+                    error.current_context(),
+                    crate::runtime::RuntimeError::RelayNotInstantiated { .. }
+                ) =>
+            {
+                Ok(false)
+            }
             Err(error) => Err(RemoteOperationFailure::Failed {
                 subject,
-                reason: error.to_string(),
+                reason: format!("{error:#}"),
             }),
         }
     }

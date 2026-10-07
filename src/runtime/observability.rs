@@ -263,18 +263,16 @@ impl Runtime {
         domain: &DomainName,
         relay: &RelayName,
         key: &Option<BranchKey>,
-    ) -> Result<bool, RuntimeError> {
+    ) -> error_stack::Result<bool, RuntimeError> {
         let Some(execution) = self.inner.executions.get(domain) else {
-            return Err(RuntimeError::RelayNotInstantiated {
-                domain: domain.as_str().to_string(),
-                relay: relay.as_str().to_string(),
-            });
+            return Err(Report::new(RuntimeError::relay_not_instantiated(
+                domain, relay,
+            )));
         };
         let Some(services) = execution.relay_services.get(relay) else {
-            return Err(RuntimeError::RelayNotInstantiated {
-                domain: domain.as_str().to_string(),
-                relay: relay.as_str().to_string(),
-            });
+            return Err(Report::new(RuntimeError::relay_not_instantiated(
+                domain, relay,
+            )));
         };
         Ok(services.branch_presence.contains(key.as_ref()))
     }
@@ -293,7 +291,7 @@ impl Runtime {
                 domain = domain.as_str(),
                 kind,
                 identifier = identifier.as_str(),
-                error = %error,
+                error = format!("{error:#}"),
                 "failed to refresh branch-aggregated metrics before describe"
             );
         }
@@ -522,7 +520,7 @@ impl Runtime {
         domain: &DomainName,
         kind: &str,
         identifier: impl Into<ModelName>,
-    ) -> Result<(), RuntimePersistenceError> {
+    ) -> error_stack::Result<(), RuntimePersistenceError> {
         let identifier = identifier.into();
         let Ok(kind) = kind.to_ascii_lowercase().parse::<ModelKind>() else {
             return Ok(());
@@ -590,27 +588,11 @@ impl Runtime {
             Some(control) => control.counters(),
             None => IngestorQuiesceCounters::default(),
         };
-        if !self.inner.executions.contains_key(domain) {
-            let transient_error = match self.inner.domain_instantiation_errors.get(domain) {
-                Some(error) => Some(error.value().clone()),
-                None => transient.error.clone(),
-            };
-            return Ok(IngestorDescribe {
-                running: false,
-                ready: false,
-                quiesce_state: quiesce_state.clone(),
-                quiesce_counters,
-                memory_backpressure_paused,
-                transient_error,
-                reconnect_backoff: transient.reconnect_backoff.clone(),
-                reconnect_wait_millis: transient.reconnect_wait_millis,
-                kafka_domain_offsets: None,
-                client_producers: self.client_ingestor_gauges(domain, ingestor),
-            });
-        }
-
         let key = DomainNodeRef::node_in(domain.clone(), ModelKind::Ingestor, ingestor.clone());
-        if !self.inner.ingestors.contains_key(&key) {
+        if !self.inner.executions.contains_key(domain) || !self.inner.ingestors.contains_key(&key) {
+            // An ingestor that did not start describes its own start report. One that recorded no
+            // failure of its own is not running because its domain's execution failed to build,
+            // and describes that build's failure.
             let transient_error = if let Some(error) = transient.error.clone() {
                 Some(error)
             } else {
@@ -774,7 +756,9 @@ mod tests {
     use ahash::HashMap;
     use fjall::Database;
     use futures_util::FutureExt as _;
-    use nervix_models::{ClusterNodeName, IngestorName, ModelKind, ModelName, ParseAsType};
+    use nervix_models::{
+        ClusterNodeName, IngestorName, ModelKind, ModelName, ParseAsType, RelayName,
+    };
     use nervix_primitives::sync::Arc;
     use tempfile::tempdir;
 
@@ -1235,5 +1219,29 @@ mod tests {
             "describe should expose domain instantiation error, got {:?}",
             describe.transient_error
         );
+    }
+
+    #[nervix_primitives::test]
+    async fn a_local_stream_is_described_only_for_a_relay_this_node_instantiates() {
+        let runtime = Runtime::new();
+        let domain = domain("default");
+        let relay = named::<RelayName>("events");
+        let not_instantiated = "relay 'events' in domain 'default' is not instantiated";
+
+        let unbuilt = runtime
+            .describe_local_stream_exists(&domain, &relay, &None)
+            .expect_err("a domain without an execution instantiates no relay");
+        assert_eq!(format!("{unbuilt:#}"), not_instantiated);
+
+        install_test_domain_execution(
+            &runtime,
+            &domain,
+            Vec::new(),
+            DomainRoutingSnapshot::default(),
+        );
+        let undeclared = runtime
+            .describe_local_stream_exists(&domain, &relay, &None)
+            .expect_err("an execution without the relay has no stream for it");
+        assert_eq!(format!("{undeclared:#}"), not_instantiated);
     }
 }

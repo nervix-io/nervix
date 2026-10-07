@@ -122,7 +122,7 @@ impl SessionServiceImpl {
                     )),
                 },
                 Err(error) => command_error(format!(
-                    "domain '{}' exists, but its stopped state is not usable everywhere: {error}",
+                    "domain '{}' exists, but its stopped state is not usable everywhere: {error:#}",
                     state.id.as_str()
                 )),
             };
@@ -154,7 +154,7 @@ impl SessionServiceImpl {
         }
         if let Err(error) = self.apply_current_cluster_state().await {
             return command_error(format!(
-                "created domain '{}', but its stopped state failed to become usable: {error}",
+                "created domain '{}', but its stopped state failed to become usable: {error:#}",
                 state.id.as_str()
             ));
         }
@@ -228,11 +228,12 @@ impl SessionServiceImpl {
         }
 
         if let Err(error) = self.apply_current_cluster_state().await {
+            let reason = format!("{error:#}");
             if let (Some(impact), Some(attempt)) = (impact, attempt) {
                 impact.fail(
                     attempt,
                     nervix_models::ImpactDiagnosticKind::Quiescence,
-                    error.to_string(),
+                    reason.clone(),
                 );
             }
             return Err(self
@@ -242,7 +243,7 @@ impl SessionServiceImpl {
                     impact.zip(attempt),
                     Report::new(DomainAlterError::StopIngestion {
                         domain: domain.clone(),
-                        reason: error.to_string(),
+                        reason,
                     }),
                 )
                 .await);
@@ -562,7 +563,7 @@ impl SessionServiceImpl {
         self.apply_current_cluster_state().await.map_err(|error| {
             Report::new(DomainAlterError::RestoreIngestion {
                 domain: domain.clone(),
-                reason: error.to_string(),
+                reason: format!("{error:#}"),
             })
         })
     }
@@ -606,7 +607,7 @@ impl SessionServiceImpl {
             failures.push(format!("stopping it again failed: {error}"));
         }
         if let Err(error) = self.apply_current_cluster_state().await {
-            failures.push(format!("reapplying the cluster state failed: {error}"));
+            failures.push(format!("reapplying the cluster state failed: {error:#}"));
         }
         if failures.is_empty() {
             return String::new();
@@ -678,7 +679,7 @@ impl SessionServiceImpl {
                     },
                     Err(error) => command_error(format!(
                         "domain '{}' exists, but its stopped state is not usable everywhere: \
-                         {error}",
+                         {error:#}",
                         create.id.as_str()
                     )),
                 };
@@ -699,7 +700,7 @@ impl SessionServiceImpl {
                 if let Err(error) = self.apply_current_cluster_state().await {
                     return command_error(format!(
                         "created domain '{}', but its stopped state failed to become usable: \
-                         {error}",
+                         {error:#}",
                         create.id.as_str()
                     ));
                 }
@@ -758,7 +759,7 @@ impl SessionServiceImpl {
                 )),
                 Err(error) => command_error(format!(
                     "domain '{}' already has placement {}, but it is not usable everywhere: \
-                     {error}",
+                     {error:#}",
                     domain.as_str(),
                     alter.policy.as_ref()
                 )),
@@ -863,7 +864,7 @@ impl SessionServiceImpl {
             }
             return command_error(format!(
                 "committed placement and schedule for domain '{}', but the destination failed to \
-                 activate: {error}",
+                 activate: {error:#}",
                 domain.as_str()
             ));
         }
@@ -874,7 +875,7 @@ impl SessionServiceImpl {
         {
             return command_error(format!(
                 "committed placement and schedule for domain '{}', but ownership state activation \
-                 did not complete: {error}",
+                 did not complete: {error:#}",
                 domain.as_str()
             ));
         }
@@ -990,7 +991,7 @@ impl SessionServiceImpl {
                 if let Err(error) = self.apply_current_cluster_state().await {
                     let rollback = self.roll_back_started_domain(domain_id).await;
                     return command_error(format!(
-                        "failed to start domain '{}': {error}{rollback}",
+                        "failed to start domain '{}': {error:#}{rollback}",
                         domain_id.as_str()
                     ));
                 }
@@ -1029,7 +1030,7 @@ impl SessionServiceImpl {
             Ok(()) => {
                 if let Err(error) = self.apply_current_cluster_state().await {
                     return command_error(format!(
-                        "stopped domain '{}', but remote stopping did not complete: {error}",
+                        "stopped domain '{}', but remote stopping did not complete: {error:#}",
                         domain_id.as_str()
                     ));
                 }

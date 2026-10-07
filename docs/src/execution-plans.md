@@ -282,8 +282,12 @@ report identifies the domain and failing part of the revision, with node, route,
 detail beneath it. Local binding can still fail when a pinned file is unavailable, a VM program
 cannot compile against installed capabilities, a declared route cadence cannot be parsed for its
 task, a module cannot prepare, or a connector cannot open. Materialized-state dependencies also
-bind to the local relay state at this boundary. The runtime records domain-instantiation or
-ingestor-transient errors. It does not mark a failed cluster revision applied. Source and sink
+bind to the local relay state at this boundary. A local failure to build or change a domain's
+execution is reported as `RuntimeError::BuildDomainExecution`, naming the domain, with the
+`ExecutionBuildError` step that failed and that step's own report beneath it, as
+[Errors And Diagnostics](./errors-and-diagnostics.md#absence-validation-and-planning) describes.
+The runtime records the whole chain as the domain's instantiation error, and an ingestor's start
+report as its transient error. It does not mark a failed cluster revision applied. Source and sink
 delivery failures retain their existing ACK,
 retry, and message-error classification. Diagnostics identify operations and fields without
 including sensitive payload values.

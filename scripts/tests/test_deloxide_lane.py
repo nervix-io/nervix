@@ -129,6 +129,29 @@ INVENTORY = textwrap.dedent(
     """
 )
 
+# Checks that run one per process and record no evidence, as the tracked locks' conformance checks
+# of the primitive crate do.
+CONFORMANCE = textwrap.dedent(
+    """
+    [[invocation]]
+    bound_seconds = 30
+    features = ["native"]
+    id = "conformance"
+    kind = "libtest-each"
+    marker = "tests::tracked_locks::"
+    package = "nervix-primitives"
+    target = "lib"
+
+    [[workload]]
+    coverage = "Debug formatting of a held lock."
+    id = "primitive.debug"
+    invariant = "Formatting never waits."
+    invocation = "conformance"
+    selections = ["deloxide", "deloxide-order"]
+    test = "tests::tracked_locks::debug_never_waits"
+    """
+)
+
 FEATURE = textwrap.dedent(
     """
     @lane
@@ -200,7 +223,8 @@ class ScriptedProcesses(Processes):
         }
         if selection == "deloxide-order":
             self.listed["probes"].append("order_reports")
-        self.listed_ignored: dict[str, list[str]] = {"probes": ["workload"], "server": []}
+        self.listed["primitives"] = ["tests::tracked_locks::debug_never_waits", "tests::atomics::ordinary"]
+        self.listed_ignored: dict[str, list[str]] = {"probes": ["workload"], "server": [], "primitives": []}
         self.endings: dict[str, Ended] = {}
         self.outputs: dict[str, str] = {}
         self.evidence: dict[str, list[str]] = {
@@ -218,6 +242,8 @@ class ScriptedProcesses(Processes):
             return artifact("test", "active_cycles", self.executable("probes"), self.root / "crates/deadlock/Cargo.toml")
         if name == "owner-tests-build":
             return artifact("lib", "nervix_server", self.executable("server"), self.root / "Cargo.toml")
+        if name == "conformance-build":
+            return artifact("lib", "nervix_primitives", self.executable("primitives"), self.root / "crates/primitives/Cargo.toml")
         if name == "scenarios-build":
             lines = [
                 artifact("bin", "nervix-server", self.executable("nervix-server"), self.root / "Cargo.toml", test=False),
@@ -241,6 +267,8 @@ class ScriptedProcesses(Processes):
             launch.log.write_text(libtest(outcomes))
         elif launch.name.startswith("owner-tests-"):
             launch.log.write_text(libtest({"store::tests::deloxide_store": "ok"}, filtered=2))
+        elif launch.name.startswith("conformance-"):
+            launch.log.write_text(libtest({"tests::tracked_locks::debug_never_waits": "ok"}, filtered=1))
         elif launch.name == "scenarios" or launch.name.startswith("scenarios-"):
             summary = self.scenario_summaries.get(launch.name, self.scenario_summary)
             launch.log.write_text(f"[Summary]\n1 feature\n{summary}\n4 steps (4 passed)\n")
@@ -351,7 +379,8 @@ class InventoryTests(unittest.TestCase):
         inventory = deloxide_lane.load_inventory(REPOSITORY)
         self.assertEqual(list(inventory.selections), ["deloxide", "deloxide-order"])
         self.assertEqual(
-            list(inventory.invocations), ["probes", "owner-tests", "scenarios", "paced-simulation"]
+            list(inventory.invocations),
+            ["probes", "primitive-conformance", "owner-tests", "scenarios", "paced-simulation"],
         )
         self.assertEqual(inventory.selections["deloxide"].recorded, "ActiveOnly")
         self.assertEqual(inventory.selections["deloxide-order"].recorded, "OrderAnalysis")
@@ -955,6 +984,57 @@ class LaneTests(unittest.TestCase):
         probes = next(launch for launch in processes.launches if launch.name == "probes")
         self.assertEqual(probes.argv, ("python3", "scripts/native_coverage.py", "exec", str(processes.executable("probes"))))
         self.assertEqual(record(lane)["workspace"]["instrumented"], True)
+
+    def test_a_check_that_records_no_evidence_completes_on_its_own_exit_and_report(self) -> None:
+        self.fixture = Fixture(self, INVENTORY + CONFORMANCE)
+        processes = ScriptedProcesses(self.fixture.root)
+        lane = self.fixture.lane(processes)
+        self.assertEqual(quietly(lane.execute), 0)
+        content = record(lane)
+        self.assertEqual(content["counts"], {"discovered": 5, "selected": 5, "executed": 5, "completed": 5})
+        self.assertEqual(content["workloads"][-1], {
+            "id": "primitive.debug",
+            "invocation": "conformance",
+            "test": "tests::tracked_locks::debug_never_waits",
+            "outcome": "ok",
+            "completed": True,
+        })
+        # Only the invocations that record evidence are observed and qualified.
+        self.assertEqual(content["findings"]["observations"], 3)
+        self.assertEqual(deloxide_lane.read_complete(lane.record.path, "deloxide"), content)
+        launches = {launch.name: launch for launch in processes.launches}
+        self.assertEqual(
+            launches["conformance-build"].argv[3:8],
+            ("--package", "nervix-primitives", "--features", "native deloxide", "--lib"),
+        )
+        check = launches["conformance-primitive.debug"]
+        self.assertEqual(check.argv[1:], ("tests::tracked_locks::debug_never_waits", "--exact", "--test-threads=1"))
+        self.assertEqual(check.cwd, self.fixture.root / "crates/primitives")
+        self.assertEqual(check.bound_seconds, 30)
+        self.assertNotIn(deloxide_lane.EVIDENCE_VARIABLE, check.environment)
+        self.assertFalse((lane.attempt / "evidence" / "conformance").exists())
+
+    def test_a_check_whose_detector_aborted_it_fails_the_lane_as_signaled(self) -> None:
+        self.fixture = Fixture(self, INVENTORY + CONFORMANCE)
+        processes = ScriptedProcesses(self.fixture.root)
+        processes.outputs["conformance-primitive.debug"] = (
+            "running 1 test\na conformance check of the tracked locks deadlocked\n"
+        )
+        processes.endings["conformance-primitive.debug"] = Ended(9, Ending.SIGNALED, None, signal.SIGABRT, 0.2)
+        status, content = self.run_failing(processes)
+        self.assertEqual(status, 1)
+        self.assertEqual(content["failure"]["class"], "signaled")
+        self.assertIn("conformance-primitive.debug was killed by SIGABRT", content["failure"]["detail"])
+        self.assertIn("primitive.debug did not run", content["failure"]["detail"])
+
+        processes = ScriptedProcesses(self.fixture.root)
+        processes.listed["primitives"].append("tests::tracked_locks::a_new_check")
+        status, content = self.run_failing(processes)
+        self.assertEqual(content["failure"]["class"], "inventory")
+        self.assertIn(
+            "conformance: tests::tracked_locks::a_new_check is in the build but not registered",
+            content["failure"]["detail"],
+        )
 
     def run_failing(self, processes: ScriptedProcesses, selection: str = "deloxide", clock: Callable[[], float] = time.monotonic) -> tuple[int, dict[str, object]]:
         lane = self.fixture.lane(processes, selection, clock=clock)

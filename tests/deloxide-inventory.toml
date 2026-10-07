@@ -8,7 +8,7 @@
 # invocation selects or executes nothing; when a process deadlocks, fails its diagnostics, is killed
 # by a signal, outlives its bound or leaves a process behind; and when evidence is missing, partly
 # written, or does not qualify. A renamed or moved workload is renamed here in the same change, and
-# a new probe, owner test or tagged scenario joins its invocation's workloads.
+# a new probe, conformance check, owner test or tagged scenario joins its invocation's workloads.
 #
 # Every `[[owner]]` names a source file in which the compiler finds a tracked blocking acquisition
 # in a diagnostic configuration, and records which workloads reach those locks, what path the lane
@@ -45,6 +45,19 @@ kind = "libtest"
 package = "nervix-deadlock"
 target = "test:active_cycles"
 
+# The tracked locks' own conformance checks, each in a process of its own. The primitive crate sits
+# below nervix-deadlock, which owns evidence files, so a check records none: its detector's sink
+# aborts the process on any finding, and the lane classifies that process by how it ended. The bound
+# is twice the minute a check gives its own participants before it fails by assertion.
+[[invocation]]
+bound_seconds = 120
+features = ["native"]
+id = "primitive-conformance"
+kind = "libtest-each"
+marker = "tests::tracked_locks::"
+package = "nervix-primitives"
+target = "lib"
+
 [[invocation]]
 bound_seconds = 600
 evidence = true
@@ -75,6 +88,9 @@ tags = [
   "@client_io_03_consumer_restore",
   "@client_io_03_generation",
   "@remote_ack_owners",
+  "@udf_column_builder",
+  "@vhost_tls_rebinding",
+  "@inferencer_branch_batches",
 ]
 target = "test:scenarios"
 
@@ -266,6 +282,62 @@ invariant = "A finding whose description cannot be written, or whose standard er
 invocation = "probes"
 selections = ["deloxide-order"]
 test = "diagnostic_output_failure_and_a_blocked_descriptor_end_with_failure"
+
+[[workload]]
+coverage = "The thread-blocking primitives a diagnostic build selects."
+id = "primitive.selected-locks"
+invariant = "A diagnostic build selects the tracked mutex, read-write lock, guards and condition variable, and keeps the standard library's barrier, one-time initialization and channel."
+invocation = "primitive-conformance"
+selections = ["deloxide", "deloxide-order"]
+test = "tests::tracked_locks::deloxide_selects_the_tracked_locks_and_keeps_the_rest"
+
+[[workload]]
+coverage = "The tracked adapters' own acquisitions: `Debug` formatting of a free and of a held mutex and read-write lock."
+id = "primitive.debug-formatting"
+invariant = "Formatting a tracked mutex or read-write lock tries the lock and never waits: a free lock prints its value, a lock its own thread holds prints `<locked>`, a read-write lock prints its value beside another reader, and no finding reaches the detector's sink."
+invocation = "primitive-conformance"
+selections = ["deloxide", "deloxide-order"]
+test = "tests::tracked_locks::debug_formatting_never_waits_for_a_held_lock"
+
+[[workload]]
+coverage = "Construction from a value or its default, exclusive borrows, non-blocking acquisitions and moving the value out of a tracked lock."
+id = "primitive.value-handoff"
+invariant = "A tracked mutex and read-write lock hand their value in and out as the locks they replace do, and a non-blocking writer is refused while a reader holds the lock."
+invocation = "primitive-conformance"
+selections = ["deloxide", "deloxide-order"]
+test = "tests::tracked_locks::a_lock_hands_its_value_in_and_out"
+
+[[workload]]
+coverage = "A tracked condition variable waking two waiters through wait and notify_all."
+id = "primitive.notification-count"
+invariant = "A notification returns exactly the two waiters it wakes, and the next one returns none."
+invocation = "primitive-conformance"
+selections = ["deloxide", "deloxide-order"]
+test = "tests::tracked_locks::notify_all_counts_the_waiters_it_wakes"
+
+[[workload]]
+coverage = "A second detector installation in one process."
+id = "primitive.second-installation"
+invariant = "A second installation is refused as already claimed and the first detector stays installed."
+invocation = "primitive-conformance"
+selections = ["deloxide", "deloxide-order"]
+test = "tests::tracked_locks::a_second_installation_is_refused"
+
+[[workload]]
+coverage = "The detector registry's record of a thread across its exit."
+id = "primitive.exited-thread"
+invariant = "A thread the registry learned is forgotten when it exits, so the registry holds no more threads than are alive."
+invocation = "primitive-conformance"
+selections = ["deloxide", "deloxide-order"]
+test = "tests::tracked_locks::an_exited_thread_leaves_the_registry"
+
+[[workload]]
+coverage = "A tracked read acquisition that waits for a writer."
+id = "primitive.released-wait"
+invariant = "A reader that waits for a write guard proceeds with the written value once the guard is released, and no finding reaches the detector's sink."
+invocation = "primitive-conformance"
+selections = ["deloxide", "deloxide-order"]
+test = "tests::tracked_locks::a_waiting_acquisition_proceeds_once_the_lock_is_released"
 
 [[workload]]
 coverage = "State-store staging, publication, snapshot readers, queued checkpoint writers, cleanup and restore reclamation under tracked installation locks."
@@ -527,6 +599,36 @@ scenario = "Stopping and restarting a domain closes the consumer and creates a n
 selections = ["deloxide", "deloxide-order"]
 
 [[workload]]
+coverage = "The bool column builder a Roto function shares across its callbacks: push, push_null and finish within each admitted call."
+examples = 2
+feature = "tests/features/runtime/udf.feature"
+id = "scenario.udf-column-builder"
+invariant = "A Roto function that validates card numbers one element at a time through the bool column builder selects the valid card and drops the invalid and the absent one, on one and three nodes."
+invocation = "scenarios"
+scenario = "A Roto UDF uses the per-element escape hatch for Luhn validation"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
+coverage = "The HTTPS listener's TLS configuration: installed by every node as a TLS VHOST is created and rebound, and read by every connection accepted meanwhile."
+examples = 2
+feature = "tests/features/runtime/vhost.feature"
+id = "scenario.vhost-tls-rebinding"
+invariant = "Rebinding a VHOST to another version of its TLS bundle makes every node's HTTPS listener present the new certificate while background HTTPS ingestion is accepted throughout, on one and three nodes."
+invocation = "scenarios"
+scenario = "Rebinding a VHOST to another version of its TLS bundle refreshes every HTTPS listener without pausing ingestion"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
+coverage = "The ONNX session lock of a batched inferencer whose model runs for interleaved concrete branches."
+examples = 2
+feature = "tests/features/runtime/inferencer.feature"
+id = "scenario.inferencer-branch-batches"
+invariant = "A batched inferencer scores interleaved records of two branches in one batch for each branch and keeps each branch's rows apart, on one and three nodes."
+invocation = "scenarios"
+scenario = "Batched inferencer isolates interleaved concrete branches"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
 coverage = "The Rust client library in a diagnostic paced driver, and the nodes it drives, across a reopen."
 examples = 4
 feature = "tests/features/runtime/paced_simulation.feature"
@@ -656,12 +758,12 @@ workloads = [
 ]
 
 [[owner]]
-gap = "Roto user-defined function calls; no lane workload calls a Roto function."
 path = "crates/nervix-roto/src/lib.rs"
+workloads = ["scenario.udf-column-builder"]
 
 [[owner]]
-gap = "The adapters' own acquisitions are their non-blocking Debug formatting; the primitive conformance checks of `just test-primitives-deloxide` cover it and no lane workload formats a tracked lock."
 path = "crates/primitives/src/sync/blocking/tracked.rs"
+workloads = ["primitive.debug-formatting"]
 
 [[owner]]
 path = "examples/paced-simulation/rust/src/report.rs"
@@ -722,8 +824,8 @@ workloads = [
 ]
 
 [[owner]]
-gap = "HTTPS listener TLS configuration for TLS VHOSTs; no lane workload configures a TLS VHOST."
 path = "src/application/tls.rs"
+workloads = ["scenario.vhost-tls-rebinding"]
 
 [[owner]]
 path = "src/application/tracing_setup.rs"
@@ -770,8 +872,12 @@ path = "src/runtime/branch_aggregated_state.rs"
 workloads = ["scenario.client-alter-drain"]
 
 [[owner]]
-gap = "Replica announcements of branch lifecycle checkpoints; the lane's WASM restore scenarios run without replicas."
 path = "src/runtime/branch_lifecycle_state.rs"
+workloads = [
+  "scenario.branch-state-resume",
+  "scenario.branch-state-stale-coordinator",
+  "scenario.restore-generation",
+]
 
 [[owner]]
 path = "src/runtime/branch_runtime.rs"
@@ -786,8 +892,8 @@ path = "src/runtime/force_flush.rs"
 workloads = ["scenario.client-alter-drain"]
 
 [[owner]]
-gap = "ONNX inferencer sessions; no lane workload runs an inferencer."
 path = "src/runtime/inferencer.rs"
+workloads = ["scenario.inferencer-branch-batches"]
 
 [[owner]]
 path = "src/runtime/ingestor_quiesce.rs"

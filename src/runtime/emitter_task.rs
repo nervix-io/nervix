@@ -341,19 +341,19 @@ impl EmitterSinkContext {
             .change_context(EmitterRuntimeError::FlushTiming)
     }
 
-    pub(super) fn parse_flush_policy(
-        &self,
-        kind: &str,
-        policy: &FlushPolicy,
-    ) -> Option<RuntimeFlushPolicy> {
-        match Runtime::parse_runtime_node_flush_policy(&self.domain, kind, &self.emitter, policy) {
+    pub(super) fn parse_flush_policy(&self, policy: &FlushPolicy) -> Option<RuntimeFlushPolicy> {
+        match Runtime::parse_runtime_node_flush_policy(policy) {
             Ok(policy) => Some(policy),
             Err(error) => {
-                self.runtime.events().report_error(error.to_string());
+                self.runtime.events().report_error(format!(
+                    "emitter '{}' in domain '{}' has an invalid flush policy: {error:#}",
+                    self.emitter.as_str(),
+                    self.domain.as_str()
+                ));
                 warn!(
                     domain = self.domain.as_str(),
                     emitter = self.emitter.as_str(),
-                    error = %error,
+                    error = format!("{error:#}"),
                     "failed to parse emitter flush policy"
                 );
                 None
@@ -452,15 +452,19 @@ impl SinkGeneralErrorHandler for EmitterSinkContext {
     nervix::dispatch(reason = "the failure is formatted through its context's Display contract")
 )]
 pub(super) fn emitter_error_message<C: error_stack::Context>(error: &Report<C>) -> String {
-    error
-        .frames()
-        .find_map(|frame| match frame.kind() {
-            FrameKind::Attachment(AttachmentKind::Printable(attachment)) => {
-                Some(attachment.to_string())
-            }
-            FrameKind::Context(_) | FrameKind::Attachment(_) => None,
-        })
-        .unwrap_or_else(|| error.current_context().to_string())
+    emitter_attached_message(error).unwrap_or_else(|| error.current_context().to_string())
+}
+
+/// The first printable attachment of `error`, which is how an emitter describes its own failure.
+pub(super) fn emitter_attached_message<C: error_stack::Context>(
+    error: &Report<C>,
+) -> Option<String> {
+    error.frames().find_map(|frame| match frame.kind() {
+        FrameKind::Attachment(AttachmentKind::Printable(attachment)) => {
+            Some(attachment.to_string())
+        }
+        FrameKind::Context(_) | FrameKind::Attachment(_) => None,
+    })
 }
 
 pub(super) fn emitter_publish_error_is_retryable(error: &Report<EmitterRuntimeError>) -> bool {
@@ -861,13 +865,9 @@ impl EmitterTask {
             Arc::new(EmitterBufferedMessages::new(emitter_buffer_count.clone()));
         EmitterSinkStarter::check_client_config(&plan)
             .change_context(EmitterStartError::ClientConfig)?;
-        let input_collect_policy = Runtime::parse_runtime_node_input_collect_policy(
-            domain,
-            "emitter",
-            &emitter.name,
-            emitter.collect_policy.as_ref(),
-        )
-        .change_context(EmitterStartError::CollectPolicy)?;
+        let input_collect_policy =
+            Runtime::parse_runtime_node_input_collect_policy(emitter.collect_policy.as_ref())
+                .change_context(EmitterStartError::CollectPolicy)?;
         let (commands, command_rx) = mpsc::channel(4);
         let (stop_signal, mut stop_rx) = watch::channel(None);
         let task_stop_signal = stop_signal.clone();
@@ -2346,13 +2346,10 @@ mod tests {
         context.report_flush_error("nats", "flush failed");
         assert!(
             context
-                .parse_flush_policy(
-                    "emitter",
-                    &FlushPolicy::Each {
-                        interval: "not-a-duration".to_string(),
-                        max_batch_size: "1MiB".to_string()
-                    }
-                )
+                .parse_flush_policy(&FlushPolicy::Each {
+                    interval: "not-a-duration".to_string(),
+                    max_batch_size: "1MiB".to_string()
+                })
                 .is_none()
         );
 
@@ -2366,7 +2363,10 @@ mod tests {
         assert!(messages[0].contains("failed to initialize nats emitter"));
         assert!(messages[1].contains("failed to publish nats message"));
         assert!(messages[2].contains("failed to flush nats rows"));
-        assert!(messages[3].contains("invalid flush_each 'not-a-duration'"));
+        assert!(messages[3].contains(
+            "emitter 'output' in domain 'emitter_tests' has an invalid flush policy: invalid \
+             flush_each 'not-a-duration'"
+        ));
     }
 
     #[nervix_primitives::test]

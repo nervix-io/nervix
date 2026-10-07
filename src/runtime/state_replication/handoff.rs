@@ -237,7 +237,7 @@ impl Runtime {
                 &entity.domain,
                 &entity.node,
             )
-            .map_err(|error| OwnershipHandoffError::persistence(error.current_context().clone()))?;
+            .change_context(OwnershipHandoffError::Persistence)?;
             discarded = discarded
                 .checked_add(1)
                 .assured("the discarded count cannot exceed the collected preparation count");

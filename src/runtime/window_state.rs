@@ -622,10 +622,12 @@ pub(super) async fn decode_window_processor_snapshot(
 }
 
 impl ReplicatedWindowProcessorState {
+    /// The window state of `placement`, publishing `initial` as its sealed snapshot. The snapshot
+    /// is opened only when a branch restores its window from it.
     pub(super) fn new(
         placement: RuntimeStatePlacement,
         initial: Option<PersistedRuntimeStateEntry>,
-    ) -> Result<Self, RuntimePersistenceError> {
+    ) -> Self {
         let generations = match initial {
             Some(initial) => PublishedGenerations::restored(
                 initial.lsm,
@@ -633,12 +635,12 @@ impl ReplicatedWindowProcessorState {
             ),
             None => PublishedGenerations::restored(0, None),
         };
-        Ok(Self {
+        Self {
             placement,
             generations,
             replication: CheckpointReplication::new(),
             catalog: None,
-        })
+        }
     }
 
     /// This state as the state of a branch this node owns, with every window it publishes recorded

@@ -489,13 +489,14 @@ just deadlock-report inspect target/deloxide/test-deloxide/deloxide-order/run.XX
 ```
 
 The lane runs every workload `tests/deloxide-inventory.toml` registers for its selection: the
-disposable-process probes, the diagnostic owner tests and the tagged one- and three-node scenarios,
-without retries. It fails when a registered workload is missing or ignored, when a probe, owner test
-or tagged scenario is not registered, when a process deadlocks, fails its diagnostics, is killed by
-a signal, outlives its bound or leaves a process behind, and when evidence is missing, partly
-written or does not qualify. An active deadlock exits `3`, a diagnostic failure `4`, a timeout or the
-expired budget `124`, and every other failure `1`. A potential cycle fails the lane until its order
-is corrected; the lane keeps no list of approved cycles.
+disposable-process probes, the tracked locks' conformance checks, the diagnostic owner tests and the
+tagged one- and three-node scenarios, without retries. It fails when a registered workload is
+missing or ignored, when a probe, conformance check, owner test or tagged scenario is not
+registered, when a process deadlocks, fails its diagnostics, is killed by a signal, outlives its
+bound or leaves a process behind, and when evidence is missing, partly written or does not qualify.
+An active deadlock exits `3`, a diagnostic failure `4`, a timeout or the expired budget `124`, and
+every other failure `1`. A potential cycle fails the lane until its order is corrected; the lane
+keeps no list of approved cycles.
 
 Each run keeps a fresh attempt under `target/deloxide/test-deloxide/<selection>/` with every log,
 probe artifact, evidence file and finding description, and `lane.json` with the exact command,
@@ -507,22 +508,21 @@ just test-deloxide-replay target/deloxide/test-deloxide/deloxide/run.XXXX/lane.j
 just test-deloxide-qualification deloxide-order
 ```
 
-A new probe, owner test or tagged scenario joins the inventory with a stable identity, the
-invariant it owns, its selections and the coverage it declares; a renamed one is renamed there in
-the same change. A source file that starts acquiring tracked blocking locks needs an `[[owner]]`
-record naming the workloads that reach them or the path the lane does not reach and why:
-`just validate-deloxide-applicability`, part of `just validate`, holds the records to the compiler's
-acquisition catalog. For a pull request labeled `deloxide`, which every change the Deloxide rule
-applies to carries, CI's `deloxide` job runs both selections through the native coverage collector,
-as `just coverage-native-extras test-deloxide test-deloxide-order` does locally, and keeps their
-attempts, completion records and diagnostic coverage reports as artifacts.
-The ordinary report tool also exports selected artifacts, records explicit proofs in reviewed
-copies and qualifies whole-process evidence. `just coverage-deadlock` measures the diagnostic
-implementation and the ordinary report command in separate instrumented builds through the native
-collector. [Data-Plane Concurrency](./data-plane-concurrency.md#diagnostic-deadlock-detection) has the
-lane's classes, its record, proof requirements, current graph limits and the paths detection does
-not cover, and [Integration Test Lifecycle](./integration-test-lifecycle.md#diagnostic-lane) its
-bounds.
+A new probe, conformance check, owner test or tagged scenario joins the inventory with a stable
+identity, the invariant it owns, its selections and the coverage it declares; a renamed one is
+renamed there in the same change. A source file that starts acquiring tracked blocking locks needs
+an `[[owner]]` record naming the workloads that reach them or the path the lane does not reach and
+why: `just validate-deloxide-applicability`, part of `just validate`, holds the records to the
+compiler's acquisition catalog. For a pull request labeled `deloxide`, which every change the
+Deloxide rule applies to carries, CI's `deloxide` job runs both selections through the native
+coverage collector, as `just coverage-native-extras test-deloxide test-deloxide-order` does locally,
+and keeps their attempts, completion records and diagnostic coverage reports as artifacts. The
+ordinary report tool also exports selected artifacts, records explicit proofs in reviewed copies and
+qualifies whole-process evidence. `just coverage-deadlock` measures the diagnostic implementation
+and the ordinary report command in separate instrumented builds through the native collector.
+[Data-Plane Concurrency](./data-plane-concurrency.md#diagnostic-deadlock-detection) has the lane's
+classes, its record, proof requirements, current graph limits and the paths detection does not
+cover, and [Integration Test Lifecycle](./integration-test-lifecycle.md#diagnostic-lane) its bounds.
 
 ### Deterministic network simulation
 
@@ -560,6 +560,27 @@ limits, the scenario matrix, and how to investigate a failure.
 
 CI runs the suite and the replay check only for a pull request labeled `turmoil`. Label a pull
 request that changes the interconnect or a seam the simulation plugs into.
+
+### External cluster chaos
+
+`just chaos` runs black-box cluster scenarios against an already built Nervix image through Docker
+Compose, Pumba and the image's packaged CLI. It compiles nothing and needs no Rust toolchain. Two
+suites run selections of those scenarios, each as its own `just chaos run` command:
+
+```bash
+just chaos suite list
+just chaos suite smoke --image ghcr.io/nervix-io/nervix@sha256:<digest>
+just chaos suite soak --image ghcr.io/nervix-io/nervix@sha256:<digest>
+```
+
+The smoke suite runs a baseline, a leader crash with its restart and a partition with its recovery;
+the soak suite runs every delivered scenario with fixed and rotating mixed-instability seeds. CI
+runs the smoke suite against a pull request's own image only for a pull request labeled `chaos`,
+and the soak suite for one labeled `chaos-soak`. The nightly build of `main` runs the soak suite,
+and a manual run of the `Chaos` workflow takes a suite and an immutable image digest. Label a pull
+request that changes the chaos runner, or the membership, failover, recovery or delivery behavior
+its scenarios verify, with `chaos`. `scripts/chaos/README.md` describes every scenario, the suites,
+their budgets and artifacts, and how to reproduce or replay a failed run.
 
 ### SIMD kernel development
 

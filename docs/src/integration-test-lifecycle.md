@@ -57,14 +57,17 @@ scenario binary was built for the mode. The ordinary suite leaves the `@deadlock
 scenarios out by default: their steps assert a detector an ordinary build does not have.
 
 The [diagnostic lane](#diagnostic-lane) also selects the ordinary `@restore_installation`,
-`@client_ingestor_alter_drain`, `@memory_pressure_pause`, `@client_io_03_consumer_restore` and
-`@client_io_03_generation` scenarios and the local `@deadlock_reports`
+`@client_ingestor_alter_drain`, `@memory_pressure_pause`, `@client_io_03_consumer_restore`,
+`@client_io_03_generation`, `@udf_column_builder`, `@vhost_tls_rebinding` and
+`@inferencer_branch_batches` scenarios and the local `@deadlock_reports`
 inspection/export/triage workflow. They exercise
 the blocking applied-state guard through interrupted checkpoint staging, complete publication and
 runtime handle clearing, including a delayed coordinator after leadership transfer and a
-successor's START, the memory-pressure pause of starting and running ingestors, and Rust client
-consumers restored after a cluster restart and closed by a domain stop. The report tool is an
-ordinary local executable, even when the scenario process
+successor's START, the memory-pressure pause of starting and running ingestors, Rust client
+consumers restored after a cluster restart and closed by a domain stop, a Roto function's column
+builder, the HTTPS listener's TLS configuration as a VHOST's bundle is rebound under HTTPS
+ingestion, and a batched inferencer's ONNX session across interleaved branches. The report tool is
+an ordinary local executable, even when the scenario process
 selects order analysis. Potential findings remain recorded without ending the process; any
 unreviewed workload finding prevents diagnostic qualification. Real server children and the
 scenario process record the same compile-time/runtime selection. The ordinary CLI built by the test
@@ -109,7 +112,10 @@ The lane's diagnostic owner tests each start their detector in a fresh process b
 publication or executor lock: the state store's staging, snapshot views, queued writers,
 interrupted publication and bounded cleanup, and the materialized publication lifetimes. Each must
 pass its libtest accounting and record exactly one qualifying process observation in both
-diagnostic selections.
+diagnostic selections. The tracked locks' conformance checks of `nervix-primitives` run the same
+way, each in a fresh process in both selections. They record no evidence file, because the
+primitive crate sits below the crate that owns evidence: a finding reaches a sink that aborts the
+check, and the lane fails on that ending.
 
 Test dependencies start through one suite-owned environment. If Docker creates a named container
 but cannot bind its randomly selected host port, that owner removes the failed container and tries
@@ -1117,15 +1123,19 @@ owns what the lane proves, its failure classes and its applicability records; th
 it runs and how long it may take.
 
 The lane starts after its prerequisites, `just tests-deps`, and builds each invocation with Cargo
-before it runs it. The probes and the owner tests are libtest executables, run directly so that a
-signal reaches the lane as a signal rather than as Cargo's status. The scenario binary runs the
-lane's tagged scenarios without retries, in two inventory invocations: the restore, client and
-diagnostic scenarios, then the paced-driver scenarios with the diagnostic Rust driver. Active mode
-runs each invocation as one process. Order mode starts a fresh process for each tagged feature in
-the first invocation; the materialized restore feature runs each scenario separately and its six
-large examples each have their own process, selected by the inventory's `order_tags`. The lane
-checks every chunk's Cucumber summary against its registered examples, retains its logs and
-evidence separately, and stops on the first failed chunk. Each process runs
+before it runs it. The prerequisites provision what the workloads load, as they do for the
+ordinary suite: the WASM guests, the generated ONNX models and the ONNX runtime library, whose
+path the lane passes to every invocation. The probes, the tracked locks' conformance checks and
+the owner tests are libtest executables, run directly so that a signal reaches the lane as a
+signal rather than as Cargo's status. The scenario binary runs the lane's tagged scenarios
+without retries, in two inventory invocations: the restore, client, diagnostic, remote ACK,
+Roto function, TLS rebinding and inferencer scenarios, then the paced-driver scenarios with the
+diagnostic Rust driver. Active mode runs each invocation as one process. Order mode starts a fresh
+process for each tagged feature in the first invocation; the materialized restore feature runs
+each scenario separately and its six large examples each have their own process, as do the four
+complete-generation restore examples, selected by the inventory's `order_tags`. The lane checks
+every chunk's Cucumber summary against its registered examples, retains its logs and evidence
+separately, and stops on the first failed chunk. Each process runs
 the inventory's fixed number of scenarios at once, four, rather than one per CPU: a diagnostic
 build pays for its tracked acquisitions on every lock, and a fixed count puts the same load on its
 nodes locally and on CI's 16-vCPU runner.
@@ -1157,14 +1167,20 @@ verdict.
 
 | Part of the job | Bound | Basis |
 | --- | --- | --- |
-| Setup before the lane | No bound of its own | Toolchain, LLVM, Go, TinyGo and kache installation, as in the other native jobs: 42 and 43 seconds in the two selections of the first passing run |
-| Prerequisites, diagnostic builds and workloads, and the coverage export | 95 minutes, `timeout` in the step | The inventory's 80-minute budget bounds the diagnostic builds and workloads, and the prerequisites and the export share the rest. The first passing run took 23m18s for `deloxide-order` and 30m27s for `deloxide`. The prerequisites took 1m36s and 3m33s, the diagnostic builds and workloads 21m37s and 26m50s, and the export 3 and 4 seconds. Inside the budget, the builds took about 10.5 and 14 minutes, the 49 scenario runs 8m03s and 9m34s at four at once, and the 32 paced runs 2m37s and 2m42s |
-| Supervision qualification | 10 minutes, `timeout` in the step | A small probe build and up to seven bounded cases; only the untracked wait runs to its bound, 15 seconds, and the others end in milliseconds. It took 43 and 49 seconds in the first passing run |
-| Uploads and the kache report | The rest of the 120-minute job limit | Attempt directories, completion records and LCOV reports, uploaded after either step's verdict. In the first passing run the uploads took 5 and 6 seconds and kache's post step 3m02s and 2m50s, and the whole jobs took 28 and 35 minutes |
+| Setup before the lane | No bound of its own | Toolchain, LLVM, Go, TinyGo and kache installation, as in the other native jobs: 46 seconds for `deloxide` and 40 for `deloxide-order` in the measured run |
+| Prerequisites, diagnostic builds and workloads, and the coverage export | 95 minutes, `timeout` in the step | The inventory's 80-minute budget bounds the diagnostic builds and workloads, and the prerequisites and the export share the rest. The measured run took 25m02s for `deloxide` and 23m24s for `deloxide-order`. The prerequisites took 3m05s and 2m46s, the diagnostic builds and workloads 21m28s and 20m11s, and the export 2 seconds in each. Inside the budget, the builds took about 11 and 9.5 minutes, the 55 scenario runs 7m41s and 7m45s at four at once, the 32 paced runs 2m35s in each, and the seven conformance checks less than a second together after a build of 8 and 7 seconds |
+| Supervision qualification | 10 minutes, `timeout` in the step | A small probe build and up to seven bounded cases; only the untracked wait runs to its bound, 15 seconds, and the others end in milliseconds. It took 40 and 41 seconds in the measured run |
+| Uploads and the kache report | The rest of the 120-minute job limit | Attempt directories, completion records and LCOV reports, uploaded after either step's verdict. In the measured run the uploads took 4 and 3 seconds and kache's post step 3m06s and 3m18s, and the whole jobs took 30 and 28 minutes |
 
-The measurements come from the first CI run in which both selections passed, on 2026-10-06, before
-the four remote ACK examples joined the inventory and before order mode separated scenario
-processes. They describe the earlier 49-run workload, not a bound for the current 53-run selection.
+The table's measurements come from the CI run of 2026-10-07 in which both selections passed with
+every owner of tracked locks reached: 110 workloads in `deloxide` and 118 in `deloxide-order`,
+with the lane instrumenting workspace crates only and running 55 scenario examples at four at
+once. The first run in which both selections passed, on 2026-10-06 with 97 and 105 workloads and
+49 scenario runs, took 30m27s and 23m18s in the lane's step. The six scenario runs and seven
+conformance checks added between those runs fit inside their variation. The table predates the
+four remote ACK examples and the order-mode per-example process split, so its durations are
+historical measurements rather than a timing claim for the current combined inventory; the
+inventory and job bounds remain enforced.
 
 When a step's `timeout` expires it sends `SIGTERM` to the step's process group. The collector
 records its attempt as interrupted and forwards the signal to the lane, which ends the process it is
