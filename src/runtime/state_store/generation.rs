@@ -160,12 +160,12 @@ impl StoredCheckpoint {
         let mut aligned = rkyv::util::AlignedVec::<16>::with_capacity(raw.len());
         aligned.extend_from_slice(raw);
         rkyv::from_bytes::<Self, rkyv::rancor::Error>(&aligned)
-            .map_err(|error| Report::new(RuntimePersistenceError::DecodeState(error.to_string())))
+            .change_context(RuntimePersistenceError::DecodeState)
     }
 
     pub(super) fn encode(&self) -> error_stack::Result<Vec<u8>, RuntimePersistenceError> {
         let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(self)
-            .map_err(|error| RuntimePersistenceError::EncodeState(error.to_string()))?;
+            .change_context(RuntimePersistenceError::EncodeState)?;
         Ok(bytes.to_vec())
     }
 

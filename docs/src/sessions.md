@@ -322,6 +322,12 @@ retained for the client to download again. The call is not bounded by the reques
 Rust client bounds the wait for each frame by it instead, and starts a failed download again from
 the first byte. [Backup And Restore](backup-and-restore.md) describes backups and their archives.
 
+The web console makes the same call over a WebSocket of its own on the console listener,
+`/console/backups/download`, authenticated like the console session. The connection carries the one
+request and the frames that answer it, one frame per binary message, and the node closes it
+normally after the last frame. The console checks the archive against the backup's summary exactly
+as the Rust client does before it hands the archive to the browser.
+
 ## Restore Streams
 
 The session service's `RestoreBackup` method is a client-streaming gRPC call that carries one
@@ -358,6 +364,12 @@ instead, and then the wait for the reply once the last frame was sent. A call th
 last frame arrived changes nothing and releases what the leader staged for it. Once the whole
 archive arrived, the restore goes on without the call.
 [Backup And Restore](backup-and-restore.md#restoring) describes restores.
+
+The web console makes the same call over a WebSocket of its own on the console listener,
+`/console/backups/restore`, authenticated like the console session. A WebSocket client cannot
+half-close the stream and still read the reply, so the stream ends with the chunk that completes the
+size the start declares, and the node answers on the open connection, then closes it normally. A
+connection that closes before that chunk ends the call as a failed gRPC call does.
 
 ## Structured Choices
 

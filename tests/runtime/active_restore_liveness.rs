@@ -293,8 +293,7 @@ pub(in super::super) fn malformed_active_chunks_and_headers_fail_before_deletion
         };
         assert!(matches!(
             error.current_context(),
-            RuntimePersistenceError::InvalidCheckpointChunks
-                | RuntimePersistenceError::DecodeState(_)
+            RuntimePersistenceError::InvalidCheckpointChunks | RuntimePersistenceError::DecodeState
         ));
         assert_eq!(
             store.checkpoint_chunks.len().assured("chunk count reads"),

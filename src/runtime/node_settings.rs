@@ -1,3 +1,4 @@
+use error_stack::ResultExt as _;
 use nervix_connector::{ParsedRetryPolicy, SourceAckPolicy};
 use nervix_models::{IngestAcknowledgement, parse_duration_text};
 
@@ -5,6 +6,42 @@ use super::{
     ingestors::{DeliverySetting, IngestorStartError, SourceStartError},
     *,
 };
+
+/// A relay, processor, generator or emitter setting whose value does not parse. The node that
+/// declares the setting names itself in the context its caller adds above this one.
+#[derive(Debug, Error)]
+pub(crate) enum NodeSettingError {
+    /// The duration parser's own error is beneath.
+    #[error("invalid {setting} '{value}'")]
+    Duration {
+        setting: NodeDurationSetting,
+        value: String,
+    },
+    #[error("invalid {setting} '{value}': {cause}")]
+    ByteSize {
+        setting: NodeByteSizeSetting,
+        value: String,
+        cause: ubyte::Error,
+    },
+}
+
+/// A duration a relay, processor, generator or emitter declares.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, strum::Display)]
+pub(crate) enum NodeDurationSetting {
+    #[strum(serialize = "flush_each")]
+    FlushEach,
+    #[strum(serialize = "collect_for")]
+    CollectFor,
+}
+
+/// A byte size a relay, processor, generator or emitter declares.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, strum::Display)]
+pub(crate) enum NodeByteSizeSetting {
+    #[strum(serialize = "max_batch_size")]
+    MaxBatchSize,
+    #[strum(serialize = "input collection max_batch_size")]
+    CollectMaxBatchSize,
+}
 
 impl Runtime {
     pub(in crate::runtime) fn parse_ack_timeout(
@@ -76,42 +113,37 @@ impl Runtime {
         })
     }
 
-    #[cfg_attr(
-        nervix_lint,
-        nervix::dispatch(
-            reason = "the typed node identifier converts through the caller-supplied Into contract"
-        )
-    )]
+    /// Parses one duration setting of a relay, processor, generator or emitter.
     pub(in crate::runtime) fn parse_runtime_node_duration_setting(
-        domain: &DomainName,
-        kind: &str,
-        identifier: impl Into<ModelName>,
-        field: &str,
+        setting: NodeDurationSetting,
         value: &str,
-    ) -> Result<Duration, RuntimeError> {
-        let identifier = identifier.into();
-        parse_duration_text(value).map_err(|source| RuntimeError::BuildDomainExecution {
-            domain: domain.as_str().to_string(),
-            reason: format!(
-                "invalid {field} '{value}' for {kind} '{}': {source}",
-                identifier.as_str()
-            ),
+    ) -> error_stack::Result<Duration, NodeSettingError> {
+        parse_duration_text(value).change_context_lazy(|| NodeSettingError::Duration {
+            setting,
+            value: value.to_string(),
         })
     }
 
-    #[cfg_attr(
-        nervix_lint,
-        nervix::dispatch(
-            reason = "the typed node identifier converts through the caller-supplied Into contract"
-        )
-    )]
+    /// Parses one byte size setting of a relay, processor, generator or emitter.
+    fn parse_runtime_node_byte_size(
+        setting: NodeByteSizeSetting,
+        value: &str,
+    ) -> error_stack::Result<u64, NodeSettingError> {
+        match value.parse::<ubyte::ByteUnit>() {
+            Ok(size) => Ok(size.as_u64()),
+            Err(cause) => Err(Report::new(NodeSettingError::ByteSize {
+                setting,
+                value: value.to_string(),
+                cause,
+            })),
+        }
+    }
+
+    /// Parses the flush policy a route or emitter declares. The node that declares it names
+    /// itself in the context it adds above a failure.
     pub(in crate::runtime) fn parse_runtime_node_flush_policy(
-        domain: &DomainName,
-        kind: &str,
-        identifier: impl Into<ModelName>,
         policy: &FlushPolicy,
-    ) -> Result<RuntimeFlushPolicy, RuntimeError> {
-        let identifier = identifier.into();
+    ) -> error_stack::Result<RuntimeFlushPolicy, NodeSettingError> {
         let FlushPolicy::Each {
             interval,
             max_batch_size,
@@ -119,73 +151,38 @@ impl Runtime {
         else {
             return Ok(RuntimeFlushPolicy::Immediate);
         };
-        let interval = Self::parse_runtime_node_duration_setting(
-            domain,
-            kind,
-            identifier.clone(),
-            "flush_each",
-            interval,
-        )?;
-        let parsed_max_batch_size =
-            max_batch_size
-                .parse::<ubyte::ByteUnit>()
-                .map_err(|source| RuntimeError::BuildDomainExecution {
-                    domain: domain.as_str().to_string(),
-                    reason: format!(
-                        "invalid max_batch_size '{}' for {} '{}': {}",
-                        max_batch_size,
-                        kind,
-                        identifier.as_str(),
-                        source
-                    ),
-                })?;
+        let interval =
+            Self::parse_runtime_node_duration_setting(NodeDurationSetting::FlushEach, interval)?;
+        let max_batch_size =
+            Self::parse_runtime_node_byte_size(NodeByteSizeSetting::MaxBatchSize, max_batch_size)?;
         Ok(RuntimeFlushPolicy::Each {
             interval,
-            max_batch_size: parsed_max_batch_size.as_u64(),
+            max_batch_size,
         })
     }
 
+    /// Parses the input collection policy a node declares, when it declares one.
     pub(in crate::runtime) fn parse_runtime_node_input_collect_policy(
-        domain: &DomainName,
-        kind: &str,
-        identifier: impl Into<ModelName>,
         policy: Option<&nervix_models::InputCollectPolicy>,
-    ) -> Result<Option<RuntimeInputCollectPolicy>, RuntimeError> {
-        let identifier = identifier.into();
-        policy
-            .map(|policy| {
-                let interval = Self::parse_runtime_node_duration_setting(
-                    domain,
-                    kind,
-                    identifier.clone(),
-                    "collect_for",
-                    &policy.collect_for,
-                )?;
-                let max_batch_size = policy
-                    .max_batch_size
-                    .as_deref()
-                    .map(|max_batch_size| {
-                        max_batch_size
-                            .parse::<ubyte::ByteUnit>()
-                            .map(|size| size.as_u64())
-                            .map_err(|source| RuntimeError::BuildDomainExecution {
-                                domain: domain.as_str().to_string(),
-                                reason: format!(
-                                    "invalid input collection max_batch_size '{}' for {} '{}': {}",
-                                    max_batch_size,
-                                    kind,
-                                    identifier.as_str(),
-                                    source
-                                ),
-                            })
-                    })
-                    .transpose()?;
-                Ok(RuntimeInputCollectPolicy {
-                    interval,
-                    max_batch_size,
-                })
-            })
-            .transpose()
+    ) -> error_stack::Result<Option<RuntimeInputCollectPolicy>, NodeSettingError> {
+        let Some(policy) = policy else {
+            return Ok(None);
+        };
+        let interval = Self::parse_runtime_node_duration_setting(
+            NodeDurationSetting::CollectFor,
+            &policy.collect_for,
+        )?;
+        let max_batch_size = match policy.max_batch_size.as_deref() {
+            Some(max_batch_size) => Some(Self::parse_runtime_node_byte_size(
+                NodeByteSizeSetting::CollectMaxBatchSize,
+                max_batch_size,
+            )?),
+            None => None,
+        };
+        Ok(Some(RuntimeInputCollectPolicy {
+            interval,
+            max_batch_size,
+        }))
     }
 
     pub(in crate::runtime) fn parse_retry_policy(
@@ -375,24 +372,102 @@ mod tests {
                 "{error:#}"
             );
 
-            let error = Runtime::parse_runtime_node_duration_setting(
-                &domain,
-                "emitter",
-                named::<ModelName>("orders_emitter"),
-                "flush_each",
-                value,
-            )
-            .expect_err("the flush interval names no duration");
-            let expected =
-                format!("invalid flush_each '{value}' for emitter 'orders_emitter': {why}");
+            let error =
+                Runtime::parse_runtime_node_duration_setting(NodeDurationSetting::FlushEach, value)
+                    .expect_err("the flush interval names no duration");
             assert!(
                 matches!(
-                    &error,
-                    RuntimeError::BuildDomainExecution { reason, .. } if reason == &expected
+                    error.current_context(),
+                    NodeSettingError::Duration {
+                        setting: NodeDurationSetting::FlushEach,
+                        value: invalid,
+                    } if invalid == value
                 ),
                 "{error:?}"
             );
+            assert_eq!(
+                format!("{error:#}"),
+                format!("invalid flush_each '{value}': {why}")
+            );
         }
+    }
+
+    #[test]
+    fn node_flush_and_collection_policies_name_the_setting_that_does_not_parse() {
+        assert_eq!(
+            Runtime::parse_runtime_node_flush_policy(&FlushPolicy::Immediate)
+                .expect("an immediate flush has nothing to parse"),
+            RuntimeFlushPolicy::Immediate
+        );
+        assert_eq!(
+            Runtime::parse_runtime_node_flush_policy(&FlushPolicy::Each {
+                interval: "250ms".to_string(),
+                max_batch_size: "1KiB".to_string(),
+            })
+            .expect("a valid cadence parses"),
+            RuntimeFlushPolicy::Each {
+                interval: Duration::from_millis(250),
+                max_batch_size: 1024,
+            }
+        );
+        let error = Runtime::parse_runtime_node_flush_policy(&FlushPolicy::Each {
+            interval: "250ms".to_string(),
+            max_batch_size: "lots".to_string(),
+        })
+        .expect_err("the batch size names no size");
+        assert!(
+            matches!(
+                error.current_context(),
+                NodeSettingError::ByteSize {
+                    setting: NodeByteSizeSetting::MaxBatchSize,
+                    value,
+                    ..
+                } if value == "lots"
+            ),
+            "{error:?}"
+        );
+        assert!(
+            format!("{error:#}").starts_with("invalid max_batch_size 'lots': "),
+            "{error:#}"
+        );
+
+        assert_eq!(
+            Runtime::parse_runtime_node_input_collect_policy(None)
+                .expect("an absent collection policy has nothing to parse"),
+            None
+        );
+        let collect =
+            |collect_for: &str, max_batch_size: Option<&str>| nervix_models::InputCollectPolicy {
+                collect_for: collect_for.to_string(),
+                max_batch_size: max_batch_size.map(str::to_string),
+            };
+        assert_eq!(
+            Runtime::parse_runtime_node_input_collect_policy(Some(&collect("1s", Some("2KiB"))))
+                .expect("a valid collection policy parses"),
+            Some(RuntimeInputCollectPolicy {
+                interval: Duration::from_secs(1),
+                max_batch_size: Some(2048),
+            })
+        );
+        let error = Runtime::parse_runtime_node_input_collect_policy(Some(&collect("oops", None)))
+            .expect_err("the collection interval names no duration");
+        assert!(
+            matches!(
+                error.current_context(),
+                NodeSettingError::Duration {
+                    setting: NodeDurationSetting::CollectFor,
+                    ..
+                }
+            ),
+            "{error:?}"
+        );
+        let error =
+            Runtime::parse_runtime_node_input_collect_policy(Some(&collect("1s", Some("lots"))))
+                .expect_err("the collection batch size names no size");
+        assert!(
+            format!("{error:#}").starts_with("invalid input collection max_batch_size 'lots': "),
+            "{error:#}"
+        );
     }
 
     #[test]

@@ -6,6 +6,8 @@
 //! - **Depends on.** Typed route specs, the VM and installed runtime capabilities.
 //! - **Must not know.** Scheduled Models or how an error route was declared in NSPL.
 
+use error_stack::ResultExt as _;
+
 use super::{message_error::MessageErrorHandlingError, vm_compile::RuntimeVmCompileContext, *};
 
 #[derive(Clone, Default)]
@@ -47,17 +49,8 @@ impl BoundMessageErrorRoutes {
             })?;
             let flush_policy = match spec.flush_policy.as_ref() {
                 Some(policy) => Some(
-                    Runtime::parse_runtime_node_flush_policy(
-                        &key.domain,
-                        key.node.kind.as_str(),
-                        &key.node.identifier,
-                        policy,
-                    )
-                    .map_err(|source| {
-                        error_stack::Report::new(MessageErrorHandlingError::FlushPolicy {
-                            node: key.node.clone(),
-                            source,
-                        })
+                    Runtime::parse_runtime_node_flush_policy(policy).change_context_lazy(|| {
+                        MessageErrorHandlingError::FlushPolicy { route: key.clone() }
                     })?,
                 ),
                 None => None,

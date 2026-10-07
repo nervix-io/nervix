@@ -2401,7 +2401,6 @@ mod tests {
         // an error fails the predicate instead of being delivered.
         let where_clause = expression("coalesce(input.left / input.divisor, 1) > 0");
         let predicate = compile_subscription_predicate(
-            &domain("default"),
             &named("ratio_subscription"),
             &where_clause,
             SubscriptionPredicateCompileContext::new(
@@ -2444,7 +2443,6 @@ mod tests {
         let schema = test_schema(&[("tenant", ParseAsType::String), ("value", ParseAsType::U32)]);
         let where_clause = expression("input.value = (3 AS U32)");
         let predicate = compile_subscription_predicate(
-            &domain("default"),
             &named("selected_row_subscription"),
             &where_clause,
             SubscriptionPredicateCompileContext::new(

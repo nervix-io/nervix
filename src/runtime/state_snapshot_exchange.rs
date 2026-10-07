@@ -383,12 +383,11 @@ impl Runtime {
             return Ok(None);
         };
         let revision = restored.revision;
-        installer.install(restored).map_err(|error| {
-            Report::new(MaterializedSnapshotExchangeError::Install {
+        installer.install(restored).change_context_lazy(|| {
+            MaterializedSnapshotExchangeError::Install {
                 target: target_node_id.clone(),
                 placement: state.placement().clone(),
-            })
-            .attach_printable(error)
+            }
         })?;
         Ok(Some(revision))
     }

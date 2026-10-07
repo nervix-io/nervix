@@ -28,7 +28,7 @@ impl Runtime {
             let flush_latest_snapshot =
                 |state: &KafkaOffsetStatePersistence,
                  store: &RuntimeStateStore|
-                 -> Result<Option<u64>, RuntimePersistenceError> {
+                 -> error_stack::Result<Option<u64>, RuntimePersistenceError> {
                     if !state.is_dirty() {
                         return Ok(None);
                     }
@@ -57,7 +57,7 @@ impl Runtime {
                                     );
                                 }
                                 Ok(None) => {}
-                                Err(error) => warn!(error = %error, "failed to flush kafka offset snapshot during shutdown"),
+                                Err(error) => warn!(error = format!("{error:#}"), "failed to flush kafka offset snapshot during shutdown"),
                             }
                             break;
                         }
@@ -71,7 +71,7 @@ impl Runtime {
                                 );
                             }
                             Ok(None) => {}
-                            Err(error) => warn!(error = %error, "failed to persist kafka offset snapshot"),
+                            Err(error) => warn!(error = format!("{error:#}"), "failed to persist kafka offset snapshot"),
                         }
                     }
                 }
@@ -184,7 +184,7 @@ impl Runtime {
                         Ok(Some(sealed)) => sealed,
                         Ok(None) => return Ok(None),
                         Err(error) => {
-                            return Err(RuntimePersistenceError::EncodeState(error.to_string()));
+                            return Err(error.change_context(RuntimePersistenceError::EncodeState));
                         }
                     };
                     let revision = sealed.descriptor.revision;
@@ -198,39 +198,34 @@ impl Runtime {
                             super::super::RESTORE_STATE_WORKING_BYTES,
                         )
                         .await
-                        .map_err(|error| RuntimePersistenceError::EncodeState(error.to_string()))?;
+                        .change_context(RuntimePersistenceError::StorageAdmission)?;
                     executor
                         .run_storage(
                             nervix_execution::StorageClass::Filesystem,
                             reservation,
                             move |_charge, cancellation| {
-                                let file = std::fs::File::open(sealed.artifact.path()).map_err(
-                                    |error| RuntimePersistenceError::EncodeState(error.to_string()),
-                                )?;
-                                writer
-                                    .publish_checkpoint_stream(
-                                        &placement,
-                                        super::super::state_store::generation::CheckpointMetadata {
-                                            lsm: revision,
-                                            length: sealed.descriptor.length,
-                                            digest: sealed.descriptor.digest,
-                                        },
-                                        file,
-                                        || {
-                                            cancellation.check().change_context(
-                                                RuntimePersistenceError::RestoreRead,
-                                            )
-                                        },
-                                    )
-                                    .map_err(|error| error.current_context().clone())
+                                let file = std::fs::File::open(sealed.artifact.path())
+                                    .change_context(RuntimePersistenceError::EncodeState)?;
+                                writer.publish_checkpoint_stream(
+                                    &placement,
+                                    super::super::state_store::generation::CheckpointMetadata {
+                                        lsm: revision,
+                                        length: sealed.descriptor.length,
+                                        digest: sealed.descriptor.digest,
+                                    },
+                                    file,
+                                    || {
+                                        cancellation
+                                            .check()
+                                            .change_context(RuntimePersistenceError::RestoreRead)
+                                    },
+                                )
                             },
                         )
                         .await
-                        .map_err(|error| {
-                            RuntimePersistenceError::EncodeState(error.to_string())
-                        })??;
+                        .change_context(RuntimePersistenceError::StorageExecution)??;
                     state.record_persisted(revision);
-                    Ok::<Option<u64>, RuntimePersistenceError>(Some(revision))
+                    Ok::<Option<u64>, Report<RuntimePersistenceError>>(Some(revision))
                 };
             loop {
                 nervix_primitives::task::consume_budget().await;
@@ -245,7 +240,7 @@ impl Runtime {
                                     );
                                 }
                                 Ok(None) => {}
-                                Err(error) => warn!(error = %error, "failed to flush materialized relay snapshot during shutdown"),
+                                Err(error) => warn!(error = format!("{error:#}"), "failed to flush materialized relay snapshot during shutdown"),
                             }
                             break;
                         }
@@ -259,7 +254,7 @@ impl Runtime {
                                 );
                             }
                             Ok(None) => {}
-                            Err(error) => warn!(error = %error, "failed to persist materialized relay snapshot"),
+                            Err(error) => warn!(error = format!("{error:#}"), "failed to persist materialized relay snapshot"),
                         }
                     }
                 }
@@ -285,9 +280,11 @@ impl Runtime {
                     let Some(snapshot) = state.snapshot_to_persist(metrics)? else {
                         return Ok(None);
                     };
-                    store
-                        .persist_latest_snapshot(&state.placement, snapshot.lsm, &snapshot.payload)
-                        .map_err(Report::new)?;
+                    store.persist_latest_snapshot(
+                        &state.placement,
+                        snapshot.lsm,
+                        &snapshot.payload,
+                    )?;
                     state.persisted(snapshot.lsm);
                     Ok::<Option<u64>, Report<RuntimePersistenceError>>(Some(snapshot.lsm))
                 };
@@ -301,7 +298,7 @@ impl Runtime {
                                     &state.placement, state.replication(), lsm,
                                 ),
                                 Ok(None) => {}
-                                Err(error) => warn!(error = %error, "failed to flush branch-aggregated state snapshot during shutdown"),
+                                Err(error) => warn!(error = format!("{error:#}"), "failed to flush branch-aggregated state snapshot during shutdown"),
                             }
                             break;
                         }
@@ -312,7 +309,7 @@ impl Runtime {
                                 &state.placement, state.replication(), lsm,
                             ),
                             Ok(None) => {}
-                            Err(error) => warn!(error = %error, "failed to persist branch-aggregated state snapshot"),
+                            Err(error) => warn!(error = format!("{error:#}"), "failed to persist branch-aggregated state snapshot"),
                         }
                     }
                 }
@@ -361,7 +358,10 @@ impl Runtime {
                     Ok(Some(snapshot)) => {
                         if let Err(error) = state.install_snapshot(snapshot.lsm, &snapshot.payload)
                         {
-                            warn!(error = %error, "failed to apply replicated kafka offset snapshot");
+                            warn!(
+                                error = format!("{error:#}"),
+                                "failed to apply replicated kafka offset snapshot"
+                            );
                             break;
                         }
                         let dispatcher = runtime.inner.remote_dispatcher.load_full();
@@ -574,7 +574,10 @@ impl Runtime {
                             snapshot.lsm,
                             &snapshot.payload,
                         ) {
-                            warn!(error = %error, "failed to apply replicated branch-aggregated state snapshot");
+                            warn!(
+                                error = format!("{error:#}"),
+                                "failed to apply replicated branch-aggregated state snapshot"
+                            );
                             continue;
                         }
                         let dispatcher = runtime.inner.remote_dispatcher.load_full();

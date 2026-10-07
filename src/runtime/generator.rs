@@ -522,15 +522,10 @@ impl Runtime {
         let ack_tracker = self.domain_ack_root_tracker(domain);
         let mut flushed_routes = Vec::with_capacity(routes.len());
         for route in routes {
-            let flush_policy = match Self::parse_runtime_node_flush_policy(
-                domain,
-                "generator",
-                &name,
-                &route.flush_policy,
-            ) {
+            let flush_policy = match Self::parse_runtime_node_flush_policy(&route.flush_policy) {
                 Ok(flush_policy) => flush_policy,
                 Err(error) => {
-                    return Err(Report::new(error)
+                    return Err(error
                         .change_context(GeneratorError::FlushPolicy {
                             relay: route.relay.clone(),
                         })

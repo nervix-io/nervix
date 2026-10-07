@@ -113,7 +113,7 @@ Feature: Resource-backed lookups
         FROM WIRE JSON SCHEMA malformed_entry_wire
         TO SCHEMA malformed_entry;
       """
-    When these NSPL commands fail with "failed to decode lookup 'malformed_by_key' line 1"
+    When these NSPL commands fail with "failed to build domain execution for '{{domain}}': failed to load lookup 'malformed_by_key': failed to decode lookup 'malformed_by_key' line 1: failed to parse json payload for codec 'malformed_entry_codec'"
       """
       CREATE HASH MAP malformed_by_key
         KEY key

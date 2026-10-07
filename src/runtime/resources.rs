@@ -252,13 +252,13 @@ impl Runtime {
         &self,
         domain: &DomainName,
         codec: &PlannedCodec,
-    ) -> Result<Arc<CompiledCodec>, RuntimeError> {
+    ) -> error_stack::Result<Arc<CompiledCodec>, RuntimeError> {
+        let build = || RuntimeError::build_domain_execution(domain);
+        let descriptors_failed = || ExecutionBuildError::CodecDescriptors {
+            codec: codec.name.clone(),
+        };
         let protobuf_descriptors =
             if let PlannedCodecWireFormat::Protobuf(config) = &codec.wire_format {
-                let build_error = |reason: String| RuntimeError::BuildDomainExecution {
-                    domain: domain.as_str().to_string(),
-                    reason,
-                };
                 let resource = ResourceId::new(
                     domain.clone(),
                     config.resource.clone(),
@@ -267,14 +267,17 @@ impl Runtime {
                 let pool = self
                     .compile_protobuf_descriptor_pool(resource, &config.config)
                     .await
-                    .map_err(|error| build_error(error.to_string()))?;
+                    .change_context_lazy(descriptors_failed)
+                    .change_context_lazy(build)?;
                 let message = pool
                     .message(&config.message)
-                    .map_err(|error| build_error(error.to_string()))?;
+                    .change_context_lazy(descriptors_failed)
+                    .change_context_lazy(build)?;
                 let batch_message = match &config.batch_message {
                     Some(batch_message) => Some(
                         pool.message(batch_message)
-                            .map_err(|error| build_error(error.to_string()))?,
+                            .change_context_lazy(descriptors_failed)
+                            .change_context_lazy(build)?,
                     ),
                     None => None,
                 };
@@ -293,20 +296,17 @@ impl Runtime {
             codec.wire_format.resolved(),
             protobuf_descriptors,
         )
-        .map_err(|report| RuntimeError::CodecCompile {
-            domain: domain.clone(),
-            report,
-        })
+        .change_context_lazy(build)
     }
 
     pub(super) async fn compile_signaling_protocol(
         &self,
         domain: &DomainName,
         protocol: &PlannedSignalingProtocol,
-    ) -> Result<Arc<CompiledSignalingProtocol>, RuntimeError> {
-        let build_error = |reason: String| RuntimeError::BuildDomainExecution {
-            domain: domain.as_str().to_string(),
-            reason,
+    ) -> error_stack::Result<Arc<CompiledSignalingProtocol>, RuntimeError> {
+        let build = || RuntimeError::build_domain_execution(domain);
+        let descriptors_failed = || ExecutionBuildError::SignalingDescriptors {
+            protocol: protocol.name.clone(),
         };
         let descriptors = if let SignalingWireFormat::Protobuf(config) = &protocol.format {
             let resource = ResourceId::new(
@@ -317,15 +317,17 @@ impl Runtime {
             let pool = self
                 .compile_protobuf_descriptor_pool(resource, &config.config)
                 .await
-                .map_err(|error| build_error(error.to_string()))?;
-            Some(SignalingProtobufDescriptors {
-                send: pool
-                    .message(&config.send_message)
-                    .map_err(|error| build_error(error.to_string()))?,
-                wait: pool
-                    .message(&config.wait_message)
-                    .map_err(|error| build_error(error.to_string()))?,
-            })
+                .change_context_lazy(descriptors_failed)
+                .change_context_lazy(build)?;
+            let send = pool
+                .message(&config.send_message)
+                .change_context_lazy(descriptors_failed)
+                .change_context_lazy(build)?;
+            let wait = pool
+                .message(&config.wait_message)
+                .change_context_lazy(descriptors_failed)
+                .change_context_lazy(build)?;
+            Some(SignalingProtobufDescriptors { send, wait })
         } else {
             None
         };
@@ -337,10 +339,7 @@ impl Runtime {
             descriptors,
         )
         .map(Arc::new)
-        .map_err(|report| RuntimeError::SignalingProtocolCompile {
-            domain: domain.clone(),
-            report,
-        })
+        .change_context_lazy(build)
     }
 
     /// Compiles the descriptors of the one resource version a codec or signaling protocol pins.
@@ -567,7 +566,8 @@ mod tests {
     use std::path::PathBuf;
 
     use nervix_models::{
-        ClientConfigEntry, ClientResourceMount, ClusterNodeName, DomainName, ResourceId,
+        ClientConfigEntry, ClientResourceMount, ClusterNodeName, CodecJaqTransformations,
+        CodecProtobufConfig, DomainName, ParseAsType, ResourceId, SignalingProtobufConfig,
         SignalingProtocolOnConnect, SignalingStep, Timestamp,
     };
     use tempfile::tempdir;
@@ -698,6 +698,62 @@ mod tests {
     }
 
     #[nervix_primitives::test]
+    async fn protobuf_descriptor_failures_name_their_codec_or_protocol_beneath_the_domain_build() {
+        let domain = DomainName::parse("tenant").expect("valid domain");
+        let runtime = Runtime::new();
+        let codec = PlannedCodec {
+            name: named("events_codec"),
+            schema: test_schema(&[("value", ParseAsType::I64)]),
+            wire_format: PlannedCodecWireFormat::Protobuf(CodecProtobufConfig {
+                resource: named("events_proto"),
+                resource_version: 1,
+                config: Vec::new(),
+                message: "events.Event".to_string(),
+                batch_message: None,
+                transformations: CodecJaqTransformations::default(),
+            }),
+            encoding_rules: Vec::new(),
+        };
+        let codec_error = runtime
+            .compile_domain_codec(&domain, &codec)
+            .await
+            .expect_err("a codec whose descriptors do not load cannot be installed");
+        assert_eq!(
+            format!("{codec_error:#}"),
+            "failed to build domain execution for 'tenant': failed to load the protobuf \
+             descriptors of codec 'events_codec': protobuf descriptors for resource \
+             'events_proto' in domain 'tenant' require a resource store"
+        );
+
+        let protocol = PlannedSignalingProtocol {
+            name: named("handshake"),
+            format: SignalingWireFormat::Protobuf(SignalingProtobufConfig {
+                resource: named("handshake_proto"),
+                resource_version: 1,
+                config: Vec::new(),
+                send_message: "handshake.Send".to_string(),
+                wait_message: "handshake.Wait".to_string(),
+            }),
+            on_connect: SignalingProtocolOnConnect {
+                accept_data: false,
+                steps: Vec::new(),
+                fail_matchers: Vec::new(),
+                timeout: "5s".to_string(),
+            },
+        };
+        let protocol_error = runtime
+            .compile_signaling_protocol(&domain, &protocol)
+            .await
+            .expect_err("a protocol whose descriptors do not load cannot be installed");
+        assert_eq!(
+            format!("{protocol_error:#}"),
+            "failed to build domain execution for 'tenant': failed to load the protobuf \
+             descriptors of signaling protocol 'handshake': protobuf descriptors for resource \
+             'handshake_proto' in domain 'tenant' require a resource store"
+        );
+    }
+
+    #[nervix_primitives::test]
     async fn signaling_compile_failure_keeps_the_connector_report_at_runtime_startup() {
         let domain = DomainName::parse("tenant").expect("valid domain");
         let protocol = PlannedSignalingProtocol {
@@ -714,22 +770,23 @@ mod tests {
             .compile_signaling_protocol(&domain, &protocol)
             .await
             .expect_err("a signaling program must compile before installation");
-        let RuntimeError::SignalingProtocolCompile {
+        let RuntimeError::BuildDomainExecution {
             domain: error_domain,
-            report,
-        } = error
+        } = error.current_context()
         else {
-            panic!("the compiler failure must retain its connector report: {error:?}");
+            panic!("the compiler failure must fail the domain build: {error:?}");
         };
-        assert_eq!(error_domain, domain);
-        assert!(report.contains::<nervix_jaq::JaqProgramError>());
+        assert_eq!(error_domain, &domain);
+        assert!(error.contains::<nervix_jaq::JaqProgramError>());
         assert!(matches!(
-            report.current_context(),
-            nervix_connector_websockets::SignalingProtocolCompileError::InvalidJaqProgram {
-                clause: "SEND JAQ",
-                index: 1,
-                ..
-            }
+            error.downcast_ref::<nervix_connector_websockets::SignalingProtocolCompileError>(),
+            Some(
+                nervix_connector_websockets::SignalingProtocolCompileError::InvalidJaqProgram {
+                    clause: "SEND JAQ",
+                    index: 1,
+                    ..
+                }
+            )
         ));
     }
 
