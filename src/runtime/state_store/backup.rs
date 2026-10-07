@@ -57,7 +57,7 @@ fn publication(
     let mut aligned = rkyv::util::AlignedVec::<16>::with_capacity(raw.len());
     aligned.extend_from_slice(&raw);
     let record = rkyv::from_bytes::<RestorePublication, rkyv::rancor::Error>(&aligned)
-        .map_err(|error| RuntimePersistenceError::DecodeState(error.to_string()))?;
+        .change_context(RuntimePersistenceError::DecodeState)?;
     Ok(Some(record))
 }
 
@@ -127,7 +127,7 @@ impl RuntimeStateStore {
                 metadata,
             };
             let encoded = rkyv::to_bytes::<rkyv::rancor::Error>(&receipt)
-                .map_err(|error| RuntimePersistenceError::EncodeState(error.to_string()))?;
+                .change_context(RuntimePersistenceError::EncodeState)?;
             if encoded.len() > RESTORE_STATE_CHUNK_BYTES {
                 return Err(Report::new(
                     RuntimePersistenceError::CheckpointPlacementTooLarge,
@@ -234,7 +234,7 @@ impl RuntimeStateStore {
             aligned.extend_from_slice(&raw);
             let receipt =
                 rkyv::from_bytes::<StagedRestoreCheckpoint, rkyv::rancor::Error>(&aligned)
-                    .map_err(|error| RuntimePersistenceError::DecodeState(error.to_string()))?;
+                    .change_context(RuntimePersistenceError::DecodeState)?;
             if receipt.authority != *authority {
                 return Err(Report::new(
                     RuntimePersistenceError::InvalidCheckpointChunks,
@@ -286,9 +286,7 @@ impl RuntimeStateStore {
                 .ok_or(RuntimePersistenceError::ReadValue)?;
         }
         if inventory != expected || headers != expected.checkpoints {
-            return Err(Report::new(RuntimePersistenceError::DecodeState(
-                "restored state installation is incomplete: staged inventory differs".to_string(),
-            )));
+            return Err(StoredStateIssue::StagedInventoryDiffers.decode_failure());
         }
         Ok(())
     }
@@ -328,7 +326,7 @@ impl RuntimeStateStore {
                         authority: authority.clone(),
                         inventory: expected,
                     })
-                    .map_err(|error| RuntimePersistenceError::EncodeState(error.to_string()))?;
+                    .change_context(RuntimePersistenceError::EncodeState)?;
                     let mut batch = self.db.batch();
                     batch.insert(
                         &self.restore_publications,
@@ -1490,7 +1488,7 @@ mod tests {
                 panic!("a damaged current format marker must fail to open");
             };
             assert!(matches!(
-                error,
+                error.current_context(),
                 RuntimePersistenceError::InvalidStorageFormat
             ));
             assert!(
@@ -1544,7 +1542,7 @@ mod tests {
             panic!("the checkpoint writer enforces its physical placement bound");
         };
         assert!(matches!(
-            error,
+            error.current_context(),
             RuntimePersistenceError::CheckpointPlacementTooLarge
         ));
     }

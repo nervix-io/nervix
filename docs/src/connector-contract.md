@@ -466,9 +466,9 @@ retains the ACKs of the source rows every record, mapped row or request carries,
 map enters the connector. Each publish is one call per write, never a virtual call per row.
 
 The host compiles a row or row request sink's `VALUES` projection before opening that sink. A failed VM
-inference or compilation retains its typed VM report under the domain and emitter context, then
-the sink-initialization context. The emitter follows its existing initialization retry policy;
-the connector never receives a partially compiled mapping.
+inference or compilation retains its typed VM report beneath a `MappedValuesError` that names the
+sink and the emitter, then the sink-initialization context. The emitter follows its existing
+initialization retry policy; the connector never receives a partially compiled mapping.
 
 The ClickHouse row sink uses the shared columnar JSON writer for `JSONEachRow`. It prepares typed
 column readers and string escape masks once for each carrier of a write, then writes each selected

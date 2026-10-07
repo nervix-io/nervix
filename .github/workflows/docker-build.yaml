@@ -4,6 +4,9 @@ on:
   workflow_dispatch:
   pull_request:
     types: [opened, synchronize, reopened, labeled]
+  # The nightly chaos soak runs against the image this build makes from main.
+  schedule:
+    - cron: "0 2 * * *"
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -25,7 +28,8 @@ jobs:
     if: >-
       (github.event_name != 'pull_request' ||
         !contains(github.event.pull_request.labels.*.name, 'no-docker')) &&
-      (github.event.action != 'labeled' || github.event.label.name == 'benchmark')
+      (github.event.action != 'labeled' ||
+        contains(fromJSON('["benchmark", "chaos", "chaos-soak"]'), github.event.label.name))
     runs-on: blacksmith-2vcpu-ubuntu-2404
     timeout-minutes: 40
     outputs:
@@ -361,11 +365,46 @@ jobs:
               core.setFailed('successful benchmark job did not publish a comparison');
             }
 
+  # The external chaos runner against the image built above, through the same `just chaos suite`
+  # command a developer runs. A pull request runs the smoke suite with the `chaos` label and the
+  # soak suite with `chaos-soak`; the nightly build of main runs the soak.
+  chaos-smoke:
+    name: chaos-smoke
+    needs: [meta, build-arch]
+    if: >-
+      github.event_name == 'pull_request' &&
+      contains(github.event.pull_request.labels.*.name, 'chaos') &&
+      github.event.pull_request.head.repo.full_name == github.repository
+    permissions:
+      contents: read
+      packages: read
+    uses: ./.github/workflows/chaos.yaml
+    with:
+      image: ghcr.io/nervix-io/nervix:${{ needs.meta.outputs.build_id }}-debian-amd64
+      suite: smoke
+
+  chaos-soak:
+    name: chaos-soak
+    needs: [meta, build-arch]
+    if: >-
+      github.event_name == 'schedule' ||
+      (github.event_name == 'pull_request' &&
+        contains(github.event.pull_request.labels.*.name, 'chaos-soak') &&
+        github.event.pull_request.head.repo.full_name == github.repository)
+    permissions:
+      contents: read
+      packages: read
+    uses: ./.github/workflows/chaos.yaml
+    with:
+      image: ghcr.io/nervix-io/nervix:${{ needs.meta.outputs.build_id }}-debian-amd64
+      suite: soak
+
   publish-manifest:
     name: manifest-${{ matrix.image }}
     needs: [meta, build-arch]
     if: >-
       github.event.action != 'labeled' &&
+      github.event_name != 'schedule' &&
       (github.event_name != 'pull_request' ||
         github.event.pull_request.head.repo.full_name == github.repository)
     runs-on: blacksmith-2vcpu-ubuntu-2404
@@ -408,6 +447,7 @@ jobs:
     timeout-minutes: 60
     if: >-
       github.event.action != 'labeled' &&
+      github.event_name != 'schedule' &&
       (github.event_name != 'pull_request' ||
         github.event.pull_request.head.repo.full_name == github.repository)
     steps:

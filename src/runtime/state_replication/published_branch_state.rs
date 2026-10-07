@@ -103,15 +103,13 @@ impl PublishedBranchState {
         let snapshot = self
             .snapshot_after(self.last_persisted_lsm(), executor)
             .await
-            .map_err(|error| {
-                RuntimeStateOperationError::persistence(error.current_context().clone())
-            })?;
+            .change_context(RuntimeStateOperationError::Persistence)?;
         let Some(snapshot) = snapshot else {
             return Ok(None);
         };
         store
             .persist_latest_snapshot(self.placement(), snapshot.lsm, &snapshot.payload)
-            .map_err(RuntimeStateOperationError::persistence)?;
+            .change_context(RuntimeStateOperationError::Persistence)?;
         self.record_persisted(snapshot.lsm);
         Ok(Some(snapshot.lsm))
     }

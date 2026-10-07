@@ -1310,7 +1310,7 @@ impl SessionServiceImpl {
                 );
                 if let Err(error) = Box::pin(self.apply_current_cluster_state()).await {
                     return command_error(format!(
-                        "the existing models in domain '{}' are not usable everywhere: {error}",
+                        "the existing models in domain '{}' are not usable everywhere: {error:#}",
                         domain.as_str()
                     ));
                 }
@@ -1564,7 +1564,7 @@ impl SessionServiceImpl {
                                     transaction_application_failure = Some(format!(
                                         "committed transaction model step in domain '{}' failed \
                                          runtime activation before ownership handoff completion: \
-                                         {error}",
+                                         {error:#}",
                                         domain.as_str()
                                     ));
                                     self.defer_planned_ownership_handoff_release(
@@ -1584,13 +1584,13 @@ impl SessionServiceImpl {
                                     {
                                         transaction_application_failure = Some(format!(
                                             "committed transaction model step in domain '{}' \
-                                             failed ownership activation: {error}",
+                                             failed ownership activation: {error:#}",
                                             domain.as_str()
                                         ));
                                         self.broadcast_error(format!(
                                             "failed to confirm ownership state activation for \
                                              committed transaction model step in domain '{}': \
-                                             {error}",
+                                             {error:#}",
                                             domain.as_str()
                                         ));
                                     }
@@ -1599,7 +1599,7 @@ impl SessionServiceImpl {
                             if let Some(error) = activation_error {
                                 if transaction_application_failure.is_none()
                                     && matches!(
-                                        error,
+                                        error.current_context(),
                                         RuntimeError::RuntimeRevisionPreparation { .. }
                                             | RuntimeError::RuntimeRevisionReadiness { .. }
                                     )
@@ -1608,13 +1608,13 @@ impl SessionServiceImpl {
                                 } else if transaction_application_failure.is_none() {
                                     transaction_application_failure = Some(format!(
                                         "committed transaction model step in domain '{}' failed \
-                                         runtime activation: {error}",
+                                         runtime activation: {error:#}",
                                         domain.as_str()
                                     ));
                                 }
                                 self.broadcast_error(format!(
                                     "failed to reconcile committed transaction model step in \
-                                     domain '{}': {error}",
+                                     domain '{}': {error:#}",
                                     domain.as_str()
                                 ));
                             }
@@ -1811,7 +1811,7 @@ impl SessionServiceImpl {
                         };
                         return command_error(format!(
                             "committed models and schedule for domain '{}', but ownership state \
-                             activation did not complete: {error}{paused}",
+                             activation did not complete: {error:#}{paused}",
                             domain.as_str(),
                         ));
                     }

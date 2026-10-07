@@ -658,7 +658,7 @@ impl SessionServiceImpl {
         if let Err(error) = self.apply_current_cluster_state().await {
             return Err(StepFailure::Failed(format!(
                 "domain '{domain}' was created, but its stopped state did not become usable: \
-                 {error}"
+                 {error:#}"
             )));
         }
         if let Err(error) = self.wait_for_authoritative_visibility().await {

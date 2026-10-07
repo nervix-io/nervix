@@ -12,6 +12,7 @@
 use std::time::Duration;
 
 use ahash::RandomState;
+use error_stack::{Report, ResultExt as _};
 use futures_util::future::BoxFuture;
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_client_wire::{
@@ -238,7 +239,7 @@ pub(in crate::application) struct RuntimeStateApplication<'a> {
 /// bounded stack regardless of the preparation and readiness paths active inside this operation.
 pub(in crate::application) fn apply_current_cluster_runtime_state(
     application: RuntimeStateApplication<'_>,
-) -> BoxFuture<'_, Result<(), crate::runtime::RuntimeError>> {
+) -> BoxFuture<'_, error_stack::Result<(), crate::runtime::RuntimeError>> {
     let RuntimeStateApplication {
         runtime,
         https_certificates,
@@ -284,11 +285,8 @@ pub(in crate::application) fn apply_current_cluster_runtime_state(
                     "failed to install the HTTPS listener TLS configuration"
                 );
             }
-            runtime_application.map_err(|error| {
-                crate::runtime::RuntimeError::BuildDomainExecution {
-                    domain: "cluster".to_string(),
-                    reason: format!("{error:#}"),
-                }
+            runtime_application.change_context(crate::runtime::RuntimeError::ApplyRevision {
+                revision: state.revision,
             })?;
             #[cfg(feature = "testing")]
             runtime
@@ -308,25 +306,23 @@ pub(in crate::application) fn apply_current_cluster_runtime_state(
             // Applying a revision gets one start-time operation budget: peer-failure detection followed
             // by readiness propagation. A peer that disconnects after this starts has only the remaining
             // portion of that budget.
-            let Some(readiness_timeout) = node_unavailability_timeout
-                .checked_add(RUNTIME_REVISION_READINESS_PROPAGATION_BOUND)
-            else {
-                return Err(
+            let deadline_overflow = || {
+                Report::new(
                     crate::runtime::RuntimeError::RuntimeRevisionReadinessDeadlineOverflow {
                         node_unavailability_timeout,
                         readiness_propagation_bound: RUNTIME_REVISION_READINESS_PROPAGATION_BOUND,
                     },
-                );
+                )
+            };
+            let Some(readiness_timeout) = node_unavailability_timeout
+                .checked_add(RUNTIME_REVISION_READINESS_PROPAGATION_BOUND)
+            else {
+                return Err(deadline_overflow());
             };
             let Some(deadline) =
                 nervix_primitives::time::Instant::now().checked_add(readiness_timeout)
             else {
-                return Err(
-                    crate::runtime::RuntimeError::RuntimeRevisionReadinessDeadlineOverflow {
-                        node_unavailability_timeout,
-                        readiness_propagation_bound: RUNTIME_REVISION_READINESS_PROPAGATION_BOUND,
-                    },
-                );
+                return Err(deadline_overflow());
             };
             let preparation = wait_for_application_revision(
                 cluster,
@@ -367,10 +363,12 @@ pub(in crate::application) fn apply_current_cluster_runtime_state(
                     );
                     continue;
                 }
-                return Err(crate::runtime::RuntimeError::RuntimeRevisionPreparation {
-                    revision: state.revision,
-                    pending_nodes: timeout.pending_nodes,
-                });
+                return Err(Report::new(
+                    crate::runtime::RuntimeError::RuntimeRevisionPreparation {
+                        revision: state.revision,
+                        pending_nodes: timeout.pending_nodes,
+                    },
+                ));
             }
             debug!(
                 %local_node_id,
@@ -394,7 +392,9 @@ pub(in crate::application) fn apply_current_cluster_runtime_state(
             runtime
                 .start_running_domain_ingestors()
                 .await
-                .map_err(|report| crate::runtime::RuntimeError::IngestorStart { report })?;
+                .change_context(crate::runtime::RuntimeError::StartIngestors {
+                    revision: state.revision,
+                })?;
             debug!(
                 %local_node_id,
                 revision = state.revision,
@@ -443,10 +443,12 @@ pub(in crate::application) fn apply_current_cluster_runtime_state(
                     );
                     continue;
                 }
-                return Err(crate::runtime::RuntimeError::RuntimeRevisionReadiness {
-                    revision: state.revision,
-                    pending_nodes: timeout.pending_nodes,
-                });
+                return Err(Report::new(
+                    crate::runtime::RuntimeError::RuntimeRevisionReadiness {
+                        revision: state.revision,
+                        pending_nodes: timeout.pending_nodes,
+                    },
+                ));
             }
             debug!(
                 %local_node_id,
@@ -1282,7 +1284,7 @@ fn rebind_resource_before_for(input: &str, cursor: usize) -> Option<ResourceName
 impl SessionServiceImpl {
     pub(in crate::application) async fn apply_current_cluster_state(
         &self,
-    ) -> Result<(), crate::runtime::RuntimeError> {
+    ) -> error_stack::Result<(), crate::runtime::RuntimeError> {
         apply_current_cluster_runtime_state(RuntimeStateApplication {
             runtime: &self.inner.runtime,
             https_certificates: &self.inner.https_certificates,

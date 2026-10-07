@@ -3,7 +3,8 @@
 //! Layer: edges.
 //!
 //! - **Owns.** Carrying one session's frames over an upgraded console connection: one frame per
-//!   binary message each way, the message limit, and the close that ends the connection.
+//!   binary message each way, the message limit, and the close that ends the connection; and what
+//!   any console WebSocket's received message carries and the close a broken framing ends it with.
 //! - **Depends on.** The session engine, the client wire WebSocket codec, and tungstenite.
 //! - **Must not know.** How the connection was upgraded or authenticated, or what any request
 //!   does.
@@ -18,8 +19,8 @@ use bytes::Bytes;
 use error_stack::Report;
 use futures_util::{Sink, SinkExt as _, Stream, StreamExt as _, stream};
 use nervix_client_wire::{
-    SessionLimits,
-    websocket::{ServerWebSocketCodec, WebSocketData, WebSocketError},
+    FrameRoot, SessionLimits, VerifiedFrame,
+    websocket::{ServerWebSocketCodec, WebSocketCodec, WebSocketData, WebSocketError},
 };
 use nervix_models::UserName;
 use nervix_primitives::sync::{CancellationToken, oneshot};
@@ -51,10 +52,80 @@ pub(in crate::application) fn console_websocket_config(limits: &SessionLimits) -
     }
 }
 
-/// Why the connection ends, when the client broke the framing.
-struct Violation {
-    code: u16,
-    reason: String,
+/// Why a console connection ends, when the client broke the framing of the call it carries.
+pub(in crate::application) struct Violation {
+    pub(in crate::application) code: u16,
+    pub(in crate::application) reason: String,
+}
+
+impl Violation {
+    fn of_decoding(error: &Report<WebSocketError>) -> Self {
+        Self {
+            code: WebSocketError::close_code(error),
+            reason: error.current_context().to_string(),
+        }
+    }
+}
+
+/// What one message a console WebSocket received carries.
+pub(in crate::application) enum ConsoleMessage<Inbound: FrameRoot> {
+    /// A binary message holding exactly one frame of the call the connection carries.
+    Frame(VerifiedFrame<Inbound>),
+    /// A ping, a pong or a raw frame, which belong to the connection and carry no frame.
+    Control,
+    /// The client closed the connection.
+    Closed,
+    /// The connection failed.
+    Failed,
+    /// The client broke the framing, and the connection ends with this close.
+    Violation(Violation),
+}
+
+impl<Inbound: FrameRoot> ConsoleMessage<Inbound> {
+    /// Reads one received message with `codec`, which verifies the frames the connection carries.
+    pub(in crate::application) fn read<Outbound: FrameRoot>(
+        codec: &WebSocketCodec<Outbound, Inbound>,
+        message: Result<Message, tungstenite::Error>,
+    ) -> Self {
+        let message = match message {
+            Ok(message) => message,
+            Err(tungstenite::Error::Capacity(CapacityError::MessageTooLong { size, max_size })) => {
+                return Self::Violation(Violation {
+                    code: CLOSE_MESSAGE_TOO_BIG,
+                    reason: format!("a message of {size} bytes exceeds the {max_size}-byte limit"),
+                });
+            }
+            Err(error) => {
+                debug!(error = %error, "a console connection failed");
+                return Self::Failed;
+            }
+        };
+        let data = match message {
+            Message::Binary(payload) => WebSocketData::Binary(Bytes::from(payload)),
+            Message::Text(_) => WebSocketData::Text,
+            Message::Close(_) => return Self::Closed,
+            Message::Ping(_) | Message::Pong(_) | Message::Frame(_) => return Self::Control,
+        };
+        match codec.decode(data) {
+            Ok(frame) => Self::Frame(frame),
+            Err(error) => Self::Violation(Violation::of_decoding(&error)),
+        }
+    }
+}
+
+/// The close that ends a console connection: with the code of the violation that ended it, or
+/// normally.
+pub(in crate::application) fn close_frame(violation: Option<Violation>) -> CloseFrame<'static> {
+    match violation {
+        Some(violation) => CloseFrame {
+            code: CloseCode::from(violation.code),
+            reason: Cow::Owned(violation.reason),
+        },
+        None => CloseFrame {
+            code: CloseCode::Normal,
+            reason: Cow::Borrowed(""),
+        },
+    }
 }
 
 /// Where the reader records the violation that ended the connection, so the writer closes with
@@ -78,40 +149,16 @@ impl ViolationReport {
         codec: &ServerWebSocketCodec,
         message: Result<Message, tungstenite::Error>,
     ) -> Option<InboundFrame> {
-        let message = match message {
-            Ok(message) => message,
-            Err(tungstenite::Error::Capacity(CapacityError::MessageTooLong { size, max_size })) => {
-                self.report(Violation {
-                    code: CLOSE_MESSAGE_TOO_BIG,
-                    reason: format!("a message of {size} bytes exceeds the {max_size}-byte limit"),
-                });
-                return Some(InboundFrame::Failed);
-            }
-            Err(error) => {
-                debug!(error = %error, "a console session connection failed");
-                return Some(InboundFrame::Failed);
-            }
-        };
-        let data = match message {
-            Message::Binary(payload) => WebSocketData::Binary(Bytes::from(payload)),
-            Message::Text(_) => WebSocketData::Text,
-            Message::Close(_) => return Some(InboundFrame::Closed),
-            Message::Ping(_) | Message::Pong(_) | Message::Frame(_) => return None,
-        };
-        match codec.decode(data) {
-            Ok(frame) => Some(InboundFrame::Frame(frame)),
-            Err(error) => {
-                self.report(violation(&error));
+        match ConsoleMessage::read(codec, message) {
+            ConsoleMessage::Frame(frame) => Some(InboundFrame::Frame(frame)),
+            ConsoleMessage::Control => None,
+            ConsoleMessage::Closed => Some(InboundFrame::Closed),
+            ConsoleMessage::Failed => Some(InboundFrame::Failed),
+            ConsoleMessage::Violation(violation) => {
+                self.report(violation);
                 Some(InboundFrame::Failed)
             }
         }
-    }
-}
-
-fn violation(error: &Report<WebSocketError>) -> Violation {
-    Violation {
-        code: WebSocketError::close_code(error),
-        reason: error.current_context().to_string(),
     }
 }
 
@@ -175,16 +222,7 @@ async fn write_frames<S, E>(
             return;
         }
     }
-    let close = match violation.await {
-        Ok(violation) => CloseFrame {
-            code: CloseCode::from(violation.code),
-            reason: Cow::Owned(violation.reason),
-        },
-        Err(_) => CloseFrame {
-            code: CloseCode::Normal,
-            reason: Cow::Borrowed(""),
-        },
-    };
+    let close = close_frame(violation.await.ok());
     if let Err(error) = sink.send(Message::Close(Some(close))).await {
         debug!(error = %error, "a console session connection closed before its close frame");
     }

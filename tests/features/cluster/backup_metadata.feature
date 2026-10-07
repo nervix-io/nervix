@@ -1,7 +1,6 @@
 Feature: Large native restore metadata
   Restoring a complete state set publishes one durable generation before START.
 
-  @restore_installation
   Scenario Outline: Native lifecycle and Kafka metadata above the bulk budget on <cluster_size> nodes restore exactly
     Given Kafka is running
     And runtime replication is configured with replica count 1 and snapshot interval "10m"

@@ -68,7 +68,7 @@ impl Runtime {
         &self,
         domain: &DomainName,
         relay: &RelayName,
-    ) -> Result<(), RuntimeError> {
+    ) -> error_stack::Result<(), ExecutionBuildError> {
         let placements = self
             .inner
             .replicated_materialized_stream_states
@@ -94,12 +94,8 @@ impl Runtime {
                     ModelKind::Relay,
                     relay,
                 )
-                .map_err(|error| RuntimeError::BuildDomainExecution {
-                    domain: domain.as_str().to_string(),
-                    reason: format!(
-                        "failed to purge materialized state for relay '{}': {error}",
-                        relay.as_str()
-                    ),
+                .change_context_lazy(|| ExecutionBuildError::PurgeNodeState {
+                    node: NodeRef::new(ModelKind::Relay, ModelName::from(relay)),
                 })?;
         }
         Ok(())
@@ -109,7 +105,7 @@ impl Runtime {
         &self,
         domain: &DomainName,
         deduplicator: &DeduplicatorName,
-    ) -> Result<(), RuntimeError> {
+    ) -> error_stack::Result<(), ExecutionBuildError> {
         let placements = self
             .inner
             .replicated_deduplicator_states
@@ -133,12 +129,8 @@ impl Runtime {
                     ModelKind::Deduplicator,
                     deduplicator,
                 )
-                .map_err(|error| RuntimeError::BuildDomainExecution {
-                    domain: domain.as_str().to_string(),
-                    reason: format!(
-                        "failed to purge state for deduplicator '{}': {error}",
-                        deduplicator.as_str()
-                    ),
+                .change_context_lazy(|| ExecutionBuildError::PurgeNodeState {
+                    node: NodeRef::new(ModelKind::Deduplicator, ModelName::from(deduplicator)),
                 })?;
         }
         Ok(())

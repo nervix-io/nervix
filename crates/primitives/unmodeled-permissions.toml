@@ -232,6 +232,13 @@ path = "crates/web-console/src/main.rs"
 reason = "The console installs its task executor once per page, and its tasks wait on and cancel futures on the browser's event loop, which no execution mode runs and where the boundary's native families do not exist: a browser build has no native capability to select a modeled primitive from."
 
 [[permission]]
+items = ["futures::AbortHandle", "futures::Abortable"]
+limit = "The browser console runs in no execution mode, so nothing it does is modeled."
+owner = "The browser console's backup dialog: the archive download and the restore stream it cancels when another identity takes over the console."
+path = "crates/web-console/src/backup_dialog.rs"
+reason = "The dialog's download and restore run as tasks on the browser's event loop, which no execution mode runs and where the boundary's native task families do not exist."
+
+[[permission]]
 items = ["futures::mpsc"]
 limit = "The browser console runs in no execution mode, so nothing it does is modeled."
 owner = "The browser console's request hand-off."

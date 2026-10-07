@@ -162,7 +162,7 @@ fn bolero_malformed_stored_wasm_checkpoints_fail_within_bounds() {
             ),
             Err(error) => assert!(matches!(
                 error.current_context(),
-                RuntimePersistenceError::DecodeState(_)
+                RuntimePersistenceError::DecodeState
             )),
         });
 }
