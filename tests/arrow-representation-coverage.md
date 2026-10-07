@@ -51,7 +51,7 @@ stream for each of the four.
 | Routed relay payload from the sending runtime to the receiving runtime's rows | `remote-relay-rows` | The rows, the concrete branch or its absence with key values to the bit, every row's watermarks and one registration per row |
 | Routed payloads whose parts disagree | `remote-relay-rows-malformed` | The first defect in the receiver's order: the body, the watermark count, the registration count, then the branch key, before any row forms a batch |
 | Relay grant request, its relay metadata and the payload the receiver rebuilds, grant replies, admission exchanges, acknowledgement resolutions and connection bindings | `relay-wire-messages` | Every field through the bounded rkyv codec under the class and limit the transport uses, branch key floats by their bits, and no charge outlives a message |
-| Damaged relay and acknowledgement messages | `relay-wire-messages-malformed` | The codec's typed decode failure within the depth bound, or a message that encodes and decodes back to itself |
+| Damaged relay and acknowledgement messages | `relay-wire-messages-malformed` | The codec's typed decode failure within the depth bound, or a message that encodes and decodes back to itself; either way the decoder frees every allocation it made, counted on the decoding thread, and no charge outlives the bytes |
 
 The earlier Arrow targets remain the owners of their paths: `client-arrow-rows` and
 `client-arrow-selection` for Row subscriptions, `client-binding-rows` and `client-ffi-host-columns`

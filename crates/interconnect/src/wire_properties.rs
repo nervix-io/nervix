@@ -5,24 +5,27 @@
 //! - **Owns.** Generated relay grant requests and replies, admission exchanges, acknowledgement
 //!   resolutions and connection bindings, with every branch key, record metadata and registration
 //!   they carry, and the properties that the bounded rkyv codec keeps each one whole and refuses
-//!   damaged bytes with a typed failure.
+//!   damaged bytes with a typed failure that leaves no charge and no allocation behind.
 //! - **Depends on.** The wire messages, the bounded codec, the executor and the vocabulary
 //!   generators.
 //! - **Must not know.** Runtime branches, Arrow decoding or the transport's connection lifecycle.
+
+use std::num::NonZeroUsize;
 
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_arbitrary::{Arbitrary, Domain, Entropy};
 use nervix_execution::{ChargedBytes, CpuClass, Executor, MemoryClass};
 use nervix_models::{
-    ClusterNodeName, DomainName, RelayName, RemoteAckOutcome, RemoteAckRegistration,
-    RemoteAckResolution, RemoteRuntimeElementValue, RemoteRuntimeField,
-    RemoteRuntimeRecordMetadata, RemoteRuntimeValue,
+    ClusterNodeIdentity, ClusterNodeIncarnation, ClusterNodeName, DomainName, RelayName,
+    RemoteAckOutcome, RemoteAckRegistration, RemoteAckResolution, RemoteRuntimeElementValue,
+    RemoteRuntimeField, RemoteRuntimeRecordMetadata, RemoteRuntimeValue,
 };
+use rkyv::{rancor::Error as RkyvError, util::AlignedVec};
 
 use super::{
-    ConnectionAccepted, ConnectionHello, RelayAdmissionRequest, RelayAdmissionResponse,
-    RelayGrantDisposition, RelayGrantRequest, RelayGrantResponse, RelayMetadata, decode_rkyv,
-    encode_rkyv,
+    ConnectionAccepted, ConnectionHello, ElementWise, RelayAdmissionRequest,
+    RelayAdmissionResponse, RelayGrantDisposition, RelayGrantRequest, RelayGrantResponse,
+    RelayMetadata, decode_aligned, decode_rkyv, encode_rkyv, validation_depth,
 };
 use crate::{PoolClass, RelayAdmissionStatus, RelayDelivery, RelayPayload, RelayPayloadKind};
 
@@ -649,9 +652,129 @@ impl MessageDamage {
     }
 }
 
+/// Decodes `bytes` as a `T` on this thread, drops what the decoder returns, and asserts that the
+/// decoder freed every allocation it made: a message the codec refuses leaves nothing behind, and
+/// neither does one it decodes.
+fn assert_decoding_frees_its_allocations<T>(bytes: &[u8], max_depth: NonZeroUsize)
+where
+    T: rkyv::Archive,
+    T::Archived: for<'a> rkyv::bytecheck::CheckBytes<rkyv::api::high::HighValidator<'a, RkyvError>>
+        + rkyv::Deserialize<T, rkyv::api::high::HighDeserializer<RkyvError>>,
+{
+    let mut aligned = AlignedVec::<16>::with_capacity(bytes.len());
+    aligned.extend_from_slice(bytes);
+    // The first decode pays for whatever the codec and its failure report set up once.
+    drop(decode_aligned::<T>(&aligned, max_depth));
+    let before = alloc_count::stats();
+    drop(decode_aligned::<T>(&aligned, max_depth));
+    let after = alloc_count::stats();
+    let allocated = after
+        .alloc_calls
+        .checked_sub(before.alloc_calls)
+        .assured("a thread's allocation count only grows");
+    let freed = after
+        .dealloc_calls
+        .checked_sub(before.dealloc_calls)
+        .assured("a thread's deallocation count only grows");
+    assert_eq!(
+        freed, allocated,
+        "the decoder frees every allocation it made"
+    );
+}
+
+/// A grant request is refused when the registrar of one of its acknowledgement registrations is
+/// no node's name, and the registrations read before that one are freed with the list that held
+/// them. A registrar's name is checked when it is read back, after the list was allocated.
+#[test]
+fn a_grant_request_refused_for_a_registrar_frees_the_registrations_read_before_it() {
+    let registered_by = |ack_id: u64, registrar: &str| RemoteAckRegistration {
+        ack_id,
+        registrar: ClusterNodeIdentity::new(
+            ClusterNodeName::parse(registrar).assured("a literal node name"),
+            ClusterNodeIncarnation::new(1),
+        ),
+    };
+    let refused_registrar = "registrar-no-node-is-named-as";
+    let request = RelayGrantRequest {
+        sender_epoch: 1,
+        delivery: RelayDelivery {
+            channel_incarnation: [7; 16],
+            sequence: 3,
+        },
+        body_bytes: 0,
+        metadata: RelayMetadata {
+            kind: RelayPayloadKind::Routed,
+            domain: DomainName::parse("orders").assured("a literal domain name"),
+            relay: RelayName::parse("accepted").assured("a literal relay name"),
+            key: None,
+            metadata: Vec::new(),
+            acks: vec![
+                Some(registered_by(1, "registrar-read-before-the-refused-one")),
+                None,
+                Some(registered_by(2, refused_registrar)),
+            ],
+            admission: None,
+        },
+    };
+    let mut bytes = rkyv::to_bytes::<RkyvError>(&request).assured("a small message encodes");
+    // The archive holds the name's text once, and a name holds no exclamation mark.
+    let position = bytes
+        .windows(refused_registrar.len())
+        .position(|window| window == refused_registrar.as_bytes())
+        .assured("the archive holds the registrar's name as its text");
+    bytes[position] = b'!';
+    let max_depth = validation_depth(&Executor::default()).assured("a positive decoder depth");
+
+    let refused = decode_aligned::<RelayGrantRequest>(&bytes, max_depth)
+        .expect_err("no node is named with an exclamation mark");
+    assert!(
+        matches!(refused.current_context(), crate::TransportError::Decode(_)),
+        "the request fails with the codec's decode failure: {refused:?}"
+    );
+    drop(refused);
+    assert_decoding_frees_its_allocations::<RelayGrantRequest>(&bytes, max_depth);
+}
+
+/// A list read back element by element is archived exactly as rkyv archives a `Vec`: the wrapper
+/// changes how a refused list is freed, and nothing a peer reads.
+#[test]
+fn a_list_read_back_element_by_element_archives_as_rkyv_archives_a_vec() {
+    #[derive(rkyv::Archive, rkyv::Serialize)]
+    struct AsVec {
+        list: Vec<Option<RemoteAckRegistration>>,
+    }
+
+    #[derive(rkyv::Archive, rkyv::Serialize)]
+    struct ElementByElement {
+        #[rkyv(with = ElementWise)]
+        list: Vec<Option<RemoteAckRegistration>>,
+    }
+
+    let registered_by = |ack_id: u64, registrar: &str| RemoteAckRegistration {
+        ack_id,
+        registrar: ClusterNodeIdentity::new(
+            ClusterNodeName::parse(registrar).assured("a literal node name"),
+            ClusterNodeIncarnation::new(ack_id),
+        ),
+    };
+    let list = vec![
+        Some(registered_by(1, "node-a")),
+        None,
+        Some(registered_by(
+            u64::MAX,
+            "a-registrar-whose-name-is-archived-out-of-line",
+        )),
+    ];
+    let as_vec =
+        rkyv::to_bytes::<RkyvError>(&AsVec { list: list.clone() }).assured("a small list encodes");
+    let element_by_element =
+        rkyv::to_bytes::<RkyvError>(&ElementByElement { list }).assured("a small list encodes");
+    assert_eq!(element_by_element.as_slice(), as_vec.as_slice());
+}
+
 /// Damaged encodings of relay messages, and arbitrary bytes, either fail with the codec's typed
-/// decode failure, within the decoder's depth bound and without leaving a charge behind, or decode
-/// to a message that encodes and decodes back to itself.
+/// decode failure, within the decoder's depth bound and without leaving a charge or an allocation
+/// behind, or decode to a message that encodes and decodes back to itself.
 #[test]
 fn bolero_damaged_relay_messages_fail_typed_or_decode_to_a_message() {
     let runtime = property_runtime();
@@ -832,6 +955,8 @@ where
     T::Archived: for<'a> rkyv::bytecheck::CheckBytes<rkyv::api::high::HighValidator<'a, rkyv::rancor::Error>>
         + rkyv::Deserialize<T, rkyv::api::high::HighDeserializer<rkyv::rancor::Error>>,
 {
+    let max_depth = validation_depth(executor).assured("a positive decoder depth");
+    assert_decoding_frees_its_allocations::<T>(damaged.as_ref(), max_depth);
     let decoded =
         match decode_rkyv::<T>(executor, MemoryClass::Relay, CpuClass::Data, damaged).await {
             Ok(decoded) => decoded.into_value(),

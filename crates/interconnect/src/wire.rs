@@ -15,13 +15,15 @@ use nervix_execution::{
 };
 use nervix_models::ClusterNodeName;
 use rkyv::{
-    Archive, Deserialize, Serialize,
+    Archive, Deserialize, Place, Serialize,
     api::{access_with_context, deserialize_using, high::HighSerializer},
     de::pooling::Pool,
-    rancor::Error as RkyvError,
-    ser::{allocator::ArenaHandle, writer::IoWriter},
+    rancor::{Error as RkyvError, Fallible},
+    ser::{Allocator, Writer, allocator::ArenaHandle, writer::IoWriter},
     util::AlignedVec,
     validation::{Validator, archive::ArchiveValidator, shared::SharedValidator},
+    vec::{ArchivedVec, VecResolver},
+    with::{ArchiveWith, DeserializeWith, SerializeWith},
 };
 
 use super::{
@@ -117,6 +119,52 @@ impl<T> Decoded<T> {
     }
 }
 
+/// How a list is archived when reading one of its elements back can refuse it.
+///
+/// rkyv reads a `Vec` back into a buffer it allocates first and hands over only once every element
+/// is in it. An element it refuses on the way, as it refuses a registration whose registrar is no
+/// node's name, leaves that buffer and every element read before it allocated for good. This
+/// wrapper archives a list exactly as rkyv archives a `Vec`, and reads it back element by element
+/// into a vector that owns what it holds, so a refused element frees them.
+pub(crate) struct ElementWise;
+
+impl<T: Archive> ArchiveWith<Vec<T>> for ElementWise {
+    type Archived = ArchivedVec<T::Archived>;
+    type Resolver = VecResolver;
+
+    fn resolve_with(field: &Vec<T>, resolver: Self::Resolver, out: Place<Self::Archived>) {
+        ArchivedVec::resolve_from_slice(field.as_slice(), resolver, out);
+    }
+}
+
+impl<T, S> SerializeWith<Vec<T>, S> for ElementWise
+where
+    T: Serialize<S>,
+    S: Fallible + Allocator + Writer + ?Sized,
+{
+    fn serialize_with(field: &Vec<T>, serializer: &mut S) -> Result<Self::Resolver, S::Error> {
+        ArchivedVec::<T::Archived>::serialize_from_slice(field.as_slice(), serializer)
+    }
+}
+
+impl<T, D> DeserializeWith<ArchivedVec<T::Archived>, Vec<T>, D> for ElementWise
+where
+    T: Archive,
+    T::Archived: Deserialize<T, D>,
+    D: Fallible + ?Sized,
+{
+    fn deserialize_with(
+        field: &ArchivedVec<T::Archived>,
+        deserializer: &mut D,
+    ) -> Result<Vec<T>, D::Error> {
+        let mut elements = Vec::with_capacity(field.len());
+        for element in field.iter() {
+            elements.push(element.deserialize(deserializer)?);
+        }
+        Ok(elements)
+    }
+}
+
 /// The rkyv metadata admitted before an Arrow relay body stream starts.
 #[derive(Debug, Clone, Archive, Serialize, Deserialize, PartialEq)]
 pub(crate) struct RelayMetadata {
@@ -125,6 +173,9 @@ pub(crate) struct RelayMetadata {
     pub(crate) relay: nervix_models::RelayName,
     pub(crate) key: Option<Vec<nervix_models::RemoteRuntimeField>>,
     pub(crate) metadata: Vec<nervix_models::RemoteRuntimeRecordMetadata>,
+    /// A registration is refused when its registrar is no node's name, so the list is read back
+    /// element by element.
+    #[rkyv(with = ElementWise)]
     pub(crate) acks: Vec<Option<nervix_models::RemoteAckRegistration>>,
     pub(crate) admission: Option<nervix_models::RemoteAckRegistration>,
 }

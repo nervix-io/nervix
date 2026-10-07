@@ -358,6 +358,11 @@ and nesting depth, before exposing it to an operation handler. Encoded and decod
 to the traffic class before decoding begins. Unknown operations, a pool mismatch, malformed
 archives, and values above the operation limit fail at the transport boundary.
 
+Validation checks an archive's shape. A typed name inside it is checked when the record is read
+back, so a record can be refused after part of it was read. A relay grant request refused that way
+frees everything it had read: its acknowledgement registrations, each of which names its registrar,
+are read back one by one, and the request is refused at the first registrar that is no node's name.
+
 Control-operation responses preserve a typed failure class and subject across the wire. A receiver
 can distinguish a node that rejects ownership, an unavailable subject, a subject that is not ready,
 and an operation that ran and failed without parsing display text. Only the final class carries an
