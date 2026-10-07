@@ -92,7 +92,9 @@ LOOKUP <name> KEY '<key>';
 
 `DESCRIBE HASH MAP` reports the loaded resource version, path, codec, owner/replica placement, key
 field, and entry count, which counts distinct keys. `LOOKUP` returns the matching decoded record
-when the key exists. These are read-only control-plane commands: they do not execute the graph or
+when the key exists, written as JSON. JSON has no number for a NaN or an infinity, so a float field
+holding one is written as the string `NaN`, `Infinity` or `-Infinity`; a key holding one matches
+the entry keyed by the same name, every NaN alike. These are read-only control-plane commands: they do not execute the graph or
 require a running domain clock, so a loaded hash map remains directly queryable while its domain is
 stopped.
 

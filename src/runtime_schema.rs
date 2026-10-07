@@ -2780,6 +2780,24 @@ impl RuntimeValue {
         }
     }
 
+    /// A float as JSON: its number, or, for a non-finite float JSON has no number for, the string
+    /// a proto3 JSON reader reads it from. A non-finite float reaches a record from a payload whose
+    /// number rounds past the type's range, an Avro or CBOR float, or a client's Arrow batch; only
+    /// a float the VM computes is refused when it is not finite.
+    fn json_float(value: f64) -> JsonValue {
+        if let Some(number) = JsonNumber::from_f64(value) {
+            return JsonValue::Number(number);
+        }
+        let name = if value.is_nan() {
+            "NaN"
+        } else if value.is_sign_negative() {
+            "-Infinity"
+        } else {
+            "Infinity"
+        };
+        JsonValue::String(name.to_string())
+    }
+
     pub(crate) fn to_json_value(&self) -> JsonValue {
         match self {
             Self::U8(v) => JsonValue::Number(JsonNumber::from(*v)),
@@ -2793,16 +2811,8 @@ impl RuntimeValue {
             Self::Bool(v) => JsonValue::Bool(*v),
             Self::String(v) => JsonValue::String(v.clone()),
             Self::Datetime(v) => JsonValue::String(v.to_rfc3339()),
-            Self::F32(v) => {
-                JsonValue::Number(JsonNumber::from_f64(f64::from(v.into_inner())).verified(
-                    "the VM turns a non-finite float result into a row error, so a stored float \
-                     is finite",
-                ))
-            }
-            Self::F64(v) => JsonValue::Number(JsonNumber::from_f64(v.into_inner()).verified(
-                "the VM turns a non-finite float result into a row error, so a stored float is \
-                 finite",
-            )),
+            Self::F32(v) => Self::json_float(f64::from(v.into_inner())),
+            Self::F64(v) => Self::json_float(v.into_inner()),
             Self::Array(values) | Self::Vec(values) => {
                 JsonValue::Array(values.iter().map(RuntimeValue::to_json_value).collect())
             }
@@ -9781,5 +9791,52 @@ mod tests {
             error.current_context(),
             CodecError::InvalidCodec { .. }
         ));
+    }
+
+    /// JSON has no number for a non-finite float, so the JSON a materialized report, a hash map
+    /// answer or a hash map key is rendered from spells one as the string a proto3 JSON reader
+    /// takes for it, and keeps every finite float a number.
+    #[test]
+    fn non_finite_floats_render_as_their_json_names() {
+        for (value, expected) in [
+            (
+                RuntimeValue::F32(OrderedFloat(f32::INFINITY)),
+                serde_json::json!("Infinity"),
+            ),
+            (
+                RuntimeValue::F32(OrderedFloat(f32::NEG_INFINITY)),
+                serde_json::json!("-Infinity"),
+            ),
+            (
+                RuntimeValue::F32(OrderedFloat(f32::NAN)),
+                serde_json::json!("NaN"),
+            ),
+            (
+                RuntimeValue::F64(OrderedFloat(f64::INFINITY)),
+                serde_json::json!("Infinity"),
+            ),
+            (
+                RuntimeValue::F64(OrderedFloat(f64::NEG_INFINITY)),
+                serde_json::json!("-Infinity"),
+            ),
+            (
+                RuntimeValue::F64(OrderedFloat(-f64::NAN)),
+                serde_json::json!("NaN"),
+            ),
+            (RuntimeValue::F64(OrderedFloat(0.5)), serde_json::json!(0.5)),
+            (
+                RuntimeValue::Vec(vec![
+                    RuntimeValue::F32(OrderedFloat(1.5)),
+                    RuntimeValue::F32(OrderedFloat(f32::NAN)),
+                ]),
+                serde_json::json!([1.5, "NaN"]),
+            ),
+        ] {
+            assert_eq!(value.to_json_value(), expected);
+        }
+        assert_eq!(
+            RuntimeValue::F64(OrderedFloat(f64::INFINITY)).to_key_fragment(),
+            "\"Infinity\""
+        );
     }
 }

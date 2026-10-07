@@ -60,6 +60,64 @@ Feature: Materialized relay state
       | 3            | node-2      |
       | 3            | node-3      |
 
+  Scenario Outline: Materialized reports spell the infinite floats a payload's numbers round to
+    Given runtime replication is configured with replica count 0 and snapshot interval "100ms"
+    And a <cluster_size> node nervix cluster is started
+    And the leader node is configured with these NSPL commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
+    And the active domain is "{{domain}}"
+    When these NSPL commands are executed on the leader node
+      """
+      CREATE SCHEMA reading ( tenant STRING, value F32 );
+      CREATE WIRE JSON SCHEMA reading_wire MODE STRICT ( tenant string, value number );
+      CREATE CODEC reading_codec FROM WIRE JSON SCHEMA reading_wire TO SCHEMA reading;
+      CREATE SCHEMA reading_tenant ( tenant STRING );
+      CREATE BRANCH by_reading_tenant SCHEMA reading_tenant TTL 5m;
+      CREATE RELAY readings SCHEMA reading BRANCHED BY by_reading_tenant
+        WITH MATERIALIZED STATE LAST BY TIMESTAMP;
+      CREATE VHOST edge readings-{{test_id}}.example.com;
+      CREATE ENDPOINT readings_ingress ON edge PATH '/readings' TYPE HTTP;
+      CREATE INGESTOR reading_source
+        FROM ENDPOINT readings_ingress MODE NO_ACK SEQUENTIAL
+        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING reading_codec
+        TO readings INHERIT ALL BRANCHED BY by_reading_tenant
+        SET tenant = message.tenant
+        FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+      START;
+      """
+    When http payload is posted to node "node-1" with host "readings-{{test_id}}.example.com" path "/readings"
+      """
+      {"tenant":"acme","value":1e39}
+      """
+    And http payload is posted to node "node-1" with host "readings-{{test_id}}.example.com" path "/readings"
+      """
+      {"tenant":"beta","value":-1e39}
+      """
+    And http payload is posted to node "node-1" with host "readings-{{test_id}}.example.com" path "/readings"
+      """
+      {"tenant":"gamma","value":0.5}
+      """
+    Then within "10s" node "<report_node>" eventually reports materialized state for relay "readings" containing
+      """
+      key={"tenant":"acme"} payload={"tenant":"acme","value":"Infinity"}
+      """
+    And within "10s" node "<report_node>" eventually reports materialized state for relay "readings" containing
+      """
+      key={"tenant":"beta"} payload={"tenant":"beta","value":"-Infinity"}
+      """
+    And within "10s" node "<report_node>" eventually reports materialized state for relay "readings" containing
+      """
+      key={"tenant":"gamma"} payload={"tenant":"gamma","value":0.5}
+      """
+
+    Examples:
+      | cluster_size | report_node |
+      | 1            | node-1      |
+      | 3            | node-1      |
+      | 3            | node-2      |
+
   Scenario Outline: Materialized relay state is resolved from the current concrete branch
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
