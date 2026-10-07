@@ -16,7 +16,7 @@
 use std::{io::Cursor, num::NonZeroUsize};
 
 use arch_into::ArchInto as _;
-use arrow_array::{RecordBatch, RecordBatchOptions};
+use arrow_array::{RecordBatch, RecordBatchOptions, new_empty_array};
 use arrow_ipc::{reader::StreamReader, writer::StreamWriter};
 use arrow_schema::Schema as ArrowSchema;
 use error_stack::{Report, ResultExt as _};
@@ -260,9 +260,14 @@ impl RuntimeRecordBatch {
         batches: Vec<RecordBatch>,
     ) -> Result<Self, Report<ArrowBodyError>> {
         if batches.is_empty() {
+            let columns = schema
+                .fields()
+                .iter()
+                .map(|field| new_empty_array(field.data_type()))
+                .collect::<Vec<_>>();
             let batch = RecordBatch::try_new_with_options(
                 schema,
-                Vec::new(),
+                columns,
                 &RecordBatchOptions::new().with_row_count(Some(0)),
             )
             .map_err(ArrowBodyError::decoding)?;
