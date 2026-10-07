@@ -438,5 +438,9 @@ impl RuntimeRecordBatch {
 }
 
 #[cfg(test)]
+#[path = "client_batch_properties.rs"]
+mod properties;
+
+#[cfg(test)]
 #[path = "client_batch_tests.rs"]
 mod tests;

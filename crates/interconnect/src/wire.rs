@@ -323,6 +323,10 @@ where
     Ok(value)
 }
 
+#[cfg(all(test, not(any(feature = "shuttle", feature = "turmoil"))))]
+#[path = "wire_properties.rs"]
+mod properties;
+
 #[cfg(all(test, feature = "turmoil"))]
 mod simulation_checks {
     use std::{

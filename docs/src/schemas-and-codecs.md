@@ -315,6 +315,28 @@ Current protobuf codec format:
 
 - `PROTOBUF`, with resource-backed `.proto` files, inline compile config, and message name
 
+### Value Fidelity
+
+A schemaful codec decodes every row it encodes back to the same values: every integer width to its
+extremes, booleans, any Unicode text, bytes, datetimes to the nanosecond, nested `ARRAY` and `VEC`
+values, and nulls of optional fields. The formats themselves set the bounds of that promise:
+
+- JSON has no number for a NaN or an infinity. `WIRE JSON` writes a non-finite float as `null`,
+  which reads back as a null of an optional field and refuses a required field or a list element.
+  `WIRE CBOR` writes the float itself but reads every value through the same JSON model, so it reads
+  a non-finite float as a null.
+- `WIRE AVRO` keeps every float bit pattern. It writes an unsigned element of an `ARRAY` or `VEC` as
+  an Avro `long`, so an element above 9223372036854775807 fails to encode.
+- A datetime travels as RFC 3339 text in UTC; text written with another offset reads as the same
+  instant.
+- A `WIRE AVRO` payload is one raw Avro datum, without an object container or a schema registry
+  header, and a `WIRE CBOR` payload is one CBOR data item.
+
+The JAQ-native and protobuf codecs are transformations rather than encodings of a row: a program
+decides the shape in each direction, numbers pass through JSON text, and a protobuf message's JSON
+view omits fields that hold their default value. `SYSLOG` writes its timestamp to the microsecond in
+UTC; see [Syslog](syslog.md).
+
 ## JAQ Transformations
 
 JAQ-backed codecs must declare a JAQ transform. The concise

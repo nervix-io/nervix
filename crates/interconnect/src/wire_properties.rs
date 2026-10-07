@@ -1,0 +1,770 @@
+//! Relay delivery and acknowledgement messages through the bounded wire codec.
+//!
+//! Layer: test harness.
+//!
+//! - **Owns.** Generated relay grant requests and replies, admission exchanges, acknowledgement
+//!   resolutions and connection bindings, with every branch key, record metadata and registration
+//!   they carry, and the properties that the bounded rkyv codec keeps each one whole and refuses
+//!   damaged bytes with a typed failure.
+//! - **Depends on.** The wire messages, the bounded codec, the executor and the vocabulary
+//!   generators.
+//! - **Must not know.** Runtime branches, Arrow decoding or the transport's connection lifecycle.
+
+use meticulous::{OptionExt as _, ResultExt as _};
+use nervix_arbitrary::{Arbitrary, Domain, Entropy};
+use nervix_execution::{ChargedBytes, CpuClass, Executor, MemoryClass};
+use nervix_models::{
+    ClusterNodeName, DomainName, RelayName, RemoteAckOutcome, RemoteAckRegistration,
+    RemoteAckResolution, RemoteRuntimeElementValue, RemoteRuntimeField,
+    RemoteRuntimeRecordMetadata, RemoteRuntimeValue,
+};
+
+use super::{
+    ConnectionAccepted, ConnectionHello, RelayAdmissionRequest, RelayAdmissionResponse,
+    RelayGrantDisposition, RelayGrantRequest, RelayGrantResponse, RelayMetadata, decode_rkyv,
+    encode_rkyv,
+};
+use crate::{PoolClass, RelayAdmissionStatus, RelayDelivery, RelayPayload, RelayPayloadKind};
+
+/// The bytes one case reads its messages from.
+const CASE_BYTES: usize = 2048;
+
+/// The most rows one generated relay payload describes.
+const ROWS: usize = 6;
+
+/// The most fields one generated branch key holds.
+const KEY_FIELDS: usize = 3;
+
+/// How deeply generated branch key values nest.
+const VALUE_DEPTH: u8 = 2;
+
+/// The most elements one generated branch key list holds.
+const ELEMENTS: usize = 3;
+
+/// The most bytes of one generated relay body.
+const BODY_BYTES: usize = 64;
+
+fn property_runtime() -> nervix_primitives::runtime::Runtime {
+    nervix_primitives::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .assured("the property runtime opens")
+}
+
+/// A branch key value as a peer compares it: every float by its bits, so a signed zero and every
+/// NaN payload are told apart.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ExactValue {
+    U8(u8),
+    I8(i8),
+    U16(u16),
+    I16(i16),
+    U32(u32),
+    I32(i32),
+    U64(u64),
+    I64(i64),
+    Bool(bool),
+    String(String),
+    Datetime(String),
+    F32(u32),
+    F64(u64),
+    Array(Vec<ExactValue>),
+    Vec(Vec<ExactValue>),
+}
+
+impl ExactValue {
+    fn of(value: &RemoteRuntimeValue) -> Self {
+        match value {
+            RemoteRuntimeValue::U8(v) => Self::U8(*v),
+            RemoteRuntimeValue::I8(v) => Self::I8(*v),
+            RemoteRuntimeValue::U16(v) => Self::U16(*v),
+            RemoteRuntimeValue::I16(v) => Self::I16(*v),
+            RemoteRuntimeValue::U32(v) => Self::U32(*v),
+            RemoteRuntimeValue::I32(v) => Self::I32(*v),
+            RemoteRuntimeValue::U64(v) => Self::U64(*v),
+            RemoteRuntimeValue::I64(v) => Self::I64(*v),
+            RemoteRuntimeValue::Bool(v) => Self::Bool(*v),
+            RemoteRuntimeValue::String(v) => Self::String(v.clone()),
+            RemoteRuntimeValue::Datetime(v) => Self::Datetime(v.clone()),
+            RemoteRuntimeValue::F32(v) => Self::F32(v.to_bits()),
+            RemoteRuntimeValue::F64(v) => Self::F64(v.to_bits()),
+            RemoteRuntimeValue::Array(values) => {
+                Self::Array(values.iter().map(Self::of_element).collect())
+            }
+            RemoteRuntimeValue::Vec(values) => {
+                Self::Vec(values.iter().map(Self::of_element).collect())
+            }
+        }
+    }
+
+    fn of_element(value: &RemoteRuntimeElementValue) -> Self {
+        match value {
+            RemoteRuntimeElementValue::U8(v) => Self::U8(*v),
+            RemoteRuntimeElementValue::I8(v) => Self::I8(*v),
+            RemoteRuntimeElementValue::U16(v) => Self::U16(*v),
+            RemoteRuntimeElementValue::I16(v) => Self::I16(*v),
+            RemoteRuntimeElementValue::U32(v) => Self::U32(*v),
+            RemoteRuntimeElementValue::I32(v) => Self::I32(*v),
+            RemoteRuntimeElementValue::U64(v) => Self::U64(*v),
+            RemoteRuntimeElementValue::I64(v) => Self::I64(*v),
+            RemoteRuntimeElementValue::Bool(v) => Self::Bool(*v),
+            RemoteRuntimeElementValue::String(v) => Self::String(v.clone()),
+            RemoteRuntimeElementValue::Datetime(v) => Self::Datetime(v.clone()),
+            RemoteRuntimeElementValue::F32(v) => Self::F32(v.to_bits()),
+            RemoteRuntimeElementValue::F64(v) => Self::F64(v.to_bits()),
+            RemoteRuntimeElementValue::Array(values) => {
+                Self::Array(values.iter().map(Self::of_element).collect())
+            }
+            RemoteRuntimeElementValue::Vec(values) => {
+                Self::Vec(values.iter().map(Self::of_element).collect())
+            }
+        }
+    }
+
+    /// A whole branch key, field by field in its order.
+    fn key(key: &Option<Vec<RemoteRuntimeField>>) -> Option<Vec<(String, Self)>> {
+        let fields = key.as_ref()?;
+        Some(
+            fields
+                .iter()
+                .map(|field| (field.name.clone(), Self::of(&field.value)))
+                .collect(),
+        )
+    }
+}
+
+/// Asserts that `actual` is `expected` field by field, the branch key by its exact values.
+fn assert_same_metadata(actual: &RelayMetadata, expected: &RelayMetadata) {
+    assert_eq!(actual.kind, expected.kind, "the payload role is kept");
+    assert_eq!(actual.domain, expected.domain, "the domain is kept");
+    assert_eq!(actual.relay, expected.relay, "the relay is kept");
+    assert_eq!(
+        ExactValue::key(&actual.key),
+        ExactValue::key(&expected.key),
+        "the branch key is kept to the bit"
+    );
+    assert_eq!(
+        actual.metadata, expected.metadata,
+        "every row's watermarks are kept"
+    );
+    assert_eq!(
+        actual.acks, expected.acks,
+        "every row's registration is kept"
+    );
+    assert_eq!(
+        actual.admission, expected.admission,
+        "the admission is kept"
+    );
+}
+
+fn assert_same_payload(actual: &RelayPayload, expected: &RelayPayload) {
+    assert_eq!(
+        actual.delivery, expected.delivery,
+        "the delivery position is kept"
+    );
+    assert_same_metadata(
+        &RelayMetadata::from_payload(actual),
+        &RelayMetadata::from_payload(expected),
+    );
+    assert_eq!(
+        actual.batch_ipc, expected.batch_ipc,
+        "the body bytes are kept"
+    );
+}
+
+/// Generated wire messages of one case.
+struct WireCase {
+    payload: RelayPayload,
+    sender_epoch: u64,
+    receiver_epoch: u64,
+    disposition: RelayGrantDisposition,
+    status: RelayAdmissionStatus,
+    resolution: RemoteAckResolution,
+    hello: ConnectionHello,
+}
+
+impl WireCase {
+    fn new(arbitrary: &mut Arbitrary<'_>, executor: &Executor) -> Self {
+        let rows = arbitrary.entropy().count(ROWS);
+        let mut metadata = Vec::with_capacity(rows);
+        let mut acks = Vec::with_capacity(rows);
+        for _ in 0..rows {
+            metadata.push(RemoteRuntimeRecordMetadata {
+                ingested_at_low_watermark: arbitrary.timestamp(),
+                ingested_at_high_watermark: arbitrary.timestamp(),
+            });
+            acks.push(if arbitrary.entropy().flag() {
+                Some(registration(arbitrary))
+            } else {
+                None
+            });
+        }
+        let admission = if arbitrary.entropy().flag() {
+            Some(registration(arbitrary))
+        } else {
+            None
+        };
+        let body_length = arbitrary.entropy().count(BODY_BYTES);
+        let mut body = Vec::with_capacity(body_length);
+        for _ in 0..body_length {
+            body.push(arbitrary.entropy().byte());
+        }
+        let payload = RelayPayload {
+            delivery: delivery(arbitrary.entropy()),
+            kind: arbitrary.entropy().pick([
+                RelayPayloadKind::Routed,
+                RelayPayloadKind::SubscriptionFanout,
+                RelayPayloadKind::Ingress,
+            ]),
+            domain: arbitrary.rule_name::<DomainName>(),
+            relay: arbitrary.rule_name::<RelayName>(),
+            key: branch_key(arbitrary),
+            batch_ipc: executor
+                .try_charge_owned(MemoryClass::Relay, body)
+                .assured("a bounded body fits the relay budget"),
+            metadata,
+            acks,
+            admission,
+        };
+        let reason = arbitrary.string();
+        let disposition = match arbitrary.entropy().byte() % 6 {
+            0 => RelayGrantDisposition::SendBody {
+                grant_id: arbitrary.entropy().any_u64(),
+            },
+            1 => RelayGrantDisposition::BodyReceived,
+            2 => RelayGrantDisposition::Admitted,
+            3 => RelayGrantDisposition::Rejected(reason.clone()),
+            4 => RelayGrantDisposition::Cancelled,
+            _ => RelayGrantDisposition::Retired,
+        };
+        let status = match arbitrary.entropy().byte() % 8 {
+            0 => RelayAdmissionStatus::Reserved,
+            1 => RelayAdmissionStatus::BodyReceived,
+            2 => RelayAdmissionStatus::Admitted,
+            3 => RelayAdmissionStatus::Rejected(reason.clone()),
+            4 => RelayAdmissionStatus::Cancelled,
+            5 => RelayAdmissionStatus::Retired,
+            6 => RelayAdmissionStatus::Unknown,
+            _ => RelayAdmissionStatus::Indeterminate,
+        };
+        let outcome = match arbitrary.entropy().byte() % 4 {
+            0 => RemoteAckOutcome::Alive,
+            1 => RemoteAckOutcome::Progress {
+                sequence: arbitrary.entropy().any_u64(),
+                parked: arbitrary.entropy().flag(),
+            },
+            2 => RemoteAckOutcome::Ack,
+            _ => RemoteAckOutcome::NoAck(reason),
+        };
+        let resolution = registration(arbitrary).resolution(outcome);
+        let hello = ConnectionHello {
+            fingerprint: arbitrary.digest(),
+            class: arbitrary.entropy().pick(PoolClass::ALL),
+            process_epoch: arbitrary.entropy().any_u64(),
+            node_id: arbitrary.rule_name::<ClusterNodeName>(),
+            advertised_host: arbitrary.string(),
+        };
+        Self {
+            payload,
+            sender_epoch: arbitrary.entropy().any_u64(),
+            receiver_epoch: arbitrary.entropy().any_u64(),
+            disposition,
+            status,
+            resolution,
+            hello,
+        }
+    }
+
+    fn grant(&self) -> RelayGrantRequest {
+        RelayGrantRequest {
+            sender_epoch: self.sender_epoch,
+            delivery: self.payload.delivery,
+            body_bytes: u64::try_from(self.payload.batch_ipc.len()).assured("a bounded body"),
+            metadata: RelayMetadata::from_payload(&self.payload),
+        }
+    }
+}
+
+fn delivery(entropy: &mut Entropy<'_>) -> RelayDelivery {
+    let mut channel_incarnation = [0; 16];
+    for byte in &mut channel_incarnation {
+        *byte = entropy.byte();
+    }
+    RelayDelivery {
+        channel_incarnation,
+        sequence: entropy.any_u64(),
+    }
+}
+
+fn registration(arbitrary: &mut Arbitrary<'_>) -> RemoteAckRegistration {
+    RemoteAckRegistration {
+        ack_id: arbitrary.entropy().any_u64(),
+        registrar: arbitrary.node_identity(),
+    }
+}
+
+/// A branch key as the wire carries it, or none. The wire carries whatever a peer wrote, so a
+/// field may hold any name, any datetime text and any float bit pattern; the receiving runtime
+/// validates the key against what a concrete branch is.
+fn branch_key(arbitrary: &mut Arbitrary<'_>) -> Option<Vec<RemoteRuntimeField>> {
+    if !arbitrary.entropy().flag() {
+        return None;
+    }
+    let count = arbitrary.entropy().count(KEY_FIELDS);
+    let mut fields = Vec::with_capacity(count);
+    for _ in 0..count {
+        fields.push(RemoteRuntimeField {
+            name: arbitrary.string(),
+            value: remote_value(arbitrary, VALUE_DEPTH),
+        });
+    }
+    Some(fields)
+}
+
+fn remote_value(arbitrary: &mut Arbitrary<'_>, depth: u8) -> RemoteRuntimeValue {
+    let collections = if depth == 0 { 0 } else { 2 };
+    let choice = arbitrary.entropy().byte() % (13 + collections);
+    match choice {
+        0 => RemoteRuntimeValue::U8(arbitrary.entropy().byte()),
+        1 => RemoteRuntimeValue::I8(i8::from_le_bytes([arbitrary.entropy().byte()])),
+        2 => RemoteRuntimeValue::U16(u16::from_le_bytes(bytes(arbitrary.entropy()))),
+        3 => RemoteRuntimeValue::I16(i16::from_le_bytes(bytes(arbitrary.entropy()))),
+        4 => RemoteRuntimeValue::U32(u32::from_le_bytes(bytes(arbitrary.entropy()))),
+        5 => RemoteRuntimeValue::I32(i32::from_le_bytes(bytes(arbitrary.entropy()))),
+        6 => RemoteRuntimeValue::U64(arbitrary.entropy().any_u64()),
+        7 => RemoteRuntimeValue::I64(arbitrary.entropy().any_i64()),
+        8 => RemoteRuntimeValue::Bool(arbitrary.entropy().flag()),
+        9 => RemoteRuntimeValue::String(arbitrary.string()),
+        10 => RemoteRuntimeValue::Datetime(arbitrary.string()),
+        11 => RemoteRuntimeValue::F32(f32::from_bits(u32::from_le_bytes(bytes(
+            arbitrary.entropy(),
+        )))),
+        12 => RemoteRuntimeValue::F64(f64::from_bits(arbitrary.entropy().any_u64())),
+        13 => RemoteRuntimeValue::Array(elements(arbitrary, depth)),
+        _ => RemoteRuntimeValue::Vec(elements(arbitrary, depth)),
+    }
+}
+
+fn elements(arbitrary: &mut Arbitrary<'_>, depth: u8) -> Vec<RemoteRuntimeElementValue> {
+    let below = depth
+        .checked_sub(1)
+        .verified("a list is drawn only above depth zero");
+    let count = arbitrary.entropy().count(ELEMENTS);
+    let mut values = Vec::with_capacity(count);
+    for _ in 0..count {
+        values.push(remote_element(arbitrary, below));
+    }
+    values
+}
+
+fn remote_element(arbitrary: &mut Arbitrary<'_>, depth: u8) -> RemoteRuntimeElementValue {
+    let collections = if depth == 0 { 0 } else { 2 };
+    let choice = arbitrary.entropy().byte() % (13 + collections);
+    match choice {
+        0 => RemoteRuntimeElementValue::U8(arbitrary.entropy().byte()),
+        1 => RemoteRuntimeElementValue::I8(i8::from_le_bytes([arbitrary.entropy().byte()])),
+        2 => RemoteRuntimeElementValue::U16(u16::from_le_bytes(bytes(arbitrary.entropy()))),
+        3 => RemoteRuntimeElementValue::I16(i16::from_le_bytes(bytes(arbitrary.entropy()))),
+        4 => RemoteRuntimeElementValue::U32(u32::from_le_bytes(bytes(arbitrary.entropy()))),
+        5 => RemoteRuntimeElementValue::I32(i32::from_le_bytes(bytes(arbitrary.entropy()))),
+        6 => RemoteRuntimeElementValue::U64(arbitrary.entropy().any_u64()),
+        7 => RemoteRuntimeElementValue::I64(arbitrary.entropy().any_i64()),
+        8 => RemoteRuntimeElementValue::Bool(arbitrary.entropy().flag()),
+        9 => RemoteRuntimeElementValue::String(arbitrary.string()),
+        10 => RemoteRuntimeElementValue::Datetime(arbitrary.string()),
+        11 => RemoteRuntimeElementValue::F32(f32::from_bits(u32::from_le_bytes(bytes(
+            arbitrary.entropy(),
+        )))),
+        12 => RemoteRuntimeElementValue::F64(f64::from_bits(arbitrary.entropy().any_u64())),
+        13 => RemoteRuntimeElementValue::Array(elements(arbitrary, depth)),
+        _ => RemoteRuntimeElementValue::Vec(elements(arbitrary, depth)),
+    }
+}
+
+fn bytes<const N: usize>(entropy: &mut Entropy<'_>) -> [u8; N] {
+    std::array::from_fn(|_| entropy.byte())
+}
+
+/// Every relay delivery message reaches the receiver whole through the bounded codec, under the
+/// class and limit the transport sends it with: a grant request with its delivery position, body
+/// length and every branch key field, float bits included, every row's watermarks and
+/// registration, and the admission; the payload the receiver rebuilds from it and the body it
+/// read; and every grant reply, admission exchange, acknowledgement resolution and connection
+/// binding. Nothing stays charged once the messages are dropped.
+#[test]
+fn bolero_relay_messages_reach_the_receiver_whole() {
+    let runtime = property_runtime();
+    bolero::check!()
+        .with_iterations(256)
+        .with_max_len(CASE_BYTES)
+        .for_each(|input| {
+            let executor = Executor::default();
+            let mut arbitrary = Arbitrary::new(input, Domain::Vocabulary);
+            let case = WireCase::new(&mut arbitrary, &executor);
+            runtime.block_on(async {
+                let relay_limit = executor.limits().relay_encoded_bytes.as_u64();
+                let management_limit = executor.limits().management_event_bytes.as_u64();
+                let grant = case.grant();
+                let encoded = encode_rkyv(
+                    &executor,
+                    MemoryClass::Relay,
+                    CpuClass::Data,
+                    relay_limit,
+                    grant.clone(),
+                )
+                .await
+                .assured("a bounded grant request encodes");
+                let decoded = decode_rkyv::<RelayGrantRequest>(
+                    &executor,
+                    MemoryClass::Relay,
+                    CpuClass::Data,
+                    encoded,
+                )
+                .await
+                .assured("an encoded grant request decodes")
+                .into_value();
+                assert_eq!(decoded.sender_epoch, grant.sender_epoch);
+                assert_eq!(decoded.delivery, grant.delivery);
+                assert_eq!(decoded.body_bytes, grant.body_bytes);
+                assert_same_metadata(&decoded.metadata, &grant.metadata);
+                let rebuilt = decoded
+                    .metadata
+                    .into_payload(decoded.delivery, case.payload.batch_ipc.clone());
+                assert_same_payload(&rebuilt, &case.payload);
+
+                let response = RelayGrantResponse {
+                    receiver_epoch: case.receiver_epoch,
+                    disposition: case.disposition.clone(),
+                };
+                assert_eq!(
+                    management_round_trip(&executor, management_limit, response.clone()).await,
+                    response
+                );
+                let admission_request = RelayAdmissionRequest {
+                    sender_epoch: case.sender_epoch,
+                    receiver_epoch: case.receiver_epoch,
+                    delivery: case.payload.delivery,
+                };
+                assert_eq!(
+                    management_round_trip(&executor, management_limit, admission_request.clone())
+                        .await,
+                    admission_request
+                );
+                let admission_response = RelayAdmissionResponse {
+                    receiver_epoch: case.receiver_epoch,
+                    status: case.status.clone(),
+                };
+                assert_eq!(
+                    management_round_trip(&executor, management_limit, admission_response.clone())
+                        .await,
+                    admission_response
+                );
+                assert_eq!(
+                    management_round_trip(&executor, management_limit, case.resolution.clone())
+                        .await,
+                    case.resolution
+                );
+                assert_eq!(
+                    management_round_trip(&executor, management_limit, case.hello.clone()).await,
+                    case.hello
+                );
+                let accepted = ConnectionAccepted {
+                    fingerprint: case.hello.fingerprint,
+                    process_epoch: case.hello.process_epoch,
+                    node_id: case.hello.node_id.clone(),
+                };
+                assert_eq!(
+                    management_round_trip(&executor, management_limit, accepted.clone()).await,
+                    accepted
+                );
+            });
+            drop(case);
+            let snapshot = executor.snapshot();
+            assert_eq!(
+                snapshot.relay_memory.reserved_bytes, 0,
+                "no relay charge outlives its message"
+            );
+            assert_eq!(
+                snapshot.management_memory.reserved_bytes, 0,
+                "no management charge outlives its message"
+            );
+        });
+}
+
+async fn management_round_trip<T>(executor: &Executor, limit: u64, value: T) -> T
+where
+    T: rkyv::Archive
+        + Send
+        + 'static
+        + for<'a> rkyv::Serialize<
+            rkyv::api::high::HighSerializer<
+                rkyv::ser::writer::IoWriter<nervix_execution::BudgetedBuffer>,
+                rkyv::ser::allocator::ArenaHandle<'a>,
+                rkyv::rancor::Error,
+            >,
+        >,
+    T::Archived: for<'a> rkyv::bytecheck::CheckBytes<rkyv::api::high::HighValidator<'a, rkyv::rancor::Error>>
+        + rkyv::Deserialize<T, rkyv::api::high::HighDeserializer<rkyv::rancor::Error>>,
+{
+    let encoded = encode_rkyv(
+        executor,
+        MemoryClass::Management,
+        CpuClass::Control,
+        limit,
+        value,
+    )
+    .await
+    .assured("a bounded management message encodes");
+    decode_rkyv::<T>(
+        executor,
+        MemoryClass::Management,
+        CpuClass::Control,
+        encoded,
+    )
+    .await
+    .assured("an encoded management message decodes")
+    .into_value()
+}
+
+/// Which message damaged bytes are read as.
+#[derive(Debug, Clone, Copy)]
+enum ReadAs {
+    GrantRequest,
+    GrantResponse,
+    AdmissionRequest,
+    AdmissionResponse,
+    Resolution,
+    Hello,
+}
+
+impl ReadAs {
+    const ALL: [Self; 6] = [
+        Self::GrantRequest,
+        Self::GrantResponse,
+        Self::AdmissionRequest,
+        Self::AdmissionResponse,
+        Self::Resolution,
+        Self::Hello,
+    ];
+}
+
+/// Damaged encodings of relay messages, and arbitrary bytes, either fail with the codec's typed
+/// decode failure, within the decoder's depth bound and without leaving a charge behind, or decode
+/// to a message that encodes and decodes back to itself.
+#[test]
+fn bolero_damaged_relay_messages_fail_typed_or_decode_to_a_message() {
+    let runtime = property_runtime();
+    bolero::check!()
+        .with_iterations(256)
+        .with_max_len(CASE_BYTES)
+        .for_each(|input| {
+            let executor = Executor::default();
+            let mut arbitrary = Arbitrary::new(input, Domain::Vocabulary);
+            let case = WireCase::new(&mut arbitrary, &executor);
+            let read_as = arbitrary.entropy().pick(ReadAs::ALL);
+            let arbitrary_bytes = arbitrary.entropy().flag();
+            runtime.block_on(async {
+                let limit = executor.limits().relay_encoded_bytes.as_u64();
+                let valid = match read_as {
+                    ReadAs::GrantRequest => {
+                        encode_rkyv(
+                            &executor,
+                            MemoryClass::Relay,
+                            CpuClass::Data,
+                            limit,
+                            case.grant(),
+                        )
+                        .await
+                    }
+                    ReadAs::GrantResponse => {
+                        let response = RelayGrantResponse {
+                            receiver_epoch: case.receiver_epoch,
+                            disposition: case.disposition.clone(),
+                        };
+                        encode_rkyv(
+                            &executor,
+                            MemoryClass::Relay,
+                            CpuClass::Data,
+                            limit,
+                            response,
+                        )
+                        .await
+                    }
+                    ReadAs::AdmissionRequest => {
+                        let request = RelayAdmissionRequest {
+                            sender_epoch: case.sender_epoch,
+                            receiver_epoch: case.receiver_epoch,
+                            delivery: case.payload.delivery,
+                        };
+                        encode_rkyv(
+                            &executor,
+                            MemoryClass::Relay,
+                            CpuClass::Data,
+                            limit,
+                            request,
+                        )
+                        .await
+                    }
+                    ReadAs::AdmissionResponse => {
+                        let response = RelayAdmissionResponse {
+                            receiver_epoch: case.receiver_epoch,
+                            status: case.status.clone(),
+                        };
+                        encode_rkyv(
+                            &executor,
+                            MemoryClass::Relay,
+                            CpuClass::Data,
+                            limit,
+                            response,
+                        )
+                        .await
+                    }
+                    ReadAs::Resolution => {
+                        encode_rkyv(
+                            &executor,
+                            MemoryClass::Relay,
+                            CpuClass::Data,
+                            limit,
+                            case.resolution.clone(),
+                        )
+                        .await
+                    }
+                    ReadAs::Hello => {
+                        encode_rkyv(
+                            &executor,
+                            MemoryClass::Relay,
+                            CpuClass::Data,
+                            limit,
+                            case.hello.clone(),
+                        )
+                        .await
+                    }
+                }
+                .assured("a bounded message encodes");
+                let mut bytes = valid.to_vec();
+                drop(valid);
+                if arbitrary_bytes {
+                    let length = arbitrary.entropy().count(256);
+                    bytes = (0..length).map(|_| arbitrary.entropy().byte()).collect();
+                } else if let Some(last) = bytes.len().checked_sub(1) {
+                    let position = arbitrary.entropy().count(last);
+                    match arbitrary.entropy().byte() % 3 {
+                        0 => bytes.truncate(position),
+                        1 => bytes[position] ^= 1 << (arbitrary.entropy().byte() % 8),
+                        _ => bytes[position] = arbitrary.entropy().byte(),
+                    }
+                }
+                let damaged = executor
+                    .try_charge_owned(MemoryClass::Relay, bytes)
+                    .assured("a bounded message fits the relay budget");
+                match read_as {
+                    ReadAs::GrantRequest => {
+                        check_damaged::<RelayGrantRequest>(&executor, damaged, |decoded, again| {
+                            assert_eq!(decoded.sender_epoch, again.sender_epoch);
+                            assert_eq!(decoded.delivery, again.delivery);
+                            assert_eq!(decoded.body_bytes, again.body_bytes);
+                            assert_same_metadata(&again.metadata, &decoded.metadata);
+                        })
+                        .await;
+                    }
+                    ReadAs::GrantResponse => {
+                        check_damaged::<RelayGrantResponse>(
+                            &executor,
+                            damaged,
+                            |decoded, again| {
+                                assert_eq!(again, decoded);
+                            },
+                        )
+                        .await;
+                    }
+                    ReadAs::AdmissionRequest => {
+                        check_damaged::<RelayAdmissionRequest>(
+                            &executor,
+                            damaged,
+                            |decoded, again| {
+                                assert_eq!(again, decoded);
+                            },
+                        )
+                        .await;
+                    }
+                    ReadAs::AdmissionResponse => {
+                        check_damaged::<RelayAdmissionResponse>(
+                            &executor,
+                            damaged,
+                            |decoded, again| {
+                                assert_eq!(again, decoded);
+                            },
+                        )
+                        .await;
+                    }
+                    ReadAs::Resolution => {
+                        check_damaged::<RemoteAckResolution>(
+                            &executor,
+                            damaged,
+                            |decoded, again| {
+                                assert_eq!(again.registration, decoded.registration);
+                                assert_eq!(again.outcome, decoded.outcome);
+                            },
+                        )
+                        .await;
+                    }
+                    ReadAs::Hello => {
+                        check_damaged::<ConnectionHello>(&executor, damaged, |decoded, again| {
+                            assert_eq!(again, decoded);
+                        })
+                        .await;
+                    }
+                }
+            });
+            drop(case);
+            let snapshot = executor.snapshot();
+            assert_eq!(
+                snapshot.relay_memory.reserved_bytes, 0,
+                "no relay charge outlives its bytes"
+            );
+        });
+}
+
+async fn check_damaged<T>(executor: &Executor, damaged: ChargedBytes, same: impl Fn(&T, &T))
+where
+    T: rkyv::Archive
+        + Clone
+        + Send
+        + 'static
+        + for<'a> rkyv::Serialize<
+            rkyv::api::high::HighSerializer<
+                rkyv::ser::writer::IoWriter<nervix_execution::BudgetedBuffer>,
+                rkyv::ser::allocator::ArenaHandle<'a>,
+                rkyv::rancor::Error,
+            >,
+        >,
+    T::Archived: for<'a> rkyv::bytecheck::CheckBytes<rkyv::api::high::HighValidator<'a, rkyv::rancor::Error>>
+        + rkyv::Deserialize<T, rkyv::api::high::HighDeserializer<rkyv::rancor::Error>>,
+{
+    let decoded =
+        match decode_rkyv::<T>(executor, MemoryClass::Relay, CpuClass::Data, damaged).await {
+            Ok(decoded) => decoded.into_value(),
+            Err(refused) => {
+                assert!(
+                    matches!(refused.current_context(), crate::TransportError::Decode(_)),
+                    "damaged bytes fail with the codec's decode failure: {refused:?}"
+                );
+                return;
+            }
+        };
+    let limit = executor.limits().relay_encoded_bytes.as_u64();
+    let encoded = encode_rkyv(
+        executor,
+        MemoryClass::Relay,
+        CpuClass::Data,
+        limit,
+        decoded.clone(),
+    )
+    .await
+    .assured("a decoded message encodes again");
+    let again = decode_rkyv::<T>(executor, MemoryClass::Relay, CpuClass::Data, encoded)
+        .await
+        .assured("a re-encoded message decodes")
+        .into_value();
+    same(&decoded, &again);
+}

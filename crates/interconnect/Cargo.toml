@@ -65,6 +65,7 @@ arrow-ipc = { workspace = true }
 arrow-schema = { workspace = true }
 blake3 = { workspace = true }
 bolero = { workspace = true }
+nervix-arbitrary = { workspace = true }
 nervix-model-harness = { workspace = true }
 rcgen = { workspace = true }
 serde = { workspace = true }

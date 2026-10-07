@@ -7343,6 +7343,7 @@ dependencies = [
  "http",
  "imbl",
  "meticulous",
+ "nervix-arbitrary",
  "nervix-dns",
  "nervix-execution",
  "nervix-model-harness",

@@ -414,6 +414,10 @@ async fn decode_body(
 }
 
 #[cfg(test)]
+#[path = "arrow_body_properties.rs"]
+mod properties;
+
+#[cfg(test)]
 mod projection_tests {
     use meticulous::ResultExt as _;
 

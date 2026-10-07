@@ -1221,4 +1221,39 @@ mod tests {
 
         let _ = fs::remove_dir_all(path);
     }
+
+    /// Every codec the schemaful codec properties generate is one this validation accepts, so the
+    /// properties cover only codecs a domain can declare and every shape a domain can declare is
+    /// one they may generate.
+    #[test]
+    fn generated_schemaful_codecs_are_accepted() {
+        use nervix_arbitrary::{Arbitrary, Domain};
+
+        use crate::runtime_schema::codec_properties::CodecCase;
+
+        let domain = DomainName::parse("generated").assured("a literal domain name");
+        for seed in 0..=u8::MAX {
+            let mut bytes = Vec::with_capacity(1024);
+            for index in 0..1024_usize {
+                let spread = index
+                    .checked_mul(31)
+                    .and_then(|spread| spread.checked_add(usize::from(seed)))
+                    .assured("a small index times a small factor fits in usize");
+                bytes.push(u8::try_from(spread % 256).assured("a remainder of 256 is one byte"));
+            }
+            let mut arbitrary = Arbitrary::new(&bytes, Domain::Vocabulary);
+            let case = CodecCase::new(&mut arbitrary);
+            let identifier = ModelName::from(&case.model.name);
+            ensure_codec_schema_compatibility(
+                &domain,
+                &identifier,
+                case.wire.resolved(),
+                &case.schema.model,
+                &case.model.encoding_rules,
+            )
+            .unwrap_or_else(|refused| {
+                panic!("seed {seed} generated a codec the registry refuses: {refused:#}")
+            });
+        }
+    }
 }

@@ -79,6 +79,12 @@ use thiserror::Error;
 mod arrow_body;
 mod batch_container;
 mod client_batch;
+#[cfg(test)]
+pub(crate) mod codec_properties;
+#[cfg(test)]
+pub(crate) mod crafted_streams;
+#[cfg(test)]
+pub(crate) mod generated_batches;
 mod jaq_unfold;
 mod syslog;
 

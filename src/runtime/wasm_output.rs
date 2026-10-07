@@ -2488,3 +2488,7 @@ mod tests {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "wasm_output_properties.rs"]
+mod properties;
