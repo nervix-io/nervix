@@ -4043,13 +4043,16 @@ fn append_json_value_to_arrow(
                     parent: location,
                     index,
                 };
-                append_json_value_to_arrow(
+                if let Err(error) = append_json_value_to_arrow(
                     builder.values().as_mut(),
                     element,
                     element_expected,
                     value,
                     &element_location,
-                )?;
+                ) {
+                    close_partial_list(builder);
+                    return Err(error);
+                }
             }
             builder.append(true);
             Ok(())
@@ -4173,13 +4176,16 @@ fn append_borrowed_json_value_to_arrow(
                     parent: location,
                     index,
                 };
-                append_borrowed_json_value_to_arrow(
+                if let Err(error) = append_borrowed_json_value_to_arrow(
                     builder.values().as_mut(),
                     element,
                     element_expected,
                     value,
                     &element_location,
-                )?;
+                ) {
+                    close_partial_list(builder);
+                    return Err(error);
+                }
             }
             builder.append(true);
             Ok(())
@@ -4382,12 +4388,15 @@ fn append_avro_value_to_arrow(
                     parent: location,
                     index,
                 };
-                append_avro_value_to_arrow(
+                if let Err(error) = append_avro_value_to_arrow(
                     builder.values().as_mut(),
                     element,
                     value,
                     &element_location,
-                )?;
+                ) {
+                    close_partial_list(builder);
+                    return Err(error);
+                }
             }
             builder.append(true);
             Ok(())
@@ -4428,6 +4437,15 @@ fn avro_value_payload(value: &AvroValue) -> &AvroValue {
 
 fn avro_value_is_null(value: &AvroValue) -> bool {
     matches!(avro_value_payload(value), AvroValue::Null)
+}
+
+/// Closes the list value a failed element append left open.
+///
+/// The elements written before the failure stay in the child builder, so the list that holds them
+/// must be closed now: left open, they would become the first elements of the next row's list
+/// value. The row they belong to is abandoned and dropped, so its list never reaches a batch.
+fn close_partial_list(builder: &mut ListBuilder<Box<dyn ArrayBuilder>>) {
+    builder.append(true);
 }
 
 /// Closes the fixed-size list value an element append failed part-way through.

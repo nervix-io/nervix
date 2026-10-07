@@ -21951,7 +21951,7 @@ async fn when_json_messages_with_user_id_are_rapidly_published_to_input(
     match source_kind.as_str() {
         "KAFKA" => world
             .cluster()
-            .publish_kafka_payloads(&input, &vec![payload.clone(); count])
+            .publish_kafka_payloads(&input, &vec![payload.as_bytes().to_vec(); count])
             .await
             .expect("failed to publish kafka message burst"),
         "MQTT" => world
@@ -21984,7 +21984,7 @@ async fn when_these_kafka_messages_are_rapidly_published(
         .lines()
         .map(str::trim)
         .filter(|line| !line.is_empty())
-        .map(ToOwned::to_owned)
+        .map(|line| line.as_bytes().to_vec())
         .collect::<Vec<_>>();
     assert!(
         !payloads.is_empty(),
@@ -21995,6 +21995,37 @@ async fn when_these_kafka_messages_are_rapidly_published(
         .publish_kafka_payloads(&topic, &payloads)
         .await
         .expect("failed to publish kafka messages");
+}
+
+/// Publishes each JSON line of the docstring encoded in a schemaful wire format, through one
+/// producer, so the ingestor polls them as one group.
+#[when(expr = "these Kafka messages encoded as {string} are rapidly published to topic {string}")]
+async fn when_these_encoded_kafka_messages_are_rapidly_published(
+    world: &mut ScenarioWorld,
+    wire_format: String,
+    topic: String,
+    #[step] step: &Step,
+) {
+    let topic = expand_placeholders(world, &topic);
+    let lines = expand_placeholders(world, docstring(step));
+    let mut payloads = Vec::new();
+    for line in lines.lines().map(str::trim).filter(|line| !line.is_empty()) {
+        payloads.push(encode_http_payload_for_codec(
+            &wire_format,
+            line,
+            &world.avro_http_field_order,
+            &world.avro_http_optional_fields,
+        ));
+    }
+    assert!(
+        !payloads.is_empty(),
+        "at least one Kafka payload is required"
+    );
+    world
+        .cluster()
+        .publish_kafka_payloads(&topic, &payloads)
+        .await
+        .expect("failed to publish encoded kafka messages");
 }
 
 #[when(expr = "Pulsar message is published to topic {string}")]

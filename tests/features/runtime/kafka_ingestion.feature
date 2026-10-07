@@ -243,6 +243,76 @@ Feature: Kafka ingestion
       | 1            |
       | 3            |
 
+  Scenario Outline: Kafka NO_ACK keeps the nested lists of a collected ingest group exact when a <wire_format> message is refused inside one
+    Given runtime replication is configured with replica count 0 and snapshot interval "100ms"
+    And a <cluster_size> node nervix cluster is started
+    And the leader node is configured with these NSPL commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
+    And Kafka topic "nested_group_input_{{test_id}}" exists with 1 partitions
+    When these NSPL commands are executed
+      """
+      CREATE SCHEMA nested_event (
+        tenant STRING,
+        matrix <matrix_type>
+      );
+      CREATE WIRE <wire_format> SCHEMA nested_event_wire MODE STRICT (
+        tenant string,
+        matrix array
+      );
+      CREATE CODEC nested_event_codec
+        FROM WIRE <wire_format> SCHEMA nested_event_wire
+        TO SCHEMA nested_event;
+      CREATE SCHEMA nested_tenant ( tenant STRING );
+      CREATE BRANCH by_nested_tenant SCHEMA nested_tenant TTL 5m;
+      CREATE RELAY nested_events SCHEMA nested_event BRANCHED BY by_nested_tenant;
+      CREATE CLIENT kafka_main
+        TYPE KAFKA
+        CONFIG {
+          'bootstrap.servers' = '{{kafka_addr}}',
+          'auto.offset.reset' = 'earliest'
+        };
+      CREATE INGESTOR nested_event_source
+        FROM KAFKA kafka_main TOPIC nested_group_input_{{test_id}}
+        OFFSET BY CONSUMER GROUP nervix_cucumber_nested_group_{{test_id}}
+        MODE NO_ACK PARALLEL
+        ON QUIESCE SUSPEND DECODE USING nested_event_codec
+        TO nested_events
+        INHERIT ALL
+        BRANCHED BY by_nested_tenant
+        SET tenant = message.tenant
+        FLUSH IMMEDIATE
+        ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
+      CREATE SUBSCRIPTION nested_events_subscription TO nested_events;
+      """
+    And these Kafka messages encoded as "<wire_format>" are rapidly published to topic "nested_group_input_{{test_id}}"
+      """
+      {"tenant":"acme","matrix":[[1,2],[3]]}
+      {"tenant":"beta","matrix":[[4],[5,300]]}
+      {"tenant":"acme","matrix":[[6],[7,8]]}
+      {"tenant":"beta","matrix":[[9],[10,11]]}
+      """
+    And these NSPL commands are executed
+      """
+      START;
+      """
+    Then within "20s" the relay subscription receives payloads
+      """
+      payload={"matrix":[[1,2],[3]],"tenant":"acme"}
+      payload={"matrix":[[6],[7,8]],"tenant":"acme"}
+      payload={"matrix":[[9],[10,11]],"tenant":"beta"}
+      """
+    And the relay subscription does not receive a payload within "1s"
+
+    Examples:
+      | cluster_size | wire_format | matrix_type  |
+      | 1            | JSON        | VEC<VEC<U8>> |
+      | 3            | JSON        | VEC<VEC<U8>> |
+      | 1            | CBOR        | VEC<VEC<U8>> |
+      | 3            | CBOR        | VEC<VEC<U8>> |
+
   Scenario Outline: Kafka ingestor reports transient source failures and recovers
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started

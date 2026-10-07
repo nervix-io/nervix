@@ -335,7 +335,8 @@ schemaful JSON codec, that group also owns mutable payload scratch and simd-json
 the connector continues lending immutable payload bytes, and the host reuses its storage until the
 group closes. Compiled field keys direct borrowed JSON values into typed columns without a serde
 tree or an intermediate row representation. A rejected payload abandons only the partial Arrow row
-it started, preserving the accepted rows and transport positions around it.
+it started, including any list value it left half-filled at any depth, preserving the accepted rows
+and transport positions around it: every payload decodes into its group exactly as it would alone.
 At group execution, the host resolves event timestamps into one Arrow column and tests paced-domain
 admission with one bitmap. It selects the accepted batch and its ACK and metadata sidecars together.
 Each timestamp rejection retains the source row's ACK for its route-local message-error delivery;
