@@ -830,7 +830,7 @@ production-owner concurrency and recovery evidence.
 | Deduplicator key group / window input group / window argument group | 8 MiB each; capture fills a group to at most half that bound, and a single larger row takes a group of its own |
 | One archived deduplicator keyspace or window | Not bounded by the bulk budget. A keyspace's key parts and values are charged to `restore_metadata` while it converts, beside the fixed per-key share admitted with the description; a window conversion holds one archived section at a time |
 | Window checkpoint identity record | 1 MiB of row identities; a larger archived group splits into groups that fit |
-| Restore conversion admission wait | 30 seconds for one window section, one window's finishing or one keyspace after the node first refuses it for room; the unit is converted again every 50 ms |
+| Restore conversion admission wait | 30 seconds after the node first refuses one unit for room: a window section, a window while its checkpoint is finished, or a keyspace. The unit is converted again every 50 ms |
 | Restored window rows a branch reopens | No row ceiling of their own; their row views are charged to the relay memory class while the branch reopens the window |
 | Physical checkpoint placement encoding | 60 KiB, including domain and installation namespace |
 | Unpublished restore checkpoint keys and values per node | 128 GiB by default; configurable with `--restore-staging-max-bytes` |
