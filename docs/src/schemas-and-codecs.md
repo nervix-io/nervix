@@ -90,7 +90,9 @@ CREATE IF NOT EXISTS WIRE AVRO SCHEMA notification_wire MODE STRICT (
 JSON, CBOR, and AVRO wire schemas must declare at least one field.
 JSON and CBOR also accept exact numeric and datetime wire types (`U8` through `I64`, `F32`,
 `F64`, and `DATETIME`) alongside the generic JSON types. The exact variants retain their type in
-the canonical definition and in completion suggestions.
+the canonical definition and in completion suggestions. A codec binds an exact wire type only to
+the internal type of the same name: a `U8` wire field to a `U8` field, and a `DATETIME` wire field,
+whose value is RFC 3339 text, to a `DATETIME` field without an `ENCODE ... AS RFC3339` rule.
 
 The web console's **Create** menu provides structured editors for internal schemas and each of
 these three declared wire formats. Internal collection controls build nested `ARRAY` and `VEC`

@@ -158,6 +158,84 @@ Feature: HTTP codec ingestion
       | 1            | VEC<ARRAY<I16, 2>> |
       | 3            | VEC<ARRAY<I16, 2>> |
 
+  Scenario Outline: A <wire_format> codec binds every exact wire type to the internal type of its name
+    Given runtime replication is configured with replica count 0 and snapshot interval "100ms"
+    And a <cluster_size> node nervix cluster is started
+    And the leader node is configured with these NSPL commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
+    When these NSPL commands are executed
+      """
+      CREATE SCHEMA exact_value (
+        u8_max U8,
+        i8_min I8,
+        u16_max U16,
+        i16_min I16,
+        u32_max U32,
+        i32_min I32,
+        u64_max U64,
+        i64_min I64,
+        f32_value F32,
+        f64_value F64,
+        occurred_at DATETIME
+      );
+      CREATE WIRE <wire_format> SCHEMA exact_value_wire MODE STRICT (
+        u8_max U8,
+        i8_min I8,
+        u16_max U16,
+        i16_min I16,
+        u32_max U32,
+        i32_min I32,
+        u64_max U64,
+        i64_min I64,
+        f32_value F32,
+        f64_value F64,
+        occurred_at DATETIME
+      );
+      CREATE CODEC exact_value_codec
+        FROM WIRE <wire_format> SCHEMA exact_value_wire
+        TO SCHEMA exact_value;
+      CREATE RELAY exact_values SCHEMA exact_value UNBRANCHED;
+      CREATE VHOST edge exact-values-{{test_id}}.example.com;
+      CREATE ENDPOINT exact_values_endpoint ON edge PATH '/ingest' TYPE HTTP;
+      CREATE INGESTOR exact_values_ingestor
+        FROM ENDPOINT exact_values_endpoint MODE NO_ACK SEQUENTIAL
+        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING exact_value_codec
+        TO exact_values
+        INHERIT ALL
+        UNBRANCHED
+        FLUSH IMMEDIATE
+        ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
+      CREATE SUBSCRIPTION exact_values_subscription TO exact_values;
+      START;
+      """
+    When http payload encoded as "<wire_format>" is posted to host "exact-values-{{test_id}}.example.com" path "/ingest"
+      """
+      {"u8_max":255,"i8_min":-128,"u16_max":65535,"i16_min":-32768,"u32_max":4294967295,"i32_min":-2147483648,"u64_max":18446744073709551615,"i64_min":-9223372036854775808,"f32_value":1.25,"f64_value":-2.5,"occurred_at":"2024-02-29T12:34:56.123456789Z"}
+      """
+    Then within "10s" the relay subscription receives a payload
+      """
+      {"f32_value":1.25,"f64_value":-2.5,"i16_min":-32768,"i32_min":-2147483648,"i64_min":-9223372036854775808,"i8_min":-128,"occurred_at":"2024-02-29T12:34:56.123456789+00:00","u16_max":65535,"u32_max":4294967295,"u64_max":18446744073709551615,"u8_max":255}
+      """
+    When http payload encoded as "<wire_format>" is posted to host "exact-values-{{test_id}}.example.com" path "/ingest"
+      """
+      {"u8_max":256,"i8_min":0,"u16_max":0,"i16_min":0,"u32_max":0,"i32_min":0,"u64_max":0,"i64_min":0,"f32_value":0.5,"f64_value":0.5,"occurred_at":"2024-02-29T12:34:56Z"}
+      """
+    Then within "10s" the active session observes a server error containing
+      """
+      codec 'exact_value_codec' failed to parse field 'u8_max'
+      """
+
+    Examples:
+      | cluster_size | wire_format |
+      | 1            | JSON        |
+      | 3            | JSON        |
+      | 1            | CBOR        |
+      | 3            | CBOR        |
+
+
   Scenario Outline: HTTP endpoint ingestor maps a payload encoded as <wire_format> from wire field order into internal schema order
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
