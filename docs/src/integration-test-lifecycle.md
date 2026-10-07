@@ -1161,13 +1161,17 @@ verdict.
 
 | Part of the job | Bound | Basis |
 | --- | --- | --- |
-| Setup before the lane | No bound of its own | Toolchain, LLVM, Go, TinyGo and kache installation, as in the other native jobs: 42 and 43 seconds in the two selections of the first passing run |
-| Prerequisites, diagnostic builds and workloads, and the coverage export | 95 minutes, `timeout` in the step | The inventory's 80-minute budget bounds the diagnostic builds and workloads, and the prerequisites and the export share the rest. The first passing run took 23m18s for `deloxide-order` and 30m27s for `deloxide`. The prerequisites took 1m36s and 3m33s, the diagnostic builds and workloads 21m37s and 26m50s, and the export 3 and 4 seconds. Inside the budget, the builds took about 10.5 and 14 minutes, the 49 scenario runs 8m03s and 9m34s at four at once, and the 32 paced runs 2m37s and 2m42s |
-| Supervision qualification | 10 minutes, `timeout` in the step | A small probe build and up to seven bounded cases; only the untracked wait runs to its bound, 15 seconds, and the others end in milliseconds. It took 43 and 49 seconds in the first passing run |
-| Uploads and the kache report | The rest of the 120-minute job limit | Attempt directories, completion records and LCOV reports, uploaded after either step's verdict. In the first passing run the uploads took 5 and 6 seconds and kache's post step 3m02s and 2m50s, and the whole jobs took 28 and 35 minutes |
+| Setup before the lane | No bound of its own | Toolchain, LLVM, Go, TinyGo and kache installation, as in the other native jobs: 46 seconds for `deloxide` and 40 for `deloxide-order` in the measured run |
+| Prerequisites, diagnostic builds and workloads, and the coverage export | 95 minutes, `timeout` in the step | The inventory's 80-minute budget bounds the diagnostic builds and workloads, and the prerequisites and the export share the rest. The measured run took 25m02s for `deloxide` and 23m24s for `deloxide-order`. The prerequisites took 3m05s and 2m46s, the diagnostic builds and workloads 21m28s and 20m11s, and the export 2 seconds in each. Inside the budget, the builds took about 11 and 9.5 minutes, the 55 scenario runs 7m41s and 7m45s at four at once, the 32 paced runs 2m35s in each, and the seven conformance checks less than a second together after a build of 8 and 7 seconds |
+| Supervision qualification | 10 minutes, `timeout` in the step | A small probe build and up to seven bounded cases; only the untracked wait runs to its bound, 15 seconds, and the others end in milliseconds. It took 40 and 41 seconds in the measured run |
+| Uploads and the kache report | The rest of the 120-minute job limit | Attempt directories, completion records and LCOV reports, uploaded after either step's verdict. In the measured run the uploads took 4 and 3 seconds and kache's post step 3m06s and 3m18s, and the whole jobs took 30 and 28 minutes |
 
-The measurements come from the first CI run in which both selections passed, on 2026-10-06, with
-the lane instrumenting workspace crates only and running four scenarios at once.
+The measurements come from the CI run of 2026-10-07 in which both selections passed with every
+owner of tracked locks reached: 110 workloads in `deloxide` and 118 in `deloxide-order`, with the
+lane instrumenting workspace crates only and running four scenarios at once. The first run in which
+both selections passed, on 2026-10-06 with 97 and 105 workloads and 49 scenario runs, took 30m27s
+and 23m18s in the lane's step. The six scenario runs and seven conformance checks added since fit
+inside the variation between runs, so the inventory's bounds and the job's bounds stay as they were.
 
 When a step's `timeout` expires it sends `SIGTERM` to the step's process group. The collector
 records its attempt as interrupted and forwards the signal to the lane, which ends the process it is
