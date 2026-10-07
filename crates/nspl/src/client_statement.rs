@@ -95,6 +95,27 @@ impl ClientStatement {
         }
     }
 
+    /// Whether this statement saves, streams or reads a backup archive on its client's machine: a
+    /// `BACKUP` saves the archive the server assembles, a `RESTORE` streams one to the server, and
+    /// a `DESCRIBE BACKUP` reads one without asking a server.
+    pub fn handles_backup_archive(&self) -> bool {
+        match self {
+            Self::DescribeBackup(_)
+            | Self::Server(Statement::Backup(_) | Statement::Restore(_)) => true,
+            Self::UseDomain(_)
+            | Self::ListDomains
+            | Self::AttachDomainClock
+            | Self::DetachDomainClock
+            | Self::BeginTransaction
+            | Self::CommitTransaction
+            | Self::RevertTransaction
+            | Self::UploadResource(_)
+            | Self::CreateSubscription(_)
+            | Self::DeleteSubscription(_)
+            | Self::Server(_) => false,
+        }
+    }
+
     /// Whether this statement reads a transaction's impact report instead of changing anything.
     ///
     /// An inspection is answered before transaction queueing: it never becomes transaction
@@ -913,6 +934,25 @@ mod tests {
                 .unwrap_or_else(|error| panic!("{source:?} must parse: {error:?}"));
             assert_eq!(parsed, expected, "{source:?}");
             assert!(parsed.requires_local_handling(), "{source:?}");
+        }
+    }
+
+    #[test]
+    fn only_backup_restore_and_describe_backup_handle_backup_archives() {
+        for (source, handles) in [
+            ("BACKUP CLUSTER TO '/tmp/cluster.nvxb';", true),
+            (
+                "RESTORE DOMAIN prod AS prod_copy FROM './arch.nvxb' DRY RUN;",
+                true,
+            ),
+            ("DESCRIBE BACKUP './cluster.nvxb' FORMAT JSON;", true),
+            ("UPLOAD RESOURCE proto VERSION '/tmp/proto';", false),
+            ("LIST DOMAINS;", false),
+            ("SHOW TRANSACTIONS;", false),
+        ] {
+            let parsed = parse_client_statement(source)
+                .unwrap_or_else(|error| panic!("{source:?} must parse: {error:?}"));
+            assert_eq!(parsed.handles_backup_archive(), handles, "{source:?}");
         }
     }
 

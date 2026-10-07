@@ -10,6 +10,7 @@ workspace = true
 
 [dependencies]
 base64 = { workspace = true }
+blake3 = { workspace = true }
 bytes = { workspace = true }
 console_error_panic_hook = { workspace = true }
 error-stack = { workspace = true }
@@ -34,19 +35,24 @@ wasm-bindgen = { workspace = true }
 wasm-bindgen-futures = { workspace = true }
 web-sys = { workspace = true, features = [
   "Blob",
+  "BlobPropertyBag",
   "Crypto",
   "Document",
   "Element",
   "File",
   "FileList",
   "FormData",
+  "HtmlAnchorElement",
   "HtmlElement",
   "HtmlDivElement",
   "HtmlInputElement",
+  "HtmlSelectElement",
   "Location",
   "Request",
   "RequestInit",
   "Response",
+  "Storage",
+  "Url",
   "Window",
 ] }
 
