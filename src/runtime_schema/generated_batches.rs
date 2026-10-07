@@ -562,9 +562,50 @@ impl Bounded for i64 {
     const LARGEST_SIGNED: i64 = i64::MAX;
 }
 
-/// How a property damages a valid encoding before it reaches a decoder.
+/// A place among however many positions a case turns out to have, drawn before the case exists:
+/// a share of them out of 65536.
+///
+/// An ordinary run hands a property at most 64 bytes, and a choice read after they run out takes
+/// its first option. What selects a case's shape is therefore read before the case, and a place
+/// inside it is drawn as a share and resolved once the case is known.
 #[derive(Debug, Clone, Copy)]
-pub(crate) enum Damage {
+pub(crate) struct Place(u16);
+
+impl Place {
+    pub(crate) fn draw(entropy: &mut Entropy<'_>) -> Self {
+        Self(u16::from_le_bytes([entropy.byte(), entropy.byte()]))
+    }
+
+    /// The one of `positions` places this is, which there must be at least one of.
+    pub(crate) fn among(self, positions: usize) -> usize {
+        let positions = u64::try_from(positions).assured("supported targets address 64 bits");
+        let scaled = u64::from(self.0)
+            .checked_mul(positions)
+            .assured("a share of a count held in memory fits in 64 bits")
+            / 65_536;
+        usize::try_from(scaled).verified("a share of the positions is below their count")
+    }
+}
+
+/// How a property damages a valid encoding before it reaches a decoder. A damage is drawn whole
+/// before the case it damages; read after its case, it would be a truncation at offset zero of
+/// nearly every case an ordinary run generates.
+#[derive(Debug, Clone)]
+pub(crate) struct Damage {
+    kind: DamageKind,
+    /// Where in the body the damage lands.
+    place: Place,
+    /// Which bit of the byte at that place a flip changes.
+    bit: u8,
+    /// What an overwritten word holds.
+    word: DamageWord,
+    /// The bytes a trail appends, or the bytes arbitrary damage replaces the body with.
+    bytes: Vec<u8>,
+}
+
+/// What a damage does to a body.
+#[derive(Debug, Clone, Copy)]
+enum DamageKind {
     /// The body ends early.
     Truncate,
     /// One bit is flipped.
@@ -579,8 +620,8 @@ pub(crate) enum Damage {
     Arbitrary,
 }
 
-impl Damage {
-    pub(crate) const ALL: [Self; 6] = [
+impl DamageKind {
+    const ALL: [Self; 6] = [
         Self::Truncate,
         Self::FlipBit,
         Self::OverwriteWord,
@@ -588,52 +629,99 @@ impl Damage {
         Self::Trail,
         Self::Arbitrary,
     ];
+}
 
-    /// `body` with this damage applied, drawing where and how from `entropy`.
-    pub(crate) fn apply(self, entropy: &mut Entropy<'_>, mut body: Vec<u8>) -> Vec<u8> {
-        match self {
-            Self::Truncate => {
-                let keep = entropy.count(body.len());
+/// What an overwritten word holds: a fixed value, or the length of the body it is written into.
+#[derive(Debug, Clone, Copy)]
+enum DamageWord {
+    Value(u32),
+    BodyLength,
+}
+
+impl Damage {
+    /// The most bytes a trail appends.
+    const TRAILING_BYTES: usize = 16;
+
+    /// The most bytes arbitrary damage replaces a body with.
+    const ARBITRARY_BYTES: usize = 256;
+
+    /// One damage, read from the front of `entropy`.
+    pub(crate) fn draw(entropy: &mut Entropy<'_>) -> Self {
+        let kind = entropy.pick(DamageKind::ALL);
+        let place = Place::draw(entropy);
+        let bit = entropy.byte() % 8;
+        let small = u32::from(entropy.byte());
+        let word = entropy.pick([
+            DamageWord::Value(0),
+            DamageWord::Value(1),
+            DamageWord::Value(u32::MAX),
+            DamageWord::Value(0x7fff_ffff),
+            DamageWord::Value(0x8000_0000),
+            DamageWord::Value(small),
+            DamageWord::BodyLength,
+        ]);
+        let length = match kind {
+            DamageKind::Trail => entropy.count(Self::TRAILING_BYTES),
+            DamageKind::Arbitrary => entropy.count(Self::ARBITRARY_BYTES),
+            DamageKind::Truncate
+            | DamageKind::FlipBit
+            | DamageKind::OverwriteWord
+            | DamageKind::RemoveByte => 0,
+        };
+        let bytes = (0..length).map(|_| entropy.byte()).collect();
+        Self {
+            kind,
+            place,
+            bit,
+            word,
+            bytes,
+        }
+    }
+
+    /// `body` with this damage applied.
+    pub(crate) fn apply(&self, mut body: Vec<u8>) -> Vec<u8> {
+        match self.kind {
+            DamageKind::Truncate => {
+                // A body of `n` bytes may keep any of its `n + 1` prefixes.
+                let prefixes = body
+                    .len()
+                    .checked_add(1)
+                    .assured("a body in memory is shorter than the address space");
+                let keep = self.place.among(prefixes);
                 body.truncate(keep);
             }
-            Self::FlipBit => {
-                if let Some(last) = body.len().checked_sub(1) {
-                    let position = entropy.count(last);
-                    let bit = entropy.byte() % 8;
-                    body[position] ^= 1 << bit;
+            DamageKind::FlipBit => {
+                if !body.is_empty() {
+                    let position = self.place.among(body.len());
+                    body[position] ^= 1 << self.bit;
                 }
             }
-            Self::OverwriteWord => {
+            DamageKind::OverwriteWord => {
                 let words = body.len() / 4;
-                if let Some(last) = words.checked_sub(1) {
-                    let start = entropy
-                        .count(last)
+                if words > 0 {
+                    let start = self
+                        .place
+                        .among(words)
                         .checked_mul(4)
                         .verified("a word index inside the body");
                     let end = start.checked_add(4).verified("a word inside the body");
-                    let small = u32::from(entropy.byte());
-                    let length = u32::try_from(body.len()).assured("a bounded body length");
-                    let word =
-                        entropy.pick([0_u32, 1, u32::MAX, 0x7fff_ffff, 0x8000_0000, small, length]);
+                    let word = match self.word {
+                        DamageWord::Value(value) => value,
+                        DamageWord::BodyLength => {
+                            u32::try_from(body.len()).assured("a bounded body length")
+                        }
+                    };
                     body[start..end].copy_from_slice(&word.to_le_bytes());
                 }
             }
-            Self::RemoveByte => {
-                if let Some(last) = body.len().checked_sub(1) {
-                    let position = entropy.count(last);
+            DamageKind::RemoveByte => {
+                if !body.is_empty() {
+                    let position = self.place.among(body.len());
                     body.remove(position);
                 }
             }
-            Self::Trail => {
-                let extra = entropy.count(16);
-                for _ in 0..extra {
-                    body.push(entropy.byte());
-                }
-            }
-            Self::Arbitrary => {
-                let length = entropy.count(256);
-                body = (0..length).map(|_| entropy.byte()).collect();
-            }
+            DamageKind::Trail => body.extend_from_slice(&self.bytes),
+            DamageKind::Arbitrary => body = self.bytes.clone(),
         }
         body
     }
@@ -800,4 +888,47 @@ fn field_as_written(field: &Field) -> Field {
         other => other.clone(),
     };
     field.clone().with_data_type(data_type)
+}
+
+/// Arrow's writer writes a timestamp's empty zone name as no zone, at the top level and inside a
+/// list: the one difference [`assert_rewritten_batch`] sets aside, and nothing else.
+#[test]
+fn a_rewritten_batch_differs_only_in_an_empty_timestamp_zone() {
+    use arrow_ipc::{reader::StreamReader, writer::StreamWriter};
+    use arrow_schema::TimeUnit;
+
+    let zoned = DataType::Timestamp(TimeUnit::Nanosecond, Some("".into()));
+    let element = StdArc::new(Field::new("item", zoned.clone(), false));
+    let schema = StdArc::new(ArrowSchema::new(vec![
+        Field::new("at", zoned, true),
+        Field::new("times", DataType::List(StdArc::clone(&element)), false),
+    ]));
+    let at = TimestampNanosecondArray::from(vec![Some(1), None]).with_timezone("");
+    let times = ListArray::try_new(
+        element,
+        OffsetBuffer::new(ScalarBuffer::from(vec![0, 2, 3])),
+        StdArc::new(TimestampNanosecondArray::from(vec![5, -6, i64::MAX]).with_timezone("")),
+        None,
+    )
+    .assured("three elements fill two lists");
+    let columns: Vec<ArrayRef> = vec![StdArc::new(at), StdArc::new(times)];
+    let original =
+        RecordBatch::try_new(StdArc::clone(&schema), columns).assured("matching columns");
+    let mut stream = Vec::new();
+    let mut writer = StreamWriter::try_new(&mut stream, &schema).assured("the schema writes");
+    writer.write(&original).assured("the batch writes");
+    writer.finish().assured("the stream ends");
+    drop(writer);
+    let mut reader = StreamReader::try_new(std::io::Cursor::new(stream), None)
+        .assured("the writer's stream opens");
+    let rewritten = reader
+        .next()
+        .assured("the stream holds its batch")
+        .assured("the writer's batch decodes");
+    assert_ne!(
+        rewritten.schema(),
+        original.schema(),
+        "the writer changes how the schema spells the zone"
+    );
+    assert_rewritten_batch(&rewritten, &original);
 }

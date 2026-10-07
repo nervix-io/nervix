@@ -185,6 +185,20 @@ struct WireCase {
 
 impl WireCase {
     fn new(arbitrary: &mut Arbitrary<'_>, executor: &Executor) -> Self {
+        // What selects each message's variant is read first. An ordinary run hands a property at
+        // most 64 bytes, and a choice read after they run out takes its first option, which would
+        // leave nearly every case with the first disposition, status and outcome and no branch
+        // key.
+        let disposition_choice = arbitrary.entropy().byte() % 6;
+        let status_choice = arbitrary.entropy().byte() % 8;
+        let outcome_choice = arbitrary.entropy().byte() % 4;
+        let kind = arbitrary.entropy().pick([
+            RelayPayloadKind::Routed,
+            RelayPayloadKind::SubscriptionFanout,
+            RelayPayloadKind::Ingress,
+        ]);
+        let class = arbitrary.entropy().pick(PoolClass::ALL);
+        let key = branch_key(arbitrary);
         let rows = arbitrary.entropy().count(ROWS);
         let mut metadata = Vec::with_capacity(rows);
         let mut acks = Vec::with_capacity(rows);
@@ -211,14 +225,10 @@ impl WireCase {
         }
         let payload = RelayPayload {
             delivery: delivery(arbitrary.entropy()),
-            kind: arbitrary.entropy().pick([
-                RelayPayloadKind::Routed,
-                RelayPayloadKind::SubscriptionFanout,
-                RelayPayloadKind::Ingress,
-            ]),
+            kind,
             domain: arbitrary.rule_name::<DomainName>(),
             relay: arbitrary.rule_name::<RelayName>(),
-            key: branch_key(arbitrary),
+            key,
             batch_ipc: executor
                 .try_charge_owned(MemoryClass::Relay, body)
                 .assured("a bounded body fits the relay budget"),
@@ -227,7 +237,7 @@ impl WireCase {
             admission,
         };
         let reason = arbitrary.string();
-        let disposition = match arbitrary.entropy().byte() % 6 {
+        let disposition = match disposition_choice {
             0 => RelayGrantDisposition::SendBody {
                 grant_id: arbitrary.entropy().any_u64(),
             },
@@ -237,7 +247,7 @@ impl WireCase {
             4 => RelayGrantDisposition::Cancelled,
             _ => RelayGrantDisposition::Retired,
         };
-        let status = match arbitrary.entropy().byte() % 8 {
+        let status = match status_choice {
             0 => RelayAdmissionStatus::Reserved,
             1 => RelayAdmissionStatus::BodyReceived,
             2 => RelayAdmissionStatus::Admitted,
@@ -247,7 +257,7 @@ impl WireCase {
             6 => RelayAdmissionStatus::Unknown,
             _ => RelayAdmissionStatus::Indeterminate,
         };
-        let outcome = match arbitrary.entropy().byte() % 4 {
+        let outcome = match outcome_choice {
             0 => RemoteAckOutcome::Alive,
             1 => RemoteAckOutcome::Progress {
                 sequence: arbitrary.entropy().any_u64(),
@@ -259,7 +269,7 @@ impl WireCase {
         let resolution = registration(arbitrary).resolution(outcome);
         let hello = ConnectionHello {
             fingerprint: arbitrary.digest(),
-            class: arbitrary.entropy().pick(PoolClass::ALL),
+            class,
             process_epoch: arbitrary.entropy().any_u64(),
             node_id: arbitrary.rule_name::<ClusterNodeName>(),
             advertised_host: arbitrary.string(),
@@ -548,6 +558,97 @@ impl ReadAs {
     ];
 }
 
+/// What a damage does to a message's bytes.
+#[derive(Debug, Clone, Copy)]
+enum MessageDamageKind {
+    /// The bytes end early.
+    Truncate,
+    /// One bit is flipped.
+    FlipBit,
+    /// One byte holds another value.
+    SetByte,
+    /// The bytes are arbitrary.
+    Arbitrary,
+}
+
+/// How damaged bytes differ from a message the codec wrote. It is drawn whole before the message,
+/// with its place as a share of the message's length, so that an input that runs out while the
+/// message is generated still damages it somewhere.
+#[derive(Debug, Clone)]
+struct MessageDamage {
+    kind: MessageDamageKind,
+    /// Where the damage lands, as a share of the message's bytes out of 65536.
+    place: u16,
+    /// Which bit of the byte at that place a flip changes.
+    bit: u8,
+    /// The value a set byte holds.
+    byte: u8,
+    /// The bytes arbitrary damage replaces the message with.
+    bytes: Vec<u8>,
+}
+
+impl MessageDamage {
+    /// The most bytes arbitrary damage replaces a message with.
+    const ARBITRARY_BYTES: usize = 256;
+
+    fn draw(entropy: &mut Entropy<'_>) -> Self {
+        let kind = entropy.pick([
+            MessageDamageKind::Truncate,
+            MessageDamageKind::FlipBit,
+            MessageDamageKind::SetByte,
+            MessageDamageKind::Arbitrary,
+        ]);
+        let place = u16::from_le_bytes(bytes(entropy));
+        let bit = entropy.byte() % 8;
+        let byte = entropy.byte();
+        let length = match kind {
+            MessageDamageKind::Arbitrary => entropy.count(Self::ARBITRARY_BYTES),
+            MessageDamageKind::Truncate
+            | MessageDamageKind::FlipBit
+            | MessageDamageKind::SetByte => 0,
+        };
+        let replacement = (0..length).map(|_| entropy.byte()).collect();
+        Self {
+            kind,
+            place,
+            bit,
+            byte,
+            bytes: replacement,
+        }
+    }
+
+    /// `message` with this damage applied.
+    fn apply(&self, mut message: Vec<u8>) -> Vec<u8> {
+        let position = self.place_in(message.len());
+        match self.kind {
+            MessageDamageKind::Truncate => message.truncate(position),
+            MessageDamageKind::FlipBit => {
+                if let Some(byte) = message.get_mut(position) {
+                    *byte ^= 1 << self.bit;
+                }
+            }
+            MessageDamageKind::SetByte => {
+                if let Some(byte) = message.get_mut(position) {
+                    *byte = self.byte;
+                }
+            }
+            MessageDamageKind::Arbitrary => message = self.bytes.clone(),
+        }
+        message
+    }
+
+    /// The byte of a message `length` bytes long this damage lands at: its share of them, which
+    /// is below `length` for every message that has a byte.
+    fn place_in(&self, length: usize) -> usize {
+        let length = u64::try_from(length).assured("supported targets address 64 bits");
+        let scaled = u64::from(self.place)
+            .checked_mul(length)
+            .assured("a share of a message length in memory fits in 64 bits")
+            / 65_536;
+        usize::try_from(scaled).verified("a share of the bytes is below their count")
+    }
+}
+
 /// Damaged encodings of relay messages, and arbitrary bytes, either fail with the codec's typed
 /// decode failure, within the decoder's depth bound and without leaving a charge behind, or decode
 /// to a message that encodes and decodes back to itself.
@@ -560,9 +661,10 @@ fn bolero_damaged_relay_messages_fail_typed_or_decode_to_a_message() {
         .for_each(|input| {
             let executor = Executor::default();
             let mut arbitrary = Arbitrary::new(input, Domain::Vocabulary);
-            let case = WireCase::new(&mut arbitrary, &executor);
+            // Which message is damaged and how is read before the messages are generated.
             let read_as = arbitrary.entropy().pick(ReadAs::ALL);
-            let arbitrary_bytes = arbitrary.entropy().flag();
+            let damage = MessageDamage::draw(arbitrary.entropy());
+            let case = WireCase::new(&mut arbitrary, &executor);
             runtime.block_on(async {
                 let limit = executor.limits().relay_encoded_bytes.as_u64();
                 let valid = match read_as {
@@ -641,21 +743,10 @@ fn bolero_damaged_relay_messages_fail_typed_or_decode_to_a_message() {
                     }
                 }
                 .assured("a bounded message encodes");
-                let mut bytes = valid.to_vec();
+                let damaged_bytes = damage.apply(valid.to_vec());
                 drop(valid);
-                if arbitrary_bytes {
-                    let length = arbitrary.entropy().count(256);
-                    bytes = (0..length).map(|_| arbitrary.entropy().byte()).collect();
-                } else if let Some(last) = bytes.len().checked_sub(1) {
-                    let position = arbitrary.entropy().count(last);
-                    match arbitrary.entropy().byte() % 3 {
-                        0 => bytes.truncate(position),
-                        1 => bytes[position] ^= 1 << (arbitrary.entropy().byte() % 8),
-                        _ => bytes[position] = arbitrary.entropy().byte(),
-                    }
-                }
                 let damaged = executor
-                    .try_charge_owned(MemoryClass::Relay, bytes)
+                    .try_charge_owned(MemoryClass::Relay, damaged_bytes)
                     .assured("a bounded message fits the relay budget");
                 match read_as {
                     ReadAs::GrantRequest => {

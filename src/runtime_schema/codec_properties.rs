@@ -26,7 +26,7 @@ use super::{CodecError, CompiledCodec, JsonDecoder, compile_codec, decode_with_c
 use crate::runtime_schema::{
     RuntimeRecordBatch,
     generated_batches::{
-        Damage, GeneratedDomain, GeneratedSchema, LogicalValue, assert_same_batch,
+        Damage, GeneratedDomain, GeneratedSchema, LogicalValue, Place, assert_same_batch,
     },
 };
 
@@ -350,36 +350,59 @@ enum PayloadDamage {
 
 impl PayloadDamage {
     const ALL: [Self; 3] = [Self::Bytes, Self::Value, Self::Key];
+}
 
-    fn apply(
-        self,
-        format: SchemafulFormat,
-        entropy: &mut Entropy<'_>,
-        payload: Vec<u8>,
-    ) -> Vec<u8> {
-        if format == SchemafulFormat::Avro || matches!(self, Self::Bytes) {
-            let damage = entropy.pick(Damage::ALL);
-            return damage.apply(entropy, payload);
+/// One damaged payload a group holds beside the codec's own: which of them it is damaged from,
+/// how, and where it stands in the group. It is drawn whole before the case, because an ordinary
+/// run's few bytes run out while a case is generated and a choice read after that takes its first
+/// option, which would leave nearly every group without a damaged payload.
+struct DamagedMember {
+    source: Place,
+    damage: PayloadDamage,
+    bytes: Damage,
+    leaf: Place,
+    replacement: JsonValue,
+    remove_key: bool,
+    key: Place,
+    position: Place,
+}
+
+impl DamagedMember {
+    fn draw(entropy: &mut Entropy<'_>) -> Self {
+        Self {
+            source: Place::draw(entropy),
+            damage: entropy.pick(PayloadDamage::ALL),
+            bytes: Damage::draw(entropy),
+            leaf: Place::draw(entropy),
+            replacement: replacement_value(entropy),
+            remove_key: entropy.flag(),
+            key: Place::draw(entropy),
+            position: Place::draw(entropy),
+        }
+    }
+
+    /// `payload`, a payload the codec wrote in `format`, with this member's damage.
+    fn apply(&self, format: SchemafulFormat, payload: Vec<u8>) -> Vec<u8> {
+        if format == SchemafulFormat::Avro || matches!(self.damage, PayloadDamage::Bytes) {
+            return self.bytes.apply(payload);
         }
         let Some(mut value) = read_json_model(format, &payload) else {
             return payload;
         };
-        match self {
-            Self::Bytes => {}
-            Self::Value => {
+        match self.damage {
+            PayloadDamage::Bytes => {}
+            PayloadDamage::Value => {
                 let leaves = count_leaves(&value);
-                if let Some(last) = leaves.checked_sub(1) {
-                    let target = entropy.count(last);
-                    let replacement = replacement_value(entropy);
-                    replace_leaf(&mut value, target, &mut 0, replacement);
+                if leaves > 0 {
+                    let target = self.leaf.among(leaves);
+                    replace_leaf(&mut value, target, &mut 0, self.replacement.clone());
                 }
             }
-            Self::Key => {
+            PayloadDamage::Key => {
                 if let JsonValue::Object(members) = &mut value {
-                    let remove = entropy.flag();
                     let keys: Vec<String> = members.keys().cloned().collect();
-                    if remove && let Some(last) = keys.len().checked_sub(1) {
-                        let key = &keys[entropy.count(last)];
+                    if self.remove_key && !keys.is_empty() {
+                        let key = &keys[self.key.among(keys.len())];
                         members.remove(key);
                     } else {
                         members.insert("undeclared field".to_string(), JsonValue::Bool(true));
@@ -486,26 +509,33 @@ fn bolero_damaged_payloads_leave_a_group_as_its_payloads_decode_alone() {
         .with_max_len(CASE_BYTES)
         .for_each(|input| {
             let mut arbitrary = Arbitrary::new(input, Domain::Vocabulary);
+            let damaged_count = arbitrary.entropy().count(DAMAGED_PAYLOADS);
+            let mut damaged_members = Vec::with_capacity(damaged_count);
+            for _ in 0..damaged_count {
+                damaged_members.push(DamagedMember::draw(arbitrary.entropy()));
+            }
             let case = CodecCase::new(&mut arbitrary);
             let rows = case.format.domain().batch(&mut arbitrary, &case.schema);
             let batch = case.schema.runtime_batch(rows.clone());
             let valid = case.encode(&batch);
-            let damaged_count = arbitrary.entropy().count(DAMAGED_PAYLOADS);
             let mut group: Vec<(Vec<u8>, Option<usize>)> = valid
                 .iter()
                 .cloned()
                 .enumerate()
                 .map(|(row, payload)| (payload, Some(row)))
                 .collect();
-            for _ in 0..damaged_count {
-                let Some(last) = valid.len().checked_sub(1) else {
+            for member in &damaged_members {
+                if valid.is_empty() {
                     break;
-                };
-                let source = &valid[arbitrary.entropy().count(last)];
-                let damage = arbitrary.entropy().pick(PayloadDamage::ALL);
-                let damaged = damage.apply(case.format, arbitrary.entropy(), source.clone());
-                let position = arbitrary.entropy().count(group.len());
-                group.insert(position, (damaged, None));
+                }
+                let source = &valid[member.source.among(valid.len())];
+                let damaged = member.apply(case.format, source.clone());
+                // A group of `n` payloads has `n + 1` places for one more.
+                let places = group
+                    .len()
+                    .checked_add(1)
+                    .assured("a small group has room for one more");
+                group.insert(member.position.among(places), (damaged, None));
             }
             let payloads: Vec<Vec<u8>> = group.iter().map(|(payload, _)| payload.clone()).collect();
             let decoded = case.decode_group(&payloads);

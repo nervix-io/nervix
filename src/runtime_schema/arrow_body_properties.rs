@@ -106,12 +106,14 @@ fn bolero_relay_bodies_carry_the_exact_schema_and_every_value() {
         .for_each(|input| {
             let executor = Executor::default();
             let mut arbitrary = Arbitrary::new(input, Domain::Vocabulary);
-            let case = BodyCase::new(&mut arbitrary);
+            // What shapes the case is read before the case: an ordinary run's few bytes run out
+            // while a batch is generated, and a choice read after that takes its first option.
             let sections = arbitrary
                 .entropy()
                 .count(SECTIONS.checked_sub(2).assured("more than one section"))
                 .checked_add(2)
                 .verified("a small count");
+            let case = BodyCase::new(&mut arbitrary);
             runtime.block_on(async {
                 let batch = case.runtime_batch();
                 let body = batch
@@ -200,10 +202,9 @@ fn bolero_damaged_relay_bodies_fail_typed_or_decode_within_their_contract() {
         .for_each(|input| {
             let executor = Executor::default();
             let mut arbitrary = Arbitrary::new(input, Domain::Vocabulary);
+            let damage = Damage::draw(arbitrary.entropy());
             let case = BodyCase::new(&mut arbitrary);
-            let damage = arbitrary.entropy().pick(Damage::ALL);
-            let valid = case.sections(1);
-            let damaged = damage.apply(arbitrary.entropy(), valid);
+            let damaged = damage.apply(case.sections(1));
             runtime.block_on(async {
                 let exact = case
                     .schema

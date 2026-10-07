@@ -17,6 +17,13 @@ list value may own elements, as Arrow allows. Its oracle compares two batches by
 field and schema metadata included, their row counts, and every cell as a reader sees it: a null,
 or a value with floats compared by their bits and lists compared element by element.
 
+An ordinary randomized run hands a property at most 64 bytes, and a choice read after they run out
+takes its first option. Every property here therefore reads what shapes its case before the case:
+the damage and the share of the encoding where it lands, the defect a payload carries, the message
+damaged bytes are read as, how a stream ends, whether the batch is branched and which rows are
+registered. The batch is generated from the bytes that remain, and the `boundaries` and `ordered`
+seeds of every corpus carry a case of full size.
+
 | Representation | Target | Complete oracle |
 | --- | --- | --- |
 | Relay body: one Arrow IPC section of a relay batch, decoded against the relay's schema or without one | `relay-arrow-bodies` | The decoded batch is the encoded one; a body of several sections is refused by the decoders that take one section and concatenated by the one that takes any number; no charge outlives a body |
@@ -116,8 +123,8 @@ Arrow IPC stream, which `relay-arrow-bodies` covers through its schema-free deco
   zone. No schema of the node's own declares such a column, and every decoder with an expected
   schema refuses it, so the damaged-input properties compare a batch read back from the writer
   with the original as the writer writes it: every field, nullability, nested field and metadata
-  entry, every row and every value, with that one zone spelling set aside. The retained input
-  `timestamp-empty-zone` holds the case.
+  entry, every row and every value, with that one zone spelling set aside.
+  `a_rewritten_batch_differs_only_in_an_empty_timestamp_zone` holds the oracle to exactly that.
 - A schemaful CBOR payload is one data item and an Avro payload is one datum; bytes after them are
   not read. A JSON payload must hold exactly one object, and a JSON object that repeats a key keeps
   one of its values.

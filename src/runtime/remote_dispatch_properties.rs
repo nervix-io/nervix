@@ -48,17 +48,26 @@ struct RoutedCase {
 
 impl RoutedCase {
     fn new(arbitrary: &mut Arbitrary<'_>) -> Self {
+        // What shapes the case is read before its batch: an ordinary run's few bytes run out while
+        // a batch is generated, and a choice read after that takes its first option, which would
+        // leave nearly every case unbranched, attached and without a registration.
+        let key = BranchKey::generated_scope(arbitrary);
+        let mode = arbitrary
+            .entropy()
+            .pick([AckMode::Attached, AckMode::Detached]);
+        let registered_rows = arbitrary.entropy().byte();
         let schema = GeneratedDomain::Arrow.schema(arbitrary);
         let rows = GeneratedDomain::Arrow.batch(arbitrary, &schema);
         let row_count = rows.num_rows();
-        let key = BranchKey::generated_scope(arbitrary);
         let mut low = Vec::with_capacity(row_count);
         let mut high = Vec::with_capacity(row_count);
         let mut acks = Vec::with_capacity(row_count);
-        for _ in 0..row_count {
+        for row in 0..row_count {
             low.push(arbitrary.entropy().any_i64());
             high.push(arbitrary.entropy().any_i64());
-            acks.push(if arbitrary.entropy().flag() {
+            // A generated view holds fewer rows than the mask has bits.
+            let registered = (registered_rows >> row) & 1 == 1;
+            acks.push(if registered {
                 Some(RemoteAckRegistration {
                     ack_id: arbitrary.entropy().any_u64(),
                     registrar: arbitrary.node_identity(),
@@ -89,9 +98,7 @@ impl RoutedCase {
             consumer: RemoteRuntimeConsumer {
                 node_id: arbitrary.rule_name::<ClusterNodeName>(),
                 relay: arbitrary.rule_name::<RelayName>(),
-                mode: arbitrary
-                    .entropy()
-                    .pick([AckMode::Attached, AckMode::Detached]),
+                mode,
             },
             domain: arbitrary.rule_name::<DomainName>(),
         }
@@ -276,10 +283,12 @@ fn bolero_routed_payloads_whose_parts_disagree_are_refused_with_their_defect() {
         .for_each(|input| {
             let receiver = Runtime::new();
             let mut arbitrary = Arbitrary::new(input, Domain::Vocabulary);
-            let case = RoutedCase::new(&mut arbitrary);
-            let foreign = RoutedCase::new(&mut arbitrary);
+            // The defect is read before the cases: an ordinary run's few bytes run out while a
+            // batch is generated, and a choice read after that takes its first option.
             let defect = arbitrary.entropy().pick(PayloadDefect::ALL);
             let grow = arbitrary.entropy().flag();
+            let case = RoutedCase::new(&mut arbitrary);
+            let foreign = RoutedCase::new(&mut arbitrary);
             runtime.block_on(async {
                 let mut payload = case.payload(&receiver).await;
                 let rows = case.acks.len();

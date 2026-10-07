@@ -164,10 +164,10 @@ fn bolero_damaged_producer_batches_fail_with_their_defect_or_decode_within_their
         .for_each(|input| {
             let executor = Executor::default();
             let mut arbitrary = Arbitrary::new(input, Domain::Vocabulary);
+            let damage = Damage::draw(arbitrary.entropy());
             let schema = GeneratedDomain::Arrow.schema(&mut arbitrary);
             let rows = GeneratedDomain::Arrow.batch(&mut arbitrary, &schema);
-            let damage = arbitrary.entropy().pick(Damage::ALL);
-            let damaged = damage.apply(arbitrary.entropy(), submitted(&rows).to_vec());
+            let damaged = damage.apply(submitted(&rows).to_vec());
             runtime.block_on(async {
                 let outcome =
                     decode(&executor, &schema, Bytes::from(damaged), generous_limits()).await;

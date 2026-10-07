@@ -111,8 +111,10 @@ fn bolero_generated_pools_decode_to_the_columns_the_guest_wrote() {
         .with_max_len(ROUND_TRIP_BYTES)
         .for_each(|input| {
             let mut arbitrary = Arbitrary::new(input, Domain::Vocabulary);
-            let pool = GeneratedPool::new(&mut arbitrary);
+            // What shapes the case is read before the case: an ordinary run's few bytes run out
+            // while a pool is generated, and a choice read after that takes its first option.
             let ending = arbitrary.entropy().pick(PoolEnding::ALL);
+            let pool = GeneratedPool::new(&mut arbitrary);
             let stream = GeneratedPool::stream(&pool.batch, ending);
             let decoded = decode_pool(&stream)
                 .assured("a pool its guest wrote whole decodes")
@@ -131,11 +133,10 @@ fn bolero_damaged_generated_pools_fail_typed_or_decode_to_a_pool() {
         .with_max_len(DAMAGED_BYTES)
         .for_each(|input| {
             let mut arbitrary = Arbitrary::new(input, Domain::Vocabulary);
-            let pool = GeneratedPool::new(&mut arbitrary);
             let ending = arbitrary.entropy().pick(PoolEnding::ALL);
-            let damage = arbitrary.entropy().pick(Damage::ALL);
-            let valid = GeneratedPool::stream(&pool.batch, ending);
-            let damaged = damage.apply(arbitrary.entropy(), valid);
+            let damage = Damage::draw(arbitrary.entropy());
+            let pool = GeneratedPool::new(&mut arbitrary);
+            let damaged = damage.apply(GeneratedPool::stream(&pool.batch, ending));
             let decoded = match decode_pool(&damaged) {
                 Ok(Some(decoded)) => decoded,
                 Ok(None) => {
