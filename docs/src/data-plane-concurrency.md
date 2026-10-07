@@ -49,11 +49,13 @@ their measured build and host load, rather than a production throughput guarante
 
 Remote record correlation uses an immutable array of delivery and admission routing positions.
 Each delivery generation owns its mutable rows under one short synchronous guard; a row's outcome
-is independent of the other rows. Separate bounded free-position queues preserve admission room
-when delivery positions fill. Record allocation and receiver batch watcher tasks reserve relay
-memory before creating their retained rows. A batch task multiplexes row progress and keepalive
-polls every 100 milliseconds; each row and the single task have fixed charges. The cadence remains
-shorter than a one-second source ACK timeout while task cardinality stays bounded by admitted batches.
+is independent of the other rows. Each side claims unused positions on demand and returns retired
+positions to its own bounded free queue, preserving admission room when delivery positions fill.
+Shutdown seals first claims before closing the queues and visits only positions that were claimed.
+Record allocation and receiver batch watcher tasks reserve relay memory before creating their
+retained rows. A batch task multiplexes row progress and keepalive polls every 100 milliseconds;
+each row and the single task have fixed charges. The cadence remains shorter than a one-second
+source ACK timeout while task cardinality stays bounded by admitted batches.
 The registered wire number selects the position, exact generation and row without a concurrent
 map lookup. The process identity is checked before routing. Generation exhaustion seals the
 position, and cancellation, timeout, terminal resolution and shutdown compete to take each row
@@ -1928,8 +1930,9 @@ which ends where its execution failed and so replays that failure. `just test-sh
 proves the path end to end: it fails one check deliberately after its invariant held, requires one
 persisted schedule, and requires it to reproduce the failure in a fresh process. CI's dedicated
 `shuttle` job runs both, only for a pull request labeled `shuttle`, and uploads
-`target/shuttle-failures` as the `shuttle-failures` artifact when a check fails. See the command
-recipes in [Developing Nervix](./developing-nervix.md).
+the failure directory in a tar archive as the `shuttle-failures` artifact when a check fails;
+fully qualified test names contain colons, which the artifact uploader rejects as paths. See the
+command recipes in [Developing Nervix](./developing-nervix.md).
 
 ### Protocols and their checks
 

@@ -1360,12 +1360,20 @@ jobs:
 
       # A modeled concurrency failure is only reproducible from the schedule that produced it,
       # and this job is the only witness of that schedule.
+      - name: Archive Shuttle failure traces
+        if: failure()
+        run: |
+          if [ -d target/native-coverage-build-shuttle/shuttle-failures ]; then
+            tar -czf target/shuttle-failures.tar.gz \
+              -C target/native-coverage-build-shuttle shuttle-failures
+          fi
+
       - name: Upload Shuttle failure traces
         if: failure()
         uses: actions/upload-artifact@v4
         with:
           name: shuttle-failures
-          path: target/native-coverage-build-shuttle/shuttle-failures
+          path: target/shuttle-failures.tar.gz
           if-no-files-found: ignore
 
   # Loom's memory-ordering models run in their own coverage collection job beside the other extra

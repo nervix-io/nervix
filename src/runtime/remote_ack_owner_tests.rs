@@ -89,7 +89,11 @@ fn a_wide_delivery_uses_row_positions_and_refusal_returns_its_memory() {
         *refused.current_context(),
         RemoteDispatchError::CorrelationMemory
     );
-    assert_eq!(owners.deliveries.len(), 1);
+    assert_eq!(
+        owners.next_delivery.load(Ordering::Relaxed),
+        0,
+        "a memory refusal cannot claim a delivery position"
+    );
     drop(occupied);
 
     let (last, last_completion) = AckSet::root();

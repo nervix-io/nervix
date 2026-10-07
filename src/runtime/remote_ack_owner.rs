@@ -19,8 +19,11 @@
 use error_stack::ResultExt as _;
 use nervix_execution::{MemoryClass, Reservation};
 use nervix_primitives::{
-    collections::{ConcurrentQueue, PushError},
-    sync::blocking::Mutex,
+    collections::{ConcurrentQueue, PopError, PushError},
+    sync::{
+        atomic::{AtomicUsize, Ordering},
+        blocking::Mutex,
+    },
 };
 
 use super::{
@@ -32,6 +35,8 @@ use super::{
 };
 
 const REMOTE_DELIVERY_CAPACITY: usize = 8192;
+// The checked two-sided capacity leaves the top bit free to seal first claims at shutdown.
+const CLAIMS_CLOSED: usize = 1_usize << (usize::BITS - 1);
 // A row's metadata alone exceeds two bytes, so the existing 32-MiB relay wire budget is
 // stricter than this address space. Row positions never overlap delivery generations.
 const ROW_POSITIONS: u64 = 1 << 24;
@@ -39,12 +44,15 @@ const ADMISSION_SWEEPS: u64 =
     REMOTE_RELAY_TOTAL_TIMEOUT.as_secs() / REMOTE_ACK_SILENCE_SWEEP_INTERVAL.as_secs();
 
 /// The node supplies immutable routing positions. A position owns one delivery, with independent
-/// record outcomes. Admission has its own free queue, so full record capacity cannot prevent a
-/// registered delivery from requesting admission. A returned position retains its generation.
+/// record outcomes. Each side claims unused positions on demand and recycles returned positions
+/// through its own free queue, so full record capacity cannot prevent admission. A returned
+/// position retains its generation.
 pub(super) struct RemoteDispatchRegistry {
     slots: Box<[Mutex<CorrelationSlot>]>,
     deliveries: ConcurrentQueue<usize>,
     admissions: ConcurrentQueue<usize>,
+    next_delivery: AtomicUsize,
+    next_admission: AtomicUsize,
     delivery_capacity: usize,
     executor: Executor,
 }
@@ -177,23 +185,18 @@ impl RemoteDispatchRegistry {
             .checked_mul(2)
             .assured("the configured routing capacity fits in usize");
         let mut slots = Vec::with_capacity(total);
-        for position in 0..total {
+        for _ in 0..total {
             slots.push(Mutex::new(CorrelationSlot::Open {
                 generation: 0,
                 correlation: None,
             }));
-            let free = if position < capacity {
-                &deliveries
-            } else {
-                &admissions
-            };
-            free.push(position)
-                .assured("each empty position enters its free queue once");
         }
         Self {
             slots: slots.into_boxed_slice(),
             deliveries,
             admissions,
+            next_delivery: AtomicUsize::new(0),
+            next_admission: AtomicUsize::new(0),
             delivery_capacity: capacity,
             executor,
         }
@@ -203,15 +206,23 @@ impl RemoteDispatchRegistry {
         &self,
         state: RemoteCorrelationState,
     ) -> error_stack::Result<u64, RemoteDispatchError> {
-        let free = match &state {
-            RemoteCorrelationState::Records(_) => &self.deliveries,
-            RemoteCorrelationState::Admission(_) => &self.admissions,
+        let (free, next, offset) = match &state {
+            RemoteCorrelationState::Records(_) => (&self.deliveries, &self.next_delivery, 0),
+            RemoteCorrelationState::Admission(_) => (
+                &self.admissions,
+                &self.next_admission,
+                self.delivery_capacity,
+            ),
         };
-        let position = free.pop().map_err(|_| {
-            Report::new(RemoteDispatchError::CorrelationCapacity {
-                capacity: self.delivery_capacity,
-            })
-        })?;
+        let position = match free.pop() {
+            Ok(position) => position,
+            Err(PopError::Empty) => self.claim_fresh(next, offset)?,
+            Err(PopError::Closed) => {
+                return Err(Report::new(RemoteDispatchError::CorrelationCapacity {
+                    capacity: self.delivery_capacity,
+                }));
+            }
+        };
         let mut slot = self.slots[position].lock();
         let CorrelationSlot::Open {
             generation,
@@ -247,6 +258,32 @@ impl RemoteDispatchRegistry {
             .verified("the route computation checked its next generation");
         *correlation = Some(RemoteCorrelation { route, state });
         Ok(route * ROW_POSITIONS)
+    }
+
+    fn claim_fresh(
+        &self,
+        next: &AtomicUsize,
+        offset: usize,
+    ) -> error_stack::Result<usize, RemoteDispatchError> {
+        // Atomic modification order arbitrates a first claim against shutdown; the slot guard
+        // publishes the correlation itself.
+        let mut position = next.load(Ordering::Relaxed);
+        loop {
+            if position >= self.delivery_capacity {
+                return Err(Report::new(RemoteDispatchError::CorrelationCapacity {
+                    capacity: self.delivery_capacity,
+                }));
+            }
+            match next.compare_exchange(
+                position,
+                position + 1,
+                Ordering::Relaxed,
+                Ordering::Relaxed,
+            ) {
+                Ok(_) => return Ok(position + offset),
+                Err(observed) => position = observed,
+            }
+        }
     }
 
     #[cfg(test)]
@@ -578,9 +615,21 @@ impl RemoteDispatchRegistry {
     }
 
     pub(super) fn shutdown(&self) {
+        // Seal first claims before choosing the scan bounds. A claim won before either seal is
+        // included even when its registrar has not reached the slot yet: the slot guard then
+        // decides whether registration or shutdown owns its final state.
+        let delivery_claimed =
+            self.next_delivery.fetch_or(CLAIMS_CLOSED, Ordering::AcqRel) & !CLAIMS_CLOSED;
+        let admission_claimed = self
+            .next_admission
+            .fetch_or(CLAIMS_CLOSED, Ordering::AcqRel)
+            & !CLAIMS_CLOSED;
         self.deliveries.close();
         self.admissions.close();
-        for slot in &self.slots {
+        for position in (0..delivery_claimed)
+            .chain(self.delivery_capacity..self.delivery_capacity + admission_claimed)
+        {
+            let slot = &self.slots[position];
             let state = std::mem::replace(&mut *slot.lock(), CorrelationSlot::Closed);
             if let CorrelationSlot::Open {
                 correlation: Some(correlation),

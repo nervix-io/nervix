@@ -697,6 +697,9 @@ room to register its runtime admission. The opaque acknowledgement number encode
 generation and row. Resolution validates all three, together with the registrar's full discovery
 identity. An exhausted generation is sealed permanently. A delayed report, terminal reply or
 cleanup cannot change a replacement occupying the same position.
+Unused positions are claimed on demand; only retired positions enter the bounded free queues.
+Shutdown seals fresh claims before scanning positions that were ever claimed, so a concurrent
+registrar either occupies a position shutdown visits or finds it closed.
 
 Record storage and receiver ACK watches are charged to the relay memory budget. One task per
 admitted batch multiplexes its row watches, with a fixed charge per row plus one task charge; a
