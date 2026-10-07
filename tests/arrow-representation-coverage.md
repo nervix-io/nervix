@@ -24,6 +24,16 @@ damaged bytes are read as, how a stream ends, whether the batch is branched and 
 registered. The batch is generated from the bytes that remain, and the `boundaries` and `ordered`
 seeds of every corpus carry a case of full size.
 
+Arrow's Rust writer writes every generated stream here, and it takes none of the freedoms the Arrow
+format leaves a writer: it writes a validity bitmap for every column with rows and exactly one
+offset more than a column has rows. Arrow's C++, Go and JavaScript writers omit the bitmap of a
+column without nulls, the Go and JavaScript writers write a bitmap longer than its rows need, the
+JavaScript writer leaves more offsets than a column has rows, and the Java writer writes no offset
+for a column without rows. `a_stream_another_arrow_writer_would_write_decodes_to_its_rows` and
+`a_generated_pool_another_arrow_writer_would_write_decodes_to_its_column` hold the producer batch
+and generated pool decoders, the two that read what another Arrow library wrote, to one hand-built
+stream for each of the four.
+
 | Representation | Target | Complete oracle |
 | --- | --- | --- |
 | Relay body: one Arrow IPC section of a relay batch, decoded against the relay's schema or without one | `relay-arrow-bodies` | The decoded batch is the encoded one; a body of several sections is refused by the decoders that take one section and concatenated by the one that takes any number; no charge outlives a body |

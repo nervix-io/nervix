@@ -21,7 +21,7 @@ use rstest::rstest;
 
 use super::{ClientBatchError, ClientBatchLimits};
 use crate::runtime_schema::{
-    crafted_streams::{StreamDefect, receiver_schema},
+    crafted_streams::{StreamDefect, WriterFreedom, receiver_schema},
     generated_batches::{Damage, GeneratedDomain, GeneratedSchema, assert_same_batch},
     ipc_stream::IpcStreamError,
 };
@@ -239,4 +239,33 @@ fn a_stream_arrows_reader_would_panic_on_is_refused_with_its_defect(
         Some(&defect.refusal()),
         "the scan refuses the stream for what it declares"
     );
+}
+
+/// A producer stream written as Arrow's C++, Go, JavaScript or Java writer writes it decodes to its
+/// rows. Arrow's Rust writer, which every generated batch here goes through, writes a validity
+/// bitmap for every column with rows and exactly one offset more than a column has rows. The other
+/// writers do not, so these hand-built streams are what holds the decoder to them.
+#[rstest]
+fn a_stream_another_arrow_writer_would_write_decodes_to_its_rows(
+    #[values(
+        WriterFreedom::ValidityOmitted,
+        WriterFreedom::ValidityLongerThanRows,
+        WriterFreedom::OffsetsLongerThanRows,
+        WriterFreedom::OffsetsEmptyWithoutRows
+    )]
+    freedom: WriterFreedom,
+) {
+    let schema = freedom.receiver_schema();
+    let executor = Executor::default();
+    let decoded = property_runtime()
+        .block_on(decode(
+            &executor,
+            &schema,
+            Bytes::from(freedom.stream("value")),
+            generous_limits(),
+        ))
+        .assured("a valid stream of the producer's schema decodes");
+    let rows = RecordBatch::try_new(schema.compiled.arrow_schema(), vec![freedom.column()])
+        .assured("the stream's column is one of the schema's one field");
+    assert_same_batch(&decoded, &rows);
 }

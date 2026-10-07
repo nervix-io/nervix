@@ -19,7 +19,7 @@ use rstest::rstest;
 use super::*;
 use crate::runtime_schema::{
     IpcStreamError,
-    crafted_streams::{END_OF_STREAM, StreamDefect},
+    crafted_streams::{END_OF_STREAM, StreamDefect, WriterFreedom},
     generated_batches::{Damage, GeneratedDomain, assert_rewritten_batch, assert_same_batch},
 };
 
@@ -218,5 +218,38 @@ fn a_generated_pool_arrows_reader_would_panic_on_is_refused_however_it_ends(
             Some(&defect.refusal()),
             "the scan refuses the stream for what it declares"
         );
+    }
+}
+
+/// A pool written as Arrow's C++, Go, JavaScript or Java writer writes it decodes to its column
+/// however the stream ends. Arrow's Rust writer, which every generated pool here goes through,
+/// writes a validity bitmap for every column with rows and exactly one offset more than a column
+/// has rows. A guest built on another Arrow library does not, so these hand-built streams are what
+/// holds the decoder to it.
+#[rstest]
+fn a_generated_pool_another_arrow_writer_would_write_decodes_to_its_column(
+    #[values(
+        WriterFreedom::ValidityOmitted,
+        WriterFreedom::ValidityLongerThanRows,
+        WriterFreedom::OffsetsLongerThanRows,
+        WriterFreedom::OffsetsEmptyWithoutRows
+    )]
+    freedom: WriterFreedom,
+) {
+    let marked = freedom.stream("");
+    let closed_length = marked
+        .len()
+        .checked_sub(END_OF_STREAM.len())
+        .assured("a crafted stream ends with its end-of-stream marker");
+    let closed = marked[..closed_length].to_vec();
+    let column = freedom.column();
+    let field = Field::new("", column.data_type().clone(), freedom.nullable());
+    let pool = RecordBatch::try_new(StdArc::new(ArrowSchema::new(vec![field])), vec![column])
+        .assured("the column is one of its own field");
+    for stream in [marked, closed] {
+        let decoded = decode_pool(&stream)
+            .assured("a valid pool decodes")
+            .assured("a pool of one column is not the empty pool");
+        assert_same_batch(&decoded, &pool);
     }
 }
