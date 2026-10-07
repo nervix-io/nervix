@@ -78,6 +78,8 @@ retries. The recorded evidence covers tracked blocking locks reached by those wo
 waits, capture atomics, dependency locks and cross-node waits retain their other concurrency
 checks.
 
+The `@restarted_voter_observation` scenario runs in both selections, reaching whole-cluster teardown, reopening each node's store, and automatic scheduling after the first relayed voter heartbeat. Its watch-channel barrier and concurrent fault map are untracked; the diagnostic evidence covers blocking locks reached by restart and scheduling. The native metadata restore scenario also runs in both selections after its Kafka replication stream and acknowledgement boundaries are repaired, retaining complete primary and replica metadata comparisons and distributed placement checks.
+
 The measured restore steps sample each node's public bulk and restore-metadata executor gauges
 every 20 milliseconds while the ordinary CLI runs. They also record the harness process's
 jemalloc allocated and resident bytes. The executor measurements separate the fixed checkpoint
@@ -94,6 +96,26 @@ The runtime's testing-only inspection API returns decoded current metadata; the 
 archive comparisons and assertions.
 The scenario takes the CLI's execution reference and replays it through the public session before
 and after restart, comparing the complete typed restore report.
+It saves the restored work's public owners and replicas before restarting, requires distributed
+placement in the three-node case, and compares every saved placement after START and after
+receiving isolated output for every tenant. A failover that drops replicas or recreates guest state
+cannot make this oracle pass by moving all execution onto one node.
+
+The complete-generation fixture allows 120 seconds for every post-restore input to reach its raw
+relay. Its forty one-mebibyte guest saves exercise sequential source acknowledgements and durable
+replica checkpoints beside the other diagnostic workloads. The full active diagnostic selection
+reached 77 of 80 inputs at the former 30-second bound, while the exact same binary reached all
+inputs and preserved every branch in the focused four-case replay. This condition ends as soon as
+the exact expected count is observed; it retains the complete output, state and branch assertions.
+
+The large materialized restore fixture prepares its rows through an acknowledged client producer.
+One round has a 120-second budget and one in-flight batch, including explicit replays of reported
+processing failures. Each replay replaces the same materialized keys with the same complete values,
+so partial effects retain the fixture's value oracle. Every attempt and terminal result is logged;
+an unknown outcome, final admission refusal or expired round fails preparation. The producer closes
+after every tenant's batch has completed, before the scenario checks all generator rows and takes
+the backup cut. Source admission, input delivery and the final archive and restore assertions remain
+separate observable steps.
 
 The lane then selects `@paced_simulation_reopen` from the public paced-driver feature. It builds the
 Rust driver in the lane's selection and supplies its path to the same scenario fixture, so the
@@ -283,6 +305,23 @@ The boundary between them is kept in four places.
   run again. A killed voter restarts from its own database and ports, and the step then waits for
   the same leader and three voters as a whole restart does. While a voter is killed or frozen, the
   fixture asks only the running ones which node leads.
+  The restarted-voter observation fixture stops every in-process node before arming its fault.
+  It blocks direct gossip between the first leader and one voter, then holds that voter's first
+  relayed heartbeat while allowing the other voters' heartbeats to advance. The leader's
+  reconciliation starts after that sample arrives, so slow harness startup cannot consume the
+  product's observation grace. A one-shot barrier captures a scheduling pass inside that grace
+  with the voter marked unavailable; its elapsed-time decision is captured before the barrier
+  waits. The scenario checks the failure-detector verdict and final ownership through public
+  cluster status. Releasing the barrier waits for that pass to finish before restoring heartbeats
+  and application health. While the heartbeat is held, peer startup waits for listeners; Raft
+  catch-up is checked after release, so the fixture never waits for progress its own fault prevents.
+  This is an in-process scheduling regression; immutable-image external
+  Chaos runs retain the real-process crash and restart evidence.
+  The durable follower catch-up fixture creates client writes while the restarted follower applies
+  its backlog and samples commands memory throughout that interval. Once the backlog is applied,
+  stopping the writer finishes its admitted command before counting completed writes: the response
+  can arrive after all voters have already applied that command. The fixture still checks the
+  storage-derived catch-up bound, append-stream limit and commands-memory budget.
 - **Test defaults.** An in-process node's shutdown timeout defaults to four minutes rather than the
   product's `50s`, which leaves the bounded shutdown phases scenarios configure by default room to
   finish, so only a scenario about the deadline reaches it. A server process runs with the product
@@ -429,6 +468,33 @@ one request timeout later. A wait that expires fails its step with the elapsed t
 text it rejected, and the last typed failure it saw. The meaning of the `connected` interconnect
 status these waits read belongs to [Cluster
 Interconnect](./interconnect.md#application-health-and-availability).
+
+The stopped-voter `DROP NODE` scenario waits for the public status report to show that the voter
+is no longer visible in gossip before removing it, then requires the exact remaining voter set.
+Application health can report an unavailable voter while gossip still sees it live, so an unavailable
+verdict does not establish membership-removal readiness. Scenarios that exercise application-health
+failure classification assert that source under their own controlled health fault.
+
+The correlator match-policy scenario observes each left input's received counter on the correlator
+owner before posting the next independent input. An HTTP acceptance alone does not order execution
+across ingestors. Its two-minute correlation window accommodates those bounded readiness waits
+without expiring the records whose match policy it asserts. The Kafka handoff scenario that pauses
+after entity-gate engagement uses a test-configured two-minute gate lease so its broker-delivery
+assertions and pause release fit inside the handoff budget under concurrent suite load.
+
+Collection and route-flush timing assertions measure observed row arrival from the HTTP publication
+instant. Concurrent branch posts retain one publication origin, and every expected row must match
+its tenant and sequence and arrive after the declared lower bound, inside the unchanged delivery
+budget. Starting a new silence window after an HTTP response would reject a valid row whose
+collection or flush deadline elapsed while the harness awaited that response. The production
+owner's timing checks retain the independent branch-deadline assertions.
+
+The MQTT changed-address restart scenario waits for the post-restart marker within its bounded
+delivery window. Its persistent QoS 1 source may replay the pre-restart marker before that row;
+broker receipt does not establish that its source acknowledgement reached the broker before the
+node stopped. The OTEL metric scenario observes one successful export from each concrete emitter
+owner before checking Collector output. HTTP intake acceptance does not establish sink export,
+and the per-owner counters retain exact progress assertions for both HTTP and gRPC.
 
 A scenario step can also read status inside a window of its own, passing that window as the phase
 deadline. Where the window bounds how long something is watched rather than how long one read may
@@ -791,6 +857,19 @@ it ends; `NERVIX_TESTCONTAINERS_MODE=reusable`, which `just test-scenarios-reuse
 for the next run instead. Scenarios still provision the topics, queues, tables, and other entities
 they use explicitly.
 
+The attached- and detached-window Kafka acknowledgement scenarios create their input topic before
+`START` and observe the consumer group's membership and the ingestor's readiness before injecting
+the output failure. Their bounded subscription assertions therefore exercise replay and
+acknowledgement isolation after source initialization, without spending those assertions' budgets
+on automatic topic creation and consumer discovery.
+
+The attached-window fixture publishes both rows through one producer and allows a thirty-second
+partial-batch wait. Collection ends as soon as its two-message ACK batch is full; the window can
+then produce the output whose failure rejects both records. Separate publication steps can exceed
+a short collection window, leaving one retained window row waiting for input while the source waits
+for that partial batch's ACK. The fixture retains its five-second ACK timeout and exact four-record
+replay assertion within eight seconds.
+
 The Pulsar broker announces a `maxMessageSize` of 1 MiB rather than Pulsar's 5 MiB default, the
 same limit the MQTT and NATS brokers keep, so one scenario message can exceed each broker's limit.
 Its admin API serves the topic-level `maxMessageSize` policy a scenario sets on its own topic; the
@@ -1085,6 +1164,12 @@ advisory and never change the build verdict; the complexity check is independent
 and workflow summary identify the exact comparison and the `coverage-merged` artifact retains the
 reports and `target/patch-coverage.md`.
 Each ordinary coverage input also retains its absolute checkout path as `coverage-source-root.txt`.
+The scenario collector also starts coverage in each published Python paced driver using the shared
+`scripts/paced_simulation_coverage` startup hook and configuration. It combines those completed
+process reports into `target/paced-simulation/python.lcov`. CI merges this scenario report with the
+deterministic Python open-policy report from the extra checks, alongside ordinary Rust coverage.
+The STOP/START generation-following outline also carries `@paced_simulation_reopen`, so both full
+Deloxide selections reach its Rust and Python drivers on one-node and three-node clusters.
 The advisory reporter reads these origins explicitly when matching LCOV sources from Blacksmith
 to files on its GitHub-hosted runner.
 

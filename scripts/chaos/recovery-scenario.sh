@@ -101,6 +101,9 @@ recovery_traffic_start() {
 
 # Stops the producer and reconstructs the accepted-input ledger from the source topic.
 recovery_final_boundary() {
+    # A disposable Kafka administration JVM can take longer than the live-probe budget under
+    # concurrent compiler load. Keep final ledger capture bounded independently of those probes.
+    local compose_call_timeout=60
     phase "${scenario} final traffic boundary"
     touch "${artifact_dir}/traffic/stop-load"
     local load_id
@@ -109,7 +112,15 @@ recovery_final_boundary() {
     producer_status="$(run_bounded 20 docker inspect --format '{{.State.ExitCode}}' "${load_id}")"
     run_bounded 20 docker logs "${load_id}" >"${artifact_dir}/traffic/producer.log" 2>&1
     trim_file "${artifact_dir}/traffic/producer.log" 1048576
-    input_end="$(topic_end_offset chaos_input)"
+    local offset_status=0
+    input_end="$(topic_end_offset chaos_input)" || offset_status=$?
+    jq -n --argjson exit_code "${offset_status}" --argjson timeout_seconds "${compose_call_timeout}" \
+        '{exit_code:$exit_code,timeout_seconds:$timeout_seconds}' \
+        >"${artifact_dir}/traffic/source-boundary-query.json"
+    if ((offset_status != 0)); then
+        recovery_fail controller "final Kafka source-boundary query failed with exit ${offset_status} within its ${compose_call_timeout}s budget; see traffic/source-boundary-query.json"
+        return 1
+    fi
     [[ "${input_end}" =~ ^[0-9]+$ && "${input_end}" -le "${record_count}" ]] \
         || recovery_fail product 'source boundary exceeded the bounded fixture'
     kcat -q -b broker:9092 -C -t chaos_input -p 0 -o beginning -c "${input_end}" \

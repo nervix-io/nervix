@@ -12,6 +12,15 @@ use test_fixtures::{test_addr, test_args, try_test_args};
 
 use super::*;
 
+fn encode_hex(bytes: &[u8]) -> String {
+    let mut out = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        use std::fmt::Write as _;
+        write!(&mut out, "{byte:02x}").assured("writing a byte into a String cannot fail");
+    }
+    out
+}
+
 #[test]
 fn args_parse_observability_listen_addr() {
     let args = test_args(&["--observability-listen-addr", "127.0.0.1:19090"]);

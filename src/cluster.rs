@@ -1190,7 +1190,56 @@ impl GossipSocket for InterconnectGossipSocket {
         if !remaining.is_empty() {
             anyhow::bail!("gossip message has trailing bytes");
         }
+        #[cfg(feature = "testing")]
+        let message = {
+            let mut message = message;
+            if let ChitchatMessage::Syn { digest, .. } | ChitchatMessage::SynAck { digest, .. } =
+                &mut message
+            {
+                self.freeze_startup_voter_digest(digest)?;
+            }
+            message
+        };
         Ok((from, message))
+    }
+}
+
+#[cfg(feature = "testing")]
+impl InterconnectGossipSocket {
+    fn freeze_startup_voter_digest<D: chitchat::Serializable + chitchat::Deserializable>(
+        &self,
+        digest: &mut D,
+    ) -> anyhow::Result<()> {
+        // Chitchat keeps digest entries private. Decode and encode its current public wire
+        // representation to hold just the selected heartbeat while other voters keep progressing.
+        let encoded = digest.serialize_to_vec();
+        let mut remaining = encoded.as_slice();
+        let count = <u16 as chitchat::Deserializable>::deserialize(&mut remaining)?;
+        let mut frozen = Vec::with_capacity(encoded.len());
+        chitchat::Serializable::serialize(&count, &mut frozen);
+        for _ in 0..count {
+            let id = ChitchatId::deserialize(&mut remaining)?;
+            let mut heartbeat = <u64 as chitchat::Deserializable>::deserialize(&mut remaining)?;
+            let gc_version = <u64 as chitchat::Deserializable>::deserialize(&mut remaining)?;
+            let max_version = <u64 as chitchat::Deserializable>::deserialize(&mut remaining)?;
+            if let Some(identity) = cluster_node_identity(&id) {
+                heartbeat = self
+                    .transport
+                    .inner
+                    .fault_injection
+                    .freeze_startup_voter_heartbeat(
+                        self.transport.inner.interconnect.node_id(),
+                        identity,
+                        heartbeat,
+                    );
+            }
+            id.serialize(&mut frozen);
+            chitchat::Serializable::serialize(&heartbeat, &mut frozen);
+            chitchat::Serializable::serialize(&gc_version, &mut frozen);
+            chitchat::Serializable::serialize(&max_version, &mut frozen);
+        }
+        *digest = D::deserialize(&mut frozen.as_slice())?;
+        Ok(())
     }
 }
 

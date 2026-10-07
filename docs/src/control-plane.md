@@ -721,10 +721,18 @@ candidate; ordinary failover then relocates from the last committed schedule.
 
 Failover acts on a voter that gossip no longer reports live. A leader whose reconciliation has just
 started, as the first node to lead after a whole cluster restarts does, can reach a quorum before
-gossip has heard from the other voters. For its first ten seconds, it therefore makes no automatic
-scheduling decision while any voter is neither reported live nor declared dead. A voter that is
-still starting rejoins and keeps its work and the state that node holds; a voter that has not
-appeared by the end of the grace is failed over as before.
+gossip has observed the other voters live. Each process's reconciliation task retains its live
+observations, including those made while following. For its first ten seconds, it makes no automatic
+scheduling decision while any current voter has never been observed live by that task. Chitchat can
+classify a voter's first relayed heartbeat as dead because it has too few heartbeat intervals to
+estimate liveness; that initial verdict does not satisfy the live-observation requirement.
+
+A voter that returns within the grace keeps its work and the state that node holds. A voter already
+observed live can undergo ordinary failover if it subsequently becomes unavailable once every
+current voter has been observed. The grace expires after ten seconds even if a voter never returns,
+so genuine owner loss still makes progress. Leadership changes retain the process's observations
+and its original deadline. A process restart starts a fresh observation history; after the grace the
+task discards that history.
 
 Forced recovery stages the destination's checkpoint inventory under the destination process
 incarnation and the complete target-schedule fingerprint. Applying staged checkpoints accepts only

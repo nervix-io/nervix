@@ -126,7 +126,7 @@ Feature: Paced simulation drivers
       | python | 1            |
       | python | 3            |
 
-  @paced_simulation
+  @paced_simulation @paced_simulation_reopen
   Scenario Outline: The <driver> driver stops with its domain and continues in the next START generation without mixing generations on <cluster_size> nodes
     Given a <cluster_size> node nervix cluster is started
     And the active domain is "paced_simulation"

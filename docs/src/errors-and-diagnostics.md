@@ -408,6 +408,11 @@ execution failure, never a decoding failure. A caller keeps the storage report b
 context: `RuntimeStateOperationError::Persistence` for a replica's installation or a snapshot task,
 `OwnershipHandoffError::Persistence` for a handoff, and the domain build's `ExecutionBuildError`
 step, which names the node and the state kind, for a state assignment.
+Native Kafka stream conversion retains the rkyv validation failure beneath `DecodeState` and the
+placement-qualified `StateReplicationError::Capture`. A cancelled conversion keeps `Cancelled` at
+that same boundary without publishing the candidate table. Installation refused after an assignment
+changes retains `StateAuthorityError` beneath `RuntimeStateOperationError::Authority` and that
+placement-qualified capture context, so a caller can distinguish malformed bytes from lost authority.
 `RestoreStagingQuota` carries the node's unpublished checkpoint limit, current usage and incoming
 checkpoint footprint; `RestoreStagingSize` rejects an unrepresentable accounting sum. A quota
 failure remains a storage failure beneath the admitted restore step and leaves its activation
@@ -860,6 +865,11 @@ deadlines, reports a runtime event that names the task and its domain and render
 of the failure, so a stale clock generation or an unrepresentable deadline beneath the clock
 failure stays visible.
 
+An owner-delivery admission failure logs the domain, relay, branch fingerprint and target together
+with the transport report, including retained cancellation and rejection causes, before returning
+the undelivered batch. This keeps admission and connection failures visible even when the batch
+carries no acknowledgement, without logging branch field values.
+
 A batch container that cannot be produced keeps its `BatchContainerError` report in the packing
 outcome until the emitter builds the message error of each member. That message error is a fixed
 public outcome, so only the report's typed reason selects its code and message: the evaluation
@@ -884,6 +894,16 @@ failure carries the answering node's opaque operator description. That text is a
 boundary for an already classified failure; it is not used to recover a new class. Runtime-state
 replication, a replica's branch checkpoint listing included, and materialized-snapshot description
 use this envelope, and local errors retain the remote class alongside their target and placement.
+Checkpoint and branch catalog request failures keep the typed interconnect request cause beneath
+that target and placement context. Their replica diagnostics render the cause chain, distinguishing
+deadline, admission, connection and framing failures without retaining checkpoint payloads.
+Kafka offset replica catch-up uses the same typed envelope for its revision description. A
+subsequent bulk stream failure remains a transport request failure, with the target, placement and
+typed staging, admission, verification or native conversion cause retained beneath it. The
+replica diagnostic prints that cause chain. Cancellation or failed conversion publishes no
+partial table, and an assignment-token refusal keeps a delayed transfer from overwriting a
+promoted owner. A commit that lacks its required replica acknowledgement still reports the
+existing quorum deadline; catch-up retries do not turn that deadline into a successful commit.
 A stopping node's `stopping_node_drain` request answers with outcomes of its own instead, because
 its only subject is the authenticated sender: completed or failed, each with the leader's report for
 the sender's log, or not the leader, which changed nothing and sends the sender to the leader it

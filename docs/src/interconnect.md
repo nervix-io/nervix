@@ -1099,6 +1099,15 @@ round synchronizes the lifecycle, reads the catalog's changes, and requests only
 the branches that changed or were announced, so a round in which no branch changed sends two
 requests however many branches the entity has.
 
+Checkpoint synchronization and catalog listing each use their operation's five-second deadline,
+including admission, connection capacity, the answer and decoding. The one-second replication poll
+interval schedules the next idle round; it does not shorten an in-flight request's deadline. A
+branch-aggregated replica uses the same checkpoint operation deadline. Polls and announcements retry
+a failed exchange, while the owner's checkpoint completion deadline remains independent and may
+fail if a replica cannot confirm in time. Replica request diagnostics retain the typed transport
+cause beneath the target and placement context, so a timeout can be distinguished from capacity,
+connection and framing failures without inspecting checkpoint bytes.
+
 The owner of a placement offers its newest checkpoint to the replicas the committed schedule
 assigns, and repeats the offer every 100 milliseconds to each replica that has not acknowledged
 that revision, until every one of them has, the node stops being the placement's primary, the
@@ -1145,6 +1154,34 @@ segments, synchronizes data before replacing the header, and retains the namespa
 before executor admission. Neither path requires a reservation proportional to container length.
 The synchronous ownership-handoff metadata boundary still admits its resident checkpoint entry
 against the bulk budget; exceeding that admission is a typed checkpoint refusal.
+
+Kafka offset replica catch-up first asks `describe_kafka_offsets` on the Commands pool whether
+the owner's revision advanced. Its typed answer distinguishes an unchanged revision, a newer
+revision, and the shared remote-operation refusal classes. An unchanged checkpoint is neither
+encoded nor transferred. A newer checkpoint uses `sync_kafka_offsets` on Bulk with the Snapshot
+subquota and a thirty-second progress deadline, independently of the replica polling cadence.
+The owner retains the admitted offset topology and reads its conservative revision before the
+offset slots, encodes the current native checkpoint directly into a quota-owned staging file, and
+sends a forty-byte revision/digest header followed by chunks of at most 64 KiB. The declared
+response length bounds the complete native payload. Encoding scratch and native conversion use
+the separate `restore_metadata` admission; bounded file I/O and transport use Bulk. Neither the
+replication message limit nor the bulk memory ceiling bounds the whole checkpoint's length.
+The receiver stages bounded chunks, releases the response stream at EOF, verifies exact length
+and digest, and decodes current archived entries directly into a new table under admitted CPU
+work. Cancellation is checked between file blocks and native entries. Only complete conversion
+reaches the replica's assignment-token installation barrier; a promoted or replaced assignment
+rejects a delayed transfer. The replica acknowledges its installed revision afterward. Kafka
+commit and reset waits use the native bulk operation's thirty-second budget. The owner
+therefore accepts a replica that completes this checkpoint after a small Commands response budget;
+an absent acknowledgement still ends the commit at the operation deadline. Transfer and admission
+failures preserve their typed causes in the replica diagnostic and retry on a later round.
+Every successful poll also repeats the replica's held revision when the checkpoint is unchanged,
+so a lost acknowledgement does not strand the owner's quorum wait or require another transfer.
+The replica checks its installation assignment before reporting that revision; promotion or
+replacement fences a retained poll's acknowledgement as well as its delayed installation.
+Debug checkpoint events identify encoding, receive and installation boundaries by placement and
+revision, with declared byte length once known. Their timestamps distinguish encoding, transfer
+and conversion delays without logging checkpoint payloads or partition offsets.
 
 Runtime-state synchronization replies and materialized-snapshot descriptions carry the shared
 typed remote-operation failure envelope. Rejection, absence, temporary unreadiness, and execution
@@ -1339,6 +1376,14 @@ interval falls back to its gossip liveness, even though no failure was recorded.
 therefore leaves scheduling and runtime availability no later than when gossip declares it dead and
 its last observation has aged out, whether or not any probe to it completes.
 
+During startup, Chitchat's dead set can also contain a voter whose first heartbeat arrived through
+another peer's digest: the failure detector has insufficient heartbeat intervals to establish
+liveness. Automatic scheduling uses a separate process-local live-observation history for its
+first ten seconds, including observations made before acquiring leadership. A voter that has never
+been observed live keeps scheduling in that bounded wait even when Chitchat lists it dead. Once all
+current voters have been observed or the grace expires, ordinary effective availability governs
+automatic failover. See [Whole-Cluster Restart Keeps Ownership](./shutdown.md#whole-cluster-restart-keeps-ownership).
+
 Command completion reads the leader's effective availability view through the
 `application_completion_peers` management progress request. The response names the leader's
 incarnation, Raft term, and required process incarnations. A follower uses it only while its own
@@ -1466,6 +1511,9 @@ from local ones.
 
 Metric labels are bounded dimensions such as traffic class, direction, operation, outcome, and
 reason. They do not include peer, domain, relay, branch, delivery identity, or payload values.
+An owner-delivery admission failure logs its domain, relay, non-sensitive branch fingerprint and
+target, together with the transport report's retained cancellation and rejection causes. The
+undelivered batch and branch field values stay out of that diagnostic.
 Per-batch and payload-bearing logs use debug or trace levels and do not expose sensitive field
 values. See [Metrics And Observability](./metrics-and-observability.md) for the metric and logging
 contract.

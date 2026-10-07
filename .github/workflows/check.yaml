@@ -704,6 +704,9 @@ jobs:
           python3 scripts/record_runner_load.py "${RUNNER_TEMP}/runner-load.csv" "${RUNNER_TEMP}/runner-load.md" > "${RUNNER_TEMP}/runner-load.log" 2>&1 &
           echo "$!" > "${RUNNER_TEMP}/runner-load.pid"
 
+      - name: Setup uv for Python driver coverage
+        uses: astral-sh/setup-uv@v6
+
       - name: Scenario coverage
         run: |
           pwd > coverage-source-root.txt
@@ -720,6 +723,7 @@ jobs:
             lcov-workspace.info
             lcov.info
             coverage-source-root.txt
+            target/paced-simulation/python.lcov
           if-no-files-found: warn
 
       - name: Publish runner load
@@ -831,7 +835,7 @@ jobs:
           while IFS= read -r report; do
             lcov --add-tracefile lcov-workspace.info --add-tracefile "$report" --output-file lcov-workspace.info
             lcov --add-tracefile lcov.info --add-tracefile "$report" --output-file lcov.info
-          done < <(find coverage-inputs/native-extras -path '*/ordinary/*/lcov.info' -o -name python.lcov)
+          done < <(find coverage-inputs -path '*/ordinary/*/lcov.info' -o -name python.lcov)
 
       - name: Report patch line coverage
         if: always()
@@ -1154,6 +1158,9 @@ jobs:
           just coverage-patch-runner
           pwd > target/coverage-source-root.txt
 
+      - name: Paced simulation Python open policy
+        run: just coverage-paced-simulation-python
+
       # The collector that the steps below run their checks through, including its refusal of
       # every incomplete collection.
       - name: Native coverage collector
@@ -1205,6 +1212,7 @@ jobs:
             target/model-coverage/python.lcov
             target/primitive-boundary/python.lcov
             target/patch-coverage/python.lcov
+            target/paced-simulation/python.lcov
             target/coverage-source-root.txt
             target/typed-ratchet/cache-qualification/**/qualification.json
           if-no-files-found: warn
