@@ -57,8 +57,7 @@ Feature: Reingestor output flushing
       """
       {"tenant":"acme","seq":1}
       """
-    Then the relay subscription does not receive a payload within "100ms"
-    And within "5s" the relay subscription receives payloads
+    Then within "5s" the relay subscription receives payloads no sooner than "100ms" after they were published
       """
       "seq":1,"tenant":"acme"
       """

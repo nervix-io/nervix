@@ -258,6 +258,9 @@ relay. Do not use them to scan across branches.
 - Every Kafka client states the required `auto.offset.reset` policy explicitly when a new consumer
   group may need records that already exist; Nervix passes the setting through and does not supply
   a hidden default.
+- Kafka `OFFSET BY DOMAIN` commits and start-point resets wait up to the native checkpoint bulk
+  operation's thirty-second budget for all assigned state replicas. A missing acknowledgement
+  follows the source's existing rejection and retry policy; this mode remains at least once.
 - Every transport ingestor source ends with its documented `ON QUIESCE` body immediately before
   `DECODE USING`, with a positive `MAX SIZE`, explicit non-endpoint overflow policy, or endpoint
   `RETRY AFTER` wherever that mode requires it. MQTT `SUSPEND` also declares `SESSION PERSISTENT

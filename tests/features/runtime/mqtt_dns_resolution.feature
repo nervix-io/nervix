@@ -375,7 +375,7 @@ Feature: MQTT name resolution
       """
       {"user_id":45}
       """
-    Then the observed broker receives a payload
+    Then within "30s" the observed broker receives payloads
       """
       {"user_id":45}
       """

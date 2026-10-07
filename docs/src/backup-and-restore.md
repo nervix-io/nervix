@@ -821,6 +821,9 @@ START behavior and two-branch isolation. It asserts domain renaming, the stopped
 new guest lifetime explicitly; capture metadata belongs to each new backup. The materialized
 one-node and three-node restore scenario also re-exports the stopped domain before START, comparing
 every descriptor field, identity and Arrow byte, including generations larger than the bulk budget.
+Its acknowledged materialized inputs retain an explicit event timestamp across retries. An
+identical successful replay must preserve the exact revision count and all archived fields, even
+when a failed earlier attempt reached only part of the relay fan-out.
 The deduplicator and window one-node and three-node scenarios re-export a stopped restore with
 identical descriptors and Arrow groups, stop an installation before its first deduplicator or
 window checkpoint, which leaves `START` gated, and release a delayed coordinator's publication

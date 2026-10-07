@@ -46,6 +46,61 @@ async fn given_restore_uses_remote_placement(world: &mut ScenarioWorld) {
     }
 }
 
+fn restored_work_placements(world: &ScenarioWorld) -> BTreeSet<String> {
+    let status = world
+        .last_command_output
+        .as_deref()
+        .assured("cluster status is read before inspecting restored placements");
+    let mut placements = BTreeSet::new();
+    for placement in scheduled_placements_for_domain(status, &world.domain) {
+        let (owner, mut replicas) = scheduled_node_placement_from_status(
+            status,
+            &world.domain,
+            &placement.kind,
+            &placement.name,
+        )
+        .assured("each scheduled entry has its public placement");
+        replicas.sort_unstable();
+        placements.insert(format!(
+            "kind={} name={} owner={} replicas={}",
+            placement.kind,
+            placement.name,
+            owner,
+            replicas.join(",")
+        ));
+    }
+    placements
+}
+
+#[then(
+    expr = "the last cluster status placements of restored work are saved as placeholder {string}"
+)]
+fn then_save_restored_work_placements(world: &mut ScenarioWorld, placeholder: String) {
+    let placements = restored_work_placements(world);
+    assert!(!placements.is_empty(), "restore installed scheduled work");
+    world.placeholders.insert(
+        placeholder,
+        placements.into_iter().collect::<Vec<_>>().join("\n"),
+    );
+}
+
+#[then(
+    expr = "the last cluster status preserves restored work placements from placeholder {string}"
+)]
+fn then_restored_work_placements_are_preserved(world: &mut ScenarioWorld, placeholder: String) {
+    let current = restored_work_placements(world);
+    let expected = world
+        .placeholders
+        .get(&placeholder)
+        .assured("the restored placements are saved before restart");
+    for placement in expected.lines() {
+        assert!(
+            current.contains(placement),
+            "restart changed restored ownership or replicas: expected {placement}; got {current:?}"
+        );
+    }
+}
+
 #[given(
     expr = "node {string} has a state-counting WASM fixture with {int} MiB saves in resource \
             directory {string}"
@@ -132,10 +187,14 @@ async fn then_restore_tenants_remain_isolated(
                 .assured("the subscription's filed server errors remain readable");
             panic!(
                 "missing isolated restored rows: {pending:?}; observed: {observed:?}; server \
-                 error: {server_error:?}"
+                 error: {server_error:?}; delivered rows: {:?}; frames outside subscription \
+                 lifetime: {:?}",
+                session.delivered_payloads(),
+                session.frames_outside_lifetime(),
             );
         };
         observed.insert(event.payload.clone());
+        world.last_subscription_payload = Some(event.payload.clone());
         // Domain offsets recover at least once, so a valid row may repeat while another branch
         // is still pending. Every observed row must still belong to an expected branch.
         let matched = expected

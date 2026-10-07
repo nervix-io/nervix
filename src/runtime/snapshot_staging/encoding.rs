@@ -18,6 +18,13 @@ impl StagedSnapshotWriter {
     /// Encode directly into a fresh staging file. The declared length bounds disk consumption;
     /// the finished artifact carries the actual length. The supplied reservation and anything
     /// the encoder retains stay owned by the job until encoding and synchronization finish.
+    #[cfg_attr(
+        nervix_lint,
+        nervix::dispatch(
+            reason = "the caller encodes through a quota-owned cancellable writer inside the \
+                      admitted storage job while retaining its memory reservation"
+        )
+    )]
     pub(crate) async fn encode_artifact(
         mut self,
         charge: Reservation,
@@ -198,6 +205,11 @@ impl Write for EncodingWriter<'_> {
         Ok(bytes.len())
     }
 
+    #[cfg_attr(
+        nervix_lint,
+        nervix::dispatch(reason = "the retained admitted file writer flushes its fixed-size \
+                                   buffer on the storage worker after cancellation is checked")
+    )]
     fn flush(&mut self) -> io::Result<()> {
         self.cancellation.check().map_err(io::Error::other)?;
         self.file.flush()

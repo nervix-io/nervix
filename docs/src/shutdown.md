@@ -651,6 +651,11 @@ owner cancels its announcers, including pending dispatches and retry waits, and 
 retained handles to be released before these routes are cleared. Teardown does not wait for an
 announcement's remote dispatch timeout; synchronization supplies any missed availability hint.
 
+Closing a Kafka offset replica task also cancels its pending revision request or bulk checkpoint
+stream immediately. A partially received or cancelled conversion never publishes a checkpoint or
+acknowledges its revision. Native conversion checks cancellation between entries and before
+publication; the replica's assignment token still fences installation if ownership changed.
+
 Consensus stops Raft and then waits for its storage to reach an idle barrier, which proves every
 earlier durable write has returned and released the store, before its dedicated database handle is
 dropped. The registry and runtime database is released separately after the services that hold its
@@ -794,10 +799,16 @@ process-start admission proof only: connectivity lost after admission does not r
 ### Whole-Cluster Restart Keeps Ownership
 
 When every node restarts, the first node to lead can form a quorum while the others are still
-starting and gossip has not heard from them yet. Its automatic scheduling therefore waits, for the
-first ten seconds of its reconciliation, while any voter is neither reported live nor declared dead.
+starting and gossip has not observed them live yet. Its automatic scheduling therefore waits, for
+the first ten seconds of its reconciliation, while any current voter has never been observed live
+by this process's reconciliation task. A first heartbeat relayed by another peer can initially put
+the voter in Chitchat's dead set before sufficient heartbeat intervals establish liveness. That
+initial dead verdict keeps the voter unobserved during the grace.
 Each owner that returns in that time keeps its work and restores it from its own storage and
-replicas, instead of having it failed over without its state. See
+replicas. Live observations made while following survive a leadership change, and the original
+ten-second deadline continues running. Once it expires, a voter that never returned is eligible for
+ordinary failover. The observation history is private to this process and is discarded after the
+grace. See
 [Planned Ownership Handoffs And Failover](./control-plane.md#planned-ownership-handoffs-and-failover).
 
 ### Restoring Processor Branches
