@@ -36,6 +36,9 @@ const CASE_BYTES: usize = 4096;
 /// The most damaged payloads one group interleaves with the valid ones.
 const DAMAGED_PAYLOADS: usize = 4;
 
+/// The most damaged payloads a group reads after its first.
+const FURTHER_DAMAGED_PAYLOADS: usize = DAMAGED_PAYLOADS - 1;
+
 /// A schemaful wire format.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum SchemafulFormat {
@@ -337,79 +340,111 @@ fn bolero_schemaful_codecs_decode_every_row_they_encode() {
 }
 
 /// How one damaged payload of a group differs from a payload the codec wrote.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 enum PayloadDamage {
     /// The bytes are damaged the way any encoding can be.
-    Bytes,
-    /// One value inside a JSON or CBOR payload holds a value of another kind or out of range, so
-    /// the payload still parses and fails, if at all, while its row is being appended.
-    Value,
-    /// A JSON or CBOR payload loses one key or gains one the wire schema does not declare.
-    Key,
+    Bytes(Damage),
+    /// The JSON model a JSON or CBOR payload is read through is damaged, so the payload still
+    /// parses and fails, if at all, while its row is being appended.
+    Model(ModelDamage),
 }
 
 impl PayloadDamage {
-    const ALL: [Self; 3] = [Self::Bytes, Self::Value, Self::Key];
+    /// One damage of a payload in `format`, read from the front of `entropy`. An Avro payload has
+    /// no JSON model, so it is damaged as bytes.
+    fn draw(entropy: &mut Entropy<'_>, format: SchemafulFormat) -> Self {
+        if format == SchemafulFormat::Avro {
+            return Self::Bytes(Damage::draw(entropy));
+        }
+        match entropy.byte() % 4 {
+            0 => Self::Bytes(Damage::draw(entropy)),
+            1 => Self::Model(ModelDamage::Value {
+                leaf: Place::draw(entropy),
+                replacement: replacement_value(entropy),
+            }),
+            2 => Self::Model(ModelDamage::KeyRemoved {
+                key: Place::draw(entropy),
+            }),
+            _ => Self::Model(ModelDamage::KeyAdded),
+        }
+    }
+}
+
+/// What a damage does to the JSON model of a payload.
+#[derive(Debug, Clone)]
+enum ModelDamage {
+    /// One scalar value holds a value of another kind or out of range.
+    Value {
+        /// Which of the payload's scalar values is replaced.
+        leaf: Place,
+        replacement: JsonValue,
+    },
+    /// The object loses one key.
+    KeyRemoved {
+        /// Which of the object's keys is removed.
+        key: Place,
+    },
+    /// The object gains a key the wire schema does not declare.
+    KeyAdded,
+}
+
+impl ModelDamage {
+    /// Damages `value`, which stays as it is when it holds nothing this damage could change.
+    fn apply(&self, value: &mut JsonValue) {
+        match self {
+            Self::Value { leaf, replacement } => {
+                let leaves = count_leaves(value);
+                if leaves > 0 {
+                    replace_leaf(value, leaf.among(leaves), &mut 0, replacement.clone());
+                }
+            }
+            Self::KeyRemoved { key } => {
+                if let JsonValue::Object(members) = value {
+                    let keys: Vec<String> = members.keys().cloned().collect();
+                    if !keys.is_empty() {
+                        members.remove(&keys[key.among(keys.len())]);
+                    }
+                }
+            }
+            Self::KeyAdded => {
+                if let JsonValue::Object(members) = value {
+                    members.insert("undeclared field".to_string(), JsonValue::Bool(true));
+                }
+            }
+        }
+    }
 }
 
 /// One damaged payload a group holds beside the codec's own: which of them it is damaged from,
-/// how, and where it stands in the group. It is drawn whole before the case, because an ordinary
-/// run's few bytes run out while a case is generated and a choice read after that takes its first
-/// option, which would leave nearly every group without a damaged payload.
+/// how, and where it stands in the group.
+#[derive(Debug, Clone)]
 struct DamagedMember {
     source: Place,
     damage: PayloadDamage,
-    bytes: Damage,
-    leaf: Place,
-    replacement: JsonValue,
-    remove_key: bool,
-    key: Place,
     position: Place,
 }
 
 impl DamagedMember {
-    fn draw(entropy: &mut Entropy<'_>) -> Self {
+    /// One damaged payload of a group in `format`, read from the front of `entropy`.
+    fn draw(entropy: &mut Entropy<'_>, format: SchemafulFormat) -> Self {
         Self {
             source: Place::draw(entropy),
-            damage: entropy.pick(PayloadDamage::ALL),
-            bytes: Damage::draw(entropy),
-            leaf: Place::draw(entropy),
-            replacement: replacement_value(entropy),
-            remove_key: entropy.flag(),
-            key: Place::draw(entropy),
+            damage: PayloadDamage::draw(entropy, format),
             position: Place::draw(entropy),
         }
     }
 
-    /// `payload`, a payload the codec wrote in `format`, with this member's damage.
+    /// `payload`, a payload the codec wrote in `format`, with this member's damage. A payload
+    /// without the JSON model a model damage needs stays as it is.
     fn apply(&self, format: SchemafulFormat, payload: Vec<u8>) -> Vec<u8> {
-        if format == SchemafulFormat::Avro || matches!(self.damage, PayloadDamage::Bytes) {
-            return self.bytes.apply(payload);
-        }
+        let damage = match &self.damage {
+            PayloadDamage::Bytes(damage) => return damage.apply(payload),
+            PayloadDamage::Model(damage) => damage,
+        };
         let Some(mut value) = read_json_model(format, &payload) else {
             return payload;
         };
-        match self.damage {
-            PayloadDamage::Bytes => {}
-            PayloadDamage::Value => {
-                let leaves = count_leaves(&value);
-                if leaves > 0 {
-                    let target = self.leaf.among(leaves);
-                    replace_leaf(&mut value, target, &mut 0, self.replacement.clone());
-                }
-            }
-            PayloadDamage::Key => {
-                if let JsonValue::Object(members) = &mut value {
-                    let keys: Vec<String> = members.keys().cloned().collect();
-                    if self.remove_key && !keys.is_empty() {
-                        let key = &keys[self.key.among(keys.len())];
-                        members.remove(key);
-                    } else {
-                        members.insert("undeclared field".to_string(), JsonValue::Bool(true));
-                    }
-                }
-            }
-        }
+        damage.apply(&mut value);
         write_json_model(format, &value)
     }
 }
@@ -509,13 +544,20 @@ fn bolero_damaged_payloads_leave_a_group_as_its_payloads_decode_alone() {
         .with_max_len(CASE_BYTES)
         .for_each(|input| {
             let mut arbitrary = Arbitrary::new(input, Domain::Vocabulary);
-            let damaged_count = arbitrary.entropy().count(DAMAGED_PAYLOADS);
-            let mut damaged_members = Vec::with_capacity(damaged_count);
-            for _ in 0..damaged_count {
-                damaged_members.push(DamagedMember::draw(arbitrary.entropy()));
-            }
-            let case = CodecCase::new(&mut arbitrary);
+            // The format and one damaged payload are read before the schema and its rows: an
+            // ordinary run's few bytes run out while those are generated, and a damaged payload
+            // read after them would be the same truncation to nothing in nearly every group. The
+            // other damaged payloads are read after the rows, so that they take none of the bytes
+            // an ordinary run has for them.
+            let format = arbitrary.entropy().pick(SchemafulFormat::ALL);
+            let mut damaged_members = vec![DamagedMember::draw(arbitrary.entropy(), format)];
+            let schema = format.domain().schema(&mut arbitrary);
+            let case = CodecCase::with_schema(&mut arbitrary, format, schema);
             let rows = case.format.domain().batch(&mut arbitrary, &case.schema);
+            let further = arbitrary.entropy().count(FURTHER_DAMAGED_PAYLOADS);
+            for _ in 0..further {
+                damaged_members.push(DamagedMember::draw(arbitrary.entropy(), format));
+            }
             let batch = case.schema.runtime_batch(rows.clone());
             let valid = case.encode(&batch);
             let mut group: Vec<(Vec<u8>, Option<usize>)> = valid
@@ -525,11 +567,13 @@ fn bolero_damaged_payloads_leave_a_group_as_its_payloads_decode_alone() {
                 .map(|(row, payload)| (payload, Some(row)))
                 .collect();
             for member in &damaged_members {
-                if valid.is_empty() {
-                    break;
-                }
-                let source = &valid[member.source.among(valid.len())];
-                let damaged = member.apply(case.format, source.clone());
+                // A group without a payload of the codec's own damages the empty payload.
+                let source = if valid.is_empty() {
+                    Vec::new()
+                } else {
+                    valid[member.source.among(valid.len())].clone()
+                };
+                let damaged = member.apply(case.format, source);
                 // A group of `n` payloads has `n + 1` places for one more.
                 let places = group
                     .len()
