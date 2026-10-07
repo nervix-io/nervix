@@ -15483,6 +15483,23 @@ async fn when_bulk_execution_is_occupied(world: &mut ScenarioWorld, node_id: Str
     });
 }
 
+/// Fill every bulk worker and every place in the bulk wait queue on a node, so the next bulk job
+/// the node is handed is refused for room rather than queued.
+#[when(expr = "bulk execution on node {string} is saturated")]
+async fn when_bulk_execution_is_saturated(world: &mut ScenarioWorld, node_id: String) {
+    let node_id = expand_placeholders(world, &node_id);
+    let node_name = crate::common::cluster::node_name(&node_id);
+    let fault_injection = world.fault_injection.clone();
+    nervix_primitives::time::timeout(
+        Duration::from_secs(60),
+        fault_injection.saturate_execution(&node_name, nervix_execution::CpuClass::Bulk),
+    )
+    .await
+    .unwrap_or_else(|error| {
+        panic!("bulk execution on '{node_id}' never filled its workers and wait queue: {error}")
+    });
+}
+
 /// Fill the credentials worker and every place in its wait queue on the leader, so the next
 /// password the leader is asked to verify is refused rather than queued. The leader is the node
 /// the scenario created its user through, so the user is already visible there.

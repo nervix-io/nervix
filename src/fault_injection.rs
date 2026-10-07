@@ -305,6 +305,7 @@ enum CommandPausePoint {
         domain: DomainName,
         coordinator: ClusterNodeName,
     },
+    RestoreBranchStateConversion(DomainName),
     TransactionCommit {
         node_id: ClusterNodeName,
         domain: String,
@@ -440,6 +441,32 @@ impl FaultInjection {
         self.inner
             .failed_restore_state_installations
             .insert(domain, RestoreStateFailure::DurablePublication);
+    }
+
+    /// Hold the restore of `domain` after its models are applied and its branch lifecycles are
+    /// staged, before it converts its first archived deduplicator keyspace or window.
+    pub fn pause_restore_branch_state_conversion(&self, domain: DomainName) {
+        self.arm_command_pause(CommandPausePoint::RestoreBranchStateConversion(domain));
+    }
+
+    pub async fn wait_for_restore_branch_state_conversion_pause(&self, domain: &DomainName) {
+        self.wait_for_command_pause(&CommandPausePoint::RestoreBranchStateConversion(
+            domain.clone(),
+        ))
+        .await;
+    }
+
+    pub fn release_restore_branch_state_conversion_pause(&self, domain: &DomainName) {
+        self.release_command_pause(&CommandPausePoint::RestoreBranchStateConversion(
+            domain.clone(),
+        ));
+    }
+
+    pub(crate) async fn pause_restore_branch_state_conversion_if_armed(&self, domain: &DomainName) {
+        self.pause_command_if_armed(CommandPausePoint::RestoreBranchStateConversion(
+            domain.clone(),
+        ))
+        .await;
     }
 
     pub fn pause_restore_state_publication(
