@@ -235,6 +235,48 @@ Feature: HTTP codec ingestion
       | 1            | CBOR        |
       | 3            | CBOR        |
 
+  Scenario Outline: A <wire_format> number reads as the F32 whose shortest decimal it is
+    Given runtime replication is configured with replica count 0 and snapshot interval "100ms"
+    And a <cluster_size> node nervix cluster is started
+    And the leader node is configured with these NSPL commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
+    When these NSPL commands are executed
+      """
+      CREATE SCHEMA single_value ( value F32 );
+      CREATE WIRE <wire_format> SCHEMA single_value_wire MODE STRICT ( value number );
+      CREATE CODEC single_value_codec
+        FROM WIRE <wire_format> SCHEMA single_value_wire
+        TO SCHEMA single_value;
+      CREATE RELAY single_values SCHEMA single_value UNBRANCHED;
+      CREATE VHOST edge single-values-{{test_id}}.example.com;
+      CREATE ENDPOINT single_values_endpoint ON edge PATH '/ingest' TYPE HTTP;
+      CREATE INGESTOR single_values_ingestor
+        FROM ENDPOINT single_values_endpoint MODE NO_ACK SEQUENTIAL
+        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING single_value_codec
+        TO single_values
+        INHERIT ALL
+        UNBRANCHED
+        FLUSH IMMEDIATE
+        ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
+      CREATE SUBSCRIPTION single_values_subscription TO single_values;
+      START;
+      """
+    When http payload is posted to host "single-values-{{test_id}}.example.com" path "/ingest"
+      """
+      {"value":7.038531e-26}
+      """
+    Then within "10s" the relay subscription receives a payload
+      """
+      {"value":7.038530691851209e-26}
+      """
+
+    Examples:
+      | cluster_size | wire_format |
+      | 1            | JSON        |
+      | 3            | JSON        |
 
   Scenario Outline: HTTP endpoint ingestor maps a payload encoded as <wire_format> from wire field order into internal schema order
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"

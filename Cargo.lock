@@ -7710,6 +7710,7 @@ dependencies = [
  "rumqttc-next",
  "rustls",
  "rustls-pki-types",
+ "ryu",
  "serde",
  "serde_json",
  "shuttle",

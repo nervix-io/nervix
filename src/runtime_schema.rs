@@ -4004,9 +4004,7 @@ fn append_json_value_to_arrow(
                 None
             }
         ),
-        ParseAsType::F32 => {
-            append_primitive!(Float32Builder, value.as_f64().map(ApproxInto::approx_into))
-        }
+        ParseAsType::F32 => append_primitive!(Float32Builder, value.as_f64().map(json_number_f32)),
         ParseAsType::F64 => append_primitive!(Float64Builder, value.as_f64()),
         ParseAsType::Array { element, len } => {
             let values = value.as_array().ok_or_else(incompatible)?;
@@ -4068,6 +4066,39 @@ fn append_json_value_to_arrow(
             Ok(())
         }
     }
+}
+
+/// The `F32` a JSON number names, given the `f64` a JSON reader parsed it as.
+///
+/// Narrowing the `f64` rounds a second time, which names the nearest `F32` except where the `f64`
+/// lies exactly halfway between two `F32` values: the decimal lay just beside that midpoint, and
+/// rounding half to even can name the neighbour of the value it was written for. `7.038531e-26`
+/// is one such decimal. A writer spells an `F32` with its shortest decimal, so at a midpoint the
+/// number names the `F32` whose shortest decimal reads as the same `f64`; every other number names
+/// the nearest `F32`.
+fn json_number_f32(wide: f64) -> f32 {
+    let nearest: f32 = wide.approx_into();
+    let nearest_wide = f64::from(nearest);
+    if !nearest.is_finite() || nearest_wide == wide {
+        return nearest;
+    }
+    let other = if nearest_wide < wide {
+        nearest.next_up()
+    } else {
+        nearest.next_down()
+    };
+    // Two adjacent `F32` values widen exactly, and so does the point halfway between them.
+    let midpoint = (nearest_wide + f64::from(other)) / 2.0;
+    if midpoint != wide {
+        return nearest;
+    }
+    let mut digits = ryu::Buffer::new();
+    let other_reads_as_wide = digits.format(other).parse::<f64>() == Ok(wide);
+    let nearest_reads_as_wide = digits.format(nearest).parse::<f64>() == Ok(wide);
+    if other_reads_as_wide && !nearest_reads_as_wide {
+        return other;
+    }
+    nearest
 }
 
 fn append_borrowed_json_value_to_arrow(
@@ -4136,10 +4167,9 @@ fn append_borrowed_json_value_to_arrow(
                 .append_value(value);
             Ok(())
         }
-        ParseAsType::F32 => append_primitive!(
-            Float32Builder,
-            value.cast_f64().map(ApproxInto::approx_into)
-        ),
+        ParseAsType::F32 => {
+            append_primitive!(Float32Builder, value.cast_f64().map(json_number_f32))
+        }
         ParseAsType::F64 => append_primitive!(Float64Builder, value.cast_f64()),
         ParseAsType::Array { element, len } => {
             let values = value.as_array().ok_or_else(incompatible)?;

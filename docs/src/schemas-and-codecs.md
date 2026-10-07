@@ -327,6 +327,10 @@ values, and nulls of optional fields. The formats themselves set the bounds of t
   which reads back as a null of an optional field and refuses a required field or a list element.
   `WIRE CBOR` writes the float itself but reads every value through the same JSON model, so it reads
   a non-finite float as a null.
+- A JSON or CBOR number read into an `F32` field becomes the nearest `F32`, and the shortest
+  decimal a writer prints for an `F32` reads back as that same `F32`, also where the number lies
+  exactly halfway between two of them once read as a 64-bit float. A number beyond the type's range
+  rounds to an infinity. Every finite float the codec writes reads back to its exact bits.
 - `WIRE AVRO` keeps every float bit pattern. It writes an unsigned element of an `ARRAY` or `VEC` as
   an Avro `long`, so an element above 9223372036854775807 fails to encode.
 - A datetime travels as RFC 3339 text in UTC; text written with another offset reads as the same
