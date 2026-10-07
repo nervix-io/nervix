@@ -349,6 +349,11 @@ rejects a key that appears twice, and checks each delayed histogram bucket again
 histogram's bucket count. Conversion charges each decoded group to bulk memory until the branch's
 native keyspace or window checkpoint is encoded, then writes that checkpoint into a quota-owned
 file for the streamed publisher.
+Every Arrow section of an archive is scanned before Arrow's reader reads it, whatever digests the
+archive carries for its own bytes. A section that declares a metadata or body length outside its
+bytes, a field type Nervix does not carry, or a record batch at odds with its own schema is refused
+as undecodable when planning reads it, a dry run included, and nothing is allocated from a length
+the section only declares.
 Backup section openings share Snapshot admission with materialized readers. A capacity-only
 refusal retries within the opening's single 30-second deadline; other failures end the fetch.
 Completed response streams release their transport permits before local verification and decoding.

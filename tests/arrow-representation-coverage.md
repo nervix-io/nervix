@@ -95,15 +95,18 @@ Arrow IPC stream, which `relay-arrow-bodies` covers through its schema-free deco
   does not implement, a list without its child, a dictionary encoding without its index type, a
   schema without its field list, a validity bitmap shorter than the nulls it is declared to hold,
   an offsets buffer that ends inside an offset, variadic buffer counts no field takes and a
-  fixed-size list too long to count. One hand-built stream for each lives in
-  `src/runtime_schema/crafted_streams.rs`, and
+  fixed-size list too long to count. It also allocates each message's metadata and body from their
+  declared lengths before reading them, so a message that declares a body of 2^60 bytes aborts the
+  process; the scan refuses a declared length that reaches past the stream before anything is
+  allocated. One hand-built stream for each lives in `src/runtime_schema/crafted_streams.rs`, and
   `a_body_arrows_reader_would_panic_on_is_refused_before_it_is_read`,
   `a_stream_arrows_reader_would_panic_on_is_refused_with_its_defect` and
   `a_generated_pool_arrows_reader_would_panic_on_is_refused_however_it_ends` hold every decoder to
   the scan's exact refusal of each; the inputs the malformed targets found are retained corpus
   regressions. On a guest's pool such a panic ended the processor's task; the scenario outline
   **A WASM processor output whose generated column `<defect>` reports a runtime error** retains a
-  buffer past its body, an integer of 7 bits and a null counted without a validity bitmap.
+  buffer past its body, an integer of 7 bits, a null counted without a validity bitmap and a body
+  declared longer than its stream.
 - The transport receives exactly the body length the grant declared, so a relay body cannot lose
   bytes in transit.
 - A stream of no record batch decodes, where any number of sections is accepted, as an empty batch

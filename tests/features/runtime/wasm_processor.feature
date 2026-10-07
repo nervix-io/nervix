@@ -2118,6 +2118,8 @@ Feature: WASM processor runtime behavior
       | 3            | is an integer of 7 bits                       | generated field 0 declares an integer of 7 bits, which no Nervix type is carried as |
       | 1            | counts a null its validity bitmap cannot hold | the IPC stream does not decode                                                      |
       | 3            | counts a null its validity bitmap cannot hold | the IPC stream does not decode                                                      |
+      | 1            | declares a body longer than its stream        | the IPC stream does not decode                                                      |
+      | 3            | declares a body longer than its stream        | the IPC stream does not decode                                                      |
 
   Scenario Outline: Malformed WASM processor output reports a runtime error
     Given runtime replication is configured with replica count 0 and snapshot interval "100ms"

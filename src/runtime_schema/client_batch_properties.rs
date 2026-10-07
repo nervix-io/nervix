@@ -214,6 +214,7 @@ fn bolero_damaged_producer_batches_fail_with_their_defect_or_decode_within_their
     StreamDefect::FixedSizeListTooLongToCount,
     ClientBatchDefect::InvalidData
 )]
+#[case::body_longer_than_stream(StreamDefect::BodyLongerThanStream, ClientBatchDefect::Malformed)]
 fn a_stream_arrows_reader_would_panic_on_is_refused_with_its_defect(
     #[case] defect: StreamDefect,
     #[case] reported: ClientBatchDefect,

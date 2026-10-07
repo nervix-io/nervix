@@ -2,9 +2,10 @@
 //!
 //! Layer: test harness.
 //!
-//! - **Owns.** One stream for each declaration Arrow's stream reader panics on instead of refusing:
-//!   every stream is one schema message of one field, at most one record batch message and the
-//!   end-of-stream marker, built message by message so a test controls every declaration.
+//! - **Owns.** One stream for each declaration Arrow's stream reader panics on, or aborts the
+//!   process on, instead of refusing: every stream is one schema message of one field, at most one
+//!   record batch message and the end-of-stream marker, built message by message so a test controls
+//!   every declaration.
 //! - **Depends on.** Arrow's IPC message definitions and the FlatBuffers builder.
 //! - **Must not know.** The decoders a test hands a stream to.
 
@@ -40,7 +41,8 @@ pub(crate) fn receiver_schema() -> GeneratedSchema {
     })
 }
 
-/// What one crafted stream declares that Arrow's reader panics on.
+/// What one crafted stream declares that Arrow's reader panics on, or allocates for until the
+/// process aborts.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum StreamDefect {
     /// A values buffer reaching past the eight-byte body its record batch message declares.
@@ -61,6 +63,9 @@ pub(crate) enum StreamDefect {
     VariadicBufferCounts,
     /// A fixed-size list whose length times its size overflows.
     FixedSizeListTooLongToCount,
+    /// A record batch message declaring a body of 2^60 bytes before the eight that follow it, which
+    /// Arrow's reader allocates before it reads them.
+    BodyLongerThanStream,
 }
 
 /// What one crafted field declares.
@@ -76,6 +81,8 @@ struct CraftedBatch {
     nodes: Vec<FieldNode>,
     buffers: Vec<Buffer>,
     variadic_buffer_counts: Option<Vec<i64>>,
+    /// The body length the message declares.
+    declared_body: i64,
     /// How many zero bytes follow the message as its body.
     body: usize,
 }
@@ -102,6 +109,7 @@ impl StreamDefect {
             Self::OffsetsCutInsideAnOffset => IpcStreamError::OffsetsNotWhole { buffer: 1 },
             Self::VariadicBufferCounts => IpcStreamError::VariadicBuffers,
             Self::FixedSizeListTooLongToCount => IpcStreamError::NodeLength { node: 0 },
+            Self::BodyLongerThanStream => IpcStreamError::Truncated,
         }
     }
 
@@ -154,7 +162,8 @@ impl StreamDefect {
             | Self::ValidityShorterThanRows
             | Self::OffsetsCutInsideAnOffset
             | Self::VariadicBufferCounts
-            | Self::FixedSizeListTooLongToCount => {
+            | Self::FixedSizeListTooLongToCount
+            | Self::BodyLongerThanStream => {
                 let field = self.field(&mut builder);
                 Some(builder.create_vector(&[field]))
             }
@@ -247,7 +256,8 @@ impl StreamDefect {
             Self::BufferPastBody
             | Self::SchemaWithoutFields
             | Self::ValidityShorterThanRows
-            | Self::VariadicBufferCounts => CraftedField {
+            | Self::VariadicBufferCounts
+            | Self::BodyLongerThanStream => CraftedField {
                 type_type: Type::Int,
                 type_: Self::integer(builder, 64),
                 children: Self::no_children(builder),
@@ -299,12 +309,14 @@ impl StreamDefect {
                 nodes: vec![FieldNode::new(1, 0)],
                 buffers: vec![Buffer::new(0, 0), Buffer::new(0, 1 << 40)],
                 variadic_buffer_counts: None,
+                declared_body: 8,
                 body: 8,
             },
             Self::ValidityShorterThanRows => CraftedBatch {
                 nodes: vec![FieldNode::new(1, 1)],
                 buffers: vec![Buffer::new(0, 0), Buffer::new(0, 8)],
                 variadic_buffer_counts: None,
+                declared_body: 8,
                 body: 8,
             },
             // Nine bytes hold the two offsets one value needs and one byte more.
@@ -312,12 +324,14 @@ impl StreamDefect {
                 nodes: vec![FieldNode::new(1, 0)],
                 buffers: vec![Buffer::new(0, 0), Buffer::new(0, 9), Buffer::new(16, 0)],
                 variadic_buffer_counts: None,
+                declared_body: 16,
                 body: 16,
             },
             Self::VariadicBufferCounts => CraftedBatch {
                 nodes: vec![FieldNode::new(1, 0)],
                 buffers: vec![Buffer::new(0, 0), Buffer::new(0, 8)],
                 variadic_buffer_counts: Some(vec![1]),
+                declared_body: 8,
                 body: 8,
             },
             // The list's length times its size of `i32::MAX` does not fit in 64 bits.
@@ -325,7 +339,15 @@ impl StreamDefect {
                 nodes: vec![FieldNode::new(1 << 40, 0), FieldNode::new(0, 0)],
                 buffers: vec![Buffer::new(0, 0), Buffer::new(0, 0), Buffer::new(0, 0)],
                 variadic_buffer_counts: None,
+                declared_body: 0,
                 body: 0,
+            },
+            Self::BodyLongerThanStream => CraftedBatch {
+                nodes: vec![FieldNode::new(1, 0)],
+                buffers: vec![Buffer::new(0, 0), Buffer::new(0, 8)],
+                variadic_buffer_counts: None,
+                declared_body: 1 << 60,
+                body: 8,
             },
         };
         Some(batch)
@@ -356,7 +378,7 @@ impl StreamDefect {
                 version: MetadataVersion::V5,
                 header_type: MessageHeader::RecordBatch,
                 header: Some(record_batch.as_union_value()),
-                bodyLength: i64::try_from(batch.body).assured("a small body length fits i64"),
+                bodyLength: batch.declared_body,
                 custom_metadata: None,
             },
         );

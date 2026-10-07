@@ -182,7 +182,8 @@ fn a_generated_pool_arrows_reader_would_panic_on_is_refused_however_it_ends(
         StreamDefect::ValidityShorterThanRows,
         StreamDefect::OffsetsCutInsideAnOffset,
         StreamDefect::VariadicBufferCounts,
-        StreamDefect::FixedSizeListTooLongToCount
+        StreamDefect::FixedSizeListTooLongToCount,
+        StreamDefect::BodyLongerThanStream
     )]
     defect: StreamDefect,
 ) {

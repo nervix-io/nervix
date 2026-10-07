@@ -8593,7 +8593,7 @@ async fn given_node_has_malformed_output_wasm_processor_fixture_resource_directo
 }
 
 #[given(
-    regex = r#"^node "([^"]+)" has a WASM fixture generating a column that (reaches past its body|is an integer of 7 bits|counts a null its validity bitmap cannot hold) for relay "([^"]+)" in resource directory "([^"]+)"$"#
+    regex = r#"^node "([^"]+)" has a WASM fixture generating a column that (reaches past its body|is an integer of 7 bits|counts a null its validity bitmap cannot hold|declares a body longer than its stream) for relay "([^"]+)" in resource directory "([^"]+)"$"#
 )]
 async fn given_node_has_unreadable_generated_column_wasm_processor_fixture_resource_directory(
     world: &mut ScenarioWorld,
@@ -8608,6 +8608,7 @@ async fn given_node_has_unreadable_generated_column_wasm_processor_fixture_resou
         "counts a null its validity bitmap cannot hold" => {
             GeneratedColumnDefect::NullWithoutValidity
         }
+        "declares a body longer than its stream" => GeneratedColumnDefect::BodyLongerThanStream,
         other => panic!("unsupported generated column defect '{other}'"),
     };
     place_generated_wasm_processor_fixture(
@@ -8952,6 +8953,8 @@ enum GeneratedColumnDefect {
     IntegerOfSevenBits,
     /// The record batch counts one null and declares an empty validity bitmap.
     NullWithoutValidity,
+    /// The record batch message declares a body of 2^60 bytes before the eight that follow it.
+    BodyLongerThanStream,
 }
 
 impl GeneratedColumnDefect {
@@ -8966,7 +8969,7 @@ impl GeneratedColumnDefect {
 
         let bits = match self {
             Self::IntegerOfSevenBits => 7,
-            Self::BufferPastBody | Self::NullWithoutValidity => 64,
+            Self::BufferPastBody | Self::NullWithoutValidity | Self::BodyLongerThanStream => 64,
         };
         let mut builder = flatbuffers::FlatBufferBuilder::new();
         let integer = Int::create(
@@ -9016,8 +9019,14 @@ impl GeneratedColumnDefect {
 
         let (node, values) = match self {
             Self::BufferPastBody => (FieldNode::new(1, 0), IpcBuffer::new(0, 1 << 40)),
-            Self::IntegerOfSevenBits => (FieldNode::new(1, 0), IpcBuffer::new(0, 8)),
+            Self::IntegerOfSevenBits | Self::BodyLongerThanStream => {
+                (FieldNode::new(1, 0), IpcBuffer::new(0, 8))
+            }
             Self::NullWithoutValidity => (FieldNode::new(1, 1), IpcBuffer::new(0, 8)),
+        };
+        let declared_body = match self {
+            Self::BodyLongerThanStream => 1 << 60,
+            Self::BufferPastBody | Self::IntegerOfSevenBits | Self::NullWithoutValidity => 8,
         };
         let mut builder = flatbuffers::FlatBufferBuilder::new();
         let nodes = builder.create_vector(&[node]);
@@ -9037,7 +9046,7 @@ impl GeneratedColumnDefect {
                 version: MetadataVersion::V5,
                 header_type: MessageHeader::RecordBatch,
                 header: Some(batch.as_union_value()),
-                bodyLength: 8,
+                bodyLength: declared_body,
                 custom_metadata: None,
             },
         );

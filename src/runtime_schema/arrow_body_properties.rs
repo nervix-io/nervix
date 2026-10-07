@@ -444,7 +444,8 @@ fn a_body_arrows_reader_would_panic_on_is_refused_before_it_is_read(
         StreamDefect::ValidityShorterThanRows,
         StreamDefect::OffsetsCutInsideAnOffset,
         StreamDefect::VariadicBufferCounts,
-        StreamDefect::FixedSizeListTooLongToCount
+        StreamDefect::FixedSizeListTooLongToCount,
+        StreamDefect::BodyLongerThanStream
     )]
     defect: StreamDefect,
 ) {
