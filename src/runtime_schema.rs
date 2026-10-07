@@ -77,8 +77,11 @@ use simd_json::{BorrowedValue, KnownKey, prelude::*};
 use thiserror::Error;
 
 mod arrow_body;
+#[cfg(test)]
+mod arrow_body_properties;
 mod batch_container;
 mod client_batch;
+mod ipc_stream;
 mod jaq_unfold;
 mod syslog;
 

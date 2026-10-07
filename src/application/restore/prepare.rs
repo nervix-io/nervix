@@ -342,7 +342,16 @@ impl SessionServiceImpl {
             )
             .await
             .change_context(RestoreRefusal::Unreadable)?;
-        let (contents, reservation) = read.change_context(RestoreRefusal::InvalidArchive)?;
+        let (contents, mut reservation) = read.change_context(RestoreRefusal::InvalidArchive)?;
+        let branch_state = metadata::branch_state_working_bytes(&contents)
+            .ok_or_else(|| Report::new(RestoreRefusal::MetadataAdmission))?;
+        let admitted = reservation
+            .bytes()
+            .checked_add(branch_state)
+            .ok_or_else(|| Report::new(RestoreRefusal::MetadataAdmission))?;
+        reservation
+            .grow_to(admitted)
+            .change_context(RestoreRefusal::MetadataAdmission)?;
         let data = executor
             .run_cpu(CpuClass::Bulk, reservation, move |charge, cancellation| {
                 let mut models = BTreeMap::new();

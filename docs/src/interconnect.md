@@ -368,11 +368,11 @@ Relay metadata uses the same validated control encoding, while relay bodies rema
 the source relay to the destination runtime. Bulk operations transfer opaque byte chunks and let
 the owning resource, snapshot, or state protocol interpret the stream.
 
-Before the receiver gives a relay Arrow stream to Arrow's reader, its bounded CPU decode checks
-each IPC message's framing and declared body against the received bytes. Record-batch nodes,
-buffers and declared compressed expansion must fit the decoded limit. Malformed declarations fail
-as a typed body decode error before Arrow can allocate or slice from them; a remaining Arrow parser
-panic on malformed metadata is contained at that boundary and reported as a decode failure.
+Before the receiver gives a relay Arrow stream to Arrow's reader, the shared IPC framing owner
+checks every message's continuation marker, metadata, declared body and column buffers against the
+received bytes. A malformed stream reports `ArrowBodyError::Framing` before the reader can allocate
+or slice from an unchecked length. A reader panic on malformed metadata that passes framing is
+reported as `ArrowBodyError::Decode`.
 
 The primary payload limits are:
 
@@ -386,6 +386,14 @@ The primary payload limits are:
 | Relay decode scratch space | 16 MiB |
 | Bulk transfer chunk | 64 KiB |
 | Snapshot section | 8 MiB |
+
+A receiver also holds an Arrow body to its own framing before it decodes it. The body is one
+canonical IPC stream: every message opens with the continuation marker, and the end-of-stream
+marker ends the body. Every length the stream declares must lie within the bytes the body carries:
+each message's metadata, its body, and each column buffer inside that body. A body that is framed
+otherwise is refused as misframed, so a declared length never sizes an allocation the body does not
+back, and a column buffer is never sliced outside its message. The same check opens every Arrow
+section of a sealed snapshot, a checkpoint or a backup archive.
 
 HTTP/2 flow control adds another bound. Each stream begins with a 64 KiB receive window, each
 connection begins with a 256 KiB receive window, and request headers are limited to 16 KiB. A

@@ -714,7 +714,7 @@ strongly consistent, selected runtime state is checkpointed, and the hot path is
 | Committed control-plane state: models, schedules, domain lifecycle, cordons, users, resources | Reopens from the committed generation | Reopens from the last committed generation; nothing acknowledged is lost |
 | Published consensus snapshots | Reopen from the current manifest; a marked installation is finished before state is exposed | Reopen from the current manifest; a marked installation is redone before state is exposed |
 | Durable handoff and forced-recovery preparations | Preserved, then reconciled or activated | Preserved, then reconciled or activated |
-| Runtime-state checkpoints: Kafka domain offsets, deduplicator and window state, materialized relay records | Flushed again as runtime tasks stop | Reopen at the last completed periodic checkpoint |
+| Runtime-state checkpoints: Kafka domain offsets, deduplicator and window state, materialized relay records | Flushed again as runtime tasks stop; a materialized relay, and a window whose retained rows exceed one 8 MiB snapshot section, are sealed to quota-owned files and written as segments synchronized before their header | Reopen at the last completed periodic checkpoint |
 | WASM guest-state checkpoints | Every checkpoint that released an acknowledgement is already synchronized | Reopen at the newest checkpoint on the node's storage, which covers every acknowledged input |
 | Restored backup state: materialized relay rows, WASM guest saves, Kafka domain offsets, branch lifecycle, deduplicator keys and window state | A restore synchronizes a complete chunked namespace and its atomic active-generation pointer before releasing the stopped domain's START gate or resuming its archived lifecycle | Reopens pointer and checkpoints from one complete database view on each assigned owner and replica; a durable pointer alone does not release an incomplete replicated installation gate. A resumed domain retains every restored kind. A normal START continues saved guest state, source positions, branch incarnations, deduplicator keys and windows, and resets materialized rows |
 | External source offsets and sink commits | Complete when the drain succeeds | Only the external connector's own delivery and transaction guarantee applies |
@@ -734,7 +734,12 @@ before the replacement header, so a large relay has the same shutdown durability
 [Backup And Restore](backup-and-restore.md#publishing-the-state-generation). A deduplicator or
 window backup likewise captures what each branch task publishes when the cut's lifecycle
 checkpoint asks it to, independently of the periodic interval, and a restore rebuilds each branch's
-native checkpoint from its archived Arrow groups and streams it through the same publisher.
+native checkpoint from its archived Arrow groups and streams it through the same publisher, one
+bounded group at a time, including a keyspace or a window larger than the bulk memory budget. A
+window whose retained rows exceed one 8 MiB snapshot section is persisted the way a materialized
+relay is: its periodic and stopping checkpoints seal in bounded pieces to a quota-owned file, and
+its segments are synchronized before the header that selects them, so a restored window larger
+than the bulk memory budget survives a graceful restart with the rows it admitted afterwards.
 
 Durability is not uniform across those rows, and the difference is operationally visible:
 
@@ -747,7 +752,9 @@ Durability is not uniform across those rows, and the difference is operationally
 - Periodic runtime checkpoints are written to the operating system without forcing a synchronization
   on every update. They therefore survive the death of the process, including `SIGKILL`, but a host
   power loss can lose the most recent ones. This is the boundary the crash qualification asserts:
-  exact counts are guaranteed only for checkpoints known durable before the kill.
+  exact counts are guaranteed only for checkpoints known durable before the kill. Segmented
+  checkpoints, those of materialized relays and of windows beyond one snapshot section, synchronize
+  their segments and then their header, so a power loss keeps the previous complete checkpoint.
 - A WASM guest-state checkpoint is synchronized, on the branch's owner and on every replica the
   schedule assigns, before the source acknowledgements it covers are released, so every checkpoint
   that released an acknowledgement survives a host power loss. Checkpoints that branches take at the

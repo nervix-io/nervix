@@ -12,14 +12,14 @@ use std::{
 
 use error_stack::{Report, ResultExt as _};
 use nervix_backup::{
-    ArchiveReadError, BackupManifest, SectionContent, SectionEntry, SectionReader, SectionVisitor,
-    read_archive, read_manifest_header,
+    ArchiveContents, ArchiveReadError, BackupManifest, DescribedRuntimeState, SectionContent,
+    SectionEntry, SectionReader, SectionVisitor, read_archive, read_manifest_header,
 };
 use nervix_execution::{Cancellation, Executor, MemoryClass, Reservation, StorageClass};
 use nervix_primitives::sync::Arc;
 
 use super::{CancellableRead, RestoreRefusal};
-use crate::runtime::StagedArtifact;
+use crate::runtime::{StagedArtifact, restored_key_fixed_bytes};
 
 /// Owned archive values overlap decoding, native per-entry conversion and resolver scratch,
 /// restore-plan copies, and placement descriptions. NSPL additionally overlaps tokens, parser
@@ -28,6 +28,27 @@ use crate::runtime::StagedArtifact;
 const RECORD_WORKING_MULTIPLIER: u64 = 16;
 const MODEL_WORKING_MULTIPLIER: u64 = 64;
 const FIXED_WORKING_BYTES: u64 = 2 * 1024 * 1024;
+
+/// The share every archived deduplicator key takes of its restore conversion whatever its values:
+/// its entry in the resident keyspace and its serializer resolver. The description admits it for
+/// every key the deduplicator descriptors count, so a keyspace whose keys the node cannot hold is
+/// refused before planning. The parts and values of those keys follow their Arrow key groups, which
+/// stay on disk, and are charged as each group converts. A window's conversion holds one group at a
+/// time beside the per-row watermarks its descriptor record already carries.
+pub(super) fn branch_state_working_bytes(contents: &ArchiveContents) -> Option<u64> {
+    let per_key = restored_key_fixed_bytes();
+    let mut bytes = 0_u64;
+    for domain in &contents.description.domains {
+        for state in &domain.state {
+            let DescribedRuntimeState::Deduplicator { descriptor, .. } = state else {
+                continue;
+            };
+            let keys = descriptor.keys.checked_mul(per_key)?;
+            bytes = bytes.checked_add(keys)?;
+        }
+    }
+    Some(bytes)
+}
 
 pub(super) async fn reserve_metadata(
     executor: &Executor,

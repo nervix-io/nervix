@@ -185,11 +185,13 @@ where
         Some(value)
     }
 
-    /// Iterates from the oldest entry to the newest.
-    pub fn iter(&self) -> impl Iterator<Item = (&K, &V)> {
-        self.order
-            .iter()
-            .map(|entry| (entry.key.as_ref(), &entry.value))
+    /// Iterates from the oldest entry to the newest. The iterator knows how many entries remain,
+    /// and a clone of it walks the same entries again.
+    pub fn iter(&self) -> Iter<'_, K, V> {
+        Iter {
+            order: self.order.iter(),
+            remaining: self.entries.len(),
+        }
     }
 
     /// Iterates from the oldest entry to the newest, yielding each key as the
@@ -231,6 +233,60 @@ where
         debug_assert_eq!(UnsafeRef::into_raw(linked).cast_const(), node_ptr);
     }
 }
+
+impl<K, V> ExpiryMap<K, V> {
+    /// The entry's shared allocation: its reference count, its order link, its key handle and its
+    /// value.
+    const ENTRY_ALLOCATION_BYTES: usize =
+        std::mem::size_of::<usize>() + std::mem::size_of::<Entry<K, V>>();
+
+    /// The key's shared allocation: its reference count and the inline key.
+    const KEY_ALLOCATION_BYTES: usize = std::mem::size_of::<usize>() + std::mem::size_of::<K>();
+
+    /// One slot of the index: the key handle and the entry handle it stores, and its control byte.
+    const INDEX_SLOT_BYTES: usize =
+        std::mem::size_of::<SharedKey<K>>() + std::mem::size_of::<Arc<Entry<K, V>>>() + 1;
+
+    /// What the map holds for one entry beside the heap data the key itself owns: the entry's and
+    /// the key's shared allocations, and two index slots, for the room the index keeps while it
+    /// grows.
+    pub const ENTRY_BYTES: usize =
+        Self::ENTRY_ALLOCATION_BYTES + Self::KEY_ALLOCATION_BYTES + 2 * Self::INDEX_SLOT_BYTES;
+}
+
+/// The entries of an [`ExpiryMap`], from the oldest to the newest.
+pub struct Iter<'a, K, V> {
+    order: intrusive_collections::linked_list::Iter<'a, EntryAdapter<K, V>>,
+    remaining: usize,
+}
+
+impl<K, V> Clone for Iter<'_, K, V> {
+    fn clone(&self) -> Self {
+        Self {
+            order: self.order.clone(),
+            remaining: self.remaining,
+        }
+    }
+}
+
+impl<'a, K, V> Iterator for Iter<'a, K, V> {
+    type Item = (&'a K, &'a V);
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let entry = self.order.next()?;
+        self.remaining = self
+            .remaining
+            .checked_sub(1)
+            .assured("the order list links exactly the entries the index holds");
+        Some((entry.key.as_ref(), &entry.value))
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        (self.remaining, Some(self.remaining))
+    }
+}
+
+impl<K, V> ExactSizeIterator for Iter<'_, K, V> {}
 
 impl<K, V> Default for ExpiryMap<K, V>
 where
@@ -286,6 +342,46 @@ mod tests {
             format!("{map:?}"),
             "{\"first\": 10, \"second\": 20, \"third\": 30}"
         );
+    }
+
+    #[test]
+    fn iteration_counts_the_remaining_entries_and_walks_them_again_when_cloned() {
+        let mut map = ExpiryMap::default();
+        for key in 0..4 {
+            assert!(map.insert(key, key * 10));
+        }
+        assert_eq!(map.remove(&1), Some(10));
+        let mut entries = map.iter();
+        assert_eq!(entries.len(), 3);
+        assert_eq!(entries.next(), Some((&0, &0)));
+        let again = entries.clone();
+        assert_eq!(entries.len(), 2);
+        assert_eq!(
+            entries
+                .map(|(key, value)| (*key, *value))
+                .collect::<Vec<_>>(),
+            vec![(2, 20), (3, 30)]
+        );
+        assert_eq!(again.len(), 2);
+        assert_eq!(
+            again.map(|(key, value)| (*key, *value)).collect::<Vec<_>>(),
+            vec![(2, 20), (3, 30)]
+        );
+    }
+
+    /// On a 64-bit target, an entry of `u64` keys and values is charged for its entry allocation (a
+    /// reference count, a key handle and the value, 24 bytes beside the order link), its 16-byte key
+    /// allocation (a reference count and the key), and two 17-byte index slots (two handles and a
+    /// control byte each).
+    #[cfg(target_pointer_width = "64")]
+    #[test]
+    fn an_entry_is_charged_for_both_allocations_and_two_index_slots() {
+        type Map = ExpiryMap<u64, u64>;
+        let link = std::mem::size_of::<intrusive_collections::LinkedListAtomicLink>();
+        assert_eq!(Map::ENTRY_ALLOCATION_BYTES, 24 + link);
+        assert_eq!(Map::KEY_ALLOCATION_BYTES, 16);
+        assert_eq!(Map::INDEX_SLOT_BYTES, 17);
+        assert_eq!(Map::ENTRY_BYTES, 74 + link);
     }
 
     #[test]

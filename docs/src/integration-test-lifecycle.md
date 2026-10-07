@@ -1262,10 +1262,13 @@ every owner of tracked locks reached: 110 workloads in `deloxide` and 118 in `de
 with the lane instrumenting workspace crates only and running 55 scenario examples at four at
 once. The first run in which both selections passed, on 2026-10-06 with 97 and 105 workloads and
 49 scenario runs, took 30m27s and 23m18s in the lane's step. The six scenario runs and seven
-conformance checks added between those runs fit inside their variation. The table predates the
-four remote ACK examples and the order-mode per-example process split, so its durations are
-historical measurements rather than a timing claim for the current combined inventory; the
-inventory and job bounds remain enforced.
+conformance checks added between those runs fit inside their variation. A `deloxide-order` run
+that included the one-node restore of a deduplicator keyspace and a window above the bulk budget,
+together with its three-node example, took 21m47s in the lane's step with 107 workloads and 51
+scenario runs before those six scenario runs and seven conformance checks were added. The table
+predates the four remote ACK examples and the order-mode per-example process split, so its
+durations are historical measurements rather than a timing claim for the current combined
+inventory; the inventory and job bounds remain enforced.
 
 When a step's `timeout` expires it sends `SIGTERM` to the step's process group. The collector
 records its attempt as interrupted and forwards the signal to the lane, which ends the process it is

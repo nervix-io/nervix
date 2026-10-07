@@ -13,24 +13,23 @@
 //! once and shared: every destination and every retry sends the same allocation, charged once, and
 //! reserves its own outstanding-delivery bytes separately.
 
-use std::{
-    io::Cursor,
-    num::NonZeroUsize,
-    panic::{AssertUnwindSafe, catch_unwind},
-};
+use std::{io::Cursor, num::NonZeroUsize};
 
 use arch_into::ArchInto as _;
 use arrow_array::{RecordBatch, RecordBatchOptions};
-use arrow_ipc::{MessageHeader, reader::StreamReader, writer::StreamWriter};
+use arrow_ipc::{reader::StreamReader, writer::StreamWriter};
 use arrow_schema::Schema as ArrowSchema;
 use error_stack::{Report, ResultExt as _};
 use nervix_execution::{
-    BudgetedBuffer, ChargedBytes, CpuClass, Executor, MemoryClass, Reservation,
+    BudgetedBuffer, ChargedBytes, CpuClass, ExecutionError, Executor, MemoryClass, Reservation,
 };
 use nervix_primitives::sync::StdArc;
 use thiserror::Error;
 
-use super::{CompiledSchema, RuntimeRecordBatch, batch_payload_bytes};
+use super::{
+    CompiledSchema, RuntimeRecordBatch, batch_payload_bytes,
+    ipc_stream::{IpcFramingDefect, IpcMessages},
+};
 
 /// Why a relay body could not be produced or consumed.
 #[derive(Debug, Error)]
@@ -53,6 +52,8 @@ pub enum ArrowBodyError {
     Encode { reason: String },
     #[error("failed to decode the relay body: {reason}")]
     Decode { reason: String },
+    #[error("the relay body's Arrow stream is misframed: {defect}")]
+    Framing { defect: IpcFramingDefect },
 }
 
 impl ArrowBodyError {
@@ -72,6 +73,14 @@ impl ArrowBodyError {
         Report::new(Self::Decode {
             reason: error.to_string(),
         })
+    }
+
+    /// A body whose stream is not framed within it, naming what its framing gets wrong.
+    fn misframed(defect: Report<IpcFramingDefect>) -> Report<Self> {
+        let context = Self::Framing {
+            defect: defect.current_context().clone(),
+        };
+        defect.change_context(context)
     }
 }
 
@@ -327,160 +336,6 @@ impl CompiledSchema {
     }
 }
 
-/// Check the IPC framing and the sizes Arrow trusts before its reader allocates or slices. The
-/// FlatBuffers verifier checks table offsets, but it does not constrain their semantic lengths.
-fn validate_ipc_messages(bytes: &[u8], decoded_limit: u64) -> Result<(), Report<ArrowBodyError>> {
-    let invalid = |reason| ArrowBodyError::decoding(reason);
-    let mut offset = 0_usize;
-    let mut expanded = 0_u64;
-    let mut saw_schema = false;
-    while offset < bytes.len() {
-        let prefix_end = offset
-            .checked_add(4)
-            .ok_or_else(|| invalid("Arrow IPC metadata length overflowed"))?;
-        let prefix: [u8; 4] = bytes
-            .get(offset..prefix_end)
-            .ok_or_else(|| invalid("truncated Arrow IPC metadata length"))?
-            .try_into()
-            .map_err(|_| invalid("invalid Arrow IPC metadata length"))?;
-        offset = prefix_end;
-        let length = if prefix == [0xff; 4] {
-            let end = offset
-                .checked_add(4)
-                .ok_or_else(|| invalid("Arrow IPC metadata length overflowed"))?;
-            let bytes: [u8; 4] = bytes
-                .get(offset..end)
-                .ok_or_else(|| invalid("truncated Arrow IPC metadata length"))?
-                .try_into()
-                .map_err(|_| invalid("invalid Arrow IPC metadata length"))?;
-            offset = end;
-            i32::from_le_bytes(bytes)
-        } else {
-            i32::from_le_bytes(prefix)
-        };
-        if length == 0 {
-            break;
-        }
-        let length =
-            usize::try_from(length).map_err(|_| invalid("negative Arrow IPC metadata length"))?;
-        let metadata_end = offset
-            .checked_add(length)
-            .ok_or_else(|| invalid("Arrow IPC metadata length overflowed"))?;
-        let metadata = bytes
-            .get(offset..metadata_end)
-            .ok_or_else(|| invalid("truncated Arrow IPC metadata"))?;
-        let message = arrow_ipc::root_as_message(metadata).map_err(ArrowBodyError::decoding)?;
-        offset = metadata_end;
-        let body_length = usize::try_from(message.bodyLength())
-            .map_err(|_| invalid("negative or unaddressable Arrow IPC body length"))?;
-        let body_end = offset
-            .checked_add(body_length)
-            .ok_or_else(|| invalid("Arrow IPC body length overflowed"))?;
-        let body = bytes
-            .get(offset..body_end)
-            .ok_or_else(|| invalid("truncated Arrow IPC body"))?;
-        if !saw_schema && message.header_type() != MessageHeader::Schema {
-            return Err(invalid("Arrow IPC stream does not begin with a schema"));
-        }
-        match message.header_type() {
-            MessageHeader::Schema => {
-                saw_schema = true;
-            }
-            MessageHeader::RecordBatch => {
-                let batch = message
-                    .header_as_record_batch()
-                    .ok_or_else(|| invalid("invalid Arrow IPC record batch header"))?;
-                validate_ipc_batch(batch, body, decoded_limit, &mut expanded)?;
-            }
-            MessageHeader::DictionaryBatch => {
-                let dictionary = message
-                    .header_as_dictionary_batch()
-                    .ok_or_else(|| invalid("invalid Arrow IPC dictionary header"))?;
-                let batch = dictionary
-                    .data()
-                    .ok_or_else(|| invalid("invalid Arrow IPC dictionary record batch"))?;
-                validate_ipc_batch(batch, body, decoded_limit, &mut expanded)?;
-            }
-            _ => {}
-        }
-        offset = body_end;
-    }
-    Ok(())
-}
-
-fn validate_ipc_batch(
-    batch: arrow_ipc::RecordBatch<'_>,
-    body: &[u8],
-    limit: u64,
-    expanded: &mut u64,
-) -> Result<(), Report<ArrowBodyError>> {
-    let invalid = |reason| ArrowBodyError::decoding(reason);
-    let count = |value| {
-        let count = u64::try_from(value).map_err(|_| invalid("negative Arrow IPC count"))?;
-        if count > limit {
-            return Err(invalid("Arrow IPC count exceeds the decoded body limit"));
-        }
-        Ok(count)
-    };
-    count(batch.length())?;
-    let nodes = batch
-        .nodes()
-        .ok_or_else(|| invalid("Arrow IPC record batch has no field nodes"))?;
-    for node in nodes {
-        let length = count(node.length())?;
-        if count(node.null_count())? > length {
-            return Err(invalid("Arrow IPC null count exceeds its field length"));
-        }
-    }
-    let buffers = batch
-        .buffers()
-        .ok_or_else(|| invalid("Arrow IPC record batch has no buffers"))?;
-    if let Some(counts) = batch.variadicBufferCounts() {
-        for variadic in counts {
-            if usize::try_from(variadic)
-                .ok()
-                .is_none_or(|value| value > buffers.len())
-            {
-                return Err(invalid("Arrow IPC variadic buffer count is invalid"));
-            }
-        }
-    }
-    for buffer in buffers {
-        let start = usize::try_from(buffer.offset())
-            .map_err(|_| invalid("negative or unaddressable Arrow IPC buffer offset"))?;
-        let length = usize::try_from(buffer.length())
-            .map_err(|_| invalid("negative or unaddressable Arrow IPC buffer length"))?;
-        let end = start
-            .checked_add(length)
-            .ok_or_else(|| invalid("Arrow IPC buffer length overflowed"))?;
-        let contents = body
-            .get(start..end)
-            .ok_or_else(|| invalid("Arrow IPC buffer exceeds its message body"))?;
-        let decoded = if batch.compression().is_some() && !contents.is_empty() {
-            let declared: [u8; 8] = contents
-                .get(..8)
-                .ok_or_else(|| invalid("truncated Arrow IPC compression length"))?
-                .try_into()
-                .map_err(|_| invalid("invalid Arrow IPC compression length"))?;
-            match i64::from_le_bytes(declared) {
-                -1 => u64::try_from(contents.len() - 8)
-                    .map_err(|_| invalid("unaddressable Arrow IPC buffer length"))?,
-                value => u64::try_from(value)
-                    .map_err(|_| invalid("negative Arrow IPC compression length"))?,
-            }
-        } else {
-            u64::try_from(length).map_err(|_| invalid("unaddressable Arrow IPC buffer length"))?
-        };
-        *expanded = expanded
-            .checked_add(decoded)
-            .ok_or_else(|| invalid("Arrow IPC decoded buffer length overflowed"))?;
-        if *expanded > limit {
-            return Err(invalid("Arrow IPC buffers exceed the decoded body limit"));
-        }
-    }
-    Ok(())
-}
-
 async fn decode_body(
     executor: &Executor,
     body: ChargedBytes,
@@ -510,7 +365,7 @@ async fn decode_body(
         .reserve(contract.carriage.memory_class(), charge)
         .await
         .change_context(ArrowBodyError::Admission)?;
-    executor
+    let decoded = executor
         .run_cpu(
             contract.carriage.cpu_class(),
             reservation,
@@ -518,12 +373,13 @@ async fn decode_body(
                 cancellation
                     .check()
                     .change_context(ArrowBodyError::Cancelled)?;
-                validate_ipc_messages(body.as_ref(), decoded_limit)?;
-                let mut reader = catch_unwind(AssertUnwindSafe(|| {
-                    StreamReader::try_new(Cursor::new(body.as_ref()), None)
-                }))
-                .map_err(|_| ArrowBodyError::decoding("invalid Arrow IPC schema"))?
-                .map_err(ArrowBodyError::decoding)?;
+                // Arrow's reader sizes what it allocates from the lengths a stream declares, so
+                // the stream is held to its own bytes before a reader sees it.
+                IpcMessages::new(body.as_ref())
+                    .check()
+                    .map_err(ArrowBodyError::misframed)?;
+                let mut reader = StreamReader::try_new(Cursor::new(body.as_ref()), None)
+                    .map_err(ArrowBodyError::decoding)?;
                 let schema = reader.schema();
                 if let Some(expected) = &contract.schema
                     && schema.as_ref() != expected.as_ref()
@@ -534,15 +390,10 @@ async fn decode_body(
                 }
                 let mut batches = Vec::new();
                 let mut decoded = 0_u64;
-                loop {
+                for next in reader.by_ref() {
                     cancellation
                         .check()
                         .change_context(ArrowBodyError::Cancelled)?;
-                    let next = catch_unwind(AssertUnwindSafe(|| reader.next()))
-                        .map_err(|_| ArrowBodyError::decoding("invalid Arrow IPC record batch"))?;
-                    let Some(next) = next else {
-                        break;
-                    };
                     let batch = next.map_err(ArrowBodyError::decoding)?;
                     if batches.len() >= contract.max_sections.get() {
                         return Err(Report::new(ArrowBodyError::TooManySections {
@@ -573,14 +424,26 @@ async fn decode_body(
                 if batches.is_empty() && contract.schema.is_some() {
                     return Err(Report::new(ArrowBodyError::NoSection));
                 }
-                catch_unwind(AssertUnwindSafe(|| {
-                    RuntimeRecordBatch::from_decoded_sections(schema, batches)
-                }))
-                .map_err(|_| ArrowBodyError::decoding("invalid Arrow IPC sections"))?
+                RuntimeRecordBatch::from_decoded_sections(schema, batches)
             },
         )
-        .await
-        .change_context(ArrowBodyError::Execution)?
+        .await;
+    match decoded {
+        Ok(batch) => batch,
+        Err(error) => {
+            let failure = match error.current_context() {
+                ExecutionError::QueueFull { .. } | ExecutionError::PoolClosed { .. } => {
+                    ArrowBodyError::Execution
+                }
+                // Arrow's reader panics only on a stream it failed to reject, so the body is
+                // what is wrong, and decoding it again would panic again.
+                ExecutionError::JobPanicked { .. } => ArrowBodyError::Decode {
+                    reason: "the stream could not be decoded".to_string(),
+                },
+            };
+            Err(error.change_context(failure))
+        }
+    }
 }
 
 #[cfg(test)]
@@ -613,79 +476,365 @@ mod projection_tests {
 }
 
 #[cfg(test)]
-mod malformed_ipc_tests {
+mod framing_tests {
+    use std::ops::Range;
+
+    use arrow_array::{ArrayRef, DictionaryArray, Int32Array, Int64Array, types::Int32Type};
+    use arrow_schema::{DataType, Field};
     use meticulous::{OptionExt as _, ResultExt as _};
 
-    use super::*;
+    use super::{super::ipc_stream::CONTINUATION_MARKER, *};
 
-    #[nervix_primitives::test]
-    async fn a_declared_ipc_body_must_fit_before_arrow_allocates_it() {
-        let mut builder = flatbuffers::FlatBufferBuilder::new();
-        let message = arrow_ipc::Message::create(
-            &mut builder,
-            &arrow_ipc::MessageArgs {
-                bodyLength: i64::MAX,
-                ..Default::default()
-            },
-        );
-        builder.finish(message, None);
-        let metadata = builder.finished_data();
-        let mut bytes = u32::try_from(metadata.len())
-            .assured("bounded metadata length fits")
-            .to_le_bytes()
-            .to_vec();
-        bytes.extend_from_slice(metadata);
-        let executor = Executor::default();
-        let reservation = executor
-            .try_reserve(
-                MemoryClass::Relay,
-                u64::try_from(bytes.len()).assured("bounded body"),
-            )
-            .assured("the bounded body is admitted");
-        let body = ChargedBytes::from_owned(bytes, reservation);
-        let error = RuntimeRecordBatch::decode_arrow_ipc(&executor, body)
-            .await
-            .expect_err("an impossible IPC body length is refused before allocation");
-        assert!(matches!(
-            error.current_context(),
-            ArrowBodyError::Decode { .. }
-        ));
+    /// The length prefix of a message in the current stream format: the continuation marker and
+    /// the metadata length.
+    const PREFIX_BYTES: usize = 8;
+
+    /// One sealed section of three rows, and the batch it was sealed from.
+    struct SealedSection {
+        schema: StdArc<ArrowSchema>,
+        batch: RuntimeRecordBatch,
+        bytes: Vec<u8>,
     }
 
-    #[test]
-    fn an_ipc_buffer_must_fit_its_message_body() {
-        let mut builder = flatbuffers::FlatBufferBuilder::new();
-        let nodes = builder.create_vector(&[arrow_ipc::FieldNode::new(1, 0)]);
-        let buffers = builder.create_vector(&[arrow_ipc::Buffer::new(64, i64::MAX)]);
-        let batch = arrow_ipc::RecordBatch::create(
-            &mut builder,
-            &arrow_ipc::RecordBatchArgs {
-                length: 1,
-                nodes: Some(nodes),
-                buffers: Some(buffers),
-                ..Default::default()
-            },
+    impl SealedSection {
+        /// A wide and a narrow column. Nothing else in the record batch message is twelve bytes
+        /// long, so a test finds the narrow column's buffer length by its value.
+        async fn sealed(executor: &Executor) -> Self {
+            let fields = vec![
+                Field::new("wide", DataType::Int64, false),
+                Field::new("narrow", DataType::Int32, false),
+            ];
+            let wide: ArrayRef = StdArc::new(Int64Array::from(vec![1, 2, 3]));
+            let narrow: ArrayRef = StdArc::new(Int32Array::from(vec![4, 5, 6]));
+            Self::of(executor, fields, vec![wide, narrow]).await
+        }
+
+        /// A dictionary-encoded column, whose values travel in a dictionary batch message of
+        /// their own before the record batch that indexes them.
+        async fn dictionary_encoded(executor: &Executor) -> Self {
+            let label = DataType::Dictionary(Box::new(DataType::Int32), Box::new(DataType::Utf8));
+            let fields = vec![Field::new("label", label, false)];
+            let labels: DictionaryArray<Int32Type> = ["red", "blue", "red"].into_iter().collect();
+            let labels: ArrayRef = StdArc::new(labels);
+            Self::of(executor, fields, vec![labels]).await
+        }
+
+        async fn of(executor: &Executor, fields: Vec<Field>, columns: Vec<ArrayRef>) -> Self {
+            let schema = StdArc::new(ArrowSchema::new(fields));
+            let batch = RecordBatch::try_new(StdArc::clone(&schema), columns)
+                .assured("every column has its field's type and three rows");
+            let batch = RuntimeRecordBatch::from_record_batch(StdArc::clone(&schema), batch)
+                .assured("the batch has the schema it was built with");
+            let section = batch
+                .encode_arrow_snapshot_section(executor)
+                .await
+                .assured("a three-row section seals");
+            Self {
+                schema,
+                bytes: section.as_ref().to_vec(),
+                batch,
+            }
+        }
+
+        /// Opens `bytes` as a section of this schema.
+        async fn open(
+            &self,
+            executor: &Executor,
+            bytes: Vec<u8>,
+        ) -> Result<RuntimeRecordBatch, Report<ArrowBodyError>> {
+            let section = executor
+                .charge_owned(MemoryClass::Bulk, bytes)
+                .await
+                .assured("the bulk budget holds one small section");
+            RuntimeRecordBatch::decode_arrow_snapshot_section(
+                executor,
+                StdArc::clone(&self.schema),
+                section,
+            )
+            .await
+        }
+
+        /// Where the metadata of the record batch message lies, and where in it the message
+        /// declares its body length.
+        fn record_batch(&self) -> RecordBatchMessage {
+            let mut offset = 0_usize;
+            loop {
+                let prefix_end = offset
+                    .checked_add(PREFIX_BYTES)
+                    .assured("a sealed test section is far below the address width");
+                let prefix = &self.bytes[offset..prefix_end];
+                assert_eq!(prefix[..4], CONTINUATION_MARKER);
+                let length: [u8; 4] = prefix[4..]
+                    .try_into()
+                    .assured("the prefix holds four length bytes behind its marker");
+                let length = usize::try_from(i32::from_le_bytes(length))
+                    .assured("a sealed message declares a positive metadata length");
+                let metadata_end = prefix_end
+                    .checked_add(length)
+                    .assured("a sealed test section is far below the address width");
+                let metadata = prefix_end..metadata_end;
+                let message = arrow_ipc::root_as_message(&self.bytes[metadata.clone()])
+                    .assured("a sealed message is an Arrow message");
+                let body_length = message.bodyLength();
+                if message.header_type() == arrow_ipc::MessageHeader::RecordBatch {
+                    // A table's vtable holds each field's offset from the table.
+                    let field = message._tab.vtable().get(arrow_ipc::Message::VT_BODYLENGTH);
+                    let table = prefix_end
+                        .checked_add(message._tab.loc())
+                        .assured("a position inside the section is far below the address width");
+                    let body_length_field = table
+                        .checked_add(usize::from(field))
+                        .assured("a position inside the section is far below the address width");
+                    return RecordBatchMessage {
+                        metadata,
+                        body_length_field,
+                    };
+                }
+                let body_bytes = usize::try_from(body_length)
+                    .assured("a sealed message declares a body length within the section");
+                offset = metadata_end
+                    .checked_add(body_bytes)
+                    .assured("a sealed test section is far below the address width");
+            }
+        }
+
+        /// The position of the one little-endian 64-bit field of `metadata` that holds `value`.
+        fn field_holding(&self, metadata: &Range<usize>, value: i64) -> usize {
+            let pattern = value.to_le_bytes();
+            let mut found = Vec::new();
+            for (index, window) in self.bytes[metadata.clone()].windows(8).enumerate() {
+                if window == pattern {
+                    found.push(index);
+                }
+            }
+            assert_eq!(
+                found.len(),
+                1,
+                "exactly one field of the message holds {value}"
+            );
+            metadata
+                .start
+                .checked_add(found[0])
+                .assured("a position inside the section is far below the address width")
+        }
+    }
+
+    struct RecordBatchMessage {
+        metadata: Range<usize>,
+        /// The position of the little-endian 64-bit body length the message declares.
+        body_length_field: usize,
+    }
+
+    /// The framing defect `result` was refused for.
+    fn framing_defect(
+        result: Result<RuntimeRecordBatch, Report<ArrowBodyError>>,
+    ) -> IpcFramingDefect {
+        let report = result.expect_err("a misframed section does not open");
+        match report.current_context() {
+            ArrowBodyError::Framing { defect } => defect.clone(),
+            other => panic!("the section is refused as misframed: {other:?}"),
+        }
+    }
+
+    #[nervix_primitives::test]
+    async fn a_sealed_section_opens_with_every_row() {
+        let executor = Executor::default();
+        let section = SealedSection::sealed(&executor).await;
+        let opened = section
+            .open(&executor, section.bytes.clone())
+            .await
+            .assured("an undamaged section opens");
+        assert_eq!(opened.batch(), section.batch.batch());
+    }
+
+    /// A dictionary batch declares column buffers of its own, held to the body of its message as
+    /// a record batch's are.
+    #[nervix_primitives::test]
+    async fn a_dictionary_encoded_section_opens_with_every_value() {
+        let executor = Executor::default();
+        let section = SealedSection::dictionary_encoded(&executor).await;
+        let opened = section
+            .open(&executor, section.bytes.clone())
+            .await
+            .assured("an undamaged dictionary-encoded section opens");
+        assert_eq!(opened.batch(), section.batch.batch());
+    }
+
+    /// The reader would otherwise allocate the declared body, 256 TiB here, before it found the
+    /// stream too short to fill it.
+    #[nervix_primitives::test]
+    async fn a_message_body_longer_than_the_stream_is_refused_before_it_is_allocated() {
+        let executor = Executor::default();
+        let section = SealedSection::sealed(&executor).await;
+        let message = section.record_batch();
+        let mut damaged = section.bytes.clone();
+        // Bit 48 of the little-endian body length.
+        let high_byte = message
+            .body_length_field
+            .checked_add(6)
+            .assured("a position inside the section is far below the address width");
+        damaged[high_byte] ^= 1;
+        let declared = arrow_ipc::root_as_message(&damaged[message.metadata.clone()])
+            .assured("the damaged metadata is still an Arrow message")
+            .bodyLength();
+        assert!(
+            declared > 1 << 48,
+            "the message declares {declared} body bytes"
         );
-        let message = arrow_ipc::Message::create(
-            &mut builder,
-            &arrow_ipc::MessageArgs {
-                header_type: MessageHeader::RecordBatch,
-                header: Some(batch.as_union_value()),
-                bodyLength: 128,
-                ..Default::default()
-            },
-        );
-        builder.finish(message, None);
-        let message = arrow_ipc::root_as_message(builder.finished_data())
-            .assured("a bounded record batch metadata table verifies");
-        let batch = message
+
+        let result = section.open(&executor, damaged).await;
+
+        assert_eq!(framing_defect(result), IpcFramingDefect::Truncated);
+    }
+
+    /// The reader would otherwise zero the declared metadata, 2 GiB here, before it found the
+    /// stream too short to fill it.
+    #[nervix_primitives::test]
+    async fn message_metadata_longer_than_the_stream_is_refused_before_it_is_allocated() {
+        let executor = Executor::default();
+        let section = SealedSection::sealed(&executor).await;
+        let mut damaged = section.bytes.clone();
+        damaged[4..PREFIX_BYTES].copy_from_slice(&i32::MAX.to_le_bytes());
+
+        let result = section.open(&executor, damaged).await;
+
+        assert_eq!(framing_defect(result), IpcFramingDefect::Truncated);
+    }
+
+    #[nervix_primitives::test]
+    async fn a_negative_metadata_length_is_refused() {
+        let executor = Executor::default();
+        let section = SealedSection::sealed(&executor).await;
+        let mut damaged = section.bytes.clone();
+        damaged[4..PREFIX_BYTES].copy_from_slice(&i32::MIN.to_le_bytes());
+
+        let result = section.open(&executor, damaged).await;
+
+        assert_eq!(framing_defect(result), IpcFramingDefect::MetadataLength);
+    }
+
+    #[nervix_primitives::test]
+    async fn a_stream_cut_inside_a_length_prefix_is_refused() {
+        let executor = Executor::default();
+        let section = SealedSection::sealed(&executor).await;
+        let mut damaged = section.bytes.clone();
+        damaged.truncate(6);
+
+        let result = section.open(&executor, damaged).await;
+
+        assert_eq!(framing_defect(result), IpcFramingDefect::Truncated);
+    }
+
+    #[nervix_primitives::test]
+    async fn a_message_with_a_damaged_continuation_marker_is_refused() {
+        let executor = Executor::default();
+        let section = SealedSection::sealed(&executor).await;
+        let mut damaged = section.bytes.clone();
+        damaged[0] = 0xfe;
+
+        let result = section.open(&executor, damaged).await;
+
+        assert_eq!(framing_defect(result), IpcFramingDefect::Continuation);
+    }
+
+    #[nervix_primitives::test]
+    async fn a_stream_without_its_end_of_stream_marker_is_refused() {
+        let executor = Executor::default();
+        let section = SealedSection::sealed(&executor).await;
+        let mut damaged = section.bytes.clone();
+        let marker = damaged
+            .len()
+            .checked_sub(PREFIX_BYTES)
+            .assured("a sealed section ends with its end-of-stream marker");
+        assert_eq!(damaged[marker..][..4], CONTINUATION_MARKER);
+        damaged.truncate(marker);
+
+        let result = section.open(&executor, damaged).await;
+
+        assert_eq!(framing_defect(result), IpcFramingDefect::Truncated);
+    }
+
+    #[nervix_primitives::test]
+    async fn bytes_behind_the_end_of_stream_marker_are_refused() {
+        let executor = Executor::default();
+        let section = SealedSection::sealed(&executor).await;
+        let mut damaged = section.bytes.clone();
+        damaged.push(0);
+
+        let result = section.open(&executor, damaged).await;
+
+        assert_eq!(framing_defect(result), IpcFramingDefect::TrailingBytes);
+    }
+
+    /// The reader would otherwise panic on a worker when it sliced the buffer out of the body.
+    #[nervix_primitives::test]
+    async fn a_column_buffer_outside_its_message_body_is_refused_without_a_worker_panic() {
+        let executor = Executor::default();
+        let section = SealedSection::sealed(&executor).await;
+        let message = section.record_batch();
+        // The narrow column's three 32-bit values are the only 12 bytes the message declares.
+        let field = section.field_holding(&message.metadata, 12);
+        let mut damaged = section.bytes.clone();
+        // Bit 40 of the little-endian buffer length.
+        let high_byte = field
+            .checked_add(5)
+            .assured("a position inside the section is far below the address width");
+        damaged[high_byte] ^= 1;
+        let longest = arrow_ipc::root_as_message(&damaged[message.metadata.clone()])
+            .assured("the damaged metadata is still an Arrow message")
             .header_as_record_batch()
-            .assured("the message carries its record batch");
-        let error = validate_ipc_batch(batch, &[0; 128], 1024, &mut 0)
-            .expect_err("a declared buffer cannot escape its message body");
-        assert!(matches!(
-            error.current_context(),
-            ArrowBodyError::Decode { .. }
-        ));
+            .assured("the damaged message is still a record batch")
+            .buffers()
+            .assured("a record batch of two columns declares buffers")
+            .iter()
+            .map(|buffer| buffer.length())
+            .max()
+            .assured("a record batch of two columns declares buffers");
+        assert!(longest > 1 << 40, "a buffer declares {longest} bytes");
+
+        let result = section.open(&executor, damaged).await;
+
+        assert_eq!(framing_defect(result), IpcFramingDefect::Buffer);
+    }
+
+    /// Whatever single bit of a sealed section is damaged, the section either opens or is refused
+    /// for what it holds. No such damage reaches the reader as a length it would allocate, which
+    /// aborts the process when the node cannot make the allocation, and damage the reader panics
+    /// on, as its schema conversion does on a field type the verifier admits, is a decode failure
+    /// rather than work the node could not execute.
+    #[nervix_primitives::test]
+    async fn every_single_damaged_bit_opens_or_is_refused_typed() {
+        let executor = Executor::default();
+        let sections = [
+            SealedSection::sealed(&executor).await,
+            SealedSection::dictionary_encoded(&executor).await,
+        ];
+        for section in &sections {
+            for position in 0..section.bytes.len() {
+                nervix_primitives::task::consume_budget().await;
+                for bit in 0..8_u8 {
+                    let mut damaged = section.bytes.clone();
+                    damaged[position] ^= 1_u8 << bit;
+
+                    let result = section.open(&executor, damaged).await;
+
+                    let Err(report) = result else {
+                        continue;
+                    };
+                    // What the reader rejects or panics on is a decode failure, and what the
+                    // framing rejects names its defect.
+                    assert!(
+                        matches!(
+                            report.current_context(),
+                            ArrowBodyError::Decode { .. }
+                                | ArrowBodyError::Framing { .. }
+                                | ArrowBodyError::NoSection
+                                | ArrowBodyError::TooManySections { .. }
+                        ),
+                        "bit {bit} of byte {position}: {report:?}"
+                    );
+                }
+            }
+        }
     }
 }

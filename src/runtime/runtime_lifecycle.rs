@@ -359,6 +359,14 @@ impl Runtime {
     }
 
     #[cfg(feature = "testing")]
+    pub(crate) async fn pause_restore_branch_state_conversion_if_armed(&self, domain: &DomainName) {
+        self.inner
+            .fault_injection
+            .pause_restore_branch_state_conversion_if_armed(domain)
+            .await;
+    }
+
+    #[cfg(feature = "testing")]
     pub(crate) async fn pause_restore_state_publication_if_armed(
         &self,
         domain: &DomainName,

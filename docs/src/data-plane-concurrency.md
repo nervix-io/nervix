@@ -416,8 +416,12 @@ runtime while it serializes.
 The publication shares the retained input and aggregate-argument Arrow columns through row views.
 The snapshot task seals those views as bounded Arrow sections on the bulk executor, while a
 separate bounded typed section carries each group of histogram delayed removals. Encoding never
-materializes a scalar-field copy of the retained payload. Restore opens the sections on the bulk
-executor and reuses their columns to rebuild exact accumulators and sketch panes.
+materializes a scalar-field copy of the retained payload. A window whose rows exceed one snapshot
+section is sealed group by group into quota-owned pieces and published as a segmented checkpoint
+under the state store's installation barrier, as a materialized relay's periodic checkpoint is;
+the snapshot task holds no lock while it seals, and the barrier is held only by the storage job
+that writes the segments and the header. Restore opens the sections on the bulk executor and
+reuses their columns to rebuild exact accumulators and sketch panes.
 
 Evicting a concrete branch resets its retained window rows and aggregate structures before the
 branch task's final publication. The published generation is empty, so a later appearance of the
@@ -1760,6 +1764,11 @@ failure after durable publication, cluster restart, branch isolation, saved sour
 positive reclamation after resumed checkpoints and the state purge from module rebinding.
 The three-node many-save case retains one replica per state and observes reclamation of both
 owner and replica chunks.
+The large branch-state scenario restores a 40 MiB deduplicator keyspace and a 40 MiB window beside
+24 small branches on one node, through a failure after durable publication, a stopped restore and a
+resumed one. Once the resumed domain runs, the window persists as a segmented checkpoint under the
+installation barrier and reopens from it after a cluster restart. Its three-node example runs in
+the ordinary suite only.
 Restore workload setup sends durable mutations and activation through the Rust client, which
 recovers the same execution reference when leadership moves; the raw subscription session keeps
 its own row stream. Large-generation and staging archive captures use a two-minute command budget

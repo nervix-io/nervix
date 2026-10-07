@@ -264,9 +264,10 @@ A submitted client batch is validated as a whole before any row is admitted: a s
 exactly one uncompressed record batch of the ingestor's canonical Arrow schema, with valid columns
 and within the row and byte limits, is refused with its typed defect. No value is cast, widened,
 coerced, or defaulted to make a batch fit, and no subset of a malformed batch is admitted.
-The shared Arrow IPC boundary checks declared message bodies, record-batch lengths, buffer ranges
-and compressed expansion before invoking Arrow's reader. A malformed representation reports a typed
-decode failure; neither a snapshot nor a received batch gains a partial row from it.
+The shared Arrow IPC boundary checks canonical message framing, declared bodies and column buffer
+ranges before invoking Arrow's reader. A malformed frame reports `ArrowBodyError::Framing` for a
+relay or snapshot body and `ClientBatchError::Malformed` for a client batch; neither gains a partial
+row from it.
 
 Session replies carry typed command purpose and outcomes. An upload failure can carry an optional
 assigned nonzero resource version; before assignment, the version is absent. Diagnostic spans can
