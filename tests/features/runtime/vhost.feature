@@ -118,7 +118,7 @@ Feature: Vhost persistence
       | 3            | 0             |
       | 3            | 1             |
 
-  @command_completion
+  @command_completion @vhost_tls_rebinding
   Scenario Outline: Rebinding a VHOST to another version of its TLS bundle refreshes every HTTPS listener without pausing ingestion
     Given a <cluster_size> node nervix cluster is started
     And node "node-1" has TLS resource directory "tls_v1" for hosts "rotate-{{test_id}}.example.com"
