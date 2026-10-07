@@ -6060,11 +6060,9 @@ async fn when_node_starts_durable_catch_up(
             }
 
             let name = burst_domain_name(&writer_prefix, written);
-            let request = client.execute(format!("CREATE DOMAIN {name};"));
-            let outcome = nervix_primitives::select! {
-                () = writer_cancellation.cancelled() => return Ok(written),
-                outcome = request => outcome,
-            };
+            // A stop ends the next iteration. Collect the admitted command's response first so
+            // the completed-write count includes a command committed before catch-up finished.
+            let outcome = client.execute(format!("CREATE DOMAIN {name};")).await;
             let outcome = outcome.map_err(|error| error.to_string())?;
             if !outcome.succeeded() {
                 return Err(format!(

@@ -317,6 +317,11 @@ The boundary between them is kept in four places.
   catch-up is checked after release, so the fixture never waits for progress its own fault prevents.
   This is an in-process scheduling regression; immutable-image external
   Chaos runs retain the real-process crash and restart evidence.
+  The durable follower catch-up fixture creates client writes while the restarted follower applies
+  its backlog and samples commands memory throughout that interval. Once the backlog is applied,
+  stopping the writer finishes its admitted command before counting completed writes: the response
+  can arrive after all voters have already applied that command. The fixture still checks the
+  storage-derived catch-up bound, append-stream limit and commands-memory budget.
 - **Test defaults.** An in-process node's shutdown timeout defaults to four minutes rather than the
   product's `50s`, which leaves the bounded shutdown phases scenarios configure by default room to
   finish, so only a scenario about the deadline reaches it. A server process runs with the product
@@ -852,12 +857,18 @@ it ends; `NERVIX_TESTCONTAINERS_MODE=reusable`, which `just test-scenarios-reuse
 for the next run instead. Scenarios still provision the topics, queues, tables, and other entities
 they use explicitly.
 
-The detached-window Kafka acknowledgement scenario creates its input topic before `START` and
-observes the consumer group's membership and the ingestor's readiness before injecting the output
-failure.
-Its bounded subscription assertion therefore exercises acknowledgement isolation after source
-initialization, without spending that assertion's budget on automatic topic creation and consumer
-discovery.
+The attached- and detached-window Kafka acknowledgement scenarios create their input topic before
+`START` and observe the consumer group's membership and the ingestor's readiness before injecting
+the output failure. Their bounded subscription assertions therefore exercise replay and
+acknowledgement isolation after source initialization, without spending those assertions' budgets
+on automatic topic creation and consumer discovery.
+
+The attached-window fixture publishes both rows through one producer and allows a thirty-second
+partial-batch wait. Collection ends as soon as its two-message ACK batch is full; the window can
+then produce the output whose failure rejects both records. Separate publication steps can exceed
+a short collection window, leaving one retained window row waiting for input while the source waits
+for that partial batch's ACK. The fixture retains its five-second ACK timeout and exact four-record
+replay assertion within eight seconds.
 
 The Pulsar broker announces a `maxMessageSize` of 1 MiB rather than Pulsar's 5 MiB default, the
 same limit the MQTT and NATS brokers keep, so one scenario message can exceed each broker's limit.
