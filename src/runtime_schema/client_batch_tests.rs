@@ -24,7 +24,7 @@ use nervix_models::{
 use nervix_primitives::sync::StdArc;
 
 use super::{ClientBatchError, ClientBatchLimits, ClientSchemaDifference};
-use crate::runtime_schema::{CompiledSchema, compile_schema};
+use crate::runtime_schema::{CompiledSchema, UnsupportedFieldKind, compile_schema};
 
 /// The ingestor schema the tests submit against: a required unsigned identifier and an optional
 /// string.
@@ -529,8 +529,12 @@ async fn a_dictionary_message_is_unexpected() {
             kind: "DictionaryBatch"
         })
     ));
+}
 
-    // A dictionary-encoded column is refused too: its stream carries a dictionary message.
+/// A dictionary-encoded column is refused where its schema declares the encoding, before its
+/// dictionary message is reached: no ingestor's schema declares such a field.
+#[nervix_primitives::test]
+async fn a_dictionary_encoded_column_is_a_schema_that_differs() {
     let dictionary_schema = StdArc::new(Schema::new(vec![
         Field::new("id", DataType::UInt64, false),
         Field::new(
@@ -547,10 +551,20 @@ async fn a_dictionary_message_is_unexpected() {
     ];
     let batch =
         RecordBatch::try_new(dictionary_schema.clone(), columns).assured("matching columns");
-    assert_eq!(
-        defect(decode(stream(&dictionary_schema, &[batch]), limits()).await),
-        ClientBatchDefect::UnexpectedMessage
+    let refused = decode(stream(&dictionary_schema, &[batch]), limits()).await;
+    assert!(
+        matches!(
+            &refused,
+            Err(ClientBatchError::SchemaMismatch {
+                difference: ClientSchemaDifference::UnsupportedFieldType {
+                    index: 1,
+                    kind: UnsupportedFieldKind::Dictionary,
+                },
+            })
+        ),
+        "the dictionary encoding of the second field is the difference: {refused:?}"
     );
+    assert_eq!(defect(refused), ClientBatchDefect::SchemaMismatch);
 }
 
 #[nervix_primitives::test]

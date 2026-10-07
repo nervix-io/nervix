@@ -5,7 +5,8 @@
 //! - **Owns.** Encoding a batch into one shared immutable body and decoding a body back into a
 //!   batch, both off the async workers and both charged to the budget of the carriage they travel
 //!   under before they allocate.
-//! - **Depends on.** The executor that admits and charges the work, and Arrow's IPC codec.
+//! - **Depends on.** The executor that admits and charges the work, the IPC stream scan that checks
+//!   a body and opens Arrow's reader over it, and Arrow's IPC writer.
 //! - **Must not know.** Who sends the body, how many destinations it has, or what happens to the
 //!   batch afterwards.
 //!
@@ -13,11 +14,11 @@
 //! once and shared: every destination and every retry sends the same allocation, charged once, and
 //! reserves its own outstanding-delivery bytes separately.
 
-use std::{io::Cursor, num::NonZeroUsize};
+use std::num::NonZeroUsize;
 
 use arch_into::ArchInto as _;
 use arrow_array::{RecordBatch, RecordBatchOptions, new_empty_array};
-use arrow_ipc::{reader::StreamReader, writer::StreamWriter};
+use arrow_ipc::writer::StreamWriter;
 use arrow_schema::Schema as ArrowSchema;
 use error_stack::{Report, ResultExt as _};
 use nervix_execution::{
@@ -26,7 +27,10 @@ use nervix_execution::{
 use nervix_primitives::sync::StdArc;
 use thiserror::Error;
 
-use super::{CompiledSchema, RuntimeRecordBatch, batch_payload_bytes};
+use super::{
+    CompiledSchema, RuntimeRecordBatch, batch_payload_bytes,
+    ipc_stream::{IpcStream, IpcStreamError},
+};
 
 /// Why a relay body could not be produced or consumed.
 #[derive(Debug, Error)]
@@ -68,6 +72,12 @@ impl ArrowBodyError {
         Report::new(Self::Decode {
             reason: error.to_string(),
         })
+    }
+
+    /// A body the scan refused, with what the scan found beneath.
+    fn framing(refusal: Report<IpcStreamError>) -> Report<Self> {
+        let reason = refusal.current_context().to_string();
+        refusal.change_context(Self::Decode { reason })
     }
 }
 
@@ -365,8 +375,21 @@ async fn decode_body(
                 cancellation
                     .check()
                     .change_context(ArrowBodyError::Cancelled)?;
-                let mut reader = StreamReader::try_new(Cursor::new(body.as_ref()), None)
-                    .map_err(ArrowBodyError::decoding)?;
+                // Arrow's reader panics on a stream that declares what it does not expect, so the
+                // stream is scanned first, and its sections counted, before any column is read.
+                let scanned = IpcStream::new(body.as_ref())
+                    .scan(None)
+                    .map_err(ArrowBodyError::framing)?;
+                if scanned.record_batches > contract.max_sections.get() {
+                    return Err(Report::new(ArrowBodyError::TooManySections {
+                        sections: scanned.record_batches,
+                        limit: contract.max_sections.get(),
+                    }));
+                }
+                if scanned.record_batches == 0 && contract.schema.is_some() {
+                    return Err(Report::new(ArrowBodyError::NoSection));
+                }
+                let mut reader = scanned.reader().map_err(ArrowBodyError::decoding)?;
                 let schema = reader.schema();
                 if let Some(expected) = &contract.schema
                     && schema.as_ref() != expected.as_ref()
@@ -382,15 +405,6 @@ async fn decode_body(
                         .check()
                         .change_context(ArrowBodyError::Cancelled)?;
                     let batch = next.map_err(ArrowBodyError::decoding)?;
-                    if batches.len() >= contract.max_sections.get() {
-                        return Err(Report::new(ArrowBodyError::TooManySections {
-                            sections: batches
-                                .len()
-                                .checked_add(1)
-                                .unwrap_or(contract.max_sections.get()),
-                            limit: contract.max_sections.get(),
-                        }));
-                    }
                     let section = batch_payload_bytes(&batch);
                     decoded = decoded.checked_add(section).ok_or_else(|| {
                         Report::new(ArrowBodyError::DecodedTooLarge {
@@ -407,9 +421,6 @@ async fn decode_body(
                         }));
                     }
                     batches.push(batch);
-                }
-                if batches.is_empty() && contract.schema.is_some() {
-                    return Err(Report::new(ArrowBodyError::NoSection));
                 }
                 RuntimeRecordBatch::from_decoded_sections(schema, batches)
             },

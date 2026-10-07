@@ -85,6 +85,7 @@ pub(crate) mod codec_properties;
 pub(crate) mod crafted_streams;
 #[cfg(test)]
 pub(crate) mod generated_batches;
+mod ipc_stream;
 mod jaq_unfold;
 mod syslog;
 
@@ -93,6 +94,8 @@ pub(crate) use batch_container::{
     BatchContainerError, BatchMember, BatchMemberEncoding, BoundedBatchEncoding,
 };
 pub use client_batch::{ClientBatchError, ClientBatchLimits, ClientSchemaDifference};
+pub use ipc_stream::UnsupportedFieldKind;
+pub(crate) use ipc_stream::{IpcStream, IpcStreamError, StreamEnding};
 pub use jaq_unfold::UnfoldPosition;
 
 #[derive(Debug, Clone, PartialEq)]

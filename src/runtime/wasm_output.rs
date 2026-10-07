@@ -1,6 +1,7 @@
 use error_stack::{Report, ResultExt as _};
 
 use super::*;
+use crate::runtime_schema::{IpcStream, IpcStreamError, StreamEnding, UnsupportedFieldKind};
 
 pub(super) struct WasmOutputContext<'a> {
     pub(super) branch: &'a mut BranchRuntime,
@@ -206,6 +207,14 @@ pub(super) enum WasmGeneratedIpcDefect {
     ZeroColumns,
     #[strum(to_string = "generated field {field_index} has non-empty name '{name}'")]
     NamedField { field_index: usize, name: String },
+    #[strum(
+        to_string = "generated field {field_index} declares {kind}, which no Nervix type is \
+                     carried as"
+    )]
+    UnsupportedField {
+        field_index: usize,
+        kind: UnsupportedFieldKind,
+    },
 }
 
 /// Why the acknowledgement token decisions one guest callback reported cannot be applied.
@@ -541,24 +550,35 @@ impl WasmOutputValidator<'_> {
         }
         let invalid =
             |defect: WasmGeneratedIpcDefect| WasmOutputError::InvalidGeneratedArrowIpc { defect };
-        let mut cursor = std::io::Cursor::new(ipc);
-        let (actual_schema, mut batches) = {
-            let reader = StreamReader::try_new(&mut cursor, None)
-                .change_context(invalid(WasmGeneratedIpcDefect::Unreadable))?;
-            let actual_schema = reader.schema();
-            let batches = reader
-                .collect::<Result<Vec<_>, _>>()
-                .change_context(invalid(WasmGeneratedIpcDefect::Unreadable))?;
-            (actual_schema, batches)
+        // Arrow's reader panics on a stream that declares what it does not expect, and the stream
+        // is the guest's, so it is scanned before the reader reads any of it on this task.
+        let scanned = match IpcStream::ending(ipc, StreamEnding::MarkerOrEnd).scan(None) {
+            Ok(scanned) => scanned,
+            Err(refusal) => {
+                let defect = match refusal.current_context() {
+                    IpcStreamError::UnsupportedField { field, kind } => {
+                        WasmGeneratedIpcDefect::UnsupportedField {
+                            field_index: *field,
+                            kind: *kind,
+                        }
+                    }
+                    _ => WasmGeneratedIpcDefect::Unreadable,
+                };
+                return Err(refusal.change_context(invalid(defect)));
+            }
         };
-        let consumed = cursor.position().arch_into();
-        if consumed != ipc.len() {
-            let trailing = ipc
-                .len()
-                .checked_sub(consumed)
-                .verified("the reader consumed a prefix of this same buffer");
+        let reader = scanned
+            .reader()
+            .change_context(invalid(WasmGeneratedIpcDefect::Unreadable))?;
+        let actual_schema = reader.schema();
+        let mut batches = reader
+            .collect::<Result<Vec<_>, _>>()
+            .change_context(invalid(WasmGeneratedIpcDefect::Unreadable))?;
+        if scanned.trailing != 0 {
             return Err(Report::new(invalid(
-                WasmGeneratedIpcDefect::TrailingBytes { trailing },
+                WasmGeneratedIpcDefect::TrailingBytes {
+                    trailing: scanned.trailing,
+                },
             )));
         }
         if batches.len() != 1 {

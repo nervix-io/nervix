@@ -595,8 +595,11 @@ A delivery proceeds as follows:
 5. The receiver reads exactly the granted length under the reservation, records body receipt, and
    places the work in its bounded application queue. The HTTP/2 body response confirms receipt by
    the receiving process only.
-6. The application lane validates the exact schema, metadata, branch, and record-acknowledgement
-   count, then resolves the configured concrete runtime branch. Work for one channel remains ordered,
+6. The application lane validates the body's Arrow IPC stream, which must hold a schema message
+   of the field types Nervix carries, one uncompressed record batch that declares the field nodes
+   and buffers that schema's fields take with every buffer inside its body, and the end-of-stream
+   marker, and then the exact schema, metadata, branch, and record-acknowledgement count, then
+   resolves the configured concrete runtime branch. Work for one channel remains ordered,
    while other channels continue independently. A payload that fails this validation never reaches
    the branch. The receiver keeps the failure as a report of `RuntimeError::DecodeRemoteRelay`
    with the typed `RemoteRelayDecodeError` beneath it, which names what the payload got wrong and

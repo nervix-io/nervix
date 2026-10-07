@@ -100,6 +100,7 @@ clap_complete = { workspace = true }
 error-stack = { workspace = true }
 fastrand = { workspace = true }
 fjall = { workspace = true }
+flatbuffers = { workspace = true }
 futures-util = { workspace = true }
 governor = { workspace = true }
 hdrhistogram = { workspace = true }
@@ -228,7 +229,6 @@ bolero = { workspace = true }
 aws-smithy-http-client = { workspace = true, features = ["rustls-aws-lc"] }
 criterion = { workspace = true }
 cucumber = { workspace = true, features = ["libtest"] }
-flatbuffers = { workspace = true }
 flate2 = { workspace = true }
 h2 = { workspace = true }
 httparse = { workspace = true }

@@ -2,10 +2,10 @@
 //!
 //! Layer: engines and infrastructure.
 //!
-//! - **Owns.** Checking the framing of a submitted stream before any column is allocated, its exact
-//!   schema, its row and byte limits, and decoding its one record batch off the async workers
-//!   under the relay budget.
-//! - **Depends on.** The executor that admits and charges the work, Arrow's IPC codec, and the
+//! - **Owns.** A submitted stream's exact schema, its row and byte limits, the defect each refusal
+//!   names, and decoding its one record batch off the async workers under the relay budget.
+//! - **Depends on.** The executor that admits and charges the work, the IPC stream scan that checks
+//!   the stream before any column is allocated and opens Arrow's reader over it, and the
 //!   vocabulary's batch defects.
 //! - **Must not know.** Producers, sessions, ingestors, or what happens to the batch afterwards.
 //!
@@ -16,28 +16,23 @@
 
 use std::{
     fmt,
-    io::Cursor,
     num::{NonZeroU64, NonZeroUsize},
 };
 
 use arch_into::ArchInto as _;
-use arrow_ipc::{MessageHeader, reader::StreamReader, root_as_message};
 use arrow_schema::{DataType as ArrowDataType, Schema as ArrowSchema};
 use bytes::Bytes;
 use error_stack::{Report, ResultExt as _};
-use meticulous::{OptionExt as _, ResultExt as _};
+use meticulous::OptionExt as _;
 use nervix_execution::{CpuClass, ExecutionError, Executor, MemoryClass};
 use nervix_models::ClientBatchDefect;
 use nervix_primitives::sync::StdArc;
 use thiserror::Error;
 
-use super::{CompiledSchema, RuntimeRecordBatch, batch_payload_bytes};
-
-/// The marker that opens every message of a canonical Arrow IPC stream.
-const CONTINUATION_MARKER: [u8; 4] = [0xff; 4];
-
-/// The width of the continuation marker and of the metadata length that follows it.
-const FRAME_WORD: usize = 4;
+use super::{
+    CompiledSchema, RuntimeRecordBatch, batch_payload_bytes,
+    ipc_stream::{IpcStream, IpcStreamError, UnsupportedFieldKind},
+};
 
 /// What one client batch may carry, as its producer's grant decides.
 #[derive(Debug, Clone, Copy)]
@@ -92,6 +87,34 @@ impl ClientBatchError {
         })
     }
 
+    /// The defect a stream the scan refused has, with what the scan found beneath. A field type
+    /// Nervix does not carry is a schema that differs from the ingestor's, a record batch at odds
+    /// with the schema its stream declares is invalid data, and anything else the scan refuses is
+    /// a stream that is not canonical.
+    fn framing(refusal: Report<IpcStreamError>) -> Report<Self> {
+        let defect = match refusal.current_context() {
+            IpcStreamError::UnexpectedMessage { kind } => Self::UnexpectedMessage { kind },
+            IpcStreamError::Compressed => Self::Compressed,
+            IpcStreamError::TooManyRows { rows, limit } => Self::TooManyRows {
+                rows: *rows,
+                limit: *limit,
+            },
+            IpcStreamError::UnsupportedField { field, kind } => Self::SchemaMismatch {
+                difference: ClientSchemaDifference::UnsupportedFieldType {
+                    index: *field,
+                    kind: *kind,
+                },
+            },
+            other if other.is_of_record_batch_shape() => Self::InvalidData {
+                reason: other.to_string(),
+            },
+            other => Self::Malformed {
+                reason: other.to_string(),
+            },
+        };
+        refusal.change_context(defect)
+    }
+
     fn invalid_data(reason: impl ToString) -> Report<Self> {
         Report::new(Self::InvalidData {
             reason: reason.to_string(),
@@ -121,6 +144,12 @@ pub enum ClientSchemaDifference {
         expected_nullable: bool,
     },
     Metadata,
+    /// The field at `index`, or a field it nests, is of a type no Nervix type is carried as, so no
+    /// ingestor's schema declares it.
+    UnsupportedFieldType {
+        index: usize,
+        kind: UnsupportedFieldKind,
+    },
 }
 
 impl ClientSchemaDifference {
@@ -207,134 +236,11 @@ impl fmt::Display for ClientSchemaDifference {
                 formatter,
                 "it carries schema or field metadata, which the ingestor's schema does not"
             ),
+            Self::UnsupportedFieldType { index, kind } => write!(
+                formatter,
+                "field {index} declares {kind}, which no Nervix type is carried as"
+            ),
         }
-    }
-}
-
-/// The messages of an Arrow IPC stream, read one at a time without decoding their bodies, so a
-/// client batch's framing is checked before any column is allocated.
-struct IpcMessages<'a> {
-    body: &'a [u8],
-    offset: usize,
-}
-
-/// The messages one scanned stream carried.
-struct ScannedStream {
-    record_batches: usize,
-}
-
-impl<'a> IpcMessages<'a> {
-    fn new(body: &'a [u8]) -> Self {
-        Self { body, offset: 0 }
-    }
-
-    /// Checks that the stream is one schema message, record batch messages within `max_rows`
-    /// and without compression, and the end-of-stream marker ending the body.
-    fn scan(mut self, max_rows: NonZeroUsize) -> Result<ScannedStream, Report<ClientBatchError>> {
-        let mut schema_seen = false;
-        let mut record_batches = 0_usize;
-        loop {
-            let Some(message) = self.next_message()? else {
-                break;
-            };
-            let header = message.header_type();
-            if header == MessageHeader::Schema && !schema_seen {
-                schema_seen = true;
-                continue;
-            }
-            if !schema_seen {
-                return Err(ClientBatchError::malformed(
-                    "the stream does not open with its schema message",
-                ));
-            }
-            if header != MessageHeader::RecordBatch {
-                let kind = header.variant_name().unwrap_or("unknown");
-                return Err(Report::new(ClientBatchError::UnexpectedMessage { kind }));
-            }
-            let batch = message.header_as_record_batch().verified(
-                "the message verifier admits a union type only beside its value, and the type is \
-                 a record batch, checked above",
-            );
-            if batch.compression().is_some() {
-                return Err(Report::new(ClientBatchError::Compressed));
-            }
-            let Ok(rows) = u64::try_from(batch.length()) else {
-                return Err(ClientBatchError::malformed(
-                    "a record batch declares a negative row count",
-                ));
-            };
-            let limit: u64 = max_rows.get().arch_into();
-            if rows > limit {
-                return Err(Report::new(ClientBatchError::TooManyRows {
-                    rows,
-                    limit: max_rows.get(),
-                }));
-            }
-            record_batches = record_batches
-                .checked_add(1)
-                .assured("every counted message occupies bytes of a body that fits in memory");
-        }
-        if !schema_seen {
-            return Err(ClientBatchError::malformed(
-                "the stream ends before its schema message",
-            ));
-        }
-        Ok(ScannedStream { record_batches })
-    }
-
-    /// The next message's header, or `None` at the end-of-stream marker, which must end the body.
-    fn next_message(&mut self) -> Result<Option<arrow_ipc::Message<'a>>, Report<ClientBatchError>> {
-        let marker = self.take(FRAME_WORD)?;
-        if marker != CONTINUATION_MARKER {
-            return Err(ClientBatchError::malformed(
-                "a message does not open with the continuation marker",
-            ));
-        }
-        let length_bytes = self.take(FRAME_WORD)?;
-        let length = i32::from_le_bytes(
-            length_bytes
-                .try_into()
-                .verified("take returned exactly the four bytes it was asked for"),
-        );
-        if length == 0 {
-            if self.offset != self.body.len() {
-                return Err(ClientBatchError::malformed(
-                    "bytes follow the end-of-stream marker",
-                ));
-            }
-            return Ok(None);
-        }
-        let Ok(length) = usize::try_from(length) else {
-            return Err(ClientBatchError::malformed(
-                "a message declares a negative metadata length",
-            ));
-        };
-        let metadata = self.take(length)?;
-        let message = root_as_message(metadata).map_err(ClientBatchError::malformed)?;
-        let Ok(body_length) = usize::try_from(message.bodyLength()) else {
-            return Err(ClientBatchError::malformed(
-                "a message declares a body length outside this body",
-            ));
-        };
-        self.take(body_length)?;
-        Ok(Some(message))
-    }
-
-    /// The next `length` bytes of the body.
-    fn take(&mut self, length: usize) -> Result<&'a [u8], Report<ClientBatchError>> {
-        let body: &'a [u8] = self.body;
-        let Some(end) = self.offset.checked_add(length) else {
-            return Err(ClientBatchError::malformed(
-                "the stream ends inside a message",
-            ));
-        };
-        let Some(bytes) = body.get(self.offset..end) else {
-            return Err(ClientBatchError::malformed(
-                "the stream ends inside a message",
-            ));
-        };
-        self.offset = end;
-        Ok(bytes)
     }
 }
 
@@ -410,9 +316,10 @@ impl RuntimeRecordBatch {
         max_rows: NonZeroUsize,
         decoded_limit: u64,
     ) -> Result<Self, Report<ClientBatchError>> {
-        let scanned = IpcMessages::new(body).scan(max_rows)?;
-        let mut reader =
-            StreamReader::try_new(Cursor::new(body), None).map_err(ClientBatchError::malformed)?;
+        let scanned = IpcStream::new(body)
+            .scan(Some(max_rows))
+            .map_err(ClientBatchError::framing)?;
+        let mut reader = scanned.reader().map_err(ClientBatchError::malformed)?;
         let schema = reader.schema();
         if let Some(difference) = ClientSchemaDifference::between(expected, &schema) {
             return Err(Report::new(ClientBatchError::SchemaMismatch { difference }));
