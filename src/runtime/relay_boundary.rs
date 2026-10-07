@@ -85,6 +85,8 @@ pub(super) struct RelayBoundaryServices {
     /// The concrete branches this node's owner of the relay holds, shared with the relay's state
     /// placement so materialized reads observe the same membership across execution rebuilds.
     pub(super) branch_presence: RelayBranchPresence,
+    /// Record ACK roots retain this domain drain tracker after the relay service's borrow ends.
+    pub(super) domain_ack_tracker: Arc<AckRootTracker>,
     channels: RelayChannels,
 }
 
@@ -1127,6 +1129,7 @@ impl RelayBoundaryServices {
         remote_runtime_consumers: Vec<RemoteRuntimeConsumer>,
         remote_dispatcher: Option<StdArc<RemoteDispatcher>>,
         branch_presence: RelayBranchPresence,
+        domain_ack_tracker: Arc<AckRootTracker>,
     ) -> Self {
         Self {
             fanout,
@@ -1136,6 +1139,7 @@ impl RelayBoundaryServices {
             remote_dispatcher,
             owner_node: ArcSwapOption::empty(),
             branch_presence,
+            domain_ack_tracker,
             channels: RelayChannels::default(),
         }
     }
@@ -1296,17 +1300,22 @@ impl RelayBoundaryServices {
                 return Err(Box::new(batch.clone()));
             }
         };
-        let delivery = ingress_slot.next_delivery();
-        let mut remote_acks = Vec::with_capacity(batch.acks.len());
-        for ack in &batch.acks {
-            if ack.is_empty() {
-                remote_acks.push(None);
-                continue;
+        let forwarded = batch
+            .acks
+            .iter()
+            .map(RemoteDispatcher::forwarded_ack)
+            .collect();
+        let mut remote_acks = match dispatcher.register_pending_acks(&owner_node, forwarded) {
+            Ok(registrations) => registrations,
+            Err(error) => {
+                let reason = error.to_string();
+                for ack in &batch.acks {
+                    ack.no_ack(reason.clone());
+                }
+                return Err(Box::new(batch.clone()));
             }
-            let registration =
-                dispatcher.register_pending_ack(&owner_node, RemoteDispatcher::forwarded_ack(ack));
-            remote_acks.push(Some(registration));
-        }
+        };
+        let delivery = ingress_slot.next_delivery();
         let admission_result = dispatcher
             .dispatch_admitted_relay_payload(
                 &owner_node,
@@ -1318,7 +1327,7 @@ impl RelayBoundaryServices {
                     key: BranchKey::to_remote_key(&batch.key),
                     batch_ipc,
                     metadata: batch.metadata.to_remote(),
-                    acks: remote_acks.clone(),
+                    acks: remote_acks.registrations().to_vec(),
                     admission: None,
                 },
                 &ingress_slot,
@@ -1334,7 +1343,7 @@ impl RelayBoundaryServices {
                 "failed to admit relay batch on its owner"
             );
             let reason = error.to_string();
-            for registration in remote_acks.iter().flatten() {
+            for registration in remote_acks.registrations().iter().flatten() {
                 dispatcher.clear_pending_ack(registration);
             }
             for ack in batch.acks.iter() {
@@ -1342,7 +1351,7 @@ impl RelayBoundaryServices {
             }
             return Err(Box::new(batch.clone()));
         }
-        dispatcher.admit_pending_acks(&remote_acks);
+        remote_acks.admit();
         Ok(())
     }
 
@@ -1474,16 +1483,25 @@ impl RelayBoundaryServices {
                 AckMode::Attached => batch.attached(),
                 AckMode::Detached => batch.detached(),
             };
-            let remote_acks = if consumer.mode == AckMode::Attached {
-                remote_batch
-                    .acks
-                    .iter()
-                    .map(|ack| {
-                        Some(dispatcher.register_pending_ack(&consumer.node_id, ack.clone()))
-                    })
-                    .collect::<Vec<_>>()
+            let mut registration_owner = if consumer.mode == AckMode::Attached {
+                match dispatcher
+                    .register_pending_acks(&consumer.node_id, remote_batch.acks.to_vec())
+                {
+                    Ok(owner) => Some(owner),
+                    Err(error) => {
+                        let reason = error.to_string();
+                        for ack in &remote_batch.acks {
+                            ack.no_ack(reason.clone());
+                        }
+                        return Err(Box::new(batch.clone()));
+                    }
+                }
             } else {
-                vec![None; remote_batch.acks.len()]
+                None
+            };
+            let remote_acks = match &registration_owner {
+                Some(owner) => owner.registrations().to_vec(),
+                None => vec![None; remote_batch.acks.len()],
             };
             let delivery = outbound_slot.next_delivery();
             let result = dispatcher
@@ -1503,7 +1521,10 @@ impl RelayBoundaryServices {
 
             match (consumer.mode, result) {
                 (AckMode::Attached, Ok(())) => {
-                    dispatcher.admit_pending_acks(&remote_acks);
+                    registration_owner
+                        .as_mut()
+                        .verified("attached delivery registers an acknowledgement owner")
+                        .admit();
                 }
                 (AckMode::Attached, Err(error)) => {
                     let reason = error.to_string();

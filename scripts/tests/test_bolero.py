@@ -94,6 +94,8 @@ class InventoryTests(unittest.TestCase):
             "endpoint-route-table",
             "relay-channel-lifetimes",
             "interconnect-slot-lifetimes",
+            "remote-correlation-lifetimes",
+            "relay-admission-owners",
             "client-emitter-wire",
             "client-requests",
             "client-replies",

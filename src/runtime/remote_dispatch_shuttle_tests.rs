@@ -13,8 +13,13 @@ use nervix_model_harness::shuttle::check_interleavings;
 use nervix_models::ClusterNodeName;
 use nervix_primitives::{sync::Arc, thread};
 
-use super::{REMOTE_ACK_SILENT_SWEEPS, RemoteDispatchRegistry};
-use crate::runtime_ack::{AckCompletion, AckOutcome, AckSet};
+use crate::{
+    runtime::{
+        remote_ack_owner::RemoteDispatchRegistry,
+        remote_dispatch::{REMOTE_ACK_SILENT_SWEEPS, RelayAdmissionUpdate},
+    },
+    runtime_ack::{AckCompletion, AckOutcome, AckSet},
+};
 
 const JOINED: &str =
     "a modeled thread's panic fails the Shuttle execution before its joiner resumes";
@@ -34,10 +39,11 @@ struct OneSweepFromFailing {
 
 impl OneSweepFromFailing {
     fn new() -> Self {
-        let registry = Arc::new(RemoteDispatchRegistry::new());
+        let registry = Arc::new(RemoteDispatchRegistry::with_capacity(2));
         let (acks, completion) = AckSet::root();
-        let ack_id = registry.next_ack_id();
-        registry.register_ack(ack_id, receiver(), acks);
+        let ack_id = registry
+            .register_ack(receiver(), acks)
+            .assured("the fixture has free correlation capacity");
         registry.admit_ack(ack_id);
         for _ in 0..REMOTE_ACK_SILENT_SWEEPS {
             assert!(
@@ -135,5 +141,94 @@ fn shuttle_a_report_racing_the_final_sweep_keeps_the_share_it_reached() {
             matches!(model.outcome(), Some(AckOutcome::NoAck(_))),
             "the sweep must fail the root of the share it removed"
         );
+    });
+}
+
+#[test]
+fn shuttle_delayed_events_cannot_resolve_a_reused_delivery_position() {
+    check_interleavings(|| {
+        let registry = Arc::new(RemoteDispatchRegistry::with_capacity(1));
+        let (first, first_completion) = AckSet::root();
+        let first = registry
+            .register_ack(receiver(), first)
+            .assured("the first delivery fits");
+        assert!(registry.resolve_ack(first, AckOutcome::Ack));
+        let (current, current_completion) = AckSet::root();
+        let current = registry
+            .register_ack(receiver(), current)
+            .assured("the completed delivery returned its position");
+        assert_ne!(first, current);
+        let delayed = registry.clone();
+        let stale = thread::spawn(move || {
+            assert!(!delayed.progress_ack(first, 1, true));
+            assert!(!delayed.resolve_ack(
+                first,
+                AckOutcome::NoAck("delayed terminal reply".to_string())
+            ));
+        });
+        let resolving = registry.clone();
+        let resolve =
+            thread::spawn(move || assert!(resolving.resolve_ack(current, AckOutcome::Ack)));
+        stale.join().assured(JOINED);
+        resolve.join().assured(JOINED);
+        assert_eq!(
+            first_completion.wait().now_or_never(),
+            Some(AckOutcome::Ack)
+        );
+        assert_eq!(
+            current_completion.wait().now_or_never(),
+            Some(AckOutcome::Ack)
+        );
+        assert!(!registry.holds_ack(current));
+    });
+}
+
+#[test]
+fn shuttle_registration_racing_shutdown_leaves_no_unresolved_accepted_share() {
+    check_interleavings(|| {
+        let registry = Arc::new(RemoteDispatchRegistry::with_capacity(1));
+        let (acks, completion) = AckSet::root();
+        let registering = registry.clone();
+        let registration = thread::spawn(move || {
+            if registering.register_ack(receiver(), acks.clone()).is_err() {
+                acks.no_ack("registration was refused");
+            }
+        });
+        let ending = registry.clone();
+        let shutdown = thread::spawn(move || ending.shutdown());
+        registration.join().assured(JOINED);
+        shutdown.join().assured(JOINED);
+        assert!(matches!(
+            completion.wait().now_or_never(),
+            Some(AckOutcome::NoAck(_))
+        ));
+        assert!(registry.register_admission().is_err());
+    });
+}
+
+#[test]
+fn shuttle_a_departed_admission_waiter_racing_its_reply_returns_one_position() {
+    check_interleavings(|| {
+        let registry = Arc::new(RemoteDispatchRegistry::with_capacity(1));
+        let (id, updates) = registry
+            .register_admission()
+            .assured("the fixture has admission room");
+        let dropping = registry.clone();
+        let departure = thread::spawn(move || {
+            drop(updates);
+            dropping.fail_silent_acks();
+        });
+        let replying = registry.clone();
+        let reply = thread::spawn(move || replying.resolve_ack(id, AckOutcome::Ack));
+        departure.join().assured(JOINED);
+        reply.join().assured(JOINED);
+        let (current, updates) = registry
+            .register_admission()
+            .assured("the departed admission returned exactly one position");
+        assert_ne!(id, current);
+        assert!(!registry.resolve_ack(id, AckOutcome::NoAck("delayed reply".to_string())));
+        assert!(registry.holds_ack(current));
+        assert!(registry.resolve_ack(current, AckOutcome::Ack));
+        assert!(matches!(*updates.borrow(), RelayAdmissionUpdate::Admitted));
     });
 }

@@ -55,7 +55,7 @@ them substitutes for another.
 | `crates/interconnect/tests/simulation/scenario.rs` | Harness | Scenario identity, committed seeds, the seed sweep, fresh-process attempts, failure records, replay, and failure injection |
 | `crates/interconnect/tests/simulation.rs` | Harness | The `simulation` test target: runner checks, the DNS and CPU scenarios, and the fresh-process record and replay checks |
 | `crates/interconnect/tests/simulation/transport.rs` | Harness | The certificate authority fixture, typed Arrow requests, host synchronization, and the exchange and link-fault scenarios |
-| `crates/interconnect/tests/simulation/relay.rs` | Harness | Relay reply loss, cancellation, and receiver-restart scenarios |
+| `crates/interconnect/tests/simulation/relay.rs` | Harness | Relay reply loss, cancellation, receiver restart, and sender replacement with a retained intake |
 | `crates/interconnect/tests/simulation/backup.rs` | Harness | Authenticated backup capture and section fetch across a partition, repair, and owner restart during transfer |
 | `crates/interconnect/tests/simulation/isolation.rs` | Harness | The three-host stalled-peer scenario and the capacity bounds it checks |
 | `crates/interconnect/tests/simulation/materialized.rs` | Harness | Exact typed branch placement and Arrow payload transfer at two revisions across a serving transport replacement |
@@ -552,6 +552,7 @@ seeds twice each, in fresh processes; the sweep replaces the seeds without weake
 | receiver restart after relay body receipt | `transport::relay::relay_restart_fences_unresolved_delivery_and_accepts_fresh_work` | 81 | 90 s / 50,000 / 90 s | A new process epoch leaves the unresolved delivery indeterminate and admits fresh work |
 | receiver restart after runtime admission | The same | 83 | 90 s / 50,000 / 90 s | The same after runtime admission |
 | receiver restart with delayed relay response | The same | 85, 1036 | 90 s / 50,000 / 90 s | A released pre-crash reply confirms only historical receipt; admission stays indeterminate against the new epoch |
+| sender replacement with a retained admitted intake | `transport::relay::sender_retirement_reclaims_capacity_while_an_admitted_intake_is_retained` | 95 | 30 s / 50,000 / 90 s | Removing the sender releases a one-item receiver's capacity while its admitted intake remains borrowed; a recreated sender transport delivers three Arrow rows with a distinct full process identity |
 | backup section partition and repair | `transport::backup::backup_section_fetch_is_fenced_and_recovers_after_partition` | 101 | 180 s / 200,000 / 90 s | A forged process identity cannot capture or consume a section; a stalled fetch reaches its deadline; a partitioned fetch fails and succeeds after repair; six 6 MiB materialized column sections, 36 MiB in all, stream in 64 KiB chunks and install as one checkpoint |
 | window section partition and repair | `transport::backup::window_sections_larger_than_the_bulk_budget_stream_across_a_partition` | 103 | 180 s / 200,000 / 90 s | The same fences and faults for three window groups of input rows and argument columns, each section classified by its own kind; 36 MiB, beyond the 32 MiB bulk budget, streams in 64 KiB chunks and installs as one branched window checkpoint |
 | backup owner restart during transfer | `transport::backup::restart_during_backup_transfer_discards_the_process_stage` | 102 | 180 s / 200,000 / 90 s | An incomplete section cannot finish after owner restart, and the replacement process has no prior capture stage |
@@ -648,7 +649,7 @@ shared operation waits until its own deadline. A burst fills the one bulk worker
 queue, the two submissions beyond them are refused without a charge, and control work is admitted in
 the same pass. Unread streams stop at one HTTP/2 window each and release their admission and memory
 at the five-second progress deadline. The held relay reserves its exact body, largest decoded batch,
-and scratch until cancellation.
+and scratch, plus its retained grant metadata, until cancellation and release of the borrowed intake.
 
 The fixture then holds the stalled link. The hub's own liveness deadline ends its probe to the
 stalled peer while the healthy peer keeps exchanging every traffic class. Removing the stalled peer

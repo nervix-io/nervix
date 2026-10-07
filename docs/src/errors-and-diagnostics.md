@@ -885,7 +885,15 @@ failure beneath the reason can quote the payload it evaluated, and is not render
 ## Cross-Node And Public Boundaries
 
 The interconnect validates and bounds the wire request before its operation handler runs. A
-transport error describes connection, admission, framing, deadline, or delivery failure. A remote
+delivery correlation that has no free position reports `CorrelationCapacity`; an exhausted
+generation reports `CorrelationIdentityExhausted`; failure to reserve record storage reports
+`CorrelationMemory`. A receiver unable to reserve a watcher reports `RemoteAckAdmission` with its
+execution admission cause, before runtime admission. These refusals judge no payload and preserve
+source retry ownership. Ending a registered delivery before admission or shutting its owner down
+resolves its held shares negatively once. Stale generations and registrar runs are ordinary
+unmatched reports logged at `debug`, and never resolve current work.
+
+A transport error describes connection, admission, framing, deadline, or delivery failure. A remote
 control response instead preserves a typed failure *subject* and one of four classes: rejected by
 the answering node, unavailable there, temporarily not ready, or executed and failed. A requester
 can use class and subject for routing, retry, and recovery without parsing text. Only an executed

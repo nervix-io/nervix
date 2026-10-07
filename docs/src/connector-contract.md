@@ -342,6 +342,20 @@ Each timestamp rejection retains the source row's ACK for its route-local messag
 accepted neighbors continue into the graph. A source position is acknowledged only after every
 message it unfolded into has completed its own route or error delivery.
 
+Remote delivery retains that host-owned ACK share in a bounded delivery owner, with independent
+row outcomes and an exact generation identity. Admission refusal or cancellation before admission
+returns the share negatively; admitted records remain pending through keepalives and required
+waits until their terminal outcome or the silence bound. Relay construction retains the domain's
+ACK-root tracker, so intake does not resolve a mutable domain registry for each row. Receiver
+watchers retain the sender's full process identity and charge their memory to the relay budget;
+sender replacement or shutdown ends them. These correlations remain volatile and are never a
+connector position or persisted commit. [Cluster Interconnect](./interconnect.md) owns their
+capacity and deadline contracts.
+
+The host refreshes pending ACK progress every 100 milliseconds during connector requests and
+retries. This cadence must stay shorter than a source's one-second `ACK TIMEOUT` so a pending
+attached sink attempt does not make the source replay work while the sink still owns it.
+
 Each source host retains its exact instance readiness handle. Poll success and suspend/resume
 publish through that scalar, without looking up the ingestor registry. Replacing an ingestor retires
 its preceding handles before installing the new instances; host drop also retires its own handle.
@@ -826,7 +840,8 @@ sequenceDiagram
   a single execution of the ingestor. It owns the attached producers, the batches each queued,
   their round-robin admission into the execution's one acknowledgement window, and every batch's
   outcome. The execution's admission worker validates a batch as one canonical Arrow IPC stream of
-  the input schema, tracks a new ACK root with the ingestor's drain accounting, reads the quiesce
+  the input schema, checking bounded IPC message and buffer declarations before Arrow decoding.
+  It then tracks a new ACK root with the ingestor's drain accounting, reads the quiesce
   state, and only then dispatches the batch through the ingestor's filter and routes, so a quiesce
   either counts the batch or refuses it with nothing dispatched. The batch's outcome is its ACK
   root's resolution under the declared ACK timeout, which counts time without acknowledgement

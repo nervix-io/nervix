@@ -460,35 +460,17 @@ impl Runtime {
     #[cfg_attr(
         nervix_lint,
         nervix::context(
-            recurring,
-            reason = "a running source publishes its flush readiness and tracks admitted \
-                      acknowledgement roots"
-        )
-    )]
-    pub(in crate::runtime) fn tracked_ack_root(
-        &self,
-        domain: &DomainName,
-    ) -> (AckSet, AckCompletion) {
-        AckSet::tracked_root(self.domain_ack_root_tracker(domain))
-    }
-
-    #[cfg_attr(
-        nervix_lint,
-        nervix::context(
-            recurring,
-            reason = "this owner is reached by recurring record, frame, acknowledgement or \
-                      state-poll work"
+            lifecycle,
+            reason = "domain construction and source startup retain this domain's ACK drain \
+                      tracker before processing records"
         )
     )]
     pub(super) fn domain_ack_root_tracker(&self, domain: &DomainName) -> Arc<AckRootTracker> {
-        nervix_primitives::expect_lint!(
-            nervix::sync_acquisition,
-            "Typed Ratchet 05 https://app.clickup.com/t/86bc9erep: retain acknowledgement root \
-             tracking before admitting relay work",
-            self.inner.in_flight_by_domain.entry(domain.clone())
-        )
-        .or_insert_with(|| Arc::new(AckRootTracker::default()))
-        .clone()
+        self.inner
+            .in_flight_by_domain
+            .entry(domain.clone())
+            .or_insert_with(|| Arc::new(AckRootTracker::default()))
+            .clone()
     }
 
     pub(in crate::runtime) fn ingestor_ack_root_trackers(

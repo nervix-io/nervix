@@ -436,7 +436,7 @@ test-primitives-compile:
 # nervix-primitives and the diagnostic owner tests each install their detector in a fresh process;
 # and the scenario binary runs the `@deadlock_diagnostics`, `@restore_installation`,
 # `@client_ingestor_alter_drain`, `@deadlock_reports`, `@memory_pressure_pause`,
-# `@client_io_03_consumer_restore`, `@client_io_03_generation`, `@udf_column_builder`,
+# `@client_io_03_consumer_restore`, `@client_io_03_generation`, `@remote_ack_owners`, `@udf_column_builder`,
 # `@vhost_tls_rebinding` and `@inferencer_branch_batches` scenarios and then the
 # `@paced_simulation_reopen` scenarios with the diagnostic Rust paced driver, without retries, on
 # in-process nodes and real diagnostic server processes of one and three nodes. Every process runs
@@ -1244,6 +1244,25 @@ coverage-archive-counts-server-append output="target/archive-counts.lcov": downl
 coverage-runtime output="target/task-handles-runtime.lcov" *args: build-web-console wasm-processor-guests download-onnxruntime
     ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)" cargo llvm-cov --package nervix-server --features testing --lib --no-default-ignore-filename-regex --lcov --output-path {{ quote(output) }} {{ args }}
 
+# Ordinary coverage for delivery correlations, membership publication and authenticated relay owners.
+coverage-remote-owners output="target/remote-owners.lcov": build-web-console wasm-processor-guests download-onnxruntime
+    #!/usr/bin/env bash
+    set -euo pipefail
+    export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
+    just coverage-clean-workspace
+    stages="$(mktemp -d {{ quote(cargo_target_dir + "/remote-owner-coverage.XXXXXX") }})"
+    cargo llvm-cov --no-report --package nervix-server --features testing --lib -- remote_
+    # Later invocations retain the first profile; --no-report and --no-clean cannot be combined.
+    cargo llvm-cov --no-clean --lcov --output-path "${stages}/cluster.lcov" \
+        --package nervix-server --features testing --lib -- cluster::tests
+    cargo llvm-cov --no-clean --lcov --output-path "${stages}/interconnect.lcov" \
+        --package nervix-interconnect --lib
+    cargo llvm-cov --no-clean --lcov --output-path "${stages}/ack-cost.lcov" \
+        --package nervix-server --features testing --lib -- remote_ack_owner_cost --ignored --nocapture
+    cargo llvm-cov --no-clean --lcov --output-path "${stages}/frame-cost.lcov" \
+        --package nervix-interconnect --lib -- remote_relay_frame_cost --ignored --nocapture
+    cargo llvm-cov report --no-default-ignore-filename-regex --lcov --output-path {{ quote(output) }}
+
 # Measure selected public scenarios with the same arguments as `test-scenarios`.
 coverage-scenarios output *args: tests-deps
     #!/usr/bin/env bash
@@ -1546,6 +1565,7 @@ bench-smoke-bodies:
     cargo bench --profile dev --package nervix-connector-syslog --bench stream_framing --features benchmarks -- --test
     cargo bench --profile dev --package nervix-vm --bench vm -- --test
     just bench-retained-channels-bodies
+    just bench-remote-owners-bodies
     just bench-materialized-state-bodies
 
 # Measure the data-plane work a node admits through its bounded executor, as the runtime submits it:
@@ -1894,7 +1914,7 @@ cargo-clippy-loom jobs=default_jobs: (run-with-jobs "loom-clippy-targets" jobs)
 
 [private, parallel]
 loom-clippy-targets: \
-    *(clippy-target *["nervix-execution", "nervix-model-harness"] ["--all-targets", "--features", "loom"]) \
+    *(clippy-target *["nervix-execution", "nervix-model-harness", "nervix-interconnect"] ["--all-targets", "--features", "loom"]) \
     (clippy-target "nervix-primitives" ["--all-targets", "--features", "loom native"]) \
     *(clippy-target *["nervix-consensus", "nervix-server"] ["--lib", "--features", "loom"]) \
     (clippy-target "nervix-server" ["--lib", "--profile", "test", "--features", "loom"]) \
@@ -2854,6 +2874,14 @@ bench-retained-channels: build-web-console wasm-processor-guests download-onnxru
 bench-retained-channels-bodies:
     ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)" cargo test --package nervix-server --features testing --lib relay_channel_cost -- --ignored --nocapture
     cargo test --package nervix-interconnect --lib established_pool_cost -- --ignored --nocapture
+
+# Delivery correlation and authenticated frame costs, including retained state and reclamation.
+bench-remote-owners: build-web-console wasm-processor-guests download-onnxruntime bench-remote-owners-bodies
+
+[private]
+bench-remote-owners-bodies:
+    ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)" cargo test --package nervix-server --features testing --lib remote_ack_owner_cost -- --ignored --nocapture
+    cargo test --package nervix-interconnect --lib remote_relay_frame_cost -- --ignored --nocapture
 
 # Native diagnostic owners and probes, composed separately from the ordinary report command.
 test-deadlock-evidence-order:

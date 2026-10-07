@@ -32,7 +32,9 @@ use crate::{
 
 /// History does not grow with workload duration once these capacities are reached: lost context
 /// is delivered as an overload finding, preventing qualification.
-const HISTORY_EDGE_CAPACITY: usize = 8_192;
+// One three-node materialized restore with leadership handoff needs more than 8,192 distinct
+// instance edges; its own process still has a fixed ceiling and reports any further loss.
+const HISTORY_EDGE_CAPACITY: usize = 16_384;
 const HELD_GUARD_CAPACITY: usize = MAX_ORDER_EDGES;
 
 std::thread_local! { static HELD: RefCell<HeldGuards> = RefCell::new(HeldGuards::default()); }

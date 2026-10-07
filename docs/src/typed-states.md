@@ -109,6 +109,18 @@ completed snapshot, and from one made at completed index zero. The trigger holds
 completed index that existed when the request was made; it suppresses duplicate requests for that
 same completed snapshot without confusing its absence with index zero.
 
+**Remote acknowledgements and admission.** A routing position is open with its generation and
+optional correlation, or permanently closed. A correlation owns either a delivery's record rows
+or an admission response channel. Pending rows distinguish waiting for admission from admitted
+silence; ordered parked progress retains its required-wait guard. The wire number is an opaque
+position/generation/row encoding, validated behind this owner with the registrar process identity.
+No numeric value means missing, and an exhausted generation never wraps into a live identity.
+An authenticated peer is starting, awaiting membership with its bound epoch, live with that epoch,
+or ended. The admission choice's private atomic byte exposes only pending, admitted and cancelled;
+one compare-and-exchange chooses an irreversible verdict. Borrowed admitted work and released
+transport permits have separate lifetimes. [Cluster Interconnect](./interconnect.md#bounded-correlation-and-peer-owners)
+owns their delivery guarantees and bounds.
+
 **Client ingestors.** An ingestor's input is either a transport, which carries its source and the
 codec that decodes it, or a client source, which carries the schema its batches hold and its
 producer policy. There is no optional codec beside an optional schema, so an ingestor cannot claim
@@ -252,6 +264,10 @@ A submitted client batch is validated as a whole before any row is admitted: a s
 exactly one uncompressed record batch of the ingestor's canonical Arrow schema, with valid columns
 and within the row and byte limits, is refused with its typed defect. No value is cast, widened,
 coerced, or defaulted to make a batch fit, and no subset of a malformed batch is admitted.
+The shared Arrow IPC boundary checks canonical message framing, declared bodies and column buffer
+ranges before invoking Arrow's reader. A malformed frame reports `ArrowBodyError::Framing` for a
+relay or snapshot body and `ClientBatchError::Malformed` for a client batch; neither gains a partial
+row from it.
 
 Session replies carry typed command purpose and outcomes. An upload failure can carry an optional
 assigned nonzero resource version; before assignment, the version is absent. Diagnostic spans can

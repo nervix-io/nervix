@@ -121,6 +121,8 @@ fn subscription_interests_from_live_nodes(
 /// Atomic publication plus a cold-path change notification for creation handshakes.
 struct SubscriptionInterestPublication {
     index: ArcSwap<SubscriptionInterestIndex>,
+    /// The same membership writer publishes current process identities for ACK watcher lifetimes.
+    live_runs: ArcSwap<BTreeMap<ClusterNodeName, ClusterNodeIncarnation>>,
     changed: watch::Sender<()>,
 }
 
@@ -128,6 +130,7 @@ impl SubscriptionInterestPublication {
     fn new() -> Self {
         Self {
             index: ArcSwap::from_pointee(SubscriptionInterestIndex::default()),
+            live_runs: ArcSwap::from_pointee(BTreeMap::new()),
             changed: watch::channel(()).0,
         }
     }
@@ -135,6 +138,13 @@ impl SubscriptionInterestPublication {
     fn publish(&self, nodes: &BTreeMap<ChitchatId, NodeState>) {
         let index = subscription_interests_from_live_nodes(nodes);
         self.index.store(StdArc::new(index));
+        let mut runs = BTreeMap::new();
+        for node in nodes.keys() {
+            if let Some(identity) = cluster_node_identity(node) {
+                runs.insert(identity.node_id().clone(), identity.incarnation());
+            }
+        }
+        self.live_runs.store(StdArc::new(runs));
         self.changed.send_replace(());
     }
 
@@ -1703,6 +1713,18 @@ impl ClusterHandle {
             .is_some()
     }
 
+    /// Read the membership writer's immutable identity publication without a gossip lock.
+    pub(crate) fn live_node_incarnation(
+        &self,
+        node: &ClusterNodeName,
+    ) -> Option<ClusterNodeIncarnation> {
+        self.subscription_interest
+            .live_runs
+            .load()
+            .get(node)
+            .copied()
+    }
+
     pub(crate) fn subscription_interest_index(&self) -> Guard<StdArc<SubscriptionInterestIndex>> {
         self.subscription_interest.load()
     }
@@ -2549,6 +2571,26 @@ mod tests {
             "events",
             minimum_version,
         ));
+    }
+
+    #[test]
+    fn membership_publication_replaces_the_process_identity_for_remote_ack_watchers() {
+        let publication = SubscriptionInterestPublication::new();
+        let (node, state) = subscription_state("node-1", 7, 7101, &[]);
+        let name = ClusterNodeName::parse("node-1").assured("the fixture node is valid");
+        publication.publish(&BTreeMap::from([(node, state)]));
+        assert_eq!(
+            publication.live_runs.load().get(&name),
+            Some(&ClusterNodeIncarnation::new(7))
+        );
+        let (node, state) = subscription_state("node-1", 8, 7101, &[]);
+        publication.publish(&BTreeMap::from([(node, state)]));
+        assert_eq!(
+            publication.live_runs.load().get(&name),
+            Some(&ClusterNodeIncarnation::new(8))
+        );
+        publication.publish(&BTreeMap::new());
+        assert!(publication.live_runs.load().is_empty());
     }
 
     #[test]

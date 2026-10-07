@@ -87,6 +87,7 @@ tags = [
   "@memory_pressure_pause",
   "@client_io_03_consumer_restore",
   "@client_io_03_generation",
+  "@remote_ack_owners",
   "@backup_wait",
   "@restarted_voter_observation",
   "@udf_column_builder",
@@ -377,6 +378,36 @@ scenario = "Diagnostic server processes record a running detector and stop grace
 selections = ["deloxide", "deloxide-order"]
 
 [[workload]]
+coverage = "Bounded remote delivery and peer admission owners under interleaved branches, attached sink acknowledgement and Kafka source offset commit."
+examples = 2
+feature = "tests/features/runtime/remote_ack_owners.feature"
+id = "scenario.remote-ack-branches"
+invariant = "On one and three nodes, two interleaved branches complete all attached deliveries and commit their source offsets while remote correlation and admission owners retire their rows."
+invocation = "scenarios"
+scenario = "Interleaved branches complete attached deliveries and commit their source offsets"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
+coverage = "A lost remote acknowledgement, source redelivery and bounded correlation retirement."
+examples = 1
+feature = "tests/features/cluster/lost_remote_acknowledgements.feature"
+id = "scenario.remote-ack-loss"
+invariant = "Losing an acknowledgement on the return path redelivers the record instead of stalling its source and leaves no diagnostic lock finding."
+invocation = "scenarios"
+scenario = "A record acknowledgement lost on its way back to the relay owner is redelivered instead of stalling its source"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
+coverage = "Producer restart fencing of an acknowledgement for an earlier process incarnation."
+examples = 1
+feature = "tests/features/cluster/producer_restart_acknowledgements.feature"
+id = "scenario.remote-ack-restart"
+invariant = "An acknowledgement addressed to the earlier producer incarnation leaves new records pending and does not strand or alias owner state."
+invocation = "scenarios"
+scenario = "An acknowledgement addressed to a restarted producer's earlier process leaves its new records pending"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
 coverage = "The local report tool's selection, export, review and qualification."
 examples = 1
 feature = "tests/features/cluster/deadlock_reports.feature"
@@ -413,6 +444,12 @@ feature = "tests/features/cluster/backup_generation.feature"
 id = "scenario.restore-generation"
 invariant = "A complete restore generation of two 20 MiB or forty 1 MiB saves on one and three nodes preserves branches and source offsets through publication and restart."
 invocation = "scenarios"
+order_tags = [
+  "@order_generation_two_saves_single",
+  "@order_generation_two_saves_cluster",
+  "@order_generation_many_saves_single",
+  "@order_generation_many_saves_cluster",
+]
 scenario = "A complete restore generation with <branches> saves of <save_mib> MiB on <cluster_size> nodes preserves branches and source offsets"
 selections = ["deloxide", "deloxide-order"]
 
@@ -483,6 +520,12 @@ feature = "tests/features/cluster/backup_materialized.feature"
 id = "scenario.materialized-bulk-generations"
 invariant = "Materialized generations larger than the bulk budget resume on every assigned owner and replica."
 invocation = "scenarios"
+order_tags = [
+  "@order_resume_fanout_single",
+  "@order_resume_fanout_cluster",
+  "@order_resume_tenants_single",
+  "@order_resume_tenants_cluster",
+]
 scenario = "Materialized generations larger than the bulk budget resume on every assigned owner and replica"
 selections = ["deloxide", "deloxide-order"]
 
@@ -493,6 +536,7 @@ feature = "tests/features/cluster/backup_materialized.feature"
 id = "scenario.materialized-delayed-coordinator"
 invariant = "A delayed coordinator cannot replace a resumed materialized generation larger than the bulk budget."
 invocation = "scenarios"
+order_tags = ["@order_materialized_fanout", "@order_materialized_tenants"]
 scenario = "A delayed coordinator cannot replace a resumed materialized generation larger than the bulk budget"
 selections = ["deloxide", "deloxide-order"]
 
@@ -833,6 +877,14 @@ workloads = [
 ]
 
 [[owner]]
+path = "crates/interconnect/src/connection/relay_owner.rs"
+workloads = [
+  "scenario.remote-ack-branches",
+  "scenario.remote-ack-loss",
+  "scenario.remote-ack-restart",
+]
+
+[[owner]]
 path = "crates/nervix-roto/src/lib.rs"
 workloads = ["scenario.udf-column-builder"]
 
@@ -1005,6 +1057,14 @@ workloads = ["scenario.diagnostic-nodes"]
 [[owner]]
 path = "src/runtime/relay_channel.rs"
 workloads = ["scenario.diagnostic-nodes"]
+
+[[owner]]
+path = "src/runtime/remote_ack_owner.rs"
+workloads = [
+  "scenario.remote-ack-branches",
+  "scenario.remote-ack-loss",
+  "scenario.remote-ack-restart",
+]
 
 [[owner]]
 path = "src/runtime/state_store.rs"

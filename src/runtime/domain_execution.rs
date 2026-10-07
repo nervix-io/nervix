@@ -612,6 +612,7 @@ impl Runtime {
                         relay.remote_runtime_consumers,
                         None,
                         relay.branch_presence,
+                        self.domain_ack_root_tracker(domain),
                     )),
                 )
             })

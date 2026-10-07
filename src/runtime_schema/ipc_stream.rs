@@ -64,15 +64,14 @@ impl<'a> IpcMessages<'a> {
     pub(super) fn check(mut self) -> Result<(), Report<IpcFramingDefect>> {
         // Every message occupies at least its two frame words, so the walk ends within the stream.
         loop {
-            let Some(message) = self.next_message()? else {
+            if self.next_message()?.is_none() {
                 return Ok(());
-            };
-            Self::check_buffers(&message)?;
+            }
         }
     }
 
     /// The next message's header, or `None` at the end-of-stream marker, which must end the
-    /// stream. The message's body lies within the stream; nothing of it is read.
+    /// stream. Its body and every column buffer lie within the stream before any caller reads it.
     pub(super) fn next_message(&mut self) -> Result<Option<Message<'a>>, Report<IpcFramingDefect>> {
         let marker = self.take(FRAME_WORD)?;
         if marker != CONTINUATION_MARKER {
@@ -103,6 +102,7 @@ impl<'a> IpcMessages<'a> {
             return Err(Report::new(IpcFramingDefect::BodyLength));
         };
         self.take(body_length)?;
+        Self::check_buffers(&message)?;
         Ok(Some(message))
     }
 

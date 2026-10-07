@@ -74,6 +74,12 @@ enum FailedRelayAdmissionResolution {
 
 #[derive(Debug, Error, PartialEq, Eq)]
 pub(super) enum RemoteDispatchError {
+    #[error("remote correlation capacity ({capacity}) is exhausted")]
+    CorrelationCapacity { capacity: usize },
+    #[error("remote correlation identity space is exhausted")]
+    CorrelationIdentityExhausted,
+    #[error("remote acknowledgement owner could not reserve relay memory")]
+    CorrelationMemory,
     #[error("relay branch delivery {sequence} to node '{target}' was evicted before admission")]
     BranchEvicted {
         target: ClusterNodeName,
@@ -159,288 +165,23 @@ struct RemoteRelayAdmissionContext<'a> {
     admitted: &'a mut bool,
 }
 
-/// The remote acknowledgement correlation registry. The runtime and the `RemoteDispatcher` it
-/// attaches must observe one instance of this: the dispatcher allocates the correlation ids that
-/// the runtime resolves when acknowledgements come back over the interconnect.
-///
-/// Both maps hold only registrations this run of the node handed out, keyed by their number. A
-/// resolution resolves an entry only once the dispatcher confirms that it names this run.
-pub(super) struct RemoteDispatchRegistry {
-    next_ack_id: AtomicU64,
-    /// Record acknowledgements this node forwarded with relay deliveries, waiting for the nodes
-    /// the deliveries went to.
-    pending_acks: DashMap<u64, PendingRemoteAck, RandomState>,
-    pub(super) pending_relay_admissions:
-        DashMap<u64, watch::Sender<RelayAdmissionUpdate>, RandomState>,
+/// One row's receiver-side acknowledgement, owned by the batch that admitted it. The batch
+/// multiplexes progress and keepalive polls so a wide relay frame does not create a task per row.
+struct RemoteAckWatch {
+    completion: AckCompletion,
+    registration: RemoteAckRegistration,
+    discovery_deadline: Instant,
+    observed_registrar: bool,
 }
 
-/// A record acknowledgement this node forwarded with a relay delivery, waiting for the node the
-/// delivery went to.
-///
-/// Its atomics change only while it is in the registry, through a borrowed lookup under the
-/// shard's shared lock. Parked progress changes under the shard's exclusive lock. The sweep fails
-/// it only through an exclusive removal that rechecks the count, so the shard lock, not the
-/// atomics' ordering, orders that recheck after every report that reached the acknowledgement
-/// first.
-struct PendingRemoteAck {
-    /// The node the delivery went to, which reports and resolves the acknowledgement.
-    receiver: ClusterNodeName,
-    acks: AckSet,
-    /// Whether the receiver admitted the delivery. Until it has, the delivery's own admission wait
-    /// decides its failure, and sweeps pass the acknowledgement by.
-    admitted: AtomicBool,
-    /// Sweeps that found no report since the receiver last reported the acknowledgement, or since
-    /// its delivery was admitted.
-    silent_sweeps: AtomicU64,
-    /// A parked share remains unresolved while it releases the upstream ownership handoff.
-    required_wait: Option<AckParkGuard>,
-    /// Delayed progress cannot reverse a newer park or resume.
-    progress_sequence: Option<u64>,
-}
-
-impl PendingRemoteAck {
-    fn new(receiver: ClusterNodeName, acks: AckSet) -> Self {
-        Self {
-            receiver,
-            acks,
-            admitted: AtomicBool::new(false),
-            silent_sweeps: AtomicU64::new(0),
-            required_wait: None,
-            progress_sequence: None,
-        }
-    }
-
-    fn admit(&self) {
-        self.admitted.store(true, Ordering::Relaxed);
-    }
-
-    /// The receiver reported that it still holds the acknowledgement.
-    fn report(&self) {
-        self.silent_sweeps.store(0, Ordering::Relaxed);
-        self.acks.ack_alive();
-    }
-
-    fn progress(&mut self, sequence: u64, parked: bool) {
-        if self.progress_sequence.is_some_and(|seen| sequence <= seen) {
-            return;
-        }
-        self.progress_sequence = Some(sequence);
-        if parked {
-            if self.required_wait.is_none() {
-                self.required_wait = Some(AckParkGuard::new([&self.acks]));
-            }
-        } else {
-            self.required_wait = None;
-        }
-    }
-
-    /// Counts one sweep that found no report, and answers whether the receiver has now been silent
-    /// past the bound. An acknowledgement whose delivery was not admitted is never counted.
-    #[allow(deprecated)] // until try_update is stabilized
-    fn swept(&self) -> bool {
-        if !self.admitted.load(Ordering::Relaxed) {
-            return false;
-        }
-        #[allow(deprecated)] // until try_update is stabilized
-        let previous = self
-            .silent_sweeps
-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |sweeps| {
-                sweeps.checked_add(1)
-            })
-            .assured(
-                "each sweep counts once, and the first sweep past REMOTE_ACK_SILENT_SWEEPS \
-                 removes the acknowledgement unless a report reset its count to zero",
-            );
-        previous >= REMOTE_ACK_SILENT_SWEEPS
-    }
-
-    /// Whether the receiver has been silent past the bound, as the sweep's exclusive removal
-    /// rechecks it.
-    fn is_silent(&self) -> bool {
-        self.admitted.load(Ordering::Relaxed)
-            && self.silent_sweeps.load(Ordering::Relaxed) > REMOTE_ACK_SILENT_SWEEPS
-    }
-}
-
-impl RemoteDispatchRegistry {
-    pub(super) fn new() -> Self {
-        Self {
-            next_ack_id: AtomicU64::new(1),
-            pending_acks: DashMap::default(),
-            pending_relay_admissions: DashMap::default(),
-        }
-    }
-
-    /// The number of a new registration. Every run of the node numbers its registrations from one.
-    pub(super) fn next_ack_id(&self) -> u64 {
-        self.next_ack_id.fetch_add(1, Ordering::Relaxed)
-    }
-
-    /// Holds `acks`, forwarded to `receiver` under `ack_id`, until the receiver resolves them.
-    pub(super) fn register_ack(&self, ack_id: u64, receiver: ClusterNodeName, acks: AckSet) {
-        nervix_primitives::expect_lint!(
-            nervix::sync_acquisition,
-            "Typed Ratchet 05 https://app.clickup.com/t/86bc9erep: retain payload attempts and \
-             acknowledgement owners through terminal delivery",
-            self.pending_acks
-                .insert(ack_id, PendingRemoteAck::new(receiver, acks))
-        );
-    }
-
-    /// Starts waiting on the receiver's reports about the acknowledgement registered under
-    /// `ack_id`, now that the receiver admitted the delivery that carried it.
-    pub(super) fn admit_ack(&self, ack_id: u64) {
-        if let Some(pending) = nervix_primitives::expect_lint!(
-            nervix::sync_acquisition,
-            "Typed Ratchet 05 https://app.clickup.com/t/86bc9erep: retain payload attempts and \
-             acknowledgement owners through terminal delivery",
-            self.pending_acks.get(&ack_id)
-        ) {
-            pending.admit();
-        }
-    }
-
-    /// Starts waiting on the receiver's reports about every acknowledgement `registrations` names,
-    /// now that the receiver admitted the delivery that carried them.
-    pub(super) fn admit_acks(&self, registrations: &[Option<RemoteAckRegistration>]) {
-        for registration in registrations.iter().flatten() {
-            self.admit_ack(registration.ack_id);
-        }
-    }
-
-    /// Records the receiver's report that it still holds the acknowledgement registered under
-    /// `ack_id`, and answers whether this node was still waiting for it.
-    pub(super) fn report_ack(&self, ack_id: u64) -> bool {
-        let Some(pending) = nervix_primitives::expect_lint!(
-            nervix::sync_acquisition,
-            "Typed Ratchet 05 https://app.clickup.com/t/86bc9erep: retain payload attempts and \
-             acknowledgement owners through terminal delivery",
-            self.pending_acks.get(&ack_id)
-        ) else {
-            return false;
-        };
-        pending.report();
-        true
-    }
-
-    /// Applies a receiver's parked or resumed status in sequence order, while still counting even
-    /// a stale status as a liveness report for the silence timeout.
-    pub(super) fn progress_ack(&self, ack_id: u64, sequence: u64, parked: bool) -> bool {
-        let Some(mut pending) = nervix_primitives::expect_lint!(
-            nervix::sync_acquisition,
-            "Typed Ratchet 05 https://app.clickup.com/t/86bc9erep: retain payload attempts and \
-             acknowledgement owners through terminal delivery, including ordered parked and \
-             resumed progress",
-            self.pending_acks.get_mut(&ack_id)
-        ) else {
-            return false;
-        };
-        pending.progress(sequence, parked);
-        pending.report();
-        true
-    }
-
-    /// Resolves the acknowledgement registered under `ack_id` with the receiver's terminal
-    /// `outcome`, and answers whether this node was still waiting for it.
-    pub(super) fn resolve_ack(&self, ack_id: u64, outcome: AckOutcome) -> bool {
-        let Some((_, pending)) = nervix_primitives::expect_lint!(
-            nervix::sync_acquisition,
-            "Typed Ratchet 05 https://app.clickup.com/t/86bc9erep: retain payload attempts and \
-             acknowledgement owners through terminal delivery",
-            self.pending_acks.remove(&ack_id)
-        ) else {
-            return false;
-        };
-        match outcome {
-            AckOutcome::Ack => pending.acks.ack_success(),
-            AckOutcome::NoAck(error) => pending.acks.no_ack(error),
-        }
-        true
-    }
-
-    /// Stops waiting for the acknowledgement registered under `ack_id` because its delivery
-    /// failed. The caller resolves the acknowledgement itself.
-    pub(super) fn clear_ack(&self, ack_id: u64) {
-        nervix_primitives::expect_lint!(
-            nervix::sync_acquisition,
-            "Typed Ratchet 05 https://app.clickup.com/t/86bc9erep: retain payload attempts and \
-             acknowledgement owners through terminal delivery",
-            self.pending_acks.remove(&ack_id)
-        );
-    }
-
-    /// Whether this node still waits for the acknowledgement registered under `ack_id`.
-    #[cfg(test)]
-    pub(super) fn holds_ack(&self, ack_id: u64) -> bool {
-        self.pending_acks.contains_key(&ack_id)
-    }
-
-    /// Counts one sweep against every forwarded acknowledgement of an admitted delivery, fails each
-    /// one whose receiver reported nothing about it for `REMOTE_ACK_SILENCE_TIMEOUT`, and returns
-    /// how many it failed for each receiver.
-    pub(super) fn fail_silent_acks(&self) -> BTreeMap<ClusterNodeName, usize> {
-        let mut silent = Vec::new();
-        for pending in nervix_primitives::expect_lint!(
-            nervix::sync_acquisition,
-            "Typed Ratchet 05 https://app.clickup.com/t/86bc9erep: retain payload attempts and \
-             acknowledgement owners through terminal delivery",
-            self.pending_acks.iter()
-        ) {
-            if pending.swept() {
-                silent.push(*pending.key());
-            }
-        }
-        let mut failed = BTreeMap::new();
-        for ack_id in silent {
-            let removed = nervix_primitives::expect_lint!(
-                nervix::sync_acquisition,
-                "Typed Ratchet 05 https://app.clickup.com/t/86bc9erep: retain payload attempts \
-                 and acknowledgement owners through terminal delivery",
-                self.pending_acks
-                    .remove_if(&ack_id, |_, pending| pending.is_silent())
-            );
-            let Some((_, pending)) = removed else {
-                continue;
-            };
-            pending.acks.no_ack(format!(
-                "node '{}' reported nothing about the forwarded record for {}",
-                pending.receiver.as_str(),
-                humantime::format_duration(REMOTE_ACK_SILENCE_TIMEOUT)
-            ));
-            match failed.get_mut(&pending.receiver) {
-                Some(count) => {
-                    *count = usize::checked_add(*count, 1)
-                        .assured("one sweep fails at most the acknowledgements held in memory");
-                }
-                None => {
-                    failed.insert(pending.receiver, 1);
-                }
-            }
-        }
-        failed
-    }
-
-    /// Sweeps the forwarded acknowledgements once every `REMOTE_ACK_SILENCE_SWEEP_INTERVAL` for as
-    /// long as it runs, failing each one its receiver stopped reporting. A sweep that runs late
-    /// counts once, so a node whose own execution stalled does not fail acknowledgements whose
-    /// reports it could not receive meanwhile.
-    pub(super) async fn sweep_silent_acks(&self) {
-        let mut sweeps = nervix_primitives::time::interval(REMOTE_ACK_SILENCE_SWEEP_INTERVAL);
-        sweeps.set_missed_tick_behavior(nervix_primitives::time::MissedTickBehavior::Skip);
-        loop {
-            nervix_primitives::task::consume_budget().await;
-            sweeps.tick().await;
-            let failed = self.fail_silent_acks();
-            for (receiver, acknowledgements) in failed {
-                warn!(
-                    target_node = %receiver,
-                    acknowledgements,
-                    silence = %humantime::format_duration(REMOTE_ACK_SILENCE_TIMEOUT),
-                    "failed forwarded record acknowledgements the receiving node stopped reporting"
-                );
-            }
-        }
-    }
+async fn wait_remote_ack_progress(
+    mut watch: RemoteAckWatch,
+) -> (RemoteAckWatch, Option<AckProgress>) {
+    let progress = nervix_primitives::select! {
+        _ = sleep(REMOTE_ACK_ALIVE_INTERVAL) => None,
+        progress = watch.completion.wait_for_progress() => Some(progress),
+    };
+    (watch, progress)
 }
 
 fn remote_ack_progress(completion: &AckCompletion) -> RemoteAckOutcome {
@@ -464,6 +205,43 @@ pub(super) struct RemoteDispatcher {
     /// The same registry the attaching runtime holds, so an acknowledgement this dispatcher sent
     /// a correlation id for resolves against the entry the runtime is waiting on.
     pub(super) registry: Arc<RemoteDispatchRegistry>,
+}
+
+/// An outbound delivery retains every registration until admission, or resolves its held shares
+/// negatively when the delivery future is cancelled. Accepted rows pass to their delivery owner.
+pub(super) struct PendingRemoteAckDelivery {
+    registry: Arc<RemoteDispatchRegistry>,
+    registrations: Vec<Option<RemoteAckRegistration>>,
+    state: PendingRemoteAckDeliveryState,
+}
+
+enum PendingRemoteAckDeliveryState {
+    Registering,
+    Admitted,
+}
+
+impl PendingRemoteAckDelivery {
+    pub(super) fn registrations(&self) -> &[Option<RemoteAckRegistration>] {
+        &self.registrations
+    }
+
+    pub(super) fn admit(&mut self) {
+        self.registry.admit_acks(&self.registrations);
+        self.state = PendingRemoteAckDeliveryState::Admitted;
+    }
+}
+
+impl Drop for PendingRemoteAckDelivery {
+    fn drop(&mut self) {
+        if matches!(self.state, PendingRemoteAckDeliveryState::Registering) {
+            for registration in self.registrations.iter().flatten() {
+                self.registry.resolve_ack(
+                    registration.ack_id,
+                    AckOutcome::NoAck("remote delivery ended before admission".to_string()),
+                );
+            }
+        }
+    }
 }
 
 impl std::fmt::Debug for RemoteDispatcher {
@@ -494,9 +272,9 @@ impl RemoteDispatcher {
 
     /// A registration numbered in this process that names this run of the node, so its resolution
     /// can only ever resolve the entry registered under it here.
-    fn next_registration(&self) -> RemoteAckRegistration {
+    fn registration(&self, ack_id: u64) -> RemoteAckRegistration {
         RemoteAckRegistration {
-            ack_id: self.registry.next_ack_id(),
+            ack_id,
             registrar: ClusterNodeIdentity::new(
                 self.local_node_id().clone(),
                 self.local_node_incarnation(),
@@ -504,9 +282,8 @@ impl RemoteDispatcher {
         }
     }
 
-    /// Whether this run of the node handed out `registration`. Every run numbers its
-    /// registrations from one, so a registration an earlier run handed out can carry the number of
-    /// an entry this run holds.
+    /// Whether this run of the node handed out `registration`. Each registration includes the
+    /// process incarnation in addition to its delivery generation and record position.
     pub(super) fn registered(&self, registration: &RemoteAckRegistration) -> bool {
         registration.registrar.node_id() == self.local_node_id()
             && registration.registrar.incarnation() == self.local_node_incarnation()
@@ -514,22 +291,31 @@ impl RemoteDispatcher {
 
     /// Registers `acks` to be resolved by `receiver`, the node the returned registration is sent
     /// to.
+    #[cfg(test)]
     pub(super) fn register_pending_ack(
         &self,
         receiver: &ClusterNodeName,
         acks: AckSet,
-    ) -> RemoteAckRegistration {
-        let registration = self.next_registration();
-        self.registry
-            .register_ack(registration.ack_id, receiver.clone(), acks);
-        registration
+    ) -> error_stack::Result<RemoteAckRegistration, RemoteDispatchError> {
+        let id = self.registry.register_ack(receiver.clone(), acks)?;
+        Ok(self.registration(id))
     }
 
-    /// Starts waiting on the receiver's reports about the acknowledgements a delivery carried, now
-    /// that the receiver admitted the delivery. From here on, an acknowledgement its receiver
-    /// reports nothing about for `REMOTE_ACK_SILENCE_TIMEOUT` fails.
-    pub(super) fn admit_pending_acks(&self, registrations: &[Option<RemoteAckRegistration>]) {
-        self.registry.admit_acks(registrations);
+    pub(super) fn register_pending_acks(
+        &self,
+        receiver: &ClusterNodeName,
+        acks: Vec<AckSet>,
+    ) -> error_stack::Result<PendingRemoteAckDelivery, RemoteDispatchError> {
+        let ids = self.registry.register_acks(receiver.clone(), acks)?;
+        let registrations = ids
+            .into_iter()
+            .map(|id| id.map(|id| self.registration(id)))
+            .collect();
+        Ok(PendingRemoteAckDelivery {
+            registry: self.registry.clone(),
+            registrations,
+            state: PendingRemoteAckDeliveryState::Registering,
+        })
     }
 
     pub(super) fn forwarded_ack(acks: &AckSet) -> AckSet {
@@ -544,29 +330,16 @@ impl RemoteDispatcher {
     /// to, and returns the updates its resolutions publish.
     pub(super) fn register_pending_relay_admission(
         &self,
-    ) -> (RemoteAckRegistration, watch::Receiver<RelayAdmissionUpdate>) {
-        let registration = self.next_registration();
-        let (sender, receiver) = watch::channel(RelayAdmissionUpdate::Pending);
-        nervix_primitives::expect_lint!(
-            nervix::sync_acquisition,
-            "Typed Ratchet 05 https://app.clickup.com/t/86bc9erep: retain payload attempts and \
-             acknowledgement owners through terminal delivery",
-            self.registry
-                .pending_relay_admissions
-                .insert(registration.ack_id, sender)
-        );
-        (registration, receiver)
+    ) -> error_stack::Result<
+        (RemoteAckRegistration, watch::Receiver<RelayAdmissionUpdate>),
+        RemoteDispatchError,
+    > {
+        let (id, receiver) = self.registry.register_admission()?;
+        Ok((self.registration(id), receiver))
     }
 
     pub(super) fn clear_pending_relay_admission(&self, registration: &RemoteAckRegistration) {
-        nervix_primitives::expect_lint!(
-            nervix::sync_acquisition,
-            "Typed Ratchet 05 https://app.clickup.com/t/86bc9erep: retain payload attempts and \
-             acknowledgement owners through terminal delivery",
-            self.registry
-                .pending_relay_admissions
-                .remove(&registration.ack_id)
-        );
+        self.registry.clear_ack(registration.ack_id);
     }
 
     pub(super) async fn request_with_timeout<M>(
@@ -614,7 +387,7 @@ impl RemoteDispatcher {
         let mut cancellation_guard = self
             .interconnect
             .relay_cancellation_guard(node_id.clone(), delivery);
-        let (registration, admission) = self.register_pending_relay_admission();
+        let (registration, admission) = self.register_pending_relay_admission()?;
         payload.admission = Some(registration.clone());
         let dispatch = self.dispatch(node_id, Envelope::RelayPayload(payload));
         tokio::pin!(dispatch);
@@ -1258,19 +1031,35 @@ impl Runtime {
                 )));
             }
         };
-        let acks = remote
-            .acks
-            .into_iter()
-            .map(|ack| {
-                if let Some(ack) = ack {
-                    let (acks, completion) = self.tracked_ack_root(&remote.domain);
-                    self.spawn_remote_ack_watcher(remote.domain.clone(), completion, Some(ack));
-                    acks
-                } else {
-                    AckSet::empty()
-                }
-            })
-            .collect::<Vec<_>>();
+        let watch_count = remote.acks.iter().flatten().count();
+        let watcher_owner = self
+            .reserve_remote_ack_watcher_memory(watch_count)
+            .map_err(|report| RuntimeError::RemoteAckAdmission {
+                domain: remote.domain.clone(),
+                report,
+            })?;
+        let mut watches = Vec::with_capacity(watch_count);
+        let mut acks = Vec::with_capacity(remote.acks.len());
+        for registration in remote.acks {
+            let Some(registration) = registration else {
+                acks.push(AckSet::empty());
+                continue;
+            };
+            let (record_acks, completion) =
+                AckSet::tracked_root(services.domain_ack_tracker.clone());
+            watches.push(RemoteAckWatch {
+                completion,
+                registration,
+                discovery_deadline: Instant::now()
+                    .checked_add(REMOTE_RELAY_INSTANTIATION_WAIT)
+                    .assured("the bounded registrar discovery grace fits the monotonic clock"),
+                observed_registrar: false,
+            });
+            acks.push(record_acks);
+        }
+        if let Some((dispatcher, memory)) = watcher_owner {
+            self.spawn_remote_ack_watchers(remote.domain.clone(), dispatcher, watches, memory);
+        }
         let batch = RelayRecordBatch::from_runtime_batch(
             schema,
             decoded.key,
@@ -1417,10 +1206,10 @@ impl Runtime {
 
     /// Resolves the admission or record acknowledgement that `resolution` names.
     ///
-    /// Only a registration this run of the node handed out is resolved. A receiver keeps resolving
-    /// what an earlier run of the node registered after that run ended, and the earlier run
-    /// numbered its registrations from one as this run does, so a resolution naming another run is
-    /// rejected rather than resolving the entry this run holds under the same number.
+    /// Only a registration this run of the node handed out is resolved. Receivers can keep
+    /// resolving registrations after their registrar run ends. A new run can produce the same
+    /// numeric route from its own positions and generations, so the full registrar identity fences
+    /// those replies before routing them to the exact delivery generation and row this run holds.
     pub(crate) fn handle_remote_ack_resolution(&self, resolution: RemoteAckResolution) {
         let RemoteAckResolution {
             registration,
@@ -1444,200 +1233,153 @@ impl Runtime {
             return;
         }
         let ack_id = registration.ack_id;
-        if outcome.is_progress() {
-            if let Some(admission) = nervix_primitives::expect_lint!(
-                nervix::sync_acquisition,
-                "Typed Ratchet 05 https://app.clickup.com/t/86bc9erep: retain payload attempts \
-                 and acknowledgement owners through terminal delivery",
-                self.inner
-                    .remote_dispatch
-                    .pending_relay_admissions
-                    .get(&ack_id)
-            ) {
-                if admission.is_closed() {
-                    drop(admission);
-                    nervix_primitives::expect_lint!(
-                        nervix::sync_acquisition,
-                        "Typed Ratchet 05 https://app.clickup.com/t/86bc9erep: retain payload \
-                         attempts and acknowledgement owners through terminal delivery",
-                        self.inner
-                            .remote_dispatch
-                            .pending_relay_admissions
-                            .remove(&ack_id)
-                    );
-                } else {
-                    admission.send_if_modified(|update| {
-                        if let RelayAdmissionUpdate::Admitted | RelayAdmissionUpdate::Rejected(_) =
-                            update
-                        {
-                            return false;
-                        }
-                        *update = RelayAdmissionUpdate::Alive;
-                        true
-                    });
-                }
-                return;
-            }
-            // A report can follow the acknowledgement's failure: the receiver keeps reporting a
-            // record whose reports this node stopped hearing for the whole silence bound.
-            let reported = match outcome {
-                RemoteAckOutcome::Alive => self.inner.remote_dispatch.report_ack(ack_id),
-                RemoteAckOutcome::Progress { sequence, parked } => self
-                    .inner
-                    .remote_dispatch
-                    .progress_ack(ack_id, sequence, parked),
-                RemoteAckOutcome::Ack | RemoteAckOutcome::NoAck(_) => unreachable!(),
-            };
-            if !reported {
-                debug!(ack_id, "received remote ack progress for unknown ack id");
-                return;
-            }
-            trace!(ack_id, "received remote ack progress");
-            return;
-        }
-
-        if let Some((_, admission)) = nervix_primitives::expect_lint!(
-            nervix::sync_acquisition,
-            "Typed Ratchet 05 https://app.clickup.com/t/86bc9erep: retain payload attempts and \
-             acknowledgement owners through terminal delivery",
-            self.inner
+        let found = match outcome {
+            RemoteAckOutcome::Alive => self.inner.remote_dispatch.report_ack(ack_id),
+            RemoteAckOutcome::Progress { sequence, parked } => self
+                .inner
                 .remote_dispatch
-                .pending_relay_admissions
-                .remove(&ack_id)
-        ) {
-            let terminal_update = match outcome {
-                RemoteAckOutcome::Ack => RelayAdmissionUpdate::Admitted,
-                RemoteAckOutcome::NoAck(error) => RelayAdmissionUpdate::Rejected(error),
-                RemoteAckOutcome::Alive | RemoteAckOutcome::Progress { .. } => return,
-            };
-            admission.send_if_modified(|update| {
-                if let RelayAdmissionUpdate::Admitted | RelayAdmissionUpdate::Rejected(_) = update {
-                    return false;
-                }
-                *update = terminal_update;
-                true
-            });
-            return;
-        }
-
-        let outcome = match outcome {
-            RemoteAckOutcome::Ack => AckOutcome::Ack,
-            RemoteAckOutcome::NoAck(error) => AckOutcome::NoAck(error),
-            RemoteAckOutcome::Alive | RemoteAckOutcome::Progress { .. } => return,
+                .progress_ack(ack_id, sequence, parked),
+            RemoteAckOutcome::Ack => self
+                .inner
+                .remote_dispatch
+                .resolve_ack(ack_id, AckOutcome::Ack),
+            RemoteAckOutcome::NoAck(error) => self
+                .inner
+                .remote_dispatch
+                .resolve_ack(ack_id, AckOutcome::NoAck(error)),
         };
-        trace!(ack_id, outcome = ?outcome, "resolving remote ack");
-        // An outcome can follow the acknowledgement's failure, when the sweep failed it after the
-        // receiver fell silent, or when its delivery failed after the receiver admitted it.
-        if !self.inner.remote_dispatch.resolve_ack(ack_id, outcome) {
-            debug!(ack_id, "received remote ack resolution for unknown ack id");
+        if !found {
+            debug!(
+                ack_id,
+                "received remote acknowledgement for an unknown registration"
+            );
         }
     }
 
+    fn reserve_remote_ack_watcher_memory(
+        &self,
+        count: usize,
+    ) -> error_stack::Result<
+        Option<(StdArc<RemoteDispatcher>, nervix_execution::Reservation)>,
+        nervix_execution::AdmissionError,
+    > {
+        if count == 0 {
+            return Ok(None);
+        }
+        let Some(dispatcher) = self.inner.remote_dispatcher.load_full() else {
+            return Ok(None);
+        };
+        // A row's poll future, queue node, ACK root, and registration fit within this charge.
+        // One batch owns one task and its scheduler allocation, even for a wide relay frame.
+        let bytes = count
+            .checked_mul(1024)
+            .and_then(|bytes| bytes.checked_add(4096))
+            .assured("one bounded relay frame's ACK watchers fit in usize");
+        let memory = dispatcher.executor.try_reserve(
+            nervix_execution::MemoryClass::Relay,
+            u64::try_from(bytes).assured("one relay frame's watcher allocation fits in u64"),
+        )?;
+        Ok(Some((dispatcher, memory)))
+    }
+
+    #[cfg(test)]
     pub(in crate::runtime) fn spawn_remote_ack_watcher(
         &self,
         domain: DomainName,
         completion: AckCompletion,
         ack: Option<RemoteAckRegistration>,
-    ) {
+    ) -> error_stack::Result<(), nervix_execution::AdmissionError> {
         let Some(ack) = ack else {
-            return;
+            return Ok(());
         };
-        let Some(dispatcher) = self.inner.remote_dispatcher.load_full() else {
-            return;
+        let Some((dispatcher, memory)) = self.reserve_remote_ack_watcher_memory(1)? else {
+            return Ok(());
         };
+        self.spawn_remote_ack_watchers(
+            domain,
+            dispatcher,
+            vec![RemoteAckWatch {
+                completion,
+                registration: ack,
+                discovery_deadline: Instant::now()
+                    .checked_add(REMOTE_RELAY_INSTANTIATION_WAIT)
+                    .assured("the bounded registrar discovery grace fits the monotonic clock"),
+                observed_registrar: false,
+            }],
+            memory,
+        );
+        Ok(())
+    }
+
+    #[cfg_attr(
+        nervix_lint,
+        nervix::dispatch(reason = "the receiver batch owns the bounded set of row progress \
+                                   futures that this stream polls")
+    )]
+    fn spawn_remote_ack_watchers(
+        &self,
+        domain: DomainName,
+        dispatcher: StdArc<RemoteDispatcher>,
+        watches: Vec<RemoteAckWatch>,
+        memory: nervix_execution::Reservation,
+    ) {
         let fault_injection = self.inner.fault_injection.clone();
-        self.spawn_remote_ack_watcher_task(async move {
-            let mut completion = completion;
-            loop {
-                nervix_primitives::select! {
-                    _ = sleep(REMOTE_ACK_ALIVE_INTERVAL) => {
-                        trace!(
-                            domain = domain.as_str(),
-                            ack_id = ack.ack_id,
-                            target_node = %ack.registrar,
-                            "sending remote ack alive"
-                        );
-                        if let Err(error) = dispatcher
-                            .dispatch(
-                                ack.registrar.node_id(),
-                                Envelope::Ack(ack.resolution(remote_ack_progress(&completion))),
-                            )
-                            .await
-                        {
-                            warn!(
-                                domain = domain.as_str(),
-                                ack_id = ack.ack_id,
-                                target_node = %ack.registrar,
-                                error = %error,
-                                "failed to return remote ack alive"
-                            );
-                        }
+        let watcher = async move {
+            let _memory = memory;
+            let mut pending = FuturesUnordered::new();
+            for watch in watches {
+                pending.push(wait_remote_ack_progress(watch));
+            }
+            while let Some((mut watch, progress)) = pending.next().await {
+                let ack = &watch.registration;
+                match dispatcher
+                    .cluster
+                    .live_node_incarnation(ack.registrar.node_id())
+                {
+                    Some(incarnation) if incarnation != ack.registrar.incarnation() => continue,
+                    Some(_) => watch.observed_registrar = true,
+                    None if watch.observed_registrar
+                        || Instant::now() >= watch.discovery_deadline =>
+                    {
+                        continue;
                     }
-                    progress = completion.wait_for_progress() => {
-                        match progress {
-                            AckProgress::Alive => {
-                                trace!(
-                                    domain = domain.as_str(),
-                                    ack_id = ack.ack_id,
-                                    target_node = %ack.registrar,
-                                    "forwarding remote ack alive"
-                                );
-                                if let Err(error) = dispatcher
-                                    .dispatch(
-                                        ack.registrar.node_id(),
-                                        Envelope::Ack(ack.resolution(remote_ack_progress(&completion))),
-                                    )
-                                    .await
-                                {
-                                    warn!(
-                                        domain = domain.as_str(),
-                                        ack_id = ack.ack_id,
-                                        target_node = %ack.registrar,
-                                        error = %error,
-                                        "failed to forward remote ack alive"
-                                    );
-                                }
-                            }
-                            AckProgress::Complete(outcome) => {
-                                trace!(
-                                    domain = domain.as_str(),
-                                    ack_id = ack.ack_id,
-                                    target_node = %ack.registrar,
-                                    outcome = ?outcome,
-                                    "sending remote ack resolution"
-                                );
-                                let outcome = match outcome {
-                                    AckOutcome::Ack => RemoteAckOutcome::Ack,
-                                    AckOutcome::NoAck(error) => RemoteAckOutcome::NoAck(error),
-                                };
-                                if fault_injection.loses_remote_acknowledgement(
-                                    dispatcher.local_node_id(),
-                                    ack.registrar.node_id(),
-                                ) {
-                                    break;
-                                }
-                                if let Err(error) = dispatcher
-                                    .dispatch(
-                                        ack.registrar.node_id(),
-                                        Envelope::Ack(ack.resolution(outcome)),
-                                    )
-                                    .await
-                                {
-                                    warn!(
-                                        domain = domain.as_str(),
-                                        ack_id = ack.ack_id,
-                                        target_node = %ack.registrar,
-                                        error = %error,
-                                        "failed to return remote ack resolution"
-                                    );
-                                }
-                                break;
-                            }
-                        }
+                    None => {}
+                }
+                let terminal = matches!(progress, Some(AckProgress::Complete(_)));
+                let outcome = match progress {
+                    Some(AckProgress::Complete(AckOutcome::Ack)) => RemoteAckOutcome::Ack,
+                    Some(AckProgress::Complete(AckOutcome::NoAck(error))) => {
+                        RemoteAckOutcome::NoAck(error)
                     }
+                    Some(AckProgress::Alive) | None => remote_ack_progress(&watch.completion),
+                };
+                trace!(domain = domain.as_str(), ack_id = ack.ack_id, target_node = %ack.registrar,
+                    terminal, "sending remote ack progress");
+                if terminal
+                    && fault_injection.loses_remote_acknowledgement(
+                        dispatcher.local_node_id(),
+                        ack.registrar.node_id(),
+                    )
+                {
+                    continue;
+                }
+                if let Err(error) = dispatcher
+                    .dispatch(
+                        ack.registrar.node_id(),
+                        Envelope::Ack(ack.resolution(outcome)),
+                    )
+                    .await
+                {
+                    warn!(domain = domain.as_str(), ack_id = ack.ack_id,
+                        target_node = %ack.registrar, error = %error,
+                        "failed to return remote ack progress");
+                }
+                if !terminal {
+                    pending.push(wait_remote_ack_progress(watch));
                 }
             }
-        });
+        };
+        self.spawn_remote_ack_watcher_task(watcher);
     }
 
     fn spawn_remote_ack_watcher_task(
@@ -1897,6 +1639,125 @@ mod tests {
         (runtime, dispatcher)
     }
 
+    #[nervix_primitives::test]
+    async fn a_cancelled_remote_delivery_resolves_its_records_and_returns_its_owner() {
+        let (runtime, dispatcher) = joined_runtime().await;
+        let (acks, completion) = AckSet::root();
+        let delivery = dispatcher
+            .register_pending_acks(&receiving_node(), vec![acks])
+            .assured("the fixture delivery fits");
+        let registration = delivery.registrations()[0]
+            .clone()
+            .assured("the fixture row has an acknowledgement");
+        assert!(dispatcher.registry.holds_ack(registration.ack_id));
+        drop(delivery);
+        assert_eq!(
+            completion.wait().await,
+            AckOutcome::NoAck("remote delivery ended before admission".to_string())
+        );
+        assert!(!dispatcher.registry.holds_ack(registration.ack_id));
+        assert_eq!(
+            dispatcher.executor.snapshot().relay_memory.reserved_bytes,
+            0
+        );
+        runtime.shutdown().await;
+    }
+
+    #[nervix_primitives::test]
+    async fn remote_ack_watcher_memory_is_released_when_the_registrar_run_differs() {
+        let (runtime, dispatcher) = joined_runtime().await;
+        let (acks, completion) = AckSet::root();
+        let registration = from_an_earlier_run(&dispatcher.registration(1));
+        runtime
+            .spawn_remote_ack_watcher(
+                named::<DomainName>("watcher"),
+                completion,
+                Some(registration),
+            )
+            .assured("the fixture watcher fits");
+        timeout(ASYNC_EVENT_FAILSAFE, async {
+            while runtime.inner.remote_ack_watcher_tasks.len() > 1 {
+                nervix_primitives::task::yield_now().await;
+            }
+        })
+        .await
+        .assured("the published registrar incarnation ends the stale watcher");
+        assert_eq!(
+            dispatcher.executor.snapshot().relay_memory.reserved_bytes,
+            0
+        );
+        acks.ack_success();
+        runtime.shutdown().await;
+    }
+
+    #[nervix_primitives::test]
+    async fn wide_remote_ack_batch_owns_one_charged_task_and_releases_it_on_shutdown() {
+        let (runtime, dispatcher) = joined_runtime().await;
+        let count = 8192;
+        let mut roots = Vec::with_capacity(count);
+        let mut watches = Vec::with_capacity(count);
+        for _ in 0..count {
+            let (root, completion) = AckSet::root();
+            roots.push(root);
+            watches.push(RemoteAckWatch {
+                completion,
+                registration: dispatcher.registration(1),
+                discovery_deadline: Instant::now()
+                    .checked_add(REMOTE_RELAY_INSTANTIATION_WAIT)
+                    .assured("the fixture discovery grace fits the clock"),
+                observed_registrar: false,
+            });
+        }
+        let (dispatcher, memory) = runtime
+            .reserve_remote_ack_watcher_memory(count)
+            .assured("the wide batch fits its relay budget")
+            .assured("the runtime has joined its cluster");
+        let executor = dispatcher.executor.clone();
+        let expected_bytes = u64::try_from(count * 1024 + 4096)
+            .assured("the fixture's watcher allocation fits in u64");
+        assert_eq!(memory.bytes(), expected_bytes);
+        runtime.spawn_remote_ack_watchers(
+            named::<DomainName>("watcher"),
+            dispatcher,
+            watches,
+            memory,
+        );
+        assert_eq!(runtime.inner.remote_ack_watcher_tasks.len(), 2);
+        assert_eq!(
+            executor.snapshot().relay_memory.reserved_bytes,
+            expected_bytes,
+        );
+        runtime.shutdown().await;
+        assert_eq!(executor.snapshot().relay_memory.reserved_bytes, 0,);
+        drop(roots);
+    }
+
+    #[nervix_primitives::test]
+    async fn remote_ack_watcher_refusal_preserves_the_typed_memory_cause() {
+        let (runtime, dispatcher) = joined_runtime().await;
+        let capacity = dispatcher.executor.snapshot().relay_memory.capacity_bytes;
+        let occupied = dispatcher
+            .executor
+            .try_reserve(nervix_execution::MemoryClass::Relay, capacity)
+            .assured("the fixture reserves exactly its relay budget");
+        let (acks, completion) = AckSet::root();
+        let error = runtime
+            .spawn_remote_ack_watcher(
+                named::<DomainName>("watcher"),
+                completion,
+                Some(dispatcher.registration(1)),
+            )
+            .expect_err("a watcher must reserve its retained memory");
+        assert!(matches!(
+            error.current_context(),
+            nervix_execution::AdmissionError::BudgetExhausted { .. }
+        ));
+        assert_eq!(runtime.inner.remote_ack_watcher_tasks.len(), 1);
+        drop(occupied);
+        acks.no_ack("fixture refusal");
+        runtime.shutdown().await;
+    }
+
     /// The node the tests' deliveries go to, which resolves the acknowledgements they forward.
     fn receiving_node() -> ClusterNodeName {
         ClusterNodeName::parse("node-2").expect("the fixture node name is valid")
@@ -1925,7 +1786,9 @@ mod tests {
         nervix_primitives::time::pause();
         let (shutdown_tx, mut shutdown_rx) = watch::channel(false);
         let (acks, completion) = AckSet::root();
-        let registration = dispatcher.register_pending_ack(&receiving_node(), acks);
+        let registration = dispatcher
+            .register_pending_ack(&receiving_node(), acks)
+            .assured("the fixture has free correlation capacity");
         let runtime_task = runtime.clone();
         let resolved = registration.clone();
 
@@ -1957,7 +1820,9 @@ mod tests {
         let (runtime, dispatcher) = joined_runtime().await;
         let tracker = Arc::new(AckRootTracker::default());
         let (acks, completion) = AckSet::tracked_root(tracker.clone());
-        let registration = dispatcher.register_pending_ack(&receiving_node(), acks);
+        let registration = dispatcher
+            .register_pending_ack(&receiving_node(), acks)
+            .assured("the fixture has free correlation capacity");
         dispatcher.registry.admit_ack(registration.ack_id);
         assert_eq!(tracker.outstanding_for_ownership_handoff(), 1);
 
@@ -1991,7 +1856,9 @@ mod tests {
     async fn remote_relay_admission_alive_resets_dispatch_timeout() {
         let (runtime, dispatcher) = joined_runtime().await;
         nervix_primitives::time::pause();
-        let (registration, admission_rx) = dispatcher.register_pending_relay_admission();
+        let (registration, admission_rx) = dispatcher
+            .register_pending_relay_admission()
+            .assured("the fixture has free correlation capacity");
         let runtime_task = runtime.clone();
         let resolved = registration.clone();
 
@@ -2010,12 +1877,7 @@ mod tests {
         .await
         .expect("alive progress should preserve the relay admission wait");
         assert!(
-            runtime
-                .inner
-                .remote_dispatch
-                .pending_relay_admissions
-                .get(&registration.ack_id)
-                .is_none(),
+            !runtime.inner.remote_dispatch.holds_ack(registration.ack_id),
             "terminal admission ack must clear pending admission state"
         );
     }
@@ -2024,7 +1886,9 @@ mod tests {
     async fn a_resolution_addressed_to_an_earlier_run_leaves_the_pending_ack_unresolved() {
         let (runtime, dispatcher) = joined_runtime().await;
         let (acks, completion) = AckSet::root();
-        let registration = dispatcher.register_pending_ack(&receiving_node(), acks);
+        let registration = dispatcher
+            .register_pending_ack(&receiving_node(), acks)
+            .assured("the fixture has free correlation capacity");
         let completion = completion.wait();
         tokio::pin!(completion);
 
@@ -2053,7 +1917,9 @@ mod tests {
     #[nervix_primitives::test]
     async fn a_resolution_addressed_to_an_earlier_run_leaves_the_relay_admission_pending() {
         let (runtime, dispatcher) = joined_runtime().await;
-        let (registration, mut admission_rx) = dispatcher.register_pending_relay_admission();
+        let (registration, mut admission_rx) = dispatcher
+            .register_pending_relay_admission()
+            .assured("the fixture has free correlation capacity");
 
         let earlier = from_an_earlier_run(&registration);
         runtime.handle_remote_ack_resolution(earlier.resolution(RemoteAckOutcome::Alive));
@@ -2083,8 +1949,12 @@ mod tests {
     async fn a_cleared_registration_ignores_a_late_resolution() {
         let (runtime, dispatcher) = joined_runtime().await;
         let (acks, completion) = AckSet::root();
-        let acknowledgement = dispatcher.register_pending_ack(&receiving_node(), acks.clone());
-        let (admission, admission_rx) = dispatcher.register_pending_relay_admission();
+        let acknowledgement = dispatcher
+            .register_pending_ack(&receiving_node(), acks.clone())
+            .assured("the fixture has free correlation capacity");
+        let (admission, admission_rx) = dispatcher
+            .register_pending_relay_admission()
+            .assured("the fixture has free correlation capacity");
 
         dispatcher.clear_pending_ack(&acknowledgement);
         dispatcher.clear_pending_relay_admission(&admission);
@@ -2108,17 +1978,15 @@ mod tests {
     #[nervix_primitives::test]
     async fn progress_for_an_abandoned_admission_retires_its_registration() {
         let (runtime, dispatcher) = joined_runtime().await;
-        let (admission, admission_rx) = dispatcher.register_pending_relay_admission();
+        let (admission, admission_rx) = dispatcher
+            .register_pending_relay_admission()
+            .assured("the fixture has free correlation capacity");
         drop(admission_rx);
 
         runtime.handle_remote_ack_resolution(admission.resolution(RemoteAckOutcome::Alive));
 
         assert!(
-            !runtime
-                .inner
-                .remote_dispatch
-                .pending_relay_admissions
-                .contains_key(&admission.ack_id),
+            !runtime.inner.remote_dispatch.holds_ack(admission.ack_id),
             "an admission nobody waits for is retired by its next progress report"
         );
     }
@@ -2127,14 +1995,15 @@ mod tests {
     async fn a_node_outside_a_cluster_resolves_nothing() {
         let runtime = Runtime::default();
         let (acks, completion) = AckSet::root();
-        runtime
+        let ack_id = runtime
             .inner
             .remote_dispatch
-            .register_ack(1, receiving_node(), acks);
+            .register_ack(receiving_node(), acks)
+            .assured("the fixture has free correlation capacity");
         let completion = completion.wait();
         tokio::pin!(completion);
         let registration = RemoteAckRegistration {
-            ack_id: 1,
+            ack_id,
             registrar: ClusterNodeIdentity::new(
                 ClusterNodeName::parse("node-1").expect("the fixture node name is valid"),
                 ClusterNodeIncarnation::new(1),
@@ -2214,7 +2083,9 @@ mod tests {
     #[nervix_primitives::test]
     async fn remote_relay_admission_progress_is_coalesced() {
         let (runtime, dispatcher) = joined_runtime().await;
-        let (registration, mut admission_rx) = dispatcher.register_pending_relay_admission();
+        let (registration, mut admission_rx) = dispatcher
+            .register_pending_relay_admission()
+            .assured("the fixture has free correlation capacity");
 
         for _ in 0..100 {
             runtime.handle_remote_ack_resolution(registration.resolution(RemoteAckOutcome::Alive));
@@ -2345,10 +2216,11 @@ mod tests {
 
     impl ForwardedAck {
         fn registered() -> Self {
-            let registry = RemoteDispatchRegistry::new();
+            let registry = RemoteDispatchRegistry::with_capacity(8);
             let (acks, completion) = AckSet::root();
-            let ack_id = registry.next_ack_id();
-            registry.register_ack(ack_id, receiving_node(), acks);
+            let ack_id = registry
+                .register_ack(receiving_node(), acks)
+                .assured("the fixture has free correlation capacity");
             Self {
                 registry,
                 ack_id,
@@ -2408,12 +2280,13 @@ mod tests {
 
     #[nervix_primitives::test]
     async fn one_sweep_counts_every_acknowledgement_it_fails_against_its_receiver() {
-        let registry = RemoteDispatchRegistry::new();
+        let registry = RemoteDispatchRegistry::with_capacity(8);
         let mut completions = Vec::new();
         for _ in 0..2 {
             let (acks, completion) = AckSet::root();
-            let ack_id = registry.next_ack_id();
-            registry.register_ack(ack_id, receiving_node(), acks);
+            let ack_id = registry
+                .register_ack(receiving_node(), acks)
+                .assured("the fixture has free correlation capacity");
             registry.admit_ack(ack_id);
             completions.push(completion);
         }
@@ -2486,10 +2359,11 @@ mod tests {
 
     #[nervix_primitives::test(start_paused = true)]
     async fn the_running_sweep_fails_an_acknowledgement_at_the_silence_bound() {
-        let registry = Arc::new(RemoteDispatchRegistry::new());
+        let registry = Arc::new(RemoteDispatchRegistry::with_capacity(8));
         let (acks, completion) = AckSet::root();
-        let ack_id = registry.next_ack_id();
-        registry.register_ack(ack_id, receiving_node(), acks);
+        let ack_id = registry
+            .register_ack(receiving_node(), acks)
+            .assured("the fixture has free correlation capacity");
         registry.admit_ack(ack_id);
         let admitted_at = Instant::now();
         let sweeping = registry.clone();
@@ -2513,10 +2387,11 @@ mod tests {
 
     #[nervix_primitives::test(start_paused = true)]
     async fn the_running_sweep_keeps_an_acknowledgement_its_receiver_keeps_reporting() {
-        let registry = Arc::new(RemoteDispatchRegistry::new());
+        let registry = Arc::new(RemoteDispatchRegistry::with_capacity(8));
         let (acks, completion) = AckSet::root();
-        let ack_id = registry.next_ack_id();
-        registry.register_ack(ack_id, receiving_node(), acks);
+        let ack_id = registry
+            .register_ack(receiving_node(), acks)
+            .assured("the fixture has free correlation capacity");
         registry.admit_ack(ack_id);
         let sweeping = registry.clone();
         let sweeps =
@@ -2536,10 +2411,11 @@ mod tests {
 
     #[nervix_primitives::test(start_paused = true)]
     async fn a_stalled_sweep_counts_once_for_the_time_it_missed() {
-        let registry = Arc::new(RemoteDispatchRegistry::new());
+        let registry = Arc::new(RemoteDispatchRegistry::with_capacity(8));
         let (acks, _completion) = AckSet::root();
-        let ack_id = registry.next_ack_id();
-        registry.register_ack(ack_id, receiving_node(), acks);
+        let ack_id = registry
+            .register_ack(receiving_node(), acks)
+            .assured("the fixture has free correlation capacity");
         registry.admit_ack(ack_id);
         let sweeping = registry.clone();
         let sweeps =

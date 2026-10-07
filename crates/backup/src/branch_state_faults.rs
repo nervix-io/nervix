@@ -11,7 +11,7 @@ use nervix_models::{BranchKeyFingerprint, Timestamp};
 use crate::{
     ArchiveReadError, ArchiveRecord, DeduplicatorStateDescriptor, SectionContent, SectionPath,
     WindowStateDescriptor,
-    archive_values::{Case, Section, State},
+    archive_values::{Case, Section, State, Values},
     branch_state_values::{Deduplicator, Window},
     malformed_properties::{damaged_archive, rejects_field},
     read_archive_contents,
@@ -224,10 +224,18 @@ impl Case {
                 let retained = u64::try_from(record.rows.len()).assured("bounded rows fit");
                 record.groups = u32::try_from(retained).assured("bounded rows fit u32");
                 record.rows.push(record.rows[0].clone());
-                record.next_sequence = record
-                    .next_sequence
-                    .checked_add(1)
-                    .assured("the generated sequence leaves room for one more row");
+                if let Some(next) = record.next_sequence.checked_add(1) {
+                    record.next_sequence = next;
+                } else {
+                    let first = record
+                        .first_sequence
+                        .assured("a retained window has a first sequence");
+                    record.first_sequence = Some(
+                        first
+                            .checked_sub(1)
+                            .assured("a bounded window ending at u64::MAX starts after zero"),
+                    );
+                }
                 let more_groups = record
                     .groups
                     .checked_add(1)
@@ -241,4 +249,37 @@ impl Case {
             incomplete("window row groups"),
         );
     }
+}
+
+#[test]
+fn missing_window_group_is_refused_when_sequence_ends_at_u64_max() {
+    let mut case = Values::new(&[0; 64]).case(true, true, 1);
+    let descriptor = case.domains[0]
+        .state
+        .iter_mut()
+        .find_map(|state| match state {
+            State::Window(value) if value.descriptor.groups > 0 => Some(&mut value.descriptor),
+            _ => None,
+        })
+        .assured("a stateful case has one branched window");
+    let retained = u64::try_from(descriptor.rows.len()).assured("bounded rows fit");
+    descriptor.first_sequence = Some(
+        u64::MAX
+            .checked_sub(retained)
+            .assured("a bounded window retains fewer rows than u64 counts"),
+    );
+    descriptor.next_sequence = u64::MAX;
+    let descriptor = descriptor.clone();
+    let path = SectionPath::window_descriptor(
+        &descriptor.domain,
+        &descriptor.entity,
+        descriptor.branch_fingerprint.as_ref(),
+    );
+    let index = case.section_index(&path);
+    case.sections[index] = Section::record(path, &descriptor);
+    case.manifest.sections[index] = case.sections[index].entry.clone();
+
+    read_archive_contents(case.export().as_slice())
+        .assured("the window at the sequence boundary is a valid archive");
+    case.assert_branch_state_faults();
 }

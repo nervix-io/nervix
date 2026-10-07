@@ -1178,6 +1178,7 @@ async fn branch_entrypoint_dispatches_an_ingestor_prepared_batch_immediately() {
         Vec::new(),
         None,
         Arc::new(BranchPresence::new()),
+        nervix_primitives::sync::Arc::new(crate::runtime_ack::AckRootTracker::default()),
     ));
     let owner_task = runtime.spawn_relay_owner_task(
         &domain,
@@ -1270,6 +1271,7 @@ async fn ingestor_and_reingestor_routes_apply_size_boundaries_independently_per_
             Vec::new(),
             None,
             Arc::new(BranchPresence::new()),
+            nervix_primitives::sync::Arc::new(crate::runtime_ack::AckRootTracker::default()),
         ));
         let owner_task = runtime.spawn_relay_owner_task(
             &domain,

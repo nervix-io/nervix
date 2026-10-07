@@ -471,7 +471,7 @@ mod tests {
         ErrorPolicies, ProcessorInputs, RelayBranching, RetryPolicy,
     };
     use nervix_primitives::{
-        sync::{mpsc, oneshot, watch},
+        sync::{atomic::AtomicBool, mpsc, oneshot, watch},
         time::Instant,
     };
     use nonzero_ext::nonzero;

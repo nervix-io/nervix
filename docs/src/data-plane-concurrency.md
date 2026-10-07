@@ -36,6 +36,62 @@ it resolved when its task, branch, channel, or attempt was created. A shared reg
 cold paths around that handle: registration and first installation, where `entry()` gives racing
 installers a single winner, replacement, teardown, and observers.
 
+## Remote ACK And Admission Owners
+
+`just bench-remote-owners` measures registration, admission, Alive, ordered parking/resume and
+terminal resolution with actual ACK roots at one and 64 rows per delivery, reports delivery tail
+latency and relay-memory reclamation, and measures the full fixed-position empty sweep. Its
+authenticated frame probe sends three current Arrow rows, admits them, returns the exact terminal
+reply and checks retired attempt counts. A separate 5,000-frame peer-owner probe completes while
+another peer's protocol guard is continuously held and checks returned permits and memory. These
+native probes also run through the existing benchmark smoke producer; local debug timings describe
+their measured build and host load, rather than a production throughput guarantee.
+
+Remote record correlation uses an immutable array of delivery and admission routing positions.
+Each delivery generation owns its mutable rows under one short synchronous guard; a row's outcome
+is independent of the other rows. Each side claims unused positions on demand and returns retired
+positions to its own bounded free queue, preserving admission room when delivery positions fill.
+Shutdown seals first claims before closing the queues and visits only positions that were claimed.
+Record allocation and receiver batch watcher tasks reserve relay memory before creating their
+retained rows. A batch task multiplexes row progress and keepalive polls every 100 milliseconds;
+each row and the single task have fixed charges. The cadence remains shorter than a one-second
+source ACK timeout while task cardinality stays bounded by admitted batches.
+The registered wire number selects the position, exact generation and row without a concurrent
+map lookup. The process identity is checked before routing. Generation exhaustion seals the
+position, and cancellation, timeout, terminal resolution and shutdown compete to take each row
+once. The ACK tree resolves after the routing guard is released.
+
+Relay services retain the domain drain tracker resolved during construction. Received rows create
+ACK roots through that handle; they never register or discover the tracker per row. Watchers read
+the membership writer's immutable incarnation publication, so registrar retirement ends their
+charged task lifetime without a gossip lock.
+
+One authenticated peer transport owns its ordinary grant, attempt, channel, watermark and outbound
+correlation collections. Connections and operation leases retain that owner. Its guard serializes
+identity and ordering decisions for this peer; there is no node-wide actor or map guard in the
+recurring protocol. The peer guard precedes the exact record guard, neither crosses an await,
+and permit release remains possible while runtime borrows an admitted record. Ordered attempt and
+grant retirement keeps cancellation effects deterministic. Cold binding and membership changes
+publish routing through CAS. [Cluster Interconnect](./interconnect.md#bounded-correlation-and-peer-owners)
+owns the capacities, grace periods and reconciliation deadlines.
+
+Production-owner Shuttle checks cover delayed events against a reused position, registration
+against shutdown, admission waiter drop against a reply, final silence sweeps against terminal and
+Alive reports, body claim against cancellation, admission against peer ending, and another peer's
+progress while one peer holds its guard. The production admission choice has a Loom model for one
+irreversible verdict; replacing its compare-and-exchange with an overwriting swap must fail and
+replay. ArcSwap, queues and external semaphore internals remain outside that atomic claim.
+Registered bounded Bolero sequences check complete verdicts, capacity and generation outcomes.
+Turmoil covers transport loss, retry, cancellation, reconnect and process restart within its
+documented scope; public one/three-node branch delivery and producer-restart scenarios cover host
+ACKs. External immutable-image faults remain separate evidence.
+
+Deloxide applies to the new delivery, peer and record blocking guards and their acquisition order.
+Both diagnostic selections run the remote ACK scenarios alongside their existing workloads. It
+does not model publication, async channels, network waits or the atomic verdict; a clean run proves
+only the tracked acquisitions the diagnostic processes executed. Generated measurements and fault
+evidence belong on the task, and a failed required attempt remains recorded.
+
 ## Relay, Transport And Source Lifetimes
 
 A concrete producer retains its branch channel handle. The relay publishes branch membership in a
@@ -1079,8 +1135,9 @@ second operation fails even when Rust would regard the expectation as fulfilled.
 Task handles remove recurring status, freeze, metric and checkpoint lookups. Source readiness,
 relay channels, buffered error delivery, domain selection and transport leasing use retained handles
 or immutable publications. Materialized writers own their mutable branch records and readers
-retain per-relay publications. Typed Ratchet 05 owns remaining remote acknowledgement/admission
-discovery. Replica catch-up retains the entity's
+retain per-relay publications. Remote acknowledgement rows and admission waiters use fixed routing
+positions with exact generations; authenticated connections retain bounded peer protocol owners.
+Replica catch-up retains the entity's
 lifecycle handle, assignment slot and its own record of each branch. Replication frames,
 synchronization and listing requests select published state handles; announcers retain their route
 and assignment slot. Their runtime registries handle installation, replacement and teardown.
@@ -1491,7 +1548,7 @@ line was reused.
 
 **Bounds and handoff.** The live registry owns the live lock, waiting attempt and thread records;
 none of its shard guards cross a tracked acquisition. Order instrumentation adds a run-bounded
-history of at most 8,192 directed instance edges, 1,024 source witnesses per edge, and 64 guard
+history of at most 16,384 directed instance edges, 1,024 source witnesses per edge, and 64 guard
 leases per thread. Ending a lock does not reclaim the historical edge budget. Refused history or
 count overflow becomes an explicit overload finding. The witness budget retains distinct storage
 worker identities across checkpoint staging. Its process regression retains all 512 worker
@@ -1560,16 +1617,19 @@ copies separate from files a live recorder replaces. The operator's workload is 
 because an unreviewed historical cycle exists.
 
 **The diagnostic lane.** `just test-deloxide` and `just test-deloxide-order` run the lane of each
-selection, and CI's `deloxide` job runs both side by side for every pull request labeled `deloxide`,
-the label each change the Deloxide rule applies to carries. `tests/deloxide-inventory.toml` is the
-lane's bounded inventory. It registers every workload a selection runs, each with a stable identity,
-the invariant it owns, the selections that must run it and the coverage it declares: the
-disposable-process probes of `nervix-deadlock`, the tracked locks' conformance checks of
-`nervix-primitives`, the diagnostic owner tests of the server library, and the tagged scenarios with
-the number of example runs each must make. It also bounds the lane: one real-time budget for a
-selection's diagnostic compilation and execution after its prerequisites, a bound for every
-invocation, a stop grace period, the reserve the scenario binary keeps for its own teardown inside
-its invocation's bound, and how many scenarios run at once, which is the same on every machine.
+selection, and CI's `deloxide` job runs both side by side for every pull request labeled
+`deloxide`, the label each change the Deloxide rule applies to carries.
+`tests/deloxide-inventory.toml` is the lane's bounded inventory. It registers every workload a
+selection runs, each with a stable identity, the invariant it owns, the selections that must run it
+and the coverage it declares: the disposable-process probes of `nervix-deadlock`, the tracked
+locks' conformance checks of `nervix-primitives`, the diagnostic owner tests of the server library,
+and the tagged scenarios with the number of example runs each must make. The three
+`@remote_ack_owners` scenarios add four example runs across interleaved branches, a lost
+acknowledgement and producer restart; both selections exercise the tracked correlation and peer
+admission owner locks. The inventory also bounds the lane: one real-time budget for a selection's
+diagnostic compilation and execution after its prerequisites, a bound for every invocation, a stop
+grace period, the reserve the scenario binary keeps for its own teardown inside its invocation's
+bound, and how many scenarios run at once, which is the same on every machine.
 
 The registered `@restarted_voter_observation` workload reaches whole-cluster restart and automatic scheduling when the leader first hears a voter through a relayed heartbeat. Its test-only watch channels and concurrent fault map are untracked. The registered native metadata restore workload exercises distributed Kafka checkpoint replication, acknowledgement, restart and exact restoration above the resident replication message budget; its stream waits and assignment atomics retain their complementary checks.
 
@@ -1579,10 +1639,14 @@ longer holds or holds ignored, a discovered probe, conformance check, owner test
 that is not registered, a scenario whose example runs changed, and an invocation that selects
 nothing. It reports how many workloads it discovered, selected, executed and saw complete. Global
 detector configurations never share a process: each probe workload is a disposable child, each
-conformance check and each owner test installs its detector in a fresh process, the scenario binary
-installs once in `main`, and every diagnostic server and paced driver process installs its own. The
-two selections are separate builds in separate target directories, apart from ordinary, fuzz, Loom,
-Shuttle and Turmoil builds.
+conformance check and each owner test installs its detector in a fresh process, and each scenario
+binary process installs once in `main`. Active detection runs its tagged scenarios together; order
+analysis starts a fresh process per feature and gives the six large materialized restore and four
+complete-generation restore examples their own processes. These restores each start several nodes
+and carry large state payloads, so per-example order histories stay within the detector and host
+budgets. Their `order_tags` in the inventory select and account for every example. Every diagnostic
+server and paced driver process installs its own detector. The two selections are separate builds
+in separate target directories, apart from ordinary, fuzz, Loom, Shuttle and Turmoil builds.
 
 The conformance checks are the tracked adapters' own: which locks a diagnostic build selects, that
 `Debug` formatting tries a lock and never waits for it, that a value moves in and out of a lock, the
@@ -1926,8 +1990,9 @@ which ends where its execution failed and so replays that failure. `just test-sh
 proves the path end to end: it fails one check deliberately after its invariant held, requires one
 persisted schedule, and requires it to reproduce the failure in a fresh process. CI's dedicated
 `shuttle` job runs both, only for a pull request labeled `shuttle`, and uploads
-`target/shuttle-failures` as the `shuttle-failures` artifact when a check fails. See the command
-recipes in [Developing Nervix](./developing-nervix.md).
+the failure directory in a tar archive as the `shuttle-failures` artifact when a check fails;
+fully qualified test names contain colons, which the artifact uploader rejects as paths. See the
+command recipes in [Developing Nervix](./developing-nervix.md).
 
 ### Protocols and their checks
 
@@ -1989,7 +2054,7 @@ feature. When a protocol is embedded in asynchronous orchestration, the synchron
 made independently testable and the runtime uses that same owner; a copied algorithm, a witness
 that a join or an extra lock publishes, or a real atomic does not make a model.
 
-The execution, consensus and server crates own a `loom` feature, and each forwards it to the
+The execution, interconnect, consensus and server crates own a `loom` feature, and each forwards it to the
 primitive crate and to every dependency that owns one, so the whole library graph of each builds
 with Loom's primitives. `just cargo-clippy-loom`, whose package checks also run in `just lint`,
 lints every Loom build:
