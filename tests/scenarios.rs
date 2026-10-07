@@ -15482,6 +15482,23 @@ async fn when_bulk_execution_is_occupied(world: &mut ScenarioWorld, node_id: Str
     });
 }
 
+/// Fill every bulk worker and every place in the bulk wait queue on a node, so the next bulk job
+/// the node is handed is refused for room rather than queued.
+#[when(expr = "bulk execution on node {string} is saturated")]
+async fn when_bulk_execution_is_saturated(world: &mut ScenarioWorld, node_id: String) {
+    let node_id = expand_placeholders(world, &node_id);
+    let node_name = crate::common::cluster::node_name(&node_id);
+    let fault_injection = world.fault_injection.clone();
+    nervix_primitives::time::timeout(
+        Duration::from_secs(60),
+        fault_injection.saturate_execution(&node_name, nervix_execution::CpuClass::Bulk),
+    )
+    .await
+    .unwrap_or_else(|error| {
+        panic!("bulk execution on '{node_id}' never filled its workers and wait queue: {error}")
+    });
+}
+
 /// Fill the credentials worker and every place in its wait queue on the leader, so the next
 /// password the leader is asked to verify is refused rather than queued. The leader is the node
 /// the scenario created its user through, so the user is already visible there.
@@ -25099,17 +25116,9 @@ enum UnmatchedPayloads {
     Fail,
 }
 
-/// Waits until every docstring line's `|`-separated fragments are all found in one subscription
-/// payload, and returns the payloads that matched, in the order they arrived.
-async fn receive_subscription_fragment_sets(
-    world: &mut ScenarioWorld,
-    duration: &str,
-    step: &Step,
-    unmatched: UnmatchedPayloads,
-    delivery_not_before: Option<Instant>,
-) -> Vec<String> {
-    let duration = parse_duration_text(duration).expect("step duration must be a valid duration");
-    let expected_fragment_sets = docstring(step)
+/// Every docstring line's `|`-separated fragments, with placeholders expanded.
+fn docstring_fragment_sets(world: &ScenarioWorld, step: &Step) -> Vec<Vec<String>> {
+    docstring(step)
         .lines()
         .map(str::trim)
         .filter(|line| !line.is_empty())
@@ -25120,13 +25129,44 @@ async fn receive_subscription_fragment_sets(
                 .map(|fragment| expand_placeholders(world, fragment))
                 .collect::<Vec<_>>()
         })
-        .collect::<Vec<_>>();
+        .collect::<Vec<_>>()
+}
 
+/// Waits until every docstring line's `|`-separated fragments are all found in one subscription
+/// payload, and returns the payloads that matched, in the order they arrived.
+async fn receive_subscription_fragment_sets(
+    world: &mut ScenarioWorld,
+    duration: &str,
+    step: &Step,
+    unmatched: UnmatchedPayloads,
+    delivery_not_before: Option<Instant>,
+) -> Vec<String> {
+    let expected_fragment_sets = docstring_fragment_sets(world, step);
     assert!(
         !expected_fragment_sets.is_empty(),
         "step docstring must contain at least one expected payload fragment set"
     );
+    receive_expected_fragment_sets(
+        world,
+        duration,
+        expected_fragment_sets,
+        unmatched,
+        delivery_not_before,
+    )
+    .await
+}
 
+/// Waits until each of `expected_fragment_sets` is found whole in one subscription payload, and
+/// returns the payloads that matched, in the order they arrived. A matching payload that arrives
+/// before `delivery_not_before` fails the wait.
+async fn receive_expected_fragment_sets(
+    world: &mut ScenarioWorld,
+    duration: &str,
+    expected_fragment_sets: Vec<Vec<String>>,
+    unmatched: UnmatchedPayloads,
+    delivery_not_before: Option<Instant>,
+) -> Vec<String> {
+    let duration = parse_duration_text(duration).expect("step duration must be a valid duration");
     let session = world
         .active_session
         .as_mut()

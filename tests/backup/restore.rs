@@ -1493,6 +1493,42 @@ fn when_restore_step_pause_is_released(world: &mut ScenarioWorld, node: String) 
         .release_restore_step_pause(&node_name(&pause.node), &pause.step);
 }
 
+#[given(
+    expr = "restoring domain {string} pauses before it converts its first deduplicator or window \
+            state"
+)]
+fn given_restore_conversion_pauses(world: &mut ScenarioWorld, domain: String) {
+    world
+        .fault_injection
+        .pause_restore_branch_state_conversion(scenario_domain(world, &domain));
+}
+
+#[then(
+    expr = "the restore of domain {string} pauses before it converts its first deduplicator or \
+            window state"
+)]
+async fn then_restore_conversion_pauses(world: &mut ScenarioWorld, domain: String) {
+    let domain = scenario_domain(world, &domain);
+    nervix_primitives::time::timeout(
+        RESTORE_PAUSE_TIMEOUT,
+        world
+            .fault_injection
+            .wait_for_restore_branch_state_conversion_pause(&domain),
+    )
+    .await
+    .unwrap_or_else(|_| {
+        panic!("the restore of '{domain}' did not reach its first deduplicator or window state")
+    });
+}
+
+#[when(expr = "the paused restore conversion of domain {string} is released")]
+fn when_restore_conversion_is_released(world: &mut ScenarioWorld, domain: String) {
+    let domain = scenario_domain(world, &domain);
+    world
+        .fault_injection
+        .release_restore_branch_state_conversion_pause(&domain);
+}
+
 /// Writes `copy` to `target` with `sections` in place of the sections of the same path.
 fn write_archive(copy: &ArchiveCopy, replaced: &BTreeMap<String, Vec<u8>>, target: &Path) {
     let mut manifest = copy
