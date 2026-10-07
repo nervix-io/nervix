@@ -2395,7 +2395,17 @@ impl Cluster {
         node_id: &str,
         fragment: &str,
     ) -> io::Result<()> {
-        self.wait_until(node_id, |status| status.raw.contains(fragment))
+        self.wait_for_status_contains_with_budget(node_id, fragment, STATUS_WAIT_BUDGET)
+            .await
+    }
+
+    pub(crate) async fn wait_for_status_contains_with_budget(
+        &self,
+        node_id: &str,
+        fragment: &str,
+        budget: Duration,
+    ) -> io::Result<()> {
+        self.wait_until_with_budget(node_id, budget, |status| status.raw.contains(fragment))
             .await
     }
 
@@ -2952,11 +2962,24 @@ impl Cluster {
     where
         F: Fn(&ClusterStatus) -> bool,
     {
+        self.wait_until_with_budget(node_id, STATUS_WAIT_BUDGET, predicate)
+            .await
+    }
+
+    async fn wait_until_with_budget<F>(
+        &self,
+        node_id: &str,
+        budget: Duration,
+        predicate: F,
+    ) -> io::Result<()>
+    where
+        F: Fn(&ClusterStatus) -> bool,
+    {
         let handle = self
             .nodes
             .get(node_id)
             .unwrap_or_else(|| panic!("unknown node '{node_id}'"));
-        let deadline = PhaseDeadline::after(STATUS_WAIT_BUDGET);
+        let deadline = PhaseDeadline::after(budget);
         let waited = deadline
             .poll_until(
                 POLL_INTERVAL,

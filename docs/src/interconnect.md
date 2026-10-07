@@ -701,8 +701,10 @@ cleanup cannot change a replacement occupying the same position.
 Record storage and receiver ACK watches are charged to the relay memory budget. One task per
 admitted batch multiplexes its row watches, with a fixed charge per row plus one task charge; a
 wide frame therefore does not allocate one task per acknowledgement. Pending rows report progress
-at a one-second cadence, below the registrar's fifteen-second silence bound even when two reports
-each exhaust their dispatch deadline. Admission
+every 100 milliseconds, below the registrar's fifteen-second silence bound even when two reports
+each exhaust their dispatch deadline. The same cadence keeps local emitter and message-error
+acknowledgements alive while a connector request is pending, giving a one-second source
+`ACK TIMEOUT` multiple chances to observe progress. Admission
 refusal is typed and occurs before runtime admission. Cancellation before admission resolves every
 held share negatively and returns its position. Completion of the last record returns the delivery
 storage and its charge. Watcher memory remains charged through its dispatch attempts and ends on

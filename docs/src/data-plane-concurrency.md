@@ -52,7 +52,8 @@ Each delivery generation owns its mutable rows under one short synchronous guard
 is independent of the other rows. Separate bounded free-position queues preserve admission room
 when delivery positions fill. Record allocation and receiver batch watcher tasks reserve relay
 memory before creating their retained rows. A batch task multiplexes row progress and keepalive
-polls; each row and the single task have fixed charges.
+polls every 100 milliseconds; each row and the single task have fixed charges. The cadence remains
+shorter than a one-second source ACK timeout while task cardinality stays bounded by admitted batches.
 The registered wire number selects the position, exact generation and row without a concurrent
 map lookup. The process identity is checked before routing. Generation exhaustion seals the
 position, and cancellation, timeout, terminal resolution and shutdown compete to take each row

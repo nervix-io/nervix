@@ -352,6 +352,10 @@ sender replacement or shutdown ends them. These correlations remain volatile and
 connector position or persisted commit. [Cluster Interconnect](./interconnect.md) owns their
 capacity and deadline contracts.
 
+The host refreshes pending ACK progress every 100 milliseconds during connector requests and
+retries. This cadence must stay shorter than a source's one-second `ACK TIMEOUT` so a pending
+attached sink attempt does not make the source replay work while the sink still owns it.
+
 Each source host retains its exact instance readiness handle. Poll success and suspend/resume
 publish through that scalar, without looking up the ingestor registry. Replacing an ingestor retires
 its preceding handles before installing the new instances; host drop also retires its own handle.

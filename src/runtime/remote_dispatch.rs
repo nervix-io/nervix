@@ -25,7 +25,7 @@ pub(super) const REMOTE_RELAY_INSTANTIATION_WAIT: Duration = Duration::from_secs
 
 pub(super) const REMOTE_RELAY_INSTANTIATION_POLL: Duration = Duration::from_millis(25);
 
-pub(super) const REMOTE_ACK_ALIVE_INTERVAL: Duration = Duration::from_secs(1);
+pub(super) const REMOTE_ACK_ALIVE_INTERVAL: Duration = Duration::from_millis(100);
 
 /// How long a node that forwarded a record acknowledgement with an admitted relay delivery waits
 /// without a report about it from the receiver before it fails the acknowledgement.
