@@ -366,8 +366,15 @@ operator-facing reason; callers decide retry and relocation from the class and s
 
 Relay metadata uses the same validated control encoding, while relay bodies remain Arrow IPC from
 the source relay to the destination runtime. Bulk operations transfer opaque byte chunks and let
-the owning resource, snapshot, or state protocol interpret the stream. The primary payload limits
-are:
+the owning resource, snapshot, or state protocol interpret the stream.
+
+Before the receiver gives a relay Arrow stream to Arrow's reader, its bounded CPU decode checks
+each IPC message's framing and declared body against the received bytes. Record-batch nodes,
+buffers and declared compressed expansion must fit the decoded limit. Malformed declarations fail
+as a typed body decode error before Arrow can allocate or slice from them; a remaining Arrow parser
+panic on malformed metadata is contained at that boundary and reported as a decode failure.
+
+The primary payload limits are:
 
 | Payload | Maximum size |
 | --- | ---: |

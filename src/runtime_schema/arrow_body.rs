@@ -13,11 +13,15 @@
 //! once and shared: every destination and every retry sends the same allocation, charged once, and
 //! reserves its own outstanding-delivery bytes separately.
 
-use std::{io::Cursor, num::NonZeroUsize};
+use std::{
+    io::Cursor,
+    num::NonZeroUsize,
+    panic::{AssertUnwindSafe, catch_unwind},
+};
 
 use arch_into::ArchInto as _;
 use arrow_array::{RecordBatch, RecordBatchOptions};
-use arrow_ipc::{reader::StreamReader, writer::StreamWriter};
+use arrow_ipc::{MessageHeader, reader::StreamReader, writer::StreamWriter};
 use arrow_schema::Schema as ArrowSchema;
 use error_stack::{Report, ResultExt as _};
 use nervix_execution::{
@@ -323,6 +327,160 @@ impl CompiledSchema {
     }
 }
 
+/// Check the IPC framing and the sizes Arrow trusts before its reader allocates or slices. The
+/// FlatBuffers verifier checks table offsets, but it does not constrain their semantic lengths.
+fn validate_ipc_messages(bytes: &[u8], decoded_limit: u64) -> Result<(), Report<ArrowBodyError>> {
+    let invalid = |reason| ArrowBodyError::decoding(reason);
+    let mut offset = 0_usize;
+    let mut expanded = 0_u64;
+    let mut saw_schema = false;
+    while offset < bytes.len() {
+        let prefix_end = offset
+            .checked_add(4)
+            .ok_or_else(|| invalid("Arrow IPC metadata length overflowed"))?;
+        let prefix: [u8; 4] = bytes
+            .get(offset..prefix_end)
+            .ok_or_else(|| invalid("truncated Arrow IPC metadata length"))?
+            .try_into()
+            .map_err(|_| invalid("invalid Arrow IPC metadata length"))?;
+        offset = prefix_end;
+        let length = if prefix == [0xff; 4] {
+            let end = offset
+                .checked_add(4)
+                .ok_or_else(|| invalid("Arrow IPC metadata length overflowed"))?;
+            let bytes: [u8; 4] = bytes
+                .get(offset..end)
+                .ok_or_else(|| invalid("truncated Arrow IPC metadata length"))?
+                .try_into()
+                .map_err(|_| invalid("invalid Arrow IPC metadata length"))?;
+            offset = end;
+            i32::from_le_bytes(bytes)
+        } else {
+            i32::from_le_bytes(prefix)
+        };
+        if length == 0 {
+            break;
+        }
+        let length =
+            usize::try_from(length).map_err(|_| invalid("negative Arrow IPC metadata length"))?;
+        let metadata_end = offset
+            .checked_add(length)
+            .ok_or_else(|| invalid("Arrow IPC metadata length overflowed"))?;
+        let metadata = bytes
+            .get(offset..metadata_end)
+            .ok_or_else(|| invalid("truncated Arrow IPC metadata"))?;
+        let message = arrow_ipc::root_as_message(metadata).map_err(ArrowBodyError::decoding)?;
+        offset = metadata_end;
+        let body_length = usize::try_from(message.bodyLength())
+            .map_err(|_| invalid("negative or unaddressable Arrow IPC body length"))?;
+        let body_end = offset
+            .checked_add(body_length)
+            .ok_or_else(|| invalid("Arrow IPC body length overflowed"))?;
+        let body = bytes
+            .get(offset..body_end)
+            .ok_or_else(|| invalid("truncated Arrow IPC body"))?;
+        if !saw_schema && message.header_type() != MessageHeader::Schema {
+            return Err(invalid("Arrow IPC stream does not begin with a schema"));
+        }
+        match message.header_type() {
+            MessageHeader::Schema => {
+                saw_schema = true;
+            }
+            MessageHeader::RecordBatch => {
+                let batch = message
+                    .header_as_record_batch()
+                    .ok_or_else(|| invalid("invalid Arrow IPC record batch header"))?;
+                validate_ipc_batch(batch, body, decoded_limit, &mut expanded)?;
+            }
+            MessageHeader::DictionaryBatch => {
+                let dictionary = message
+                    .header_as_dictionary_batch()
+                    .ok_or_else(|| invalid("invalid Arrow IPC dictionary header"))?;
+                let batch = dictionary
+                    .data()
+                    .ok_or_else(|| invalid("invalid Arrow IPC dictionary record batch"))?;
+                validate_ipc_batch(batch, body, decoded_limit, &mut expanded)?;
+            }
+            _ => {}
+        }
+        offset = body_end;
+    }
+    Ok(())
+}
+
+fn validate_ipc_batch(
+    batch: arrow_ipc::RecordBatch<'_>,
+    body: &[u8],
+    limit: u64,
+    expanded: &mut u64,
+) -> Result<(), Report<ArrowBodyError>> {
+    let invalid = |reason| ArrowBodyError::decoding(reason);
+    let count = |value| {
+        let count = u64::try_from(value).map_err(|_| invalid("negative Arrow IPC count"))?;
+        if count > limit {
+            return Err(invalid("Arrow IPC count exceeds the decoded body limit"));
+        }
+        Ok(count)
+    };
+    count(batch.length())?;
+    let nodes = batch
+        .nodes()
+        .ok_or_else(|| invalid("Arrow IPC record batch has no field nodes"))?;
+    for node in nodes {
+        let length = count(node.length())?;
+        if count(node.null_count())? > length {
+            return Err(invalid("Arrow IPC null count exceeds its field length"));
+        }
+    }
+    let buffers = batch
+        .buffers()
+        .ok_or_else(|| invalid("Arrow IPC record batch has no buffers"))?;
+    if let Some(counts) = batch.variadicBufferCounts() {
+        for variadic in counts {
+            if usize::try_from(variadic)
+                .ok()
+                .is_none_or(|value| value > buffers.len())
+            {
+                return Err(invalid("Arrow IPC variadic buffer count is invalid"));
+            }
+        }
+    }
+    for buffer in buffers {
+        let start = usize::try_from(buffer.offset())
+            .map_err(|_| invalid("negative or unaddressable Arrow IPC buffer offset"))?;
+        let length = usize::try_from(buffer.length())
+            .map_err(|_| invalid("negative or unaddressable Arrow IPC buffer length"))?;
+        let end = start
+            .checked_add(length)
+            .ok_or_else(|| invalid("Arrow IPC buffer length overflowed"))?;
+        let contents = body
+            .get(start..end)
+            .ok_or_else(|| invalid("Arrow IPC buffer exceeds its message body"))?;
+        let decoded = if batch.compression().is_some() && !contents.is_empty() {
+            let declared: [u8; 8] = contents
+                .get(..8)
+                .ok_or_else(|| invalid("truncated Arrow IPC compression length"))?
+                .try_into()
+                .map_err(|_| invalid("invalid Arrow IPC compression length"))?;
+            match i64::from_le_bytes(declared) {
+                -1 => u64::try_from(contents.len() - 8)
+                    .map_err(|_| invalid("unaddressable Arrow IPC buffer length"))?,
+                value => u64::try_from(value)
+                    .map_err(|_| invalid("negative Arrow IPC compression length"))?,
+            }
+        } else {
+            u64::try_from(length).map_err(|_| invalid("unaddressable Arrow IPC buffer length"))?
+        };
+        *expanded = expanded
+            .checked_add(decoded)
+            .ok_or_else(|| invalid("Arrow IPC decoded buffer length overflowed"))?;
+        if *expanded > limit {
+            return Err(invalid("Arrow IPC buffers exceed the decoded body limit"));
+        }
+    }
+    Ok(())
+}
+
 async fn decode_body(
     executor: &Executor,
     body: ChargedBytes,
@@ -360,8 +518,12 @@ async fn decode_body(
                 cancellation
                     .check()
                     .change_context(ArrowBodyError::Cancelled)?;
-                let mut reader = StreamReader::try_new(Cursor::new(body.as_ref()), None)
-                    .map_err(ArrowBodyError::decoding)?;
+                validate_ipc_messages(body.as_ref(), decoded_limit)?;
+                let mut reader = catch_unwind(AssertUnwindSafe(|| {
+                    StreamReader::try_new(Cursor::new(body.as_ref()), None)
+                }))
+                .map_err(|_| ArrowBodyError::decoding("invalid Arrow IPC schema"))?
+                .map_err(ArrowBodyError::decoding)?;
                 let schema = reader.schema();
                 if let Some(expected) = &contract.schema
                     && schema.as_ref() != expected.as_ref()
@@ -372,10 +534,15 @@ async fn decode_body(
                 }
                 let mut batches = Vec::new();
                 let mut decoded = 0_u64;
-                for next in reader.by_ref() {
+                loop {
                     cancellation
                         .check()
                         .change_context(ArrowBodyError::Cancelled)?;
+                    let next = catch_unwind(AssertUnwindSafe(|| reader.next()))
+                        .map_err(|_| ArrowBodyError::decoding("invalid Arrow IPC record batch"))?;
+                    let Some(next) = next else {
+                        break;
+                    };
                     let batch = next.map_err(ArrowBodyError::decoding)?;
                     if batches.len() >= contract.max_sections.get() {
                         return Err(Report::new(ArrowBodyError::TooManySections {
@@ -406,7 +573,10 @@ async fn decode_body(
                 if batches.is_empty() && contract.schema.is_some() {
                     return Err(Report::new(ArrowBodyError::NoSection));
                 }
-                RuntimeRecordBatch::from_decoded_sections(schema, batches)
+                catch_unwind(AssertUnwindSafe(|| {
+                    RuntimeRecordBatch::from_decoded_sections(schema, batches)
+                }))
+                .map_err(|_| ArrowBodyError::decoding("invalid Arrow IPC sections"))?
             },
         )
         .await
@@ -438,6 +608,84 @@ mod projection_tests {
                 .expect_err("the occupied budget refuses projection")
                 .current_context(),
             ArrowBodyError::Admission
+        ));
+    }
+}
+
+#[cfg(test)]
+mod malformed_ipc_tests {
+    use meticulous::{OptionExt as _, ResultExt as _};
+
+    use super::*;
+
+    #[nervix_primitives::test]
+    async fn a_declared_ipc_body_must_fit_before_arrow_allocates_it() {
+        let mut builder = flatbuffers::FlatBufferBuilder::new();
+        let message = arrow_ipc::Message::create(
+            &mut builder,
+            &arrow_ipc::MessageArgs {
+                bodyLength: i64::MAX,
+                ..Default::default()
+            },
+        );
+        builder.finish(message, None);
+        let metadata = builder.finished_data();
+        let mut bytes = u32::try_from(metadata.len())
+            .assured("bounded metadata length fits")
+            .to_le_bytes()
+            .to_vec();
+        bytes.extend_from_slice(metadata);
+        let executor = Executor::default();
+        let reservation = executor
+            .try_reserve(
+                MemoryClass::Relay,
+                u64::try_from(bytes.len()).assured("bounded body"),
+            )
+            .assured("the bounded body is admitted");
+        let body = ChargedBytes::from_owned(bytes, reservation);
+        let error = RuntimeRecordBatch::decode_arrow_ipc(&executor, body)
+            .await
+            .expect_err("an impossible IPC body length is refused before allocation");
+        assert!(matches!(
+            error.current_context(),
+            ArrowBodyError::Decode { .. }
+        ));
+    }
+
+    #[test]
+    fn an_ipc_buffer_must_fit_its_message_body() {
+        let mut builder = flatbuffers::FlatBufferBuilder::new();
+        let nodes = builder.create_vector(&[arrow_ipc::FieldNode::new(1, 0)]);
+        let buffers = builder.create_vector(&[arrow_ipc::Buffer::new(64, i64::MAX)]);
+        let batch = arrow_ipc::RecordBatch::create(
+            &mut builder,
+            &arrow_ipc::RecordBatchArgs {
+                length: 1,
+                nodes: Some(nodes),
+                buffers: Some(buffers),
+                ..Default::default()
+            },
+        );
+        let message = arrow_ipc::Message::create(
+            &mut builder,
+            &arrow_ipc::MessageArgs {
+                header_type: MessageHeader::RecordBatch,
+                header: Some(batch.as_union_value()),
+                bodyLength: 128,
+                ..Default::default()
+            },
+        );
+        builder.finish(message, None);
+        let message = arrow_ipc::root_as_message(builder.finished_data())
+            .assured("a bounded record batch metadata table verifies");
+        let batch = message
+            .header_as_record_batch()
+            .assured("the message carries its record batch");
+        let error = validate_ipc_batch(batch, &[0; 128], 1024, &mut 0)
+            .expect_err("a declared buffer cannot escape its message body");
+        assert!(matches!(
+            error.current_context(),
+            ArrowBodyError::Decode { .. }
         ));
     }
 }

@@ -840,7 +840,8 @@ sequenceDiagram
   a single execution of the ingestor. It owns the attached producers, the batches each queued,
   their round-robin admission into the execution's one acknowledgement window, and every batch's
   outcome. The execution's admission worker validates a batch as one canonical Arrow IPC stream of
-  the input schema, tracks a new ACK root with the ingestor's drain accounting, reads the quiesce
+  the input schema, checking bounded IPC message and buffer declarations before Arrow decoding.
+  It then tracks a new ACK root with the ingestor's drain accounting, reads the quiesce
   state, and only then dispatches the batch through the ingestor's filter and routes, so a quiesce
   either counts the batch or refuses it with nothing dispatched. The batch's outcome is its ACK
   root's resolution under the declared ACK timeout, which counts time without acknowledgement

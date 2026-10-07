@@ -921,6 +921,11 @@ that. A decoded batch the local relay boundary refuses is the separate
 `RuntimeError::DispatchRemoteRelay`. Remote payload handling returns these as `error-stack`
 reports: the receiver logs the whole chain, and a payload it refused before admitting it is
 answered with the chain rendered as the reason.
+The shared Arrow body decoder first validates IPC frame, body, field-node and buffer declarations
+against the bytes and decoded limit. Corrupt declarations and parser panics caused by malformed
+IPC become `ArrowBodyError::Decode` beneath the caller's failure; they do not escape a bounded
+worker as a panic or allocate from an unchecked declared length. Snapshot readers retain their
+own typed section context above that error.
 [Cluster Interconnect](./interconnect.md)
 defines the exchange forms, limits, deadlines, and relay acknowledgement boundaries. A record
 acknowledgement lost between two nodes becomes an ordinary negative acknowledgement: the node that
