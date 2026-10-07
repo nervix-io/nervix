@@ -2,7 +2,6 @@ Feature: Deduplicator keyspaces and windows larger than the bulk budget in backu
   A restore converts each archived keyspace and window into its native checkpoint one bounded
   group at a time, and a restored window larger than the bulk budget persists again.
 
-  @restore_installation
   Scenario Outline: A keyspace and a window above the bulk budget resume exactly beside many small branches on <cluster_size> nodes
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "10m"
     And the production sticky scheduler is configured
@@ -83,7 +82,11 @@ Feature: Deduplicator keyspaces and windows larger than the bulk budget in backu
       key={"tenant":"large"} | "samples":41 | "total":1339 | "first_latency":12 | "last_latency":70 | "smallest":12 | "largest":70 | "latency_p0":5.0 | "note_bytes":42991616
       """
 
+    @restore_installation
     Examples:
       | cluster_size | replica_count |
       | 1            | 0             |
+
+    Examples:
+      | cluster_size | replica_count |
       | 3            | 1             |
