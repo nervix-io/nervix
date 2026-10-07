@@ -720,6 +720,7 @@ Feature: Inferencer resources
       | 1            | 0             | DENSE TENSOR<F32> | ARRAY<F32, 2>    | ARRAY<F32, 2>     |
       | 3            | 0             | DENSE TENSOR<F32> | ARRAY<F32, 2>    | ARRAY<F32, 2>     |
 
+  @inferencer_branch_batches
   Scenario Outline: Batched inferencer isolates interleaved concrete branches
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
@@ -798,7 +799,7 @@ Feature: Inferencer resources
       """
       {"tenant":"beta","padding":"<padding>","features":[300.0,3000.0],"mask":[3.0,30.0]}
       """
-    Then within "5s" the relay subscription receives payloads containing all fragments
+    Then within "30s" the relay subscription receives payloads containing all fragments
       """
       key={"tenant":"acme"} | "scores":[103.0,1030.0]
       key={"tenant":"acme"} | "scores":[305.0,3050.0]

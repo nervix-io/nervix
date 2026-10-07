@@ -1536,26 +1536,37 @@ copies separate from files a live recorder replaces. The operator's workload is 
 because an unreviewed historical cycle exists.
 
 **The diagnostic lane.** `just test-deloxide` and `just test-deloxide-order` run the lane of each
-selection, and CI's `deloxide` job runs both side by side for every pull request labeled
-`deloxide`, the label each change the Deloxide rule applies to carries.
-`tests/deloxide-inventory.toml` is the lane's bounded inventory. It registers every workload a
-selection runs, each with a stable identity, the invariant it owns, the selections that must run it
-and the coverage it declares: the disposable-process probes of `nervix-deadlock`, the diagnostic
-owner tests of the server library, and the tagged scenarios with the number of example runs each
-must make. It also bounds the lane: one real-time budget for a selection's diagnostic compilation
-and execution after its prerequisites, a bound for every invocation, a stop grace period, the
-reserve the scenario binary keeps for its own teardown inside its invocation's bound, and how many
-scenarios run at once, which is the same on every machine.
+selection, and CI's `deloxide` job runs both side by side for every pull request labeled `deloxide`,
+the label each change the Deloxide rule applies to carries. `tests/deloxide-inventory.toml` is the
+lane's bounded inventory. It registers every workload a selection runs, each with a stable identity,
+the invariant it owns, the selections that must run it and the coverage it declares: the
+disposable-process probes of `nervix-deadlock`, the tracked locks' conformance checks of
+`nervix-primitives`, the diagnostic owner tests of the server library, and the tagged scenarios with
+the number of example runs each must make. It also bounds the lane: one real-time budget for a
+selection's diagnostic compilation and execution after its prerequisites, a bound for every
+invocation, a stop grace period, the reserve the scenario binary keeps for its own teardown inside
+its invocation's bound, and how many scenarios run at once, which is the same on every machine.
 
 For each invocation the lane builds the selection's executable, lists what the build holds or reads
 the tagged scenarios from the feature files, and refuses a registered workload that the build no
-longer holds or holds ignored, a discovered probe, owner test or tagged scenario that is not
-registered, a scenario whose example runs changed, and an invocation that selects nothing. It
-reports how many workloads it discovered, selected, executed and saw complete. Global detector
-configurations never share a process: each probe workload is a disposable child, each owner test
-installs its detector in a fresh process, the scenario binary installs once in `main`, and every
-diagnostic server and paced driver process installs its own. The two selections are separate
-builds in separate target directories, apart from ordinary, fuzz, Loom, Shuttle and Turmoil builds.
+longer holds or holds ignored, a discovered probe, conformance check, owner test or tagged scenario
+that is not registered, a scenario whose example runs changed, and an invocation that selects
+nothing. It reports how many workloads it discovered, selected, executed and saw complete. Global
+detector configurations never share a process: each probe workload is a disposable child, each
+conformance check and each owner test installs its detector in a fresh process, the scenario binary
+installs once in `main`, and every diagnostic server and paced driver process installs its own. The
+two selections are separate builds in separate target directories, apart from ordinary, fuzz, Loom,
+Shuttle and Turmoil builds.
+
+The conformance checks are the tracked adapters' own: which locks a diagnostic build selects, that
+`Debug` formatting tries a lock and never waits for it, that a value moves in and out of a lock, the
+exact count of waiters a notification wakes, the refusal of a second installation, the registry's
+record of a thread across its exit, and a tracked wait that proceeds once its lock is released.
+`nervix-primitives` sits below `nervix-deadlock`, which owns evidence files, so a conformance check
+records none. Its detector's sink panics on any finding and a panicking sink aborts the process, so
+the lane ends such a check as `signaled`, with the finding in its retained output.
+`just test-primitives-deloxide` runs the same checks in one process for each selection, beside the
+other modes' conformance.
 
 Every process the lane starts runs in a session of its own. A process that outlives its bound
 receives `SIGTERM` and, after the stop grace period, `SIGKILL` with its whole group. The lane is a
@@ -1624,8 +1635,9 @@ compiler finds a tracked blocking acquisition in a diagnostic configuration. Eac
 registered workloads whose processes reach its tracked locks, the path the lane does not reach and
 why, or both. `just validate-deloxide-applicability`, part of `just validate` and CI's `checks`
 job, reads the acquisition catalog `just ratchet` writes and fails on an owner without a record and
-on a record whose file no longer acquires a tracked lock. The catalog is the compiler's resolution
-of the Deloxide adapters' operations, not a search for lock names. A record is a reviewed
+on a record whose file no longer acquires a tracked lock. It reports how many owners registered
+workloads reach and how many record a path the lane does not reach. The catalog is the compiler's
+resolution of the Deloxide adapters' operations, not a search for lock names. A record is a reviewed
 declaration: the lane's coverage report is evidence about it, not a proof of ownership. Format
 equality, malformed and out-of-bounds rejection, normalized-cycle deduplication and the summary's
 counts are registered Bolero properties with the same assertion in ordinary and sanitizer execution.
@@ -1672,7 +1684,15 @@ Those restore scenarios also run in the ordinary public suite. The memory-pressu
 the node's pause lock as the pause collects every registered quiesce control and as each starting
 ingestor reads the pause, on one and three nodes. The client consumer scenarios take the Rust
 client consumer's state and parked-read locks in the scenario process as a consumer is restored
-after a session restart and closed by a domain restart.
+after a session restart and closed by a domain restart. The Roto scenario takes the bool column
+builder's lock in every `push`, `push_null` and `finish` of an admitted function call, for a
+selected, a dropped and an absent value. The TLS rebinding scenario replaces the HTTPS listener's
+TLS configuration on every node as a TLS VHOST is created and rebound, while each connection the
+background HTTPS posts open reads it. The inferencer scenario takes a branch's ONNX session lock
+for each batch of two interleaved branches. Each of the three runs on one and three nodes. On three
+nodes with a replica, the deduplicator, window and guest-save restore scenarios leave the owner's
+lifecycle and branch checkpoint announcements with the replica's lifecycle handle, where the
+replica task takes them under the same lock.
 
 Shuttle checks the production handoff's delivery/refusal and close races, including counter drain,
 through the registered replay-capable harness, in the Shuttle build where no detector is installed.
