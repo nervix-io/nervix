@@ -1097,6 +1097,24 @@ async fn request_identities_start_at_one_and_are_never_reused() {
 
 #[nervix_primitives::test]
 async fn connection_options_reject_unbounded_seeds_and_deadlines_before_connecting() {
+    for backup_wait_timeout in [Duration::ZERO, Duration::from_secs(24 * 60 * 60 + 1)] {
+        nervix_primitives::task::consume_budget().await;
+        let result = Client::connect_with_options(
+            "http://127.0.0.1:9",
+            None,
+            ConnectOptions {
+                backup_wait_timeout,
+                ..ConnectOptions::default()
+            },
+        )
+        .await;
+        assert!(matches!(
+            result,
+            Err(ClientError::InvalidDeadline {
+                field: "backup_wait_timeout"
+            })
+        ));
+    }
     let endpoint = Url::parse("http://127.0.0.1:9").assured("the test endpoint is a URL");
     let too_many_seeds = ConnectOptions {
         seed_servers: vec![endpoint.clone(); 33],

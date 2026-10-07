@@ -59,6 +59,8 @@ pub struct ConnectOptions {
     pub connect_timeout: Duration,
     pub request_timeout: Duration,
     pub retry_timeout: Duration,
+    /// Overall BACKUP command wait, including redirects and reconnects, before archive download.
+    pub backup_wait_timeout: Duration,
 }
 
 impl Default for ConnectOptions {
@@ -73,6 +75,7 @@ impl Default for ConnectOptions {
             connect_timeout: Duration::from_secs(10),
             request_timeout: Duration::from_secs(120),
             retry_timeout: Duration::from_secs(120),
+            backup_wait_timeout: Duration::from_secs(10 * 60),
         }
     }
 }
@@ -211,6 +214,10 @@ impl GrpcConnector {
 
     pub(crate) fn retry_timeout(&self) -> Duration {
         self.options.retry_timeout
+    }
+
+    pub(crate) fn backup_wait_timeout(&self) -> Duration {
+        self.options.backup_wait_timeout
     }
 
     pub(crate) fn seed_servers(&self) -> &[Url] {
