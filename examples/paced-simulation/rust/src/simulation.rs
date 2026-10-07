@@ -182,11 +182,26 @@ async fn connect(settings: &Settings) -> Result<Client, RunError> {
     }
 }
 
+/// Whether the application opens in its current generation or follows an observed START.
+#[derive(Clone, Copy)]
+enum OpenIntent {
+    CurrentGeneration,
+    FollowingStart,
+}
+
+impl OpenIntent {
+    fn retries(self, refusal: Refusal) -> bool {
+        refusal == Refusal::EndpointUnavailable
+            || matches!(self, Self::FollowingStart) && refusal == Refusal::DomainStopped
+    }
+}
+
 /// Opens a producer on the ingestor the settings name, asking again while it is not running on its
 /// node yet.
 async fn open_producer(
     client: &Client,
     settings: &Settings,
+    intent: OpenIntent,
 ) -> error_stack::Result<Producer, ProducerOpenError> {
     let limits = ClientProducerLimits {
         batches: settings.credit_batches,
@@ -218,7 +233,7 @@ async fn open_producer(
                 }));
             }
         };
-        if refusal == Refusal::EndpointUnavailable && Instant::now() < deadline {
+        if intent.retries(refusal) && Instant::now() < deadline {
             nervix_primitives::time::sleep(OPEN_RETRY_DELAY).await;
             continue;
         }
@@ -459,7 +474,7 @@ impl Planner {
                 failure.current_context()
             ));
         }
-        let producer = open_producer(&self.client, &self.settings)
+        let producer = open_producer(&self.client, &self.settings, OpenIntent::CurrentGeneration)
             .await
             .map_err(RunError::Producer)?;
         let opened = producer.description().generation;
@@ -827,7 +842,7 @@ impl Planner {
                 failure.current_context()
             ));
         }
-        let producer = open_producer(&self.client, &self.settings)
+        let producer = open_producer(&self.client, &self.settings, OpenIntent::FollowingStart)
             .await
             .map_err(RunError::Producer)?;
         let opened = producer.description().generation;
@@ -1295,7 +1310,7 @@ async fn simulate(settings: Settings) -> Result<Finish, RunError> {
     };
     consumer_tasks.extend(outputs.tasks);
 
-    let producer = open_producer(&client, &settings)
+    let producer = open_producer(&client, &settings, OpenIntent::CurrentGeneration)
         .await
         .map_err(RunError::Producer)?;
     report::line(producer_line(&settings, &producer));
@@ -1425,6 +1440,17 @@ mod tests {
     use nervix_models::{ClientProcessingFailure, DomainClockPeriod, DomainClockSkew};
 
     use super::*;
+
+    #[test]
+    fn only_an_open_following_start_retries_a_stopped_domain() {
+        assert!(OpenIntent::FollowingStart.retries(Refusal::DomainStopped));
+        assert!(!OpenIntent::CurrentGeneration.retries(Refusal::DomainStopped));
+        for intent in [OpenIntent::CurrentGeneration, OpenIntent::FollowingStart] {
+            assert!(intent.retries(Refusal::EndpointUnavailable));
+            assert!(!intent.retries(Refusal::SchemaMismatch));
+            assert!(!intent.retries(Refusal::DomainNotFound));
+        }
+    }
 
     #[test]
     fn every_outcome_has_its_ledger_cause() {

@@ -649,6 +649,26 @@ impl StagedSnapshot {
             .reserve(MemoryClass::Bulk, length.max(1))
             .await
             .change_context(SnapshotStagingError::Admission)?;
+        self.read_admitted(length, reservation).await
+    }
+
+    /// Read a complete native checkpoint under the caller's conversion reservation. Transport
+    /// chunks keep their separate bulk charges; native materialization may exceed that budget.
+    pub(in crate::runtime) async fn read_admitted(
+        &mut self,
+        length: u64,
+        reservation: nervix_execution::Reservation,
+    ) -> Result<ChargedBytes, Report<SnapshotStagingError>> {
+        if length > self.remaining() {
+            return Err(Report::new(SnapshotStagingError::LengthMismatch {
+                actual: self.remaining(),
+                declared: length,
+            }));
+        }
+        let end = self
+            .offset
+            .checked_add(length)
+            .assured("a read within the remaining length stays inside the staged snapshot");
         let file = self
             .file
             .take()
@@ -663,7 +683,7 @@ impl StagedSnapshot {
                     let result = if cancellation.is_cancelled() {
                         Err(Report::new(SnapshotStagingError::Cancelled))
                     } else {
-                        read_exact(&mut file, charge, length)
+                        read_exact(&mut file, charge, length, cancellation)
                     };
                     StagedRead { file, result }
                 },
@@ -681,6 +701,7 @@ fn read_exact(
     file: &mut tempfile::NamedTempFile,
     charge: nervix_execution::Reservation,
     length: u64,
+    cancellation: &nervix_execution::Cancellation,
 ) -> Result<ChargedBytes, Report<SnapshotStagingError>> {
     let mut buffer = BudgetedBuffer::with_limit(charge, length.max(1));
     let mut remaining = length;
@@ -688,6 +709,9 @@ fn read_exact(
         .verified("the block size is capped at the read block, which fits every pointer width");
     let mut block = vec![0_u8; block_bytes];
     while remaining > 0 {
+        cancellation
+            .check()
+            .change_context(SnapshotStagingError::Cancelled)?;
         let wanted = usize::try_from(remaining.min(block.len().arch_into()))
             .verified("the wanted count is capped at the block length, which is a usize");
         let read = file

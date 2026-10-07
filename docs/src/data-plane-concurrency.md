@@ -623,6 +623,26 @@ An incoming materialized snapshot releases its response stream at EOF, before lo
 or Arrow decoding. Those local operations retain their own staging and memory admission; they do
 not keep Snapshot request or connection-stream permits while waiting for executor work.
 
+Kafka offset catch-up checks the revision before retaining or encoding a checkpoint. Capture
+holds the assignment barrier only to select a conservative revision and immutable partition
+topology; encoding retains that topology and reads shared offset slots after the barrier returns.
+A commit included ahead of the captured revision is offered again by the following revision.
+The native encoder writes into quota-owned staging disk with a fixed 64 KiB I/O grant and separately
+admitted serializer scratch. Bulk transfer carries bounded chunks rather than a whole resident
+checkpoint. At EOF the receiver releases its Snapshot stream, verifies the staged file, and admits
+native decoding separately. It builds a replacement table directly from archived entries, checks
+cancellation between entries, and publishes only under the replica's existing assignment token.
+A failed conversion changes no installed offsets; rebinding rejects a delayed installer. No new
+concurrent map, per-record lock, or atomic ordering is introduced by this transfer path.
+An unchanged poll repeats the held revision through the existing replica assignment admission.
+This recovers a lost acknowledgement without encoding another checkpoint, while promotion or
+replacement prevents a retained poll from reporting progress through its former token.
+The runtime passes the native bulk operation's thirty-second budget into the quorum wait for both
+committed and reset Kafka offsets. The offset-state owner supplies the register-before-read wait
+mechanism; it no longer chooses a separate response budget that can expire while an admitted
+native checkpoint is still progressing. A missing replica acknowledgement still fails at this
+bounded deadline.
+
 ### Acknowledgement state
 
 Each source attempt owns one in-memory acknowledgement tree. Fan-out reserves shares in an atomic
@@ -1550,6 +1570,8 @@ the number of example runs each must make. It also bounds the lane: one real-tim
 selection's diagnostic compilation and execution after its prerequisites, a bound for every
 invocation, a stop grace period, the reserve the scenario binary keeps for its own teardown inside
 its invocation's bound, and how many scenarios run at once, which is the same on every machine.
+
+The registered `@restarted_voter_observation` workload reaches whole-cluster restart and automatic scheduling when the leader first hears a voter through a relayed heartbeat. Its test-only watch channels and concurrent fault map are untracked. The registered native metadata restore workload exercises distributed Kafka checkpoint replication, acknowledgement, restart and exact restoration above the resident replication message budget; its stream waits and assignment atomics retain their complementary checks.
 
 For each invocation the lane builds the selection's executable, lists what the build holds or reads
 the tagged scenarios from the feature files, and refuses a registered workload that the build no

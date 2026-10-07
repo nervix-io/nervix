@@ -208,16 +208,12 @@ Feature: Domain-paced branch buffering
       CREATE SUBSCRIPTION observed_subscription TO observed;
       START AT '2000-01-01T00:00:00Z' TIME RATE 0.0001;
       """
-    And http payload is posted to host "collect-buffering-{{test_id}}.example.com" path "/events"
+    And http payloads are posted concurrently to host "collect-buffering-{{test_id}}.example.com" path "/events"
       """
       {"tenant":"alpha","sequence":1,"path":"collect"}
-      """
-    And http payload is posted to host "collect-buffering-{{test_id}}.example.com" path "/events"
-      """
       {"tenant":"beta","sequence":1,"path":"collect"}
       """
-    Then the relay subscription does not receive a payload within "300ms"
-    And within "2s" the relay subscription receives payloads
+    Then within "2s" the relay subscription receives payloads no sooner than "300ms" after they were published
       """
       {"path":"collect","sequence":1,"tenant":"alpha"}
       {"path":"collect","sequence":1,"tenant":"beta"}

@@ -44,6 +44,8 @@ the graph; otherwise use conspicuous placeholders and state the assumptions.
 
 Read [references/configuring-nervix.md](references/configuring-nervix.md), then use its routing
 guidance to select the relevant Markdown entries from the public index.
+For Kafka domain offsets, retain the documented native checkpoint quorum budget and at-least-once
+retry boundary when explaining source recovery.
 
 ## Assemble the graph
 

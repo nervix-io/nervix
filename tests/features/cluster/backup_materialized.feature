@@ -190,9 +190,9 @@ Feature: Materialized backup and archived lifecycle resumption
     And a <cluster_size> node nervix cluster is started
     And the active domain is "{{domain}}"
     When a materialized restore workload with <relays> relays is created
-    And round 1 of <row_kib> KiB materialized rows is posted for <tenants> tenants
+    And round 1 of <row_kib> KiB materialized rows is submitted for <tenants> tenants
     Then within "180s" the materialized generators report round 1, <row_kib> KiB, <relays> relays and <tenants> tenants
-    When round 2 of <row_kib> KiB materialized rows is posted for <tenants> tenants
+    When round 2 of <row_kib> KiB materialized rows is submitted for <tenants> tenants
     Then within "180s" the materialized generators report round 2, <row_kib> KiB, <relays> relays and <tenants> tenants
     When the materialized summary subscription "summary_subscription" is closed
     Then the current leader node is saved as placeholder "leader"
@@ -258,9 +258,9 @@ Feature: Materialized backup and archived lifecycle resumption
     And a 3 node nervix cluster is started
     And the active domain is "{{domain}}"
     When a materialized restore workload with <relays> relays is created
-    And round 1 of <row_kib> KiB materialized rows is posted for <tenants> tenants
+    And round 1 of <row_kib> KiB materialized rows is submitted for <tenants> tenants
     Then within "180s" the materialized generators report round 1, <row_kib> KiB, <relays> relays and <tenants> tenants
-    When round 2 of <row_kib> KiB materialized rows is posted for <tenants> tenants
+    When round 2 of <row_kib> KiB materialized rows is submitted for <tenants> tenants
     Then within "180s" the materialized generators report round 2, <row_kib> KiB, <relays> relays and <tenants> tenants
     When the materialized summary subscription "summary_subscription" is closed
     Then the current leader node is saved as placeholder "leader"
@@ -283,7 +283,7 @@ Feature: Materialized backup and archived lifecycle resumption
       CREATE SUBSCRIPTION resumed_summaries TO summaries;
       """
     Then within "180s" the materialized generators report round 2, <row_kib> KiB, <relays> relays and <tenants> tenants
-    When round 3 of <row_kib> KiB materialized rows is posted for <tenants> tenants
+    When round 3 of <row_kib> KiB materialized rows is submitted for <tenants> tenants
     Then within "180s" the materialized generators report round 3, <row_kib> KiB, <relays> relays and <tenants> tenants
     When the materialized summary subscription "resumed_summaries" is closed
     When the CLI backs up "domain {{domain}} --timeout 120s" from node "{{survivor}}" into "large-before-stale.nvxb" reporting JSON

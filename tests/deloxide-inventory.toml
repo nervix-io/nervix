@@ -87,6 +87,7 @@ tags = [
   "@memory_pressure_pause",
   "@client_io_03_consumer_restore",
   "@client_io_03_generation",
+  "@restarted_voter_observation",
   "@udf_column_builder",
   "@vhost_tls_rebinding",
   "@inferencer_branch_batches",
@@ -605,6 +606,16 @@ scenario = "The <driver> driver drains buffered routes and reopens its consumers
 selections = ["deloxide", "deloxide-order"]
 
 [[workload]]
+coverage = "Diagnostic Rust driver and nodes across domain stop and a later START generation; Python runs through its ordinary shared binding. Channels, async waits and Python synchronization are untracked."
+examples = 4
+feature = "tests/features/runtime/paced_simulation.feature"
+id = "paced.follow-start-generation"
+invariant = "The Rust and Python drivers stop with their domain and explicitly open the later START generation on one and three nodes, preserving exactly one effect per completed reading and admitting no prior-generation reading after the new generation begins."
+invocation = "paced-simulation"
+scenario = "The <driver> driver stops with its domain and continues in the next START generation without mixing generations on <cluster_size> nodes"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
 coverage = "Refused ticks retained across a producer contract change."
 examples = 4
 feature = "tests/features/runtime/paced_simulation.feature"
@@ -634,6 +645,26 @@ invocation = "paced-simulation"
 scenario = "The <driver> driver fails clearly when reopening a <change_kind> <endpoint> on <cluster_size> nodes"
 selections = ["deloxide", "deloxide-order"]
 
+[[workload]]
+coverage = "Whole-cluster teardown, node-owned store reopening and automatic scheduling after a voter's first relayed heartbeat. Watch channels and the test fault map are untracked."
+examples = 1
+feature = "tests/features/cluster/restarted_voter_observation.feature"
+id = "scenario.restarted-voter-observation"
+invariant = "A voter first heard through a relayed heartbeat keeps every scheduled owner during the original startup grace and after becoming live and catching up to Raft."
+invocation = "scenarios"
+scenario = "A voter first heard through a relayed heartbeat keeps its ownership after cluster restart"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
+coverage = "Distributed native lifecycle and Kafka metadata restoration above the bulk budget, durable generation publication, checkpoint replication and acknowledgement, and exact owner and replica values after restart. Stream waits and assignment atomics are untracked."
+examples = 2
+feature = "tests/features/cluster/backup_metadata.feature"
+id = "scenario.native-metadata-restore"
+invariant = "One- and three-node clusters restore every native lifecycle and Kafka offset value above the bulk budget, preserve distributed owners and replicas through restart and START, and recover the complete typed restore report under its original execution reference."
+invocation = "scenarios"
+scenario = "Native lifecycle and Kafka metadata above the bulk budget on <cluster_size> nodes restore exactly"
+selections = ["deloxide", "deloxide-order"]
+
 [[owner]]
 path = "crates/checkpoint-replication/src/replication.rs"
 workloads = [
@@ -651,12 +682,17 @@ workloads = [
   "scenario.client-consumer-restore",
   "scenario.client-consumer-generation",
   "paced.reopen-generation",
+  "paced.follow-start-generation",
   "paced.reopen-failure",
 ]
 
 [[owner]]
 path = "crates/client-core/src/domain_clock.rs"
-workloads = ["scenario.paced-resume", "paced.reopen-generation"]
+workloads = [
+  "scenario.paced-resume",
+  "paced.reopen-generation",
+  "paced.follow-start-generation",
+]
 
 [[owner]]
 path = "crates/client-core/src/exchange.rs"
@@ -676,7 +712,7 @@ workloads = ["scenario.client-alter-drain", "paced.refused-tick-replay"]
 
 [[owner]]
 path = "crates/client-core/src/restoration.rs"
-workloads = ["paced.reopen-generation"]
+workloads = ["paced.reopen-generation", "paced.follow-start-generation"]
 
 [[owner]]
 path = "crates/client-core/src/subscriptions.rs"
@@ -727,6 +763,7 @@ workloads = ["primitive.debug-formatting"]
 path = "examples/paced-simulation/rust/src/report.rs"
 workloads = [
   "paced.reopen-generation",
+  "paced.follow-start-generation",
   "paced.refused-tick-replay",
   "paced.delayed-refusal",
   "paced.reopen-failure",
@@ -736,6 +773,7 @@ workloads = [
 path = "examples/paced-simulation/rust/src/simulation.rs"
 workloads = [
   "paced.reopen-generation",
+  "paced.follow-start-generation",
   "paced.refused-tick-replay",
   "paced.delayed-refusal",
   "paced.reopen-failure",
@@ -800,6 +838,7 @@ workloads = ["scenario.client-alter-drain", "scenario.client-alter-rejection"]
 [[owner]]
 path = "src/cluster.rs"
 workloads = [
+  "scenario.restarted-voter-observation",
   "scenario.diagnostic-nodes",
   "scenario.diagnostic-server-processes",
 ]
@@ -832,6 +871,7 @@ workloads = ["scenario.client-alter-drain"]
 [[owner]]
 path = "src/runtime/branch_lifecycle_state.rs"
 workloads = [
+  "scenario.native-metadata-restore",
   "scenario.branch-state-resume",
   "scenario.branch-state-stale-coordinator",
   "scenario.restore-generation",
@@ -888,6 +928,7 @@ workloads = ["scenario.diagnostic-nodes"]
 [[owner]]
 path = "src/runtime/state_store.rs"
 workloads = [
+  "scenario.native-metadata-restore",
   "owner.restore-storage",
   "scenario.restore-generation",
   "scenario.restore-staging-quota",

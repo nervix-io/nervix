@@ -310,6 +310,7 @@ impl ExpectedSummaries<'_> {
             duration,
             expected,
             crate::UnmatchedPayloads::Fail,
+            None,
         )
         .await;
     }

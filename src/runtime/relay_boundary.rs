@@ -1325,6 +1325,14 @@ impl RelayBoundaryServices {
             )
             .await;
         if let Err(error) = admission_result {
+            warn!(
+                domain = domain.as_str(),
+                relay = relay.as_str(),
+                branch = ?batch.key.as_ref().map(BranchKey::fingerprint),
+                target_node = %owner_node,
+                error = ?error,
+                "failed to admit relay batch on its owner"
+            );
             let reason = error.to_string();
             for registration in remote_acks.iter().flatten() {
                 dispatcher.clear_pending_ack(registration);

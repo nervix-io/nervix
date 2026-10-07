@@ -45,6 +45,10 @@ use nervix_recovery::{Discarded as _, NoReceiver as _};
 
 use crate::registry::SchedulerMode;
 
+mod restarted_voter;
+
+use restarted_voter::StartupVoterGossip;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum EmitterFaultMode {
     Fail,
@@ -122,6 +126,8 @@ struct FaultInjectionState {
     failed_health_links: DashMap<HealthResponsePauseKey, (), RandomState>,
     /// A blocked peer drops gossip requests until the scenario restores its links.
     blocked_gossip_nodes: DashMap<ClusterNodeName, Duration, RandomState>,
+    /// Restart regressions retain one relayed heartbeat until the first scheduling pass finishes.
+    startup_voter_gossip: DashMap<ClusterNodeName, StartupVoterGossip, RandomState>,
     /// Application health handlers clone a pause so it remains alive after its map guard drops.
     health_response_pauses: DashMap<HealthResponsePauseKey, Arc<TestPause>, RandomState>,
     /// Runtime and harness waiters clone a pause so it remains alive after its map guard drops.
@@ -378,6 +384,7 @@ impl Default for FaultInjection {
                 failed_health_responders: DashMap::default(),
                 failed_health_links: DashMap::default(),
                 blocked_gossip_nodes: DashMap::default(),
+                startup_voter_gossip: DashMap::default(),
                 health_response_pauses: DashMap::default(),
                 command_pauses: DashMap::default(),
                 entity_gate_pauses: DashMap::default(),
@@ -1180,6 +1187,7 @@ impl FaultInjection {
     ) -> bool {
         self.inner.blocked_gossip_nodes.contains_key(sending_node)
             || self.inner.blocked_gossip_nodes.contains_key(receiving_node)
+            || self.startup_voter_gossip_exchange_is_blocked(sending_node, receiving_node)
     }
 
     pub(crate) fn gossip_send_delay(&self, destination: &ClusterNodeName) -> Option<Duration> {
