@@ -88,6 +88,7 @@ tags = [
   "@client_io_03_consumer_restore",
   "@client_io_03_generation",
   "@remote_ack_owners",
+  "@backup_wait",
   "@restarted_voter_observation",
   "@udf_column_builder",
   "@vhost_tls_rebinding",
@@ -690,6 +691,76 @@ scenario = "The <driver> driver fails clearly when reopening a <change_kind> <en
 selections = ["deloxide", "deloxide-order"]
 
 [[workload]]
+coverage = "Diagnostic domain capture, refusal and resumption around an ordinary CLI subprocess's second-domain cut expiry."
+examples = 2
+feature = "tests/features/cluster/backup_wait.feature"
+id = "scenario.backup-cut-expiry"
+invariant = "A second-domain cut expiry returns its bounded failure and resumes both domains on one and three nodes."
+invocation = "scenarios"
+scenario = "A second-domain quiesce expiry returns its failure and resumes both domains"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
+coverage = "Diagnostic node capture and retained-result recovery through a raw session, followed by ordinary CLI archive download to stdout."
+examples = 2
+feature = "tests/features/cluster/backup_wait.feature"
+id = "scenario.backup-destination-recovery"
+invariant = "One- and three-node clusters recover the same completed backup execution to another local destination and stdout."
+invocation = "scenarios"
+scenario = "A backup execution can be recovered to another local destination"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
+coverage = "Diagnostic cluster lifetimes and leader routing around an ordinary CLI capture spanning independently quiesced domain cuts."
+examples = 1
+feature = "tests/features/cluster/backup_wait.feature"
+id = "scenario.backup-leader-recovery"
+invariant = "A leader change between domain cuts preserves the execution reference and completes the original multi-domain capture."
+invocation = "scenarios"
+scenario = "A leader change between domain cuts preserves multi-domain backup recovery"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
+coverage = "Diagnostic session refusal for an ordinary CLI recovery under an expired execution reference."
+examples = 2
+feature = "tests/features/cluster/backup_wait.feature"
+id = "scenario.backup-reference-expiry"
+invariant = "An expired reference refuses recovery without starting a fresh capture on one and three nodes."
+invocation = "scenarios"
+scenario = "An expired reference refuses CLI recovery without starting another backup"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
+coverage = "Diagnostic harness and node lifetimes around an ordinary CLI subprocess's bounded wait, recovery and conflicting capture-input refusal."
+examples = 2
+feature = "tests/features/cluster/backup_wait.feature"
+id = "scenario.backup-bounded-recovery"
+invariant = "A bounded CLI wait preserves the original multi-domain execution for recovery to another file and rejects changed capture inputs."
+invocation = "scenarios"
+scenario = "A bounded CLI wait recovers the same multi-domain backup to another file"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
+coverage = "Diagnostic native-client pending-reply cancellation after wait expiry, followed by a fresh client's reference-preserving recovery and archive download."
+examples = 2
+feature = "tests/features/cluster/backup_wait.feature"
+id = "scenario.backup-native-recovery"
+invariant = "A bounded native wait preserves the original multi-domain execution for recovery by a fresh client on one and three nodes."
+invocation = "scenarios"
+scenario = "A bounded native wait recovers the original multi-domain backup"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
+coverage = "Client command and pending-reply lifetimes while two delayed domain cuts each stay within their own budget and together exceed the ordinary request budget."
+examples = 2
+feature = "tests/features/cluster/backup_wait.feature"
+id = "scenario.backup-multi-domain-wait"
+invariant = "One- and three-node cluster backups wait across independent domain cut budgets and retain both quiesced cuts."
+invocation = "scenarios"
+scenario = "An NSPL cluster backup waits across independent domain cut budgets"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
 coverage = "Whole-cluster teardown, node-owned store reopening and automatic scheduling after a voter's first relayed heartbeat. Watch channels and the test fault map are untracked."
 examples = 1
 feature = "tests/features/cluster/restarted_voter_observation.feature"
@@ -718,7 +789,12 @@ workloads = [
 
 [[owner]]
 path = "crates/client-core/src/client.rs"
-workloads = ["paced.reopen-generation", "paced.delayed-refusal"]
+workloads = [
+  "paced.reopen-generation",
+  "paced.delayed-refusal",
+  "scenario.backup-native-recovery",
+  "scenario.backup-multi-domain-wait",
+]
 
 [[owner]]
 path = "crates/client-core/src/consumer.rs"
@@ -740,7 +816,12 @@ workloads = [
 
 [[owner]]
 path = "crates/client-core/src/exchange.rs"
-workloads = ["scenario.client-alter-drain", "paced.reopen-generation"]
+workloads = [
+  "scenario.client-alter-drain",
+  "paced.reopen-generation",
+  "scenario.backup-native-recovery",
+  "scenario.backup-multi-domain-wait",
+]
 
 [[owner]]
 path = "crates/client-core/src/producer.rs"

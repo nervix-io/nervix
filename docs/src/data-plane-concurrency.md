@@ -1732,6 +1732,16 @@ declaration: the lane's coverage report is evidence about it, not a proof of own
 equality, malformed and out-of-bounds rejection, normalized-cycle deduplication and the summary's
 counts are registered Bolero properties with the same assertion in ordinary and sanitizer execution.
 
+The native backup-wait workloads reach the client's pending-reply locks during multi-domain
+capture, bounded wait expiry and recovery under the same execution reference. They run on one-
+and three-node clusters in both selections and name the client request and exchange owners in
+the inventory. The detector observes their blocking reply-registration and cancellation locks.
+Async command and reconnect mutexes, physical deadlines and network scheduling remain outside
+its observation; the public scenarios and client-session regressions assert their wait, expiry,
+leader-change and recovery outcomes directly. The bounded native-client case runs inside the
+diagnostic harness and reaches expiry and recovery with tracked client locks. The CLI scenarios
+exercise diagnostic nodes around ordinary subprocesses, whose own locks remain untracked.
+
 The lane's state-store owner test starts its detector in a fresh process before constructing store
 or executor locks and runs the current generation regressions: cancellation before and after pointer publication, snapshot
 readers, queued checkpoint writers, corrupt and incomplete chunks, exact retry after reopen,

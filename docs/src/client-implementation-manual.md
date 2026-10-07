@@ -263,7 +263,9 @@ use.
   any effect. A client SHOULD use a UUIDv7 for every command.
 - **E-2.** A client MUST keep the reference together with the exact query text, the domain, the
   expected transaction position, and the expected preview until the command's outcome is known.
-  Every repetition MUST send all of them unchanged, under a new request identity.
+  Every repetition MUST send all of them unchanged, under a new request identity. Explicit backup
+  recovery MAY change the client-local archive destination as A-8 specifies; its server capture
+  inputs and selected domain MUST remain unchanged.
 - **E-3.** A client MUST NOT create a new reference for a command whose outcome is uncertain. It
   MUST repeat the command under the same reference until it receives a terminal disposition, or give
   up and report the outcome as unknown, naming the reference.
@@ -636,6 +638,17 @@ payload, infinity, and nullable and sensitive branch key fields.
   command's request deadline, and SHOULD bound the wait for each frame instead. A client that lost
   the outcome of `BACKUP` itself repeats the command under the same reference, as E-3 requires, to
   recover the summary.
+- **A-7.** A client MUST distinguish each domain's quiesce timeout from the overall backup command
+  wait. It SHOULD provide a bounded configurable wait without requiring the operator to predict
+  the number of domains. All redirects and reconnects in one wait MUST share one deadline and
+  execution reference. If that wait ends without a terminal outcome, the client MUST report the
+  reference as uncertain and MUST NOT imply that admitted work was cancelled. The native client
+  defaults to a ten-minute command wait; its duration is between one millisecond and 24 hours.
+- **A-8.** Recovery MUST retain the original selected domain, scope, resource inclusion and
+  capture options. The local archive destination MAY change; it is excluded from the semantic
+  request binding. A client MUST respect an execution-reference conflict or expiry and MUST NOT
+  silently issue a fresh reference. An explicit renewed wait does not renew archive retention or
+  server retry validity, and the archive may already be unavailable when its outcome is recovered.
 
 ## Restore Streams
 

@@ -29,6 +29,7 @@ mod large_branch_state;
 mod materialized;
 pub(crate) mod restore;
 mod staging;
+mod wait;
 
 /// The backup a scenario ran through its own session.
 #[derive(Debug, Clone)]
