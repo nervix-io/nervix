@@ -23,7 +23,12 @@ Usage:
   just chaos run mixed-instability --image IMAGE [--seed N] [--duration 30m] [--policy POLICY]
       [--coverage LIST] [--plan FILE] [--max-memory-bytes N] [--max-recovery-backlog N] [--max-pending N]
   just chaos replay RUN_DIRECTORY [--artifacts DIR] [--run-id ID] [--timeout SECONDS] [--keep]
-  just chaos cleanup --run-id RUN_ID
+  just chaos suite list
+  just chaos suite smoke|soak --image IMAGE [--shard N] [--entry ID]... [--artifacts DIR] [--suite-id ID]
+  just chaos suite shards SUITE
+  just chaos suite cleanup [--wait SECONDS] SUITE_DIRECTORY
+  just chaos suite report [--expect-shards N] SUITE_JSON...
+  just chaos cleanup --run-id RUN_ID [--evidence DIR]
   just chaos self-test
 
 Run `just chaos run baseline --help` for all baseline options.
@@ -33,6 +38,7 @@ Run `just chaos run partition-recovery --help` for partition-recovery options.
 Run `just chaos run degraded-links --help` for degradation profiles and thresholds.
 Run `just chaos run stateful --help` for stateful and domain-time faults.
 Run `just chaos run mixed-instability --help` for seeded plans, quorum policies and coverage.
+Run `just chaos suite --help` for the smoke and soak suites that CI runs.
 EOF
 }
 
@@ -142,6 +148,9 @@ case "${command_name}" in
         run_directory="$1"
         shift
         exec "${script_dir}/run-baseline.sh" --scenario mixed-instability --replay "${run_directory}" "$@"
+        ;;
+    suite)
+        exec "${script_dir}/suite.sh" "$@"
         ;;
     cleanup)
         exec "${script_dir}/cleanup.sh" "$@"

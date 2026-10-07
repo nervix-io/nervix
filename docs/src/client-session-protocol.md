@@ -3,7 +3,7 @@
 The client session protocol is the public boundary between a client and a Nervix node. It carries
 NSPL commands and their outcomes, transaction attachment and inspection, completion and choice
 lookups, domain selection and the observations that follow it, Row subscriptions, domain clock
-attachments, producers that submit batches to client ingestors, resource uploads, and backup downloads. The CLI, the web console, the Rust client, every host of the
+attachments, producers that submit batches to client ingestors, resource uploads, backup downloads, and restore streams. The CLI, the web console, the Rust client, every host of the
 shared Rust binding, and independent implementations in other languages all speak it.
 
 The protocol owns framing, verification, the session limits, request correlation, cancellation,
@@ -63,7 +63,7 @@ over the interconnect, and that node encodes Row frames for its own sessions.
 | --- | --- | --- |
 | Vocabulary | `nervix-models` | Execution references, domain, relay, subscription and user names, timestamps, the transaction status, preview identity and impact report, the resource description, and the observed domain clock. |
 | Edges | The wire crate, `nervix-client-wire` | The FlatBuffers schema, frame verification and ownership, the session limits, the typed requests, replies, events, transfers and rows the schema describes, the display text of a row, and how frames travel in gRPC and WebSocket messages. It knows no registry, runtime, consensus, parser, Arrow, or client dispatch. |
-| Edges | The session service in `nervix-server` | Authenticating a call, one session per transport connection, correlation, the ordered and concurrent lanes, cancellation against admission, typed rejections, reply encoding and transfer, the control and subscription lanes a session's frames wait in, unsolicited events, domain clock attachments, the upload stream, and the backup download stream. |
+| Edges | The session service in `nervix-server` | Authenticating a call, one session per transport connection, correlation, the ordered and concurrent lanes, cancellation against admission, typed rejections, reply encoding and transfer, the control and subscription lanes a session's frames wait in, unsolicited events, domain clock attachments, the upload stream, the backup download stream, the restore stream, and carrying a download or a restore over a console WebSocket of its own. |
 | Edges | The Row encoder in `nervix-server` | Binding one subscription generation to the row schema it announces and writing selected Arrow rows into bounded frames. |
 | Control plane | The command pipeline and transaction use cases | Durable execution identity, admission, exact recovery, domain mutation ownership, plan fencing, the transaction lifecycle, and the completion barrier. |
 | Control plane | Backup execution and retained archives | Assembling a backup's archive from one applied revision, retaining it under the backup's execution reference until a download collects it or its retry validity ends, and the bounded stream that sends it. |
@@ -71,7 +71,7 @@ over the interconnect, and that node encodes Row frames for its own sessions.
 | Data plane | Relay subscription fan-out | The subscribers of one relay, the definition they were attached under, and ending every subscriber before a batch of another definition can reach it. |
 | Edges | The Rust client, `nervix-client-core` | Connecting, TLS selection, the dispatcher that pairs replies with requests, execution identity across retries, redirect and reconnect, transaction binding and previews, desired subscriptions and their restoration, followed domain clocks, uploads, and backup downloads verified against their summary. |
 | Edges | The shared binding, `nervix-client-ffi` | The C ABI through which C, C++, Python, JVM and Ruby hosts drive the Rust client's state machine, with borrowed frame access, bulk column copies, retained domain clock events, retained reads of the clock of each followed domain with its projections, and the Rust client's producers and consumers with their typed outcomes, settlements and Arrow batches built and read one column level at a time. |
-| Edges | The web console and the CLI | Consumers of the same protocol with bounded buffers of their own. The console speaks it over the WebSocket; the CLI uses the Rust client. |
+| Edges | The web console and the CLI | Consumers of the same protocol with bounded buffers of their own. The console speaks it over its WebSockets: the session, and one per backup download or restore stream, whose archive it verifies or measures itself; the CLI uses the Rust client. |
 
 The server is the composition root: it is the only crate that names the wire crate, the command
 pipeline, and the runtime together. The wire crate names neither Arrow nor the parser, so an
@@ -255,11 +255,34 @@ once with a `SessionEnding` whose reason is a `LeaderRedirect` naming the leader
 reconnects to the leader's advertised console endpoint. A console session also ends this way when
 its node stops leading, which the node checks every 250 milliseconds.
 
-The console WebSocket carries the `Exchange` session only. It has no backup download, so the console
-refuses `BACKUP`, and no upload stream: the console
-uploads a resource through its own HTTP path, `/console/resources/upload`, where the leader builds
-the archive from the files it receives, as [Resource Versions And
-Bindings](./resource-versions.md#assignment) describes.
+The console listener serves three WebSockets, each carrying one kind of call with exactly the
+frames its gRPC method carries:
+
+| Path | Call | Frames |
+| --- | --- | --- |
+| `GET /console/ws` | The `Exchange` session | `ClientMessage` frames answered by `ServerMessage` frames. One connection is one session. |
+| `GET /console/backups/download` | One `DownloadBackup` call | One `BackupDownloadRequest` frame answered by `BackupDownloadMessage` frames, then a normal close. |
+| `GET /console/backups/restore` | One `RestoreBackup` attempt | `RestoreMessage` frames answered by exactly one `RestoreReply` frame, then a normal close. |
+
+A frame of another call's root fails verification and closes the connection with `1007`. A download
+connection takes exactly one request: another data message after it closes the connection with
+`1008`, and a close or a failed connection stops the download before it sends another frame, which
+releases only its own hold on the archive. Any node serves a download and a restore, and each
+answers from its own role exactly as its gRPC method does: a node that does not retain the archive
+and is not the leader answers a download with a redirect, and a restore sent to a follower is
+answered with a redirect outcome.
+
+A WebSocket client cannot half-close a stream the way a gRPC client does: once it sends a close, it
+reads nothing more. A restore over the console WebSocket therefore ends with the chunk that
+completes the size its start declares, and the connection stays open for the reply. A close or a
+failed connection before that chunk ends the attempt in transport, which changes nothing and
+releases what the leader staged for it. A frame the restore cannot read, such as a chunk before the
+start or a second start, ends the stream at that frame, and the restore refuses it without reading
+further. The server closes with `1011` the rare answer it cannot fit into a frame.
+
+The console has no upload stream: it uploads a resource through its own HTTP path,
+`/console/resources/upload`, where the leader builds the archive from the files it receives, as
+[Resource Versions And Bindings](./resource-versions.md#assignment) describes.
 
 ### Authentication
 
@@ -294,8 +317,10 @@ names.
 | Credentials missing or wrong | `UNAUTHENTICATED` | `401`, no upgrade |
 | Credentials the node could not verify now | `UNAVAILABLE` | `503`, no upgrade |
 | Message above the frame limit | `OUT_OF_RANGE`, refused before buffering | Close `1009` |
-| Message that is not a valid frame | `INTERNAL` | Close `1007` |
+| Message that is not a valid frame, or a frame of another call | `INTERNAL` | Close `1007` |
 | Text message | — | Close `1003` |
+| A second request on a download | — | Close `1008` |
+| The node began to stop, during a download or a restore | The call is cut | Close `1001` |
 | Frame without a valid request identity | `SessionEnding` with `ProtocolViolated`, then the end of the stream | The same `SessionEnding`, then a normal close |
 | Session ended by the server | The end of the stream, with status `OK` | A normal close |
 
@@ -1523,10 +1548,14 @@ hold on the archive, which stays retained for the client to download again. The 
 resume offset: a client starts a failed download again from the first byte, and accepts the archive
 only when the completion frame has arrived and every byte matches the summary's size and digest.
 
-The console WebSocket carries no download, so the console refuses `BACKUP` instead of assembling an
-archive nobody could collect. `DESCRIBE BACKUP` never reaches a node at all: a client reads the
-archive file on its own machine, and a node answers the statement sent as a command with
-`RequestFailed`.
+The web console sends `BACKUP` on its session and downloads the archive over a console WebSocket of
+its own, from the console of the node whose session reported the backup. It verifies the archive
+exactly as the Rust client does, and hands it to the browser as a download only once it is
+complete and matches the summary. The browser tab records the backup's execution reference, query
+and domain until the archive is downloaded, so a reloaded page repeats the command under the same
+reference, recovers the summary, and downloads the archive again while it is retained.
+`DESCRIBE BACKUP` never reaches a node at all: a client reads the archive file on its own machine,
+and a node answers the statement sent as a command with `RequestFailed`.
 
 ## Restore Streams
 
@@ -1603,7 +1632,13 @@ applies, the reply is a `LeaderRedirect` or the call fails, and repeating the st
 leader hands it the archive, from which it resumes the restore at its first step not recorded. The
 protocol has no resume offset: every repetition sends the archive from its first byte.
 
-The console WebSocket carries no restore stream, so the console refuses `RESTORE`.
+The web console streams a restore over a console WebSocket of its own, to the console of the
+leader its session follows. It reads the archive file the operator chose once to measure and digest
+it before the start, and again as it streams. The stream ends with the chunk that completes the
+declared size instead of a half-close, and the console watches for a reply that arrives before
+every chunk was sent. It repeats a redirected, interrupted, or still-applying restore under the
+same reference, statement and archive, and reports the outcome as unknown, naming the reference,
+when ten minutes of repetitions leave it unknown.
 
 ## Node Stop And Restart As A Client Observes Them
 
@@ -1616,7 +1651,9 @@ cancelled before admission and never begins an effect. Work that was admitted ke
 reply follows for it: a transaction commit continues, and the node waits for it until its shutdown
 deadline. Subscriptions and domain clock attachments stop with their session, and an upload stream
 still waiting for its client ends at once. A console session receives `SessionEnding` with reason
-`ServerShuttingDown` after the control frames it had already queued, then a normal close. A gRPC
+`ServerShuttingDown` after the control frames it had already queued, then a normal close. A backup
+download or a restore stream on a console WebSocket of its own ends at once with close code `1001`,
+and a restore admitted with its whole archive goes on without its call. A gRPC
 connection is cut when admission closes, so a native client sees its stream fail, as after any
 transport loss, rather than the ending frame. Either way the client reconnects to another node and
 repeats each outstanding command under its execution reference, which joins the admitted work or

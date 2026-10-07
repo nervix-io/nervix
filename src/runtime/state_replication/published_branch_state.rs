@@ -95,24 +95,20 @@ impl PublishedBranchState {
             Self::Deduplicator(state) => {
                 let snapshot = state
                     .snapshot_after(Some(self.last_persisted_lsm()))
-                    .map_err(|error| {
-                        RuntimeStateOperationError::persistence(error.current_context().clone())
-                    })?;
+                    .change_context(RuntimeStateOperationError::Persistence)?;
                 let Some(snapshot) = snapshot else {
                     return Ok(None);
                 };
                 store
                     .persist_latest_snapshot(self.placement(), snapshot.lsm, &snapshot.payload)
-                    .map_err(RuntimeStateOperationError::persistence)?;
+                    .change_context(RuntimeStateOperationError::Persistence)?;
                 snapshot.lsm
             }
             Self::WindowProcessor(state) => {
                 let persistence = state
                     .persistence_after(self.last_persisted_lsm(), executor, staging)
                     .await
-                    .map_err(|error| {
-                        RuntimeStateOperationError::persistence(error.current_context().clone())
-                    })?;
+                    .change_context(RuntimeStateOperationError::Persistence)?;
                 match persistence {
                     None => return Ok(None),
                     Some(WindowPersistence::Resident(snapshot)) => {
@@ -122,7 +118,7 @@ impl PublishedBranchState {
                                 snapshot.lsm,
                                 &snapshot.payload,
                             )
-                            .map_err(RuntimeStateOperationError::persistence)?;
+                            .change_context(RuntimeStateOperationError::Persistence)?;
                         snapshot.lsm
                     }
                     Some(WindowPersistence::Sealed { revision, artifact }) => {
@@ -133,11 +129,7 @@ impl PublishedBranchState {
                                 Arc::new(artifact),
                             )
                             .await
-                            .map_err(|error| {
-                                RuntimeStateOperationError::persistence(
-                                    error.current_context().clone(),
-                                )
-                            })?;
+                            .change_context(RuntimeStateOperationError::Persistence)?;
                         revision
                     }
                 }

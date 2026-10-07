@@ -88,7 +88,6 @@ impl CapturedDeduplicatorKeyspace {
         payload: &[u8],
     ) -> error_stack::Result<Self, DeduplicatorArchiveError> {
         let recent_keys = decode_deduplicator_snapshot(payload)
-            .map_err(Report::new)
             .change_context(DeduplicatorArchiveError::Decode)?;
         Ok(Self {
             generation: StdArc::new(Generation {

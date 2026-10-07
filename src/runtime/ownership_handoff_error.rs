@@ -1,16 +1,14 @@
 //! Layer: data plane.
 //! Owns: typed failure contexts for capturing, validating, and activating runtime state handoffs,
 //! and the rejection a peer receives for one.
-//! May depend on: runtime state persistence errors, the model vocabulary, the interconnect's
-//! handoff failure envelope, and `error-stack` reports.
+//! May depend on: the model vocabulary, the interconnect's handoff failure envelope, and
+//! `error-stack` reports, which keep a runtime state persistence failure beneath them.
 //! Must not know: schedules, consensus transactions, NSPL, or edge protocols.
 
 use error_stack::Report;
 use nervix_interconnect::OwnershipHandoffFailure;
 use nervix_models::{ModelKind, ModelName};
 use thiserror::Error;
-
-use super::RuntimePersistenceError;
 
 pub(crate) type OwnershipHandoffResult<T> = Result<T, Report<OwnershipHandoffError>>;
 
@@ -50,8 +48,9 @@ pub(crate) enum OwnershipHandoffError {
         kind: ModelKind,
         identifier: ModelName,
     },
-    #[error(transparent)]
-    Persistence(#[from] RuntimePersistenceError),
+    /// The node's runtime state storage failed; its `RuntimePersistenceError` report is beneath.
+    #[error("ownership handoff state storage failed")]
+    Persistence,
 }
 
 impl OwnershipHandoffError {
@@ -91,9 +90,5 @@ impl OwnershipHandoffError {
     /// instead of only its outermost one.
     pub(crate) fn remote_rejection(report: &Report<Self>) -> OwnershipHandoffFailure {
         OwnershipHandoffFailure::rejected(format!("{report:#}"))
-    }
-
-    pub(crate) fn persistence(error: RuntimePersistenceError) -> Report<Self> {
-        Report::new(Self::Persistence(error))
     }
 }

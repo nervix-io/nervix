@@ -897,8 +897,11 @@ impl Application {
             restore_staging_max_bytes,
         )
         .map_err(|error| {
-            error!(error = %error, "failed to initialize runtime persistence");
-            Report::new(AppError::OpenRuntimeState)
+            error!(
+                error = format!("{error:#}"),
+                "failed to initialize runtime persistence"
+            );
+            error.change_context(AppError::OpenRuntimeState)
         })?;
         let resource_store = StdArc::new(
             ResourceStore::open_with_limits(
@@ -953,8 +956,12 @@ impl Application {
                 .apply_changes(&changes.domain, revision)
                 .await
             {
-                error!(error = %error, "failed to apply startup runtime changes");
-                let error = Report::new(AppError::ApplyStartupRuntime(error.to_string()));
+                let reason = format!("{error:#}");
+                error!(
+                    error = reason.as_str(),
+                    "failed to apply startup runtime changes"
+                );
+                let error = Report::new(AppError::ApplyStartupRuntime(reason));
                 startup.terminate().await;
                 return Err(error);
             }
@@ -1795,7 +1802,7 @@ impl Application {
                 shutdown: &schedule_shutdown,
             };
             if let Err(error) = apply_current_cluster_runtime_state(application).await {
-                warn!(error = %error, "failed to apply initial cluster schedule");
+                warn!(error = format!("{error:#}"), "failed to apply initial cluster schedule");
             }
             loop {
                 nervix_primitives::task::consume_budget().await;
@@ -1806,7 +1813,7 @@ impl Application {
                             break;
                         }
                         if let Err(error) = apply_current_cluster_runtime_state(application).await {
-                            warn!(error = %error, "failed to apply updated cluster schedule");
+                            warn!(error = format!("{error:#}"), "failed to apply updated cluster schedule");
                         }
                     }
                 }
@@ -2019,7 +2026,7 @@ impl Application {
                         }
                         Err(error) => Err(RemoteOperationFailure::failed(
                             RemoteOperationSubject::domain(&request.domain),
-                            error.to_string(),
+                            format!("{error:#}"),
                         )),
                     };
                     RemoteDomainDrainStatusResponse { result }
@@ -2525,7 +2532,10 @@ impl Application {
         background_tasks.push(nervix_primitives::task::spawn(async move {
             let mut domains_rx = domain_apply_service.inner.consensus.subscribe_domains();
             if let Err(error) = domain_apply_service.apply_current_cluster_state().await {
-                warn!(error = %error, "failed to apply cluster schedule after initial domain sync");
+                warn!(
+                    error = format!("{error:#}"),
+                    "failed to apply cluster schedule after initial domain sync"
+                );
             }
 
             loop {
@@ -2537,7 +2547,7 @@ impl Application {
                             break;
                         }
                         if let Err(error) = domain_apply_service.apply_current_cluster_state().await {
-                            warn!(error = %error, "failed to apply cluster schedule after domain sync");
+                            warn!(error = format!("{error:#}"), "failed to apply cluster schedule after domain sync");
                         }
                     }
                 }

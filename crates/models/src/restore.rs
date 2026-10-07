@@ -13,7 +13,7 @@ use std::{fmt, num::NonZeroU64};
 
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 use serde::{Deserialize, Serialize};
-use strum::AsRefStr;
+use strum::{AsRefStr, EnumString};
 
 use crate::{
     ArchiveDigest, ClusterNodeName, CommandExecutionReference, DomainName, Timestamp,
@@ -139,6 +139,7 @@ impl RestoreScope {
     RkyvSerialize,
     RkyvDeserialize,
     AsRefStr,
+    EnumString,
 )]
 #[strum(serialize_all = "SCREAMING_SNAKE_CASE")]
 pub enum ExistingUserPolicy {
@@ -391,6 +392,17 @@ mod tests {
             RestoreStep::ApplyModels(domain("prod")).to_string(),
             "apply models of domain 'prod'"
         );
+    }
+
+    #[test]
+    fn existing_user_policies_parse_from_their_own_names() {
+        for policy in [
+            ExistingUserPolicy::Fail,
+            ExistingUserPolicy::Skip,
+            ExistingUserPolicy::Replace,
+        ] {
+            assert_eq!(policy.as_ref().parse::<ExistingUserPolicy>(), Ok(policy));
+        }
     }
 
     #[test]
