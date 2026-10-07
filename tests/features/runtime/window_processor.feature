@@ -1284,6 +1284,7 @@ Feature: Window processor runtime behavior
     Given Kafka is running
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
+    And Kafka topic "metrics_{{test_id}}" exists with 1 partitions
     And the leader node is configured with these NSPL commands
       """
       CREATE UNPACED DOMAIN {{domain}};
@@ -1321,7 +1322,7 @@ Feature: Window processor runtime behavior
         'auto.offset.reset' = 'earliest'
       };
         CREATE INGESTOR kafka_metrics
-        FROM KAFKA kafka_main TOPIC metrics_{{test_id}} OFFSET BY CONSUMER GROUP nervix_cucumber_{{test_id}} MODE ACK PARALLEL MAX 2 BATCH TIMEOUT 100ms ACK TIMEOUT 5s RETRY POLICY BACKOFF 100ms MAX 200ms
+        FROM KAFKA kafka_main TOPIC metrics_{{test_id}} OFFSET BY CONSUMER GROUP nervix_cucumber_{{test_id}} MODE ACK PARALLEL MAX 2 BATCH TIMEOUT 30s ACK TIMEOUT 5s RETRY POLICY BACKOFF 100ms MAX 200ms
         ON QUIESCE SUSPEND DECODE USING metric_codec
         TO metrics
         INHERIT ALL
@@ -1345,13 +1346,15 @@ Feature: Window processor runtime behavior
         CREATE SUBSCRIPTION metrics_subscription TO metrics;
         START;
       """
+    Then Kafka consumer group "nervix_cucumber_{{test_id}}" eventually has 1 consumers
+    And within "10s" DESCRIBE INGESTOR "kafka_metrics" on the leader node contains
+      """
+      ready: true
+      """
     When emitter "kafka_forward" enters fault mode
-    And Kafka message is published to topic "metrics_{{test_id}}"
+    And these Kafka messages are rapidly published to topic "metrics_{{test_id}}"
       """
       {"tenant":"acme","latency":10}
-      """
-    And Kafka message is published to topic "metrics_{{test_id}}"
-      """
       {"tenant":"acme","latency":20}
       """
     Then within "8s" the relay subscription receives payloads
@@ -1372,6 +1375,7 @@ Feature: Window processor runtime behavior
     Given Kafka is running
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
+    And Kafka topic "metrics_{{test_id}}" exists with 1 partitions
     And the leader node is configured with these NSPL commands
       """
       CREATE UNPACED DOMAIN {{domain}};
@@ -1433,7 +1437,12 @@ Feature: Window processor runtime behavior
         CREATE SUBSCRIPTION metrics_subscription TO metrics;
         START;
       """
-    And emitter "kafka_forward" enters fault mode
+    Then Kafka consumer group "nervix_cucumber_{{test_id}}" eventually has 1 consumers
+    And within "10s" DESCRIBE INGESTOR "kafka_metrics" on the leader node contains
+      """
+      ready: true
+      """
+    When emitter "kafka_forward" enters fault mode
     And Kafka message is published to topic "metrics_{{test_id}}"
       """
       {"tenant":"acme","latency":10}

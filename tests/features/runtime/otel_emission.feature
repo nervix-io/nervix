@@ -252,7 +252,13 @@ Feature: OTEL emission
       ON GENERAL ERROR LOG;
       START;
       """
-    And http payload is posted to host "otel-metric-{{test_id}}.example.com" path "/metric"
+    When these NSPL commands are executed on the leader node
+      """
+      SHOW CLUSTER STATUS;
+      """
+    Then the last cluster status owner for scheduled "emitter" "request_count_to_otel" is saved as placeholder "otel_http_owner"
+    And the last cluster status owner for scheduled "emitter" "request_count_to_otel_grpc" is saved as placeholder "otel_grpc_owner"
+    When http payload is posted to host "otel-metric-{{test_id}}.example.com" path "/metric"
       """
       {
         "window_start":"2026-08-24T12:34:00Z",
@@ -261,7 +267,21 @@ Feature: OTEL emission
         "route":"/checkout"
       }
       """
-    Then OpenTelemetry Collector eventually contains "nervix.test.request.count"
+    Then node "{{otel_http_owner}}" observability metric "nervix_messages_total" with labels eventually equals 1
+      """
+      target_kind="EMITTER"
+      target="request_count_to_otel"
+      direction="sent"
+      relay="request_counts"
+      """
+    And node "{{otel_grpc_owner}}" observability metric "nervix_messages_total" with labels eventually equals 1
+      """
+      target_kind="EMITTER"
+      target="request_count_to_otel_grpc"
+      direction="sent"
+      relay="request_counts"
+      """
+    And OpenTelemetry Collector eventually contains "nervix.test.request.count"
     And OpenTelemetry Collector eventually contains "nervix.test.request.count.grpc"
     And the DNS fixture eventually receives a question for "otel-http.nervix.test"
     And the DNS fixture eventually receives a question for "otel-grpc.nervix.test"

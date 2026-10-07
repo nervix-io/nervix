@@ -1003,6 +1003,11 @@ impl Cluster {
     ) -> io::Result<()> {
         self.start_node_without_waiting_for_raft_catch_up_within(node_id, construction)
             .await?;
+        self.wait_for_node_raft_catch_up(node_id).await
+    }
+
+    /// Compare public applied positions after a startup fault has been released.
+    pub(crate) async fn wait_for_node_raft_catch_up(&self, node_id: &str) -> io::Result<()> {
         let leader_lookup = PhaseDeadline::after(STATUS_WAIT_BUDGET);
         let mut leader_applied = None;
         for probe_node_id in self
@@ -1456,6 +1461,14 @@ impl Cluster {
     }
 
     pub(crate) async fn restart(&mut self) -> io::Result<()> {
+        self.restart_with_voter_heartbeat(None).await
+    }
+
+    pub(crate) async fn restart_with_relayed_voter(&mut self, voter: &str) -> io::Result<()> {
+        self.restart_with_voter_heartbeat(Some(voter)).await
+    }
+
+    async fn restart_with_voter_heartbeat(&mut self, voter: Option<&str>) -> io::Result<()> {
         let node_ids = self.nodes.keys().cloned().collect::<Vec<_>>();
         let mut first_error = None;
 
@@ -1487,12 +1500,28 @@ impl Cluster {
             .assured("a test cluster is built from a handful of nodes, not billions");
         let construction = PhaseDeadline::after(cluster_startup_budget(nodes_to_start));
         let bootstrap = self.node_id(1);
+        if let Some(voter) = voter {
+            self.fault_injection
+                .hold_restarted_voter_heartbeat(node_name(&bootstrap), node_name(voter));
+            self.fault_injection
+                .fail_health_responses_between(node_name(&bootstrap), node_name(voter));
+        }
         self.start_node_within(&bootstrap, construction).await?;
         for node_id in node_ids.iter().filter(|node_id| **node_id != bootstrap) {
-            self.start_node_within(node_id, construction).await?;
+            if voter.is_some() {
+                // The held heartbeat can keep replication from catching this voter up. Let the
+                // scenario reach and release the observation barrier before waiting for catch-up.
+                self.start_node_without_waiting_for_raft_catch_up_within(node_id, construction)
+                    .await?;
+            } else {
+                self.start_node_within(node_id, construction).await?;
+            }
         }
 
         self.wait_for_any_leader(&bootstrap).await?;
+        if voter.is_some() {
+            return self.wait_for_leader(&bootstrap, Some(&bootstrap)).await;
+        }
         if node_ids.len() > 1 {
             for node_id in &node_ids {
                 self.wait_for_any_leader(node_id).await?;

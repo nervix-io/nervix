@@ -241,6 +241,7 @@ mod ingestor_quiesce;
 mod ingestor_start;
 mod ingestors;
 mod kafka_offset_state;
+mod kafka_offset_transfer;
 mod local_drain;
 mod lookup_hash_map;
 mod lsm_sequence;
@@ -744,16 +745,16 @@ pub(crate) use domain_execution::LookupRuntime;
 /// ```compile_fail
 /// use nervix_server::runtime::state_capability_compile_tests::KafkaOffsetStateOriginator;
 ///
-/// fn forbidden(originator: &KafkaOffsetStateOriginator) {
-///     let _ = originator.install_snapshot(1, &[]);
+/// fn forbidden(originator: &KafkaOffsetStateOriginator, cancellation: &nervix_execution::Cancellation) {
+///     let _ = originator.install_cancellable_snapshot(1, &[], cancellation);
 /// }
 /// ```
 ///
 /// ```compile_fail
 /// use nervix_server::runtime::state_capability_compile_tests::KafkaOffsetStateRead;
 ///
-/// fn forbidden(reader: &KafkaOffsetStateRead) {
-///     let _ = reader.install_snapshot(1, &[]);
+/// fn forbidden(reader: &KafkaOffsetStateRead, cancellation: &nervix_execution::Cancellation) {
+///     let _ = reader.install_cancellable_snapshot(1, &[], cancellation);
 /// }
 /// ```
 ///

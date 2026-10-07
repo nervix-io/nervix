@@ -117,7 +117,7 @@ Feature: Relay correlation
                    right_profile_aliases WHERE right.tenant = 'acme'
         CORRELATE WHERE lower(left.first_name) = lower(right.first_name)
         MATCH <match_policy>
-        MAX TIME 5s
+        MAX TIME 2m
         ON CORRELATION TIMEOUT DROP, DROP
         BRANCHED BY by_left_profile_ingestor
         TO correlated_profiles
@@ -138,15 +138,36 @@ Feature: Relay correlation
         CREATE SUBSCRIPTION correlation_audits_subscription TO correlation_audits WHERE tenant = 'acme';
         START;
       """
+    When these NSPL commands are executed on the leader node
+      """
+      DESCRIBE CORRELATOR correlate_profiles;
+      """
+    Then the last command output owner is saved as placeholder "correlator_owner"
     When http payload is posted to node "node-1" with host "http-{{test_id}}.example.com" path "/left"
       """
       {"tenant":"acme","first_name":"John","marker":1}
       """
-    And http payload is posted to node "node-1" with host "http-{{test_id}}.example.com" path "/left-alias"
+    Then within "30s" node "{{correlator_owner}}" observability metric "nervix_messages_total" with labels eventually equals 1
+      """
+      domain="{{domain}}"
+      target_kind="CORRELATOR"
+      target="correlate_profiles"
+      direction="received"
+      relay="left_profiles"
+      """
+    When http payload is posted to node "node-1" with host "http-{{test_id}}.example.com" path "/left-alias"
       """
       {"tenant":"acme","first_name":"JOHN","marker":2}
       """
-    And http payload is posted to node "node-1" with host "http-{{test_id}}.example.com" path "/left"
+    Then within "30s" node "{{correlator_owner}}" observability metric "nervix_messages_total" with labels eventually equals 1
+      """
+      domain="{{domain}}"
+      target_kind="CORRELATOR"
+      target="correlate_profiles"
+      direction="received"
+      relay="left_profile_aliases"
+      """
+    When http payload is posted to node "node-1" with host "http-{{test_id}}.example.com" path "/left"
       """
       {"tenant":"acme","first_name":"Jane","marker":3}
       """

@@ -53,3 +53,7 @@ prints its summary.
 
 The public scenarios in `tests/features/runtime/paced_simulation.feature` run both programs as
 published against this graph.
+
+With `--follow-generations`, both drivers retry a stopped-domain producer open within their
+existing 30-second budget after observing a later paced START generation. An initial open still
+requires a running domain. `just test-paced-simulation` checks both drivers' open policies.

@@ -143,9 +143,23 @@ build-paced-simulation:
     CARGO_TARGET_DIR={{ cargo_target_dir }} cargo build --package nervix-paced-simulation \
         --package nervix-client-ffi
 
-# Run the unit tests of the paced simulation's Rust driver.
-test-paced-simulation *args:
+# Run the unit tests of both paced simulation drivers.
+test-paced-simulation *args: test-paced-simulation-python
     cargo test --package nervix-paced-simulation -- {{ args }}
+
+test-paced-simulation-python:
+    python3 -m unittest discover -s examples/paced-simulation/python -p 'test_*.py'
+
+# Deterministic application-open coverage, including refusal and deadline outcomes.
+coverage-paced-simulation-python:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    mkdir -p {{ quote(cargo_target_dir + "/paced-simulation") }}
+    export COVERAGE_FILE="{{ cargo_target_dir }}/paced-simulation/python.coverage"
+    uvx --from coverage==7.11.0 coverage run --branch \
+        --source=examples/paced-simulation/python,scripts/paced_simulation_coverage \
+        -m unittest discover -s examples/paced-simulation/python -p 'test_*.py'
+    uvx --from coverage==7.11.0 coverage lcov -o "{{ cargo_target_dir }}/paced-simulation/python.lcov"
 
 # Run the paced simulation's Rust driver against a running node, for example
 # `just paced-simulation --server http://127.0.0.1:47391 --ticks 100`.
@@ -917,7 +931,16 @@ test-scenarios-coverage: tests-deps
     export NERVIX_CLIENT_LIBRARY={{ quote(cargo_target_dir + "/llvm-cov-target/debug/libnervix_client_ffi.so") }}
     install -m 755 {{ quote(cargo_target_dir + "/debug/nervix-nspl-format") }} \
         {{ quote(cargo_target_dir + "/llvm-cov-target/debug/nervix-nspl-format") }}
-    cargo llvm-cov --no-report --features testing --package nervix-server --test scenarios
+    collection_dir="$(mktemp -d {{ quote(cargo_target_dir + "/paced-simulation-coverage.XXXXXX") }})"
+    export COVERAGE_FILE="${collection_dir}/python.coverage"
+    export PYTHONPATH="{{ justfile_directory() }}/scripts/paced_simulation_coverage${PYTHONPATH:+:${PYTHONPATH}}"
+    export COVERAGE_PROCESS_START="{{ justfile_directory() }}/scripts/paced_simulation_coverage/coverage.ini"
+    uv run --no-project --with coverage==7.11.0 cargo llvm-cov --no-report \
+        --features testing --package nervix-server --test scenarios
+    uvx --from coverage==7.11.0 coverage combine --data-file "${collection_dir}/python.coverage"
+    mkdir -p {{ quote(cargo_target_dir + "/paced-simulation") }}
+    uvx --from coverage==7.11.0 coverage lcov --data-file "${collection_dir}/python.coverage" \
+        -o "{{ cargo_target_dir }}/paced-simulation/python.lcov"
     cargo llvm-cov report --no-default-ignore-filename-regex --lcov --output-path lcov-workspace.info
     cargo llvm-cov report --package nervix-cli --package nervix-web-console \
         --package nervix-server --lcov --output-path lcov.info
@@ -1255,21 +1278,9 @@ coverage-paced-simulation output="target/paced-simulation.lcov" scenario_binary=
     #!/usr/bin/env bash
     set -euo pipefail
     collection_dir="$(mktemp -d {{ quote(cargo_target_dir + "/paced-simulation-coverage.XXXXXX") }})"
-    cat > "${collection_dir}/sitecustomize.py" <<'PYTHON'
-    import sys
-    if sys.argv[0].endswith("paced_simulation.py"):
-        import coverage
-        coverage.process_startup()
-    PYTHON
-    cat > "${collection_dir}/coverage.ini" <<CONFIG
-    [run]
-    branch = true
-    parallel = true
-    source = {{ justfile_directory() }}/examples/paced-simulation/python
-    data_file = ${collection_dir}/python.coverage
-    CONFIG
-    export PYTHONPATH="${collection_dir}${PYTHONPATH:+:${PYTHONPATH}}"
-    export COVERAGE_PROCESS_START="${collection_dir}/coverage.ini"
+    export COVERAGE_FILE="${collection_dir}/python.coverage"
+    export PYTHONPATH="{{ justfile_directory() }}/scripts/paced_simulation_coverage${PYTHONPATH:+:${PYTHONPATH}}"
+    export COVERAGE_PROCESS_START="{{ justfile_directory() }}/scripts/paced_simulation_coverage/coverage.ini"
     if [[ -n {{ quote(scenario_binary) }} ]]; then
         just coverage-paced-simulation-binaries
         (

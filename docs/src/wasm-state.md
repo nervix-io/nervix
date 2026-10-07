@@ -301,9 +301,12 @@ node is reported durable and every later checkpoint there fails until the node r
 
 A replica acts on an announcement only while the placement is current on it and the announcing node
 is the owner its schedule names. The announcement wakes the replica task that keeps the processor's
-branches current, which fetches the checkpoint in its next round. That task also reads what changed
-in the owner's catalog of the processor's branch checkpoints at least once every replication poll
-interval, so a checkpoint whose announcement was lost still reaches the replica within one interval.
+branches current, which fetches the checkpoint in its next round. While idle, the task also starts a
+round after the one-second replication poll interval, so a lost announcement is recovered by
+periodic synchronization. Lifecycle, catalog and checkpoint requests each retain their typed
+five-second response deadline, including time waiting for transport capacity; the poll interval
+does not cancel a request still within that deadline. A busy or failing replica can take longer
+than one interval to catch up. The owner's whole checkpoint still has ten seconds to complete.
 The replica installs a revision newer than the one it holds, synchronizes its storage, and only then
 acknowledges; a replica that already holds the announced revision or a newer one synchronizes and
 acknowledges what it holds, so a lost acknowledgement is replaced by the next announcement. Each
