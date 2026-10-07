@@ -206,12 +206,8 @@ impl MemoryPressureController {
                 return MemoryPressureState::Pressured;
             }
 
-            match runtime.resume_one_ingestor_after_memory_pressure().await {
-                Ok(true) => {}
-                Ok(false) => return MemoryPressureState::Healthy,
-                Err(error) => {
-                    warn!(error = %error, "failed to resume ingestor after memory pressure");
-                }
+            if !runtime.resume_one_ingestor_after_memory_pressure().await {
+                return MemoryPressureState::Healthy;
             }
         }
     }

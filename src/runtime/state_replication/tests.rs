@@ -1452,15 +1452,13 @@ async fn materialized_relay_snapshot_task_owns_persistence() {
         branch_key: None,
     };
     let schema = test_schema(&[("status", ParseAsType::String)]);
-    let mut assignment = runtime
-        .replicated_materialized_stream_state(
-            placement.clone(),
-            schema.arrow_schema(),
-            None,
-            Vec::new(),
-            None,
-        )
-        .expect("materialized relay state should initialize");
+    let mut assignment = runtime.replicated_materialized_stream_state(
+        placement.clone(),
+        schema.arrow_schema(),
+        None,
+        Vec::new(),
+        None,
+    );
     let mut state = assignment
         .originator
         .take()
@@ -1667,8 +1665,7 @@ fn a_window_state_publication_proceeds_while_a_snapshot_reads_the_previous_one()
         identifier: named("latency_window"),
         branch_key: string_branch_key("tenant", "acme"),
     };
-    let state = ReplicatedWindowProcessorState::new(placement, None)
-        .expect("window processor state should initialize");
+    let state = ReplicatedWindowProcessorState::new(placement, None);
     let live_state = WindowProcessorState::new(
         &window_plan(
             "SET count = COUNT(input.latency)",
@@ -1713,8 +1710,7 @@ async fn a_recreated_window_branch_refuses_the_previous_lifetime_checkpoint() {
         &[("count", ParseAsType::I64)],
     );
     let input_schema = test_schema(&[("latency", ParseAsType::I64)]);
-    let state = ReplicatedWindowProcessorState::new(placement, None)
-        .expect("window processor state should initialize");
+    let state = ReplicatedWindowProcessorState::new(placement, None);
     state
         .replace_state(&WindowProcessorState::new(&plan, 7))
         .expect("the first lifetime should publish");

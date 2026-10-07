@@ -1826,30 +1826,29 @@ impl Runtime {
         domain: &DomainName,
         relay: &RelayName,
         expected: &RelaySubscriptionDefinition,
-    ) -> Result<RelaySubscriptionReceiver<RelayRecordBatch>, RuntimeError> {
+    ) -> error_stack::Result<RelaySubscriptionReceiver<RelayRecordBatch>, RuntimeError> {
         let Some(routing) = self.domain_routing(domain) else {
-            return Err(RuntimeError::RelayNotInstantiated {
-                domain: domain.as_str().to_string(),
-                relay: relay.as_str().to_string(),
-            });
+            return Err(Report::new(RuntimeError::relay_not_instantiated(
+                domain, relay,
+            )));
         };
         let routing = routing.load();
         let Some(services) = routing.relay_services.get(relay) else {
-            return Err(RuntimeError::RelayNotInstantiated {
-                domain: domain.as_str().to_string(),
-                relay: relay.as_str().to_string(),
-            });
+            return Err(Report::new(RuntimeError::relay_not_instantiated(
+                domain, relay,
+            )));
         };
         match services.fanout.subscriptions().attach(expected) {
             Ok(receiver) => Ok(receiver),
-            Err(RelaySubscriptionRefusal::NotDeclared) => Err(RuntimeError::RelayNotInstantiated {
-                domain: domain.as_str().to_string(),
-                relay: relay.as_str().to_string(),
-            }),
-            Err(RelaySubscriptionRefusal::Redefined) => Err(RuntimeError::RelayRedefined {
-                domain: domain.clone(),
-                relay: relay.clone(),
-            }),
+            Err(RelaySubscriptionRefusal::NotDeclared) => Err(Report::new(
+                RuntimeError::relay_not_instantiated(domain, relay),
+            )),
+            Err(RelaySubscriptionRefusal::Redefined) => {
+                Err(Report::new(RuntimeError::RelayRedefined {
+                    domain: domain.clone(),
+                    relay: relay.clone(),
+                }))
+            }
         }
     }
 

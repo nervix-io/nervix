@@ -1,0 +1,301 @@
+name: Chaos
+
+# Runs a suite of the external chaos runner against an already built Nervix image: the Docker
+# Build workflow calls it with the image its build job published, and a manual run names an
+# immutable image. Every shard runs `just chaos suite` on its own Docker worker, which needs no
+# Rust toolchain, compiles nothing and runs no repository test binary.
+on:
+  workflow_call:
+    inputs:
+      image:
+        description: Nervix image the image-build job published; the plan resolves it to its digest.
+        type: string
+        required: true
+      suite:
+        description: Suite of scripts/chaos/suites.json.
+        type: string
+        required: true
+  workflow_dispatch:
+    inputs:
+      image:
+        description: Immutable Nervix image, REPOSITORY@sha256:DIGEST.
+        type: string
+        required: true
+      suite:
+        description: Suite of scripts/chaos/suites.json.
+        type: choice
+        options:
+          - smoke
+          - soak
+        default: smoke
+
+permissions:
+  contents: read
+  packages: read
+
+env:
+  CHAOS_IMAGE_INPUT: ${{ inputs.image }}
+  CHAOS_SUITE: ${{ inputs.suite }}
+  NO_COLOR: "1"
+
+jobs:
+  plan:
+    name: plan
+    runs-on: blacksmith-2vcpu-ubuntu-2404
+    timeout-minutes: 10
+    outputs:
+      image: ${{ steps.image.outputs.image }}
+      shards: ${{ steps.shards.outputs.shards }}
+      shard-count: ${{ steps.shards.outputs.count }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Install just
+        uses: taiki-e/install-action@v2
+        with:
+          tool: just@latest,toml-cli
+
+      - name: Plan the shards and their budgets
+        id: shards
+        run: |
+          shards="$(just chaos suite shards "${CHAOS_SUITE}")"
+          echo "shards=${shards}" >> "${GITHUB_OUTPUT}"
+          echo "count=$(jq 'length' <<<"${shards}")" >> "${GITHUB_OUTPUT}"
+          jq -r '.[] | "shard \(.shard): \(.entries | join(", ")); \(.execution_minutes) min of runs, step \(.step_minutes) min, job \(.job_minutes) min"' \
+            <<<"${shards}"
+
+      - name: Login to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # Every shard runs the same immutable image: a manual run must name a digest, and the tag
+      # the build job published is replaced by the digest it points to now.
+      - name: Resolve the image to its digest
+        id: image
+        run: |
+          reference="${CHAOS_IMAGE_INPUT}"
+          if [[ "${GITHUB_EVENT_NAME}" == workflow_dispatch && ! "${reference}" =~ @sha256:[a-f0-9]{64}$ ]]; then
+            echo "::error::a manual chaos run needs an immutable image, REPOSITORY@sha256:DIGEST, not ${reference}"
+            exit 1
+          fi
+          repository="${reference%@*}"
+          if [[ "${repository##*/}" == *:* ]]; then
+            repository="${repository%:*}"
+          fi
+          digest="$(timeout 120 docker buildx imagetools inspect "${reference}" --format '{{json .Manifest}}' | jq -r '.digest')"
+          [[ "${digest}" =~ ^sha256:[a-f0-9]{64}$ ]] || {
+            echo "::error::${reference} did not resolve to a digest"
+            exit 1
+          }
+          echo "image=${repository}@${digest}" >> "${GITHUB_OUTPUT}"
+          echo "${reference} resolves to ${repository}@${digest}"
+
+      - name: Logout from GHCR
+        if: always()
+        run: docker logout ghcr.io
+
+  run:
+    name: ${{ inputs.suite }} shard ${{ matrix.shard.shard }}
+    needs: plan
+    # A GitHub-hosted worker: Pumba's network faults need the prio, sfq and netem queueing
+    # disciplines, which the Blacksmith workers' kernel does not provide, so every run there stops
+    # in its network preflight or verifier self-check.
+    runs-on: ubuntu-24.04
+    # The job budget is the shard's step budget plus the measured reserve for evidence, cleanup and
+    # upload, so those steps still run when the suite step reaches its own budget.
+    timeout-minutes: ${{ matrix.shard.job_minutes }}
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: ${{ fromJSON(needs.plan.outputs.shards) }}
+    env:
+      CHAOS_IMAGE: ${{ needs.plan.outputs.image }}
+      CHAOS_SHARD: ${{ matrix.shard.shard }}
+      CHAOS_SUITE_ID: ci-${{ github.run_id }}-${{ github.run_attempt }}-${{ inputs.suite }}-${{ matrix.shard.shard }}
+      # The chaos scripts need jq 1.8; the worker's own jq is Ubuntu's 1.7.
+      CHAOS_JQ_URL: https://github.com/jqlang/jq/releases/download/jq-1.8.1/jq-linux-amd64
+      CHAOS_JQ_SHA256: 020468de7539ce70ef1bceaf7cde2e8c4f2ca6c3afb84642aabc5c97d9fc2a0d
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Install just
+        uses: taiki-e/install-action@v2
+        with:
+          tool: just@latest,toml-cli
+
+      # The suite runs with just, toml and the pinned jq on a PATH that holds no Rust toolchain,
+      # which shows that the external command builds nothing.
+      - name: Prepare the controller's tools on a PATH without a Rust toolchain
+        run: |
+          tools="${RUNNER_TEMP}/chaos-tools"
+          mkdir -p "${tools}"
+          install -m 0755 "$(command -v just)" "$(command -v toml)" "${tools}/"
+          curl --fail --silent --show-error --location --retry 3 --max-time 120 \
+            --output "${tools}/jq" "${CHAOS_JQ_URL}"
+          echo "${CHAOS_JQ_SHA256}  ${tools}/jq" | sha256sum --check --strict
+          chmod 0755 "${tools}/jq"
+          "${tools}/jq" --version
+          chaos_path="${tools}"
+          IFS=: read -ra entries <<<"${PATH}"
+          for entry in "${entries[@]}"; do
+            case "${entry}" in
+              "" | */.cargo/bin | */.rustup/*) ;;
+              *) chaos_path="${chaos_path}:${entry}" ;;
+            esac
+          done
+          for tool in cargo rustc rustup; do
+            if PATH="${chaos_path}" command -v "${tool}" >/dev/null 2>&1; then
+              echo "::error::${tool} is still reachable as $(PATH="${chaos_path}" command -v "${tool}")"
+              exit 1
+            fi
+          done
+          echo "CHAOS_PATH=${chaos_path}" >> "${GITHUB_ENV}"
+
+      # The worker's kernel must offer the queueing disciplines Pumba installs inside node network
+      # namespaces; the runs' own network preflight then proves that a fault blocks and heals.
+      - name: Load the queueing disciplines of Pumba's faults
+        run: |
+          for module in sch_prio sch_sfq sch_netem; do
+            sudo modprobe "${module}" || {
+              echo "::error::this worker's kernel cannot load ${module}, which Pumba's network faults need"
+              exit 1
+            }
+          done
+
+      - name: Login to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Pull the image
+        run: timeout 600 docker pull "${CHAOS_IMAGE}"
+
+      - name: Logout from GHCR
+        if: always()
+        run: docker logout ghcr.io
+
+      # The suite step ends at its budget: the runs' own bounds and one teardown reserve. exec hands
+      # a cancellation's TERM to just, which passes it to the suite and the run it executes.
+      - name: Run the ${{ inputs.suite }} suite
+        timeout-minutes: ${{ matrix.shard.step_minutes }}
+        run: |
+          export PATH="${CHAOS_PATH}"
+          exec just chaos suite "${CHAOS_SUITE}" --shard "${CHAOS_SHARD}" --image "${CHAOS_IMAGE}" \
+            --artifacts "${RUNNER_TEMP}/chaos" --suite-id "${CHAOS_SUITE_ID}"
+
+      # A cancelled or timed-out suite step ends with the runner killing only `just`, so the suite
+      # and its run may still be finishing their exit work. Cleanup waits up to five minutes for
+      # them and kills what remains, then, as a second witness after the runs' own exit traps,
+      # captures what any run of this suite left behind, removes it and confirms nothing remains.
+      - name: Remove the suite's Docker resources
+        if: always()
+        timeout-minutes: 8
+        run: |
+          if [[ -n "${CHAOS_PATH:-}" ]]; then
+            export PATH="${CHAOS_PATH}"
+          fi
+          just chaos suite cleanup "${RUNNER_TEMP}/chaos/${CHAOS_SUITE_ID}"
+
+      - name: Publish the shard summary
+        if: always()
+        run: |
+          summary="${RUNNER_TEMP}/chaos/${CHAOS_SUITE_ID}/summary.md"
+          if [[ -s "${summary}" ]]; then
+            cat "${summary}" >> "${GITHUB_STEP_SUMMARY}"
+          else
+            echo "## Chaos ${CHAOS_SUITE} shard ${CHAOS_SHARD}: no suite record" >> "${GITHUB_STEP_SUMMARY}"
+          fi
+
+      - name: Upload the shard verdict
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: chaos-verdict-${{ inputs.suite }}-${{ matrix.shard.shard }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/chaos/${{ env.CHAOS_SUITE_ID }}/suite.json
+            ${{ runner.temp }}/chaos/${{ env.CHAOS_SUITE_ID }}/summary.md
+          if-no-files-found: warn
+          retention-days: 14
+
+      # Every run directory, console log and cleanup capture: enough to reproduce each run, or to
+      # replay a mixed-instability run with `just chaos replay`.
+      - name: Upload the shard evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: chaos-${{ inputs.suite }}-${{ matrix.shard.shard }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/chaos/${{ env.CHAOS_SUITE_ID }}
+          if-no-files-found: warn
+          retention-days: 14
+
+  verdict:
+    name: ${{ inputs.suite }} verdict
+    needs: [plan, run]
+    if: always() && needs.plan.result == 'success'
+    runs-on: blacksmith-2vcpu-ubuntu-2404
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          sparse-checkout: scripts/chaos
+
+      # Every attempt of this run keeps its own verdicts, so a rerun of failed shards never replaces
+      # the verdicts of the attempt it repeats.
+      - name: Download the shard verdicts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: chaos-verdict-${{ inputs.suite }}-*-${{ github.run_id }}-*
+          path: ${{ runner.temp }}/verdicts
+
+      # The suite passes only when the latest attempt of every planned shard recorded a passing
+      # verdict.
+      - name: Publish the suite verdict
+        env:
+          SHARD_COUNT: ${{ needs.plan.outputs.shard-count }}
+        run: |
+          declare -A latest_attempt=()
+          declare -A latest_record=()
+          all_records=()
+          while IFS= read -r record; do
+            all_records+=("${record}")
+            artifact="$(basename "$(dirname "${record}")")"
+            attempt="${artifact##*-}"
+            shard="$(jq -r '.shard' "${record}")"
+            if [[ -z "${latest_attempt[${shard}]:-}" ]] || ((attempt > latest_attempt[${shard}])); then
+              latest_attempt["${shard}"]="${attempt}"
+              latest_record["${shard}"]="${record}"
+            fi
+          done < <(find "${RUNNER_TEMP}/verdicts" -name suite.json -type f 2>/dev/null | sort)
+          records=()
+          while IFS= read -r shard; do
+            [[ -n "${shard}" ]] || continue
+            records+=("${latest_record[${shard}]}")
+          done < <(printf '%s\n' "${!latest_record[@]}" | sort -n)
+          status=0
+          bash scripts/chaos/suite.sh report --expect-shards "${SHARD_COUNT}" ${records[@]+"${records[@]}"} \
+            > "${RUNNER_TEMP}/verdict.md" || status=$?
+          for record in ${all_records[@]+"${all_records[@]}"}; do
+            artifact="$(basename "$(dirname "${record}")")"
+            shard="$(jq -r '.shard' "${record}")"
+            if [[ "${record}" != "${latest_record[${shard}]}" ]]; then
+              printf "\nAttempt %s of shard %s, %s, was rerun; its artifacts remain as \`%s\`.\n" \
+                "${artifact##*-}" "${shard}" "$(jq -r '.status' "${record}")" "${artifact}" \
+                >> "${RUNNER_TEMP}/verdict.md"
+            fi
+          done
+          cat "${RUNNER_TEMP}/verdict.md" >> "${GITHUB_STEP_SUMMARY}"
+          cat "${RUNNER_TEMP}/verdict.md"
+          exit "${status}"

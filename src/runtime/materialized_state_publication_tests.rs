@@ -692,15 +692,13 @@ mod shuttle_checks {
                 placed.identifier.clone(),
             );
             let state_schema = row(1, 1, 1).arrow_schema();
-            let mut assignment = runtime
-                .replicated_materialized_stream_state(
-                    placed.clone(),
-                    state_schema.clone(),
-                    None,
-                    Vec::new(),
-                    None,
-                )
-                .assured("empty state installs");
+            let mut assignment = runtime.replicated_materialized_stream_state(
+                placed.clone(),
+                state_schema.clone(),
+                None,
+                Vec::new(),
+                None,
+            );
             let mut originator = assignment.originator.take().assured("local origination");
             let specs = HashMap::from_iter([(
                 relay.clone(),

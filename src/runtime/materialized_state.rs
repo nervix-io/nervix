@@ -16,7 +16,7 @@
 )]
 
 use ahash::RandomState;
-use error_stack::Report;
+use error_stack::{Report, ResultExt as _};
 use imbl::{GenericHashMap, shared_ptr::DefaultSharedPtr};
 use nervix_checkpoint_replication::CheckpointReplication;
 use nervix_execution::{Executor, MemoryClass, Reservation};
@@ -719,34 +719,38 @@ impl MaterializedRelaySnapshotInstaller {
     pub(super) fn install(
         &self,
         restored: RestoredMaterializedSnapshot,
-    ) -> Result<(), RuntimeStateOperationError> {
-        self.read.state.assignment.authorize_exclusive(
+    ) -> error_stack::Result<(), RuntimeStateOperationError> {
+        let installation = self.read.state.assignment.authorize_exclusive(
             self.assignment,
             StateCapability::InstallSnapshot,
             || {
                 let installed_revision = self.read.state.current_lsm.current();
                 if restored.revision < installed_revision {
-                    return Err(RuntimeStateOperationError::MaterializedSnapshotRevision {
-                        received: restored.revision,
-                        current: installed_revision,
-                    });
+                    return Err(Report::new(
+                        RuntimeStateOperationError::MaterializedSnapshotRevision {
+                            received: restored.revision,
+                            current: installed_revision,
+                        },
+                    ));
                 }
                 let installed_branch_generation =
                     self.read.state.branch_generation.load(Ordering::SeqCst);
                 if restored.branch_generation < installed_branch_generation {
-                    return Err(RuntimeStateOperationError::Checkpoint(format!(
-                        "refused a materialized relay snapshot from branch generation {} while \
-                         branch generation {installed_branch_generation} is installed",
-                        restored.branch_generation,
-                    )));
+                    return Err(Report::new(
+                        RuntimeStateOperationError::MaterializedSnapshotBranchGeneration {
+                            received: restored.branch_generation,
+                            current: installed_branch_generation,
+                        },
+                    ));
                 }
                 let installed_fence = self.read.state.installed_fence.load(Ordering::SeqCst);
                 if restored.fence < installed_fence {
-                    return Err(RuntimeStateOperationError::Checkpoint(format!(
-                        "refused a materialized relay snapshot sealed under ownership fence {} \
-                         while fence {installed_fence} is installed",
-                        restored.fence,
-                    )));
+                    return Err(Report::new(
+                        RuntimeStateOperationError::MaterializedSnapshotFence {
+                            received: restored.fence,
+                            current: installed_fence,
+                        },
+                    ));
                 }
                 let mut entries = MaterializedBranches::default();
                 for record in restored.records {
@@ -769,8 +773,8 @@ impl MaterializedRelaySnapshotInstaller {
                 *self.read.state.sealed.lock() = None;
                 Ok(())
             },
-        )??;
-        Ok(())
+        );
+        installation.change_context(RuntimeStateOperationError::Authority)?
     }
 }
 
@@ -992,25 +996,63 @@ mod tests {
                 }],
             ),
         );
-        let newer = RestoredMaterializedSnapshot::from_captured_generation(
-            &executor,
-            MaterializedGeneration::new(
-                2,
-                1,
-                1,
-                schema,
-                vec![MaterializedGenerationRecord {
-                    branch: None,
-                    row: test_runtime_row([("value".to_string(), RuntimeValue::I64(2))]),
-                }],
-            ),
-        );
+        let generation = |revision: u64, fence: u64, branch_generation: u64| {
+            RestoredMaterializedSnapshot::from_captured_generation(
+                &executor,
+                MaterializedGeneration::new(
+                    revision,
+                    fence,
+                    branch_generation,
+                    schema.clone(),
+                    vec![MaterializedGenerationRecord {
+                        branch: None,
+                        row: test_runtime_row([("value".to_string(), RuntimeValue::I64(2))]),
+                    }],
+                ),
+            )
+        };
         installer
-            .install(newer)
+            .install(generation(2, 3, 3))
             .assured("a newer snapshot is admissible");
+
+        let refusal = installer
+            .install(earlier)
+            .expect_err("an earlier revision must not replace newer rows");
         assert!(
-            installer.install(earlier).is_err(),
-            "an earlier revision must not replace newer rows"
+            matches!(
+                refusal.current_context(),
+                RuntimeStateOperationError::MaterializedSnapshotRevision {
+                    received: 1,
+                    current: 2
+                }
+            ),
+            "{refusal:?}"
+        );
+        let refusal = installer
+            .install(generation(4, 3, 2))
+            .expect_err("a snapshot from an earlier branch lifecycle is refused");
+        assert!(
+            matches!(
+                refusal.current_context(),
+                RuntimeStateOperationError::MaterializedSnapshotBranchGeneration {
+                    received: 2,
+                    current: 3
+                }
+            ),
+            "{refusal:?}"
+        );
+        let refusal = installer
+            .install(generation(4, 2, 3))
+            .expect_err("a snapshot sealed under a superseded fence is refused");
+        assert!(
+            matches!(
+                refusal.current_context(),
+                RuntimeStateOperationError::MaterializedSnapshotFence {
+                    received: 2,
+                    current: 3
+                }
+            ),
+            "{refusal:?}"
         );
         assert_eq!(
             installer

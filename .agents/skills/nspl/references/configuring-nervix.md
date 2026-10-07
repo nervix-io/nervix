@@ -370,18 +370,20 @@ Choose checks relevant to the configured graph:
   would bind now; `SHOW CREATE` shows the version each existing binding stores.
 - `BACKUP CLUSTER TO '<file>';` or `BACKUP DOMAIN [<name>] TO '<file>' [WITHOUT RESOURCES]
   [WITHOUT STATE | WITHOUT PAUSE | TIMEOUT <duration>];` writes an archive on the client's machine,
-  sent alone from `nervix-cli` or a native client. A normal backup quiesces each running domain
+  sent alone from `nervix-cli`, a native client, or the web console, which saves it as a verified
+  browser download. A normal backup quiesces each running domain
   before capturing WASM guest state, Kafka domain source offsets, branch lifecycle, fresh
   materialized relay generations, deduplicator keys and the rows windows retain. `WITHOUT
   PAUSE` reads published checkpoints while execution continues; `WITHOUT STATE` captures only
-  configuration. `DESCRIBE BACKUP '<file>';` verifies one offline and inventories its state,
-  domains, users, and resource versions. Treat an archive as a secret.
+  configuration. `DESCRIBE BACKUP '<file>';` verifies one offline in `nervix-cli` and inventories
+  its state, domains, users, and resource versions. Treat an archive as a secret.
 - `RESTORE CLUSTER FROM '<file>' [RESUME] [ON EXISTING USER FAIL | SKIP | REPLACE] [DRY RUN]
   [WITHOUT STATE | WITHOUT SOURCE OFFSETS];` or
   `RESTORE DOMAIN <name> [AS <new_name>] FROM '<file>' [RESUME] [DRY RUN]
   [WITHOUT STATE | WITHOUT SOURCE OFFSETS];` recreates users, domains,
   resource versions under their archived numbers, models, and compatible runtime state from an archive, sent alone from
-  `nervix-cli` or a native client. The default leaves restored domains stopped. `RESUME` makes them
+  `nervix-cli`, a native client, or the web console's Backups dialog, which streams an archive file
+  you choose. The default leaves restored domains stopped. `RESUME` makes them
   running at the archived start generation and clock mapping after complete publication, preserving
   materialized rows, deduplicator keys and windows. Paced mappings project downtime; normal `START`
   establishes a new generation and clears materialized state. Restored deduplicator keys expire at

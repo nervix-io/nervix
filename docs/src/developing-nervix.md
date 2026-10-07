@@ -561,6 +561,27 @@ limits, the scenario matrix, and how to investigate a failure.
 CI runs the suite and the replay check only for a pull request labeled `turmoil`. Label a pull
 request that changes the interconnect or a seam the simulation plugs into.
 
+### External cluster chaos
+
+`just chaos` runs black-box cluster scenarios against an already built Nervix image through Docker
+Compose, Pumba and the image's packaged CLI. It compiles nothing and needs no Rust toolchain. Two
+suites run selections of those scenarios, each as its own `just chaos run` command:
+
+```bash
+just chaos suite list
+just chaos suite smoke --image ghcr.io/nervix-io/nervix@sha256:<digest>
+just chaos suite soak --image ghcr.io/nervix-io/nervix@sha256:<digest>
+```
+
+The smoke suite runs a baseline, a leader crash with its restart and a partition with its recovery;
+the soak suite runs every delivered scenario with fixed and rotating mixed-instability seeds. CI
+runs the smoke suite against a pull request's own image only for a pull request labeled `chaos`,
+and the soak suite for one labeled `chaos-soak`. The nightly build of `main` runs the soak suite,
+and a manual run of the `Chaos` workflow takes a suite and an immutable image digest. Label a pull
+request that changes the chaos runner, or the membership, failover, recovery or delivery behavior
+its scenarios verify, with `chaos`. `scripts/chaos/README.md` describes every scenario, the suites,
+their budgets and artifacts, and how to reproduce or replay a failed run.
+
 ### SIMD kernel development
 
 [SIMD Kernels](./simd-kernels.md) owns the typed-buffer admission rule, caller catalog, dispatch

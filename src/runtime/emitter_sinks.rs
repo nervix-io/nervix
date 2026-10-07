@@ -253,7 +253,6 @@ impl EmitterSinkStarter {
                 let projection = Self::projection(MappedValuesProjectionInit {
                     label: "OTEL",
                     namespace: "otel",
-                    domain: &context.domain,
                     emitter: &context.emitter,
                     mapping: &sink.mapping,
                     input_schema: input_schema.arrow_schema(),
@@ -276,7 +275,6 @@ impl EmitterSinkStarter {
                 let projection = Self::projection(MappedValuesProjectionInit {
                     label: "ClickHouse",
                     namespace: "clickhouse",
-                    domain: &context.domain,
                     emitter: &context.emitter,
                     mapping: &sink.mapping,
                     input_schema: input_schema.arrow_schema(),
@@ -299,7 +297,6 @@ impl EmitterSinkStarter {
                 let projection = Self::projection(MappedValuesProjectionInit {
                     label: "Postgres",
                     namespace: "postgres",
-                    domain: &context.domain,
                     emitter: &context.emitter,
                     mapping: &sink.mapping,
                     input_schema: input_schema.arrow_schema(),
@@ -326,7 +323,6 @@ impl EmitterSinkStarter {
                 let projection = Self::projection(MappedValuesProjectionInit {
                     label: "MySQL",
                     namespace: "mysql",
-                    domain: &context.domain,
                     emitter: &context.emitter,
                     mapping: &sink.mapping,
                     input_schema: input_schema.arrow_schema(),
@@ -353,7 +349,6 @@ impl EmitterSinkStarter {
                 let projection = Self::projection(MappedValuesProjectionInit {
                     label: "MongoDB",
                     namespace: "mongodb",
-                    domain: &context.domain,
                     emitter: &context.emitter,
                     mapping: &sink.mapping,
                     input_schema: input_schema.arrow_schema(),
@@ -380,7 +375,6 @@ impl EmitterSinkStarter {
                 let projection = Self::projection(MappedValuesProjectionInit {
                     label: "Iceberg",
                     namespace: "iceberg",
-                    domain: &context.domain,
                     emitter: &context.emitter,
                     mapping: &sink.mapping,
                     input_schema: input_schema.arrow_schema(),
