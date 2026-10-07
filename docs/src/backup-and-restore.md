@@ -770,6 +770,12 @@ fingerprint in hexadecimal, or `unbranched`. A deduplicator or window descriptor
 many groups as it has keys or rows, and none when it has none; every named group must be present,
 and a window group must hold both its input rows and its argument columns.
 
+Every `.arrow` section is one canonical Arrow IPC stream: its schema message, one record batch
+and the end-of-stream marker, which ends the section. Every message opens with the continuation
+marker, and every length the stream declares, a message's metadata, its body and each column
+buffer, lies within the section. A restore refuses a section framed otherwise before it decodes
+or allocates anything from it.
+
 A resource named `.` or `..` appears in a section path as `%2E` or `%2E%2E`.
 
 A record section begins with a twelve-byte header: the magic `NVXBKREC`, then the record's kind and

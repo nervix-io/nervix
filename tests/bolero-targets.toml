@@ -1763,6 +1763,36 @@ test_target = "lib"
 
 [[target]]
 case_timeout_seconds = 10
+corpus = "src/runtime_schema/__fuzz__/runtime_schema__arrow_body_properties__bolero_arrow_bodies_restore_every_column_value_and_null/corpus"
+domain_version = 1
+features = []
+id = "runtime-arrow-bodies"
+invariant = "A batch read back from its relay body and from its sealed snapshot section has the schema it was written with, every value of every column and every null."
+manifest = "Cargo.toml"
+max_input_bytes = 1024
+package = "nervix-server"
+random_iterations = 128
+source = "src/runtime_schema/arrow_body_properties.rs"
+test = "runtime_schema::arrow_body_properties::bolero_arrow_bodies_restore_every_column_value_and_null"
+test_target = "lib"
+
+[[target]]
+case_timeout_seconds = 10
+corpus = "src/runtime_schema/__fuzz__/runtime_schema__arrow_body_properties__bolero_damaged_arrow_bodies_are_refused_typed_or_decode_canonically/corpus"
+domain_version = 1
+features = []
+id = "runtime-arrow-bodies-malformed"
+invariant = "A relay body or a sealed snapshot section damaged once, and arbitrary bytes, are refused for what they hold or decode to a batch that encodes and decodes back to itself, and no damage makes the decoder allocate from a length the body does not carry."
+manifest = "Cargo.toml"
+max_input_bytes = 2048
+package = "nervix-server"
+random_iterations = 256
+source = "src/runtime_schema/arrow_body_properties.rs"
+test = "runtime_schema::arrow_body_properties::bolero_damaged_arrow_bodies_are_refused_typed_or_decode_canonically"
+test_target = "lib"
+
+[[target]]
+case_timeout_seconds = 10
 corpus = "src/runtime/__fuzz__/runtime__window_state__tests__bolero_sealed_window_checkpoints_match_their_resident_encoding/corpus"
 domain_version = 1
 features = []

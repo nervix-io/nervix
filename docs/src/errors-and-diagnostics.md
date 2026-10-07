@@ -889,7 +889,16 @@ beneath it: no admission registration, a body that is not one Arrow section of t
 metadata or acknowledgement sidecars whose row count differs from the body's, acknowledgement
 registrations on a subscription fan-out, a branch key that does not decode, or rows that do not
 assemble into a relay batch. The Arrow body, `BranchKeyError` or relay batch failure stays beneath
-that. A decoded batch the local relay boundary refuses is the separate
+that. An Arrow body that is not one canonical IPC stream framed within its own bytes is
+`ArrowBodyError::Framing`, naming the `IpcFramingDefect`: a message without its continuation
+marker, a stream cut inside a message, a negative length, metadata that is not an Arrow message, a
+column buffer outside its message's body, or bytes behind the end-of-stream marker. The decoder
+refuses it before it allocates or reads anything from a declared length, for a relay body and for
+an Arrow section of a sealed snapshot or a backup archive alike. A client batch names the same
+defects as the reason of its `Malformed` defect. A stream the framing admits and Arrow's reader
+then panics on ends its decode job, and the decoder reports that as `ArrowBodyError::Decode`, a
+defect of the body, rather than as work the node could not execute: decoding the same body again
+would panic again. A decoded batch the local relay boundary refuses is the separate
 `RuntimeError::DispatchRemoteRelay`. Remote payload handling returns these as `error-stack`
 reports: the receiver logs the whole chain, and a payload it refused before admitting it is
 answered with the chain rendered as the reason.
