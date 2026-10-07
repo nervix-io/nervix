@@ -57,14 +57,17 @@ scenario binary was built for the mode. The ordinary suite leaves the `@deadlock
 scenarios out by default: their steps assert a detector an ordinary build does not have.
 
 The [diagnostic lane](#diagnostic-lane) also selects the ordinary `@restore_installation`,
-`@client_ingestor_alter_drain`, `@memory_pressure_pause`, `@client_io_03_consumer_restore` and
-`@client_io_03_generation` scenarios and the local `@deadlock_reports`
+`@client_ingestor_alter_drain`, `@memory_pressure_pause`, `@client_io_03_consumer_restore`,
+`@client_io_03_generation`, `@udf_column_builder`, `@vhost_tls_rebinding` and
+`@inferencer_branch_batches` scenarios and the local `@deadlock_reports`
 inspection/export/triage workflow. They exercise
 the blocking applied-state guard through interrupted checkpoint staging, complete publication and
 runtime handle clearing, including a delayed coordinator after leadership transfer and a
-successor's START, the memory-pressure pause of starting and running ingestors, and Rust client
-consumers restored after a cluster restart and closed by a domain stop. The report tool is an
-ordinary local executable, even when the scenario process
+successor's START, the memory-pressure pause of starting and running ingestors, Rust client
+consumers restored after a cluster restart and closed by a domain stop, a Roto function's column
+builder, the HTTPS listener's TLS configuration as a VHOST's bundle is rebound under HTTPS
+ingestion, and a batched inferencer's ONNX session across interleaved branches. The report tool is
+an ordinary local executable, even when the scenario process
 selects order analysis. Potential findings remain recorded without ending the process; any
 unreviewed workload finding prevents diagnostic qualification. Real server children and the
 scenario process record the same compile-time/runtime selection. The ordinary CLI built by the test
@@ -109,7 +112,10 @@ The lane's diagnostic owner tests each start their detector in a fresh process b
 publication or executor lock: the state store's staging, snapshot views, queued writers,
 interrupted publication and bounded cleanup, and the materialized publication lifetimes. Each must
 pass its libtest accounting and record exactly one qualifying process observation in both
-diagnostic selections.
+diagnostic selections. The tracked locks' conformance checks of `nervix-primitives` run the same
+way, each in a fresh process in both selections. They record no evidence file, because the
+primitive crate sits below the crate that owns evidence: a finding reaches a sink that aborts the
+check, and the lane fails on that ending.
 
 Test dependencies start through one suite-owned environment. If Docker creates a named container
 but cannot bind its randomly selected host port, that owner removes the failed container and tries
@@ -1117,9 +1123,12 @@ owns what the lane proves, its failure classes and its applicability records; th
 it runs and how long it may take.
 
 The lane starts after its prerequisites, `just tests-deps`, and builds each invocation with Cargo
-before it runs it. The probes and the owner tests are libtest executables, run directly so that a
-signal reaches the lane as a signal rather than as Cargo's status. The scenario binary runs the
-lane's tagged scenarios without retries, in two invocations: the restore, client and diagnostic
+before it runs it. The prerequisites provision what the workloads load, as they do for the ordinary
+suite: the WASM guests, the generated ONNX models and the ONNX runtime library, whose path the lane
+passes to every invocation. The probes, the tracked locks' conformance checks and the owner tests
+are libtest executables, run directly so that a signal reaches the lane as a signal rather than as
+Cargo's status. The scenario binary runs the lane's tagged scenarios without retries, in two
+invocations: the restore, client, diagnostic, Roto function, TLS rebinding and inferencer
 scenarios, then the paced-driver scenarios with the diagnostic Rust driver. Each invocation runs
 the inventory's fixed number of scenarios at once, four, rather than one per CPU: a diagnostic
 build pays for its tracked acquisitions on every lock, and a fixed count puts the same load on its

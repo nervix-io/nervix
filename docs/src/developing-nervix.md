@@ -489,13 +489,14 @@ just deadlock-report inspect target/deloxide/test-deloxide/deloxide-order/run.XX
 ```
 
 The lane runs every workload `tests/deloxide-inventory.toml` registers for its selection: the
-disposable-process probes, the diagnostic owner tests and the tagged one- and three-node scenarios,
-without retries. It fails when a registered workload is missing or ignored, when a probe, owner test
-or tagged scenario is not registered, when a process deadlocks, fails its diagnostics, is killed by
-a signal, outlives its bound or leaves a process behind, and when evidence is missing, partly
-written or does not qualify. An active deadlock exits `3`, a diagnostic failure `4`, a timeout or the
-expired budget `124`, and every other failure `1`. A potential cycle fails the lane until its order
-is corrected; the lane keeps no list of approved cycles.
+disposable-process probes, the tracked locks' conformance checks, the diagnostic owner tests and the
+tagged one- and three-node scenarios, without retries. It fails when a registered workload is
+missing or ignored, when a probe, conformance check, owner test or tagged scenario is not
+registered, when a process deadlocks, fails its diagnostics, is killed by a signal, outlives its
+bound or leaves a process behind, and when evidence is missing, partly written or does not qualify.
+An active deadlock exits `3`, a diagnostic failure `4`, a timeout or the expired budget `124`, and
+every other failure `1`. A potential cycle fails the lane until its order is corrected; the lane
+keeps no list of approved cycles.
 
 Each run keeps a fresh attempt under `target/deloxide/test-deloxide/<selection>/` with every log,
 probe artifact, evidence file and finding description, and `lane.json` with the exact command,
@@ -507,22 +508,21 @@ just test-deloxide-replay target/deloxide/test-deloxide/deloxide/run.XXXX/lane.j
 just test-deloxide-qualification deloxide-order
 ```
 
-A new probe, owner test or tagged scenario joins the inventory with a stable identity, the
-invariant it owns, its selections and the coverage it declares; a renamed one is renamed there in
-the same change. A source file that starts acquiring tracked blocking locks needs an `[[owner]]`
-record naming the workloads that reach them or the path the lane does not reach and why:
-`just validate-deloxide-applicability`, part of `just validate`, holds the records to the compiler's
-acquisition catalog. For a pull request labeled `deloxide`, which every change the Deloxide rule
-applies to carries, CI's `deloxide` job runs both selections through the native coverage collector,
-as `just coverage-native-extras test-deloxide test-deloxide-order` does locally, and keeps their
-attempts, completion records and diagnostic coverage reports as artifacts.
-The ordinary report tool also exports selected artifacts, records explicit proofs in reviewed
-copies and qualifies whole-process evidence. `just coverage-deadlock` measures the diagnostic
-implementation and the ordinary report command in separate instrumented builds through the native
-collector. [Data-Plane Concurrency](./data-plane-concurrency.md#diagnostic-deadlock-detection) has the
-lane's classes, its record, proof requirements, current graph limits and the paths detection does
-not cover, and [Integration Test Lifecycle](./integration-test-lifecycle.md#diagnostic-lane) its
-bounds.
+A new probe, conformance check, owner test or tagged scenario joins the inventory with a stable
+identity, the invariant it owns, its selections and the coverage it declares; a renamed one is
+renamed there in the same change. A source file that starts acquiring tracked blocking locks needs
+an `[[owner]]` record naming the workloads that reach them or the path the lane does not reach and
+why: `just validate-deloxide-applicability`, part of `just validate`, holds the records to the
+compiler's acquisition catalog. For a pull request labeled `deloxide`, which every change the
+Deloxide rule applies to carries, CI's `deloxide` job runs both selections through the native
+coverage collector, as `just coverage-native-extras test-deloxide test-deloxide-order` does locally,
+and keeps their attempts, completion records and diagnostic coverage reports as artifacts. The
+ordinary report tool also exports selected artifacts, records explicit proofs in reviewed copies and
+qualifies whole-process evidence. `just coverage-deadlock` measures the diagnostic implementation
+and the ordinary report command in separate instrumented builds through the native collector.
+[Data-Plane Concurrency](./data-plane-concurrency.md#diagnostic-deadlock-detection) has the lane's
+classes, its record, proof requirements, current graph limits and the paths detection does not
+cover, and [Integration Test Lifecycle](./integration-test-lifecycle.md#diagnostic-lane) its bounds.
 
 ### Deterministic network simulation
 
