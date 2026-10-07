@@ -1671,6 +1671,13 @@ jobs:
           chmod +x llvm.sh
           sudo ./llvm.sh 23
 
+      # The interconnect's wire properties take their vocabulary values from the generator crate,
+      # whose WASM protocol bindings are generated when it is built.
+      - name: Setup flatc
+        uses: Nugine/setup-flatc@v1
+        with:
+          version: "25.12.19"
+
       # The same toolchain and flags the other jobs build with, so the dependencies this build
       # shares with them compile identically.
       - name: Configure cargo
