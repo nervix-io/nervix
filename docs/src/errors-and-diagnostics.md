@@ -1196,6 +1196,17 @@ typed fields let the caller act; which context must cross each boundary; and whi
 diagnostic or recovery class closes the path. That classification must preserve branch and
 sensitivity rules, and it must not add a second form of a failure the owner already represents.
 
+The external Chaos controller distinguishes an `observation` failure from a product recovery
+failure. A degraded-link bandwidth probe that cannot establish its connection, deliver its full
+payload, observe the receiver's successful exit, or retain its helper evidence reports the probe's
+sender, receiver, address and port. Its adjacent probe record preserves readiness, transfer
+deadline, both helpers' outcomes, received byte count and cleanup outcomes, with raw helper logs.
+A timeout of the Docker client also ends the exact sender container; it does not leave a live
+transfer to alter a later measurement. A failed required attempt remains evidence even after a
+subsequent successful qualification. The controller's measurement budget does not extend the
+product's recovery budget. [The external Chaos runner](https://github.com/nervix-io/nervix/blob/main/scripts/chaos/README.md) owns the
+commands, measurement interpretation and retained artifact paths.
+
 A diagnostic node's findings retain a typed source. `WaitForGraph`/`ActiveCycle` establishes an
 active tracked-lock cycle and ends the diagnostic process with status `3` after recording.
 `LockOrderViolation`/`PotentialCycle` is historical order, retained as unreviewed evidence while the
