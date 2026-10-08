@@ -32,6 +32,22 @@ impl Runtime {
         .verified("the None persistence path has no fallible step")
     }
 
+    /// A runtime without persistence that consults `fault_injection`, so a test can arm the
+    /// failures and waits its runtime seams take.
+    #[cfg(all(test, feature = "testing"))]
+    pub(crate) fn with_fault_injection(fault_injection: ConfiguredFaultInjection) -> Self {
+        Self::with_persistence_and_temp_dir(
+            Executor::default(),
+            None,
+            None,
+            DEFAULT_STATE_SNAPSHOT_INTERVAL,
+            fault_injection,
+            PathBuf::from(DEFAULT_TEMP_DIR),
+            DEFAULT_RESTORE_STAGING_MAX_BYTES,
+        )
+        .verified("the None persistence path has no fallible step")
+    }
+
     pub(in crate::runtime) fn with_persistence(
         db: Option<Database>,
         state_snapshot_interval: Duration,
@@ -307,6 +323,16 @@ impl Runtime {
         self.inner
             .fault_injection
             .take_armed_transaction_binding_drop(node_id)
+    }
+
+    #[cfg(feature = "testing")]
+    pub(crate) fn take_shutdown_cordon_release_delay(
+        &self,
+        stopping_node: &ClusterNodeName,
+    ) -> Option<Duration> {
+        self.inner
+            .fault_injection
+            .take_shutdown_cordon_release_delay(stopping_node)
     }
 
     #[cfg(feature = "testing")]

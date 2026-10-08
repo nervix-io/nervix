@@ -21,6 +21,40 @@ Feature: Graceful shutdown
       raft.cordoned_nodes: node-2
       """
 
+  @shutdown_cordon_release
+  Scenario Outline: A stopping <role> whose cordon release outlasts one second completes its drain and leaves no cordon
+    Given graceful shutdown drain is enabled
+    And drain timeout is configured as "30s"
+    And the production sticky scheduler is configured
+    And a 3 node nervix cluster is started
+    And the leader node is configured with these NSPL commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      CREATE SCHEMA cordon_event ( id I64 );
+      CREATE RELAY cordon_input SCHEMA cordon_event UNBRANCHED;
+      CREATE RELAY cordon_output SCHEMA cordon_event UNBRANCHED;
+      CREATE JUNCTION cordon_route FROM cordon_input UNBRANCHED
+        TO cordon_output INHERIT ALL FLUSH IMMEDIATE ON MESSAGE ERROR LOG;
+      START;
+      """
+    When leadership is transferred to node "<leader>"
+    And these NSPL commands are executed on the leader node
+      """
+      RELOCATE JUNCTION cordon_route ONTO NODE node-2 IGNORE PREFERENCES;
+      """
+    Then node "node-1" eventually reports status containing "kind=junction name=cordon_route owner=node-2"
+    When the leader takes "2s" to release the shutdown drain cordon of node "node-2"
+    And node "node-2" is gracefully stopped
+    Then the last shutdown of node "node-2" reports its drain-support phase "Completed"
+    And node "node-1" eventually reports status containing "raft.cordoned_nodes: (none)"
+    When node "node-2" is started
+    Then node "node-2" eventually reports status containing "raft.cordoned_nodes: (none)"
+
+    Examples:
+      | role     | leader |
+      | leader   | node-2 |
+      | follower | node-1 |
+
   Scenario: A follower started without the default user's password hands its work to another node before it stops
     Given graceful shutdown drain is enabled
     And drain timeout is configured as "30s"

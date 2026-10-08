@@ -103,7 +103,7 @@ pub enum ShutdownPhase {
 }
 
 /// How a shutdown phase ended.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, strum::EnumString)]
 pub enum ShutdownPhaseOutcome {
     /// The phase finished its contract before the shutdown deadline.
     Completed,

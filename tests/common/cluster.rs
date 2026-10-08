@@ -69,7 +69,7 @@ use nervix_server::{
     FaultInjection, SchedulerMode,
     application::{
         Application, CommandExecutionPolicy, InternalTransportMode, ShutdownCoordinator,
-        init_tracing_to_file,
+        ShutdownOutcome, init_tracing_to_file,
     },
     memory_pressure::MemoryPressureConfig,
     runtime::{DEFAULT_DOMAIN_DRAIN_TIMEOUT, DEFAULT_TEMP_DIR, branch_task_stop_timeout},
@@ -1161,6 +1161,16 @@ impl Cluster {
             .get_mut(node_id)
             .unwrap_or_else(|| panic!("unknown node '{node_id}'"));
         handle.stop().await
+    }
+
+    /// How the last stop of `node_id` that a scenario requested and waited for ended, or `None`
+    /// when no such stop has finished its phases.
+    pub(crate) fn last_shutdown_outcome(&self, node_id: &str) -> Option<ShutdownOutcome> {
+        let handle = self
+            .nodes
+            .get(node_id)
+            .unwrap_or_else(|| panic!("unknown node '{node_id}'"));
+        handle.last_shutdown
     }
 
     /// Move a stopped node's interconnect to another loopback address behind the same advertised
@@ -3044,6 +3054,9 @@ struct NodeHandle {
     config: TestClusterConfig,
     task: OwnedNodeTask,
     shutdown: Option<ShutdownCoordinator>,
+    /// How the last stop a scenario requested and waited for ended, kept after its coordinator
+    /// is released so the scenario can read the outcome of each shutdown phase.
+    last_shutdown: Option<ShutdownOutcome>,
     live: LiveClusterHandle,
 }
 
@@ -3060,6 +3073,7 @@ impl NodeHandle {
             config,
             task: OwnedNodeTask::not_started(),
             shutdown: None,
+            last_shutdown: None,
             live,
         }
     }
@@ -3209,7 +3223,9 @@ impl NodeHandle {
                 }))
             }
         };
-        self.shutdown = None;
+        if let Some(shutdown) = self.shutdown.take() {
+            self.last_shutdown = shutdown.outcome();
+        }
         self.fault_injection
             .unregister_consensus(&node_name(&self.spec.node_id));
         if task_result.is_ok() {
