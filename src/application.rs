@@ -104,9 +104,11 @@ use nervix_primitives::{
 };
 use observability_http::serve_observability_http;
 use ownership_handoff::{FORCED_OWNERSHIP_RECOVERY_BUDGET, ForcedOwnershipRecoveryCoordinator};
+#[cfg(feature = "testing")]
+use scheduling::VOTER_OBSERVATION_GRACE;
 use scheduling::{
     KafkaPartitionWatcherKey, KafkaPartitionWatcherTask, LEADER_KAFKA_PARTITION_WATCH_INTERVAL,
-    VOTER_OBSERVATION_GRACE,
+    StartupVoterObservations,
 };
 use session::grpc::SessionGrpcService;
 pub use session_service::SessionServiceImpl;
@@ -658,16 +660,6 @@ pub struct Application {
     pub drain_timeout: Duration,
 }
 
-#[cfg(test)]
-fn encode_hex(bytes: &[u8]) -> String {
-    let mut out = String::with_capacity(bytes.len() * 2);
-    for byte in bytes {
-        use std::fmt::Write as _;
-        write!(&mut out, "{byte:02x}").assured("writing a byte into a String cannot fail");
-    }
-    out
-}
-
 /// Runs the server command line with termination signals the caller has already registered, so
 /// neither signal can end the process by its default action while the application starts.
 pub async fn run_cli(
@@ -897,8 +889,11 @@ impl Application {
             restore_staging_max_bytes,
         )
         .map_err(|error| {
-            error!(error = %error, "failed to initialize runtime persistence");
-            Report::new(AppError::OpenRuntimeState)
+            error!(
+                error = format!("{error:#}"),
+                "failed to initialize runtime persistence"
+            );
+            error.change_context(AppError::OpenRuntimeState)
         })?;
         let resource_store = StdArc::new(
             ResourceStore::open_with_limits(
@@ -953,8 +948,12 @@ impl Application {
                 .apply_changes(&changes.domain, revision)
                 .await
             {
-                error!(error = %error, "failed to apply startup runtime changes");
-                let error = Report::new(AppError::ApplyStartupRuntime(error.to_string()));
+                let reason = format!("{error:#}");
+                error!(
+                    error = reason.as_str(),
+                    "failed to apply startup runtime changes"
+                );
+                let error = Report::new(AppError::ApplyStartupRuntime(reason));
                 startup.terminate().await;
                 return Err(error);
             }
@@ -1129,6 +1128,8 @@ impl Application {
         let scheduler_mode = runtime.scheduler_mode();
 
         let cluster_for_reconcile = cluster.clone();
+        #[cfg(feature = "testing")]
+        let fault_injection_for_reconcile = fault_injection.clone();
         let consensus_for_reconcile = consensus.proposer();
         let registry_for_reconcile = registry.clone();
         let runtime_for_reconcile = runtime.clone();
@@ -1233,7 +1234,16 @@ impl Application {
         }
         background_tasks.push(nervix_primitives::task::spawn(async move {
             sleep(Duration::from_millis(500)).await;
+            #[cfg(feature = "testing")]
+            {
+                let observation = fault_injection_for_reconcile
+                    .wait_for_initial_voter_heartbeat_if_armed(consensus_for_reconcile.local_node_id());
+                if reconcile_shutdown.run_until_cancelled(observation).await.is_none() {
+                    return;
+                }
+            }
             let reconcile_started = nervix_primitives::time::Instant::now();
+            let mut startup_voter_observations = StartupVoterObservations::default();
             let mut default_user_resolved = false;
             let mut missing_init_default_user_password_warned = false;
             loop {
@@ -1242,6 +1252,12 @@ impl Application {
                 // once the peers have stopped. The pass therefore ends with drain support rather
                 // than holding terminal teardown until the grace period aborts the whole task.
                 let reconcile_pass = async {
+                    // Keep process-local live observations through follower passes and leadership
+                    // changes. A dead verdict alone can also mean an initial relayed heartbeat.
+                    startup_voter_observations.observe(
+                        &cluster_for_reconcile.gossip_state().await,
+                        reconcile_started.elapsed(),
+                    );
                     if consensus_for_reconcile.current_leader().await.as_ref()
                         != Some(consensus_for_reconcile.local_node_id())
                     {
@@ -1384,14 +1400,24 @@ impl Application {
                         let topology = automatic_schedule_input.topology();
                         // A leader that has just started cannot yet tell a voter that is still
                         // starting from one that failed, and treating it as failed would move its
-                        // work without the state it holds. Until gossip has heard from or given up
-                        // on every voter, or the observation grace has passed, no automatic
-                        // decision is made.
-                        let unobserved_voters =
-                            scheduling_availability.unobserved_node_ids(topology.voters());
-                        if !unobserved_voters.is_empty()
-                            && reconcile_started.elapsed() < VOTER_OBSERVATION_GRACE
-                        {
+                        // work without the state it holds. Wait for a live observation of every
+                        // voter in this process, bounded by the startup grace. Chitchat's initial
+                        // dead verdict from one relayed sample cannot satisfy that observation.
+                        let observation_elapsed = reconcile_started.elapsed();
+                        startup_voter_observations
+                            .observe(&scheduling_availability, observation_elapsed);
+                        let unobserved_voters = startup_voter_observations
+                            .unobserved_voters(topology.voters(), observation_elapsed);
+                        #[cfg(feature = "testing")]
+                        if observation_elapsed < VOTER_OBSERVATION_GRACE {
+                            fault_injection_for_reconcile
+                                .pause_startup_voter_observation_if_armed(
+                                    consensus_for_reconcile.local_node_id(),
+                                    &scheduling_availability.dead_node_ids,
+                                )
+                                .await;
+                        }
+                        if !unobserved_voters.is_empty() {
                             debug!(
                                 unobserved_voters = unobserved_voters.len(),
                                 "automatic scheduling waits for gossip to observe every voter"
@@ -1628,6 +1654,9 @@ impl Application {
                 let Some(()) = reconcile_shutdown.run_until_cancelled(reconcile_pass).await else {
                     break;
                 };
+                #[cfg(feature = "testing")]
+                fault_injection_for_reconcile
+                    .finish_startup_voter_observation(consensus_for_reconcile.local_node_id());
                 nervix_primitives::select! {
                     _ = reconcile_shutdown.cancelled() => break,
                     _ = sleep(Duration::from_secs(1)) => {}
@@ -1795,7 +1824,7 @@ impl Application {
                 shutdown: &schedule_shutdown,
             };
             if let Err(error) = apply_current_cluster_runtime_state(application).await {
-                warn!(error = %error, "failed to apply initial cluster schedule");
+                warn!(error = format!("{error:#}"), "failed to apply initial cluster schedule");
             }
             loop {
                 nervix_primitives::task::consume_budget().await;
@@ -1806,7 +1835,7 @@ impl Application {
                             break;
                         }
                         if let Err(error) = apply_current_cluster_runtime_state(application).await {
-                            warn!(error = %error, "failed to apply updated cluster schedule");
+                            warn!(error = format!("{error:#}"), "failed to apply updated cluster schedule");
                         }
                     }
                 }
@@ -2019,7 +2048,7 @@ impl Application {
                         }
                         Err(error) => Err(RemoteOperationFailure::failed(
                             RemoteOperationSubject::domain(&request.domain),
-                            error.to_string(),
+                            format!("{error:#}"),
                         )),
                     };
                     RemoteDomainDrainStatusResponse { result }
@@ -2525,7 +2554,10 @@ impl Application {
         background_tasks.push(nervix_primitives::task::spawn(async move {
             let mut domains_rx = domain_apply_service.inner.consensus.subscribe_domains();
             if let Err(error) = domain_apply_service.apply_current_cluster_state().await {
-                warn!(error = %error, "failed to apply cluster schedule after initial domain sync");
+                warn!(
+                    error = format!("{error:#}"),
+                    "failed to apply cluster schedule after initial domain sync"
+                );
             }
 
             loop {
@@ -2537,7 +2569,7 @@ impl Application {
                             break;
                         }
                         if let Err(error) = domain_apply_service.apply_current_cluster_state().await {
-                            warn!(error = %error, "failed to apply cluster schedule after domain sync");
+                            warn!(error = format!("{error:#}"), "failed to apply cluster schedule after domain sync");
                         }
                     }
                 }

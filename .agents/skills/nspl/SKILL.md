@@ -44,6 +44,8 @@ the graph; otherwise use conspicuous placeholders and state the assumptions.
 
 Read [references/configuring-nervix.md](references/configuring-nervix.md), then use its routing
 guidance to select the relevant Markdown entries from the public index.
+For Kafka domain offsets, retain the documented native checkpoint quorum budget and at-least-once
+retry boundary when explaining source recovery.
 
 ## Assemble the graph
 
@@ -100,6 +102,12 @@ and clears materialized state while preserving compatible WASM state, source off
 lifecycle, deduplicator keys and windows. `RESUME` precedes the user policy and `DRY RUN`; the dry
 run reports the planned status and generation. Read
 [Backup And Restore](https://docs.nervix.io/backup-and-restore.html) for format and memory limits.
+
+`BACKUP ... TIMEOUT` bounds each running domain's cut independently. Native clients use a separate
+bounded overall backup wait (CLI `--backup-wait-timeout`, default `10m`). If that wait is uncertain,
+retain its execution reference and recover with CLI `backup --execution-reference` and the same
+selected domain, scope, resources and capture options; the output file or stdout may change.
+Waiting again does not extend server retry validity or archive retention.
 
 Use `BEGIN; ... COMMIT;` when sending multiple queueable configuration statements. A transaction
 belongs to one already-existing domain: `BEGIN` binds it to the selected domain and every queued

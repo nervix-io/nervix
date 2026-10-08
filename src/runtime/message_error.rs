@@ -85,12 +85,9 @@ pub(super) enum MessageErrorHandlingError {
     PreparedRouteUnavailable { route: MessageErrorRouteKey },
     #[error("duplicate prepared message-error route for {} '{}' to relay '{}'", .route.node.kind.as_str(), .route.node.identifier.as_str(), .route.error_relay.as_str())]
     DuplicatePreparedRoute { route: MessageErrorRouteKey },
-    #[error("failed to parse the message-error flush policy for {} '{}'", .node.kind.as_str(), .node.identifier.as_str())]
-    FlushPolicy {
-        node: NodeRef,
-        #[source]
-        source: RuntimeError,
-    },
+    /// The route's flush policy does not parse; the setting that does not is beneath.
+    #[error("the message-error route for {} '{}' to relay '{}' has an invalid flush policy", .route.node.kind.as_str(), .route.node.identifier.as_str(), .route.error_relay.as_str())]
+    FlushPolicy { route: MessageErrorRouteKey },
     #[error(
         "failed to compile the message-error route for {} '{}' in domain '{}' to relay '{}': {error:#}",
         .node.kind.as_str(),
@@ -1289,6 +1286,7 @@ mod tests {
                 Vec::new(),
                 None,
                 Arc::new(BranchPresence::new()),
+                nervix_primitives::sync::Arc::new(crate::runtime_ack::AckRootTracker::default()),
             )),
         )]);
         let plans = BoundMessageErrorRoutes::bind(

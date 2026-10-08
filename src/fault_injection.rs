@@ -45,6 +45,10 @@ use nervix_recovery::{Discarded as _, NoReceiver as _};
 
 use crate::registry::SchedulerMode;
 
+mod restarted_voter;
+
+use restarted_voter::StartupVoterGossip;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum EmitterFaultMode {
     Fail,
@@ -122,6 +126,8 @@ struct FaultInjectionState {
     failed_health_links: DashMap<HealthResponsePauseKey, (), RandomState>,
     /// A blocked peer drops gossip requests until the scenario restores its links.
     blocked_gossip_nodes: DashMap<ClusterNodeName, Duration, RandomState>,
+    /// Restart regressions retain one relayed heartbeat until the first scheduling pass finishes.
+    startup_voter_gossip: DashMap<ClusterNodeName, StartupVoterGossip, RandomState>,
     /// Application health handlers clone a pause so it remains alive after its map guard drops.
     health_response_pauses: DashMap<HealthResponsePauseKey, Arc<TestPause>, RandomState>,
     /// Runtime and harness waiters clone a pause so it remains alive after its map guard drops.
@@ -300,10 +306,12 @@ enum CommandPausePoint {
         step: RestoreStep,
     },
     BackupCut(DomainName),
+    BackupDownload(ClusterNodeName),
     RestoreStatePublication {
         domain: DomainName,
         coordinator: ClusterNodeName,
     },
+    RestoreBranchStateConversion(DomainName),
     TransactionCommit {
         node_id: ClusterNodeName,
         domain: String,
@@ -376,6 +384,7 @@ impl Default for FaultInjection {
                 failed_health_responders: DashMap::default(),
                 failed_health_links: DashMap::default(),
                 blocked_gossip_nodes: DashMap::default(),
+                startup_voter_gossip: DashMap::default(),
                 health_response_pauses: DashMap::default(),
                 command_pauses: DashMap::default(),
                 entity_gate_pauses: DashMap::default(),
@@ -439,6 +448,32 @@ impl FaultInjection {
         self.inner
             .failed_restore_state_installations
             .insert(domain, RestoreStateFailure::DurablePublication);
+    }
+
+    /// Hold the restore of `domain` after its models are applied and its branch lifecycles are
+    /// staged, before it converts its first archived deduplicator keyspace or window.
+    pub fn pause_restore_branch_state_conversion(&self, domain: DomainName) {
+        self.arm_command_pause(CommandPausePoint::RestoreBranchStateConversion(domain));
+    }
+
+    pub async fn wait_for_restore_branch_state_conversion_pause(&self, domain: &DomainName) {
+        self.wait_for_command_pause(&CommandPausePoint::RestoreBranchStateConversion(
+            domain.clone(),
+        ))
+        .await;
+    }
+
+    pub fn release_restore_branch_state_conversion_pause(&self, domain: &DomainName) {
+        self.release_command_pause(&CommandPausePoint::RestoreBranchStateConversion(
+            domain.clone(),
+        ));
+    }
+
+    pub(crate) async fn pause_restore_branch_state_conversion_if_armed(&self, domain: &DomainName) {
+        self.pause_command_if_armed(CommandPausePoint::RestoreBranchStateConversion(
+            domain.clone(),
+        ))
+        .await;
     }
 
     pub fn pause_restore_state_publication(
@@ -1152,6 +1187,7 @@ impl FaultInjection {
     ) -> bool {
         self.inner.blocked_gossip_nodes.contains_key(sending_node)
             || self.inner.blocked_gossip_nodes.contains_key(receiving_node)
+            || self.startup_voter_gossip_exchange_is_blocked(sending_node, receiving_node)
     }
 
     pub(crate) fn gossip_send_delay(&self, destination: &ClusterNodeName) -> Option<Duration> {
@@ -1324,6 +1360,21 @@ impl FaultInjection {
 
     pub fn release_backup_cut_pause(&self, domain: &DomainName) {
         self.release_command_pause(&CommandPausePoint::BackupCut(domain.clone()));
+    }
+
+    /// Holds the next backup archive download on `node_id`, once, after the node opened the
+    /// retained archive and before it streams any frame of it, so the archive is not collected.
+    pub fn pause_backup_download_on(&self, node_id: ClusterNodeName) {
+        self.arm_command_pause(CommandPausePoint::BackupDownload(node_id));
+    }
+
+    pub async fn wait_for_backup_download_pause(&self, node_id: &ClusterNodeName) {
+        self.wait_for_command_pause(&CommandPausePoint::BackupDownload(node_id.clone()))
+            .await;
+    }
+
+    pub fn release_backup_download_pause(&self, node_id: &ClusterNodeName) {
+        self.release_command_pause(&CommandPausePoint::BackupDownload(node_id.clone()));
     }
 
     pub fn pause_transaction_commit_after(
@@ -2087,6 +2138,11 @@ impl FaultInjection {
             step: step.clone(),
         })
         .await;
+    }
+
+    pub(crate) async fn pause_backup_download_if_armed(&self, node_id: &ClusterNodeName) {
+        self.pause_command_if_armed(CommandPausePoint::BackupDownload(node_id.clone()))
+            .await;
     }
 
     pub(crate) async fn pause_backup_cut_if_armed(&self, domain: &DomainName) {

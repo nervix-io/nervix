@@ -24,6 +24,9 @@ name = "nervix-execution"
 [[package]]
 checks = [
   "connection::retained_slots_tests::shuttle_a_retained_pool_slot_claims_one_worker_and_retirement_is_final",
+  "connection::relay_owner::tests::shuttle_peer_retirement_racing_runtime_admission_releases_the_exact_intake",
+  "connection::relay_owner::tests::shuttle_a_claimed_body_racing_cancellation_keeps_one_reconcilable_verdict",
+  "connection::relay_owner::tests::shuttle_another_peer_progresses_while_one_peer_holds_its_protocol_guard",
   "connection::stream_slots::shuttle_checks::bulk_drain_stops_leasing_and_waits_for_every_leased_slot",
   "connection::stream_slots::shuttle_checks::management_drain_stops_leasing_and_waits_for_every_leased_slot",
   "connection::stream_slots::shuttle_checks::relay_drain_stops_leasing_and_waits_for_every_leased_slot",
@@ -147,6 +150,9 @@ checks = [
   "runtime::relay_channel::shuttle_tests::shuttle_publishers_wait_for_the_slowest_consumer_and_skip_consumers_that_leave",
   "runtime::relay_subscription::shuttle_tests::shuttle_an_attachment_racing_a_redefinition_is_refused_or_closed_by_it",
   "runtime::remote_dispatch::shuttle_tests::shuttle_a_report_racing_the_final_sweep_keeps_the_share_it_reached",
+  "runtime::remote_dispatch::shuttle_tests::shuttle_delayed_events_cannot_resolve_a_reused_delivery_position",
+  "runtime::remote_dispatch::shuttle_tests::shuttle_registration_racing_shutdown_leaves_no_unresolved_accepted_share",
+  "runtime::remote_dispatch::shuttle_tests::shuttle_a_departed_admission_waiter_racing_its_reply_returns_one_position",
   "runtime::remote_dispatch::shuttle_tests::shuttle_a_terminal_outcome_racing_the_final_sweep_resolves_the_share_once",
   "runtime::state_replication::checkpoint_announcement::shuttle_tests::shuttle_a_retired_replication_ends_its_announcer",
   "runtime::state_replication::checkpoint_announcement::shuttle_tests::shuttle_an_announcement_racing_the_replica_wait_is_never_missed",

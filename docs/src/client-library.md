@@ -58,7 +58,9 @@ same `ExecutionHandle` to `execute_prepared` after an uncertain, cancelled, or t
 
 Every call is bounded by `ConnectOptions`: `connect_timeout` for each connection attempt (10
 seconds by default), `request_timeout` for each request (120 seconds), and `retry_timeout` for the
-call with all of its retries and redirects (120 seconds). A call whose deadline passes before a
+call with all of its retries and redirects (120 seconds). `BACKUP` uses `backup_wait_timeout`
+instead for its command wait and reply (ten minutes), shared across every domain cut, redirect and
+reconnect. All four durations must be between one millisecond and 24 hours. A call whose deadline passes before a
 command's outcome is known fails with `ClientError::UncertainCommand`, which names the execution
 reference. An `https://` server is verified only against `ca_certificate_pem`: the client loads no
 system roots, so a TLS connection needs the certificate authority that signed the server's
@@ -141,7 +143,7 @@ the current session refused to open it again, completes without a request and re
 
 `execute` runs `BACKUP CLUSTER TO '<file>';` and `BACKUP DOMAIN [<name>] TO '<file>';` as one
 command and then downloads the archive the backup assembled into the named file. The download is
-not bounded by the client's retry deadline; each frame must arrive within the request timeout. The
+not bounded by the client's command wait; each frame must arrive within the request timeout. The
 client writes a private file beside the destination and moves it over the destination only once
 the archive's size and BLAKE3 digest match the backup's summary, so the file never holds a partial
 archive, and on Unix only its owner may read it. A download that fails in transport starts again
@@ -155,6 +157,13 @@ users, and each domain's revision, section count and bytes. A download that stil
 downloads the archive again, and `Client::download_backup(reference, summary, destination)`
 downloads a summary's archive directly. A download that receives the whole archive releases it on
 the server, and a later download of it is refused.
+
+For recovery from another process, `Client::prepare_backup_with_reference(backup, reference)`
+creates a handle for `execute_prepared` with that durable reference. Select the original domain
+and retain the scope, resources and capture options; the destination file may change. The server
+enforces the semantic binding and retry validity. Each explicit wait attempt is bounded again by
+`backup_wait_timeout`, and does not renew archive retention. `TIMEOUT` in NSPL remains a separate
+budget for each running domain's cut, so a cluster capture may validly exceed that duration.
 
 `execute` refuses `DESCRIBE BACKUP`, which `nervix-cli` serves from a local file without a server;
 the `nervix-backup` crate's `describe_archive` reads and verifies an archive for other Rust

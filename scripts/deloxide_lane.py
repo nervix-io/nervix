@@ -11,7 +11,9 @@ invocation the lane builds its executable for the selection, discovers what the 
 feature files hold, and refuses a registered workload that is missing or ignored, a discovered test
 or tagged scenario that is not registered, and a selection with nothing in it. It then runs the
 invocation supervised and accounts for what ran: libtest's outcome of every registered test, or the
-scenario count Cucumber reports against the examples the tags select.
+scenario count Cucumber reports against the examples the tags select. Active detection runs the
+tagged suite in one process; order analysis starts fresh processes per feature and for the large
+restore examples the inventory isolates with `order_tags`.
 
 Every process the lane starts runs in a session of its own within its bound and the lane's budget.
 A process that outlives its bound gets SIGTERM, then SIGKILL after the stop grace, and its whole
@@ -226,6 +228,8 @@ class Workload:
     feature: str | None
     scenario: str | None
     examples: int | None
+    # Example tags that need separate order-history processes. Empty for ordinary scenarios.
+    order_tags: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -418,7 +422,7 @@ def parse_inventory(text: str) -> Inventory:
         _known_keys(
             table,
             {"id", "invocation", "selections", "invariant", "coverage", "test", "feature",
-             "scenario", "examples"},
+             "scenario", "examples", "order_tags"},
             where,
         )
         invocation = invocations.get(_string(table, "invocation", where))
@@ -434,10 +438,11 @@ def parse_inventory(text: str) -> Inventory:
         feature = table.get("feature")
         scenario = table.get("scenario")
         examples = table.get("examples")
+        order_tags = _strings(table, "order_tags", where)
         if invocation.kind.is_libtest():
             test = _string(table, "test", where)
-            if feature is not None or scenario is not None or examples is not None:
-                raise LaneError(f"{where}: a test workload has no `feature`, `scenario` or `examples`")
+            if feature is not None or scenario is not None or examples is not None or order_tags:
+                raise LaneError(f"{where}: a test workload has no `feature`, `scenario`, `examples` or `order_tags`")
             if not invocation.registers(test):
                 raise LaneError(f"{where}: {test} does not carry its invocation's marker")
             if test in invocation.ignored or (invocation.id, test) in tests_seen:
@@ -449,6 +454,11 @@ def parse_inventory(text: str) -> Inventory:
             examples = _positive(table, "examples", where)
             if test is not None:
                 raise LaneError(f"{where}: a scenario workload has no `test`")
+            if "order_tags" in table and not order_tags:
+                raise LaneError(f"{where}: `order_tags` must name each isolated example")
+            if order_tags and (len(order_tags) != examples or len(set(order_tags)) != len(order_tags)
+                               or any(not re.fullmatch(r"@[A-Za-z_][A-Za-z_0-9]*", tag) for tag in order_tags)):
+                raise LaneError(f"{where}: `order_tags` must be distinct example tags, one per run")
             # Tags select the same scenarios in every build, so every selection runs them.
             if set(names) != set(selections):
                 raise LaneError(f"{where}: a scenario runs in every selection its tags reach")
@@ -465,6 +475,7 @@ def parse_inventory(text: str) -> Inventory:
             feature=feature,
             scenario=scenario,
             examples=examples,
+            order_tags=order_tags,
         )
     for invocation in invocations.values():
         for name in selections:
@@ -663,6 +674,81 @@ def scenario_problems(
                 f"for the lane but not registered"
             )
     return problems
+
+
+@dataclass(frozen=True)
+class ScenarioChunk:
+    name: str
+    inputs: tuple[str, ...]
+    tags: tuple[str, ...]
+    name_filter: str | None
+    workloads: tuple[Workload, ...]
+    expected: int
+    example_tag: str | None = None
+
+
+def scenario_chunks(
+    root: Path, invocation: Invocation, registered: Sequence[Workload], selection: str
+) -> list[ScenarioChunk]:
+    """Keep historical order edges inside one feature, or one large restore example.
+
+    Active detection still runs the complete tagged suite once. Order analysis cannot retain a
+    whole suite's unrelated lock histories in one process; each chunk starts a fresh detector.
+    """
+
+    if selection != "deloxide-order":
+        return [ScenarioChunk(
+            invocation.id, invocation.inputs, invocation.tags, None, tuple(registered),
+            sum(workload.examples or 0 for workload in registered),
+        )]
+    by_feature: dict[str, list[Workload]] = {}
+    for workload in registered:
+        by_feature.setdefault(workload.feature or "", []).append(workload)
+    chunks: list[ScenarioChunk] = []
+    for feature, workloads in by_feature.items():
+        isolated = any(workload.order_tags for workload in workloads)
+        if not isolated:
+            chunks.append(ScenarioChunk(
+                f"{invocation.id}-{len(chunks)}", (feature,), invocation.tags, None,
+                tuple(workloads), sum(workload.examples or 0 for workload in workloads),
+            ))
+            continue
+        for workload in workloads:
+            if not workload.order_tags:
+                chunks.append(ScenarioChunk(
+                    f"{invocation.id}-{len(chunks)}", (feature,), invocation.tags,
+                    workload.scenario, (workload,), workload.examples or 0,
+                ))
+                continue
+            for tag in workload.order_tags:
+                selected = discover_scenarios(root, [feature], [tag])
+                if len(selected) != 1 or selected[0].name != workload.scenario or selected[0].runs != 1:
+                    raise LaneError(
+                        f"{invocation.id}: {workload.id} order tag {tag} must select exactly "
+                        f"one example of its registered scenario in {feature}"
+                    )
+                chunks.append(ScenarioChunk(
+                    f"{invocation.id}-{len(chunks)}", (feature,), (tag,), None,
+                    (workload,), 1, tag,
+                ))
+    if sum(chunk.expected for chunk in chunks) != sum(workload.examples or 0 for workload in registered):
+        raise LaneError(f"{invocation.id}: order chunks do not account for every registered example")
+    return chunks
+
+
+def scenario_arguments(chunk: ScenarioChunk, concurrency: int | None) -> list[str]:
+    """Select a chunk with one Cucumber filter; its CLI excludes combining tags and names."""
+    arguments: list[str] = []
+    for pattern in chunk.inputs:
+        arguments.extend(["--input", pattern])
+    if chunk.name_filter is not None:
+        arguments.extend(["--name", f"^{re.escape(chunk.name_filter)}$"])
+    else:
+        arguments.extend(["--tags", " or ".join(chunk.tags)])
+    arguments.extend(["--retry", "0"])
+    if concurrency is not None:
+        arguments.extend(["--concurrency", str(concurrency)])
+    return arguments
 
 
 def test_problems(
@@ -1697,67 +1783,76 @@ class Lane:
             raise LaneFailed(Failure.INVENTORY, "\n".join(problems))
         expected = sum(workload.examples or 0 for workload in registered)
         self.counts.selected += expected
+        try:
+            chunks = scenario_chunks(self.root, invocation, registered, self.selection.name)
+        except LaneError as error:
+            raise LaneFailed(Failure.INVENTORY, str(error)) from error
         scenario_environment = dict(environment)
         if invocation.driver is not None:
             driver = self.build_driver(invocation.driver)
             scenario_environment["NERVIX_PACED_SIMULATION_PATH"] = str(driver)
             library = self.workspace.prepared / "debug" / "libnervix_client_ffi.so"
             scenario_environment["NERVIX_CLIENT_LIBRARY"] = str(library)
-        bound = self.bound(invocation.bound_seconds)
-        suite_budget = int(bound) - self.inventory.bounds.suite_teardown_reserve_seconds
-        if suite_budget <= 0:
-            raise LaneFailed(
-                Failure.BUDGET,
-                f"{invocation.id}: the budget left cannot hold the suite and its teardown reserve",
+        completed_runs = {workload.id: 0 for workload in registered}
+        recorded_workloads: set[str] = set()
+        for chunk in chunks:
+            bound = self.bound(invocation.bound_seconds)
+            suite_budget = int(bound) - self.inventory.bounds.suite_teardown_reserve_seconds
+            if suite_budget <= 0:
+                raise LaneFailed(
+                    Failure.BUDGET,
+                    f"{chunk.name}: the budget left cannot hold the suite and its teardown reserve",
+                )
+            chunk_environment = dict(scenario_environment)
+            chunk_environment[SUITE_BUDGET_VARIABLE] = f"{suite_budget}s"
+            if chunk.name != invocation.id and EVIDENCE_VARIABLE in chunk_environment:
+                directory = Path(chunk_environment[EVIDENCE_VARIABLE]) / chunk.name
+                directory.mkdir(parents=True, exist_ok=True)
+                chunk_environment[EVIDENCE_VARIABLE] = str(directory)
+            arguments = scenario_arguments(chunk, invocation.concurrency)
+            launch = Launch(
+                name=chunk.name,
+                argv=self.command(executable, arguments),
+                cwd=cwd,
+                environment=chunk_environment,
+                bound_seconds=bound,
+                log=self.attempt / f"{chunk.name}.log",
             )
-        scenario_environment[SUITE_BUDGET_VARIABLE] = f"{suite_budget}s"
-        arguments: list[str] = []
-        for pattern in invocation.inputs:
-            arguments.extend(["--input", pattern])
-        arguments.extend(["--tags", " or ".join(invocation.tags), "--retry", "0"])
-        if invocation.concurrency is not None:
-            arguments.extend(["--concurrency", str(invocation.concurrency)])
-        launch = Launch(
-            name=invocation.id,
-            argv=self.command(executable, arguments),
-            cwd=cwd,
-            environment=scenario_environment,
-            bound_seconds=bound,
-            log=self.attempt / f"{invocation.id}.log",
-        )
-        print(f"{self.label()}: {launch.name}: {expected} scenario runs", flush=True)
-        ended = self.processes.run(launch)
-        self.retain_suite_logs(invocation)
-        summary = scenario_summary(launch.log.read_text(encoding="utf-8", errors="replace"))
-        total = 0
-        passed = 0
-        if summary is not None:
-            total = summary.get("total", 0)
-            passed = summary.get("passed", 0)
-        self.counts.executed += total
-        self.counts.completed += passed
-        complete = total == expected and passed == expected
-        for workload in registered:
-            self.workloads.append({
-                "id": workload.id,
-                "invocation": invocation.id,
-                "scenario": workload.scenario,
-                "runs": workload.examples,
-                "completed": complete,
-            })
-        self.record_launch(invocation, launch, ended, {"scenarios": summary, "expected": expected})
-        problems = []
-        if not complete:
-            problems.append(
-                f"{invocation.id}: the tags select {expected} scenario runs, and Cucumber reported "
-                f"{summary if summary is not None else 'no summary'}"
-            )
-        self.check(launch, ended, problems)
+            print(f"{self.label()}: {chunk.name}: {chunk.expected} scenario runs", flush=True)
+            ended = self.processes.run(launch)
+            self.retain_suite_logs(chunk.name)
+            summary = scenario_summary(launch.log.read_text(encoding="utf-8", errors="replace"))
+            total = summary.get("total", 0) if summary is not None else 0
+            passed = summary.get("passed", 0) if summary is not None else 0
+            self.counts.executed += total
+            self.counts.completed += passed
+            complete = total == chunk.expected and passed == chunk.expected
+            self.record_launch(invocation, launch, ended, {"scenarios": summary, "expected": chunk.expected})
+            problems = []
+            if not complete:
+                problems.append(
+                    f"{chunk.name}: selected {chunk.expected} scenario runs, and Cucumber reported "
+                    f"{summary if summary is not None else 'no summary'}"
+                )
+            self.check(launch, ended, problems)
+            for workload in chunk.workloads:
+                completed_runs[workload.id] += 1 if chunk.example_tag is not None else workload.examples or 0
+                if completed_runs[workload.id] == workload.examples and workload.id not in recorded_workloads:
+                    self.workloads.append({
+                        "id": workload.id,
+                        "invocation": invocation.id,
+                        "scenario": workload.scenario,
+                        "runs": completed_runs[workload.id],
+                        "completed": True,
+                    })
+                    recorded_workloads.add(workload.id)
+        if len(recorded_workloads) != len(registered):
+            raise LaneFailed(Failure.INCOMPLETE, f"{invocation.id}: some registered scenarios did not complete")
 
-    def retain_suite_logs(self, invocation: Invocation) -> None:
+    def retain_suite_logs(self, launch_name: str) -> None:
         logs = self.root / "tests" / "logs"
         if logs.is_dir():
-            shutil.copytree(logs, self.attempt / f"{invocation.id}-logs", dirs_exist_ok=True)
+            shutil.copytree(logs, self.attempt / f"{launch_name}-logs", dirs_exist_ok=True)
 
     def record_launch(
         self, invocation: Invocation, launch: Launch, ended: Ended, accounting: Mapping[str, object]

@@ -89,16 +89,19 @@ impl SessionServiceImpl {
                                 }
                                 None
                             }
-                            Err(
-                                RuntimeError::RuntimeRevisionPreparation { .. }
-                                | RuntimeError::RuntimeRevisionReadiness { .. },
-                            ) => {
+                            Err(error)
+                                if matches!(
+                                    error.current_context(),
+                                    RuntimeError::RuntimeRevisionPreparation { .. }
+                                        | RuntimeError::RuntimeRevisionReadiness { .. }
+                                ) =>
+                            {
                                 sleep(Duration::from_millis(100)).await;
                                 return Ok(TransactionApplicationAttempt::Retry);
                             }
                             Err(error) => Some(format!(
                                 "transaction '{}' committed the effect beginning at statement {}, \
-                                 but it failed to become usable: {error}",
+                                 but it failed to become usable: {error:#}",
                                 transaction.id,
                                 applying.result.operation_range().first()
                             )),
@@ -156,13 +159,13 @@ impl SessionServiceImpl {
                     actual.fail(
                         attempt,
                         nervix_models::ImpactDiagnosticKind::Recovery,
-                        error.to_string(),
+                        format!("{error:#}"),
                     );
-                    return Err(Report::new(error).change_context(
-                        TransactionCommitError::RecoverQuiescence {
+                    return Err(
+                        error.change_context(TransactionCommitError::RecoverQuiescence {
                             id: transaction.id.clone(),
-                        },
-                    ));
+                        }),
+                    );
                 }
                 if let Err(error) = self.wait_for_paused_domain_drain(domain).await {
                     actual.fail(
@@ -238,7 +241,7 @@ impl SessionServiceImpl {
         &self,
         actual: &TransactionStepImpactRecorder,
         transaction: &ReplicatedTransaction,
-    ) -> Option<RuntimeError> {
+    ) -> Option<Report<RuntimeError>> {
         if let Err(error) = self.apply_current_cluster_state().await {
             return Some(error);
         }
@@ -303,7 +306,7 @@ impl SessionServiceImpl {
         let restored_revision = self.inner.consensus.current_runtime_revision().await;
         if let Err(error) = self.apply_current_cluster_state().await {
             self.broadcast_error(format!(
-                "failed to apply the models restored in domain '{}': {error}",
+                "failed to apply the models restored in domain '{}': {error:#}",
                 domain.as_str()
             ));
             return;

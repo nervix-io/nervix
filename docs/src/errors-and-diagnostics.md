@@ -23,7 +23,7 @@ delivery can fail during schedule application.
 | Vocabulary Models and the execution-graph description | Alterations the stored Model refuses; invalid placement members, inferencer tensor schemas, and upload identities; values canonical NSPL cannot spell; and execution-graph encoding or decoding | Refuse the command and keep the stored Model unchanged, or report which statement or graph could not be rendered or decoded. |
 | NSPL language and formatter | Source text the lexer or parser rejects, with the stage that rejected it, the rejected text, and every diagnostic's message and byte span; statements the formatter cannot render, and formatted output that does not reparse to the statements it came from | Report the stage and underline each diagnostic in the text that was submitted, or leave a file unchanged and report the formatter defect. |
 | Arrow record and batch layer | Schema, field, column, row, and batch construction or decoding failures | Reject a malformed batch or a field operation without inventing a replacement value. |
-| Bounded execution | A memory charge a class could not grant (`AdmissionError`), a job refused because its class's wait queue is full, a closed pool, a job that panicked on its worker (`ExecutionError`), and a job that stopped at a `Cancelled` check because its caller stopped waiting | The job's owner maps each to its own typed outcome. A refusal judged nothing, so it stays retryable: an emitter keeps its rows, an ingested payload fails its dispatch rather than its decode and an endpoint answers it as a retryable rejection, and a credential check answers `UNAVAILABLE` rather than failing authentication. The unfolding of a payload a quiesce buffer retained, or of a poll a paced source handed over, is not refused at all: nothing could present it again, so it waits for a place. So does a payload a source handed over without an acknowledgement, when its transport survives a held loop; any other such payload is refused, reported as an ingestor error and counted in `nervix_ingestor_unfolding_refused_total`. A panic is the job's own defect. |
+| Bounded execution | A memory charge a class could not grant (`AdmissionError`), a job refused because its class's wait queue is full, a closed pool, a job that panicked on its worker (`ExecutionError`), and a job that stopped at a `Cancelled` check because its caller stopped waiting | The job's owner maps each to its own typed outcome. A refusal judged nothing, so it stays retryable: an emitter keeps its rows, an ingested payload fails its dispatch rather than its decode and an endpoint answers it as a retryable rejection, a credential check answers `UNAVAILABLE` rather than failing authentication, and a restore's deduplicator or window conversion releases what it holds and converts the refused window section or keyspace again, within a 30-second wait for room, rather than reporting archived state of another shape. The unfolding of a payload a quiesce buffer retained, or of a poll a paced source handed over, is not refused at all: nothing could present it again, so it waits for a place. The job that admits one key group into a keyspace a restore is converting waits for a place too, because the keys admitted so far could be presented again only by converting the keyspace from its first group. So does a payload a source handed over without an acknowledgement, when its transport survives a held loop; any other such payload is refused, reported as an ingestor error and counted in `nervix_ingestor_unfolding_refused_total`. A panic is the job's own defect. |
 | Expression VM frontend and runtime bridge | Invalid expression scopes, types, sensitivity, compiled program inputs, and evaluation failures | Refuse a model during validation, or classify an affected row or batch during execution. [VM Functions](./vm-functions.md) owns execution detail. |
 | Stateful processors | Branch-local deduplication, ordering, window, correlation, inference, and WASM execution or state failures, and a processor task's restore of the branches its lifecycle checkpoint names (`ProcessorBranchTaskError`) | Apply the processor's message or node policy, or fail a checkpoint and its held acknowledgements. A restore that fails installs no branch and stays pending: the task retries it after a backoff, holds its input, and refuses a lifecycle checkpoint or guest-state reset with `BranchesUnrestored` until an attempt succeeds. [Shutdown And Recovery](./shutdown.md#restoring-processor-branches) owns that sequence. |
 | Connector crates and host | Integration-specific configuration, decoding, external source and sink outcomes; host-owned routing, retry, flush, and acknowledgement failures | Separate a record rejection from a source or sink failure and follow the configured retry or acknowledgement contract. [Connector Crates And The Connector Contract](./connector-contract.md) owns those contracts. |
@@ -31,6 +31,7 @@ delivery can fail during schedule application.
 | Ingest grouping and relay batching | Route grouping, branch-key construction, Arrow batch assembly, relay admission, and delivery failures | Keep the affected concrete branch and fail or retry the correct in-memory attempt. |
 | Client ingestor endpoint | Whether a submitted batch is a canonical Arrow IPC stream of the input schema (`ClientBatchError`), whether the node had capacity to validate it, and how its acknowledgement root resolved | Answer the batch as not admitted with its defect or a temporary refusal, or with its terminal outcome, and end a producer with the reason its attachment ended. |
 | Registry, placement, and planning | Invalid domain models, references, capabilities, branch relationships, flush contracts, schedules, and placements | Reject the command before activating an invalid graph or refuse a relocation plan. |
+| Runtime installation | A committed revision this node cannot plan or apply, a domain execution it cannot build or change (`RuntimeError::BuildDomainExecution` above the `ExecutionBuildError` step that failed), and ingestors that do not start once their revision is prepared | Keep the previously applied schedule as the predecessor for a retry, and report the whole chain with the failed command, the domain's instantiation error and the runtime event. |
 | Backup archive format | Records that do not encode or exceed their size limit, and archives whose structure, record headers, record values, section lengths or digests do not match what the manifest declares | Refuse to write an archive, or refuse a whole archive naming the section and the check that failed. |
 | Restore planning | Archives a restore cannot apply to the cluster: the wrong scope, a domain the archive lacks or the cluster has, an archived user the cluster has under `ON EXISTING USER FAIL`, resource versions the archive does not hold consistently, and models that bind no restored version | Refuse the restore before it changes anything, naming the domain, user, resource, version, or model. |
 | Interconnect | Authentication, framing, limits, transport, and the class and subject of a remote operation failure | Distinguish a transport failure from a peer's rejection, absence, unreadiness, or executed failure. |
@@ -178,10 +179,15 @@ endpoint renders the whole chain in its decode notice, a lookup line keeps it be
 failed on, and an emitter keeps it beneath the record it rejects or the encoding it could not start. The rendered chain reads as the codec
 diagnostic did before: `codec 'events_codec' failed to parse field 'user_id': ...` followed by the
 Arrow builder's own reason. A codec that fails to compile while a domain execution is built keeps its
-report in the runtime build error. A codec failure whose parser or writer error is its `#[source]`,
+report beneath `RuntimeError::BuildDomainExecution`, which names the domain. A codec failure whose
+parser or writer error is its `#[source]`,
 such as a simd-json, CBOR, Avro, protobuf, I/O, UTF-8 or timestamp error, leaves that error out of
 its own message: `error-stack` records a context's source as the frame beneath it, so the rendered
 chain names each cause once.
+
+An endpoint that decodes a payload but cannot dispatch or flush its ingest group uses the same
+rendered report chain in its runtime event and log. A temporary unfolding admission refusal logs
+its report chain while preserving the endpoint's retryable refusal outcome.
 
 Iceberg object storage retains the Iceberg storage error contract when it installs the node's
 HTTP resolver. Invalid object URLs are `DataInvalid`, and an unsupported Azure connection string
@@ -337,6 +343,28 @@ archive as `NX_ERROR_PROTOCOL`, and a write failure as `NX_ERROR_INVALID_ARGUMEN
 execution reference so a host can run the backup again. No diagnostic of a backup includes archive
 contents, password hashes, or resource bytes.
 
+The native backup command wait is bounded independently of each domain's quiesce budget and the
+archive's per-frame stall bound. An exhausted command wait reports `ClientError::UncertainCommand`
+with the durable reference. The CLI's JSON `BACKUP_FAILED` report includes
+`error.execution_reference` for that uncertainty and for `ClientError::BackupDownload`; its text
+report names `--execution-reference` as the recovery option. Reusing that reference preserves the
+server's conflict, expiry and retention authority.
+
+The web console owns its own typed download and restore failures. A download failure names the
+server's refusal, a transport failure, a stalled or interrupted stream, a missing leader or a
+redirect loop, frames out of order or undecodable, an archive that differs from the backup's
+summary, or an archive the browser could not save; it retries a transport failure, a stall, an
+interrupted stream and `ReadFailed` from the first byte, and reports the rest as the reason the
+completed backup's archive was not downloaded, never as a failure of the backup. A restore stream
+failure names an archive file the browser could not read or that is empty, a transport failure, a
+stall, a missing reply, a reply that does not decode or answers another request or reference, or a
+restore whose outcome stayed unknown through its repetitions, which the dialog reports naming the
+execution reference. A refusal of the stream is shown as `restore refused (<failure>): <message>`,
+and the restore's own outcome as the dispatcher renders any command's. The console WebSocket
+transport closes a call whose client broke its framing with the codec's close code, a second
+download request with `1008`, an answer that does not fit a frame with `1011`, and every call when
+the node stops with `1001`.
+
 A captured-section opening refused only for Snapshot request capacity retains its inventory and
 retries within one 30-second opening deadline. The typed capacity classification determines this
 retry; other request failures end the fetch. Deadline expiry remains a capture failure, and an
@@ -390,6 +418,22 @@ chunk set or a conflicting publication inventory. `RestoreRead`, `Cancelled`, `S
 storage admission preserve their owning failure boundary. `CheckpointPlacementTooLarge` rejects
 an encoding beyond the bounded storage key allowance. `InvalidStorageFormat` requires recreation
 of the node state directory when the required current format marker is missing or invalid.
+Runtime state storage keeps the cause of each failure beneath its `RuntimePersistenceError`. Opening
+the store keeps the storage engine's error beneath its keyspace, read, write or synchronization
+failure. An encoding or decoding failure keeps the serializer's error, or the `StoredStateIssue` the
+stored bytes have, such as a key without its domain separator or a restore whose staged inventory
+differs, beneath `EncodeState` or `DecodeState`, so the rendered chain still reads
+`failed to decode runtime state: runtime state key has no domain separator`. A memory or storage
+refusal while a materialized relay's restored snapshot is opened is a storage admission or
+execution failure, never a decoding failure. A caller keeps the storage report beneath its own
+context: `RuntimeStateOperationError::Persistence` for a replica's installation or a snapshot task,
+`OwnershipHandoffError::Persistence` for a handoff, and the domain build's `ExecutionBuildError`
+step, which names the node and the state kind, for a state assignment.
+Native Kafka stream conversion retains the rkyv validation failure beneath `DecodeState` and the
+placement-qualified `StateReplicationError::Capture`. A cancelled conversion keeps `Cancelled` at
+that same boundary without publishing the candidate table. Installation refused after an assignment
+changes retains `StateAuthorityError` beneath `RuntimeStateOperationError::Authority` and that
+placement-qualified capture context, so a caller can distinguish malformed bytes from lost authority.
 `RestoreStagingQuota` carries the node's unpublished checkpoint limit, current usage and incoming
 checkpoint footprint; `RestoreStagingSize` rejects an unrepresentable accounting sum. A quota
 failure remains a storage failure beneath the admitted restore step and leaves its activation
@@ -494,11 +538,15 @@ mistaken for the failed one. Unbranched work has no branch key. [Data Plane](./d
 branch execution and [Cluster Interconnect](./interconnect.md) owns snapshot exchange.
 
 The materialized installation owner refuses a lower snapshot revision with
-`RuntimeStateOperationError::MaterializedSnapshotRevision { received, current }`, preserving both
-values in its diagnostic. It checks this before publishing any restored row, alongside assignment,
-branch-generation and ownership-fence validation. A cached snapshot from another assignment is
-rebuilt under the current fence rather than reported as current; a fence change during encoding
-remains the snapshot owner's typed `OwnershipChanged` failure.
+`RuntimeStateOperationError::MaterializedSnapshotRevision { received, current }`, a snapshot from an
+earlier branch lifecycle with `MaterializedSnapshotBranchGeneration { received, current }`, and one
+sealed under a superseded ownership fence with `MaterializedSnapshotFence { received, current }`,
+preserving both values in each diagnostic. It checks these before publishing any restored row,
+alongside assignment validation. An assignment that no longer grants the installation fails as
+`RuntimeStateOperationError::Authority` with the assignment's `StateAuthorityError` beneath, and the
+snapshot exchange keeps the refusal beneath its own install failure. A cached snapshot from another
+assignment is rebuilt under the current fence rather than reported as current; a fence change during
+encoding remains the snapshot owner's typed `OwnershipChanged` failure.
 
 ```mermaid
 sequenceDiagram
@@ -538,7 +586,9 @@ presents that command failure inline and does not replace it with a local guess 
 the selected schema. A subscription filter is parsed locally only to confirm that it is an
 expression. The server compiles it against the relay's schema when it creates the subscription, and
 its refusal of an unknown field or scope, a type mismatch, a relay that no longer exists, or an open
-transaction is the subscription's failure, shown inline without opening a tab.
+transaction is the subscription's failure, shown inline without opening a tab. A predicate that does
+not lower or compile is a `SubscriptionPredicateCompileError` naming the subscription, with the VM's
+failure beneath, and the failed command renders the whole chain.
 
 Domain activation has typed failures for a relay or codec missing its schema, a codec missing its
 wire definition, a relay missing its branch or carrying an invalid branch TTL, and an endpoint
@@ -548,6 +598,34 @@ emitters, processors, message-error routes, placement and the ownership fingerpr
 revision before runtime installation. A planning failure leaves the previously applied schedule as
 the predecessor for a retry; runtime installation adds domain context and never selects a fallback
 configuration.
+
+Installing a domain on a node, whether it builds the domain's execution, applies a schedule delta,
+swaps or reassigns nodes, or applies a dynamic update, returns a report whose top context is
+`RuntimeError::BuildDomainExecution`, naming the domain. The step that failed stays beneath it as an
+`ExecutionBuildError`, which names the node, relay, lookup, codec, signaling protocol or WASM
+processor it concerns and keeps the step's own report beneath itself: a domain clock that does not
+bind; UDFs, protobuf descriptors or a lookup that do not load; a WASM module that is not prepared;
+forced recovery or prepared handoff state that does not activate; runtime state that cannot be
+placed, assigned, restored, shared or purged; a relay, emitter or processor task that does not stop
+or hand off its branches; processor plans, message-error routes or reingestors that do not bind or
+start; an emitter flush change the running task does not apply; an execution revision without the
+plan of a node it names; an installed execution that is gone; and a node whose state access its
+assignment does not grant. A codec or signaling protocol that does not compile, an ingestor, emitter
+or generator that does not start, and a WASM state reset the processor's task does not take,
+answer or apply keep their own reports directly beneath the domain context, because those already
+name what failed.
+
+Each admitted runtime revision is applied by the session service. A committed revision that cannot
+be planned against the one applied before it is `RuntimeError::PlanScheduleRevision`, with the
+decision layer's report beneath. A revision this node cannot apply fails as
+`RuntimeError::ApplyRevision`, naming the revision, above the runtime's report, and an ingestor of a
+running domain that does not start once the revision is prepared fails as
+`RuntimeError::StartIngestors` above the ingestor's start report. A failed command and the event a
+session receives render the whole chain, such as `failed to start domain 'edge': failed to apply
+runtime revision 7: failed to build domain execution for 'edge': failed to load lookup 'zips': ...`,
+and a domain whose build failed records the same chain as its instantiation error. Revision
+preparation and readiness timeouts keep variants of their own, which a transaction recognizes in
+the report's top context to retry its application rather than fail it.
 
 Ingestor and reingestor planning has typed failures for an ingestor whose source is missing or
 resolves to another kind or name, a missing codec, a route or input relay missing from the domain,
@@ -570,12 +648,16 @@ binding context are start failures of their own. Every failure to compose or ope
 `IngestorStartError::Initialize`, naming the ingestor and its domain, with the cause beneath it: a
 `SourceStartError` for a missing node resolver, signaling protocol or endpoint, Kafka `DOMAIN`
 offsets this node does not own, or a delivery-mode duration that does not parse, or else the report
-of the client configuration, connector plan, source instance or domain cadence that failed. A
-runtime caller that still returns `RuntimeError` keeps the whole report in
-`RuntimeError::IngestorStart`, whose message is the report's chain, such as
-`failed to initialize ingestor 'syslog_source' in domain 'edge': invalid Syslog client config key
-'framing': UDP does not use stream framing`. That message is what the failed command and the
-ingestor's transient status show.
+of the client configuration, connector plan, source instance or domain cadence that failed. The
+runtime keeps the whole report beneath its own context: the domain build's
+`RuntimeError::BuildDomainExecution`, or `RuntimeError::StartIngestors` when the session service
+starts the ingestors of a prepared revision. The ingestor's transient status shows the start
+report's chain, such as `failed to initialize ingestor 'syslog_source' in domain 'edge': invalid
+Syslog client config key 'framing': UDP does not use stream framing`, and the failed command shows
+the same chain beneath the contexts above it. An ingestor that recorded no start failure of its own
+is not running because its domain's execution failed to build, and its transient status shows the
+domain's instantiation error instead. A build attempt clears the start failures its predecessor
+recorded before it can fail, so an ingestor never shows a failure a later attempt did not record.
 
 Emitter execution planning has typed failures for missing source relays or codecs, an unresolved
 or mismatched client, unsupported publishing mode, an invalid source predicate or route, invalid
@@ -594,18 +676,28 @@ invalid sink client configuration or input collection policy. Starting a generat
 `GeneratorError` report the same way: `GeneratorError::Start` names the generator and its domain
 above an output relay the node has not instantiated, an output program that does not compile, a
 cadence the domain clock cannot bind, an invalid output flush policy, or a source relay without a
-dispatch gate. A runtime caller that still returns `RuntimeError` keeps either report whole in
-`RuntimeError::EmitterStart` or `RuntimeError::GeneratorStart`, whose message is the report's
-chain, such as `failed to start emitter 'audit' in domain 'edge': the route program did not
-compile: FILTER-MAP compile failed for 'audit': ...`.
+dispatch gate. The domain build keeps either report whole beneath
+`RuntimeError::BuildDomainExecution`, so a failed command renders it after the domain, such as
+`failed to build domain execution for 'edge': failed to start emitter 'audit' in domain 'edge': the
+route program did not compile: FILTER-MAP compile failed for 'audit': ...`.
+
+A relay, processor, generator or emitter setting whose value does not parse is a
+`NodeSettingError` naming the setting and its value, with the duration parser's error beneath it or
+the byte-size parser's reason in its message. The node that declares the setting adds its own
+context above it, so the setting's error does not repeat the node: `GeneratorError::FlushPolicy`
+names the output relay, `EmitterStartError::CollectPolicy` the emitter's input collection, and
+`MessageErrorHandlingError::FlushPolicy` the message-error route and its relay. An emitter's
+`VALUES` mapping that does not compile is a `MappedValuesError` naming the sink and the emitter, with
+the VM's failure beneath, under the emitter's sink initialization failure.
 
 Stopping an emitter's task to swap it fails as a `ScheduledEmitterStopFailure`, which keeps the
 task running beside a `ScheduledEmitterStopError` report: the task was unavailable, did not accept
 its stop command in time, dropped its answer, did not drain before its deadline, or answered that
 its drain failed, with the task's own failure beneath. The swap installs the retained task again
-and fails with `RuntimeError::BuildDomainExecution`, whose reason is the failure's description:
-the task's own description of its drain failure when it answered that its drain failed, and
-otherwise the stop error itself. A later stop can still end the retained task.
+and fails with `ExecutionBuildError::StopEmitter` above the stop report, beneath
+`RuntimeError::BuildDomainExecution`. The emitter holds the task's own description of a failed
+drain as a printable attachment, which a rendered chain does not show, so `StopEmitter` carries that
+description and its message ends with it. A later stop can still end the retained task.
 
 Node startup validates execution memory limits before admitting any work. A Commands budget must
 hold both the bounded resident replication window and one bounded normalized command-state write;
@@ -794,6 +886,11 @@ deadlines, reports a runtime event that names the task and its domain and render
 of the failure, so a stale clock generation or an unrepresentable deadline beneath the clock
 failure stays visible.
 
+An owner-delivery admission failure logs the domain, relay, branch fingerprint and target together
+with the transport report, including retained cancellation and rejection causes, before returning
+the undelivered batch. This keeps admission and connection failures visible even when the batch
+carries no acknowledgement, without logging branch field values.
+
 A batch container that cannot be produced keeps its `BatchContainerError` report in the packing
 outcome until the emitter builds the message error of each member. That message error is a fixed
 public outcome, so only the report's typed reason selects its code and message: the evaluation
@@ -802,7 +899,15 @@ failure beneath the reason can quote the payload it evaluated, and is not render
 ## Cross-Node And Public Boundaries
 
 The interconnect validates and bounds the wire request before its operation handler runs. A
-transport error describes connection, admission, framing, deadline, or delivery failure. A remote
+delivery correlation that has no free position reports `CorrelationCapacity`; an exhausted
+generation reports `CorrelationIdentityExhausted`; failure to reserve record storage reports
+`CorrelationMemory`. A receiver unable to reserve a watcher reports `RemoteAckAdmission` with its
+execution admission cause, before runtime admission. These refusals judge no payload and preserve
+source retry ownership. Ending a registered delivery before admission or shutting its owner down
+resolves its held shares negatively once. Stale generations and registrar runs are ordinary
+unmatched reports logged at `debug`, and never resolve current work.
+
+A transport error describes connection, admission, framing, deadline, or delivery failure. A remote
 control response instead preserves a typed failure *subject* and one of four classes: rejected by
 the answering node, unavailable there, temporarily not ready, or executed and failed. A requester
 can use class and subject for routing, retry, and recovery without parsing text. Only an executed
@@ -810,6 +915,16 @@ failure carries the answering node's opaque operator description. That text is a
 boundary for an already classified failure; it is not used to recover a new class. Runtime-state
 replication, a replica's branch checkpoint listing included, and materialized-snapshot description
 use this envelope, and local errors retain the remote class alongside their target and placement.
+Checkpoint and branch catalog request failures keep the typed interconnect request cause beneath
+that target and placement context. Their replica diagnostics render the cause chain, distinguishing
+deadline, admission, connection and framing failures without retaining checkpoint payloads.
+Kafka offset replica catch-up uses the same typed envelope for its revision description. A
+subsequent bulk stream failure remains a transport request failure, with the target, placement and
+typed staging, admission, verification or native conversion cause retained beneath it. The
+replica diagnostic prints that cause chain. Cancellation or failed conversion publishes no
+partial table, and an assignment-token refusal keeps a delayed transfer from overwriting a
+promoted owner. A commit that lacks its required replica acknowledgement still reports the
+existing quorum deadline; catch-up retries do not turn that deadline into a successful commit.
 A stopping node's `stopping_node_drain` request answers with outcomes of its own instead, because
 its only subject is the authenticated sender: completed or failed, each with the leader's report for
 the sender's log, or not the leader, which changed nothing and sends the sender to the leader it
@@ -823,7 +938,16 @@ beneath it: no admission registration, a body that is not one Arrow section of t
 metadata or acknowledgement sidecars whose row count differs from the body's, acknowledgement
 registrations on a subscription fan-out, a branch key that does not decode, or rows that do not
 assemble into a relay batch. The Arrow body, `BranchKeyError` or relay batch failure stays beneath
-that. A decoded batch the local relay boundary refuses is the separate
+that. An Arrow body that is not one canonical IPC stream framed within its own bytes is
+`ArrowBodyError::Framing`, naming the `IpcFramingDefect`: a message without its continuation
+marker, a stream cut inside a message, a negative length, metadata that is not an Arrow message, a
+column buffer outside its message's body, or bytes behind the end-of-stream marker. The decoder
+refuses it before it allocates or reads anything from a declared length, for a relay body and for
+an Arrow section of a sealed snapshot or a backup archive alike. A client batch names the same
+defects as the reason of its `Malformed` defect. A stream the framing admits and Arrow's reader
+then panics on ends its decode job, and the decoder reports that as `ArrowBodyError::Decode`, a
+defect of the body, rather than as work the node could not execute: decoding the same body again
+would panic again. A decoded batch the local relay boundary refuses is the separate
 `RuntimeError::DispatchRemoteRelay`. Remote payload handling returns these as `error-stack`
 reports: the receiver logs the whole chain, and a payload it refused before admitting it is
 answered with the chain rendered as the reason.

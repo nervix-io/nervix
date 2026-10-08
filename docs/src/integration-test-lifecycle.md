@@ -57,14 +57,17 @@ scenario binary was built for the mode. The ordinary suite leaves the `@deadlock
 scenarios out by default: their steps assert a detector an ordinary build does not have.
 
 The [diagnostic lane](#diagnostic-lane) also selects the ordinary `@restore_installation`,
-`@client_ingestor_alter_drain`, `@memory_pressure_pause`, `@client_io_03_consumer_restore` and
-`@client_io_03_generation` scenarios and the local `@deadlock_reports`
+`@client_ingestor_alter_drain`, `@memory_pressure_pause`, `@client_io_03_consumer_restore`,
+`@client_io_03_generation`, `@udf_column_builder`, `@vhost_tls_rebinding` and
+`@inferencer_branch_batches` scenarios and the local `@deadlock_reports`
 inspection/export/triage workflow. They exercise
 the blocking applied-state guard through interrupted checkpoint staging, complete publication and
 runtime handle clearing, including a delayed coordinator after leadership transfer and a
-successor's START, the memory-pressure pause of starting and running ingestors, and Rust client
-consumers restored after a cluster restart and closed by a domain stop. The report tool is an
-ordinary local executable, even when the scenario process
+successor's START, the memory-pressure pause of starting and running ingestors, Rust client
+consumers restored after a cluster restart and closed by a domain stop, a Roto function's column
+builder, the HTTPS listener's TLS configuration as a VHOST's bundle is rebound under HTTPS
+ingestion, and a batched inferencer's ONNX session across interleaved branches. The report tool is
+an ordinary local executable, even when the scenario process
 selects order analysis. Potential findings remain recorded without ending the process; any
 unreviewed workload finding prevents diagnostic qualification. Real server children and the
 scenario process record the same compile-time/runtime selection. The ordinary CLI built by the test
@@ -74,6 +77,8 @@ quoted file glob, and the lane requires every tagged scenario run to execute and
 retries. The recorded evidence covers tracked blocking locks reached by those workloads; async
 waits, capture atomics, dependency locks and cross-node waits retain their other concurrency
 checks.
+
+The `@restarted_voter_observation` scenario runs in both selections, reaching whole-cluster teardown, reopening each node's store, and automatic scheduling after the first relayed voter heartbeat. Its watch-channel barrier and concurrent fault map are untracked; the diagnostic evidence covers blocking locks reached by restart and scheduling. The native metadata restore scenario also runs in both selections after its Kafka replication stream and acknowledgement boundaries are repaired, retaining complete primary and replica metadata comparisons and distributed placement checks.
 
 The measured restore steps sample each node's public bulk and restore-metadata executor gauges
 every 20 milliseconds while the ordinary CLI runs. They also record the harness process's
@@ -91,6 +96,26 @@ The runtime's testing-only inspection API returns decoded current metadata; the 
 archive comparisons and assertions.
 The scenario takes the CLI's execution reference and replays it through the public session before
 and after restart, comparing the complete typed restore report.
+It saves the restored work's public owners and replicas before restarting, requires distributed
+placement in the three-node case, and compares every saved placement after START and after
+receiving isolated output for every tenant. A failover that drops replicas or recreates guest state
+cannot make this oracle pass by moving all execution onto one node.
+
+The complete-generation fixture allows 120 seconds for every post-restore input to reach its raw
+relay. Its forty one-mebibyte guest saves exercise sequential source acknowledgements and durable
+replica checkpoints beside the other diagnostic workloads. The full active diagnostic selection
+reached 77 of 80 inputs at the former 30-second bound, while the exact same binary reached all
+inputs and preserved every branch in the focused four-case replay. This condition ends as soon as
+the exact expected count is observed; it retains the complete output, state and branch assertions.
+
+The large materialized restore fixture prepares its rows through an acknowledged client producer.
+One round has a 120-second budget and one in-flight batch, including explicit replays of reported
+processing failures. Each replay replaces the same materialized keys with the same complete values,
+so partial effects retain the fixture's value oracle. Every attempt and terminal result is logged;
+an unknown outcome, final admission refusal or expired round fails preparation. The producer closes
+after every tenant's batch has completed, before the scenario checks all generator rows and takes
+the backup cut. Source admission, input delivery and the final archive and restore assertions remain
+separate observable steps.
 
 The lane then selects `@paced_simulation_reopen` from the public paced-driver feature. It builds the
 Rust driver in the lane's selection and supplies its path to the same scenario fixture, so the
@@ -109,7 +134,10 @@ The lane's diagnostic owner tests each start their detector in a fresh process b
 publication or executor lock: the state store's staging, snapshot views, queued writers,
 interrupted publication and bounded cleanup, and the materialized publication lifetimes. Each must
 pass its libtest accounting and record exactly one qualifying process observation in both
-diagnostic selections.
+diagnostic selections. The tracked locks' conformance checks of `nervix-primitives` run the same
+way, each in a fresh process in both selections. They record no evidence file, because the
+primitive crate sits below the crate that owns evidence: a finding reaches a sink that aborts the
+check, and the lane fails on that ending.
 
 Test dependencies start through one suite-owned environment. If Docker creates a named container
 but cannot bind its randomly selected host port, that owner removes the failed container and tries
@@ -277,6 +305,23 @@ The boundary between them is kept in four places.
   run again. A killed voter restarts from its own database and ports, and the step then waits for
   the same leader and three voters as a whole restart does. While a voter is killed or frozen, the
   fixture asks only the running ones which node leads.
+  The restarted-voter observation fixture stops every in-process node before arming its fault.
+  It blocks direct gossip between the first leader and one voter, then holds that voter's first
+  relayed heartbeat while allowing the other voters' heartbeats to advance. The leader's
+  reconciliation starts after that sample arrives, so slow harness startup cannot consume the
+  product's observation grace. A one-shot barrier captures a scheduling pass inside that grace
+  with the voter marked unavailable; its elapsed-time decision is captured before the barrier
+  waits. The scenario checks the failure-detector verdict and final ownership through public
+  cluster status. Releasing the barrier waits for that pass to finish before restoring heartbeats
+  and application health. While the heartbeat is held, peer startup waits for listeners; Raft
+  catch-up is checked after release, so the fixture never waits for progress its own fault prevents.
+  This is an in-process scheduling regression; immutable-image external
+  Chaos runs retain the real-process crash and restart evidence.
+  The durable follower catch-up fixture creates client writes while the restarted follower applies
+  its backlog and samples commands memory throughout that interval. Once the backlog is applied,
+  stopping the writer finishes its admitted command before counting completed writes: the response
+  can arrive after all voters have already applied that command. The fixture still checks the
+  storage-derived catch-up bound, append-stream limit and commands-memory budget.
 - **Test defaults.** An in-process node's shutdown timeout defaults to four minutes rather than the
   product's `50s`, which leaves the bounded shutdown phases scenarios configure by default room to
   finish, so only a scenario about the deadline reaches it. A server process runs with the product
@@ -423,6 +468,33 @@ one request timeout later. A wait that expires fails its step with the elapsed t
 text it rejected, and the last typed failure it saw. The meaning of the `connected` interconnect
 status these waits read belongs to [Cluster
 Interconnect](./interconnect.md#application-health-and-availability).
+
+The stopped-voter `DROP NODE` scenario waits for the public status report to show that the voter
+is no longer visible in gossip before removing it, then requires the exact remaining voter set.
+Application health can report an unavailable voter while gossip still sees it live, so an unavailable
+verdict does not establish membership-removal readiness. Scenarios that exercise application-health
+failure classification assert that source under their own controlled health fault.
+
+The correlator match-policy scenario observes each left input's received counter on the correlator
+owner before posting the next independent input. An HTTP acceptance alone does not order execution
+across ingestors. Its two-minute correlation window accommodates those bounded readiness waits
+without expiring the records whose match policy it asserts. The Kafka handoff scenario that pauses
+after entity-gate engagement uses a test-configured two-minute gate lease so its broker-delivery
+assertions and pause release fit inside the handoff budget under concurrent suite load.
+
+Collection and route-flush timing assertions measure observed row arrival from the HTTP publication
+instant. Concurrent branch posts retain one publication origin, and every expected row must match
+its tenant and sequence and arrive after the declared lower bound, inside the unchanged delivery
+budget. Starting a new silence window after an HTTP response would reject a valid row whose
+collection or flush deadline elapsed while the harness awaited that response. The production
+owner's timing checks retain the independent branch-deadline assertions.
+
+The MQTT changed-address restart scenario waits for the post-restart marker within its bounded
+delivery window. Its persistent QoS 1 source may replay the pre-restart marker before that row;
+broker receipt does not establish that its source acknowledgement reached the broker before the
+node stopped. The OTEL metric scenario observes one successful export from each concrete emitter
+owner before checking Collector output. HTTP intake acceptance does not establish sink export,
+and the per-owner counters retain exact progress assertions for both HTTP and gRPC.
 
 A scenario step can also read status inside a window of its own, passing that window as the phase
 deadline. Where the window bounds how long something is watched rather than how long one read may
@@ -785,6 +857,19 @@ it ends; `NERVIX_TESTCONTAINERS_MODE=reusable`, which `just test-scenarios-reuse
 for the next run instead. Scenarios still provision the topics, queues, tables, and other entities
 they use explicitly.
 
+The attached- and detached-window Kafka acknowledgement scenarios create their input topic before
+`START` and observe the consumer group's membership and the ingestor's readiness before injecting
+the output failure. Their bounded subscription assertions therefore exercise replay and
+acknowledgement isolation after source initialization, without spending those assertions' budgets
+on automatic topic creation and consumer discovery.
+
+The attached-window fixture publishes both rows through one producer and allows a thirty-second
+partial-batch wait. Collection ends as soon as its two-message ACK batch is full; the window can
+then produce the output whose failure rejects both records. Separate publication steps can exceed
+a short collection window, leaving one retained window row waiting for input while the source waits
+for that partial batch's ACK. The fixture retains its five-second ACK timeout and exact four-record
+replay assertion within eight seconds.
+
 The Pulsar broker announces a `maxMessageSize` of 1 MiB rather than Pulsar's 5 MiB default, the
 same limit the MQTT and NATS brokers keep, so one scenario message can exceed each broker's limit.
 Its admin API serves the topic-level `maxMessageSize` policy a scenario sets on its own topic; the
@@ -1079,6 +1164,12 @@ advisory and never change the build verdict; the complexity check is independent
 and workflow summary identify the exact comparison and the `coverage-merged` artifact retains the
 reports and `target/patch-coverage.md`.
 Each ordinary coverage input also retains its absolute checkout path as `coverage-source-root.txt`.
+The scenario collector also starts coverage in each published Python paced driver using the shared
+`scripts/paced_simulation_coverage` startup hook and configuration. It combines those completed
+process reports into `target/paced-simulation/python.lcov`. CI merges this scenario report with the
+deterministic Python open-policy report from the extra checks, alongside ordinary Rust coverage.
+The STOP/START generation-following outline also carries `@paced_simulation_reopen`, so both full
+Deloxide selections reach its Rust and Python drivers on one-node and three-node clusters.
 The advisory reporter reads these origins explicitly when matching LCOV sources from Blacksmith
 to files on its GitHub-hosted runner.
 
@@ -1117,10 +1208,19 @@ owns what the lane proves, its failure classes and its applicability records; th
 it runs and how long it may take.
 
 The lane starts after its prerequisites, `just tests-deps`, and builds each invocation with Cargo
-before it runs it. The probes and the owner tests are libtest executables, run directly so that a
-signal reaches the lane as a signal rather than as Cargo's status. The scenario binary runs the
-lane's tagged scenarios without retries, in two invocations: the restore, client and diagnostic
-scenarios, then the paced-driver scenarios with the diagnostic Rust driver. Each invocation runs
+before it runs it. The prerequisites provision what the workloads load, as they do for the
+ordinary suite: the WASM guests, the generated ONNX models and the ONNX runtime library, whose
+path the lane passes to every invocation. The probes, the tracked locks' conformance checks and
+the owner tests are libtest executables, run directly so that a signal reaches the lane as a
+signal rather than as Cargo's status. The scenario binary runs the lane's tagged scenarios
+without retries, in two inventory invocations: the restore, client, diagnostic, remote ACK,
+Roto function, TLS rebinding and inferencer scenarios, then the paced-driver scenarios with the
+diagnostic Rust driver. Active mode runs each invocation as one process. Order mode starts a fresh
+process for each tagged feature in the first invocation; the materialized restore feature runs
+each scenario separately and its six large examples each have their own process, as do the four
+complete-generation restore examples, selected by the inventory's `order_tags`. The lane checks
+every chunk's Cucumber summary against its registered examples, retains its logs and evidence
+separately, and stops on the first failed chunk. Each process runs
 the inventory's fixed number of scenarios at once, four, rather than one per CPU: a diagnostic
 build pays for its tracked acquisitions on every lock, and a fixed count puts the same load on its
 nodes locally and on CI's 16-vCPU runner.
@@ -1152,13 +1252,23 @@ verdict.
 
 | Part of the job | Bound | Basis |
 | --- | --- | --- |
-| Setup before the lane | No bound of its own | Toolchain, LLVM, Go, TinyGo and kache installation, as in the other native jobs: 42 and 43 seconds in the two selections of the first passing run |
-| Prerequisites, diagnostic builds and workloads, and the coverage export | 95 minutes, `timeout` in the step | The inventory's 80-minute budget bounds the diagnostic builds and workloads, and the prerequisites and the export share the rest. The first passing run took 23m18s for `deloxide-order` and 30m27s for `deloxide`. The prerequisites took 1m36s and 3m33s, the diagnostic builds and workloads 21m37s and 26m50s, and the export 3 and 4 seconds. Inside the budget, the builds took about 10.5 and 14 minutes, the 49 scenario runs 8m03s and 9m34s at four at once, and the 32 paced runs 2m37s and 2m42s |
-| Supervision qualification | 10 minutes, `timeout` in the step | A small probe build and up to seven bounded cases; only the untracked wait runs to its bound, 15 seconds, and the others end in milliseconds. It took 43 and 49 seconds in the first passing run |
-| Uploads and the kache report | The rest of the 120-minute job limit | Attempt directories, completion records and LCOV reports, uploaded after either step's verdict. In the first passing run the uploads took 5 and 6 seconds and kache's post step 3m02s and 2m50s, and the whole jobs took 28 and 35 minutes |
+| Setup before the lane | No bound of its own | Toolchain, LLVM, Go, TinyGo and kache installation, as in the other native jobs: 46 seconds for `deloxide` and 40 for `deloxide-order` in the measured run |
+| Prerequisites, diagnostic builds and workloads, and the coverage export | 95 minutes, `timeout` in the step | The inventory's 80-minute budget bounds the diagnostic builds and workloads, and the prerequisites and the export share the rest. The measured run took 25m02s for `deloxide` and 23m24s for `deloxide-order`. The prerequisites took 3m05s and 2m46s, the diagnostic builds and workloads 21m28s and 20m11s, and the export 2 seconds in each. Inside the budget, the builds took about 11 and 9.5 minutes, the 55 scenario runs 7m41s and 7m45s at four at once, the 32 paced runs 2m35s in each, and the seven conformance checks less than a second together after a build of 8 and 7 seconds |
+| Supervision qualification | 10 minutes, `timeout` in the step | A small probe build and up to seven bounded cases; only the untracked wait runs to its bound, 15 seconds, and the others end in milliseconds. It took 40 and 41 seconds in the measured run |
+| Uploads and the kache report | The rest of the 120-minute job limit | Attempt directories, completion records and LCOV reports, uploaded after either step's verdict. In the measured run the uploads took 4 and 3 seconds and kache's post step 3m06s and 3m18s, and the whole jobs took 30 and 28 minutes |
 
-The measurements come from the first CI run in which both selections passed, on 2026-10-06, with
-the lane instrumenting workspace crates only and running four scenarios at once.
+The table's measurements come from the CI run of 2026-10-07 in which both selections passed with
+every owner of tracked locks reached: 110 workloads in `deloxide` and 118 in `deloxide-order`,
+with the lane instrumenting workspace crates only and running 55 scenario examples at four at
+once. The first run in which both selections passed, on 2026-10-06 with 97 and 105 workloads and
+49 scenario runs, took 30m27s and 23m18s in the lane's step. The six scenario runs and seven
+conformance checks added between those runs fit inside their variation. A `deloxide-order` run
+that included the one-node restore of a deduplicator keyspace and a window above the bulk budget,
+together with its three-node example, took 21m47s in the lane's step with 107 workloads and 51
+scenario runs before those six scenario runs and seven conformance checks were added. The table
+predates the four remote ACK examples and the order-mode per-example process split, so its
+durations are historical measurements rather than a timing claim for the current combined
+inventory; the inventory and job bounds remain enforced.
 
 When a step's `timeout` expires it sends `SIGTERM` to the step's process group. The collector
 records its attempt as interrupted and forwards the signal to the lane, which ends the process it is

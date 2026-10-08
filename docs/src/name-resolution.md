@@ -374,7 +374,7 @@ connection delivers it.
 | A source | Fails its connection or its resume | The ingestor host, on the source's retry policy or, for a `NO_ACK` source, its reconnect cadence |
 | A sink | Fails its start, its reopening or its publish | The emitter host, on its backoff and retry policy |
 | A Redis command pool | Fails the physical connection the pool was opening | The emitter that borrows from the pool, on its retry policy |
-| A native session | Fails the connection attempt as `ClientError::ConnectServer` | The session's bounded reconnect policy until its retry deadline |
+| A native session | Fails the connection attempt as `ClientError::ConnectServer` | The session's bounded reconnect policy until its command wait ends; `BACKUP` uses `backup_wait_timeout` |
 
 A shutdown or quiesce that arrives while a source is resuming cancels the resume, together with
 every lookup, dial and handshake in it, as [Stopping Intake](./shutdown.md#stopping-intake)
@@ -535,6 +535,12 @@ The scenario features are `cluster/dns_resolution.feature`, the `runtime/*_dns_r
 files for RabbitMQ, Redis, MQTT, Syslog, WebSocket, ClickHouse and SQS, the fixture-name scenarios
 in the HTTP polling, Prometheus, Sentry, OTEL, Iceberg, HTTP emitter and WebSocket client features,
 `tools/cli_session.feature`, and `runtime/client_wire_qualification.feature`.
+
+The MQTT changed-answer and restart scenario requires the new post-restart payload inside a
+bounded delivery wait. Its persistent QoS 1 source may replay the preceding payload before that
+marker; the resolver qualification proves reconnecting delivery and preserves MQTT's replay
+semantics. The OTEL fixture-name metric scenario observes a successful export from both concrete
+emitter owners before checking the Collector's HTTP and gRPC output.
 
 ## Guarantees And Non-Guarantees
 

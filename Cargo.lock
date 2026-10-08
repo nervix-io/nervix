@@ -7337,7 +7337,6 @@ dependencies = [
  "bolero",
  "bytes",
  "error-stack",
- "fastrand",
  "futures-util",
  "h2",
  "http",
@@ -7359,6 +7358,7 @@ dependencies = [
  "serde_json",
  "sha2 0.10.9",
  "shuttle",
+ "sorted-vec",
  "strum 0.26.3",
  "tempfile",
  "thiserror 2.0.21",
@@ -7888,6 +7888,7 @@ version = "0.1.0-dev"
 dependencies = [
  "any_spawner",
  "base64 0.22.1",
+ "blake3",
  "bytes",
  "console_error_panic_hook",
  "error-stack",

@@ -275,16 +275,17 @@ impl Runtime {
                     )
                     .await;
                 if let Err(error) = dispatch_result.and(flush_result) {
+                    let reason = format!("{error:#}");
                     self.inner.events.report_error(format!(
                         "failed to dispatch {protocol} message for ingestor '{}' in domain '{}': \
-                         {error:?}",
+                         {reason}",
                         binding.ingestor.as_str(),
                         binding.domain.as_str(),
                     ));
                     warn!(
                         domain = binding.domain.as_str(),
                         ingestor = binding.ingestor.as_str(),
-                        error = ?error,
+                        error = %reason,
                         protocol,
                         "failed to dispatch endpoint message"
                     );
@@ -294,7 +295,7 @@ impl Runtime {
                 debug!(
                     domain = binding.domain.as_str(),
                     ingestor = binding.ingestor.as_str(),
-                    error = ?error,
+                    error = %format_args!("{error:#}"),
                     protocol,
                     "the node could not take an endpoint message now"
                 );

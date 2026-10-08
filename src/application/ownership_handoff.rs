@@ -12,7 +12,7 @@ use std::{
     time::Duration,
 };
 
-use error_stack::Report;
+use error_stack::{Report, ResultExt as _};
 use futures_util::{StreamExt, stream::FuturesUnordered};
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_interconnect::{
@@ -1470,9 +1470,7 @@ impl SessionServiceImpl {
                     domain,
                     &moved.entity,
                 )
-                .map_err(|error| {
-                    OwnershipHandoffError::persistence(error.current_context().clone())
-                });
+                .change_context(OwnershipHandoffError::Persistence);
         }
         self.inner
             .interconnect
@@ -2100,6 +2098,7 @@ impl SessionServiceImpl {
             .await;
         if let Err(error) = activation {
             let hold_duration = handoff.started_at.elapsed();
+            let reason = format!("{error:#}");
             for moved in &handoff.moves {
                 warn!(
                     domain = domain.as_str(),
@@ -2109,7 +2108,7 @@ impl SessionServiceImpl {
                     destination = %moved.destination,
                     hold_duration_millis = hold_duration.as_millis(),
                     promoted_replica = moved.promoted_replica,
-                    error = %error,
+                    error = reason.as_str(),
                     "planned ownership handoff destination did not confirm activation"
                 );
             }
@@ -2117,7 +2116,7 @@ impl SessionServiceImpl {
                 impact.fail(
                     attempt,
                     nervix_models::ImpactDiagnosticKind::Ownership,
-                    error.to_string(),
+                    reason,
                 );
                 impact.uncertain(
                     attempt,
@@ -2163,10 +2162,11 @@ impl SessionServiceImpl {
         &self,
         domain: &DomainName,
         handoff: PlannedOwnershipHandoff,
-        error: &crate::runtime::RuntimeError,
+        error: &Report<crate::runtime::RuntimeError>,
         impact: Option<&TransactionStepImpactRecorder>,
     ) {
         let hold_duration = handoff.started_at.elapsed();
+        let error = format!("{error:#}");
         for moved in &handoff.moves {
             warn!(
                 domain = domain.as_str(),
@@ -2176,7 +2176,7 @@ impl SessionServiceImpl {
                 destination = %moved.destination,
                 hold_duration_millis = hold_duration.as_millis(),
                 promoted_replica = moved.promoted_replica,
-                error = %error,
+                error = error.as_str(),
                 "planned ownership handoff activation failed; gate remains held until its deadline"
             );
         }
@@ -2184,7 +2184,7 @@ impl SessionServiceImpl {
             impact.fail(
                 attempt,
                 nervix_models::ImpactDiagnosticKind::Activation,
-                error.to_string(),
+                error,
             );
             impact.uncertain(
                 attempt,

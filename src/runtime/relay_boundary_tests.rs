@@ -63,6 +63,7 @@ async fn runtime_report_chain_detached_relay_delivery_log() {
         }],
         Some(dispatcher),
         Arc::new(BranchPresence::new()),
+        nervix_primitives::sync::Arc::new(crate::runtime_ack::AckRootTracker::default()),
     );
     let batch = RelayRecordBatch::single(
         test_schema(&[("value", ParseAsType::I64)]),
@@ -504,6 +505,7 @@ async fn concrete_relay_reuses_branch_collapse_for_runtime_consumers() {
         Vec::new(),
         None,
         Arc::new(BranchPresence::new()),
+        nervix_primitives::sync::Arc::new(crate::runtime_ack::AckRootTracker::default()),
     ));
     let owner_task = runtime.spawn_relay_owner_task(
         &domain,
@@ -876,6 +878,7 @@ async fn owner_ingress_publishes_branch_presence_to_the_relay_state_placement() 
         Vec::new(),
         None,
         placement_presence.clone(),
+        nervix_primitives::sync::Arc::new(crate::runtime_ack::AckRootTracker::default()),
     ));
     let (shutdown, _) = watch::channel(false);
     let schema = test_schema(&[("user_id", ParseAsType::U32)]);
@@ -1507,6 +1510,7 @@ fn services_reporting_to(presence: RelayBranchPresence) -> Arc<RelayBoundaryServ
         Vec::new(),
         None,
         presence,
+        nervix_primitives::sync::Arc::new(crate::runtime_ack::AckRootTracker::default()),
     ))
 }
 
@@ -1643,23 +1647,21 @@ async fn relay_state_shutdown_drains_every_ready_batch() {
     install_unpaced_test_domain(&runtime, &domain);
     let relay = named::<RelayName>("materialized_orders");
     let schema = test_schema(&[("value", ParseAsType::I64)]);
-    let mut assignment = runtime
-        .replicated_materialized_stream_state(
-            RuntimeStatePlacement {
-                domain: domain.clone(),
-                state: RuntimeState::MaterializedRelay {
-                    schema: SchemaFingerprint::from_digest([7; 32]),
-                },
-                kind: ModelKind::Relay,
-                identifier: ModelName::from(&relay.clone()),
-                branch_key: None,
+    let mut assignment = runtime.replicated_materialized_stream_state(
+        RuntimeStatePlacement {
+            domain: domain.clone(),
+            state: RuntimeState::MaterializedRelay {
+                schema: SchemaFingerprint::from_digest([7; 32]),
             },
-            schema.arrow_schema(),
-            None,
-            Vec::new(),
-            None,
-        )
-        .expect("materialized state should initialize");
+            kind: ModelKind::Relay,
+            identifier: ModelName::from(&relay.clone()),
+            branch_key: None,
+        },
+        schema.arrow_schema(),
+        None,
+        Vec::new(),
+        None,
+    );
     let state = assignment
         .originator
         .take()
@@ -2166,7 +2168,10 @@ async fn relay_rebuilds_end_subscribers_only_when_the_relay_rows_change() {
         .subscribe_stream(&domain, &relay, &notification_definition(false))
         .await
         .expect_err("the relay no longer has the public definition");
-    assert!(matches!(refused, RuntimeError::RelayRedefined { .. }));
+    assert!(matches!(
+        refused.current_context(),
+        RuntimeError::RelayRedefined { .. }
+    ));
     let mut sensitive = runtime
         .subscribe_stream(&domain, &relay, &notification_definition(true))
         .await
@@ -2184,7 +2189,35 @@ async fn relay_rebuilds_end_subscribers_only_when_the_relay_rows_change() {
         .subscribe_stream(&domain, &relay, &notification_definition(true))
         .await
         .expect_err("the relay is gone");
-    assert!(matches!(refused, RuntimeError::RelayNotInstantiated { .. }));
+    assert!(matches!(
+        refused.current_context(),
+        RuntimeError::RelayNotInstantiated { .. }
+    ));
+}
+
+#[nervix_primitives::test]
+async fn a_subscriber_cannot_attach_to_a_relay_this_node_does_not_declare() {
+    let runtime = Runtime::default();
+    let domain = domain("default");
+    let relay = named::<RelayName>("notifications");
+    let not_instantiated = "relay 'notifications' in domain 'default' is not instantiated";
+
+    let unrouted = runtime
+        .subscribe_stream(&domain, &relay, &notification_definition(false))
+        .await
+        .expect_err("a domain without an execution routes no relay");
+    assert_eq!(format!("{unrouted:#}"), not_instantiated);
+
+    let mut routing = DomainRoutingSnapshot::default();
+    routing
+        .relay_services
+        .insert(relay.clone(), test_relay_boundary_services());
+    install_test_domain_execution(&runtime, &domain, Vec::new(), routing);
+    let undeclared = runtime
+        .subscribe_stream(&domain, &relay, &notification_definition(false))
+        .await
+        .expect_err("a relay boundary that declares no definition admits no subscriber");
+    assert_eq!(format!("{undeclared:#}"), not_instantiated);
 }
 
 #[nervix_primitives::test]

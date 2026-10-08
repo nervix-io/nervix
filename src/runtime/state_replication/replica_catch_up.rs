@@ -15,7 +15,9 @@
     )
 )]
 
-use nervix_interconnect::{BranchCheckpointCursor, BranchCheckpointListingRequest};
+use nervix_interconnect::{
+    BranchCheckpointCursor, BranchCheckpointListingRequest, StateSyncRequest,
+};
 
 use super::*;
 use crate::runtime::branch_lifecycle_state::NamedBranches;
@@ -65,20 +67,11 @@ pub(in crate::runtime) trait StateOwner: Send + Sync {
 pub(in crate::runtime) struct RemoteStateOwner {
     runtime: Runtime,
     node: ClusterNodeName,
-    response_timeout: Duration,
 }
 
 impl RemoteStateOwner {
-    pub(in crate::runtime) fn new(
-        runtime: Runtime,
-        node: ClusterNodeName,
-        response_timeout: Duration,
-    ) -> Self {
-        Self {
-            runtime,
-            node,
-            response_timeout,
-        }
+    pub(in crate::runtime) fn new(runtime: Runtime, node: ClusterNodeName) -> Self {
+        Self { runtime, node }
     }
 }
 
@@ -97,7 +90,7 @@ impl StateOwner for RemoteStateOwner {
                 &self.node,
                 placement,
                 after_lsm,
-                self.response_timeout,
+                StateSyncRequest::TIMEOUT,
             )
             .await
     }
@@ -124,10 +117,10 @@ impl StateOwner for RemoteStateOwner {
                     lifecycle: lifecycle.to_remote(),
                     after,
                 },
-                self.response_timeout,
+                BranchCheckpointListingRequest::TIMEOUT,
             )
             .await
-            .map_err(|reason| Report::new(request_failed()).attach_printable(reason))?;
+            .change_context_lazy(request_failed)?;
         let listing = response.result.map_err(|failure| {
             Report::new(StateReplicationError::RemoteFailure {
                 target: self.node.clone(),
@@ -393,3 +386,7 @@ impl Runtime {
 #[cfg(test)]
 #[path = "replica_catch_up_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "remote_owner_tests.rs"]
+mod remote_owner_tests;

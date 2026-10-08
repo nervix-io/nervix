@@ -260,7 +260,10 @@ Relay admission:
 
 - `nervix_interconnect_relay_channels`, `nervix_interconnect_relay_attempts`,
   `nervix_interconnect_relay_grants`: logical channels with unresolved work, attempts whose outcome
-  has not been retired, and transfer grants issued and not yet spent
+  has not been retired, and transfer grants issued and not yet spent. These aggregate bounded
+  authenticated peer owners. Ending a peer releases its protocol capacity immediately, including
+  when the application still borrows an admitted intake; that intake's retained metadata stays
+  charged to relay memory until its last borrow ends.
 - `nervix_interconnect_relay_admissions_total` and
   `nervix_interconnect_relay_admission_wait_seconds_total`: attempts resolved, by `outcome`
   (`admitted`, `rejected`, `cancelled`), and the time they spent between an accepted reservation

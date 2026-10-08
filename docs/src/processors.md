@@ -335,9 +335,12 @@ Stepping removes records strictly before the step cutoff; records exactly at tha
 Panes are merged only from rows still in the active window and are rebuilt after stepping.
 Published branch snapshots share the retained Arrow input and argument columns, seal them in bounded
 sections, and rebuild the same sketches from those columns when ownership moves, a node recovers or
-a [backup](backup-and-restore.md) is restored. Histogram delayed removals travel in bounded typed
-sections beside the columns. A restored window continues only under the archived window model and
-branch lifetime; otherwise it starts empty and the restore reports a warning.
+a [backup](backup-and-restore.md) is restored. A window whose retained rows exceed one 8 MiB
+snapshot section persists through bounded pieces on quota-owned disk rather than in memory, so the
+window a node persists is bounded by its own `WIDTH` and `MAX STATE SIZE` and by the node's snapshot
+staging quota rather than by the bulk memory budget. Histogram delayed removals travel in bounded
+typed sections beside the columns. A restored window continues only under the archived window model
+and branch lifetime; otherwise it starts empty and the restore reports a warning.
 
 Admission reads each consecutive run of retained rows as typed Arrow value slices with their
 validity bits. Counts and integer sums are exact across run boundaries. Floating-point sums and

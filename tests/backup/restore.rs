@@ -46,6 +46,61 @@ async fn given_restore_uses_remote_placement(world: &mut ScenarioWorld) {
     }
 }
 
+fn restored_work_placements(world: &ScenarioWorld) -> BTreeSet<String> {
+    let status = world
+        .last_command_output
+        .as_deref()
+        .assured("cluster status is read before inspecting restored placements");
+    let mut placements = BTreeSet::new();
+    for placement in scheduled_placements_for_domain(status, &world.domain) {
+        let (owner, mut replicas) = scheduled_node_placement_from_status(
+            status,
+            &world.domain,
+            &placement.kind,
+            &placement.name,
+        )
+        .assured("each scheduled entry has its public placement");
+        replicas.sort_unstable();
+        placements.insert(format!(
+            "kind={} name={} owner={} replicas={}",
+            placement.kind,
+            placement.name,
+            owner,
+            replicas.join(",")
+        ));
+    }
+    placements
+}
+
+#[then(
+    expr = "the last cluster status placements of restored work are saved as placeholder {string}"
+)]
+fn then_save_restored_work_placements(world: &mut ScenarioWorld, placeholder: String) {
+    let placements = restored_work_placements(world);
+    assert!(!placements.is_empty(), "restore installed scheduled work");
+    world.placeholders.insert(
+        placeholder,
+        placements.into_iter().collect::<Vec<_>>().join("\n"),
+    );
+}
+
+#[then(
+    expr = "the last cluster status preserves restored work placements from placeholder {string}"
+)]
+fn then_restored_work_placements_are_preserved(world: &mut ScenarioWorld, placeholder: String) {
+    let current = restored_work_placements(world);
+    let expected = world
+        .placeholders
+        .get(&placeholder)
+        .assured("the restored placements are saved before restart");
+    for placement in expected.lines() {
+        assert!(
+            current.contains(placement),
+            "restart changed restored ownership or replicas: expected {placement}; got {current:?}"
+        );
+    }
+}
+
 #[given(
     expr = "node {string} has a state-counting WASM fixture with {int} MiB saves in resource \
             directory {string}"
@@ -109,11 +164,13 @@ async fn then_restore_tenants_remain_isolated(
         .map(|tenant| format!("restore-tenant-{tenant}"))
         .collect::<BTreeSet<_>>();
     let mut pending = expected.clone();
+    let mut observed = BTreeSet::new();
     let session = world
         .active_session
         .as_mut()
         .assured("the restored output has a subscription");
     while !pending.is_empty() {
+        nervix_primitives::task::consume_budget().await;
         let now = Instant::now();
         assert!(
             now < deadline,
@@ -122,8 +179,22 @@ async fn then_restore_tenants_remain_isolated(
         let event = session
             .try_next_subscription(deadline.saturating_duration_since(now))
             .await
-            .assured("the subscription remains connected")
-            .assured("each restored tenant emits its expected even row");
+            .assured("the subscription remains connected");
+        let Some(event) = event else {
+            let server_error = session
+                .try_next_server_error(Duration::ZERO)
+                .await
+                .assured("the subscription's filed server errors remain readable");
+            panic!(
+                "missing isolated restored rows: {pending:?}; observed: {observed:?}; server \
+                 error: {server_error:?}; delivered rows: {:?}; frames outside subscription \
+                 lifetime: {:?}",
+                session.delivered_payloads(),
+                session.frames_outside_lifetime(),
+            );
+        };
+        observed.insert(event.payload.clone());
+        world.last_subscription_payload = Some(event.payload.clone());
         // Domain offsets recover at least once, so a valid row may repeat while another branch
         // is still pending. Every observed row must still belong to an expected branch.
         let matched = expected
@@ -1420,6 +1491,42 @@ fn when_restore_step_pause_is_released(world: &mut ScenarioWorld, node: String) 
     world
         .fault_injection
         .release_restore_step_pause(&node_name(&pause.node), &pause.step);
+}
+
+#[given(
+    expr = "restoring domain {string} pauses before it converts its first deduplicator or window \
+            state"
+)]
+fn given_restore_conversion_pauses(world: &mut ScenarioWorld, domain: String) {
+    world
+        .fault_injection
+        .pause_restore_branch_state_conversion(scenario_domain(world, &domain));
+}
+
+#[then(
+    expr = "the restore of domain {string} pauses before it converts its first deduplicator or \
+            window state"
+)]
+async fn then_restore_conversion_pauses(world: &mut ScenarioWorld, domain: String) {
+    let domain = scenario_domain(world, &domain);
+    nervix_primitives::time::timeout(
+        RESTORE_PAUSE_TIMEOUT,
+        world
+            .fault_injection
+            .wait_for_restore_branch_state_conversion_pause(&domain),
+    )
+    .await
+    .unwrap_or_else(|_| {
+        panic!("the restore of '{domain}' did not reach its first deduplicator or window state")
+    });
+}
+
+#[when(expr = "the paused restore conversion of domain {string} is released")]
+fn when_restore_conversion_is_released(world: &mut ScenarioWorld, domain: String) {
+    let domain = scenario_domain(world, &domain);
+    world
+        .fault_injection
+        .release_restore_branch_state_conversion_pause(&domain);
 }
 
 /// Writes `copy` to `target` with `sections` in place of the sections of the same path.

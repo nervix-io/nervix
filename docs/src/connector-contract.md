@@ -342,6 +342,20 @@ Each timestamp rejection retains the source row's ACK for its route-local messag
 accepted neighbors continue into the graph. A source position is acknowledged only after every
 message it unfolded into has completed its own route or error delivery.
 
+Remote delivery retains that host-owned ACK share in a bounded delivery owner, with independent
+row outcomes and an exact generation identity. Admission refusal or cancellation before admission
+returns the share negatively; admitted records remain pending through keepalives and required
+waits until their terminal outcome or the silence bound. Relay construction retains the domain's
+ACK-root tracker, so intake does not resolve a mutable domain registry for each row. Receiver
+watchers retain the sender's full process identity and charge their memory to the relay budget;
+sender replacement or shutdown ends them. These correlations remain volatile and are never a
+connector position or persisted commit. [Cluster Interconnect](./interconnect.md) owns their
+capacity and deadline contracts.
+
+The host refreshes pending ACK progress every 100 milliseconds during connector requests and
+retries. This cadence must stay shorter than a source's one-second `ACK TIMEOUT` so a pending
+attached sink attempt does not make the source replay work while the sink still owns it.
+
 Each source host retains its exact instance readiness handle. Poll success and suspend/resume
 publish through that scalar, without looking up the ingestor registry. Replacing an ingestor retires
 its preceding handles before installing the new instances; host drop also retires its own handle.
@@ -465,9 +479,9 @@ retains the ACKs of the source rows every record, mapped row or request carries,
 map enters the connector. Each publish is one call per write, never a virtual call per row.
 
 The host compiles a row or row request sink's `VALUES` projection before opening that sink. A failed VM
-inference or compilation retains its typed VM report under the domain and emitter context, then
-the sink-initialization context. The emitter follows its existing initialization retry policy;
-the connector never receives a partially compiled mapping.
+inference or compilation retains its typed VM report beneath a `MappedValuesError` that names the
+sink and the emitter, then the sink-initialization context. The emitter follows its existing
+initialization retry policy; the connector never receives a partially compiled mapping.
 
 The ClickHouse row sink uses the shared columnar JSON writer for `JSONEachRow`. It prepares typed
 column readers and string escape masks once for each carrier of a write, then writes each selected
@@ -767,7 +781,10 @@ sequenceDiagram
   With `OFFSET BY DOMAIN`, the host supplies typed access to replicated next-offset state and a
   committed partition schedule. The leader observes partition topology and commits assignments;
   executing sources follow that schedule. Offset snapshots can lag a crash, so this mode remains
-  at least once. [Kafka ingestion](./ingestors.md#kafka) defines the recovery details.
+  at least once. Commits and start-point resets wait for the assigned state replicas within the
+  native checkpoint bulk operation's thirty-second budget. A missing acknowledgement still fails
+  the commit and follows the host's existing rejection and retry policy.
+  [Kafka ingestion](./ingestors.md#kafka) defines the recovery details.
   Replica ACKs reach that installed offset state through a resolved, retired-on-ending route and
   the existing assignment publication. The host's announcer retains its route and follows replica
   assignment changes without reading node-wide state or execution registries. The Kafka commit and
@@ -823,7 +840,8 @@ sequenceDiagram
   a single execution of the ingestor. It owns the attached producers, the batches each queued,
   their round-robin admission into the execution's one acknowledgement window, and every batch's
   outcome. The execution's admission worker validates a batch as one canonical Arrow IPC stream of
-  the input schema, tracks a new ACK root with the ingestor's drain accounting, reads the quiesce
+  the input schema, checking bounded IPC message and buffer declarations before Arrow decoding.
+  It then tracks a new ACK root with the ingestor's drain accounting, reads the quiesce
   state, and only then dispatches the batch through the ingestor's filter and routes, so a quiesce
   either counts the batch or refuses it with nothing dispatched. The batch's outcome is its ACK
   root's resolution under the declared ACK timeout, which counts time without acknowledgement
@@ -919,6 +937,10 @@ report carries the source as the frame beneath it: a rendered chain names each c
 Syslog `max_message_size` or `addr` value that does not parse therefore reads as the key and value
 followed by the parser's error, both at the source's start and in the Syslog sink's configuration
 diagnostic.
+
+The endpoint source also reports the full ingest-group dispatch or flush chain in its runtime event
+and log. A refusal to admit unfolding remains retryable and its diagnostic retains the executor
+cause without treating the payload as decoded or rejected.
 
 Paced-source resume and poll status, source suspend and close events, and cadence failures render
 the full report supplied by their owner. Kafka partition-watch failures similarly name the ingestor

@@ -473,14 +473,23 @@ the server, so it works before a cluster exists.
 Persistent statements are applied by the leader. The CLI gives each one a stable execution
 reference and retains it until the terminal result. If the session lands on a follower, the client
 follows the redirect and reconnects on its own, repeating the statement under the same reference,
-and waits out an election the same way; all of it is bounded by the client's 120-second retry
-deadline. A statement the leader never answered in that time is reported with its execution
+and waits out an election the same way; ordinary commands are bounded by the client's 120-second
+retry deadline. `BACKUP` uses the global `--backup-wait-timeout` instead, ten minutes by default,
+for the entire command across all domain cuts and reconnections. This applies to NSPL in
+`--command` and the REPL as well as the `backup` subcommand. Its per-domain `TIMEOUT` does not
+determine that total wait. A statement the leader never answered in its wait is reported with its execution
 reference as not known yet. A redirect that reaches the terminal as a statement's own result is
 printed as:
 
 ```text
 topology: not-a-leader, retry on leader 'node-2' at http://10.0.0.12:47391/
 ```
+
+After an uncertain backup, `backup --execution-reference REFERENCE` recovers the admitted command
+and downloads its archive with the original selected domain, scope, resources and capture
+options. The output file or stdout destination may change. The JSON failure report exposes
+`error.execution_reference`; [Backup And Restore](backup-and-restore.md#waiting-and-recovering)
+describes recovery and retention limits.
 
 Transaction controls follow the same redirect beginning with `BEGIN`. The CLI retains the returned
 transaction id and attaches it on the new connection before resuming any queued statement or

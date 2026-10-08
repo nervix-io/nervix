@@ -29,7 +29,8 @@ including the subscription fan-out that feeds a client's Row frames.
 Source-local compiler contracts distinguish peer/slot installation from recurring stream,
 frame, admission and acknowledgement operations. Retained admission records and placement progress
 name their bounded protocol key and transition bound. Transport selection reads immutable target
-and connection publications; remote ACK tracking retains exact-operation repair expectations.
+and connection publications. Delivery generations own remote ACK rows; authenticated peer owners
+own relay protocol collections under short, peer-scoped transition guards.
 A retained slot admits one worker through an atomic claim; established operations read that claim. The compiler's
 contracts do not establish wire delivery or concurrency guarantees; those remain the protocols
 and checks described here. [Data-Plane Concurrency](./data-plane-concurrency.md#source-contracts)
@@ -365,8 +366,15 @@ operator-facing reason; callers decide retry and relocation from the class and s
 
 Relay metadata uses the same validated control encoding, while relay bodies remain Arrow IPC from
 the source relay to the destination runtime. Bulk operations transfer opaque byte chunks and let
-the owning resource, snapshot, or state protocol interpret the stream. The primary payload limits
-are:
+the owning resource, snapshot, or state protocol interpret the stream.
+
+Before the receiver gives a relay Arrow stream to Arrow's reader, the shared IPC framing owner
+checks every message's continuation marker, metadata, declared body and column buffers against the
+received bytes. A malformed stream reports `ArrowBodyError::Framing` before the reader can allocate
+or slice from an unchecked length. A reader panic on malformed metadata that passes framing is
+reported as `ArrowBodyError::Decode`.
+
+The primary payload limits are:
 
 | Payload | Maximum size |
 | --- | ---: |
@@ -378,6 +386,14 @@ are:
 | Relay decode scratch space | 16 MiB |
 | Bulk transfer chunk | 64 KiB |
 | Snapshot section | 8 MiB |
+
+A receiver also holds an Arrow body to its own framing before it decodes it. The body is one
+canonical IPC stream: every message opens with the continuation marker, and the end-of-stream
+marker ends the body. Every length the stream declares must lie within the bytes the body carries:
+each message's metadata, its body, and each column buffer inside that body. A body that is framed
+otherwise is refused as misframed, so a declared length never sizes an allocation the body does not
+back, and a column buffer is never sliced outside its message. The same check opens every Arrow
+section of a sealed snapshot, a checkpoint or a backup archive.
 
 HTTP/2 flow control adds another bound. Each stream begins with a 64 KiB receive window, each
 connection begins with a 256 KiB receive window, and request headers are limited to 16 KiB. A
@@ -667,13 +683,13 @@ it. From the moment the delivery that carries the acknowledgement is admitted, a
 counts the passes in which the receiver reported nothing about it, and fails the acknowledgement
 once fifteen seconds of such passes have gone by. The bound outlasts two consecutive reports that
 each exhaust their five-second deadline, so a receiver that is still working on the record is not
-mistaken for one that stopped. Before admission, the delivery's own admission wait decides its
-failure, and the sweep leaves its acknowledgements alone. The sweep counts its own passes rather
+mistaken for one that stopped. Before admission, the delivery guard resolves cancelled work and
+the sweep bounds an abandoned registration at the five-minute total admission wait. The sweep counts its own passes rather
 than elapsed time, so a registering node whose own execution stalled, such as a paused container,
 does not fail acknowledgements whose reports it could not receive meanwhile.
 
-A failed acknowledgement resolves negatively exactly once. The sweep's removal rechecks the count
-under the entry's exclusive map lock, so a report that arrives first keeps the acknowledgement
+A failed acknowledgement resolves negatively exactly once. The sweep and report transitions use
+the exact delivery generation's guard, so a report that arrives first keeps the acknowledgement
 pending, and a terminal outcome or the delivery's own failure that resolves it first leaves the
 sweep nothing to fail. The source attempt fails with it and redelivers the record along the current
 routes, so a sink that already completed the record can receive it again. A report or outcome that
@@ -688,6 +704,52 @@ fails the acknowledgement fifteen seconds after the consumer's node fell silent,
 the record, and the source's retry takes over. Each sweep that failed acknowledgements logs, at
 `warn`, one line per receiver with the number it failed.
 
+### Bounded Correlation And Peer Owners
+
+The sender has 8,192 delivery positions and a separate 8,192 admission positions. One delivery
+owns all its record rows, with independent outcomes; filling delivery capacity therefore leaves
+room to register its runtime admission. The opaque acknowledgement number encodes a position,
+generation and row. Resolution validates all three, together with the registrar's full discovery
+identity. An exhausted generation is sealed permanently. A delayed report, terminal reply or
+cleanup cannot change a replacement occupying the same position.
+Unused positions are claimed on demand; only retired positions enter the bounded free queues.
+Shutdown seals fresh claims before scanning positions that were ever claimed, so a concurrent
+registrar either occupies a position shutdown visits or finds it closed.
+
+Record storage and receiver ACK watches are charged to the relay memory budget. One task per
+admitted batch multiplexes its row watches, with a fixed charge per row plus one task charge; a
+wide frame therefore does not allocate one task per acknowledgement. Pending rows report progress
+every 100 milliseconds, below the registrar's fifteen-second silence bound even when two reports
+each exhaust their dispatch deadline. The same cadence keeps local emitter and message-error
+acknowledgements alive while a connector request is pending, giving a one-second source
+`ACK TIMEOUT` multiple chances to observe progress. Admission
+refusal is typed and occurs before runtime admission. Cancellation before admission resolves every
+held share negatively and returns its position. Completion of the last record returns the delivery
+storage and its charge. Watcher memory remains charged through its dispatch attempts and ends on
+completion, runtime shutdown, or the registrar run leaving or changing. The membership writer
+publishes immutable process identities; a watcher gives initial discovery five seconds and stops
+once a previously observed registrar is absent. Terminal delivery retains the five-second event
+deadline described above; this does not promise suppression of replay duplicates after lost outcomes.
+
+An authenticated connection retains its peer's protocol owner. That owner alone mutates ordinary
+grant, attempt, channel, admission and outbound-correlation collections. Each synchronous guard
+is scoped to that peer, is released before transport waits, and follows peer then record lock
+order. Runtime admission and cancellation use one irreversible atomic verdict. Peer removal or
+epoch replacement cancels unadmitted records and releases transport item and terminal permits,
+including when runtime still borrows an admitted intake. Its admitted verdict remains valid.
+Decoded metadata keeps its memory charge until its last borrower releases it.
+
+With incoming queue capacity `Q`, each peer holds at most `Q` grants, attempts, active channels and
+admission records, at most `2Q` channel watermarks, and at most `2Q` outbound attempts and admission
+correlations. New unrelated channels are refused when retained watermarks occupy their budget;
+they are never evicted early to admit a replay. Lost terminal replies remain reconcilable. A
+sixty-second sweep reclaims protocol state after ten minutes without progress or reconciliation;
+live admission reports renew retained records. Authentication before gossip membership permits
+discovery, while relay operations wait for live membership. An owner still awaiting membership
+ends after ten minutes and closes its bound intake connections. Routing publication has at most
+the configured peer limit; normal frame and ACK operations use retained owners rather than a
+node-wide shared-map guard.
+
 ### Ordering, Retry, And Reconciliation
 
 A delivery identity combines the sender process epoch, receiver process epoch, channel incarnation,
@@ -700,9 +762,8 @@ does not resend the body. Sequence watermarks reject reordering and duplicate en
 sender channels rotate after five minutes. A receiver keeps a channel's watermark while a batch
 granted on that channel is unresolved, and for at least ten minutes after the watermark was last
 recorded or consulted by a grant, status, or cancellation request, so ordinary reconnects can still
-reconcile. A consultation reads the watermark through a shared lookup and refreshes its retention
-with one atomic maximum, so checking a delivery against its channel takes no exclusive lock on the
-watermark.
+reconcile. A consultation refreshes retention under that peer's protocol guard, together with its
+sequence decision. Independent peers have independent guards.
 
 The [relay reconciliation and receiver-restart simulations](./interconnect-simulation.md#relay-reconciliation-and-cancellation)
 check this boundary through the production authenticated connection. They lose the reply after an
@@ -715,7 +776,7 @@ has delivered an attempt's terminal outcome, it retires that same attempt: it ad
 watermark and releases the attempt, its channel occupancy, and its admission without rebuilding
 either identity or looking the admission up again.
 
-Relay attempts, grants, watermarks, admission state, and record-acknowledgement maps are in-memory
+Relay attempts, grants, watermarks, admission state, and record-acknowledgement owners are in-memory
 hot-path state. A receiver process-epoch change therefore makes an unresolved delivery
 indeterminate. The transport does not replay it automatically against the new process. If the
 source's policy calls for another attempt, that attempt opens a new channel incarnation and is a new
@@ -1053,6 +1114,15 @@ round synchronizes the lifecycle, reads the catalog's changes, and requests only
 the branches that changed or were announced, so a round in which no branch changed sends two
 requests however many branches the entity has.
 
+Checkpoint synchronization and catalog listing each use their operation's five-second deadline,
+including admission, connection capacity, the answer and decoding. The one-second replication poll
+interval schedules the next idle round; it does not shorten an in-flight request's deadline. A
+branch-aggregated replica uses the same checkpoint operation deadline. Polls and announcements retry
+a failed exchange, while the owner's checkpoint completion deadline remains independent and may
+fail if a replica cannot confirm in time. Replica request diagnostics retain the typed transport
+cause beneath the target and placement context, so a timeout can be distinguished from capacity,
+connection and framing failures without inspecting checkpoint bytes.
+
 The owner of a placement offers its newest checkpoint to the replicas the committed schedule
 assigns, and repeats the offer every 100 milliseconds to each replica that has not acknowledged
 that revision, until every one of them has, the node stops being the placement's primary, the
@@ -1099,6 +1169,34 @@ segments, synchronizes data before replacing the header, and retains the namespa
 before executor admission. Neither path requires a reservation proportional to container length.
 The synchronous ownership-handoff metadata boundary still admits its resident checkpoint entry
 against the bulk budget; exceeding that admission is a typed checkpoint refusal.
+
+Kafka offset replica catch-up first asks `describe_kafka_offsets` on the Commands pool whether
+the owner's revision advanced. Its typed answer distinguishes an unchanged revision, a newer
+revision, and the shared remote-operation refusal classes. An unchanged checkpoint is neither
+encoded nor transferred. A newer checkpoint uses `sync_kafka_offsets` on Bulk with the Snapshot
+subquota and a thirty-second progress deadline, independently of the replica polling cadence.
+The owner retains the admitted offset topology and reads its conservative revision before the
+offset slots, encodes the current native checkpoint directly into a quota-owned staging file, and
+sends a forty-byte revision/digest header followed by chunks of at most 64 KiB. The declared
+response length bounds the complete native payload. Encoding scratch and native conversion use
+the separate `restore_metadata` admission; bounded file I/O and transport use Bulk. Neither the
+replication message limit nor the bulk memory ceiling bounds the whole checkpoint's length.
+The receiver stages bounded chunks, releases the response stream at EOF, verifies exact length
+and digest, and decodes current archived entries directly into a new table under admitted CPU
+work. Cancellation is checked between file blocks and native entries. Only complete conversion
+reaches the replica's assignment-token installation barrier; a promoted or replaced assignment
+rejects a delayed transfer. The replica acknowledges its installed revision afterward. Kafka
+commit and reset waits use the native bulk operation's thirty-second budget. The owner
+therefore accepts a replica that completes this checkpoint after a small Commands response budget;
+an absent acknowledgement still ends the commit at the operation deadline. Transfer and admission
+failures preserve their typed causes in the replica diagnostic and retry on a later round.
+Every successful poll also repeats the replica's held revision when the checkpoint is unchanged,
+so a lost acknowledgement does not strand the owner's quorum wait or require another transfer.
+The replica checks its installation assignment before reporting that revision; promotion or
+replacement fences a retained poll's acknowledgement as well as its delayed installation.
+Debug checkpoint events identify encoding, receive and installation boundaries by placement and
+revision, with declared byte length once known. Their timestamps distinguish encoding, transfer
+and conversion delays without logging checkpoint payloads or partition offsets.
 
 Runtime-state synchronization replies and materialized-snapshot descriptions carry the shared
 typed remote-operation failure envelope. Rejection, absence, temporary unreadiness, and execution
@@ -1293,6 +1391,14 @@ interval falls back to its gossip liveness, even though no failure was recorded.
 therefore leaves scheduling and runtime availability no later than when gossip declares it dead and
 its last observation has aged out, whether or not any probe to it completes.
 
+During startup, Chitchat's dead set can also contain a voter whose first heartbeat arrived through
+another peer's digest: the failure detector has insufficient heartbeat intervals to establish
+liveness. Automatic scheduling uses a separate process-local live-observation history for its
+first ten seconds, including observations made before acquiring leadership. A voter that has never
+been observed live keeps scheduling in that bounded wait even when Chitchat lists it dead. Once all
+current voters have been observed or the grace expires, ordinary effective availability governs
+automatic failover. See [Whole-Cluster Restart Keeps Ownership](./shutdown.md#whole-cluster-restart-keeps-ownership).
+
 Command completion reads the leader's effective availability view through the
 `application_completion_peers` management progress request. The response names the leader's
 incarnation, Raft term, and required process incarnations. A follower uses it only while its own
@@ -1390,6 +1496,8 @@ indeterminate-delivery decisions inspect the current typed context, not formatte
 Runtime dispatch, relay admission-response and remote acknowledgement logs render every context
 of those local reports. State synchronization, checkpoint announcement and replica catch-up logs
 also retain the underlying request, placement or storage cause when their owner adds context.
+When remote ACK registration cannot reserve correlation memory, the affected record's negative
+acknowledgement carries the registration report chain, including its admission cause.
 An answering node sends its established remote failure class or stream rejection text over the
 wire; a local report's cause chain is not serialized into an HTTP/2 response.
 
@@ -1423,6 +1531,9 @@ from local ones.
 
 Metric labels are bounded dimensions such as traffic class, direction, operation, outcome, and
 reason. They do not include peer, domain, relay, branch, delivery identity, or payload values.
+An owner-delivery admission failure logs its domain, relay, non-sensitive branch fingerprint and
+target, together with the transport report's retained cancellation and rejection causes. The
+undelivered batch and branch field values stay out of that diagnostic.
 Per-batch and payload-bearing logs use debug or trace levels and do not expose sensitive field
 values. See [Metrics And Observability](./metrics-and-observability.md) for the metric and logging
 contract.

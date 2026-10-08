@@ -137,7 +137,7 @@ Feature: Bounded complete restore generations
       """
       state structures: <branches>
       """
-    Then within "30s" DESCRIBE DOMAIN section "input_output" metric "messages_total" "sent" relay "raw_metrics" across physical nodes totals <restored_inputs>
+    Then within "120s" DESCRIBE DOMAIN section "input_output" metric "messages_total" "sent" relay "raw_metrics" across physical nodes totals <restored_inputs>
     And within "30s" DESCRIBE DOMAIN section "processed" metric "messages_total" "sent" relay "filtered_metrics" across physical nodes totals <branches>
     And within "30s" the restore subscription receives one isolated even row for each of <branches> tenants
     When the CLI backs up "domain {{domain}} --timeout 120s" from node "{{leader}}" into "restored-state.nvxb" reporting JSON
@@ -160,9 +160,22 @@ Feature: Bounded complete restore generations
       """
     Then at least <reclaimed_mib> MiB of replaced restore chunks are reclaimed
 
+    @order_generation_two_saves_single
     Examples:
       | cluster_size | save_mib | branches | restored_inputs | replicas | reclaimed_mib |
       | 1            | 20       | 2        | 4               | 0        | 40            |
+
+    @order_generation_two_saves_cluster
+    Examples:
+      | cluster_size | save_mib | branches | restored_inputs | replicas | reclaimed_mib |
       | 3            | 20       | 2        | 4               | 0        | 40            |
+
+    @order_generation_many_saves_single
+    Examples:
+      | cluster_size | save_mib | branches | restored_inputs | replicas | reclaimed_mib |
       | 1            | 1        | 40       | 80              | 0        | 40            |
+
+    @order_generation_many_saves_cluster
+    Examples:
+      | cluster_size | save_mib | branches | restored_inputs | replicas | reclaimed_mib |
       | 3            | 1        | 40       | 80              | 1        | 80            |

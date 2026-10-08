@@ -28,7 +28,7 @@ impl Runtime {
             let flush_latest_snapshot =
                 |state: &KafkaOffsetStatePersistence,
                  store: &RuntimeStateStore|
-                 -> Result<Option<u64>, RuntimePersistenceError> {
+                 -> error_stack::Result<Option<u64>, RuntimePersistenceError> {
                     if !state.is_dirty() {
                         return Ok(None);
                     }
@@ -57,7 +57,7 @@ impl Runtime {
                                     );
                                 }
                                 Ok(None) => {}
-                                Err(error) => warn!(error = %error, "failed to flush kafka offset snapshot during shutdown"),
+                                Err(error) => warn!(error = format!("{error:#}"), "failed to flush kafka offset snapshot during shutdown"),
                             }
                             break;
                         }
@@ -71,7 +71,7 @@ impl Runtime {
                                 );
                             }
                             Ok(None) => {}
-                            Err(error) => warn!(error = %error, "failed to persist kafka offset snapshot"),
+                            Err(error) => warn!(error = format!("{error:#}"), "failed to persist kafka offset snapshot"),
                         }
                     }
                 }
@@ -111,7 +111,14 @@ impl Runtime {
                                     "failed to publish branch state during shutdown"
                                 );
                             }
-                            match state.persist_published(&store, &runtime.inner.executor).await {
+                            match state
+                                .persist_published(
+                                    &store,
+                                    &runtime.inner.executor,
+                                    &runtime.inner.snapshot_staging,
+                                )
+                                .await
+                            {
                                 Ok(Some(lsm)) => runtime.announce_checkpoint(
                                     state.placement(), state.replication(), lsm,
                                 ),
@@ -137,7 +144,14 @@ impl Runtime {
                             continue;
                         }
                         next_persist = Instant::now() + snapshot_interval;
-                        match state.persist_published(&store, &runtime.inner.executor).await {
+                        match state
+                            .persist_published(
+                                &store,
+                                &runtime.inner.executor,
+                                &runtime.inner.snapshot_staging,
+                            )
+                            .await
+                        {
                             Ok(Some(lsm)) => runtime.announce_checkpoint(
                                 state.placement(), state.replication(), lsm,
                             ),
@@ -184,53 +198,16 @@ impl Runtime {
                         Ok(Some(sealed)) => sealed,
                         Ok(None) => return Ok(None),
                         Err(error) => {
-                            return Err(RuntimePersistenceError::EncodeState(error.to_string()));
+                            return Err(error.change_context(RuntimePersistenceError::EncodeState));
                         }
                     };
                     let revision = sealed.descriptor.revision;
                     let placement = state.read().placement().clone();
-                    let writer = store.checkpoint_stream_writer();
-                    // Publishing a generation is filesystem work with a durability barrier, so it
-                    // runs on the storage workers rather than on the async worker this task holds.
-                    let reservation = executor
-                        .reserve(
-                            nervix_execution::MemoryClass::Bulk,
-                            super::super::RESTORE_STATE_WORKING_BYTES,
-                        )
-                        .await
-                        .map_err(|error| RuntimePersistenceError::EncodeState(error.to_string()))?;
-                    executor
-                        .run_storage(
-                            nervix_execution::StorageClass::Filesystem,
-                            reservation,
-                            move |_charge, cancellation| {
-                                let file = std::fs::File::open(sealed.artifact.path()).map_err(
-                                    |error| RuntimePersistenceError::EncodeState(error.to_string()),
-                                )?;
-                                writer
-                                    .publish_checkpoint_stream(
-                                        &placement,
-                                        super::super::state_store::generation::CheckpointMetadata {
-                                            lsm: revision,
-                                            length: sealed.descriptor.length,
-                                            digest: sealed.descriptor.digest,
-                                        },
-                                        file,
-                                        || {
-                                            cancellation.check().change_context(
-                                                RuntimePersistenceError::RestoreRead,
-                                            )
-                                        },
-                                    )
-                                    .map_err(|error| error.current_context().clone())
-                            },
-                        )
-                        .await
-                        .map_err(|error| {
-                            RuntimePersistenceError::EncodeState(error.to_string())
-                        })??;
+                    store
+                        .publish_checkpoint_artifact(&placement, revision, sealed.artifact)
+                        .await?;
                     state.record_persisted(revision);
-                    Ok::<Option<u64>, RuntimePersistenceError>(Some(revision))
+                    Ok::<Option<u64>, Report<RuntimePersistenceError>>(Some(revision))
                 };
             loop {
                 nervix_primitives::task::consume_budget().await;
@@ -245,7 +222,7 @@ impl Runtime {
                                     );
                                 }
                                 Ok(None) => {}
-                                Err(error) => warn!(error = %error, "failed to flush materialized relay snapshot during shutdown"),
+                                Err(error) => warn!(error = format!("{error:#}"), "failed to flush materialized relay snapshot during shutdown"),
                             }
                             break;
                         }
@@ -259,7 +236,7 @@ impl Runtime {
                                 );
                             }
                             Ok(None) => {}
-                            Err(error) => warn!(error = %error, "failed to persist materialized relay snapshot"),
+                            Err(error) => warn!(error = format!("{error:#}"), "failed to persist materialized relay snapshot"),
                         }
                     }
                 }
@@ -285,9 +262,11 @@ impl Runtime {
                     let Some(snapshot) = state.snapshot_to_persist(metrics)? else {
                         return Ok(None);
                     };
-                    store
-                        .persist_latest_snapshot(&state.placement, snapshot.lsm, &snapshot.payload)
-                        .map_err(Report::new)?;
+                    store.persist_latest_snapshot(
+                        &state.placement,
+                        snapshot.lsm,
+                        &snapshot.payload,
+                    )?;
                     state.persisted(snapshot.lsm);
                     Ok::<Option<u64>, Report<RuntimePersistenceError>>(Some(snapshot.lsm))
                 };
@@ -349,21 +328,19 @@ impl Runtime {
                 }
                 initial_sync_pending = false;
                 let after_lsm = offsets.current_lsm();
-                match runtime
-                    .request_state_sync_with_timeout(
-                        &primary_node,
-                        &placement,
-                        Some(after_lsm),
-                        poll_interval,
-                    )
-                    .await
-                {
-                    Ok(Some(snapshot)) => {
-                        if let Err(error) = state.install_snapshot(snapshot.lsm, &snapshot.payload)
-                        {
-                            warn!(error = %error, "failed to apply replicated kafka offset snapshot");
+                let synchronized = nervix_primitives::select! {
+                    changed = shutdown_rx.changed() => {
+                        if changed.is_err() || *shutdown_rx.borrow() {
                             break;
                         }
+                        continue;
+                    }
+                    synchronized = runtime.sync_kafka_offsets_from(
+                        &primary_node, &state, after_lsm,
+                    ) => synchronized,
+                };
+                match synchronized {
+                    Ok(lsm) => {
                         let dispatcher = runtime.inner.remote_dispatcher.load_full();
                         if let Some(dispatcher) = dispatcher
                             && let Err(error) = dispatcher
@@ -373,7 +350,7 @@ impl Runtime {
                                         nervix_interconnect::ControlEnvelope::StateReplicationAck(
                                             nervix_interconnect::StateReplicationAck {
                                                 placement: placement.to_remote(),
-                                                lsm: snapshot.lsm,
+                                                lsm,
                                             },
                                         ),
                                     ),
@@ -383,7 +360,6 @@ impl Runtime {
                             warn!(node_id = %dispatcher.local_node_id(), error = %format_args!("{error:#}"), "failed to acknowledge replicated kafka offset snapshot");
                         }
                     }
-                    Ok(None) => {}
                     Err(error) => {
                         warn!(error = %format_args!("{error:#}"), "failed to sync replicated kafka offsets");
                     }
@@ -437,7 +413,7 @@ impl Runtime {
             if let Err(error) = runtime.restore_replica_branch_lifecycle(&branch_lru, &lifecycle) {
                 warn!(error = %format_args!("{error:#}"), "failed to read the stored replicated branch lifecycle");
             }
-            let owner = RemoteStateOwner::new(runtime.clone(), primary_node, poll_interval);
+            let owner = RemoteStateOwner::new(runtime.clone(), primary_node);
             let mut checkpoints = ReplicaBranchCheckpoints::default();
             let mut initial_sync_pending = true;
             loop {
@@ -564,7 +540,7 @@ impl Runtime {
                         &primary_node,
                         &state.placement,
                         Some(after_lsm),
-                        poll_interval,
+                        nervix_interconnect::StateSyncRequest::TIMEOUT,
                     )
                     .await
                 {
@@ -574,7 +550,10 @@ impl Runtime {
                             snapshot.lsm,
                             &snapshot.payload,
                         ) {
-                            warn!(error = %error, "failed to apply replicated branch-aggregated state snapshot");
+                            warn!(
+                                error = format!("{error:#}"),
+                                "failed to apply replicated branch-aggregated state snapshot"
+                            );
                             continue;
                         }
                         let dispatcher = runtime.inner.remote_dispatcher.load_full();

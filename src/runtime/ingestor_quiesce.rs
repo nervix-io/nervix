@@ -1400,15 +1400,15 @@ impl Runtime {
         quiesced
     }
 
-    pub(crate) async fn resume_one_ingestor_after_memory_pressure(
-        &self,
-    ) -> Result<bool, RuntimeError> {
+    /// Releases the memory-pressure quiesce of one paused ingestor, and reports whether one was
+    /// paused.
+    pub(crate) async fn resume_one_ingestor_after_memory_pressure(&self) -> bool {
         let Some(key) = self
             .inner
             .memory_pressure
             .next_to_resume(&self.inner.ingestor_quiescence)
         else {
-            return Ok(false);
+            return false;
         };
         self.release_ingestor_quiesce(
             &key.domain,
@@ -1420,7 +1420,7 @@ impl Runtime {
             ingestor = key.identifier().as_str(),
             "resumed ingestor after memory pressure"
         );
-        Ok(true)
+        true
     }
 
     pub(crate) fn ingestors_paused_for_memory_pressure(&self) -> bool {
@@ -2145,17 +2145,10 @@ mod tests {
                 .and_then(|control| control.cause()),
             Some(IngestorQuiesceCause::MemoryPressure)
         );
+        assert!(runtime.resume_one_ingestor_after_memory_pressure().await);
         assert!(
-            runtime
-                .resume_one_ingestor_after_memory_pressure()
-                .await
-                .expect("resume should succeed")
-        );
-        assert!(
-            !runtime
-                .resume_one_ingestor_after_memory_pressure()
-                .await
-                .expect("pause should clear after the last ingestor resumes")
+            !runtime.resume_one_ingestor_after_memory_pressure().await,
+            "the pause clears once the last ingestor resumes"
         );
         runtime
             .stop_ingestor(&domain, &ingestor)
@@ -2169,12 +2162,7 @@ mod tests {
 
         assert_eq!(runtime.pause_ingestors_for_memory_pressure().await, 0);
         assert!(runtime.ingestors_paused_for_memory_pressure());
-        assert!(
-            !runtime
-                .resume_one_ingestor_after_memory_pressure()
-                .await
-                .expect("resume should succeed")
-        );
+        assert!(!runtime.resume_one_ingestor_after_memory_pressure().await);
         assert!(!runtime.ingestors_paused_for_memory_pressure());
     }
 

@@ -93,7 +93,7 @@ use nervix_primitives::{
     stream::StreamExt,
     sync::{
         Arc, CancellationToken, Mutex, Notify, StdArc,
-        atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
+        atomic::{AtomicU64, AtomicUsize, Ordering},
         broadcast, mpsc, oneshot, watch,
     },
     task::{AbortOnDropHandle, JoinHandle, TaskTracker},
@@ -225,6 +225,7 @@ mod entity_gate;
 mod entrypoint_routes;
 mod error;
 mod events;
+mod execution_build_error;
 mod fault_injection;
 mod filter_map;
 mod force_flush;
@@ -241,6 +242,7 @@ mod ingestor_quiesce;
 mod ingestor_start;
 mod ingestors;
 mod kafka_offset_state;
+mod kafka_offset_transfer;
 mod local_drain;
 mod lookup_hash_map;
 mod lsm_sequence;
@@ -282,6 +284,7 @@ pub mod relay_interaction_benchmark;
 mod relay_processor_node;
 mod relay_subscription;
 mod relay_transit;
+mod remote_ack_owner;
 mod remote_dispatch;
 mod reorderer;
 mod resources;
@@ -353,7 +356,10 @@ use deduplicator::{
     CompiledDeduplicatorKeyProgram, DeduplicatorKey, DeduplicatorKeyspace,
     PublishedDeduplicatorKey, ReplicatedDeduplicatorState, compile_deduplicator_key_program,
 };
-pub(crate) use deduplicator_archive::{ArchivedDeduplicatorKeys, CapturedDeduplicatorKeyspace};
+pub(crate) use deduplicator_archive::{
+    ArchivedDeduplicatorKeys, CapturedDeduplicatorKeyspace, DeduplicatorArchiveError,
+    restored_key_fixed_bytes,
+};
 use domain_clock::{
     DomainCadenceOccurrence, DomainCadenceStart, DomainClockAccessResult, LogicalDeadline,
     checked_add_duration_to_timestamp, wait_for_branch_deadline,
@@ -424,7 +430,7 @@ use force_flush::{
     DomainForceFlush, DomainForceFlushCompletion, DomainForceFlushParticipant,
     IngestorAckRootTrackers,
 };
-use generator::{GeneratorError, GeneratorTaskSpec};
+use generator::GeneratorTaskSpec;
 use http_request_fields::{
     AcceptedHttpRequests, AdmittedHttpRequests, CompiledHttpRequestFields, HttpRequestFields,
     HttpRequestInput, HttpRequestSchemas, SourceRecords,
@@ -547,7 +553,8 @@ use relay_transit::{
     RelayAdmissions, RelayOwnerAdmission, RelayOwnerBatchCompletion, RelayRoutedAdmission,
     RelayTransit,
 };
-use remote_dispatch::{REMOTE_ACK_ALIVE_INTERVAL, RemoteDispatchRegistry, RemoteDispatcher};
+use remote_ack_owner::RemoteDispatchRegistry;
+use remote_dispatch::{REMOTE_ACK_ALIVE_INTERVAL, RemoteDispatcher};
 use reorderer::{ReordererFlushContext, flush_branch_reorderer_output, reorder_key_part};
 use schedule_apply::ScheduleApplication;
 use scheduled_node::{
@@ -570,7 +577,7 @@ pub(in crate::runtime) use state_store::{
     ForcedRuntimeStateRecoveryTransition, RuntimeState, RuntimeStateHandoffTransition,
     RuntimeStateKind, RuntimeStateOperationError, RuntimeStateResult, RuntimeStateStore,
     ScheduledStateIdentity, StateAssignmentAuthority, StateAssignmentToken, StateAuthorityError,
-    StateCapability, StateIdentityError, StateReplicationRoles,
+    StateCapability, StateIdentityError, StateReplicationRoles, StoredStateIssue,
 };
 #[cfg(test)]
 pub(in crate::runtime) use test_fixtures::STUPID_CHANNEL_CAPACITY_REMOVE_ME;
@@ -649,8 +656,8 @@ use window_accumulator::{
     RetainedWindowRows, WindowAccumulator, WindowAccumulatorPlan, WindowArgumentColumns, WindowRow,
 };
 pub(crate) use window_archive::{
-    ArchivedWindow, CapturedWindow, WindowAccumulatorState, WindowCheckpointBuilder,
-    WindowDelayedRemoval,
+    ArchivedRows, ArchivedWindow, CapturedWindow, PendingArguments, WindowAccumulatorState,
+    WindowArchiveError, WindowCheckpointBuilder, WindowDelayedRemoval,
 };
 use window_processor::{
     WindowAdmission, WindowProcessorError, WindowProcessorState, evaluate_window_arguments,
@@ -659,7 +666,8 @@ use window_processor::{
 };
 use window_state::{
     LinearHistogramDelayedRemovalSnapshot, ReplicatedWindowProcessorState,
-    WindowAccumulatorSnapshot, WindowEntrySnapshot, WindowProcessorStateSnapshot,
+    WindowAccumulatorSnapshot, WindowEntrySnapshot, WindowPersistence,
+    WindowProcessorStateSnapshot,
 };
 
 #[cfg(test)]
@@ -746,16 +754,16 @@ pub(crate) use domain_execution::LookupRuntime;
 /// ```compile_fail
 /// use nervix_server::runtime::state_capability_compile_tests::KafkaOffsetStateOriginator;
 ///
-/// fn forbidden(originator: &KafkaOffsetStateOriginator) {
-///     let _ = originator.install_snapshot(1, &[]);
+/// fn forbidden(originator: &KafkaOffsetStateOriginator, cancellation: &nervix_execution::Cancellation) {
+///     let _ = originator.install_cancellable_snapshot(1, &[], cancellation);
 /// }
 /// ```
 ///
 /// ```compile_fail
 /// use nervix_server::runtime::state_capability_compile_tests::KafkaOffsetStateRead;
 ///
-/// fn forbidden(reader: &KafkaOffsetStateRead) {
-///     let _ = reader.install_snapshot(1, &[]);
+/// fn forbidden(reader: &KafkaOffsetStateRead, cancellation: &nervix_execution::Cancellation) {
+///     let _ = reader.install_cancellable_snapshot(1, &[], cancellation);
 /// }
 /// ```
 ///
@@ -907,6 +915,7 @@ pub(crate) use entity_gate::{
 };
 pub(crate) use error::RuntimeError;
 pub(crate) use events::RuntimeEvent;
+use execution_build_error::{ExecutionBuildError, ExecutionStep};
 pub(crate) use ingest_metadata::IngestFilterMapMetadata;
 use ingest_task_handles::IngestTaskHandles;
 pub(crate) use ingestor_quiesce::IngestorQuiesceCounters;

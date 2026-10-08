@@ -21,8 +21,9 @@ use nervix_consensus::{
     ConsensusError, RestoreExecution,
 };
 use nervix_models::{
-    CommandExecutionReference, DomainName, DomainStartPoint, DomainState, DomainStatus, Restore,
-    RestoreArchive, Statement, Timestamp, TransactionPosition, TransactionStatus, UserName,
+    Backup, BackupCapture, BackupResources, BackupScope, CommandExecutionReference, DomainName,
+    DomainStartPoint, DomainState, DomainStatus, Restore, RestoreArchive, Statement, Timestamp,
+    TransactionPosition, TransactionStatus, UserName,
 };
 use nervix_nspl::client_statement::ClientStatement;
 use nervix_primitives::{
@@ -44,6 +45,24 @@ use super::{
 
 const DEFAULT_COMMAND_RETRY_VALIDITY: Duration = Duration::from_secs(15 * 60);
 const DEFAULT_COMMAND_EXECUTION_CAPACITY: usize = 65_536;
+
+/// The server's capture inputs. The destination belongs exclusively to the client's download.
+#[derive(rkyv::Archive, rkyv::Serialize)]
+struct BackupExecutionParameters {
+    scope: BackupScope,
+    resources: BackupResources,
+    capture: BackupCapture,
+}
+
+impl From<&Backup> for BackupExecutionParameters {
+    fn from(backup: &Backup) -> Self {
+        Self {
+            scope: backup.scope.clone(),
+            resources: backup.resources,
+            capture: backup.capture,
+        }
+    }
+}
 
 #[derive(Debug, Clone, Copy, clap::Args)]
 pub struct CommandExecutionPolicy {
@@ -257,12 +276,18 @@ impl PersistentCommandRequest {
         if let Statement::CreateUser(create) = &mut digest_statement {
             create.body.password.clear();
         }
-        let encoded =
-            rkyv::to_bytes::<rkyv::rancor::Error>(&digest_statement).map_err(|error| {
-                Report::new(PersistentCommandRequestError::Encoding {
-                    message: error.to_string(),
-                })
-            })?;
+        let encoded = match &digest_statement {
+            Statement::Backup(backup) => {
+                hasher.update(b"BACKUP");
+                rkyv::to_bytes::<rkyv::rancor::Error>(&BackupExecutionParameters::from(backup))
+            }
+            _ => rkyv::to_bytes::<rkyv::rancor::Error>(&digest_statement),
+        }
+        .map_err(|error| {
+            Report::new(PersistentCommandRequestError::Encoding {
+                message: error.to_string(),
+            })
+        })?;
         let encoded_bytes = encoded.as_slice();
         let encoded_length = u64::try_from(encoded_bytes.len())
             .map_err(|_| Report::new(PersistentCommandRequestError::SemanticsTooLarge))?;
@@ -1236,6 +1261,65 @@ mod tests {
             statement: ClientStatement::Server(statement),
             domain: None,
         })
+    }
+
+    fn backup_request_digest(backup: Backup, selected_domain: DomainName) -> [u8; 32] {
+        let operation = SessionCommandOperation::Execute(PendingSessionCommand {
+            request_reference: CommandExecutionReference::parse("backup.request")
+                .assured("the test reference is valid"),
+            expected_transaction_position: None,
+            source: backup.to_canonical_nspl(),
+            statement: ClientStatement::Server(Statement::Backup(backup)),
+            domain: Some(selected_domain.clone()),
+        });
+        PersistentCommandRequest::from_operations(&[operation], Some(&selected_domain))
+            .assured("backup semantics encode")
+            .assured("the backup is persistent")
+            .digest
+    }
+
+    #[test]
+    fn backup_request_identity_binds_capture_inputs_and_selected_domain() {
+        let backup = Backup {
+            scope: BackupScope::Cluster,
+            destination: "cluster.nvxb".to_string(),
+            resources: BackupResources::Included,
+            capture: BackupCapture::Quiesced {
+                timeout: Some(Duration::from_secs(30)),
+            },
+        };
+        let expected = backup_request_digest(backup.clone(), domain());
+        let mut alternate = backup.clone();
+        alternate.destination = "another-directory/recovered.nvxb".to_string();
+        assert_eq!(backup_request_digest(alternate, domain()), expected);
+        let another_domain = DomainName::parse("tenant").assured("the selected domain is valid");
+        assert_ne!(
+            backup_request_digest(backup.clone(), another_domain.clone()),
+            expected
+        );
+        let mut alternate = backup.clone();
+        alternate.resources = BackupResources::Omitted;
+        assert_ne!(backup_request_digest(alternate, domain()), expected);
+        for scope in [
+            BackupScope::Domain(None),
+            BackupScope::Domain(Some(another_domain)),
+        ] {
+            let mut alternate = backup.clone();
+            alternate.scope = scope;
+            assert_ne!(backup_request_digest(alternate, domain()), expected);
+        }
+        for capture in [
+            BackupCapture::Live,
+            BackupCapture::ConfigurationOnly,
+            BackupCapture::Quiesced { timeout: None },
+            BackupCapture::Quiesced {
+                timeout: Some(Duration::from_secs(31)),
+            },
+        ] {
+            let mut alternate = backup.clone();
+            alternate.capture = capture;
+            assert_ne!(backup_request_digest(alternate, domain()), expected);
+        }
     }
 
     #[test]

@@ -109,6 +109,18 @@ completed snapshot, and from one made at completed index zero. The trigger holds
 completed index that existed when the request was made; it suppresses duplicate requests for that
 same completed snapshot without confusing its absence with index zero.
 
+**Remote acknowledgements and admission.** A routing position is open with its generation and
+optional correlation, or permanently closed. A correlation owns either a delivery's record rows
+or an admission response channel. Pending rows distinguish waiting for admission from admitted
+silence; ordered parked progress retains its required-wait guard. The wire number is an opaque
+position/generation/row encoding, validated behind this owner with the registrar process identity.
+No numeric value means missing, and an exhausted generation never wraps into a live identity.
+An authenticated peer is starting, awaiting membership with its bound epoch, live with that epoch,
+or ended. The admission choice's private atomic byte exposes only pending, admitted and cancelled;
+one compare-and-exchange chooses an irreversible verdict. Borrowed admitted work and released
+transport permits have separate lifetimes. [Cluster Interconnect](./interconnect.md#bounded-correlation-and-peer-owners)
+owns their delivery guarantees and bounds.
+
 **Client ingestors.** An ingestor's input is either a transport, which carries its source and the
 codec that decodes it, or a client source, which carries the schema its batches hold and its
 producer policy. There is no optional codec beside an optional schema, so an ingestor cannot claim
@@ -126,6 +138,14 @@ reachable member through an empty address. Other service advertisements, includi
 may be absent independently. Absence says the service is unavailable; it does not invent a reason.
 Peer selection and transport handling follow the [interconnect contract](./interconnect.md).
 
+**Startup voter evidence.** The reconciliation task owns a process-local set of typed node names
+actually observed live, including observations made while following. An absent voter in that set
+means no live observation; Chitchat's current dead verdict does not supply one. A first relayed
+heartbeat can therefore leave a voter unobserved even though gossip knows its identity. Expiring the
+ten-second startup grace ends the observation requirement without declaring that voter live, and a
+leadership change retains the original deadline. The set is discarded after expiry. See
+[Whole-Cluster Restart Keeps Ownership](./shutdown.md#whole-cluster-restart-keeps-ownership).
+
 ## Identity Across Scheduling And Recovery
 
 Schema-bound runtime state is keyed by a computed `SchemaFingerprint` supplied by the committed
@@ -138,6 +158,16 @@ required identity is an error, not a default digest.
 The runtime Kafka offset key remains schema-independent. A backup archive also records the
 ingestor's scheduled fingerprint with those offsets, so restore applies them only to the same
 ingestor contract after publishing its target schedule.
+
+Kafka replica catch-up describes revision state as `Current` or `Advanced(revision)`, with typed
+remote-operation failures for refusal. An advanced revision selects a bulk native checkpoint;
+its header must name a revision newer than the replica's request and no earlier than the described
+revision. Length, digest and the current archived shape are verified before a replacement table
+is published through the retained replica assignment token. A cancelled or invalid transfer
+leaves the installed state intact. Every successful synchronization returns the held revision,
+including a `Current` answer, after validating replica authority. It is acknowledged again so
+lost progress reports recover without another transfer; a promoted or replaced assignment rejects
+reports through a retained token.
 
 The runtime checks a stored state's schema identity against the current scheduled identity before
 accepting it. WASM guest state additionally uses its generation for the concrete branch. A state
@@ -234,6 +264,10 @@ A submitted client batch is validated as a whole before any row is admitted: a s
 exactly one uncompressed record batch of the ingestor's canonical Arrow schema, with valid columns
 and within the row and byte limits, is refused with its typed defect. No value is cast, widened,
 coerced, or defaulted to make a batch fit, and no subset of a malformed batch is admitted.
+The shared Arrow IPC boundary checks canonical message framing, declared bodies and column buffer
+ranges before invoking Arrow's reader. A malformed frame reports `ArrowBodyError::Framing` for a
+relay or snapshot body and `ClientBatchError::Malformed` for a client batch; neither gains a partial
+row from it.
 
 Session replies carry typed command purpose and outcomes. An upload failure can carry an optional
 assigned nonzero resource version; before assignment, the version is absent. Diagnostic spans can
@@ -313,6 +347,13 @@ default. [Data-Plane Concurrency](./data-plane-concurrency.md#diagnostic-deadloc
 current representation, qualification policy and coverage limits.
 
 ## Validation And Failure Boundaries
+
+Native connection options validate every timeout at setup: one millisecond through 24 hours.
+The backup command wait has its own required duration, distinct from an optional per-domain
+quiesce override and the ordinary request and retry bounds. Backup execution identity projects
+the typed scope, resource inclusion and capture options together with the selected domain; the
+local output destination remains a client download concern. Recovery may change that destination
+while the server continues to validate the original semantic request and execution reference.
 
 The registry rejects unresolved or contradictory contracts before a graph becomes active. It
 resolves branch names, schemas, fields, and sensitivity as one branch state. Scheduling supplies
@@ -482,6 +523,11 @@ ledger distinguishes source-audited findings from demonstrated runtime behavior 
 which values remain legitimate zeros, empty content, Arrow masked lanes, and private encodings.
 
 ## Recurring Task Observations
+
+The paced simulation applications represent endpoint-open intent as `CurrentGeneration` or
+`FollowingStart`. Only the latter permits a bounded retry of `DomainStopped` after observing a
+later paced generation; initial and contract-change opens retain the stopped-domain refusal.
+The opened producer's generation and its paced clock still own permission to plan readings.
 
 Healthy connector status is absence of a failure; a failure contains its safe error and an optional
 retry in one publication. Domain-clock publication carries lifecycle pause, generation and start

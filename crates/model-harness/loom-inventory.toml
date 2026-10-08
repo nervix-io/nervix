@@ -258,7 +258,7 @@ path = "src/runtime/entity_gate.rs"
 weakened = "self.force_flushes.load(Ordering::Relaxed)"
 
 [[invariant]]
-claim = "A Kafka offset snapshot stamped with a commit's revision encodes that commit's offset: the commit stores the partition's offset before it advances the revision, the snapshot reads the revision before the offsets, and advancing releases what reading the revision acquires."
+claim = "A captured Kafka offset checkpoint stamped with a commit's revision encodes that commit's offset after releasing the assignment barrier: the commit stores the partition's offset before it advances the revision, capture reads the revision before retaining the table and encoding its offsets, and advancing releases what reading the revision acquires."
 id = "runtime.kafka-offset-state.snapshot-revision"
 package = "nervix-server"
 test = "runtime::kafka_offset_state::tests::loom_models::loom_a_snapshot_carrying_a_commits_revision_carries_its_offset"
@@ -298,3 +298,17 @@ invariant = "server.backup.cut-generation"
 original = ".compare_exchange_weak(state, state + 1, Ordering::AcqRel, Ordering::Relaxed)"
 path = "src/runtime/backup_capture_fence.rs"
 weakened = ".compare_exchange_weak(state, state + 1, Ordering::Release, Ordering::Relaxed)"
+
+[[invariant]]
+claim = "Concurrent runtime admission and transport cancellation choose exactly one irreversible relay verdict; later participants cannot overwrite the winner."
+id = "interconnect.relay.irreversible-admission"
+package = "nervix-interconnect"
+test = "connection::relay_admission_choice::loom_models::loom_admission_and_cancellation_choose_one_irreversible_verdict"
+
+[[qualification]]
+failure = "admission verdict changed after its winning transition"
+id = "interconnect.relay.overwriting-verdict"
+invariant = "interconnect.relay.irreversible-admission"
+original = ".compare_exchange(PENDING, choice, Ordering::AcqRel, Ordering::Acquire)\n            .is_ok()"
+path = "crates/interconnect/src/connection/relay_admission_choice.rs"
+weakened = ".swap(choice, Ordering::AcqRel) == PENDING"

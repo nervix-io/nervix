@@ -8,23 +8,21 @@
 
 use super::*;
 
+/// Why a runtime entry point failed. Each variant is a context of an `error_stack` report, and the
+/// failure that caused it, such as the [`ExecutionBuildError`] step of a domain build or an
+/// ingestor's, emitter's or generator's start report, stays beneath it.
 #[derive(Debug, Error)]
 pub enum RuntimeError {
     #[error("ingestor '{ingestor}' in domain '{domain}' is not running")]
-    IngestorNotRunning { domain: String, ingestor: String },
-    /// An ingestor did not start. The report names the ingestor and keeps every cause beneath it.
-    #[error("{report:#}")]
-    IngestorStart { report: Report<IngestorStartError> },
-    /// An emitter did not start. The report names the emitter and its domain and keeps every
-    /// cause beneath them.
-    #[error("{report:#}")]
-    EmitterStart { report: Report<EmitterStartError> },
-    /// A generator did not start. The report names the generator and its domain and keeps every
-    /// cause beneath them.
-    #[error("{report:#}")]
-    GeneratorStart { report: Report<GeneratorError> },
+    IngestorNotRunning {
+        domain: DomainName,
+        ingestor: IngestorName,
+    },
     #[error("relay '{relay}' in domain '{domain}' is not instantiated")]
-    RelayNotInstantiated { domain: String, relay: String },
+    RelayNotInstantiated {
+        domain: DomainName,
+        relay: RelayName,
+    },
     #[error(
         "relay '{relay}' in domain '{domain}' was redefined after its definition was read; read \
          it again"
@@ -33,34 +31,19 @@ pub enum RuntimeError {
         domain: DomainName,
         relay: RelayName,
     },
-    #[error("failed to build domain execution for '{domain}': {reason}")]
-    BuildDomainExecution { domain: String, reason: String },
-    #[error("failed to build domain execution for '{domain}': {report}")]
-    SignalingProtocolCompile {
-        domain: DomainName,
-        report: Report<nervix_connector_websockets::SignalingProtocolCompileError>,
-    },
-    /// A codec of the domain did not compile. The report keeps the rule or declaration the codec
-    /// breaks beneath the codec's own context.
-    #[error("failed to build domain execution for '{domain}': {report:#}")]
-    CodecCompile {
-        domain: DomainName,
-        report: Report<CodecError>,
-    },
-    #[error(
-        "failed to build domain execution for '{domain}': failed to compile domain UDFs: {report}"
-    )]
-    CompileDomainUdfs {
-        domain: String,
-        report: Report<nervix_roto::UdfError>,
-    },
-    /// An ingestor or reingestor could not bind its programs on this node. The report names the
-    /// node and the program, and keeps the compile failure beneath them.
-    #[error("failed to bind an ingestor or reingestor of domain '{domain}': {report:#}")]
-    EntrypointBinding {
-        domain: DomainName,
-        report: Report<EntrypointBindingError>,
-    },
+    /// Building or changing the execution of a domain failed. The step that failed is beneath.
+    #[error("failed to build domain execution for '{domain}'")]
+    BuildDomainExecution { domain: DomainName },
+    /// The committed schedule revision could not be planned against the one applied before it.
+    #[error("failed to plan the committed schedule revision")]
+    PlanScheduleRevision,
+    /// This node could not apply the admitted runtime revision. Its failure is beneath.
+    #[error("failed to apply runtime revision {revision}")]
+    ApplyRevision { revision: u64 },
+    /// The ingestors of running domains did not start once the revision was prepared. The
+    /// ingestor's start report is beneath.
+    #[error("failed to start the ingestors of runtime revision {revision}")]
+    StartIngestors { revision: u64 },
     #[error(
         "timed out waiting for runtime revision {revision} to be prepared on nodes \
          {pending_nodes:?}"
@@ -86,6 +69,11 @@ pub enum RuntimeError {
         node_unavailability_timeout: Duration,
         readiness_propagation_bound: Duration,
     },
+    #[error("could not own remote acknowledgements in domain '{domain}': {report:#}")]
+    RemoteAckAdmission {
+        domain: DomainName,
+        report: Report<nervix_execution::AdmissionError>,
+    },
     /// A relay payload another node sent did not decode into a batch of its relay. The
     /// `RemoteRelayDecodeError` beneath it names what the payload got wrong and keeps the
     /// decoder's own failure beneath that.
@@ -106,13 +94,10 @@ pub enum RuntimeError {
 }
 
 impl RuntimeError {
-    pub(super) fn entrypoint_binding(
-        domain: &DomainName,
-        report: Report<EntrypointBindingError>,
-    ) -> Self {
-        Self::EntrypointBinding {
+    /// The context of every failure to build or change `domain`'s execution.
+    pub(super) fn build_domain_execution(domain: &DomainName) -> Self {
+        Self::BuildDomainExecution {
             domain: domain.clone(),
-            report,
         }
     }
 
@@ -125,8 +110,8 @@ impl RuntimeError {
 
     pub(super) fn relay_not_instantiated(domain: &DomainName, relay: &RelayName) -> Self {
         Self::RelayNotInstantiated {
-            domain: domain.as_str().to_string(),
-            relay: relay.as_str().to_string(),
+            domain: domain.clone(),
+            relay: relay.clone(),
         }
     }
 }

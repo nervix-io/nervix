@@ -121,6 +121,8 @@ fn subscription_interests_from_live_nodes(
 /// Atomic publication plus a cold-path change notification for creation handshakes.
 struct SubscriptionInterestPublication {
     index: ArcSwap<SubscriptionInterestIndex>,
+    /// The same membership writer publishes current process identities for ACK watcher lifetimes.
+    live_runs: ArcSwap<BTreeMap<ClusterNodeName, ClusterNodeIncarnation>>,
     changed: watch::Sender<()>,
 }
 
@@ -128,6 +130,7 @@ impl SubscriptionInterestPublication {
     fn new() -> Self {
         Self {
             index: ArcSwap::from_pointee(SubscriptionInterestIndex::default()),
+            live_runs: ArcSwap::from_pointee(BTreeMap::new()),
             changed: watch::channel(()).0,
         }
     }
@@ -135,6 +138,13 @@ impl SubscriptionInterestPublication {
     fn publish(&self, nodes: &BTreeMap<ChitchatId, NodeState>) {
         let index = subscription_interests_from_live_nodes(nodes);
         self.index.store(StdArc::new(index));
+        let mut runs = BTreeMap::new();
+        for node in nodes.keys() {
+            if let Some(identity) = cluster_node_identity(node) {
+                runs.insert(identity.node_id().clone(), identity.incarnation());
+            }
+        }
+        self.live_runs.store(StdArc::new(runs));
         self.changed.send_replace(());
     }
 
@@ -1180,7 +1190,56 @@ impl GossipSocket for InterconnectGossipSocket {
         if !remaining.is_empty() {
             anyhow::bail!("gossip message has trailing bytes");
         }
+        #[cfg(feature = "testing")]
+        let message = {
+            let mut message = message;
+            if let ChitchatMessage::Syn { digest, .. } | ChitchatMessage::SynAck { digest, .. } =
+                &mut message
+            {
+                self.freeze_startup_voter_digest(digest)?;
+            }
+            message
+        };
         Ok((from, message))
+    }
+}
+
+#[cfg(feature = "testing")]
+impl InterconnectGossipSocket {
+    fn freeze_startup_voter_digest<D: chitchat::Serializable + chitchat::Deserializable>(
+        &self,
+        digest: &mut D,
+    ) -> anyhow::Result<()> {
+        // Chitchat keeps digest entries private. Decode and encode its current public wire
+        // representation to hold just the selected heartbeat while other voters keep progressing.
+        let encoded = digest.serialize_to_vec();
+        let mut remaining = encoded.as_slice();
+        let count = <u16 as chitchat::Deserializable>::deserialize(&mut remaining)?;
+        let mut frozen = Vec::with_capacity(encoded.len());
+        chitchat::Serializable::serialize(&count, &mut frozen);
+        for _ in 0..count {
+            let id = ChitchatId::deserialize(&mut remaining)?;
+            let mut heartbeat = <u64 as chitchat::Deserializable>::deserialize(&mut remaining)?;
+            let gc_version = <u64 as chitchat::Deserializable>::deserialize(&mut remaining)?;
+            let max_version = <u64 as chitchat::Deserializable>::deserialize(&mut remaining)?;
+            if let Some(identity) = cluster_node_identity(&id) {
+                heartbeat = self
+                    .transport
+                    .inner
+                    .fault_injection
+                    .freeze_startup_voter_heartbeat(
+                        self.transport.inner.interconnect.node_id(),
+                        identity,
+                        heartbeat,
+                    );
+            }
+            id.serialize(&mut frozen);
+            chitchat::Serializable::serialize(&heartbeat, &mut frozen);
+            chitchat::Serializable::serialize(&gc_version, &mut frozen);
+            chitchat::Serializable::serialize(&max_version, &mut frozen);
+        }
+        *digest = D::deserialize(&mut frozen.as_slice())?;
+        Ok(())
     }
 }
 
@@ -1652,6 +1711,18 @@ impl ClusterHandle {
         self.local_subscription_interest_version(domain, relay)
             .await
             .is_some()
+    }
+
+    /// Read the membership writer's immutable identity publication without a gossip lock.
+    pub(crate) fn live_node_incarnation(
+        &self,
+        node: &ClusterNodeName,
+    ) -> Option<ClusterNodeIncarnation> {
+        self.subscription_interest
+            .live_runs
+            .load()
+            .get(node)
+            .copied()
     }
 
     pub(crate) fn subscription_interest_index(&self) -> Guard<StdArc<SubscriptionInterestIndex>> {
@@ -2500,6 +2571,26 @@ mod tests {
             "events",
             minimum_version,
         ));
+    }
+
+    #[test]
+    fn membership_publication_replaces_the_process_identity_for_remote_ack_watchers() {
+        let publication = SubscriptionInterestPublication::new();
+        let (node, state) = subscription_state("node-1", 7, 7101, &[]);
+        let name = ClusterNodeName::parse("node-1").assured("the fixture node is valid");
+        publication.publish(&BTreeMap::from([(node, state)]));
+        assert_eq!(
+            publication.live_runs.load().get(&name),
+            Some(&ClusterNodeIncarnation::new(7))
+        );
+        let (node, state) = subscription_state("node-1", 8, 7101, &[]);
+        publication.publish(&BTreeMap::from([(node, state)]));
+        assert_eq!(
+            publication.live_runs.load().get(&name),
+            Some(&ClusterNodeIncarnation::new(8))
+        );
+        publication.publish(&BTreeMap::new());
+        assert!(publication.live_runs.load().is_empty());
     }
 
     #[test]

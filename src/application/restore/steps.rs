@@ -386,6 +386,11 @@ impl SessionServiceImpl {
                         else {
                             continue;
                         };
+                        #[cfg(feature = "testing")]
+                        self.inner
+                            .runtime
+                            .pause_restore_branch_state_conversion_if_armed(&domain.target)
+                            .await;
                         let artifact = Arc::new(
                             super::branch_state::prepare_deduplicator_checkpoint(
                                 &self.inner.runtime,
@@ -420,6 +425,11 @@ impl SessionServiceImpl {
                             );
                             continue;
                         }
+                        #[cfg(feature = "testing")]
+                        self.inner
+                            .runtime
+                            .pause_restore_branch_state_conversion_if_armed(&domain.target)
+                            .await;
                         let artifact = Arc::new(
                             super::branch_state::prepare_window_checkpoint(
                                 &self.inner.runtime,
@@ -658,7 +668,7 @@ impl SessionServiceImpl {
         if let Err(error) = self.apply_current_cluster_state().await {
             return Err(StepFailure::Failed(format!(
                 "domain '{domain}' was created, but its stopped state did not become usable: \
-                 {error}"
+                 {error:#}"
             )));
         }
         if let Err(error) = self.wait_for_authoritative_visibility().await {

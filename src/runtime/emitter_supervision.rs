@@ -173,14 +173,16 @@ impl ScheduledEmitterStopFailure {
         Self { error, task }
     }
 
-    /// Why the stop failed, as the emitter's diagnostics describe it: the task's own description of
-    /// a failed drain, or the stop's own reason.
-    pub(super) fn reason(&self) -> String {
-        emitter_task::emitter_error_message(&self.error)
+    /// The task's own description of a drain it failed, which the stop report holds as a printable
+    /// attachment that a rendered chain does not show; absent when the stop failed before the
+    /// task answered, or the task described nothing.
+    pub(super) fn drain_description(&self) -> Option<String> {
+        emitter_task::emitter_attached_message(&self.error)
     }
 
-    pub(super) fn into_task(self) -> ScheduledEmitterTask {
-        self.task
+    /// The report of why the stop failed, and the task it leaves running.
+    pub(super) fn into_parts(self) -> (Report<ScheduledEmitterStopError>, ScheduledEmitterTask) {
+        (self.error, self.task)
     }
 }
 
@@ -469,7 +471,7 @@ mod tests {
         ErrorPolicies, ProcessorInputs, RelayBranching, RetryPolicy,
     };
     use nervix_primitives::{
-        sync::{mpsc, oneshot, watch},
+        sync::{atomic::AtomicBool, mpsc, oneshot, watch},
         time::Instant,
     };
     use nonzero_ext::nonzero;
@@ -589,7 +591,7 @@ mod tests {
             "the failed step must stay beneath the start context: {error:#}"
         );
         assert_eq!(
-            RuntimeError::EmitterStart { report: error }.to_string(),
+            format!("{error:#}"),
             "failed to start emitter 'audit' in domain 'edge': input relay 'events' has no schema \
              on this node"
         );
@@ -633,8 +635,11 @@ mod tests {
             .stop(grace)
             .await
             .expect_err("a failed transport drain must fail the emitter stop");
-        assert_eq!(failed.reason(), "transport drain failed");
-        let scheduled = failed.into_task();
+        assert_eq!(
+            failed.drain_description().as_deref(),
+            Some("transport drain failed")
+        );
+        let (_, scheduled) = failed.into_parts();
 
         scheduled
             .stop(grace)
@@ -662,12 +667,14 @@ mod tests {
             .stop(Duration::from_millis(50))
             .await
             .expect_err("a dropped drain response must retain the scheduled task");
-        assert_eq!(
-            failed.reason(),
-            "scheduled emitter task dropped its stop response"
-        );
+        assert_eq!(failed.drain_description(), None);
+        let (error, retained) = failed.into_parts();
+        assert!(matches!(
+            error.current_context(),
+            ScheduledEmitterStopError::ResponseDropped
+        ));
         assert!(
-            failed.into_task().stop_signal.borrow().is_none(),
+            retained.stop_signal.borrow().is_none(),
             "a dropped response must not leave the retained emitter interrupted"
         );
     }
@@ -698,10 +705,10 @@ mod tests {
             .expect_err("final flush failure must reach the stopping caller");
 
         assert_eq!(
-            error.reason(),
-            "emitter final flush failed: broker unavailable"
+            error.drain_description().as_deref(),
+            Some("emitter final flush failed: broker unavailable")
         );
-        let mut retained = error.into_task();
+        let (_, mut retained) = error.into_parts();
         let _ = (&mut retained.task).await;
         assert!(finished.load(Ordering::Acquire));
     }
@@ -739,11 +746,12 @@ mod tests {
             .await
             .expect_err("a dropped response must fail stopping");
 
-        assert_eq!(
-            error.reason(),
-            "scheduled emitter task dropped its stop response"
-        );
-        let mut retained = error.into_task();
+        assert_eq!(error.drain_description(), None);
+        let (error, mut retained) = error.into_parts();
+        assert!(matches!(
+            error.current_context(),
+            ScheduledEmitterStopError::ResponseDropped
+        ));
         assert!(!dropped.load(Ordering::Acquire));
         retained.task.abort();
         let _ = (&mut retained.task).await;
@@ -783,8 +791,12 @@ mod tests {
             .await
             .expect_err("a missing stop response must time out");
 
-        assert_eq!(error.reason(), "scheduled emitter task timed out draining");
-        let mut retained = error.into_task();
+        assert_eq!(error.drain_description(), None);
+        let (error, mut retained) = error.into_parts();
+        assert!(matches!(
+            error.current_context(),
+            ScheduledEmitterStopError::DrainTimeout
+        ));
         assert!(!dropped.load(Ordering::Acquire));
         retained.task.abort();
         let _ = (&mut retained.task).await;
@@ -820,7 +832,7 @@ mod tests {
             .err()
             .assured("an emitter without an input relay cannot start");
         assert_eq!(
-            RuntimeError::EmitterStart { report: no_input }.to_string(),
+            format!("{no_input:#}"),
             "failed to start emitter 'audit' in domain 'edge': the emitter has no input relay"
         );
 
@@ -839,10 +851,7 @@ mod tests {
             .err()
             .assured("an input relay without resolved branching cannot start the emitter");
         assert_eq!(
-            RuntimeError::EmitterStart {
-                report: no_branching
-            }
-            .to_string(),
+            format!("{no_branching:#}"),
             "failed to start emitter 'audit' in domain 'edge': input relay 'events' has no \
              resolved branching on this node"
         );
@@ -862,11 +871,12 @@ mod tests {
             .stop(Duration::from_secs(1))
             .await
             .expect_err("a task whose commands closed cannot take its stop");
-        assert_eq!(
-            unavailable.reason(),
-            "scheduled emitter task is unavailable for stopping"
-        );
-        unavailable.into_task().task.abort();
+        let (error, retained) = unavailable.into_parts();
+        assert!(matches!(
+            error.current_context(),
+            ScheduledEmitterStopError::Unavailable
+        ));
+        retained.task.abort();
 
         let (commands, _command_rx) = mpsc::channel(1);
         let (queued_response, _queued_receiver) = oneshot::channel();
@@ -887,10 +897,11 @@ mod tests {
             .stop(Duration::from_millis(5))
             .await
             .expect_err("a task whose command queue stays full cannot take its stop");
-        assert_eq!(
-            unaccepted.reason(),
-            "scheduled emitter task timed out accepting its stop command"
-        );
-        unaccepted.into_task().task.abort();
+        let (error, retained) = unaccepted.into_parts();
+        assert!(matches!(
+            error.current_context(),
+            ScheduledEmitterStopError::AcceptTimeout
+        ));
+        retained.task.abort();
     }
 }

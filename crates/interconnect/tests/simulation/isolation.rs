@@ -43,6 +43,8 @@ const HUB_PENDING_JOBS: usize = 8;
 const REFUSED_JOBS: usize = 2;
 const STREAM_CHUNK_BYTES: usize = 16 * 1024;
 const STREAM_BYTES: u64 = 256 * 1024;
+/// The current serialized grant for this fixture's names, empty row metadata and one registrar.
+const HELD_RELAY_METADATA_BYTES: u64 = 136;
 /// How long one more shared management request waits for a stream on the saturated connection.
 const SLOT_WAIT: Duration = Duration::from_millis(250);
 /// The interval between reads inside a condition wait: one simulation tick.
@@ -1323,12 +1325,13 @@ impl HubHost {
         let reservation = u64::try_from(body.batch_ipc.len())
             .assured("the fixture batch length fits in u64")
             .checked_add(overlap)
+            .and_then(|bytes| bytes.checked_add(HELD_RELAY_METADATA_BYTES))
             .assured("one relay operation is addressable");
         let reserved = self.observe();
         assert_eq!(
             reserved.executor.relay_memory.reserved_bytes, reservation,
-            "the grant reserved the exact body, the largest decoded batch and scratch: \
-             {reserved:?}"
+            "the grant reserved the exact body, retained metadata, largest decoded batch and \
+             scratch: {reserved:?}"
         );
         assert_eq!(reserved.transport.relay_attempts, 1);
         self.trace.record(

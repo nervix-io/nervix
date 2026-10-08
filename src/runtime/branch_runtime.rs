@@ -397,12 +397,12 @@ impl BranchRuntime {
                 warn!(
                     domain = self.domain.as_str(),
                     relay = relay.as_str(),
-                    error = %error,
+                    error = format!("{error:#}"),
                     "failed to open the persisted branch-local materialized relay snapshot"
                 );
                 return;
             }
-            match nervix_primitives::expect_lint!(
+            let mut assignment = nervix_primitives::expect_lint!(
                 nervix::lifecycle_call,
                 "first installation of this concrete branch binds its materialized placement and \
                  retains the resulting state",
@@ -413,28 +413,16 @@ impl BranchRuntime {
                     Vec::new(),
                     None,
                 )
-            ) {
-                Ok(mut assignment) => {
-                    let Some(state) = assignment.originator.take() else {
-                        warn!(
-                            domain = self.domain.as_str(),
-                            relay = relay.as_str(),
-                            "branch-local materialized relay lacks authoritative state access"
-                        );
-                        return;
-                    };
-                    self.materialized_states.insert(relay.clone(), state);
-                }
-                Err(error) => {
-                    warn!(
-                        domain = self.domain.as_str(),
-                        relay = relay.as_str(),
-                        error = %error,
-                        "failed to reconcile materialized relay membership"
-                    );
-                    return;
-                }
-            }
+            );
+            let Some(state) = assignment.originator.take() else {
+                warn!(
+                    domain = self.domain.as_str(),
+                    relay = relay.as_str(),
+                    "branch-local materialized relay lacks authoritative state access"
+                );
+                return;
+            };
+            self.materialized_states.insert(relay.clone(), state);
         }
         self.relay_state_epoch = Some(current_epoch);
     }
@@ -2167,7 +2155,7 @@ fn checkpoint_branch_instance_lru_snapshot<V>(
     };
     runtime
         .persist_branch_lru_snapshot(placement, snapshot.clone())
-        .map_err(|error| OwnershipHandoffError::persistence(error.current_context().clone()))?;
+        .change_context(OwnershipHandoffError::Persistence)?;
     Ok(snapshot)
 }
 

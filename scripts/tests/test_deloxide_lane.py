@@ -18,6 +18,7 @@ import textwrap
 import time
 import unittest
 from collections.abc import Callable, Mapping, Sequence
+from dataclasses import replace
 from pathlib import Path
 
 from scripts import deloxide_lane
@@ -128,6 +129,29 @@ INVENTORY = textwrap.dedent(
     """
 )
 
+# Checks that run one per process and record no evidence, as the tracked locks' conformance checks
+# of the primitive crate do.
+CONFORMANCE = textwrap.dedent(
+    """
+    [[invocation]]
+    bound_seconds = 30
+    features = ["native"]
+    id = "conformance"
+    kind = "libtest-each"
+    marker = "tests::tracked_locks::"
+    package = "nervix-primitives"
+    target = "lib"
+
+    [[workload]]
+    coverage = "Debug formatting of a held lock."
+    id = "primitive.debug"
+    invariant = "Formatting never waits."
+    invocation = "conformance"
+    selections = ["deloxide", "deloxide-order"]
+    test = "tests::tracked_locks::debug_never_waits"
+    """
+)
+
 FEATURE = textwrap.dedent(
     """
     @lane
@@ -199,7 +223,8 @@ class ScriptedProcesses(Processes):
         }
         if selection == "deloxide-order":
             self.listed["probes"].append("order_reports")
-        self.listed_ignored: dict[str, list[str]] = {"probes": ["workload"], "server": []}
+        self.listed["primitives"] = ["tests::tracked_locks::debug_never_waits", "tests::atomics::ordinary"]
+        self.listed_ignored: dict[str, list[str]] = {"probes": ["workload"], "server": [], "primitives": []}
         self.endings: dict[str, Ended] = {}
         self.outputs: dict[str, str] = {}
         self.evidence: dict[str, list[str]] = {
@@ -207,6 +232,7 @@ class ScriptedProcesses(Processes):
             "scenarios": ["deadlock-2-1.rkyv", "process-clusters/cluster-a/deadlock-3-1.rkyv"],
         }
         self.scenario_summary = "2 scenarios (2 passed)"
+        self.scenario_summaries: dict[str, str] = {}
 
     def executable(self, name: str) -> Path:
         return self.root / "bin" / name
@@ -216,6 +242,8 @@ class ScriptedProcesses(Processes):
             return artifact("test", "active_cycles", self.executable("probes"), self.root / "crates/deadlock/Cargo.toml")
         if name == "owner-tests-build":
             return artifact("lib", "nervix_server", self.executable("server"), self.root / "Cargo.toml")
+        if name == "conformance-build":
+            return artifact("lib", "nervix_primitives", self.executable("primitives"), self.root / "crates/primitives/Cargo.toml")
         if name == "scenarios-build":
             lines = [
                 artifact("bin", "nervix-server", self.executable("nervix-server"), self.root / "Cargo.toml", test=False),
@@ -239,11 +267,17 @@ class ScriptedProcesses(Processes):
             launch.log.write_text(libtest(outcomes))
         elif launch.name.startswith("owner-tests-"):
             launch.log.write_text(libtest({"store::tests::deloxide_store": "ok"}, filtered=2))
-        elif launch.name == "scenarios":
-            launch.log.write_text(f"[Summary]\n1 feature\n{self.scenario_summary}\n4 steps (4 passed)\n")
+        elif launch.name.startswith("conformance-"):
+            launch.log.write_text(libtest({"tests::tracked_locks::debug_never_waits": "ok"}, filtered=1))
+        elif launch.name == "scenarios" or launch.name.startswith("scenarios-"):
+            summary = self.scenario_summaries.get(launch.name, self.scenario_summary)
+            launch.log.write_text(f"[Summary]\n1 feature\n{summary}\n4 steps (4 passed)\n")
         directory = launch.environment.get(deloxide_lane.EVIDENCE_VARIABLE)
         if directory is not None:
-            for name in self.evidence.get(launch.name, []):
+            evidence = self.evidence.get(launch.name, [])
+            if launch.name.startswith("scenarios-"):
+                evidence = self.evidence.get("scenarios", [])
+            for name in evidence:
                 path = Path(directory) / name
                 path.parent.mkdir(parents=True, exist_ok=True)
                 path.write_bytes(b"evidence")
@@ -345,7 +379,8 @@ class InventoryTests(unittest.TestCase):
         inventory = deloxide_lane.load_inventory(REPOSITORY)
         self.assertEqual(list(inventory.selections), ["deloxide", "deloxide-order"])
         self.assertEqual(
-            list(inventory.invocations), ["probes", "owner-tests", "scenarios", "paced-simulation"]
+            list(inventory.invocations),
+            ["probes", "primitive-conformance", "owner-tests", "scenarios", "paced-simulation"],
         )
         self.assertEqual(inventory.selections["deloxide"].recorded, "ActiveOnly")
         self.assertEqual(inventory.selections["deloxide-order"].recorded, "OrderAnalysis")
@@ -377,6 +412,53 @@ class InventoryTests(unittest.TestCase):
                 self.assertEqual(deloxide_lane.scenario_problems(invocation, registered, discovered), [])
                 self.assertGreater(sum(scenario.runs for scenario in discovered), 0)
 
+    def test_order_scenarios_have_fresh_feature_and_large_example_processes(self) -> None:
+        inventory = deloxide_lane.load_inventory(REPOSITORY)
+        invocation = inventory.invocations["scenarios"]
+        registered = inventory.workloads_of("scenarios", "deloxide-order")
+        active = deloxide_lane.scenario_chunks(REPOSITORY, invocation, registered, "deloxide")
+        self.assertEqual(len(active), 1)
+        self.assertEqual(active[0].expected, sum(workload.examples or 0 for workload in registered))
+        order = deloxide_lane.scenario_chunks(REPOSITORY, invocation, registered, "deloxide-order")
+        self.assertEqual(sum(chunk.expected for chunk in order), active[0].expected)
+        self.assertEqual(len({chunk.name for chunk in order}), len(order))
+        self.assertEqual(
+            {chunk.example_tag for chunk in order if chunk.example_tag is not None},
+            {
+                "@order_generation_two_saves_single", "@order_generation_two_saves_cluster",
+                "@order_generation_many_saves_single", "@order_generation_many_saves_cluster",
+                "@order_resume_fanout_single", "@order_resume_fanout_cluster",
+                "@order_resume_tenants_single", "@order_resume_tenants_cluster",
+                "@order_materialized_fanout", "@order_materialized_tenants",
+            },
+        )
+        self.assertTrue(all(chunk.expected == 1 for chunk in order if chunk.example_tag))
+        generation = [
+            chunk for chunk in order
+            if chunk.inputs == ("tests/features/cluster/backup_generation.feature",)
+        ]
+        self.assertEqual(len(generation), 4)
+        self.assertTrue(all(chunk.expected == 1 and chunk.example_tag for chunk in generation))
+        named = next(chunk for chunk in order if chunk.name_filter is not None)
+        named_arguments = deloxide_lane.scenario_arguments(named, invocation.concurrency)
+        self.assertEqual(named_arguments.count("--name"), 1)
+        self.assertNotIn("--tags", named_arguments)
+        self.assertIn("--retry", named_arguments)
+        tagged = next(chunk for chunk in order if chunk.example_tag is not None)
+        tagged_arguments = deloxide_lane.scenario_arguments(tagged, invocation.concurrency)
+        self.assertEqual(tagged_arguments.count("--tags"), 1)
+        self.assertNotIn("--name", tagged_arguments)
+        remote = [chunk for chunk in order if chunk.inputs == ("tests/features/runtime/remote_ack_owners.feature",)]
+        self.assertEqual(len(remote), 1)
+        self.assertEqual(remote[0].expected, 2)
+        bad = [
+            replace(workload, order_tags=("@missing_example", *workload.order_tags[1:]))
+            if workload.id == "scenario.materialized-bulk-generations" else workload
+            for workload in registered
+        ]
+        with self.assertRaisesRegex(LaneError, "order tag @missing_example must select exactly one example"):
+            deloxide_lane.scenario_chunks(REPOSITORY, invocation, bad, "deloxide-order")
+
     def test_the_fixture_inventory_parses(self) -> None:
         inventory = deloxide_lane.parse_inventory(INVENTORY)
         probes = inventory.invocations["probes"]
@@ -391,6 +473,11 @@ class InventoryTests(unittest.TestCase):
         self.assertEqual([workload.id for workload in inventory.workloads_of("probes", "deloxide")], ["probe.cycle"])
         with self.assertRaisesRegex(LaneError, "no selection `loom`; the inventory selects deloxide, deloxide-order"):
             inventory.selection("loom")
+        bad_tags = INVENTORY.replace(
+            'id = "scenario.nodes"', 'id = "scenario.nodes"\n    order_tags = ["@single"]', 1
+        )
+        with self.assertRaisesRegex(LaneError, "order_tags.*one per run"):
+            deloxide_lane.parse_inventory(bad_tags)
 
     def test_every_malformed_entry_is_refused_naming_it(self) -> None:
         def edited(old: str, new: str) -> str:
@@ -783,6 +870,50 @@ class LaneTests(unittest.TestCase):
     def setUp(self) -> None:
         self.fixture = Fixture(self)
 
+    def test_order_example_processes_account_for_every_run_and_keep_separate_evidence(self) -> None:
+        extra = textwrap.dedent("""
+            [[workload]]
+            coverage = "Large restore examples."
+            examples = 2
+            feature = "features/lane.feature"
+            id = "scenario.large"
+            invariant = "Each restore example ends cleanly."
+            invocation = "scenarios"
+            order_tags = ["@large_first", "@large_second"]
+            scenario = "Large restore on <kind>"
+            selections = ["deloxide", "deloxide-order"]
+
+        """)
+        fixture = Fixture(self, INVENTORY.replace("[[owner]]\n", extra + "[[owner]]\n", 1))
+        (fixture.root / "features/lane.feature").write_text(FEATURE + textwrap.dedent("""
+              Scenario Outline: Large restore on <kind>
+                Given a step
+                @large_first
+                Examples:
+                  | kind |
+                  | a    |
+                @large_second
+                Examples:
+                  | kind |
+                  | b    |
+        """))
+        processes = ScriptedProcesses(fixture.root, "deloxide-order")
+        processes.scenario_summaries = {
+            "scenarios-1": "1 scenario (1 passed)",
+            "scenarios-2": "1 scenario (1 passed)",
+        }
+        lane = fixture.lane(processes, "deloxide-order")
+        self.assertEqual(quietly(lane.execute), 0)
+        content = record(lane)
+        self.assertEqual([workload["id"] for workload in content["workloads"][-2:]], ["scenario.nodes", "scenario.large"])
+        self.assertEqual(content["counts"], {"discovered": 7, "selected": 7, "executed": 7, "completed": 7})
+        chunks = [launch for launch in processes.launches if re.fullmatch(r"scenarios-[0-9]+", launch.name)]
+        self.assertEqual([launch.name for launch in chunks], ["scenarios-0", "scenarios-1", "scenarios-2"])
+        self.assertIn("--name", chunks[0].argv)
+        self.assertIn("@large_first", chunks[1].argv)
+        self.assertIn("@large_second", chunks[2].argv)
+        self.assertEqual(len({launch.environment[deloxide_lane.EVIDENCE_VARIABLE] for launch in chunks}), 3)
+
     def test_a_complete_run_accounts_for_every_workload_and_qualifies_every_observation(self) -> None:
         processes = ScriptedProcesses(self.fixture.root, "deloxide-order")
         step_summary = self.fixture.root / "step-summary.md"
@@ -811,7 +942,7 @@ class LaneTests(unittest.TestCase):
         self.assertEqual(deloxide_lane.read_complete(lane.record.path, "deloxide-order"), content)
 
         launches = {launch.name: launch for launch in processes.launches}
-        self.assertEqual(list(launches), ["probes-build", "probes", "owner-tests-build", "owner-tests-owner.store", "scenarios-build", "scenarios"])
+        self.assertEqual(list(launches), ["probes-build", "probes", "owner-tests-build", "owner-tests-owner.store", "scenarios-build", "scenarios-0"])
         build = launches["probes-build"]
         self.assertEqual(build.argv[:5], ("cargo", "test", "--no-run", "--package", "nervix-deadlock"))
         self.assertIn("deloxide-order", build.argv)
@@ -825,12 +956,13 @@ class LaneTests(unittest.TestCase):
         owner = launches["owner-tests-owner.store"]
         self.assertEqual(owner.argv[1:], ("store::tests::deloxide_store", "--exact", "--test-threads=1"))
         self.assertEqual(owner.environment[deloxide_lane.EVIDENCE_VARIABLE], str(lane.attempt / "evidence/owner-tests/owner.store"))
-        scenarios = launches["scenarios"]
-        self.assertEqual(scenarios.argv[1:], ("--input", "features/**/*.feature", "--tags", "@lane", "--retry", "0", "--concurrency", "4"))
+        scenarios = launches["scenarios-0"]
+        self.assertEqual(scenarios.argv[1:], ("--input", "features/lane.feature", "--tags", "@lane", "--retry", "0", "--concurrency", "4"))
         self.assertEqual(scenarios.environment[deloxide_lane.SUITE_BUDGET_VARIABLE], "110s")
+        self.assertEqual(scenarios.environment[deloxide_lane.EVIDENCE_VARIABLE], str(lane.attempt / "evidence/scenarios/scenarios-0"))
         self.assertEqual(scenarios.environment[deloxide_lane.REPORT_TOOL_VARIABLE], str(self.fixture.target / "debug/nervix-deadlock-report"))
         recorded = [launch for launch in content["launches"] if launch["stage"] == "run"]
-        self.assertEqual([launch["name"] for launch in recorded], ["probes", "owner-tests-owner.store", "scenarios"])
+        self.assertEqual([launch["name"] for launch in recorded], ["probes", "owner-tests-owner.store", "scenarios-0"])
         self.assertEqual(recorded[0]["accounting"]["outcomes"]["workload"], "ignored")
         self.assertEqual(recorded[2]["accounting"]["scenarios"], {"total": 2, "passed": 2})
 
@@ -852,6 +984,57 @@ class LaneTests(unittest.TestCase):
         probes = next(launch for launch in processes.launches if launch.name == "probes")
         self.assertEqual(probes.argv, ("python3", "scripts/native_coverage.py", "exec", str(processes.executable("probes"))))
         self.assertEqual(record(lane)["workspace"]["instrumented"], True)
+
+    def test_a_check_that_records_no_evidence_completes_on_its_own_exit_and_report(self) -> None:
+        self.fixture = Fixture(self, INVENTORY + CONFORMANCE)
+        processes = ScriptedProcesses(self.fixture.root)
+        lane = self.fixture.lane(processes)
+        self.assertEqual(quietly(lane.execute), 0)
+        content = record(lane)
+        self.assertEqual(content["counts"], {"discovered": 5, "selected": 5, "executed": 5, "completed": 5})
+        self.assertEqual(content["workloads"][-1], {
+            "id": "primitive.debug",
+            "invocation": "conformance",
+            "test": "tests::tracked_locks::debug_never_waits",
+            "outcome": "ok",
+            "completed": True,
+        })
+        # Only the invocations that record evidence are observed and qualified.
+        self.assertEqual(content["findings"]["observations"], 3)
+        self.assertEqual(deloxide_lane.read_complete(lane.record.path, "deloxide"), content)
+        launches = {launch.name: launch for launch in processes.launches}
+        self.assertEqual(
+            launches["conformance-build"].argv[3:8],
+            ("--package", "nervix-primitives", "--features", "native deloxide", "--lib"),
+        )
+        check = launches["conformance-primitive.debug"]
+        self.assertEqual(check.argv[1:], ("tests::tracked_locks::debug_never_waits", "--exact", "--test-threads=1"))
+        self.assertEqual(check.cwd, self.fixture.root / "crates/primitives")
+        self.assertEqual(check.bound_seconds, 30)
+        self.assertNotIn(deloxide_lane.EVIDENCE_VARIABLE, check.environment)
+        self.assertFalse((lane.attempt / "evidence" / "conformance").exists())
+
+    def test_a_check_whose_detector_aborted_it_fails_the_lane_as_signaled(self) -> None:
+        self.fixture = Fixture(self, INVENTORY + CONFORMANCE)
+        processes = ScriptedProcesses(self.fixture.root)
+        processes.outputs["conformance-primitive.debug"] = (
+            "running 1 test\na conformance check of the tracked locks deadlocked\n"
+        )
+        processes.endings["conformance-primitive.debug"] = Ended(9, Ending.SIGNALED, None, signal.SIGABRT, 0.2)
+        status, content = self.run_failing(processes)
+        self.assertEqual(status, 1)
+        self.assertEqual(content["failure"]["class"], "signaled")
+        self.assertIn("conformance-primitive.debug was killed by SIGABRT", content["failure"]["detail"])
+        self.assertIn("primitive.debug did not run", content["failure"]["detail"])
+
+        processes = ScriptedProcesses(self.fixture.root)
+        processes.listed["primitives"].append("tests::tracked_locks::a_new_check")
+        status, content = self.run_failing(processes)
+        self.assertEqual(content["failure"]["class"], "inventory")
+        self.assertIn(
+            "conformance: tests::tracked_locks::a_new_check is in the build but not registered",
+            content["failure"]["detail"],
+        )
 
     def run_failing(self, processes: ScriptedProcesses, selection: str = "deloxide", clock: Callable[[], float] = time.monotonic) -> tuple[int, dict[str, object]]:
         lane = self.fixture.lane(processes, selection, clock=clock)
@@ -941,7 +1124,7 @@ class LaneTests(unittest.TestCase):
         processes.scenario_summary = "1 scenario (1 passed)"
         status, content = self.run_failing(processes)
         self.assertEqual(content["failure"]["class"], "incomplete")
-        self.assertIn("the tags select 2 scenario runs, and Cucumber reported {'total': 1, 'passed': 1}", content["failure"]["detail"])
+        self.assertIn("selected 2 scenario runs, and Cucumber reported {'total': 1, 'passed': 1}", content["failure"]["detail"])
 
     def test_missing_partial_and_nonqualifying_evidence_fail_the_lane(self) -> None:
         cases: dict[str, tuple[Callable[[ScriptedProcesses], None], str, int]] = {
@@ -1258,6 +1441,14 @@ class CommandLineTests(unittest.TestCase):
         self.assertEqual(status, 0)
         self.assertEqual(json.loads(report.read_text())["verdict"], "complete")
         self.assertEqual(self.main("run", "loom"), 1)
+
+    def test_order_run_records_fresh_scenario_process_and_its_evidence(self) -> None:
+        self.assertEqual(self.main("run", "deloxide-order", selection="deloxide-order"), 0)
+        launches = self.processes[-1].launches
+        scenario = next(launch for launch in launches if launch.name == "scenarios-0")
+        self.assertIn("features/lane.feature", scenario.argv)
+        self.assertIn("@lane", scenario.argv)
+        self.assertTrue(scenario.environment[deloxide_lane.EVIDENCE_VARIABLE].endswith("/scenarios-0"))
 
     def test_replay_runs_a_launch_of_a_record(self) -> None:
         self.assertEqual(self.main("run", "deloxide"), 0)

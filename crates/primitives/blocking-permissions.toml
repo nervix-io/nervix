@@ -381,3 +381,10 @@ items = ["thread::Builder"]
 owner = "The scenario harness external Kafka group member."
 path = "tests/common/kafka_group_member.rs"
 reason = "The external harness must keep polling librdkafka while async scenario steps observe its assignment; it has no node executor."
+
+[[permission]]
+bound = "Two modeled participants per execution, both joined before the bounded Shuttle execution ends."
+items = ["thread::spawn"]
+owner = "The interconnect relay-owner checks and native contention probe"
+path = "crates/interconnect/src/connection/relay_owner_tests.rs"
+reason = "At most two modeled participants race the production admission owner and peer retirement, or one native participant measures an independent peer while another peer's guard is held. The shared harness bounds exploration; the native probe takes 5,000 frames and every participant joins."

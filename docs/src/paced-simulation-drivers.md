@@ -313,6 +313,12 @@ The clock and the data endpoints recover independently, and neither waits for th
   the next `START`, opens a new producer and new consumers under the new generation, and continues
   from that generation's reached tick center. Without it the run finishes.
   The `domain_stopped` and `generation_changed` reopen reasons wait for this next generation.
+  Once the clock reports a later paced generation, the explicit new producer also retries
+  `domain stopped` within the same 30-second open budget: the serving node can report that clock
+  before its endpoint-open view has applied the corresponding `START`. Both drivers still require
+  the opened producer's own generation to have a paced clock before planning any readings.
+  Opens in the current generation retain their immediate `domain stopped` refusal, and schema,
+  missing-endpoint and other terminal refusals remain terminal while following a generation.
 - With `--consumer-delay` the output emitter has no consumer at first: it retains the batches it
   could not deliver, which `DESCRIBE EMITTER` shows, and the producer stops being granted credit once
   its outstanding batches fill it. The backlog is bounded by that credit. Consumers that join drain

@@ -222,7 +222,7 @@ impl SessionServiceImpl {
         }
         self.apply_current_cluster_state()
             .await
-            .map_err(|error| failed(&request.domain, &error.to_string()))?;
+            .map_err(|error| failed(&request.domain, &format!("{error:#}")))?;
         match request.action {
             BackupDrainAction::FlushIfIdle => {
                 self.inner
@@ -303,7 +303,7 @@ impl SessionServiceImpl {
         .await?;
         self.apply_current_cluster_state()
             .await
-            .map_err(|error| failed(&request.domain, &error.to_string()))?;
+            .map_err(|error| failed(&request.domain, &format!("{error:#}")))?;
         if self.inner.consensus.current_leader().await.as_ref() != Some(peer) {
             return Err(failed(
                 &request.domain,

@@ -38,14 +38,14 @@ BACKUP CLUSTER TO './cluster-config.nvxb' WITHOUT STATE;
 - `WITHOUT PAUSE` includes published runtime checkpoints without pausing a running domain. Its
   state and configuration need not be from one quiesced cut.
 - `TIMEOUT <duration>` bounds each running domain's quiesce wait. It is valid with the normal
-  quiesced capture. The CLI's `--timeout` also extends its request and retry deadlines by that
-  duration, leaving the ordinary request budget for command admission, capture and the reply.
+  quiesced capture. Domains are captured in sequence and each receives its own budget. The
+  command's total wait includes all cuts, admission and archive assembly.
 - The path names a file on the client's machine. A leading `~/` refers to the client user's home
-  directory.
+  directory. In the web console it names the file the browser saves the archive as.
 
-`BACKUP` runs in `nervix-cli` and in the Rust and C clients. It must be sent alone: not in a batch
-with other statements and not while a transaction is open. The web console refuses it, because a
-browser session has no file to write.
+`BACKUP` runs in `nervix-cli`, in the Rust and C clients, and in the web console, which saves the
+archive as a browser download; see [From The Web Console](#from-the-web-console). It must be sent
+alone: not in a batch with other statements and not while a transaction is open.
 
 Each domain records the applied configuration revision and Raft log entry of its own capture.
 Before reading state, each owner waits up to five seconds to apply the selected log revision,
@@ -123,6 +123,8 @@ nervix-cli backup cluster --output cluster.nvxb --format json
 | `--without-state` | Captures configuration only. |
 | `--without-pause` | Captures published runtime state without quiescing a running domain. |
 | `--timeout DURATION` | Bounds the normal quiesced capture of each running domain. |
+| `--backup-wait-timeout DURATION` | Bounds the overall command wait across all cuts, redirects and reconnects. Defaults to `10m`; also applies to NSPL through `--command` and the REPL. |
+| `--execution-reference REFERENCE` | Recovers the same backup under its durable reference, with the original selected domain, scope, resources and capture options. The output destination may change. |
 | `--format text` or `--format json` | How the report is printed. Text is the default. |
 
 When the archive goes to standard output, the report goes to standard error, so standard output
@@ -149,11 +151,39 @@ A failure prints `{"error": {"code": "...", "message": "..."}}` instead. The cod
 server, `BACKUP_REFUSED` for a backup the server refused, and `WRITE_FAILED` for an archive that
 could not be written to standard output.
 
+### Waiting And Recovering
+
+The native client uses one bounded overall command wait for `BACKUP`, ten minutes by default.
+`--backup-wait-timeout` sets it independently of each domain's `--timeout`, without counting or
+predicting domains. Native wait options accept durations from one millisecond through 24 hours.
+Redirects and reconnects share the same deadline and execution reference. Ordinary request and
+retry deadlines remain separate; an archive download begins after the command completes and
+bounds each frame's wait with the ordinary request timeout.
+
+When the command wait expires, admission may already have happened. The CLI exits unsuccessfully
+and reports the durable reference. A JSON `BACKUP_FAILED` report includes
+`error.execution_reference` for an uncertain command or failed archive download. Recover promptly
+with the same selected `--domain`, scope, resource inclusion and capture options:
+
+```sh
+nervix-cli --domain payments backup cluster --output cluster.nvxb --timeout 30s --backup-wait-timeout 4m --format json
+nervix-cli --domain payments backup cluster --output recovered.nvxb --timeout 30s --backup-wait-timeout 10m --execution-reference 0192d4e4-7b36-7c3e-9f00-5b2d8c3a1e44
+```
+
+Use the reference returned by the first command. Recovery waits for the applying command or
+returns its recorded outcome, then downloads the retained archive. `--output -` may also be used
+for recovery. Changing capture inputs conflicts with the bound request. A fresh reference starts
+a separate backup. Expiration of the client wait ends only that waiter; it does not cancel the
+admitted command or extend the server's retry validity or archive retention. A longer wait can
+therefore recover a terminal outcome whose archive is already unavailable, especially when the
+server has a shorter retry validity. Such a download is reported as a failure with its reference.
+
 ## Downloading The Archive
 
 The leader assembles the archive in its staging area and retains it under the backup's execution
 reference. The client then downloads it through the session service's `DownloadBackup` streaming
-call; [Sessions](sessions.md#backup-downloads) describes the call.
+call, which the web console reaches through a console WebSocket of its own;
+[Sessions](sessions.md#backup-downloads) describes the call.
 
 - The archive is retained until a download receives all of it, or until the retry validity of the
   backup's execution reference ends, 15 minutes by default; see
@@ -256,16 +286,16 @@ RESTORE DOMAIN payments FROM './payments.nvxb' WITHOUT SOURCE OFFSETS;
   with a warning. The archive reader still rejects malformed records of a supported kind, and
   always validates section lengths and digests.
 - The path names a file on the client's machine. A leading `~/` refers to the client user's home
-  directory.
+  directory. In the web console it names the archive file the operator chose.
 
 A fresh cluster already has the user its configuration creates when the cluster starts, and a
 cluster archive holds that user too, so restoring a cluster archive into a fresh cluster takes
 `ON EXISTING USER SKIP` to keep the fresh cluster's password, or `ON EXISTING USER REPLACE` to take
 the archived one.
 
-`RESTORE` runs in `nervix-cli` and in the Rust and C clients. It must be sent alone: not in a batch
-with other statements and not while a transaction is open. The web console refuses it, because a
-browser session has no file to read.
+`RESTORE` runs in `nervix-cli`, in the Rust and C clients, and in the web console, which streams an
+archive file the operator chooses; see [From The Web Console](#from-the-web-console). It must be
+sent alone: not in a batch with other statements and not while a transaction is open.
 
 ### What A Restore Recreates
 
@@ -341,13 +371,47 @@ identity and column pieces, then concatenates them into a quota-owned file with 
 That file uses the same streamed publisher as a guest save, including when one relay's container
 exceeds the 32 MiB bulk budget. It never enters encoded metadata installation. Temporary conversion
 pieces and the completed container can briefly occupy twice the container's disk space.
-Deduplicator and window sections follow the same boundary. Planning, including a dry run, decodes
-every key group, input group and argument group under the exact Arrow schema the restored models
-give it, one bounded group at a time on the bulk CPU workers. It checks the key and row counts,
-rejects a key that appears twice, and checks each delayed histogram bucket against the restored
-histogram's bucket count. Conversion charges each decoded group to bulk memory until the branch's
-native keyspace or window checkpoint is encoded, then writes that checkpoint into a quota-owned
-file for the streamed publisher.
+Deduplicator and window sections follow the same boundary, including a keyspace or a window whose
+native checkpoint exceeds the 32 MiB bulk budget. Planning, including a dry run, and installation
+decode every key group, input group and argument group under the exact Arrow schema the restored
+models give it, one bounded group at a time on the bulk CPU workers. Each decoded group is charged
+to bulk memory only while it converts. Conversion checks the key and row counts, rejects a key that
+appears twice, and checks each delayed histogram bucket against the restored histogram's bucket
+count.
+
+A deduplicator conversion holds the keyspace as the runtime holds a restored one: every key
+normalized as the restored `DEDUPLICATE ON` expressions key it, in an expiry map. That is how a key
+the archive holds twice is found. The parts and values of the keys follow their Arrow columns, and
+are charged to the `restore_metadata` class as each group is admitted; a conversion that class
+cannot hold now is refused rather than kept waiting. The fixed share of every key, its map entry
+and its serializer resolver, was admitted with the archive description. The native checkpoint then
+streams from the resident keyspace into a quota-owned file through a 64 KiB buffered writer under
+the fixed 2 MiB bulk grant, converting one entry at a time. It is the same encoding the runtime
+writes for the same keys.
+
+A window conversion seals each archived group's input rows, and then its argument columns, into
+quota-owned pieces as soon as each is admitted, so it holds one archived section and its decoded
+batch at a time and never the whole window. When a group's row identities fit one 1 MiB identity
+record, its archived input and argument sections become the checkpoint's Arrow sections
+unchanged. Otherwise the group splits into groups that fit, whose columns are projected again.
+The window header, which counts the rows and the nested containers' bytes, is written last and
+placed first; the delayed histogram removals follow in bounded typed sections. The pieces are then
+concatenated into the checkpoint file with one 64 KiB buffer, and briefly occupy twice the
+checkpoint's disk space.
+
+A conversion the node refuses only for room does not fail the restore. A memory class with no room
+left, a worker queue that is full and a staging quota that cannot hold another piece judged nothing
+of the archive, so the conversion releases what it holds and converts the refused unit again. For a
+window the unit is one section: it is read and decoded again into a checkpoint that is exactly as
+it was before the refused attempt, whose staged pieces were dropped. A window refused while its
+sealed pieces are finished into one checkpoint is converted again from its first group. For a
+keyspace the unit is the keyspace from its first group, because the keys already admitted are what
+held its charge. A unit is converted again every 50 ms for up to 30 seconds after the node first
+refuses it. A refusal that outlasts that wait ends the conversion and is reported as the node
+having had no room for it, since what the restore itself holds can be what fills the budget. A
+request larger than a whole budget, and archived content that does not fit the restored shapes,
+end it at once.
+
 Backup section openings share Snapshot admission with materialized readers. A capacity-only
 refusal retries within the opening's single 30-second deadline; other failures end the fetch.
 Completed response streams release their transport permits before local verification and decoding.
@@ -418,9 +482,14 @@ preparation reservation: 16 times encoded record bytes (including the manifest),
 bytes, and 2 MiB of fixed overhead. Resource archives, guest saves and the materialized,
 deduplicator and window Arrow groups remain on disk; their conversion is charged separately. The charge
 covers overlapping owned archive values, aligned decode buffers, model parsing and planning
-copies, branch text and typed-key conversion, and native serializer resolvers. Admission refuses
-unaddressable estimates or unavailable capacity before a restore changes the cluster. Parsing and
-the pure restore planner run as admitted bulk CPU work.
+copies, branch text and typed-key conversion, and native serializer resolvers. Once the
+description is decoded, the reservation also grows by the fixed share of every key the archive's
+deduplicator descriptors count: the key's entry in the resident keyspace and its resolver in the
+streamed checkpoint's serializer scratch. A window descriptor's record already carries each
+retained row's watermarks, so its record charge covers the per-row identities a window conversion
+builds one group at a time. Admission refuses unaddressable estimates or unavailable capacity
+before a restore changes the cluster. Parsing and the pure restore planner run as admitted bulk
+CPU work.
 
 The description, parsed Models and reservation have one shared lifetime. A native encoding job
 retains that owner through cancellation; each entry is converted separately, and fixed-capacity
@@ -657,6 +726,43 @@ A failure prints `{"error": {"code": "...", "message": "..."}}` instead. The cod
 restore that failed at a step. A `RESTORE_INCOMPLETE` error carries the restore's report as
 `report`, in the shape above.
 
+## From The Web Console
+
+The web console's **Backups** dialog takes a backup as a browser download and restores an archive
+the operator uploads, with the same statements, options, reports, and failures as `nervix-cli`.
+It runs on the console's own session and follows its leader redirect; a `BACKUP` or `RESTORE` typed
+in the console's REPL runs through the same dialog. [Web Console](client-tools-web-console.md#backing-up-and-restoring)
+describes the dialog itself.
+
+- **Backup.** The console sends `BACKUP` as a command under an execution reference, then downloads
+  the archive with the `DownloadBackup` call over a console WebSocket, from the node that reported
+  the backup. It hands the archive to the browser as a download only once its size and BLAKE3
+  digest match the backup's summary, under the last component of the file the statement names.
+  A download that fails in transport starts again from the first byte while the archive is
+  retained. A download the leader refuses ends with its reason, and the backup itself completed.
+- **A reload resumes a backup.** The browser tab records the backup's execution reference, query
+  text, and domain until its archive is downloaded. A reloaded page sends the backup again under
+  that reference, which returns the recorded outcome instead of running the backup twice, and
+  downloads the archive again while it is retained, unless the download the reload interrupted had
+  already collected it by queuing its last bytes. Closing the tab or signing in as another user
+  forgets the record.
+- **Restore.** The console reads the chosen file once to measure its size and BLAKE3 digest, and
+  streams it with the `RestoreBackup` call over a console WebSocket to the leader. The dialog runs
+  the `DRY RUN` form first: its report, and each domain's planned model run drawn as an impact
+  report, must plan the current options and file before the restore itself can run. The restore's
+  report lists each step as applied, failed, or not attempted, and the result lists the warnings
+  for the state the restore skipped.
+- **Retries.** Every attempt of a restore sends the same execution reference, statement, and
+  archive. A redirect streams it again to the leader, and a lost connection or an unknown outcome
+  streams it again from its first byte, for about ten minutes; after that the console reports the
+  outcome as unknown and names the reference.
+- **What the browser shows.** The dialog shows the summary a backup reports and the report a
+  restore returns, and never what an archive holds beyond them. `DESCRIBE BACKUP` runs only in
+  `nervix-cli`.
+- **Sensitivity.** The browser saves an archive with its downloads directory's permissions, not the
+  owner-only file `nervix-cli` writes. A downloaded archive holds password hashes, client secrets,
+  and TLS private keys; keep it where only its owner can read it.
+
 ## Archive Format
 
 An archive is a tar stream. Every entry is a regular file with owner-only permissions and a zero
@@ -692,6 +798,12 @@ Deduplicator and window groups use the same coordinates. `<branch>` is the branc
 fingerprint in hexadecimal, or `unbranched`. A deduplicator or window descriptor names at most as
 many groups as it has keys or rows, and none when it has none; every named group must be present,
 and a window group must hold both its input rows and its argument columns.
+
+Every `.arrow` section is one canonical Arrow IPC stream: its schema message, one record batch
+and the end-of-stream marker, which ends the section. Every message opens with the continuation
+marker, and every length the stream declares, a message's metadata, its body and each column
+buffer, lies within the section. A restore refuses a section framed otherwise before it decodes
+or allocates anything from it.
 
 A resource named `.` or `..` appears in a section path as `%2E` or `%2E%2E`.
 
@@ -743,7 +855,10 @@ missing or reordered sections and truncated streams before verified contents rea
 Materialized cases also reject inconsistent row/group counts, missing identity or column sections,
 invalid keys/watermarks and damaged Arrow bytes. Deduplicator and window properties compare
 complete descriptors, typed branch keys, row sequences and watermarks, delayed histogram removals
-and every Arrow group's bytes; their malformed cases reject reversed watermarks, impossible
+and every Arrow group's bytes. The restore conversion property streams every rebuilt keyspace and
+checks it against the runtime's own encoding of the same keys byte for byte, and rebuilds windows
+both from archived sections kept whole and from groups split by a narrow identity record; their
+malformed cases reject reversed watermarks, impossible
 sequences and group counts, a zero incarnation, missing key, input or argument groups, misplaced
 group numbers and descriptors that name more groups than the archive holds. The owning runtime column property separately
 checks exact-schema encoding, restore conversion and complete native generation equality.
@@ -754,6 +869,9 @@ START behavior and two-branch isolation. It asserts domain renaming, the stopped
 new guest lifetime explicitly; capture metadata belongs to each new backup. The materialized
 one-node and three-node restore scenario also re-exports the stopped domain before START, comparing
 every descriptor field, identity and Arrow byte, including generations larger than the bulk budget.
+Its acknowledged materialized inputs retain an explicit event timestamp across retries. An
+identical successful replay must preserve the exact revision count and all archived fields, even
+when a failed earlier attempt reached only part of the relay fan-out.
 The deduplicator and window one-node and three-node scenarios re-export a stopped restore with
 identical descriptors and Arrow groups, stop an installation before its first deduplicator or
 window checkpoint, which leaves `START` gated, and release a delayed coordinator's publication
@@ -786,6 +904,10 @@ production-owner concurrency and recovery evidence.
 | Materialized identity group / Arrow group | 1 MiB / 8 MiB |
 | Materialized capture metadata / typed uniqueness metadata / native row views | 8 MiB each, independently admitted |
 | Deduplicator key group / window input group / window argument group | 8 MiB each; capture fills a group to at most half that bound, and a single larger row takes a group of its own |
+| One archived deduplicator keyspace or window | Not bounded by the bulk budget. A keyspace's key parts and values are charged to `restore_metadata` while it converts, beside the fixed per-key share admitted with the description; a window conversion holds one archived section at a time |
+| Window checkpoint identity record | 1 MiB of row identities; a larger archived group splits into groups that fit |
+| Restore conversion admission wait | 30 seconds after the node first refuses one unit for room: a window section, a window while its checkpoint is finished, or a keyspace. The unit is converted again every 50 ms |
+| Restored window rows a branch reopens | No row ceiling of their own; their row views are charged to the relay memory class while the branch reopens the window |
 | Physical checkpoint placement encoding | 60 KiB, including domain and installation namespace |
 | Unpublished restore checkpoint keys and values per node | 128 GiB by default; configurable with `--restore-staging-max-bytes` |
 
@@ -797,8 +919,15 @@ the archive is larger than one archive may be, or the leader's staging area cann
 it again once retained archives are released and snapshot transfers finish. A restore's model batch
 is not bounded by the statement and source-byte limits of a transaction. Each node must admit the
 bounded installation or publication job within its bulk working-memory budget (32 MiB by default).
-A state set may exceed that budget. An individual job that cannot be admitted fails with the start
-gate still closed.
+A state set, and an individual materialized relay, deduplicator keyspace or window, may exceed that
+budget. An individual job that cannot be admitted fails with the start gate still closed.
+
+A restored deduplicator keyspace or window that exceeds one 2 MiB state-sync response is installed
+on every assigned owner and replica, but its replicas do not follow the revisions the owner
+publishes after `RESUME`, which is the replica limit any keyspace or window of that size has. The
+owner persists them: a window whose retained rows exceed one 8 MiB snapshot section is sealed in
+pieces on quota-owned disk and published as a segmented checkpoint, so it survives a restart at
+any size the node's snapshot staging quota holds rather than only within the bulk budget.
 
 ## Failures
 
@@ -831,12 +960,19 @@ A refused restore reports `restore refused:` and the reason, and changed nothing
 - a model binds a resource version the restore does not import as completed
 - a domain's models do not form a valid configuration, as the transaction planner finds
 - an archived materialized relay, deduplicator keyspace or window does not convert under the shape
-  its restored model gives it, naming the entity; a dry run runs the same conversion
+  its restored model gives it, or its conversion cannot be admitted, naming the entity; a dry run
+  runs the same conversion. A deduplicator or window conversion the node refuses only for room is
+  converted again first, and is refused only once that refusal has lasted its 30-second wait
+- the archive's metadata, including the fixed share of every archived deduplicator key, exceeds the
+  node's available restore preparation budget
 
 A restore that failed at a step reports `restore failed at step '<step>':`, the reason, and that the
 steps before it stay applied, together with the report of every step. The reasons are a consensus
 refusal of the step, a resource version that could not be installed or completed on every live
-node, and a model batch the leader refused, such as lookup data that does not load at its path or
-TLS material that does not load. A restore whose archive no client sent to a new leader before the
-retry validity of its execution reference ended reports `restore stopped after the steps it
-recorded`. No message includes password hashes or resource bytes.
+node, a model batch the leader refused, such as lookup data that does not load at its path or TLS
+material that does not load, and state that does not convert or install. Installation converts
+each keyspace and window as planning did, with the same wait for room, so a momentarily busy node
+does not fail the step; a refusal for room that outlasts the wait does. A restore whose archive no
+client sent to a new leader before the retry validity of its execution reference ended reports
+`restore stopped after the steps it recorded`. No message includes password hashes or resource
+bytes.

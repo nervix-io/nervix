@@ -265,7 +265,15 @@ async fn bind_with_incoming(
     credentials: Credentials,
     seed: u64,
 ) -> (Transport, mpsc::Receiver<ReceivedEnvelope>) {
-    let mut options = TransportOptions::default();
+    bind_with_incoming_options(name, credentials, seed, TransportOptions::default()).await
+}
+
+async fn bind_with_incoming_options(
+    name: &'static str,
+    credentials: Credentials,
+    seed: u64,
+    mut options: TransportOptions,
+) -> (Transport, mpsc::Receiver<ReceivedEnvelope>) {
     let entropy = SimulatedEntropy::new(seed, name);
     options.entropy = TransportEntropy::from_source(move || entropy.next_u64());
     Transport::bind(

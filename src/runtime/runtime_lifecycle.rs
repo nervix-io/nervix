@@ -7,6 +7,8 @@
     )
 )]
 
+use error_stack::ResultExt as _;
+
 use super::*;
 
 impl Runtime {
@@ -33,7 +35,7 @@ impl Runtime {
     pub(in crate::runtime) fn with_persistence(
         db: Option<Database>,
         state_snapshot_interval: Duration,
-    ) -> Result<Self, RuntimePersistenceError> {
+    ) -> error_stack::Result<Self, RuntimePersistenceError> {
         Self::with_persistence_and_temp_dir(
             Executor::default(),
             None,
@@ -53,7 +55,7 @@ impl Runtime {
         fault_injection: ConfiguredFaultInjection,
         temp_dir: PathBuf,
         restore_staging_max_bytes: u64,
-    ) -> Result<Self, RuntimePersistenceError> {
+    ) -> error_stack::Result<Self, RuntimePersistenceError> {
         let events = RuntimeEvents::new();
         let (domain_status_changed, _) = watch::channel(0);
         let state_store = db
@@ -64,14 +66,12 @@ impl Runtime {
             .map(Arc::new);
         let prepared_runtime_state_handoffs = DashMap::default();
         if let Some(store) = state_store.as_ref() {
-            let persisted_handoffs = store
-                .handoff_preparations()
-                .map_err(|error| error.current_context().clone())?;
+            let persisted_handoffs = store.handoff_preparations()?;
             for persisted in persisted_handoffs {
                 let mut checkpoints = Vec::with_capacity(persisted.checkpoints.len());
                 for (placement, snapshot) in persisted.checkpoints {
                     let placement = RuntimeStatePlacement::from_remote(placement)
-                        .map_err(|error| RuntimePersistenceError::DecodeState(error.to_string()))?;
+                        .change_context(RuntimePersistenceError::DecodeState)?;
                     checkpoints.push((placement, snapshot));
                 }
                 prepared_runtime_state_handoffs.insert(
@@ -151,7 +151,7 @@ impl Runtime {
                 fault_injection,
                 resource_store: ArcSwapOption::empty(),
                 remote_dispatcher: ArcSwapOption::empty(),
-                remote_dispatch: Arc::new(RemoteDispatchRegistry::new()),
+                remote_dispatch: Arc::new(RemoteDispatchRegistry::new(executor.clone())),
                 remote_ack_watcher_shutdown: CancellationToken::new(),
                 remote_ack_watcher_tasks: TaskTracker::new(),
                 state_replication_tasks: Default::default(),
@@ -343,10 +343,26 @@ impl Runtime {
     }
 
     #[cfg(feature = "testing")]
+    pub(crate) async fn pause_backup_download_if_armed(&self, node_id: &ClusterNodeName) {
+        self.inner
+            .fault_injection
+            .pause_backup_download_if_armed(node_id)
+            .await;
+    }
+
+    #[cfg(feature = "testing")]
     pub(crate) async fn pause_backup_cut_if_armed(&self, domain: &DomainName) {
         self.inner
             .fault_injection
             .pause_backup_cut_if_armed(domain)
+            .await;
+    }
+
+    #[cfg(feature = "testing")]
+    pub(crate) async fn pause_restore_branch_state_conversion_if_armed(&self, domain: &DomainName) {
+        self.inner
+            .fault_injection
+            .pause_restore_branch_state_conversion_if_armed(domain)
             .await;
     }
 
@@ -612,7 +628,7 @@ impl Runtime {
                 warn!(
                     domain = domain.as_str(),
                     ingestor = key.identifier().as_str(),
-                    error = %error,
+                    error = %format_args!("{error:#}"),
                     "failed to stop domain ingestor during schedule rebuild"
                 );
             }
@@ -649,6 +665,7 @@ impl Runtime {
         self.inner.remote_ack_watcher_shutdown.cancel();
         self.inner.remote_ack_watcher_tasks.close();
         self.inner.remote_ack_watcher_tasks.wait().await;
+        self.inner.remote_dispatch.shutdown();
         self.inner.state_replication_tasks.close();
         self.inner.state_replication_tasks.wait().await;
         self.inner.relay_branch_presences.clear();

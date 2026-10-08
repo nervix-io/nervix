@@ -161,6 +161,7 @@ mod endpoint_intake;
 mod ingestion_time;
 mod paced_simulation;
 mod process_cluster;
+mod restarted_voter;
 mod session_protocol;
 
 const SCENARIOS_PATH: &str = "tests/features";
@@ -6059,11 +6060,9 @@ async fn when_node_starts_durable_catch_up(
             }
 
             let name = burst_domain_name(&writer_prefix, written);
-            let request = client.execute(format!("CREATE DOMAIN {name};"));
-            let outcome = nervix_primitives::select! {
-                () = writer_cancellation.cancelled() => return Ok(written),
-                outcome = request => outcome,
-            };
+            // A stop ends the next iteration. Collect the admitted command's response first so
+            // the completed-write count includes a command committed before catch-up finished.
+            let outcome = client.execute(format!("CREATE DOMAIN {name};")).await;
             let outcome = outcome.map_err(|error| error.to_string())?;
             if !outcome.succeeded() {
                 return Err(format!(
@@ -15483,6 +15482,23 @@ async fn when_bulk_execution_is_occupied(world: &mut ScenarioWorld, node_id: Str
     });
 }
 
+/// Fill every bulk worker and every place in the bulk wait queue on a node, so the next bulk job
+/// the node is handed is refused for room rather than queued.
+#[when(expr = "bulk execution on node {string} is saturated")]
+async fn when_bulk_execution_is_saturated(world: &mut ScenarioWorld, node_id: String) {
+    let node_id = expand_placeholders(world, &node_id);
+    let node_name = crate::common::cluster::node_name(&node_id);
+    let fault_injection = world.fault_injection.clone();
+    nervix_primitives::time::timeout(
+        Duration::from_secs(60),
+        fault_injection.saturate_execution(&node_name, nervix_execution::CpuClass::Bulk),
+    )
+    .await
+    .unwrap_or_else(|error| {
+        panic!("bulk execution on '{node_id}' never filled its workers and wait queue: {error}")
+    });
+}
+
 /// Fill the credentials worker and every place in its wait queue on the leader, so the next
 /// password the leader is asked to verify is refused rather than queued. The leader is the node
 /// the scenario created its user through, so the user is already visible there.
@@ -20635,6 +20651,23 @@ async fn then_node_eventually_reports_status_containing(
         .expect("cluster status fragment did not appear");
 }
 
+#[then(expr = "within {string} node {string} eventually reports status containing {string}")]
+async fn then_within_duration_node_eventually_reports_status_containing(
+    world: &mut ScenarioWorld,
+    duration: String,
+    node_id: String,
+    fragment: String,
+) {
+    let budget = parse_duration_text(&duration).expect("step duration must be a valid duration");
+    let node_id = expand_placeholders(world, &node_id);
+    let fragment = expand_placeholders(world, &fragment);
+    world
+        .cluster()
+        .wait_for_status_contains_with_budget(&node_id, &fragment, budget)
+        .await
+        .expect("cluster status fragment did not appear within the requested duration");
+}
+
 #[then(
     expr = "within {string} node {string} eventually reports deduplicator {string} owner equals \
             placeholder {string}"
@@ -23027,6 +23060,7 @@ async fn when_http_payloads_are_posted_concurrently(
     append_cucumber_log_line(&format!(
         "http publish concurrent: node=node-1 host={host} path={path} payloads={payloads:?}"
     ));
+    world.last_publish_at = Some(Instant::now());
     let cluster = world.cluster();
     try_join_all(
         payloads
@@ -25009,7 +25043,7 @@ async fn then_within_duration_the_stream_subscription_receives_payloads_containi
     duration: String,
     #[step] step: &Step,
 ) {
-    receive_subscription_fragment_sets(world, &duration, step, UnmatchedPayloads::Skip).await;
+    receive_subscription_fragment_sets(world, &duration, step, UnmatchedPayloads::Skip, None).await;
 }
 
 /// Like the step above, except that every payload arriving before the last fragment set matches
@@ -25024,10 +25058,36 @@ async fn then_within_duration_the_stream_subscription_receives_exactly_the_fragm
     duration: String,
     #[step] step: &Step,
 ) {
-    receive_subscription_fragment_sets(world, &duration, step, UnmatchedPayloads::Fail).await;
+    receive_subscription_fragment_sets(world, &duration, step, UnmatchedPayloads::Fail, None).await;
 }
 
-/// Like the step above, and every payload matching a fragment set carries the same value in the
+/// Measures every expected row from publication, so a delayed HTTP response cannot start a new
+/// silence window after a valid collection or flush deadline has already passed.
+#[then(
+    expr = "within {string} the relay subscription receives payloads no sooner than {string} \
+            after they were published"
+)]
+async fn then_subscription_payloads_arrive_after_publication_delay(
+    world: &mut ScenarioWorld,
+    duration: String,
+    delay: String,
+    #[step] step: &Step,
+) {
+    let delay = parse_duration_text(&delay).expect("step delay must be a valid duration");
+    let published_at = world
+        .last_publish_at
+        .expect("a delivery-delay assertion must follow a publishing step");
+    receive_subscription_fragment_sets(
+        world,
+        &duration,
+        step,
+        UnmatchedPayloads::Fail,
+        Some(published_at + delay),
+    )
+    .await;
+}
+
+/// Every payload matching a fragment set carries the same value in the
 /// named JSON field, such as the one error reference the members of a failed batch share.
 #[then(
     expr = "within {string} the relay subscription receives payloads containing all fragments \
@@ -25040,7 +25100,8 @@ async fn then_within_duration_the_stream_subscription_receives_fragments_sharing
     #[step] step: &Step,
 ) {
     let matched =
-        receive_subscription_fragment_sets(world, &duration, step, UnmatchedPayloads::Skip).await;
+        receive_subscription_fragment_sets(world, &duration, step, UnmatchedPayloads::Skip, None)
+            .await;
     let values = matched
         .iter()
         .map(|payload| {
@@ -25072,16 +25133,9 @@ enum UnmatchedPayloads {
     Fail,
 }
 
-/// Waits until every docstring line's `|`-separated fragments are all found in one subscription
-/// payload, and returns the payloads that matched, in the order they arrived.
-async fn receive_subscription_fragment_sets(
-    world: &mut ScenarioWorld,
-    duration: &str,
-    step: &Step,
-    unmatched: UnmatchedPayloads,
-) -> Vec<String> {
-    let duration = parse_duration_text(duration).expect("step duration must be a valid duration");
-    let expected_fragment_sets = docstring(step)
+/// Every docstring line's `|`-separated fragments, with placeholders expanded.
+fn docstring_fragment_sets(world: &ScenarioWorld, step: &Step) -> Vec<Vec<String>> {
+    docstring(step)
         .lines()
         .map(str::trim)
         .filter(|line| !line.is_empty())
@@ -25092,13 +25146,44 @@ async fn receive_subscription_fragment_sets(
                 .map(|fragment| expand_placeholders(world, fragment))
                 .collect::<Vec<_>>()
         })
-        .collect::<Vec<_>>();
+        .collect::<Vec<_>>()
+}
 
+/// Waits until every docstring line's `|`-separated fragments are all found in one subscription
+/// payload, and returns the payloads that matched, in the order they arrived.
+async fn receive_subscription_fragment_sets(
+    world: &mut ScenarioWorld,
+    duration: &str,
+    step: &Step,
+    unmatched: UnmatchedPayloads,
+    delivery_not_before: Option<Instant>,
+) -> Vec<String> {
+    let expected_fragment_sets = docstring_fragment_sets(world, step);
     assert!(
         !expected_fragment_sets.is_empty(),
         "step docstring must contain at least one expected payload fragment set"
     );
+    receive_expected_fragment_sets(
+        world,
+        duration,
+        expected_fragment_sets,
+        unmatched,
+        delivery_not_before,
+    )
+    .await
+}
 
+/// Waits until each of `expected_fragment_sets` is found whole in one subscription payload, and
+/// returns the payloads that matched, in the order they arrived. A matching payload that arrives
+/// before `delivery_not_before` fails the wait.
+async fn receive_expected_fragment_sets(
+    world: &mut ScenarioWorld,
+    duration: &str,
+    expected_fragment_sets: Vec<Vec<String>>,
+    unmatched: UnmatchedPayloads,
+    delivery_not_before: Option<Instant>,
+) -> Vec<String> {
+    let duration = parse_duration_text(duration).expect("step duration must be a valid duration");
     let session = world
         .active_session
         .as_mut()
@@ -25138,6 +25223,13 @@ async fn receive_subscription_fragment_sets(
             .position(|fragments| fragments.iter().all(|fragment| payload.contains(fragment)));
         match (position, unmatched) {
             (Some(index), _) => {
+                if let Some(not_before) = delivery_not_before {
+                    assert!(
+                        Instant::now() >= not_before,
+                        "subscription payload {payload:?} arrived before its publication-relative \
+                         delivery bound"
+                    );
+                }
                 remaining.remove(index);
                 matched.push(payload);
             }

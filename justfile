@@ -143,9 +143,23 @@ build-paced-simulation:
     CARGO_TARGET_DIR={{ cargo_target_dir }} cargo build --package nervix-paced-simulation \
         --package nervix-client-ffi
 
-# Run the unit tests of the paced simulation's Rust driver.
-test-paced-simulation *args:
+# Run the unit tests of both paced simulation drivers.
+test-paced-simulation *args: test-paced-simulation-python
     cargo test --package nervix-paced-simulation -- {{ args }}
+
+test-paced-simulation-python:
+    python3 -m unittest discover -s examples/paced-simulation/python -p 'test_*.py'
+
+# Deterministic application-open coverage, including refusal and deadline outcomes.
+coverage-paced-simulation-python:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    mkdir -p {{ quote(cargo_target_dir + "/paced-simulation") }}
+    export COVERAGE_FILE="{{ cargo_target_dir }}/paced-simulation/python.coverage"
+    uvx --from coverage==7.11.0 coverage run --branch \
+        --source=examples/paced-simulation/python,scripts/paced_simulation_coverage \
+        -m unittest discover -s examples/paced-simulation/python -p 'test_*.py'
+    uvx --from coverage==7.11.0 coverage lcov -o "{{ cargo_target_dir }}/paced-simulation/python.lcov"
 
 # Run the paced simulation's Rust driver against a running node, for example
 # `just paced-simulation --server http://127.0.0.1:47391 --ticks 100`.
@@ -413,22 +427,25 @@ test-primitives-compile:
     cargo check --package nervix-primitives --lib --target wasm32-unknown-unknown
 
 # Run the Deloxide diagnostic lane in its active-only selection: every workload
-# tests/deloxide-inventory.toml registers for the `deloxide` build, after the prerequisites. The lane
-# builds each invocation for the selection under target/deloxide, so the diagnostic server binary
-# never replaces the ordinary one, and refuses a registered workload that is missing or ignored and a
-# probe, owner test or tagged scenario that is not registered. The probes of nervix-deadlock run
-# every workload in a disposable child that must report its cycle, record its evidence and end as
-# its contract says; the diagnostic owner tests each install their detector in a fresh process; and
-# the scenario binary runs the `@deadlock_diagnostics`, `@restore_installation`,
+# tests/deloxide-inventory.toml registers for the `deloxide` build, after the prerequisites. The
+# lane builds each invocation for the selection under target/deloxide, so the diagnostic server
+# binary never replaces the ordinary one, and refuses a registered workload that is missing or
+# ignored and a probe, conformance check, owner test or tagged scenario that is not registered. The
+# probes of nervix-deadlock run every workload in a disposable child that must report its cycle,
+# record its evidence and end as its contract says; the tracked locks' conformance checks of
+# nervix-primitives and the diagnostic owner tests each install their detector in a fresh process;
+# and the scenario binary runs the `@deadlock_diagnostics`, `@restore_installation`,
 # `@client_ingestor_alter_drain`, `@deadlock_reports`, `@memory_pressure_pause`,
-# `@client_io_03_consumer_restore` and `@client_io_03_generation` scenarios and then the
+# `@client_io_03_consumer_restore`, `@client_io_03_generation`, `@remote_ack_owners`, `@udf_column_builder`,
+# `@vhost_tls_rebinding` and `@inferencer_branch_batches` scenarios and then the
 # `@paced_simulation_reopen` scenarios with the diagnostic Rust paced driver, without retries, on
-# in-process nodes and real diagnostic server processes of one and three nodes. Every process runs in
-# a session of its own within its bound and the inventory's budget, and the lane fails on an active
-# deadlock (status 3), a diagnostic failure (4), a signal, a timeout or an expired budget (124), a
-# leftover process, incomplete accounting, and missing, partly written or nonqualifying evidence. A
-# fresh attempt under target/deloxide/test-deloxide/deloxide keeps every log, artifact, evidence file
-# and finding description, and lane.json with the exact commands, bounds and outcomes. Under the
+# in-process nodes and real diagnostic server processes of one and three nodes. Every process runs
+# in a session of its own within its bound and the inventory's budget, and the lane fails on an
+# active deadlock (status 3), a diagnostic failure (4), a signal, a timeout or an expired budget
+# (124), a leftover process, incomplete accounting, and missing, partly written or nonqualifying
+# evidence. A fresh attempt under target/deloxide/test-deloxide/deloxide keeps every log, artifact,
+# evidence file and finding description, and lane.json with the exact commands, bounds and
+# outcomes. Under the
 # native coverage collector the same lane builds instrumented and records its completion there.
 test-deloxide: tests-deps test-deloxide-workloads
 
@@ -914,7 +931,16 @@ test-scenarios-coverage: tests-deps
     export NERVIX_CLIENT_LIBRARY={{ quote(cargo_target_dir + "/llvm-cov-target/debug/libnervix_client_ffi.so") }}
     install -m 755 {{ quote(cargo_target_dir + "/debug/nervix-nspl-format") }} \
         {{ quote(cargo_target_dir + "/llvm-cov-target/debug/nervix-nspl-format") }}
-    cargo llvm-cov --no-report --features testing --package nervix-server --test scenarios
+    collection_dir="$(mktemp -d {{ quote(cargo_target_dir + "/paced-simulation-coverage.XXXXXX") }})"
+    export COVERAGE_FILE="${collection_dir}/python.coverage"
+    export PYTHONPATH="{{ justfile_directory() }}/scripts/paced_simulation_coverage${PYTHONPATH:+:${PYTHONPATH}}"
+    export COVERAGE_PROCESS_START="{{ justfile_directory() }}/scripts/paced_simulation_coverage/coverage.ini"
+    uv run --no-project --with coverage==7.11.0 cargo llvm-cov --no-report \
+        --features testing --package nervix-server --test scenarios
+    uvx --from coverage==7.11.0 coverage combine --data-file "${collection_dir}/python.coverage"
+    mkdir -p {{ quote(cargo_target_dir + "/paced-simulation") }}
+    uvx --from coverage==7.11.0 coverage lcov --data-file "${collection_dir}/python.coverage" \
+        -o "{{ cargo_target_dir }}/paced-simulation/python.lcov"
     cargo llvm-cov report --no-default-ignore-filename-regex --lcov --output-path lcov-workspace.info
     cargo llvm-cov report --package nervix-cli --package nervix-web-console \
         --package nervix-server --lcov --output-path lcov.info
@@ -1121,7 +1147,9 @@ coverage-backup-archives output="target/backup-archives.lcov": tests-deps
         --package nervix-backup --package nervix-nspl --package nervix-server
 
 # Deduplicator and window archive coverage: their records and Arrow groups, capture, restore
-# conversion and installation, and the public scenarios that resume, re-export and skip them.
+# conversion into staged pieces and installation, segmented persistence of large windows, the
+# framing check their Arrow sections open through, and the public scenarios that resume, re-export
+# and skip them, including state above the bulk budget and a conversion refused for room.
 coverage-backup-branch-state output="target/backup-branch-state.lcov": tests-deps
     #!/usr/bin/env bash
     set -euo pipefail
@@ -1131,12 +1159,15 @@ coverage-backup-branch-state output="target/backup-branch-state.lcov": tests-dep
     export NERVIX_TEST_CLI_PATH={{ quote(cargo_target_dir + "/llvm-cov-target/debug/nervix-cli") }}
     cargo llvm-cov --no-report --lib --package nervix-backup
     cargo llvm-cov --no-report --lib --package nervix-models -- window_model_digest
+    cargo llvm-cov --no-report --lib --package nervix-expiry-map
     cargo llvm-cov --no-report --features testing --package nervix-server --lib -- \
-        deduplicator window_ backup restore branch_state runtime_ack
+        deduplicator window_ backup restore branch_state runtime_ack snapshot_staging \
+        materialized_snapshot checkpoint_stream arrow_body client_batch
     cargo llvm-cov --no-report --features testing --package nervix-server --test scenarios -- \
-        --input tests/features/cluster/backup_branch_state.feature --concurrency 2 --retry 0
+        --input 'tests/features/cluster/backup_branch_state*.feature' --concurrency 2 --retry 0
     cargo llvm-cov report --no-default-ignore-filename-regex --lcov --output-path {{ quote(output) }} \
-        --package nervix-backup --package nervix-models --package nervix-server --package nervix-cli
+        --package nervix-backup --package nervix-models --package nervix-server --package nervix-cli \
+        --package nervix-expiry-map
 
 # Append current checkpoint-reader and backup ownership tests to retained archive profiles.
 coverage-backup-archives-state-append output="target/backup-archives.lcov":
@@ -1213,6 +1244,25 @@ coverage-archive-counts-server-append output="target/archive-counts.lcov": downl
 coverage-runtime output="target/task-handles-runtime.lcov" *args: build-web-console wasm-processor-guests download-onnxruntime
     ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)" cargo llvm-cov --package nervix-server --features testing --lib --no-default-ignore-filename-regex --lcov --output-path {{ quote(output) }} {{ args }}
 
+# Ordinary coverage for delivery correlations, membership publication and authenticated relay owners.
+coverage-remote-owners output="target/remote-owners.lcov": build-web-console wasm-processor-guests download-onnxruntime
+    #!/usr/bin/env bash
+    set -euo pipefail
+    export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
+    just coverage-clean-workspace
+    stages="$(mktemp -d {{ quote(cargo_target_dir + "/remote-owner-coverage.XXXXXX") }})"
+    cargo llvm-cov --no-report --package nervix-server --features testing --lib -- remote_
+    # Later invocations retain the first profile; --no-report and --no-clean cannot be combined.
+    cargo llvm-cov --no-clean --lcov --output-path "${stages}/cluster.lcov" \
+        --package nervix-server --features testing --lib -- cluster::tests
+    cargo llvm-cov --no-clean --lcov --output-path "${stages}/interconnect.lcov" \
+        --package nervix-interconnect --lib
+    cargo llvm-cov --no-clean --lcov --output-path "${stages}/ack-cost.lcov" \
+        --package nervix-server --features testing --lib -- remote_ack_owner_cost --ignored --nocapture
+    cargo llvm-cov --no-clean --lcov --output-path "${stages}/frame-cost.lcov" \
+        --package nervix-interconnect --lib -- remote_relay_frame_cost --ignored --nocapture
+    cargo llvm-cov report --no-default-ignore-filename-regex --lcov --output-path {{ quote(output) }}
+
 # Measure selected public scenarios with the same arguments as `test-scenarios`.
 coverage-scenarios output *args: tests-deps
     #!/usr/bin/env bash
@@ -1252,21 +1302,9 @@ coverage-paced-simulation output="target/paced-simulation.lcov" scenario_binary=
     #!/usr/bin/env bash
     set -euo pipefail
     collection_dir="$(mktemp -d {{ quote(cargo_target_dir + "/paced-simulation-coverage.XXXXXX") }})"
-    cat > "${collection_dir}/sitecustomize.py" <<'PYTHON'
-    import sys
-    if sys.argv[0].endswith("paced_simulation.py"):
-        import coverage
-        coverage.process_startup()
-    PYTHON
-    cat > "${collection_dir}/coverage.ini" <<CONFIG
-    [run]
-    branch = true
-    parallel = true
-    source = {{ justfile_directory() }}/examples/paced-simulation/python
-    data_file = ${collection_dir}/python.coverage
-    CONFIG
-    export PYTHONPATH="${collection_dir}${PYTHONPATH:+:${PYTHONPATH}}"
-    export COVERAGE_PROCESS_START="${collection_dir}/coverage.ini"
+    export COVERAGE_FILE="${collection_dir}/python.coverage"
+    export PYTHONPATH="{{ justfile_directory() }}/scripts/paced_simulation_coverage${PYTHONPATH:+:${PYTHONPATH}}"
+    export COVERAGE_PROCESS_START="{{ justfile_directory() }}/scripts/paced_simulation_coverage/coverage.ini"
     if [[ -n {{ quote(scenario_binary) }} ]]; then
         just coverage-paced-simulation-binaries
         (
@@ -1527,6 +1565,7 @@ bench-smoke-bodies:
     cargo bench --profile dev --package nervix-connector-syslog --bench stream_framing --features benchmarks -- --test
     cargo bench --profile dev --package nervix-vm --bench vm -- --test
     just bench-retained-channels-bodies
+    just bench-remote-owners-bodies
     just bench-materialized-state-bodies
 
 # Measure the data-plane work a node admits through its bounded executor, as the runtime submits it:
@@ -1875,7 +1914,7 @@ cargo-clippy-loom jobs=default_jobs: (run-with-jobs "loom-clippy-targets" jobs)
 
 [private, parallel]
 loom-clippy-targets: \
-    *(clippy-target *["nervix-execution", "nervix-model-harness"] ["--all-targets", "--features", "loom"]) \
+    *(clippy-target *["nervix-execution", "nervix-model-harness", "nervix-interconnect"] ["--all-targets", "--features", "loom"]) \
     (clippy-target "nervix-primitives" ["--all-targets", "--features", "loom native"]) \
     *(clippy-target *["nervix-consensus", "nervix-server"] ["--lib", "--features", "loom"]) \
     (clippy-target "nervix-server" ["--lib", "--profile", "test", "--features", "loom"]) \
@@ -2835,6 +2874,14 @@ bench-retained-channels: build-web-console wasm-processor-guests download-onnxru
 bench-retained-channels-bodies:
     ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)" cargo test --package nervix-server --features testing --lib relay_channel_cost -- --ignored --nocapture
     cargo test --package nervix-interconnect --lib established_pool_cost -- --ignored --nocapture
+
+# Delivery correlation and authenticated frame costs, including retained state and reclamation.
+bench-remote-owners: build-web-console wasm-processor-guests download-onnxruntime bench-remote-owners-bodies
+
+[private]
+bench-remote-owners-bodies:
+    ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)" cargo test --package nervix-server --features testing --lib remote_ack_owner_cost -- --ignored --nocapture
+    cargo test --package nervix-interconnect --lib remote_relay_frame_cost -- --ignored --nocapture
 
 # Native diagnostic owners and probes, composed separately from the ordinary report command.
 test-deadlock-evidence-order:

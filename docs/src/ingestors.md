@@ -697,6 +697,11 @@ output was already written.
 
 `OFFSET BY DOMAIN` is at-least-once. A commit records the partition's next offset in memory. Nervix persists the offsets on the runtime state snapshot interval and whenever a node stops executing the domain, and when the ingestor has state replicas, a commit completes only after every replica has acknowledged it. Crash recovery may therefore restart from a slightly stale persisted offset snapshot. The leader watches Kafka partition topology and commits any rebalance through the strongly consistent domain schedule, which is persisted through the control-plane Raft/Fjall path. Executing ingestors consume only the committed partition assignment.
 
+A commit or start-point reset waits for its replica acknowledgements within the native checkpoint
+bulk operation's thirty-second budget. A missing acknowledgement fails the commit at that deadline;
+the source applies its existing rejection and retry policy. Large native checkpoints use bounded
+disk staging and transfer chunks, so checkpoint length is independent of the Bulk memory ceiling.
+
 Offset recovery details:
 
 - persisted per-partition offsets are clamped to the partition's currently available Kafka watermark range on reassignment

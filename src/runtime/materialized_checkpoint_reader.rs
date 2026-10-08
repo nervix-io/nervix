@@ -64,7 +64,7 @@ impl CapturedMaterializedCheckpoint {
             .change_context(MaterializedSnapshotError::Admission)?;
         let mut source = self.source;
         let header = source.take_header(executor).await?;
-        let _layout = header.metadata_layout()?;
+        let _layout = header.metadata_layout(super::RestoredRows::Relay)?;
         Ok(MaterializedCheckpointReader {
             source,
             header,

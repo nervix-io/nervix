@@ -309,15 +309,13 @@ fn every_acknowledgement_reaches_the_replication_of_the_state_it_names() {
         None,
     );
     publish_current_assignment(&runtime, &materialized);
-    let materialized_state = runtime
-        .replicated_materialized_stream_state(
-            materialized.clone(),
-            StdArc::new(arrow_schema::Schema::empty()),
-            None,
-            Vec::new(),
-            None,
-        )
-        .expect("materialized state initializes");
+    let materialized_state = runtime.replicated_materialized_stream_state(
+        materialized.clone(),
+        StdArc::new(arrow_schema::Schema::empty()),
+        None,
+        Vec::new(),
+        None,
+    );
     acknowledge(&runtime, &replica, &materialized);
     assert_eq!(
         held_by(
@@ -572,6 +570,22 @@ async fn runtime_shutdown_cancels_an_in_flight_checkpoint_announcement() {
 /// can run.
 #[nervix_primitives::test(start_paused = true)]
 async fn a_committed_offset_completes_when_its_replica_acknowledges_it() {
+    committed_offset_after_replica_delay(Some(Duration::ZERO)).await;
+}
+
+/// A native checkpoint may finish after a small command response deadline while still making
+/// progress within its bulk operation. Its replica acknowledgement must complete the commit.
+#[nervix_primitives::test(start_paused = true)]
+async fn a_committed_offset_accepts_a_replica_finishing_a_native_bulk_transfer() {
+    committed_offset_after_replica_delay(Some(Duration::from_secs(6))).await;
+}
+
+#[nervix_primitives::test(start_paused = true)]
+async fn a_committed_offset_without_replica_progress_expires_within_the_native_bulk_budget() {
+    committed_offset_after_replica_delay(None).await;
+}
+
+async fn committed_offset_after_replica_delay(delay: Option<Duration>) {
     let runtime = Runtime::default();
     let owner = named::<ClusterNodeName>("node-1");
     let replica = named::<ClusterNodeName>("node-2");
@@ -624,6 +638,32 @@ async fn a_committed_offset_completes_when_its_replica_acknowledges_it() {
         !committing.is_finished(),
         "an acknowledgement of an older revision does not complete the commit"
     );
+    let Some(delay) = delay else {
+        let refused = committing
+            .await
+            .expect("the commit task does not panic")
+            .expect_err("an absent replica acknowledgement does not complete a commit");
+        assert!(matches!(
+            refused.current_context(),
+            StateReplicationError::ReplicaQuorum {
+                lsm: 1,
+                required_acks: 1,
+                ..
+            }
+        ));
+        assert_eq!(
+            Instant::now(),
+            started + SyncKafkaOffsets::TIMEOUT,
+            "an absent replica ends the commit at its bounded native operation deadline"
+        );
+        return;
+    };
+    nervix_primitives::time::advance(delay).await;
+    nervix_primitives::task::yield_now().await;
+    assert!(
+        !committing.is_finished(),
+        "the commit must wait for the native checkpoint's replica acknowledgement"
+    );
     runtime.handle_state_replication_ack(
         &replica,
         StateSyncAck {
@@ -637,7 +677,7 @@ async fn a_committed_offset_completes_when_its_replica_acknowledges_it() {
         .expect("the replica's acknowledgement completes the commit");
     assert_eq!(
         Instant::now(),
-        started,
+        started + delay,
         "the acknowledgement, not the deadline, completed the commit"
     );
 }

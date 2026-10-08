@@ -16,6 +16,7 @@
     )
 )]
 
+use error_stack::ResultExt as _;
 use imbl::{GenericHashMap, shared_ptr::DefaultSharedPtr};
 use nervix_connector_websockets::CompiledSignalingProtocol;
 
@@ -426,7 +427,8 @@ impl Runtime {
         &self,
         domain: &DomainName,
         revision: Option<Arc<ExecutionRevision>>,
-    ) -> Result<(), RuntimeError> {
+    ) -> error_stack::Result<(), RuntimeError> {
+        let build = || RuntimeError::build_domain_execution(domain);
         if let Some((_, mut existing)) = self.inner.executions.remove(domain) {
             existing.routing.deactivate();
             self.stop_domain_execution(domain, existing).await;
@@ -446,12 +448,10 @@ impl Runtime {
             self.clear_relay_branch_presences_for_domain(domain);
             return Ok(());
         }
-        let domain_clock =
-            self.bind_domain_clock(domain)
-                .map_err(|error| RuntimeError::BuildDomainExecution {
-                    domain: domain.as_str().to_string(),
-                    reason: error.to_string(),
-                })?;
+        let domain_clock = self
+            .bind_domain_clock(domain)
+            .change_context(ExecutionBuildError::BindDomainClock)
+            .change_context_lazy(build)?;
         self.install_state_identities_from_unplaced_revision(domain, &revision);
         let (shutdown_tx, _) = watch::channel(false);
         let mut relay_builders = HashMap::new();
@@ -472,10 +472,8 @@ impl Runtime {
         let udf_executor = self
             .compile_domain_udfs(domain, resource_plans.udfs.clone())
             .await
-            .map_err(|error| RuntimeError::CompileDomainUdfs {
-                domain: domain.as_str().to_string(),
-                report: error,
-            })?;
+            .change_context(ExecutionBuildError::CompileUdfs)
+            .change_context_lazy(build)?;
         let entrypoints = &revision.entrypoints;
         let emitter_plans = &revision.emitters;
         let branch_relays = branch_relays_from_plans(branched_specs, entrypoints);
@@ -492,10 +490,10 @@ impl Runtime {
             // this execution; any other relay starts from a presence of its own.
             let branch_presence = if branch_relays.contains(&relay.name) {
                 self.relay_branch_presence(domain, &relay.name)
-                    .map_err(|error| RuntimeError::BuildDomainExecution {
-                        domain: domain.as_str().to_string(),
-                        reason: error.to_string(),
-                    })?
+                    .change_context_lazy(|| ExecutionBuildError::RelayBranchPresence {
+                        relay: relay.name.clone(),
+                    })
+                    .change_context_lazy(build)?
             } else {
                 Arc::new(BranchPresence::new())
             };
@@ -534,18 +532,19 @@ impl Runtime {
 
         for lookup in resource_plans.lookups.values() {
             let Some(codec) = codecs.get(&lookup.codec).cloned() else {
-                return Err(RuntimeError::BuildDomainExecution {
-                    domain: domain.as_str().to_string(),
-                    reason: format!("missing compiled codec '{}'", lookup.codec),
-                });
+                return Err(Report::new(ExecutionBuildError::MissingLookupCodec {
+                    lookup: lookup.name.clone(),
+                    codec: lookup.codec.clone(),
+                })
+                .change_context(build()));
             };
             let runtime = self
                 .load_lookup_runtime(lookup.clone(), codec)
                 .await
-                .map_err(|error| RuntimeError::BuildDomainExecution {
-                    domain: domain.as_str().to_string(),
-                    reason: error.to_string(),
-                })?;
+                .change_context_lazy(|| ExecutionBuildError::LoadLookup {
+                    lookup: lookup.name.clone(),
+                })
+                .change_context_lazy(build)?;
             lookup_specs.push((lookup.name.clone(), Arc::new(runtime)));
         }
 
@@ -553,10 +552,11 @@ impl Runtime {
             let mut inputs = Vec::with_capacity(emitter.inputs.len());
             for input in &emitter.inputs {
                 let Some(relay) = relay_builders.get_mut(&input.relay) else {
-                    return Err(RuntimeError::BuildDomainExecution {
-                        domain: domain.as_str().to_string(),
-                        reason: format!("missing emitter input relay '{}'", input.relay),
-                    });
+                    return Err(Report::new(ExecutionBuildError::MissingInputRelay {
+                        node: NodeRef::new(ModelKind::Emitter, ModelName::from(&emitter.name)),
+                        relay: input.relay.clone(),
+                    })
+                    .change_context(build()));
                 };
                 inputs.push((
                     input.relay.clone(),
@@ -586,15 +586,11 @@ impl Runtime {
             let mut inputs = Vec::new();
             for input_relay in &node_spec.spec.input_relays {
                 let Some(relay) = relay_builders.get_mut(input_relay) else {
-                    return Err(RuntimeError::BuildDomainExecution {
-                        domain: domain.as_str().to_string(),
-                        reason: format!(
-                            "missing {} '{}' input relay '{}'",
-                            node_spec.spec.kind.as_str(),
-                            node_spec.spec.processor.as_str(),
-                            input_relay.as_str()
-                        ),
-                    });
+                    return Err(Report::new(ExecutionBuildError::MissingInputRelay {
+                        node: NodeRef::new(node_spec.spec.kind, node_spec.spec.processor.clone()),
+                        relay: input_relay.clone(),
+                    })
+                    .change_context(build()));
                 };
                 inputs.push((
                     input_relay.clone(),
@@ -616,6 +612,7 @@ impl Runtime {
                         relay.remote_runtime_consumers,
                         None,
                         relay.branch_presence,
+                        self.domain_ack_root_tracker(domain),
                     )),
                 )
             })
@@ -656,10 +653,8 @@ impl Runtime {
             },
         )
         .await
-        .map_err(|reason| RuntimeError::BuildDomainExecution {
-            domain: domain.as_str().to_string(),
-            reason: format!("failed to bind published processor plans: {reason:#}"),
-        })?;
+        .change_context(ExecutionBuildError::BindProcessorPlans)
+        .change_context_lazy(build)?;
         let message_error_plans = Arc::new(
             BoundMessageErrorRoutes::bind(
                 revision.message_errors.clone(),
@@ -670,10 +665,8 @@ impl Runtime {
                     udfs: &udf_executor,
                 },
             )
-            .map_err(|reason| RuntimeError::BuildDomainExecution {
-                domain: domain.as_str().to_string(),
-                reason: format!("failed to bind message-error routes: {reason:#}"),
-            })?,
+            .change_context(ExecutionBuildError::BindMessageErrorRoutes)
+            .change_context_lazy(build)?,
         );
 
         for (node_spec, inputs) in processor_input_specs {
@@ -710,12 +703,12 @@ impl Runtime {
 
         for generator in resource_plans.generators.values() {
             let spec = GeneratorTaskSpec::bind(domain, generator, &relay_services, &udf_executor)
-                .map_err(|report| RuntimeError::GeneratorStart { report })?;
+                .change_context_lazy(build)?;
             let entity = NodeRef::new(ModelKind::Generator, &generator.name);
             generator_tasks.insert(
                 entity,
                 self.spawn_generator_task(domain, &shutdown_tx, spec)
-                    .map_err(|report| RuntimeError::GeneratorStart { report })?,
+                    .change_context_lazy(build)?,
             );
         }
 
@@ -733,12 +726,12 @@ impl Runtime {
                         codecs: &codecs,
                         deps: self
                             .emitter_task_deps(execution_build_deps, &emitter)
-                            .map_err(|report| RuntimeError::EmitterStart { report })?,
+                            .change_context_lazy(build)?,
                     },
                     emitter,
                     inputs,
                 )
-                .map_err(|report| RuntimeError::EmitterStart { report })?,
+                .change_context_lazy(build)?,
             );
         }
 
@@ -754,7 +747,8 @@ impl Runtime {
                 },
                 reingestor_inputs,
             )
-            .map_err(|report| RuntimeError::entrypoint_binding(domain, report))?;
+            .change_context(ExecutionBuildError::StartReingestors)
+            .change_context_lazy(build)?;
 
         let start_version = match self.inner.domains.get(domain) {
             Some(state) => state.start_version,
@@ -1024,13 +1018,20 @@ mod tests {
         let Err(report) = result else {
             panic!("execution must reject a paced domain without an installed mapping");
         };
-        let RuntimeError::BuildDomainExecution { domain, reason } = report.current_context() else {
+        let RuntimeError::BuildDomainExecution { domain } = report.current_context() else {
             panic!("clock binding must report the failed domain execution");
         };
-        assert_eq!(domain, clock_domain.as_str());
+        assert_eq!(domain, &clock_domain);
         assert!(
-            reason.contains("not installed"),
-            "unexpected error: {reason}"
+            matches!(
+                report.downcast_ref::<ExecutionBuildError>(),
+                Some(ExecutionBuildError::BindDomainClock)
+            ),
+            "{report:?}"
+        );
+        assert!(
+            format!("{report:#}").contains("not installed"),
+            "unexpected error: {report:#}"
         );
     }
 
@@ -1058,13 +1059,20 @@ mod tests {
         let Err(report) = result else {
             panic!("execution must reject a paced clock without its committed authority");
         };
-        let RuntimeError::BuildDomainExecution { domain, reason } = report.current_context() else {
+        let RuntimeError::BuildDomainExecution { domain } = report.current_context() else {
             panic!("clock binding must report the failed domain execution");
         };
-        assert_eq!(domain, clock_domain.as_str());
+        assert_eq!(domain, &clock_domain);
         assert!(
-            reason.contains("not installed"),
-            "unexpected error: {reason}"
+            matches!(
+                report.downcast_ref::<ExecutionBuildError>(),
+                Some(ExecutionBuildError::BindDomainClock)
+            ),
+            "{report:?}"
+        );
+        assert!(
+            format!("{report:#}").contains("not installed"),
+            "unexpected error: {report:#}"
         );
     }
 
@@ -1421,7 +1429,17 @@ mod tests {
             )
             .await
             .expect_err("a lookup cannot load before its resource store is attached");
-        assert!(error.to_string().contains("resource store is not attached"));
+        assert!(
+            matches!(
+                error.downcast_ref::<ExecutionBuildError>(),
+                Some(ExecutionBuildError::LoadLookup { lookup }) if lookup.as_str() == "tenants"
+            ),
+            "{error:?}"
+        );
+        assert!(
+            format!("{error:#}").contains("resource store is not attached"),
+            "{error:#}"
+        );
         assert!(!runtime.inner.executions.contains_key(&domain));
     }
 

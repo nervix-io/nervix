@@ -38,7 +38,7 @@ Always read `NSPL Overview`. Add the indexed topics relevant to the requested gr
 | Runtime-node colocation, spreading preferences, path-gated rules, and domain placement defaults | `Placement Policies` and `Control Plane` |
 | Hash maps and lookup expressions | `Lookups` |
 | Session subscriptions and domain clock attachment | `Sessions`; `Command Line Client` for the CLI `subscribe` and `domain-clock` streams |
-| Configuration backups, their archives, `DESCRIBE BACKUP`, and `RESTORE` | `Backup And Restore` |
+| Configuration backups, their archives, bounded waits and exact-reference recovery, `DESCRIBE BACKUP`, and `RESTORE` | `Backup And Restore` |
 | Metrics and runtime inspection | `Metrics And Observability` |
 | Full graph examples | `Examples` |
 | Applications that pace producers and consumers by an attached domain clock, and the `TIMESTAMP AT`/`TIMESTAMP NOW` admission they meet | `Paced Simulation Drivers` and `Domains And Time` |
@@ -258,6 +258,9 @@ relay. Do not use them to scan across branches.
 - Every Kafka client states the required `auto.offset.reset` policy explicitly when a new consumer
   group may need records that already exist; Nervix passes the setting through and does not supply
   a hidden default.
+- Kafka `OFFSET BY DOMAIN` commits and start-point resets wait up to the native checkpoint bulk
+  operation's thirty-second budget for all assigned state replicas. A missing acknowledgement
+  follows the source's existing rejection and retry policy; this mode remains at least once.
 - Every transport ingestor source ends with its documented `ON QUIESCE` body immediately before
   `DECODE USING`, with a positive `MAX SIZE`, explicit non-endpoint overflow policy, or endpoint
   `RETRY AFTER` wherever that mode requires it. MQTT `SUSPEND` also declares `SESSION PERSISTENT
@@ -370,18 +373,20 @@ Choose checks relevant to the configured graph:
   would bind now; `SHOW CREATE` shows the version each existing binding stores.
 - `BACKUP CLUSTER TO '<file>';` or `BACKUP DOMAIN [<name>] TO '<file>' [WITHOUT RESOURCES]
   [WITHOUT STATE | WITHOUT PAUSE | TIMEOUT <duration>];` writes an archive on the client's machine,
-  sent alone from `nervix-cli` or a native client. A normal backup quiesces each running domain
+  sent alone from `nervix-cli`, a native client, or the web console, which saves it as a verified
+  browser download. A normal backup quiesces each running domain
   before capturing WASM guest state, Kafka domain source offsets, branch lifecycle, fresh
   materialized relay generations, deduplicator keys and the rows windows retain. `WITHOUT
   PAUSE` reads published checkpoints while execution continues; `WITHOUT STATE` captures only
-  configuration. `DESCRIBE BACKUP '<file>';` verifies one offline and inventories its state,
-  domains, users, and resource versions. Treat an archive as a secret.
+  configuration. `DESCRIBE BACKUP '<file>';` verifies one offline in `nervix-cli` and inventories
+  its state, domains, users, and resource versions. Treat an archive as a secret.
 - `RESTORE CLUSTER FROM '<file>' [RESUME] [ON EXISTING USER FAIL | SKIP | REPLACE] [DRY RUN]
   [WITHOUT STATE | WITHOUT SOURCE OFFSETS];` or
   `RESTORE DOMAIN <name> [AS <new_name>] FROM '<file>' [RESUME] [DRY RUN]
   [WITHOUT STATE | WITHOUT SOURCE OFFSETS];` recreates users, domains,
   resource versions under their archived numbers, models, and compatible runtime state from an archive, sent alone from
-  `nervix-cli` or a native client. The default leaves restored domains stopped. `RESUME` makes them
+  `nervix-cli`, a native client, or the web console's Backups dialog, which streams an archive file
+  you choose. The default leaves restored domains stopped. `RESUME` makes them
   running at the archived start generation and clock mapping after complete publication, preserving
   materialized rows, deduplicator keys and windows. Paced mappings project downtime; normal `START`
   establishes a new generation and clears materialized state. Restored deduplicator keys expire at
@@ -405,8 +410,10 @@ Choose checks relevant to the configured graph:
   logical usage from SST allocation. Recover an uncertain applying restore with its exact
   execution reference; after a terminal failed restore, restore into a fresh target name.
   Restore metadata preparation has a separate per-node `restore_metadata` memory grant, defaulting
-  to 2 GiB and admitted before decoding or planning. Native lifecycle and Kafka checkpoints stream
-  through quota-owned files and 64 KiB windows with a fixed 2 MiB bulk I/O grant per operation.
+  to 2 GiB and admitted before decoding or planning. Native lifecycle, Kafka, deduplicator and
+  window checkpoints stream through quota-owned files and 64 KiB windows with a fixed 2 MiB bulk
+  I/O grant per operation, so a keyspace or window larger than the 32 MiB bulk budget restores; a
+  deduplicator conversion also charges its resident keyspace to `restore_metadata` while it runs.
   Observe `nervix_execution_memory_reserved_bytes` by class; database and runtime `START` memory
   have separate owners. The backup chapter documents record limits and preparation sizing.
 - `SHOW UDFS`, `DESCRIBE UDF <name>`, and `SHOW CREATE UDF <name>` inspect trusted Roto functions.
