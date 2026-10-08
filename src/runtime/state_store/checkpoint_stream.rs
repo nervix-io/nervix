@@ -23,6 +23,55 @@ impl RuntimeStateStore {
             chunks: self.checkpoint_chunks.clone(),
         }
     }
+
+    /// Publish the sealed checkpoint `artifact` holds as the checkpoint of `placement` at
+    /// `revision`, in bounded segments whose data is durable before the header that selects them.
+    ///
+    /// The namespace is pinned before the write waits for admission. The write runs on the storage
+    /// workers under the fixed restore working reservation and retains the artifact until it ends,
+    /// including when it is cancelled.
+    pub(in crate::runtime) async fn publish_checkpoint_artifact(
+        &self,
+        placement: &RuntimeStatePlacement,
+        revision: u64,
+        artifact: Arc<crate::runtime::StagedArtifact>,
+    ) -> error_stack::Result<(), RuntimePersistenceError> {
+        let writer = self.checkpoint_stream_writer();
+        let placement = placement.clone();
+        let reservation = self
+            .executor
+            .reserve(
+                MemoryClass::Bulk,
+                crate::runtime::RESTORE_STATE_WORKING_BYTES,
+            )
+            .await
+            .change_context(RuntimePersistenceError::StorageAdmission)?;
+        self.executor
+            .run_storage(
+                StorageClass::Filesystem,
+                reservation,
+                move |_charge, cancellation| {
+                    let file = std::fs::File::open(artifact.path())
+                        .change_context(RuntimePersistenceError::RestoreRead)?;
+                    writer.publish_checkpoint_stream(
+                        &placement,
+                        CheckpointMetadata {
+                            lsm: revision,
+                            length: artifact.length(),
+                            digest: artifact.digest(),
+                        },
+                        file,
+                        || {
+                            cancellation
+                                .check()
+                                .change_context(RuntimePersistenceError::Cancelled)
+                        },
+                    )
+                },
+            )
+            .await
+            .change_context(RuntimePersistenceError::StorageExecution)?
+    }
 }
 
 impl CheckpointStreamWriter {

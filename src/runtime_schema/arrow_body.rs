@@ -22,14 +22,14 @@ use arrow_ipc::writer::StreamWriter;
 use arrow_schema::Schema as ArrowSchema;
 use error_stack::{Report, ResultExt as _};
 use nervix_execution::{
-    BudgetedBuffer, ChargedBytes, CpuClass, Executor, MemoryClass, Reservation,
+    BudgetedBuffer, ChargedBytes, CpuClass, ExecutionError, Executor, MemoryClass, Reservation,
 };
 use nervix_primitives::sync::StdArc;
 use thiserror::Error;
 
 use super::{
     CompiledSchema, RuntimeRecordBatch, batch_payload_bytes,
-    ipc_stream::{IpcStream, IpcStreamError},
+    ipc_stream::{IpcFramingDefect, IpcMessages, IpcStreamError},
 };
 
 /// Why a relay body could not be produced or consumed.
@@ -53,6 +53,8 @@ pub enum ArrowBodyError {
     Encode { reason: String },
     #[error("failed to decode the relay body: {reason}")]
     Decode { reason: String },
+    #[error("the relay body's Arrow stream is misframed: {defect}")]
+    Framing { defect: IpcFramingDefect },
 }
 
 impl ArrowBodyError {
@@ -74,10 +76,18 @@ impl ArrowBodyError {
         })
     }
 
-    /// A body the scan refused, with what the scan found beneath.
-    fn framing(refusal: Report<IpcStreamError>) -> Report<Self> {
-        let reason = refusal.current_context().to_string();
-        refusal.change_context(Self::Decode { reason })
+    /// A body the scan refused, with what the scan found beneath: misframed, naming what its
+    /// framing gets wrong, or one that does not decode for what its stream declares.
+    fn refused(refusal: Report<IpcStreamError>) -> Report<Self> {
+        let context = match refusal.current_context() {
+            IpcStreamError::Framing { defect } => Self::Framing {
+                defect: defect.clone(),
+            },
+            declared => Self::Decode {
+                reason: declared.to_string(),
+            },
+        };
+        refusal.change_context(context)
     }
 }
 
@@ -367,7 +377,7 @@ async fn decode_body(
         .reserve(contract.carriage.memory_class(), charge)
         .await
         .change_context(ArrowBodyError::Admission)?;
-    executor
+    let decoded = executor
         .run_cpu(
             contract.carriage.cpu_class(),
             reservation,
@@ -375,11 +385,12 @@ async fn decode_body(
                 cancellation
                     .check()
                     .change_context(ArrowBodyError::Cancelled)?;
-                // Arrow's reader panics on a stream that declares what it does not expect, so the
-                // stream is scanned first, and its sections counted, before any column is read.
-                let scanned = IpcStream::new(body.as_ref())
+                // Arrow's reader sizes what it allocates from the lengths a stream declares, and
+                // panics on a stream that declares what it does not expect. The stream is
+                // therefore scanned first, and its sections counted, before any column is read.
+                let scanned = IpcMessages::new(body.as_ref())
                     .scan(None)
-                    .map_err(ArrowBodyError::framing)?;
+                    .map_err(ArrowBodyError::refused)?;
                 if scanned.record_batches > contract.max_sections.get() {
                     return Err(Report::new(ArrowBodyError::TooManySections {
                         sections: scanned.record_batches,
@@ -425,13 +436,24 @@ async fn decode_body(
                 RuntimeRecordBatch::from_decoded_sections(schema, batches)
             },
         )
-        .await
-        .change_context(ArrowBodyError::Execution)?
+        .await;
+    match decoded {
+        Ok(batch) => batch,
+        Err(error) => {
+            let failure = match error.current_context() {
+                ExecutionError::QueueFull { .. } | ExecutionError::PoolClosed { .. } => {
+                    ArrowBodyError::Execution
+                }
+                // Arrow's reader panics only on a stream it failed to reject, so the body is
+                // what is wrong, and decoding it again would panic again.
+                ExecutionError::JobPanicked { .. } => ArrowBodyError::Decode {
+                    reason: "the stream could not be decoded".to_string(),
+                },
+            };
+            Err(error.change_context(failure))
+        }
+    }
 }
-
-#[cfg(test)]
-#[path = "arrow_body_properties.rs"]
-mod properties;
 
 #[cfg(test)]
 mod projection_tests {
@@ -459,5 +481,342 @@ mod projection_tests {
                 .current_context(),
             ArrowBodyError::Admission
         ));
+    }
+}
+
+#[cfg(test)]
+mod framing_tests {
+    use std::ops::Range;
+
+    use arrow_array::{ArrayRef, Int32Array, Int64Array};
+    use arrow_schema::{DataType, Field};
+    use meticulous::{OptionExt as _, ResultExt as _};
+
+    use super::{super::ipc_stream::CONTINUATION_MARKER, *};
+
+    /// The length prefix of a message in the current stream format: the continuation marker and
+    /// the metadata length.
+    const PREFIX_BYTES: usize = 8;
+
+    /// One sealed section of three rows, and the batch it was sealed from.
+    struct SealedSection {
+        schema: StdArc<ArrowSchema>,
+        batch: RuntimeRecordBatch,
+        bytes: Vec<u8>,
+    }
+
+    impl SealedSection {
+        /// A wide and a narrow column. Nothing else in the record batch message is twelve bytes
+        /// long, so a test finds the narrow column's buffer length by its value.
+        async fn sealed(executor: &Executor) -> Self {
+            let fields = vec![
+                Field::new("wide", DataType::Int64, false),
+                Field::new("narrow", DataType::Int32, false),
+            ];
+            let wide: ArrayRef = StdArc::new(Int64Array::from(vec![1, 2, 3]));
+            let narrow: ArrayRef = StdArc::new(Int32Array::from(vec![4, 5, 6]));
+            Self::of(executor, fields, vec![wide, narrow]).await
+        }
+
+        async fn of(executor: &Executor, fields: Vec<Field>, columns: Vec<ArrayRef>) -> Self {
+            let schema = StdArc::new(ArrowSchema::new(fields));
+            let batch = RecordBatch::try_new(StdArc::clone(&schema), columns)
+                .assured("every column has its field's type and three rows");
+            let batch = RuntimeRecordBatch::from_record_batch(StdArc::clone(&schema), batch)
+                .assured("the batch has the schema it was built with");
+            let section = batch
+                .encode_arrow_snapshot_section(executor)
+                .await
+                .assured("a three-row section seals");
+            Self {
+                schema,
+                bytes: section.as_ref().to_vec(),
+                batch,
+            }
+        }
+
+        /// Opens `bytes` as a section of this schema.
+        async fn open(
+            &self,
+            executor: &Executor,
+            bytes: Vec<u8>,
+        ) -> Result<RuntimeRecordBatch, Report<ArrowBodyError>> {
+            let section = executor
+                .charge_owned(MemoryClass::Bulk, bytes)
+                .await
+                .assured("the bulk budget holds one small section");
+            RuntimeRecordBatch::decode_arrow_snapshot_section(
+                executor,
+                StdArc::clone(&self.schema),
+                section,
+            )
+            .await
+        }
+
+        /// Where the metadata of the record batch message lies, and where in it the message
+        /// declares its body length.
+        fn record_batch(&self) -> RecordBatchMessage {
+            let mut offset = 0_usize;
+            loop {
+                let prefix_end = offset
+                    .checked_add(PREFIX_BYTES)
+                    .assured("a sealed test section is far below the address width");
+                let prefix = &self.bytes[offset..prefix_end];
+                assert_eq!(prefix[..4], CONTINUATION_MARKER);
+                let length: [u8; 4] = prefix[4..]
+                    .try_into()
+                    .assured("the prefix holds four length bytes behind its marker");
+                let length = usize::try_from(i32::from_le_bytes(length))
+                    .assured("a sealed message declares a positive metadata length");
+                let metadata_end = prefix_end
+                    .checked_add(length)
+                    .assured("a sealed test section is far below the address width");
+                let metadata = prefix_end..metadata_end;
+                let message = arrow_ipc::root_as_message(&self.bytes[metadata.clone()])
+                    .assured("a sealed message is an Arrow message");
+                let body_length = message.bodyLength();
+                if message.header_type() == arrow_ipc::MessageHeader::RecordBatch {
+                    // A table's vtable holds each field's offset from the table.
+                    let field = message._tab.vtable().get(arrow_ipc::Message::VT_BODYLENGTH);
+                    let table = prefix_end
+                        .checked_add(message._tab.loc())
+                        .assured("a position inside the section is far below the address width");
+                    let body_length_field = table
+                        .checked_add(usize::from(field))
+                        .assured("a position inside the section is far below the address width");
+                    return RecordBatchMessage {
+                        metadata,
+                        body_length_field,
+                    };
+                }
+                let body_bytes = usize::try_from(body_length)
+                    .assured("a sealed message declares a body length within the section");
+                offset = metadata_end
+                    .checked_add(body_bytes)
+                    .assured("a sealed test section is far below the address width");
+            }
+        }
+
+        /// The position of the one little-endian 64-bit field of `metadata` that holds `value`.
+        fn field_holding(&self, metadata: &Range<usize>, value: i64) -> usize {
+            let pattern = value.to_le_bytes();
+            let mut found = Vec::new();
+            for (index, window) in self.bytes[metadata.clone()].windows(8).enumerate() {
+                if window == pattern {
+                    found.push(index);
+                }
+            }
+            assert_eq!(
+                found.len(),
+                1,
+                "exactly one field of the message holds {value}"
+            );
+            metadata
+                .start
+                .checked_add(found[0])
+                .assured("a position inside the section is far below the address width")
+        }
+    }
+
+    struct RecordBatchMessage {
+        metadata: Range<usize>,
+        /// The position of the little-endian 64-bit body length the message declares.
+        body_length_field: usize,
+    }
+
+    /// The framing defect `result` was refused for.
+    fn framing_defect(
+        result: Result<RuntimeRecordBatch, Report<ArrowBodyError>>,
+    ) -> IpcFramingDefect {
+        let report = result.expect_err("a misframed section does not open");
+        match report.current_context() {
+            ArrowBodyError::Framing { defect } => defect.clone(),
+            other => panic!("the section is refused as misframed: {other:?}"),
+        }
+    }
+
+    #[nervix_primitives::test]
+    async fn a_sealed_section_opens_with_every_row() {
+        let executor = Executor::default();
+        let section = SealedSection::sealed(&executor).await;
+        let opened = section
+            .open(&executor, section.bytes.clone())
+            .await
+            .assured("an undamaged section opens");
+        assert_eq!(opened.batch(), section.batch.batch());
+    }
+
+    /// The reader would otherwise allocate the declared body, 256 TiB here, before it found the
+    /// stream too short to fill it.
+    #[nervix_primitives::test]
+    async fn a_message_body_longer_than_the_stream_is_refused_before_it_is_allocated() {
+        let executor = Executor::default();
+        let section = SealedSection::sealed(&executor).await;
+        let message = section.record_batch();
+        let mut damaged = section.bytes.clone();
+        // Bit 48 of the little-endian body length.
+        let high_byte = message
+            .body_length_field
+            .checked_add(6)
+            .assured("a position inside the section is far below the address width");
+        damaged[high_byte] ^= 1;
+        let declared = arrow_ipc::root_as_message(&damaged[message.metadata.clone()])
+            .assured("the damaged metadata is still an Arrow message")
+            .bodyLength();
+        assert!(
+            declared > 1 << 48,
+            "the message declares {declared} body bytes"
+        );
+
+        let result = section.open(&executor, damaged).await;
+
+        assert_eq!(framing_defect(result), IpcFramingDefect::Truncated);
+    }
+
+    /// The reader would otherwise zero the declared metadata, 2 GiB here, before it found the
+    /// stream too short to fill it.
+    #[nervix_primitives::test]
+    async fn message_metadata_longer_than_the_stream_is_refused_before_it_is_allocated() {
+        let executor = Executor::default();
+        let section = SealedSection::sealed(&executor).await;
+        let mut damaged = section.bytes.clone();
+        damaged[4..PREFIX_BYTES].copy_from_slice(&i32::MAX.to_le_bytes());
+
+        let result = section.open(&executor, damaged).await;
+
+        assert_eq!(framing_defect(result), IpcFramingDefect::Truncated);
+    }
+
+    #[nervix_primitives::test]
+    async fn a_negative_metadata_length_is_refused() {
+        let executor = Executor::default();
+        let section = SealedSection::sealed(&executor).await;
+        let mut damaged = section.bytes.clone();
+        damaged[4..PREFIX_BYTES].copy_from_slice(&i32::MIN.to_le_bytes());
+
+        let result = section.open(&executor, damaged).await;
+
+        assert_eq!(framing_defect(result), IpcFramingDefect::MetadataLength);
+    }
+
+    #[nervix_primitives::test]
+    async fn a_stream_cut_inside_a_length_prefix_is_refused() {
+        let executor = Executor::default();
+        let section = SealedSection::sealed(&executor).await;
+        let mut damaged = section.bytes.clone();
+        damaged.truncate(6);
+
+        let result = section.open(&executor, damaged).await;
+
+        assert_eq!(framing_defect(result), IpcFramingDefect::Truncated);
+    }
+
+    #[nervix_primitives::test]
+    async fn a_message_without_its_continuation_marker_is_refused() {
+        let executor = Executor::default();
+        let section = SealedSection::sealed(&executor).await;
+        let mut damaged = section.bytes.clone();
+        // The stream format before the marker opened a message with its metadata length.
+        damaged.drain(..4);
+
+        let result = section.open(&executor, damaged).await;
+
+        assert_eq!(framing_defect(result), IpcFramingDefect::Continuation);
+    }
+
+    #[nervix_primitives::test]
+    async fn a_stream_without_its_end_of_stream_marker_is_refused() {
+        let executor = Executor::default();
+        let section = SealedSection::sealed(&executor).await;
+        let mut damaged = section.bytes.clone();
+        let marker = damaged
+            .len()
+            .checked_sub(PREFIX_BYTES)
+            .assured("a sealed section ends with its end-of-stream marker");
+        assert_eq!(damaged[marker..][..4], CONTINUATION_MARKER);
+        damaged.truncate(marker);
+
+        let result = section.open(&executor, damaged).await;
+
+        assert_eq!(framing_defect(result), IpcFramingDefect::Truncated);
+    }
+
+    #[nervix_primitives::test]
+    async fn bytes_behind_the_end_of_stream_marker_are_refused() {
+        let executor = Executor::default();
+        let section = SealedSection::sealed(&executor).await;
+        let mut damaged = section.bytes.clone();
+        damaged.push(0);
+
+        let result = section.open(&executor, damaged).await;
+
+        assert_eq!(framing_defect(result), IpcFramingDefect::TrailingBytes);
+    }
+
+    /// The reader would otherwise panic on a worker when it sliced the buffer out of the body.
+    #[nervix_primitives::test]
+    async fn a_column_buffer_outside_its_message_body_is_refused_without_a_worker_panic() {
+        let executor = Executor::default();
+        let section = SealedSection::sealed(&executor).await;
+        let message = section.record_batch();
+        // The narrow column's three 32-bit values are the only 12 bytes the message declares.
+        let field = section.field_holding(&message.metadata, 12);
+        let mut damaged = section.bytes.clone();
+        // Bit 40 of the little-endian buffer length.
+        let high_byte = field
+            .checked_add(5)
+            .assured("a position inside the section is far below the address width");
+        damaged[high_byte] ^= 1;
+        let longest = arrow_ipc::root_as_message(&damaged[message.metadata.clone()])
+            .assured("the damaged metadata is still an Arrow message")
+            .header_as_record_batch()
+            .assured("the damaged message is still a record batch")
+            .buffers()
+            .assured("a record batch of two columns declares buffers")
+            .iter()
+            .map(|buffer| buffer.length())
+            .max()
+            .assured("a record batch of two columns declares buffers");
+        assert!(longest > 1 << 40, "a buffer declares {longest} bytes");
+
+        let result = section.open(&executor, damaged).await;
+
+        assert_eq!(framing_defect(result), IpcFramingDefect::Buffer);
+    }
+
+    /// Whatever single bit of a sealed section is damaged, the section either opens or is refused
+    /// for what it holds. No such damage reaches the reader as a length it would allocate, which
+    /// aborts the process when the node cannot make the allocation, or as a declaration it would
+    /// panic on, as its schema conversion does on a field type the verifier admits: the scan
+    /// refuses both before the reader reads the stream.
+    #[nervix_primitives::test]
+    async fn every_single_damaged_bit_opens_or_is_refused_typed() {
+        let executor = Executor::default();
+        let section = SealedSection::sealed(&executor).await;
+        for position in 0..section.bytes.len() {
+            nervix_primitives::task::consume_budget().await;
+            for bit in 0..8_u8 {
+                let mut damaged = section.bytes.clone();
+                damaged[position] ^= 1_u8 << bit;
+
+                let result = section.open(&executor, damaged).await;
+
+                let Err(report) = result else {
+                    continue;
+                };
+                // What the scan or the reader rejects for what the stream declares is a decode
+                // failure, and what the framing rejects names its defect.
+                assert!(
+                    matches!(
+                        report.current_context(),
+                        ArrowBodyError::Decode { .. }
+                            | ArrowBodyError::Framing { .. }
+                            | ArrowBodyError::NoSection
+                            | ArrowBodyError::TooManySections { .. }
+                    ),
+                    "bit {bit} of byte {position}: {report:?}"
+                );
+            }
+        }
     }
 }

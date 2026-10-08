@@ -1,7 +1,7 @@
 use error_stack::{Report, ResultExt as _};
 
 use super::*;
-use crate::runtime_schema::{IpcStream, IpcStreamError, StreamEnding, UnsupportedFieldKind};
+use crate::runtime_schema::{IpcMessages, IpcStreamError, StreamEnding, UnsupportedFieldKind};
 
 pub(super) struct WasmOutputContext<'a> {
     pub(super) branch: &'a mut BranchRuntime,
@@ -552,7 +552,7 @@ impl WasmOutputValidator<'_> {
             |defect: WasmGeneratedIpcDefect| WasmOutputError::InvalidGeneratedArrowIpc { defect };
         // Arrow's reader panics on a stream that declares what it does not expect, and the stream
         // is the guest's, so it is scanned before the reader reads any of it on this task.
-        let scanned = match IpcStream::ending(ipc, StreamEnding::MarkerOrEnd).scan(None) {
+        let scanned = match IpcMessages::ending(ipc, StreamEnding::MarkerOrEnd).scan(None) {
             Ok(scanned) => scanned,
             Err(refusal) => {
                 let defect = match refusal.current_context() {

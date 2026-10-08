@@ -24,7 +24,7 @@ use nervix_primitives::sync::StdArc;
 
 use super::{
     generated_batches::GeneratedSchema,
-    ipc_stream::{IpcStreamError, UnsupportedFieldKind},
+    ipc_stream::{IpcFramingDefect, IpcStreamError, UnsupportedFieldKind},
 };
 
 /// The end-of-stream marker: the continuation marker and a zero metadata length.
@@ -270,7 +270,9 @@ impl StreamDefect {
     /// What the scan refuses the stream for.
     pub(crate) fn refusal(self) -> IpcStreamError {
         match self {
-            Self::BufferPastBody => IpcStreamError::BufferOutsideBody { buffer: 1 },
+            Self::BufferPastBody => IpcStreamError::Framing {
+                defect: IpcFramingDefect::Buffer,
+            },
             Self::IntegerOfSevenBits => IpcStreamError::UnsupportedField {
                 field: 0,
                 kind: UnsupportedFieldKind::IntegerWidth { bits: 7 },
@@ -288,7 +290,9 @@ impl StreamDefect {
             Self::OffsetsCutInsideAnOffset => IpcStreamError::OffsetsNotWhole { buffer: 1 },
             Self::VariadicBufferCounts => IpcStreamError::VariadicBuffers,
             Self::FixedSizeListTooLongToCount => IpcStreamError::NodeLength { node: 0 },
-            Self::BodyLongerThanStream => IpcStreamError::Truncated,
+            Self::BodyLongerThanStream => IpcStreamError::Framing {
+                defect: IpcFramingDefect::Truncated,
+            },
         }
     }
 

@@ -1,24 +1,31 @@
-//! One Arrow IPC stream, checked before Arrow's reader reads any of it.
+//! The framing of an Arrow IPC stream and what the stream may declare, checked without decoding
+//! what it describes.
 //!
 //! Layer: engines and infrastructure.
 //!
-//! - **Owns.** Reading a stream's messages one at a time without decoding their bodies, and
-//!   everything a stream must hold before it reaches Arrow's reader: the continuation marker and
-//!   lengths that frame each message, the schema message first with only the field types Nervix
-//!   carries, record batch messages only and uncompressed, every record batch shaped as that
-//!   schema says with its buffers inside its own body, and the stream's end. Opening Arrow's reader
-//!   over a stream it accepted.
-//! - **Depends on.** Arrow's IPC message definitions and its stream reader.
-//! - **Must not know.** Who sent the stream, what its batches are for, or what happens to them.
+//! - **Owns.** Walking a stream message by message and holding every length it declares, each
+//!   message's metadata, its body and its column buffers, to the bytes that actually follow; and
+//!   everything else a stream must hold before it reaches Arrow's reader: the schema message first
+//!   with only the field types Nervix carries, record batch messages only and uncompressed, every
+//!   record batch shaped as that schema says, and the stream's end. Opening Arrow's reader over a
+//!   stream it accepted.
+//! - **Depends on.** Arrow's IPC message schema and its stream reader.
+//! - **Must not know.** Which contract a stream travels under, who sent it, or what happens to its
+//!   batches.
 //!
-//! Arrow's stream reader trusts what a stream declares. It panics, rather than refusing the stream,
-//! on a field type or a type parameter it does not implement, on a list without its one child, on
-//! a buffer that reaches past its message body, on a validity bitmap shorter than the nulls it is
-//! declared to hold, on an offsets buffer that ends inside an offset, on variadic buffer counts no
-//! field takes and on a fixed-size list too long to count, and it allocates a message's metadata
-//! and body from the lengths the stream declares before reading them. A stream from outside the
-//! node is therefore scanned here first, and [`ScannedStream::reader`] is the only way the node
-//! opens Arrow's reader over one.
+//! Arrow's stream reader trusts what a stream declares. It sizes each message's metadata and body
+//! from the lengths the stream declares before it reads them, so a stream that overstates one
+//! makes the reader allocate what the stream claims rather than what it carries. It panics, rather
+//! than refusing the stream, on a field type or a type parameter it does not implement, on a list
+//! without its one child, on a column buffer that reaches past its message body, on a validity
+//! bitmap shorter than the nulls it is declared to hold, on an offsets buffer that ends inside an
+//! offset, on variadic buffer counts no field takes and on a fixed-size list too long to count.
+//! Every decoder of a stream the node did not write therefore scans it here first, and
+//! [`ScannedStream::reader`] is the only way the node opens Arrow's reader over one.
+//!
+//! The one framing accepted is the one a current writer produces: every message opens with the
+//! continuation marker. The end-of-stream marker ends the stream, unless the caller admits a
+//! stream whose writer closed it after a whole message instead, as the Arrow format allows.
 
 use std::{io::Cursor, num::NonZeroUsize};
 
@@ -33,7 +40,7 @@ use meticulous::{OptionExt as _, ResultExt as _};
 use thiserror::Error;
 
 /// The marker that opens every message of a canonical Arrow IPC stream.
-const CONTINUATION_MARKER: [u8; 4] = [0xff; 4];
+pub(super) const CONTINUATION_MARKER: [u8; 4] = [0xff; 4];
 
 /// The width of the continuation marker and of the metadata length that follows it.
 const FRAME_WORD: usize = 4;
@@ -47,22 +54,33 @@ const OFFSET_WIDTH: i64 = 4;
 /// length within `i32` keeps that product inside 64 bits.
 const MAX_FIELD_NODE_LENGTH: i32 = i32::MAX;
 
+/// Why a stream is not framed within the bytes that carry it.
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+pub enum IpcFramingDefect {
+    #[error("the stream ends inside a message")]
+    Truncated,
+    #[error("a message does not open with the continuation marker")]
+    Continuation,
+    #[error("bytes follow the end-of-stream marker")]
+    TrailingBytes,
+    #[error("a message declares a negative metadata length")]
+    MetadataLength,
+    /// The metadata is not an Arrow message, for the reason its verifier gives.
+    #[error("{reason}")]
+    Message { reason: String },
+    #[error("a message declares a body length outside this body")]
+    BodyLength,
+    #[error("a column buffer lies outside the body of its message")]
+    Buffer,
+}
+
 /// Why a stream is not one canonical Arrow IPC stream of the field types Nervix carries. Each
 /// variant names the defect without the bytes, which may carry a payload.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub(crate) enum IpcStreamError {
-    #[error("the stream ends inside a message")]
-    Truncated,
-    #[error("a message does not open with the continuation marker")]
-    ContinuationMarker,
-    #[error("a message declares a negative metadata length")]
-    NegativeMetadataLength,
-    #[error("a message's metadata is not an Arrow IPC message: {reason}")]
-    Metadata { reason: String },
-    #[error("a message declares a body length outside this body")]
-    BodyLength,
-    #[error("bytes follow the end-of-stream marker")]
-    TrailingBytes,
+    /// The stream is not framed within its bytes.
+    #[error("{defect}")]
+    Framing { defect: IpcFramingDefect },
     #[error("the stream ends before its schema message")]
     MissingSchema,
     #[error("the stream does not open with its schema message")]
@@ -85,8 +103,6 @@ pub(crate) enum IpcStreamError {
     NegativeRowCount,
     #[error("a record batch has {rows} rows, more than the {limit} one batch may carry")]
     TooManyRows { rows: u64, limit: usize },
-    #[error("a record batch declares buffer {buffer} outside its message body")]
-    BufferOutsideBody { buffer: usize },
     #[error("a record batch declares variadic buffer counts, which no Nervix type has")]
     VariadicBuffers,
     #[error(
@@ -109,6 +125,14 @@ pub(crate) enum IpcStreamError {
 }
 
 impl IpcStreamError {
+    /// A stream whose framing is what is wrong, naming the defect.
+    fn misframed(defect: Report<IpcFramingDefect>) -> Report<Self> {
+        let context = Self::Framing {
+            defect: defect.current_context().clone(),
+        };
+        defect.change_context(context)
+    }
+
     /// Whether the defect is a record batch at odds with the schema its own stream declares, as
     /// opposed to a stream that does not frame its messages or a schema Nervix does not carry.
     pub(crate) fn is_of_record_batch_shape(&self) -> bool {
@@ -119,12 +143,7 @@ impl IpcStreamError {
             | Self::NodeLength { .. }
             | Self::ValidityTooShort { .. }
             | Self::OffsetsNotWhole { .. } => true,
-            Self::Truncated
-            | Self::ContinuationMarker
-            | Self::NegativeMetadataLength
-            | Self::Metadata { .. }
-            | Self::BodyLength
-            | Self::TrailingBytes
+            Self::Framing { .. }
             | Self::MissingSchema
             | Self::SchemaNotFirst
             | Self::BigEndian
@@ -133,8 +152,7 @@ impl IpcStreamError {
             | Self::UnexpectedMessage { .. }
             | Self::Compressed
             | Self::NegativeRowCount
-            | Self::TooManyRows { .. }
-            | Self::BufferOutsideBody { .. } => false,
+            | Self::TooManyRows { .. } => false,
         }
     }
 }
@@ -365,18 +383,14 @@ impl StreamShape {
         }
     }
 
-    /// Checks one record batch message: uncompressed, a row count within `max_rows`, every buffer
-    /// it declares inside the body the message declares, and the field nodes and buffers this
-    /// shape's fields take, each holding what Arrow's reader reads without checking.
+    /// Checks one record batch message, whose buffers the walk has held to its body: uncompressed,
+    /// a row count within `max_rows`, and the field nodes and buffers this shape's fields take,
+    /// each holding what Arrow's reader reads without checking.
     fn check_record_batch(
         &self,
-        message: &Message<'_>,
+        batch: &RecordBatch<'_>,
         max_rows: Option<NonZeroUsize>,
     ) -> Result<(), Report<IpcStreamError>> {
-        let batch = message.header_as_record_batch().verified(
-            "the message verifier admits a union type only beside its value, and the caller \
-             checked the type is a record batch",
-        );
         if batch.compression().is_some() {
             return Err(Report::new(IpcStreamError::Compressed));
         }
@@ -395,20 +409,8 @@ impl StreamShape {
                 }));
             }
         }
-        let body_length = message.bodyLength();
         let buffers = batch.buffers().unwrap_or_default();
-        for (index, buffer) in buffers.iter().enumerate() {
-            let end = buffer.offset().checked_add(buffer.length());
-            let inside = buffer.offset() >= 0
-                && buffer.length() >= 0
-                && matches!(end, Some(end) if end <= body_length);
-            if !inside {
-                return Err(Report::new(IpcStreamError::BufferOutsideBody {
-                    buffer: index,
-                }));
-            }
-        }
-        self.check_fields(&batch, buffers)
+        self.check_fields(batch, buffers)
     }
 
     /// Checks that the record batch declares exactly the field nodes and buffers this shape's
@@ -481,7 +483,7 @@ struct DeclaredBuffers<'a> {
 }
 
 /// One buffer a record batch declares: its place among the record batch's buffers and its length
-/// in bytes, which the caller has checked lies inside the message body.
+/// in bytes, which the walk has held to the message body.
 struct DeclaredBuffer {
     index: usize,
     length: i64,
@@ -519,23 +521,24 @@ impl DeclaredBuffers<'_> {
     }
 }
 
-/// The messages of an Arrow IPC stream, read one at a time without decoding their bodies.
-pub(crate) struct IpcStream<'a> {
-    body: &'a [u8],
+/// The messages of an Arrow IPC stream, read one at a time without decoding their bodies, so a
+/// stream is checked before any column is allocated.
+pub(crate) struct IpcMessages<'a> {
+    stream: &'a [u8],
     offset: usize,
     ending: StreamEnding,
 }
 
-impl<'a> IpcStream<'a> {
-    /// A stream that the end-of-stream marker must end.
-    pub(crate) fn new(body: &'a [u8]) -> Self {
-        Self::ending(body, StreamEnding::Marker)
+impl<'a> IpcMessages<'a> {
+    /// The messages of a stream that the end-of-stream marker must end.
+    pub(crate) fn new(stream: &'a [u8]) -> Self {
+        Self::ending(stream, StreamEnding::Marker)
     }
 
-    /// A stream that may end as `ending` allows.
-    pub(crate) fn ending(body: &'a [u8], ending: StreamEnding) -> Self {
+    /// The messages of a stream that may end as `ending` allows.
+    pub(crate) fn ending(stream: &'a [u8], ending: StreamEnding) -> Self {
         Self {
-            body,
+            stream,
             offset: 0,
             ending,
         }
@@ -550,7 +553,8 @@ impl<'a> IpcStream<'a> {
     ) -> Result<ScannedStream<'a>, Report<IpcStreamError>> {
         let mut shape: Option<StreamShape> = None;
         let mut record_batches = 0_usize;
-        while let Some(message) = self.next_message()? {
+        // Every message occupies at least its two frame words, so the walk ends within the stream.
+        while let Some(message) = self.next_message().map_err(IpcStreamError::misframed)? {
             let header = message.header_type();
             let Some(declared) = &shape else {
                 if header != MessageHeader::Schema {
@@ -563,7 +567,12 @@ impl<'a> IpcStream<'a> {
                 let kind = header.variant_name().unwrap_or("unknown");
                 return Err(Report::new(IpcStreamError::UnexpectedMessage { kind }));
             }
-            declared.check_record_batch(&message, max_rows)?;
+            let batch = message.header_as_record_batch().verified(
+                "the message verifier admits a union type only beside its value, and the type was \
+                 just checked to be a record batch",
+            );
+            Self::check_buffers(&message, &batch).map_err(IpcStreamError::misframed)?;
+            declared.check_record_batch(&batch, max_rows)?;
             record_batches = record_batches
                 .checked_add(1)
                 .assured("every counted message occupies bytes of a body that fits in memory");
@@ -571,10 +580,10 @@ impl<'a> IpcStream<'a> {
         if shape.is_none() {
             return Err(Report::new(IpcStreamError::MissingSchema));
         }
-        let body: &'a [u8] = self.body;
-        let (stream, after) = body
+        let whole: &'a [u8] = self.stream;
+        let (stream, after) = whole
             .split_at_checked(self.offset)
-            .verified("the scan only moves its offset over bytes it took from the body");
+            .verified("the walk only moves its offset over bytes it took from the stream");
         Ok(ScannedStream {
             stream,
             record_batches,
@@ -582,14 +591,15 @@ impl<'a> IpcStream<'a> {
         })
     }
 
-    /// The next message's header, or `None` at the stream's end.
-    fn next_message(&mut self) -> Result<Option<Message<'a>>, Report<IpcStreamError>> {
-        if self.ending == StreamEnding::MarkerOrEnd && self.offset == self.body.len() {
+    /// The next message's header, or `None` at the stream's end. The message's body lies within
+    /// the stream; nothing of it is read.
+    fn next_message(&mut self) -> Result<Option<Message<'a>>, Report<IpcFramingDefect>> {
+        if self.ending == StreamEnding::MarkerOrEnd && self.offset == self.stream.len() {
             return Ok(None);
         }
         let marker = self.take(FRAME_WORD)?;
         if marker != CONTINUATION_MARKER {
-            return Err(Report::new(IpcStreamError::ContinuationMarker));
+            return Err(Report::new(IpcFramingDefect::Continuation));
         }
         let length_bytes = self.take(FRAME_WORD)?;
         let length = i32::from_le_bytes(
@@ -598,37 +608,58 @@ impl<'a> IpcStream<'a> {
                 .verified("take returned exactly the four bytes it was asked for"),
         );
         if length == 0 {
-            if self.ending == StreamEnding::Marker && self.offset != self.body.len() {
-                return Err(Report::new(IpcStreamError::TrailingBytes));
+            if self.ending == StreamEnding::Marker && self.offset != self.stream.len() {
+                return Err(Report::new(IpcFramingDefect::TrailingBytes));
             }
             return Ok(None);
         }
         let Ok(length) = usize::try_from(length) else {
-            return Err(Report::new(IpcStreamError::NegativeMetadataLength));
+            return Err(Report::new(IpcFramingDefect::MetadataLength));
         };
         let metadata = self.take(length)?;
         let message = root_as_message(metadata).map_err(|error| {
-            Report::new(IpcStreamError::Metadata {
+            Report::new(IpcFramingDefect::Message {
                 reason: error.to_string(),
             })
         })?;
         let Ok(body_length) = usize::try_from(message.bodyLength()) else {
-            return Err(Report::new(IpcStreamError::BodyLength));
+            return Err(Report::new(IpcFramingDefect::BodyLength));
         };
         self.take(body_length)?;
         Ok(Some(message))
     }
 
-    /// The next `length` bytes of the body.
-    fn take(&mut self, length: usize) -> Result<&'a [u8], Report<IpcStreamError>> {
-        let body: &'a [u8] = self.body;
+    /// The next `length` bytes of the stream.
+    fn take(&mut self, length: usize) -> Result<&'a [u8], Report<IpcFramingDefect>> {
+        let stream: &'a [u8] = self.stream;
         let Some(end) = self.offset.checked_add(length) else {
-            return Err(Report::new(IpcStreamError::Truncated));
+            return Err(Report::new(IpcFramingDefect::Truncated));
         };
-        let Some(bytes) = body.get(self.offset..end) else {
-            return Err(Report::new(IpcStreamError::Truncated));
+        let Some(bytes) = stream.get(self.offset..end) else {
+            return Err(Report::new(IpcFramingDefect::Truncated));
         };
         self.offset = end;
         Ok(bytes)
+    }
+
+    /// Holds every column buffer `batch` declares to the body of its message.
+    fn check_buffers(
+        message: &Message<'_>,
+        batch: &RecordBatch<'_>,
+    ) -> Result<(), Report<IpcFramingDefect>> {
+        let Some(buffers) = batch.buffers() else {
+            return Ok(());
+        };
+        let body_length = message.bodyLength();
+        // The buffers are a vector of the message's verified metadata, which bounds their count.
+        for buffer in buffers {
+            let Some(end) = buffer.offset().checked_add(buffer.length()) else {
+                return Err(Report::new(IpcFramingDefect::Buffer));
+            };
+            if buffer.offset() < 0 || buffer.length() < 0 || end > body_length {
+                return Err(Report::new(IpcFramingDefect::Buffer));
+            }
+        }
+        Ok(())
     }
 }

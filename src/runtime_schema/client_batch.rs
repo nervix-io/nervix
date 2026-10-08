@@ -31,7 +31,7 @@ use thiserror::Error;
 
 use super::{
     CompiledSchema, RuntimeRecordBatch, batch_payload_bytes,
-    ipc_stream::{IpcStream, IpcStreamError, UnsupportedFieldKind},
+    ipc_stream::{IpcMessages, IpcStreamError, UnsupportedFieldKind},
 };
 
 /// What one client batch may carry, as its producer's grant decides.
@@ -316,7 +316,7 @@ impl RuntimeRecordBatch {
         max_rows: NonZeroUsize,
         decoded_limit: u64,
     ) -> Result<Self, Report<ClientBatchError>> {
-        let scanned = IpcStream::new(body)
+        let scanned = IpcMessages::new(body)
             .scan(Some(max_rows))
             .map_err(ClientBatchError::framing)?;
         let mut reader = scanned.reader().map_err(ClientBatchError::malformed)?;

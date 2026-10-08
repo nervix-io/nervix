@@ -1,9 +1,10 @@
-//! Generated Arrow batches through the relay body and snapshot section codecs.
+//! The Arrow IPC bodies a batch travels and is sealed as, read back whole and read back damaged.
 //!
 //! Layer: test harness.
 //!
 //! - **Owns.** The round-trip and damaged-body properties of every Arrow IPC body the runtime
-//!   encodes and decodes, and the boundary of each limit those decoders enforce.
+//!   encodes and decodes, relay bodies and sealed snapshot sections alike, and the boundary of
+//!   each limit those decoders enforce.
 //! - **Depends on.** The generated batches and their logical oracle, the body codecs and the
 //!   executor that charges them.
 //! - **Must not know.** Relays, peers or the interconnect that carries a body.
@@ -98,7 +99,7 @@ fn repeated(rows: &RecordBatch, sections: usize) -> RecordBatch {
 /// start inside a larger batch. A body of several sections is refused by the decoders that accept
 /// exactly one and concatenated by the one that accepts any number. Nothing stays charged.
 #[test]
-fn bolero_relay_bodies_carry_the_exact_schema_and_every_value() {
+fn bolero_arrow_bodies_restore_every_column_value_and_null() {
     let runtime = property_runtime();
     bolero::check!()
         .with_iterations(128)
@@ -194,7 +195,7 @@ fn bolero_relay_bodies_carry_the_exact_schema_and_every_value() {
 /// decode to a valid batch: of the expected schema where the decoder knows it, and one that
 /// encodes and decodes back to itself.
 #[test]
-fn bolero_damaged_relay_bodies_fail_typed_or_decode_within_their_contract() {
+fn bolero_damaged_arrow_bodies_are_refused_typed_or_decode_canonically() {
     let runtime = property_runtime();
     bolero::check!()
         .with_iterations(256)
@@ -248,6 +249,7 @@ async fn check_damaged_outcome(
                 matches!(
                     failure.current_context(),
                     ArrowBodyError::Decode { .. }
+                        | ArrowBodyError::Framing { .. }
                         | ArrowBodyError::TooManySections { .. }
                         | ArrowBodyError::NoSection
                         | ArrowBodyError::DecodedTooLarge { .. }
@@ -432,8 +434,9 @@ async fn a_body_of_another_schema_is_refused_where_the_schema_is_known() {
     ));
 }
 
-/// A body declaring what Arrow's reader would panic on is refused as undecodable by the framing
-/// scan, before the reader reads it, by every relay body decoder.
+/// A body declaring what Arrow's reader would panic on, or allocate for until the process aborts,
+/// is refused by the scan before the reader reads it, by every relay body decoder: as misframed
+/// when its framing is what is wrong, and as undecodable for anything else it declares.
 #[rstest]
 fn a_body_arrows_reader_would_panic_on_is_refused_before_it_is_read(
     #[values(
@@ -463,10 +466,17 @@ fn a_body_arrows_reader_would_panic_on_is_refused_before_it_is_read(
             .await
             .expect_err("the stream declares what no valid stream does");
         for refused in [exact, any] {
-            assert!(
-                matches!(refused.current_context(), ArrowBodyError::Decode { .. }),
-                "the body is refused as undecodable: {refused:?}"
-            );
+            match (defect.refusal(), refused.current_context()) {
+                (
+                    IpcStreamError::Framing { defect: expected },
+                    ArrowBodyError::Framing { defect: reported },
+                ) => assert_eq!(*reported, expected, "the body is refused as misframed"),
+                (IpcStreamError::Framing { .. }, other) => {
+                    panic!("a misframed body is refused as misframed: {other:?}")
+                }
+                (_, ArrowBodyError::Decode { .. }) => {}
+                (_, other) => panic!("the body is refused as undecodable: {other:?}"),
+            }
             assert_eq!(
                 refused.downcast_ref::<IpcStreamError>(),
                 Some(&defect.refusal()),

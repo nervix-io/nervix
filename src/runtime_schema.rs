@@ -77,6 +77,8 @@ use simd_json::{BorrowedValue, KnownKey, prelude::*};
 use thiserror::Error;
 
 mod arrow_body;
+#[cfg(test)]
+mod arrow_body_properties;
 mod batch_container;
 mod client_batch;
 #[cfg(test)]
@@ -95,7 +97,7 @@ pub(crate) use batch_container::{
 };
 pub use client_batch::{ClientBatchError, ClientBatchLimits, ClientSchemaDifference};
 pub use ipc_stream::UnsupportedFieldKind;
-pub(crate) use ipc_stream::{IpcStream, IpcStreamError, StreamEnding};
+pub(crate) use ipc_stream::{IpcMessages, IpcStreamError, StreamEnding};
 pub use jaq_unfold::UnfoldPosition;
 
 #[derive(Debug, Clone, PartialEq)]

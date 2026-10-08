@@ -384,6 +384,16 @@ are:
 | Bulk transfer chunk | 64 KiB |
 | Snapshot section | 8 MiB |
 
+A receiver also holds an Arrow body to its own framing before it decodes it. The body is one
+canonical IPC stream: every message opens with the continuation marker, and the end-of-stream
+marker ends the body. Every length the stream declares must lie within the bytes the body carries:
+each message's metadata, its body, and each column buffer inside that body. A body that is framed
+otherwise is refused as misframed, so a declared length never sizes an allocation the body does not
+back, and a column buffer is never sliced outside its message. The same scan refuses, as
+undecodable, a body whose schema declares a field type Nervix does not carry, a dictionary encoding
+among them, or whose record batch is at odds with that schema. It opens every Arrow section of a
+sealed snapshot, a checkpoint or a backup archive.
+
 HTTP/2 flow control adds another bound. Each stream begins with a 64 KiB receive window, each
 connection begins with a 256 KiB receive window, and request headers are limited to 16 KiB. A
 receiver releases more HTTP/2 credit only as it accepts and accounts for more data. Large streamed

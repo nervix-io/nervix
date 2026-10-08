@@ -38,9 +38,9 @@ stream for each of the four.
 
 | Representation | Target | Complete oracle |
 | --- | --- | --- |
-| Relay body: one Arrow IPC section of a relay batch, decoded against the relay's schema or without one | `relay-arrow-bodies` | The decoded batch is the encoded one; a body of several sections is refused by the decoders that take one section and concatenated by the one that takes any number; no charge outlives a body |
-| Sealed snapshot section: one Arrow IPC section of a runtime snapshot | `relay-arrow-bodies` | The decoded section is the encoded batch under its expected schema |
-| Damaged relay bodies and snapshot sections | `relay-arrow-bodies-malformed` | `Decode`, `TooManySections`, `NoSection` or `DecodedTooLarge`, never `Admission` or `Execution`; or a batch of the expected schema that encodes and decodes back to itself |
+| Relay body: one Arrow IPC section of a relay batch, decoded against the relay's schema or without one | `runtime-arrow-bodies` | The decoded batch is the encoded one; a body of several sections is refused by the decoders that take one section and concatenated by the one that takes any number; no charge outlives a body |
+| Sealed snapshot section: one Arrow IPC section of a runtime snapshot | `runtime-arrow-bodies` | The decoded section is the encoded batch under its expected schema |
+| Damaged relay bodies and snapshot sections | `runtime-arrow-bodies-malformed` | `Framing` with the defect of the stream's framing, `Decode`, `TooManySections`, `NoSection` or `DecodedTooLarge`, never `Admission` or `Execution`; or a batch of the expected schema that encodes and decodes back to itself |
 | Producer batch: the canonical Arrow IPC stream the client library writes and the node decodes | `client-producer-batches` | The decoded batch is the submitted one; the client library and the node map the ingestor's fields to one Arrow schema; limits equal to the batch admit it and one row or byte less refuses it with the size and the limit |
 | Damaged producer batches | `client-producer-batches-malformed` | A refusal that names a defect of the batch, never a busy node; or a batch of the exact schema within the row limit that the client library writes and the node decodes back to itself |
 | Generated column pool: the Arrow IPC stream a WASM guest writes beside its routed outputs | `wasm-generated-pools` | The decoded pool is the written one, unnamed fields with their types, nullability and metadata and every row, value and null, whether the stream ends with the end-of-stream marker or is closed after its record batch |
@@ -60,7 +60,7 @@ for the shared binding, the WASM targets in the
 backup and storage targets in the
 [storage representation coverage map](./storage-representation-coverage.md) for archived and stored
 Arrow sections. A remote hash map answer and a client emitter delivery travel as the relay body's
-Arrow IPC stream, which `relay-arrow-bodies` covers through its schema-free decoder.
+Arrow IPC stream, which `runtime-arrow-bodies` covers through its schema-free decoder.
 
 ## Codec Domains
 
@@ -110,7 +110,7 @@ Arrow IPC stream, which `relay-arrow-bodies` covers through its schema-free deco
   message ends, as the Arrow format allows a writer that closes its stream, and bytes after its
   marker are the pool's trailing bytes.
 - Arrow's reader trusts what a stream declares and panics where the scan now refuses: on a buffer
-  past its body, which `relay-arrow-bodies-malformed` found, on a field type or type parameter it
+  past its body, which `runtime-arrow-bodies-malformed` found, on a field type or type parameter it
   does not implement, a list without its child, a dictionary encoding without its index type, a
   schema without its field list, a validity bitmap shorter than the nulls it is declared to hold,
   an offsets buffer that ends inside an offset, variadic buffer counts no field takes and a

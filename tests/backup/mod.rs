@@ -25,6 +25,7 @@ use crate::common::{
 mod branch_state;
 mod console;
 mod fidelity;
+mod large_branch_state;
 mod materialized;
 pub(crate) mod restore;
 mod staging;
