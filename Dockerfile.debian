@@ -32,6 +32,7 @@ ARG KACHE_S3_SECRET_KEY
 ENV RUSTUP_HOME=/usr/local/rustup
 ENV CARGO_HOME=/usr/local/cargo
 ENV PATH=/usr/local/cargo/bin:$PATH
+ENV CARGO_INCREMENTAL=0
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
