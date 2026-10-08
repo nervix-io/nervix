@@ -2419,6 +2419,21 @@ deps-down:
 chaos *args:
     exec bash scripts/chaos/chaos.sh {{ args }}
 
+# Exercise the actual rate-probe owner with delayed connects, partial bytes and unreachable peers.
+test-chaos-rate-probe:
+    exec bash scripts/chaos/tests/rate-probe-self-test.sh
+
+# Requires kcov; retains shell Cobertura coverage for the probe and its regression controls.
+coverage-chaos-rate-probe:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    # kcov's Bash descriptor exchange cannot handle an inherited limit near INT_MAX.
+    descriptor_limit="$(ulimit -n)"
+    if [[ "${descriptor_limit}" == unlimited ]] || ((descriptor_limit > 65536)); then
+        ulimit -n 65536
+    fi
+    kcov --clean --include-path={{ quote(invocation_directory() / "scripts/chaos/link-degradation.sh") }},{{ quote(invocation_directory() / "scripts/chaos/tests/rate-probe-self-test.sh") }} {{ quote(cargo_target_dir / "chaos-rate-probe-coverage") }} scripts/chaos/tests/rate-probe-self-test.sh
+
 # Regenerate the prebuilt WASM guest the stateful chaos scenarios upload, after a guest ABI change.
 # The chaos runner itself never builds guest code; `cargo test --package nervix-wasm` checks that
 # the checked-in module still equals what this writes.
