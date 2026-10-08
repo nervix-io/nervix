@@ -1493,6 +1493,11 @@ Local transport operations return `error_stack` reports. TLS and wire failures r
 causes beneath `TransportError`; typed requests and stream readers add `RequestError` context while
 retaining the transport report. Deadline, shutdown, quota, cancellation, relay-rejection, and
 indeterminate-delivery decisions inspect the current typed context, not formatted report text.
+Runtime dispatch, relay admission-response and remote acknowledgement logs render every context
+of those local reports. State synchronization, checkpoint announcement and replica catch-up logs
+also retain the underlying request, placement or storage cause when their owner adds context.
+When remote ACK registration cannot reserve correlation memory, the affected record's negative
+acknowledgement carries the registration report chain, including its admission cause.
 An answering node sends its established remote failure class or stream rejection text over the
 wire; a local report's cause chain is not serialized into an HTTP/2 response.
 

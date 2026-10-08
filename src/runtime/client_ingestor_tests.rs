@@ -23,6 +23,108 @@ use crate::runtime_ack::{AckCompletion, AckSet};
 /// Generously longer than any step here takes, so only a hang reaches it.
 const WAIT: Duration = Duration::from_secs(30);
 
+#[nervix_primitives::test]
+async fn runtime_report_chain_admitted_client_batch_log() {
+    use crate::{
+        runtime::report_observer::ReportLogObserver,
+        runtime_schema::{RuntimeValue, test_runtime_row},
+    };
+
+    let runtime = Runtime::default();
+    let domain = domain("tenant");
+    let ingestor = named::<IngestorName>("orders_in");
+    install_unpaced_test_domain(&runtime, &domain);
+    let handles = runtime
+        .ingest_task_handles(&domain, &ingestor)
+        .assured("the fixture ingestor attaches before its domain ends");
+    let schema = test_schema(&[("id", ParseAsType::U64)]);
+    let route = bind_ingestor_route_for_test(
+        &ModelName::from(&ingestor),
+        IngestMetadataKind::Headers,
+        false,
+        &nervix_nspl::parse_route_construction("SET id = input.id")
+            .assured("the fixture route assigns its declared field"),
+        RuntimeVmSchemaPair {
+            input: schema.arrow_schema(),
+            input_sensitivity: schema.vm_sensitivity(),
+            output: schema.arrow_schema(),
+            output_sensitivity: schema.vm_sensitivity(),
+        },
+        RuntimeVmCompileContext {
+            available_materialized_streams: &HashMap::default(),
+            available_lookups: &HashMap::default(),
+            current_branching: &ResolvedBranching::unbranched(),
+            udfs: None,
+        },
+    )
+    .assured("the fixture route binds its one field");
+    let metrics = runtime.inner.metrics.clone();
+    let labels = metrics.register_ingestor_quiesce(&domain, &ingestor, None);
+    let intake = ClientIntake {
+        handles,
+        runtime: runtime.clone(),
+        domain: domain.clone(),
+        ingestor: ingestor.clone(),
+        schema,
+        timestamp_source: None,
+        output_routes: Arc::new(BoundIngestorRoutes {
+            routes: vec![BoundEntryRoute {
+                relay: named("orders"),
+                program: route,
+                branch: BoundRouteBranch::Unbranched,
+                message_error_policy: MessageErrorPolicy::Log,
+            }],
+        }),
+        filter_where: None,
+        branched_senders: HashMap::default(),
+        metrics: metrics.resolve_global_node_message_metrics(
+            &domain,
+            ModelKind::Ingestor,
+            &ModelName::from(&ingestor),
+            None,
+            "received",
+        ),
+        quiesce: Arc::new(IngestorQuiesceControl::new(
+            IngestQuiesceMode::Suspend,
+            metrics,
+            labels,
+        )),
+        trackers: IngestorAckRootTrackers::detached(),
+        ack_timeout: WAIT,
+    };
+    let body = test_runtime_row([("id".into(), RuntimeValue::U64(1))])
+        .one_row_batch()
+        .encode_arrow_ipc(runtime.executor())
+        .await
+        .assured("the fixture has a valid Arrow batch for client admission");
+    runtime
+        .domain_clock_lifecycle(&domain)
+        .assured("the fixture retains routing while withdrawing its clock publication")
+        .mark_missing();
+    let mut logs = ReportLogObserver::new();
+    let outcome = logs
+        .observe(
+            intake.admit(AdmissionJob {
+                attachment: ClientAttachmentId::from_u128(1),
+                submission: submission(1),
+                body: Bytes::copy_from_slice(body.as_ref()),
+                max_batch_bytes: NonZeroU64::new(1024 * 1024)
+                    .assured("the fixture grants a nonzero batch allowance"),
+            }),
+        )
+        .await;
+    let AdmissionResult::Admitted { completion, .. } = outcome else {
+        panic!("a decoded batch that fails during dispatch was already admitted");
+    };
+    assert!(matches!(completion.wait().await, AckOutcome::NoAck(_)));
+    assert_eq!(
+        logs.next("a client batch failed after it was admitted")
+            .fields["error"],
+        "failed to establish ingestion time for 'tenant.orders_in': domain 'tenant' clock is \
+         unavailable to ingestor 'orders_in': domain 'tenant' is missing from this runtime"
+    );
+}
+
 fn fields(names: &[&str]) -> Vec<SchemaField> {
     names
         .iter()

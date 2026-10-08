@@ -39,6 +39,49 @@ fn relay_metrics(runtime: &Runtime, domain: &DomainName, relay: &RelayName) -> R
     )
 }
 
+#[nervix_primitives::test(start_paused = true)]
+async fn runtime_report_chain_detached_relay_delivery_log() {
+    use crate::runtime::report_observer::ReportLogObserver;
+
+    let runtime = Runtime::default();
+    let local = named("node-1");
+    attach_loopback_cluster(&runtime, &local).await;
+    let dispatcher = runtime
+        .inner
+        .remote_dispatcher
+        .load_full()
+        .assured("the loopback cluster installs its dispatcher");
+    dispatcher.interconnect.shutdown().await;
+    let services = RelayBoundaryServices::new(
+        RelayBoundaryFanout::direct_with_capacity(NonZeroUsize::MIN),
+        0,
+        0,
+        vec![RemoteRuntimeConsumer {
+            node_id: named("node-2"),
+            relay: named("orders"),
+            mode: AckMode::Detached,
+        }],
+        Some(dispatcher),
+        Arc::new(BranchPresence::new()),
+        nervix_primitives::sync::Arc::new(crate::runtime_ack::AckRootTracker::default()),
+    );
+    let batch = RelayRecordBatch::single(
+        test_schema(&[("value", ParseAsType::I64)]),
+        None,
+        test_runtime_row([("value".into(), RuntimeValue::I64(1))]),
+        AckSet::empty(),
+    )
+    .assured("the fixture batch carries one valid I64 row");
+    let mut logs = ReportLogObserver::new();
+    logs.observe(services.dispatch_remote_runtime_consumers(&domain("default"), &batch))
+        .await
+        .assured("a detached delivery reports its failure without rejecting the local batch");
+    assert_eq!(
+        logs.next("detached remote delivery failed").fields["error"],
+        "failed to cancel relay delivery 0 on node 'node-2': transport is shutting down"
+    );
+}
+
 #[nervix_primitives::test]
 async fn relay_task_stops_classify_join_failures_by_task_kind() {
     let (state_shutdown, _state_shutdown_rx) = watch::channel(false);
