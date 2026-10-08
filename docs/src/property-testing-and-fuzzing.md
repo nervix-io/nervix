@@ -106,6 +106,8 @@ own Cucumber, Shuttle, Loom, Turmoil and external Chaos evidence.
 | `codec-schemaful-rows` | `nervix-server` `WIRE JSON`, `WIRE CBOR` and `WIRE AVRO` row round-trip equality through one group builder | registry-accepted codecs over each format's value domain, generic and exact wire types and shuffled wire field order, v1 | 256 | 4096 bytes |
 | `codec-schemaful-payload-groups` | `nervix-server` each payload decodes in a group exactly as alone; refusals are typed | codec payloads interleaved with damaged bytes, swapped values and changed keys, v1 | 256 | 4096 bytes |
 | `codec-json-non-finite-floats` | `nervix-server` the JSON projection of non-finite floats: optional top-level fields read back as nulls, required fields and list elements refuse the payload | `WIRE JSON` and `WIRE CBOR` codecs over every float bit pattern and field type, v1 | 256 | 4096 bytes |
+| `codec-transforming-numbers` | `nervix-server` number equality through the JAQ-native `JSON`, `YAML`, `TOML` and `CBOR` codecs and a protobuf codec with unchanged programs: `F64` and `F32` bits, alone and in lists, and `I64` values; a protobuf singular zero reads back positive | generated batches of one schema of numbers over every finite float bit pattern, v1 | 256 | 1024 bytes |
+| `jaq-native-numbers` | `nervix-jaq` number equality through the identity program and each numeric native format's writer and reader: float bits, integer value and signedness | finite floats of any bit pattern, boundary floats and 64-bit integers, `TOML` within its signed range, v1 | 256 | 256 bytes |
 | `remote-relay-rows` | `nervix-server` routed relay batch equality from the sender's payload to the receiver's rows, branch key bits and watermarks | every field type, concrete and absent branches and per-row registrations, v1 | 128 | 2048 bytes |
 | `remote-relay-rows-malformed` | `nervix-server` the first payload defect in the receiver's check order | foreign bodies, miscounted watermarks and registrations and invalid branch keys, v1 | 128 | 2048 bytes |
 | `relay-wire-messages` | `nervix-interconnect` relay grant, reply, admission, acknowledgement and connection binding equality through the bounded codec | every message variant, branch key values with any float bits and per-row metadata, v1 | 256 | 2048 bytes |
@@ -168,11 +170,12 @@ boundaries. Request, reply and event coverage checks compare generated families 
 union declarations, so adding a family requires extending its generator.
 
 The [Arrow, codec and interconnect representation coverage map](https://github.com/nervix-io/nervix/blob/main/tests/arrow-representation-coverage.md)
-ties the relay body, producer batch, WASM generated pool, schemaful codec, routed relay payload and
-relay wire message targets to their oracles, each codec's value domain and the contract boundaries
-they record. Its server targets share one generator of schemas and batches over every current field
-type and one logical oracle that compares batches cell by cell with floats by their bits.
-`just test-bolero codec-` runs the three codec targets.
+ties the relay body, producer batch, WASM generated pool, schemaful codec, JAQ-native and protobuf
+codec number, routed relay payload and relay wire message targets to their oracles, each codec's
+value domain and the contract boundaries they record. Its server targets share one generator of
+schemas and batches over every current field type and one logical oracle that compares batches cell
+by cell with floats by their bits. `just test-bolero codec-` runs the four codec targets, and
+`just test-bolero jaq-native` the numbers a JAQ program and its native formats carry.
 
 ## Generated Domains
 
@@ -262,8 +265,10 @@ recorded boundary, not a claim:
   spelling, and a Postgres `ON CONFLICT DO UPDATE` whose target names every mapped column is
   rejected, because it leaves no column to update. Only the vocabulary domain generates those
   states, for the archive properties.
-- A time rate's JSON form is not asserted: `serde_json` reads a float without correct rounding, so
-  it may land one unit in the last place away. Its text and archived forms keep every bit.
+- A time rate's text, JSON and archived forms keep every bit. The workspace builds `serde_json`
+  with `float_roundtrip`, which reads a decimal as the float nearest to it; its default reader is
+  best-effort and lands one unit in the last place away for a tenth to a quarter of the decimals
+  that computed floats print as.
 
 ## Commands And Enforcement
 

@@ -339,9 +339,18 @@ values, and nulls of optional fields. The formats themselves set the bounds of t
   header, and a `WIRE CBOR` payload is one CBOR data item.
 
 The JAQ-native and protobuf codecs are transformations rather than encodings of a row: a program
-decides the shape in each direction, numbers pass through JSON text, and a protobuf message's JSON
-view omits fields that hold their default value. `SYSLOG` writes its timestamp to the microsecond in
-UTC; see [Syslog](syslog.md).
+decides the shape in each direction. A number a program passes on unchanged keeps its value: a
+64-bit integer exactly, and a finite float to its bits through `JSON`, `YAML`, `TOML`, `CBOR` and
+the `double` and `float` fields of a protobuf message, because every decimal is read as the float
+nearest to it. The formats set two bounds of their own:
+
+- `TOML` holds signed 64-bit integers. A larger unsigned value is written as it stands and refused
+  when it is read.
+- A protobuf message does not carry a field that holds its default value, so its JSON view omits
+  such a field: a zero of either sign, `false`, empty text or an empty list. An ingestion program
+  that needs one restores it, as `(.level // 0)` does; a negative zero comes back positive.
+
+`SYSLOG` writes its timestamp to the microsecond in UTC; see [Syslog](syslog.md).
 
 ## JAQ Transformations
 

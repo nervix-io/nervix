@@ -735,6 +735,13 @@ mod tests {
         SignalingWaitStep, SignalingWireFormat,
     };
     use nervix_primitives::sync::{StdArc, blocking::Mutex};
+    use prost_reflect::{
+        DescriptorPool,
+        prost_types::{
+            DescriptorProto, FieldDescriptorProto, FileDescriptorProto, FileDescriptorSet,
+            field_descriptor_proto::{Label, Type},
+        },
+    };
     use serde_json::json;
     use tokio_tungstenite::tungstenite::protocol::Role;
 
@@ -850,6 +857,54 @@ mod tests {
                 accept_data: false,
             }),
         ]
+    }
+
+    /// A `Level` message of one `double` field, as a protobuf signaling protocol describes its
+    /// frames.
+    fn level_descriptor() -> MessageDescriptor {
+        let field = FieldDescriptorProto {
+            name: Some("level".to_string()),
+            number: Some(1),
+            label: Some(Label::Optional.into()),
+            r#type: Some(Type::Double.into()),
+            json_name: Some("level".to_string()),
+            ..Default::default()
+        };
+        let message = DescriptorProto {
+            name: Some("Level".to_string()),
+            field: vec![field],
+            ..Default::default()
+        };
+        let file = FileDescriptorProto {
+            name: Some("level.proto".to_string()),
+            package: Some("nervix.test".to_string()),
+            message_type: vec![message],
+            syntax: Some("proto3".to_string()),
+            ..Default::default()
+        };
+        DescriptorPool::from_file_descriptor_set(FileDescriptorSet { file: vec![file] })
+            .expect("the descriptor set declares one valid message")
+            .get_message_by_name("nervix.test.Level")
+            .expect("the pool holds the message it was built from")
+    }
+
+    #[test]
+    fn a_protobuf_frame_keeps_the_bits_of_a_double() {
+        let descriptor = level_descriptor();
+        let level = 1.4000000000000001_f64;
+
+        let encoded = encode_protobuf_payload(&descriptor, &json!({"level": level}))
+            .expect("the value is a Level message");
+        let decoded =
+            decode_protobuf_payload(&descriptor, &encoded).expect("the bytes are a Level message");
+
+        let mut expected = vec![0x09];
+        expected.extend_from_slice(&level.to_le_bytes());
+        assert_eq!(encoded, expected);
+        assert_eq!(
+            decoded["level"].as_f64().map(f64::to_bits),
+            Some(level.to_bits())
+        );
     }
 
     #[test]

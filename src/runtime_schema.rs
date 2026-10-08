@@ -90,6 +90,8 @@ pub(crate) mod generated_batches;
 mod ipc_stream;
 mod jaq_unfold;
 mod syslog;
+#[cfg(test)]
+mod transforming_codec_properties;
 
 pub(crate) use arrow_body::ArrowBodyError;
 pub(crate) use batch_container::{

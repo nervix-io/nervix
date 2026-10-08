@@ -2000,3 +2000,33 @@ random_iterations = 256
 source = "src/runtime/wasm_output_properties.rs"
 test = "runtime::wasm_output::properties::bolero_damaged_generated_pools_fail_typed_or_decode_to_a_pool"
 test_target = "lib"
+
+[[target]]
+case_timeout_seconds = 10
+corpus = "src/runtime_schema/__fuzz__/runtime_schema__transforming_codec_properties__bolero_transforming_codecs_decode_every_number_they_encode/corpus"
+domain_version = 1
+features = []
+id = "codec-transforming-numbers"
+invariant = "Every row of a generated batch of numbers that a JAQ-native JSON, YAML, TOML or CBOR codec or a protobuf codec encodes through unchanged programs decodes back to the same row: a finite F64 and F32 of any bit pattern to its bits, alone and as an element of a list, and an I64 to its value; a protobuf singular zero of either sign reads back as positive zero."
+manifest = "Cargo.toml"
+max_input_bytes = 1024
+package = "nervix-server"
+random_iterations = 256
+source = "src/runtime_schema/transforming_codec_properties.rs"
+test = "runtime_schema::transforming_codec_properties::bolero_transforming_codecs_decode_every_number_they_encode"
+test_target = "lib"
+
+[[target]]
+case_timeout_seconds = 10
+corpus = "crates/jaq/src/__fuzz__/number_properties__bolero_programs_and_native_formats_keep_every_number/corpus"
+domain_version = 1
+features = []
+id = "jaq-native-numbers"
+invariant = "Every finite float of any bit pattern keeps its bits, and every 64-bit integer its value and signedness, through the identity program, through the writer and reader of each native format that holds numbers (JSON, YAML, TOML within its signed integers, and CBOR), and through a payload read and handed to the identity program."
+manifest = "Cargo.toml"
+max_input_bytes = 256
+package = "nervix-jaq"
+random_iterations = 256
+source = "crates/jaq/src/number_properties.rs"
+test = "number_properties::bolero_programs_and_native_formats_keep_every_number"
+test_target = "lib"

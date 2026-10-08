@@ -48,6 +48,8 @@ stream for each of the four.
 | `WIRE JSON`, `WIRE CBOR` and `WIRE AVRO` rows | `codec-schemaful-rows` | Every row of a batch, encoded one payload per row by a codec of a shape the registry accepts and decoded into one group builder, is the original row |
 | Groups of payloads with damaged members | `codec-schemaful-payload-groups` | Each payload is accepted or refused in a group exactly as alone, with a typed failure of its own bytes, and the group holds exactly the rows its accepted payloads decode to alone |
 | `WIRE JSON` and `WIRE CBOR` rows holding non-finite floats | `codec-json-non-finite-floats` | The projection, not a round trip: a non-finite float of an optional top-level field reads back as a null with every other value intact, and one in a required field or a list element refuses the payload with a typed failure |
+| Numbers through the JAQ-native `JSON`, `YAML`, `TOML` and `CBOR` codecs and a protobuf codec, with unchanged programs | `codec-transforming-numbers` | Every row of a batch of numbers, encoded one payload per row and decoded, is the original row: an `F64` and an `F32` to their bits, alone and in a list, and an `I64` to its value; a protobuf singular zero of either sign reads back as positive zero |
+| Numbers through a JAQ program and through each numeric native format's writer and reader | `jaq-native-numbers` | The identity program answers with the numbers it was given, and `JSON`, `YAML`, `TOML` and `CBOR` read back the numbers they wrote, directly and handed to the identity program: floats to their bits, integers to their value and signedness |
 | Routed relay payload from the sending runtime to the receiving runtime's rows | `remote-relay-rows` | The rows, the concrete branch or its absence with key values to the bit, every row's watermarks and one registration per row |
 | Routed payloads whose parts disagree | `remote-relay-rows-malformed` | The first defect in the receiver's order: the body, the watermark count, the registration count, then the branch key, before any row forms a batch |
 | Relay grant request, its relay metadata and the payload the receiver rebuilds, grant replies, admission exchanges, acknowledgement resolutions and connection bindings | `relay-wire-messages` | Every field through the bounded rkyv codec under the class and limit the transport uses, branch key floats by their bits, and no charge outlives a message |
@@ -94,10 +96,34 @@ Arrow IPC stream, which `runtime-arrow-bodies` covers through its schema-free de
   from 1677 through 2262, and bytes as padded base64 text in JSON and CBOR and as octets in Avro.
 - A wire schema lists its fields in any order. Avro writes them in that order, and every format
   decodes into the internal schema's column order.
-- The JAQ-native, protobuf and `SYSLOG` codecs are projections, not lossless round trips: a JAQ
-  program decides the shape both ways and numbers pass through serde JSON, the protobuf JSON view
-  omits default values, and `SYSLOG` keeps microseconds in UTC and its own header rules. Their
-  owning tests state those contracts.
+- The JAQ-native and protobuf codecs are transformations: a JAQ program decides the shape both
+  ways, so no property holds them to every value of every schema. Their numbers are held. Through
+  unchanged programs a finite `F64` and `F32` of any bit pattern keeps its bits, alone and in a
+  list, and an `I64` its value, through `JSON`, `YAML`, `TOML`, `CBOR` and a protobuf message; and
+  every number keeps its value through a program's run and through each native format's writer and
+  reader.
+- serde_json read a decimal with its best-effort reader, which names a neighbouring float for 10
+  to 25 percent of the sixteen- and seventeen-digit decimals that computed floats print as. Every
+  number a JAQ program answers with is read from its decimal, and a protobuf message is read and
+  written through the JSON text of its view, so an `F64` such as `1.4000000000000001`, the product
+  of `0.1` and `14`, changed in its last place on its way through either, whatever the format; a
+  protobuf round trip could move it twice. The workspace builds serde_json with `float_roundtrip`,
+  which reads every decimal as the float nearest to it.
+  `a_float_keeps_its_bits_through_a_transforming_codec`, the reproducers of
+  `crates/jaq/src/number_properties.rs` and the scenario outlines **Kafka emitter and ingestor keep
+  every digit of an F64 through a JAQ native `<format>` codec** and **Kafka emitter and ingestor
+  keep every digit of an F64 through a protobuf codec** retain that case. A protobuf signaling
+  frame and a Sentry event read numbers the same way: the outline **Websocket endpoint signaling
+  sends and matches a protobuf double with every digit** and
+  `a_protobuf_frame_keeps_the_bits_of_a_double` hold the frame, and
+  `envelope_keeps_every_digit_of_an_event_number` the event, whose public step compares numbers
+  after Sentry has stored them.
+- Two bounds of those codecs are their formats' own. `TOML` holds signed 64-bit integers: its
+  writer writes a larger unsigned integer as it stands and its reader refuses it. A protobuf
+  message does not carry a singular field that holds its default, and a zero of either sign is
+  that default, so a negative zero of a `double` or `float` field reads back as the positive zero
+  an ingestion program restores; an element of a repeated field keeps its sign.
+- `SYSLOG` keeps microseconds in UTC and its own header rules, which its owning tests state.
 
 ## Contract Boundaries
 

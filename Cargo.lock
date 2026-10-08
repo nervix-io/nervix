@@ -7376,6 +7376,7 @@ dependencies = [
 name = "nervix-jaq"
 version = "0.1.0-dev"
 dependencies = [
+ "bolero",
  "bytes",
  "ciborium",
  "error-stack",
@@ -7383,6 +7384,7 @@ dependencies = [
  "jaq-fmts",
  "jaq-json",
  "jaq-std",
+ "meticulous",
  "nervix-models",
  "serde",
  "serde_json",

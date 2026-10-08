@@ -9,8 +9,10 @@
 //!   compiled codecs' row encoder and payload decoder.
 //! - **Must not know.** Ingestors, emitters, connectors or the ingest group that owns a builder.
 //!
-//! The JAQ-native, protobuf and syslog codecs are not lossless and stay outside these properties:
-//! their contracts are transformations and fixed field projections, which their own tests state.
+//! The JAQ-native, protobuf and syslog codecs stay outside these properties: their contracts are
+//! transformations and fixed field projections, which their own tests state. The numbers a
+//! JAQ-native or protobuf codec carries through unchanged programs are held by
+//! `transforming_codec_properties`.
 
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_arbitrary::{Arbitrary, Domain, Entropy};

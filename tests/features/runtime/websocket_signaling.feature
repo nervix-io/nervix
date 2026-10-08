@@ -286,6 +286,89 @@ Feature: Websocket signaling protocols
       | 1            | 0             |
       | 3            | 0             |
 
+  Scenario Outline: Websocket endpoint signaling sends and matches a protobuf double with every digit
+    Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
+    And a <cluster_size> node nervix cluster is started
+    And node "node-1" has resource directory "proto_dir" containing
+      """
+      {
+        "levels.proto": "syntax = \"proto3\";\npackage nervix.test;\n\nmessage Offer {\n  double level = 1;\n}\n\nmessage Accept {\n  double level = 1;\n}\n"
+      }
+      """
+    And the leader node is configured with these NSPL commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
+    When these NSPL commands are executed
+      """
+      CREATE RESOURCE proto_bundle;
+      """
+    And these NSPL commands are executed
+      """
+      UPLOAD RESOURCE proto_bundle VERSION '{{proto_dir}}';
+      """
+    And these NSPL commands are executed
+      """
+      CREATE SCHEMA notification (
+        seq I64
+      );
+
+      CREATE WIRE JSON SCHEMA notification_wire MODE STRICT (
+        seq integer
+      );
+
+      CREATE CODEC notification_codec
+        FROM WIRE JSON SCHEMA notification_wire
+        TO SCHEMA notification;
+
+      CREATE RELAY notifications SCHEMA notification UNBRANCHED;
+
+      CREATE VHOST edge ws-{{test_id}}.example.com;
+
+      CREATE SIGNALING PROTOCOL protobuf_levels
+        FORMAT PROTOBUF USING RESOURCE proto_bundle VERSION 1
+          CONFIG {'file' = 'levels.proto', 'include' = '.'}
+          SEND MESSAGE 'nervix.test.Offer'
+          WAIT MESSAGE 'nervix.test.Accept'
+        ON CONNECT
+        SEND JAQ '{level: 1.4000000000000001}'
+        WAIT JAQ '.level == 1.4000000000000001'
+        TIMEOUT 5s;
+
+      CREATE ENDPOINT ws_notifications_endpoint
+        ON edge
+        PATH '/ws'
+        TYPE WEBSOCKETS WITH SIGNALING PROTOCOL protobuf_levels;
+
+      CREATE INGESTOR ws_notifications
+        FROM ENDPOINT ws_notifications_endpoint MODE NO_ACK SEQUENTIAL
+        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
+        TO notifications
+        INHERIT ALL
+        UNBRANCHED
+        FLUSH EACH 100ms MAX BATCH SIZE 1MiB
+        ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
+
+      CREATE SUBSCRIPTION notifications_subscription TO notifications;
+      START;
+      """
+    And websocket frames are exchanged with host "ws-{{test_id}}.example.com" path "/ws"
+      """
+      EXPECT BASE64 CWdmZmZmZvY/
+      SEND BASE64 CWdmZmZmZvY/
+      SEND {"seq":1}
+      """
+    Then within "5s" the relay subscription receives payloads in order
+      """
+      "seq":1
+      """
+
+    Examples:
+      | cluster_size | replica_count |
+      | 1            | 0             |
+      | 3            | 0             |
+
   Scenario Outline: Websocket endpoint signaling carries captured state into a later phase
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
