@@ -101,7 +101,11 @@ pub(in crate::application) const LEADER_KAFKA_PARTITION_WATCH_INTERVAL: Duration
 pub(in crate::application) const RUNTIME_REVISION_READINESS_PROPAGATION_BOUND: Duration =
     Duration::from_secs(30);
 
-const SHUTDOWN_CORDON_CLEANUP_TIMEOUT: Duration = Duration::from_secs(1);
+/// The least time a stopping node waits for the release of the cordon its own drain set. It is what
+/// the release has when the move of the node's work used the whole drain timeout, so a drain that
+/// timed out still clears the cordon its request may have set, and all it has when the voters that
+/// stay are too few to commit it.
+const SHUTDOWN_CORDON_RELEASE_GRACE: Duration = Duration::from_secs(1);
 const SHUTDOWN_LEADER_OBSERVATION_INTERVAL: Duration = Duration::from_millis(25);
 
 #[derive(Debug, thiserror::Error)]
@@ -152,11 +156,28 @@ impl ShutdownDrainBudget {
     /// What remains of the drain timeout, which is nothing once it or the shutdown deadline has
     /// passed.
     fn remaining(&self) -> Duration {
-        let drain_remaining = self
-            .timeout
+        self.drain_remaining().min(self.deadline.remaining())
+    }
+
+    /// How long the release of the cordon the node's own drain set may wait, and never past the
+    /// shutdown deadline. While voters that stay can commit it, that is what remains of the drain
+    /// timeout, or the release grace when less than that remains. When they cannot, it is the
+    /// release grace alone, since only voters that are stopping too could commit the release.
+    fn cordon_release_bound(&self, quorum: ShutdownReleaseQuorum) -> Duration {
+        let wait = match quorum {
+            ShutdownReleaseQuorum::Staying => {
+                self.drain_remaining().max(SHUTDOWN_CORDON_RELEASE_GRACE)
+            }
+            ShutdownReleaseQuorum::Leaving => SHUTDOWN_CORDON_RELEASE_GRACE,
+        };
+        wait.min(self.deadline.remaining())
+    }
+
+    /// What remains of the drain timeout alone, which is nothing once it has passed.
+    fn drain_remaining(&self) -> Duration {
+        self.timeout
             .checked_sub(self.started.elapsed())
-            .unwrap_or(Duration::ZERO);
-        drain_remaining.min(self.deadline.remaining())
+            .unwrap_or(Duration::ZERO)
     }
 }
 
@@ -170,6 +191,73 @@ enum ShutdownOwnershipMove {
     /// The leader was asked to cordon the node and move its scheduled work, and that drain ended
     /// with this outcome.
     Requested(ShutdownPhaseOutcome),
+}
+
+impl ShutdownOwnershipMove {
+    /// What the move of the node's scheduled work came to.
+    fn outcome(&self) -> ShutdownPhaseOutcome {
+        match self {
+            Self::NoReplacement => ShutdownPhaseOutcome::Completed,
+            Self::NotRequested => ShutdownPhaseOutcome::Abandoned,
+            Self::Requested(outcome) => *outcome,
+        }
+    }
+
+    /// Which cordon the node is left with after this move, given whether an operator had cordoned
+    /// the node before it began stopping.
+    fn drain_cordon(&self, operator_cordon_exists: bool) -> ShutdownDrainCordon {
+        match self {
+            Self::NoReplacement | Self::NotRequested => ShutdownDrainCordon::NeverSet,
+            Self::Requested(_) if operator_cordon_exists => ShutdownDrainCordon::Operator,
+            Self::Requested(_) => ShutdownDrainCordon::SetByDrain,
+        }
+    }
+}
+
+/// The cordon a stopping node holds once it has moved, or tried to move, its scheduled work.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ShutdownDrainCordon {
+    /// The drain was never requested, so it cordoned nothing.
+    NeverSet,
+    /// An operator cordoned the node before it began stopping. That cordon outlives the stop.
+    Operator,
+    /// The requested drain may have cordoned the node, and the stop releases that cordon.
+    SetByDrain,
+}
+
+/// Whether the release of a stopping node's drain cordon can commit without voters that are
+/// stopping too.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ShutdownReleaseQuorum {
+    /// The stopping node and the voters that are live and not terminating form a quorum, so the
+    /// release can commit with voters that stay.
+    Staying,
+    /// Too few voters stay to form that quorum, as when the whole cluster stops together, so the
+    /// release commits only while voters that are stopping too still run.
+    Leaving,
+}
+
+impl ShutdownReleaseQuorum {
+    /// Whether `local_node_id` and the voters among `staying_node_ids`, the live nodes whose
+    /// incarnations are not terminating, form a quorum of `voters`.
+    fn of(
+        local_node_id: &ClusterNodeName,
+        voters: &BTreeSet<ClusterNodeName>,
+        staying_node_ids: &BTreeSet<ClusterNodeName>,
+    ) -> Self {
+        let mut committing_voters = voters
+            .intersection(staying_node_ids)
+            .collect::<BTreeSet<_>>();
+        if voters.contains(local_node_id) {
+            committing_voters.insert(local_node_id);
+        }
+        let quorum = SessionServiceImpl::raft_quorum_size(voters.len());
+        if committing_voters.len() >= quorum {
+            Self::Staying
+        } else {
+            Self::Leaving
+        }
+    }
 }
 
 /// Whether the drain of this node's scheduled work can be requested, and from which leader.
@@ -953,47 +1041,71 @@ impl SessionServiceImpl {
         let ownership_move = self
             .move_local_ownership_for_shutdown(&local_node_id, &budget)
             .await;
-        let ownership_outcome = match ownership_move {
-            ShutdownOwnershipMove::NoReplacement => ShutdownPhaseOutcome::Completed,
-            ShutdownOwnershipMove::NotRequested => ShutdownPhaseOutcome::Abandoned,
-            ShutdownOwnershipMove::Requested(move_outcome) if operator_cordon_exists => {
+        let drain_cordon = ownership_move.drain_cordon(operator_cordon_exists);
+
+        // Moving ownership hands scheduled work to other nodes. Everything this node has already
+        // admitted, including all of its work when no replacement exists, completes here before
+        // terminal teardown, within what remains of the same drain timeout. The release of the
+        // drain's cordon runs beside it, so a consensus write that takes long does not shorten the
+        // time admitted work has to complete.
+        let cordon_settlement =
+            self.settle_shutdown_drain_cordon(&local_node_id, drain_cordon, &budget);
+        let local_drain = self.drain_local_graphs_for_shutdown(&budget);
+        let (cordon_outcome, local_outcome) =
+            futures_util::future::join(cordon_settlement, local_drain).await;
+        ownership_move
+            .outcome()
+            .combine(cordon_outcome)
+            .combine(local_outcome)
+    }
+
+    /// Leaves an operator's cordon in place, and releases the cordon this stopping node's own
+    /// drain may have set within the release bound of `budget`.
+    async fn settle_shutdown_drain_cordon(
+        &self,
+        local_node_id: &ClusterNodeName,
+        drain_cordon: ShutdownDrainCordon,
+        budget: &ShutdownDrainBudget,
+    ) -> ShutdownPhaseOutcome {
+        match drain_cordon {
+            ShutdownDrainCordon::NeverSet => ShutdownPhaseOutcome::Completed,
+            ShutdownDrainCordon::Operator => {
                 info!(
                     node_id = %local_node_id,
                     "preserving operator cordon across graceful shutdown"
                 );
-                move_outcome
+                ShutdownPhaseOutcome::Completed
             }
-            ShutdownOwnershipMove::Requested(move_outcome) => {
-                let cleanup_timeout = SHUTDOWN_CORDON_CLEANUP_TIMEOUT.min(deadline.remaining());
-                let cleanup = nervix_primitives::time::timeout(
-                    cleanup_timeout,
-                    self.clear_shutdown_drain_cordon(&local_node_id),
-                )
-                .await;
-                let cleanup_outcome = match cleanup {
+            ShutdownDrainCordon::SetByDrain => {
+                let quorum = self.shutdown_release_quorum(local_node_id).await;
+                let release_bound = budget.cordon_release_bound(quorum);
+                let release = self.clear_shutdown_drain_cordon(local_node_id);
+                match nervix_primitives::time::timeout(release_bound, release).await {
                     Ok(outcome) => outcome,
                     Err(_) => {
                         warn!(
                             node_id = %local_node_id,
-                            timeout = ?cleanup_timeout,
+                            timeout = ?release_bound,
                             "timed out clearing shutdown drain cordon"
                         );
                         ShutdownPhaseOutcome::Abandoned
                     }
-                };
-                move_outcome.combine(cleanup_outcome)
+                }
             }
-        };
+        }
+    }
 
-        // Moving ownership hands scheduled work to other nodes. Everything this node has already
-        // admitted, including all of its work when no replacement exists, completes here before
-        // terminal teardown, within what remains of the same drain timeout.
+    /// Completes the work this stopping node has already admitted, within what remains of the
+    /// drain timeout.
+    async fn drain_local_graphs_for_shutdown(
+        &self,
+        budget: &ShutdownDrainBudget,
+    ) -> ShutdownPhaseOutcome {
         let local_drain = self.inner.runtime.drain_local_graphs(budget.remaining());
-        let local_outcome = match local_drain.await {
+        match local_drain.await {
             LocalGraphDrainOutcome::Quiescent => ShutdownPhaseOutcome::Completed,
             LocalGraphDrainOutcome::Abandoned => ShutdownPhaseOutcome::Abandoned,
-        };
-        ownership_outcome.combine(local_outcome)
+        }
     }
 
     async fn move_local_ownership_for_shutdown(
@@ -1056,9 +1168,21 @@ impl SessionServiceImpl {
         ShutdownDrainRoute::Leader(leader)
     }
 
+    /// Whether this stopping node and the voters that are live and not terminating can commit the
+    /// release of its drain cordon.
+    async fn shutdown_release_quorum(
+        &self,
+        local_node_id: &ClusterNodeName,
+    ) -> ShutdownReleaseQuorum {
+        let availability = self.inner.cluster.availability_state().await;
+        let staying_node_ids = availability.placement_candidate_node_ids();
+        let voters = self.inner.consensus.membership_voter_ids().await;
+        ShutdownReleaseQuorum::of(local_node_id, &voters, &staying_node_ids)
+    }
+
     /// Asks `leader` to act on this stopping node's own scheduled work, and asks the leader this
-    /// node observes next whenever the node asked does not lead, which changed nothing. While this
-    /// node leads, it acts for itself.
+    /// node observes next whenever the node asked does not lead, which changed nothing, or lost
+    /// its leadership while it released the cordon. While this node leads, it acts for itself.
     ///
     /// Another leader hears the request over the interconnect, which authenticates this node by its
     /// certificate, so asking needs no user credential.
@@ -1186,20 +1310,44 @@ impl SessionServiceImpl {
                 }
             }
             StoppingNodeDrainAction::ReleaseCordon => {
+                #[cfg(feature = "testing")]
+                if let Some(delay) = self
+                    .inner
+                    .runtime
+                    .take_shutdown_cordon_release_delay(&node_id)
+                {
+                    sleep(delay).await;
+                }
                 let released = self
                     .inner
                     .consensus
                     .set_node_cordoned(node_id.clone(), false)
                     .await;
-                match released {
-                    Ok(()) => StoppingNodeDrainResponse::Completed {
-                        report: format!("uncordoned node '{node_id}'"),
-                    },
-                    Err(error) => StoppingNodeDrainResponse::Failed {
-                        report: ConsensusError::report_message(&error),
-                    },
-                }
+                Self::cordon_release_response(&node_id, released)
             }
+        }
+    }
+
+    /// The answer to stopping node `node_id`'s request to release its drain cordon, from what this
+    /// leader's write of the release came to.
+    ///
+    /// A leader that lost its leadership while it wrote the release answers as a node that does
+    /// not lead, so the stopping node asks the leader it observes next. Clearing a cordon is
+    /// idempotent, so asking again is safe even when the first write still commits.
+    fn cordon_release_response(
+        node_id: &ClusterNodeName,
+        released: Result<(), Report<ConsensusError>>,
+    ) -> StoppingNodeDrainResponse {
+        let Err(error) = released else {
+            return StoppingNodeDrainResponse::Completed {
+                report: format!("uncordoned node '{node_id}'"),
+            };
+        };
+        if let ConsensusError::LeadershipLost { .. } = error.current_context() {
+            return StoppingNodeDrainResponse::NotLeader;
+        }
+        StoppingNodeDrainResponse::Failed {
+            report: ConsensusError::report_message(&error),
         }
     }
 

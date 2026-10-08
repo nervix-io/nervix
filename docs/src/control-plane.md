@@ -672,9 +672,11 @@ drain. Its cleanup clears the drain cordon only when shutdown began with an unco
 runs after a successful, failed, timed-out, or unanswered drain attempt. A pre-existing operator
 cordon therefore remains set across shutdown and restart. When the drain timeout or the shutdown
 deadline passes before the node observes a leader to request its drain from, nothing was cordoned
-and no cleanup runs. A follower requests both the drain and the cleanup from the leader over the
-cluster interconnect, authenticated by its node certificate rather than by a user credential; see
-[Topology Cases](./shutdown.md#topology-cases).
+and no cleanup runs. The cleanup runs beside the completion of admitted work in place;
+[Releasing The Drain Cordon](./shutdown.md#releasing-the-drain-cordon) owns its bound and what a
+cleanup that cannot complete leaves behind. A follower requests both the drain and the cleanup from
+the leader over the cluster interconnect, authenticated by its node certificate rather than by a
+user credential; see [Topology Cases](./shutdown.md#topology-cases).
 
 A graceful-shutdown drain has two parts that share one drain timeout, and the drain also ends when
 the shutdown deadline passes first. When another live, schedulable Raft voter exists, the node

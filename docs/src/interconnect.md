@@ -333,10 +333,13 @@ clears the cordon that drain set. The leader acts for the node the authenticated
 to, so the certificate that admitted the connection is the whole authorization: a node can drain
 and uncordon only itself, and no user credential takes part. The answer is completed or failed, each
 with the leader's account of the action for the stopping node's log, or not the leader, from a node
-that changed nothing and leaves the sender to ask the leader it observes next. The leader runs the
-action in a service task of its own, so a drain that has begun finishes, and releases what it holds,
-even when the sender's deadline, which is what remains of its drain timeout, abandons the request
-first.
+that changed nothing and leaves the sender to ask the leader it observes next. A leader that loses
+its leadership while it writes a release also answers not the leader, because clearing a cordon
+again through the next leader is harmless. The leader runs the action in a service task of its own,
+so a drain that has begun finishes, and releases what it holds, even when the sender's deadline
+abandons the request first. For a drain that deadline is what remains of the sender's drain
+timeout; for a release it is the bound
+[Releasing The Drain Cordon](./shutdown.md#releasing-the-drain-cordon) states.
 [Topology Cases](./shutdown.md#topology-cases) owns when a node sends it.
 
 ## Wire Contract And Payloads
