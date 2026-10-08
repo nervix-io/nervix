@@ -264,6 +264,18 @@ prebuilt Alpine netcat transfer. A node's readiness is not part of that check, b
 leader's link can start an election, during which a node can report no leader for a moment. The
 transfer counts all bytes at the receiver and times their arrival. It records a healthy ICMP and
 transfer baseline before any fault.
+The 262,144-byte transfer has one 90-second sender deadline, covering connection establishment,
+TCP retransmissions and byte delivery. It uses the pinned BusyBox netcat's EOF half-close rather
+than an idle timeout. At 256 kbit/s the payload alone needs at least 8.192 seconds; packet loss
+can add retransmission stalls. The measured duration continues to include connection establishment
+and receiver completion, so it is end-to-end transfer throughput, not isolated steady-state link
+capacity. A failed transfer remains an `observation` failure and names both nodes and the receiver's
+address and port. The adjacent `*.probe.json` records readiness, deadlines, both helper outcomes,
+received bytes and cleanup outcomes; `*.log`, `*.server-start.log`, `*.readiness.log`,
+`*.server.log`, `*.server.stderr.log` and `*.server-exit.txt` retain raw evidence for stages reached.
+Timing out the Docker client also removes its exact sender container. Receiver completion has a
+separate ten-second observation bound; helper logs and removal each retain their twenty-second
+controller bounds. These bounds do not relax the product's post-heal recovery deadline.
 Loss, delay, jitter and rate must also show their expected measured effect; an installed qdisc alone
 cannot pass. SIGTERM heals each injector, after which the qdisc and ICMP delay must return to the
 healthy state. The exit trap heals all run-owned faults even with `--keep` or an interrupted run.
@@ -1322,6 +1334,14 @@ Run the external verifier, pinned tool image and Compose contract checks directl
 ```bash
 just chaos self-test
 ```
+
+`just test-chaos-rate-probe` exercises the production probe with a two-second connect delay,
+partial bytes, complete loss, a receiver that does not listen, a receiver launch failure and a
+nonzero receiver exit, failed log retrieval and failed cleanup. It uses only the pinned probe and
+nettools images with Docker, and leaves no helper behind. `just coverage-chaos-rate-probe` runs
+those controls under kcov and retains its
+shell Cobertura report under `target/chaos-rate-probe-coverage/`. These observations test the external
+probe; they make no claim about product recovery or model-checker coverage.
 
 ## Suites and CI
 

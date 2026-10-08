@@ -29,6 +29,22 @@ use crate::{domain_clock_authority::DomainClockAuthorityCandidates, task_shutdow
 
 const DOMAIN_CLOCK_PROGRESS_RETRY_BACKOFF: Duration = Duration::from_millis(200);
 
+impl crate::runtime::Runtime {
+    fn report_domain_clock_failure(
+        &self,
+        domain: &DomainName,
+        operation: &str,
+        error: &error_stack::Report<nervix_models::DomainClockError>,
+        log_message: &str,
+    ) {
+        self.report_error(format!(
+            "domain clock {operation} for '{}' failed: {error:#}",
+            domain.as_str(),
+        ));
+        warn!(domain = domain.as_str(), error = %format_args!("{error:#}"), "{log_message}");
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct DomainClockTaskSpec {
     clock: DomainClockState,
@@ -129,7 +145,7 @@ impl DomainClockProgressDelivery {
                     debug!(
                         domain = domain_id.as_str(),
                         node = %target,
-                        error = %error,
+                        error = %format_args!("{error:#}"),
                         "failed to deliver domain clock progress"
                     );
                     nervix_primitives::select! {
@@ -475,14 +491,11 @@ async fn run_domain_clock(
         {
             Ok(due) => due,
             Err(error) => {
-                service.inner.runtime.report_error(format!(
-                    "domain clock projection for '{}' failed: {error}",
-                    domain_id.as_str()
-                ));
-                warn!(
-                    domain = domain_id.as_str(),
-                    error = %error,
-                    "domain clock arithmetic failed"
+                service.inner.runtime.report_domain_clock_failure(
+                    &domain_id,
+                    "projection",
+                    &error,
+                    "domain clock arithmetic failed",
                 );
                 break;
             }
@@ -497,11 +510,12 @@ async fn run_domain_clock(
                             spacing
                         }
                         Err(error) => {
-                            service.inner.runtime.report_error(format!(
-                                "domain clock cadence for '{}' failed: {error}",
-                                domain_id.as_str()
-                            ));
-                            warn!(domain = domain_id.as_str(), error = %error, "domain clock cadence failed");
+                            service.inner.runtime.report_domain_clock_failure(
+                                &domain_id,
+                                "cadence",
+                                &error,
+                                "domain clock cadence failed",
+                            );
                             break;
                         }
                     },
@@ -539,14 +553,11 @@ async fn run_domain_clock(
         let next_boundary = match spec.clock.tick_boundary(spec.period, next_tick_id) {
             Ok(boundary) => boundary,
             Err(error) => {
-                service.inner.runtime.report_error(format!(
-                    "domain clock boundary for '{}' failed: {error}",
-                    domain_id.as_str()
-                ));
-                warn!(
-                    domain = domain_id.as_str(),
-                    error = %error,
-                    "domain clock boundary arithmetic failed"
+                service.inner.runtime.report_domain_clock_failure(
+                    &domain_id,
+                    "boundary",
+                    &error,
+                    "domain clock boundary arithmetic failed",
                 );
                 break;
             }
@@ -554,11 +565,12 @@ async fn run_domain_clock(
         let reached_logical = match spec.clock.logical_time_at(wall_time) {
             Ok(reached) => reached,
             Err(error) => {
-                service.inner.runtime.report_error(format!(
-                    "domain clock projection for '{}' failed: {error}",
-                    domain_id.as_str()
-                ));
-                warn!(domain = domain_id.as_str(), error = %error, "domain clock projection failed");
+                service.inner.runtime.report_domain_clock_failure(
+                    &domain_id,
+                    "projection",
+                    &error,
+                    "domain clock projection failed",
+                );
                 break;
             }
         };
@@ -568,11 +580,12 @@ async fn run_domain_clock(
         {
             Ok(wait) => wait,
             Err(error) => {
-                service.inner.runtime.report_error(format!(
-                    "domain clock rate conversion for '{}' failed: {error}",
-                    domain_id.as_str()
-                ));
-                warn!(domain = domain_id.as_str(), error = %error, "domain clock rate conversion failed");
+                service.inner.runtime.report_domain_clock_failure(
+                    &domain_id,
+                    "rate conversion",
+                    &error,
+                    "domain clock rate conversion failed",
+                );
                 break;
             }
         };
@@ -722,7 +735,7 @@ impl SessionServiceImpl {
             {
                 warn!(
                     domain = domain_id.as_str(),
-                    error = %error,
+                    error = %format_args!("{error:#}"),
                     "failed to reconcile committed domain-clock authority"
                 );
             }
@@ -740,9 +753,57 @@ impl SessionServiceImpl {
             &request.progress,
         ) {
             self.broadcast_error(format!(
-                "failed to apply domain clock progress for '{}': {error}",
+                "failed to apply domain clock progress for '{}': {error:#}",
                 request.domain_id.as_str(),
             ));
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::runtime::{Runtime, RuntimeEvent, report_observer::ReportLogObserver};
+
+    #[nervix_primitives::test]
+    async fn runtime_report_chain_clock_events_and_logs() {
+        let runtime = Runtime::default();
+        let mut events = runtime.subscribe_events();
+        let domain = DomainName::parse("orders").assured("the fixture domain name is valid");
+        let clock = DomainClockState::new(
+            Timestamp::from_unix_nanos(0),
+            Timestamp::from_unix_nanos(i64::MAX),
+            nervix_models::DomainTimeRate::ONE,
+        );
+        let period = DomainClockPeriod::try_from(Duration::from_nanos(1))
+            .assured("the fixture clock has a positive period");
+        let Err(error) = clock.tick_boundary(period, 2) else {
+            panic!("the second tick exceeds the timestamp range");
+        };
+        let chain = "domain clock tick boundary leaves the signed Unix-nanosecond range: \
+                     timestamp arithmetic leaves the signed Unix-nanosecond range";
+        let mut logs = ReportLogObserver::new();
+        for (operation, message) in [
+            ("projection", "domain clock arithmetic failed"),
+            ("cadence", "domain clock cadence failed"),
+            ("boundary", "domain clock boundary arithmetic failed"),
+            ("projection", "domain clock projection failed"),
+            ("rate conversion", "domain clock rate conversion failed"),
+        ] {
+            logs.observe(async {
+                runtime.report_domain_clock_failure(&domain, operation, &error, message);
+            })
+            .await;
+            let RuntimeEvent::Error(event) =
+                nervix_primitives::time::timeout(Duration::from_secs(1), events.recv())
+                    .await
+                    .assured("the clock failure is queued before its observation deadline")
+                    .assured("each clock failure publishes its report");
+            assert_eq!(
+                event,
+                format!("domain clock {operation} for 'orders' failed: {chain}")
+            );
+            assert_eq!(logs.next(message).fields["error"], chain);
         }
     }
 }

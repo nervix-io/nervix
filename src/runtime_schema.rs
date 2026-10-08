@@ -2362,7 +2362,7 @@ pub enum RuntimeSchemaError {
     EmptyTestSequence { kind: RuntimeValueKind },
     #[error("test ARRAY length {length} exceeds the Arrow i32 length range")]
     TestArrayLengthOutOfRange { length: usize },
-    #[error("failed to {operation}: {source}")]
+    #[error("failed to {operation}")]
     ArrowOperation {
         operation: RuntimeSchemaOperation,
         #[source]

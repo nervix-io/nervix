@@ -47,6 +47,16 @@ Values a caller acts on belong in typed fields; display formatting happens when 
 reported. `anyhow` remains at integration and tooling boundaries whose caller has no domain choice
 to make, such as a foreign callback that only accepts a general error.
 
+Runtime reporting renders every context in the report it receives, using alternate `Display`
+(`{error:#}`), including report-bearing tracing fields. Clock arithmetic and attachment, source
+cadence and lifecycle, Kafka partition inspection, relay dispatch and acknowledgement delivery,
+and state checkpoint publication and replica catch-up preserve their causes at those boundaries.
+A failed dead-letter dispatch renders its report once and uses that chain in both its runtime
+event and its negative acknowledgement. Nested message-error construction reports retain the VM
+or Arrow cause. A context with a `#[source]` names its own operation and leaves the source's
+wording to the next frame, so the chain describes each failure once. Reports remain typed until
+these reporting decisions; sensitivity rules continue to apply to every context.
+
 Codec jaq transformations are compiled during registry validation for every declared direction.
 A syntax error names the codec, domain, and direction and rejects the transaction before the model
 is committed. The browser keeps the draft editable so the program can be corrected and submitted
@@ -174,6 +184,10 @@ parser or writer error is its `#[source]`,
 such as a simd-json, CBOR, Avro, protobuf, I/O, UTF-8 or timestamp error, leaves that error out of
 its own message: `error-stack` records a context's source as the frame beneath it, so the rendered
 chain names each cause once.
+
+An endpoint that decodes a payload but cannot dispatch or flush its ingest group uses the same
+rendered report chain in its runtime event and log. A temporary unfolding admission refusal logs
+its report chain while preserving the endpoint's retryable refusal outcome.
 
 Iceberg object storage retains the Iceberg storage error contract when it installs the node's
 HTTP resolver. Invalid object URLs are `DataInvalid`, and an unsupported Azure connection string
@@ -1202,6 +1216,17 @@ meaning; whether it is an ordinary outcome, a recoverable failure, or a broken i
 typed fields let the caller act; which context must cross each boundary; and which public
 diagnostic or recovery class closes the path. That classification must preserve branch and
 sensitivity rules, and it must not add a second form of a failure the owner already represents.
+
+The external Chaos controller distinguishes an `observation` failure from a product recovery
+failure. A degraded-link bandwidth probe that cannot establish its connection, deliver its full
+payload, observe the receiver's successful exit, or retain its helper evidence reports the probe's
+sender, receiver, address and port. Its adjacent probe record preserves readiness, transfer
+deadline, both helpers' outcomes, received byte count and cleanup outcomes, with raw helper logs.
+A timeout of the Docker client also ends the exact sender container; it does not leave a live
+transfer to alter a later measurement. A failed required attempt remains evidence even after a
+subsequent successful qualification. The controller's measurement budget does not extend the
+product's recovery budget. [The external Chaos runner](https://github.com/nervix-io/nervix/blob/main/scripts/chaos/README.md) owns the
+commands, measurement interpretation and retained artifact paths.
 
 A diagnostic node's findings retain a typed source. `WaitForGraph`/`ActiveCycle` establishes an
 active tracked-lock cycle and ends the diagnostic process with status `3` after recording.
