@@ -6,7 +6,9 @@
 //! - **Depends on.** Nothing but the messages its variants carry.
 //! - **Must not know.** Any failure a running node recovers from on its own.
 
+use nervix_models::DomainName;
 use thiserror::Error;
+
 #[derive(Debug, Error)]
 pub enum AppError {
     #[error("failed to build the Tokio runtime")]
@@ -72,8 +74,12 @@ pub enum AppError {
          dedicated consensus database layout"
     )]
     ConsensusStorageLayout,
-    #[error("failed to apply startup runtime changes: {0}")]
-    ApplyStartupRuntime(String),
+    #[error("failed to read startup runtime changes from the registry")]
+    ReadStartupRuntimeChanges,
+    #[error("failed to plan startup runtime changes for domain '{domain}'")]
+    PlanStartupRuntime { domain: DomainName },
+    #[error("failed to apply startup runtime changes for domain '{domain}'")]
+    ApplyStartupRuntime { domain: DomainName },
     #[error("failed to open runtime state store")]
     OpenRuntimeState,
     #[error("failed to load interconnect tls configuration")]

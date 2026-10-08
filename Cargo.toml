@@ -725,7 +725,7 @@ testcontainers = { version = "0.27.3", default-features = false, features = [
   "watchdog",
 ] }
 thiserror = "2"
-tikv-jemalloc-ctl = { version = "0.7.0", features = ["stats"] }
+tikv-jemalloc-ctl = { version = "0.7.0", features = ["stats", "use_std"] }
 tikv-jemallocator = { version = "0.7.0", features = ["stats"] }
 tokio = "1"
 turmoil = "0.7.2"

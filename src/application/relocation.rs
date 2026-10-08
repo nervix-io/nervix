@@ -7,7 +7,7 @@
 
 use std::collections::BTreeSet;
 
-use error_stack::Report;
+use error_stack::{Report, ResultExt as _};
 use meticulous::OptionExt as _;
 use nervix_consensus::{DomainMutationLease, DomainPlanningInputs};
 use nervix_models::{
@@ -27,7 +27,7 @@ use super::{
     session_service::SessionServiceImpl,
 };
 use crate::registry::{
-    ActiveGraph, RelocationCoverage, RelocationMemberReason, RelocationPlanError, RelocationUnit,
+    ActiveGraph, RelocationCoverage, RelocationMemberReason, RelocationUnit,
     ownership_handoff_relays_for_schedule,
 };
 
@@ -39,8 +39,8 @@ enum RelocationError {
     DomainPaused { domain: DomainName },
     #[error("domain '{domain}' has no active schedule")]
     NoActiveSchedule { domain: DomainName },
-    #[error("relocation plan failed: {source}")]
-    Graph { source: RelocationPlanError },
+    #[error("relocation plan failed")]
+    Graph,
     #[error("node '{node}' is not a raft member")]
     DestinationNotMember { node: ClusterNodeName },
     #[error("node '{node}' is not a live raft voter")]
@@ -342,7 +342,7 @@ impl SessionServiceImpl {
                 relocation.strategy,
                 &relocation.overrides,
             )
-            .map_err(|source| Report::new(RelocationError::Graph { source }))?;
+            .change_context(RelocationError::Graph)?;
 
         // Failover reassigns from the same liveness signal, so a relocation must read it the same
         // way or it would plan a handoff from an owner failover is already taking over.

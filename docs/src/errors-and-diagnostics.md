@@ -559,7 +559,13 @@ references. A branch mismatch in an error route, for example, identifies the sou
 relay, and both branch declarations. A flush-based route without `FLUSH EACH` or `FLUSH IMMEDIATE`
 fails validation; the registry does not supply a cadence. The current registry reports this as an
 invalid-model failure naming the node and output in its diagnostic. Planning failures likewise
-retain the selected entity or placement so an operator can correct the request. See [Control
+retain the selected entity or placement so an operator can correct the request. A relocation the
+graph cannot plan is a `RelocationPlanError` report beneath `RelocationError::Graph`: a member
+that does not exist names the domain and the member, a server-listener ingestor names the ingestor,
+a corridor whose `FROM`/`TO` pairs are all disconnected, a hard group whose overrides request
+different strategies lists every member of that group, and an override outside the unit names its
+member. The failed command renders the chain, such as `relocation plan failed: junction
+'chain_distant' is not part of the relocation`. See [Control
 Plane](./control-plane.md) for activation and [Typed States And Validation
 Boundaries](./typed-states.md) for required state.
 
@@ -692,6 +698,23 @@ a typed execution-configuration failure. A budget below the selected requirement
 class, operation, configured budget, and required bytes, so the node fails startup with an
 actionable diagnostic instead of discovering insufficient storage capacity while applying a
 transaction.
+
+Memory-pressure watermarks are validated where the node reads its options. A low watermark that is
+not below the high one, or a zero check interval, is a `MemoryPressureConfigError` carrying the
+configured values beneath `AppError::InvalidMemoryPressureConfig`, so the node does not start. The
+supervisor's constructor validates the same configuration beneath
+`MemoryPressureError::InvalidConfig`, and an allocator sample that jemalloc refuses is
+`MemoryPressureError::ReadJemalloc`, naming the control it read, the epoch, `stats.allocated` or
+`stats.resident`, with jemalloc's own error beneath. A refused sample at startup fails it beneath
+`AppError::InitMemoryPressureMonitor`; a refused sample while the node runs is logged with its whole
+chain and the supervisor keeps its current pause state until the next sample.
+
+Startup applies each domain's stored schedule before the node serves. A registry that cannot list
+those changes fails as `AppError::ReadStartupRuntimeChanges`, a stored graph that does not plan into
+an execution revision as `AppError::PlanStartupRuntime`, and a revision the runtime does not install
+as `AppError::ApplyStartupRuntime`; the last two name the domain. Each keeps the registry's or the
+runtime's report beneath it, so the node's exit renders the whole chain rather than the top context
+of the failure.
 
 ## Runtime Message Errors
 
