@@ -1208,13 +1208,19 @@ owns what the lane proves, its failure classes and its applicability records; th
 it runs and how long it may take.
 
 The lane starts after its prerequisites, `just tests-deps`, and builds each invocation with Cargo
-before it runs it. The prerequisites provision what the workloads load, as they do for the ordinary
-suite: the WASM guests, the generated ONNX models and the ONNX runtime library, whose path the lane
-passes to every invocation. The probes, the tracked locks' conformance checks and the owner tests
-are libtest executables, run directly so that a signal reaches the lane as a signal rather than as
-Cargo's status. The scenario binary runs the lane's tagged scenarios without retries, in two
-invocations: the restore, client, diagnostic, Roto function, TLS rebinding and inferencer
-scenarios, then the paced-driver scenarios with the diagnostic Rust driver. Each invocation runs
+before it runs it. The prerequisites provision what the workloads load, as they do for the
+ordinary suite: the WASM guests, the generated ONNX models and the ONNX runtime library, whose
+path the lane passes to every invocation. The probes, the tracked locks' conformance checks and
+the owner tests are libtest executables, run directly so that a signal reaches the lane as a
+signal rather than as Cargo's status. The scenario binary runs the lane's tagged scenarios
+without retries, in two inventory invocations: the restore, client, diagnostic, remote ACK,
+Roto function, TLS rebinding and inferencer scenarios, then the paced-driver scenarios with the
+diagnostic Rust driver. Active mode runs each invocation as one process. Order mode starts a fresh
+process for each tagged feature in the first invocation; the materialized restore feature runs
+each scenario separately and its six large examples each have their own process, as do the four
+complete-generation restore examples, selected by the inventory's `order_tags`. The lane checks
+every chunk's Cucumber summary against its registered examples, retains its logs and evidence
+separately, and stops on the first failed chunk. Each process runs
 the inventory's fixed number of scenarios at once, four, rather than one per CPU: a diagnostic
 build pays for its tracked acquisitions on every lock, and a fixed count puts the same load on its
 nodes locally and on CI's 16-vCPU runner.
@@ -1251,17 +1257,18 @@ verdict.
 | Supervision qualification | 10 minutes, `timeout` in the step | A small probe build and up to seven bounded cases; only the untracked wait runs to its bound, 15 seconds, and the others end in milliseconds. It took 40 and 41 seconds in the measured run |
 | Uploads and the kache report | The rest of the 120-minute job limit | Attempt directories, completion records and LCOV reports, uploaded after either step's verdict. In the measured run the uploads took 4 and 3 seconds and kache's post step 3m06s and 3m18s, and the whole jobs took 30 and 28 minutes |
 
-The measurements come from the CI run of 2026-10-07 in which both selections passed with every
-owner of tracked locks reached: 110 workloads in `deloxide` and 118 in `deloxide-order`, with the
-lane instrumenting workspace crates only and running four scenarios at once. The first run in which
-both selections passed, on 2026-10-06 with 97 and 105 workloads and 49 scenario runs, took 30m27s
-and 23m18s in the lane's step. The six scenario runs and seven conformance checks added since fit
-inside the variation between runs, so the inventory's bounds and the job's bounds stay as they were.
-One more scenario run joined after those measurements: the one-node restore of a deduplicator
-keyspace and a window above the bulk budget. A `deloxide-order` run of 2026-10-07 that carried it
-together with its three-node example, with 107 workloads and 51 scenario runs before the six
-scenario runs and seven conformance checks above were added, took 21m47s in the lane's step, so the
-bounds stay as they were.
+The table's measurements come from the CI run of 2026-10-07 in which both selections passed with
+every owner of tracked locks reached: 110 workloads in `deloxide` and 118 in `deloxide-order`,
+with the lane instrumenting workspace crates only and running 55 scenario examples at four at
+once. The first run in which both selections passed, on 2026-10-06 with 97 and 105 workloads and
+49 scenario runs, took 30m27s and 23m18s in the lane's step. The six scenario runs and seven
+conformance checks added between those runs fit inside their variation. A `deloxide-order` run
+that included the one-node restore of a deduplicator keyspace and a window above the bulk budget,
+together with its three-node example, took 21m47s in the lane's step with 107 workloads and 51
+scenario runs before those six scenario runs and seven conformance checks were added. The table
+predates the four remote ACK examples and the order-mode per-example process split, so its
+durations are historical measurements rather than a timing claim for the current combined
+inventory; the inventory and job bounds remain enforced.
 
 When a step's `timeout` expires it sends `SIGTERM` to the step's process group. The collector
 records its attempt as interrupted and forwards the signal to the lane, which ends the process it is

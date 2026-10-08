@@ -20868,6 +20868,23 @@ async fn then_node_eventually_reports_status_containing(
         .expect("cluster status fragment did not appear");
 }
 
+#[then(expr = "within {string} node {string} eventually reports status containing {string}")]
+async fn then_within_duration_node_eventually_reports_status_containing(
+    world: &mut ScenarioWorld,
+    duration: String,
+    node_id: String,
+    fragment: String,
+) {
+    let budget = parse_duration_text(&duration).expect("step duration must be a valid duration");
+    let node_id = expand_placeholders(world, &node_id);
+    let fragment = expand_placeholders(world, &fragment);
+    world
+        .cluster()
+        .wait_for_status_contains_with_budget(&node_id, &fragment, budget)
+        .await
+        .expect("cluster status fragment did not appear within the requested duration");
+}
+
 #[then(
     expr = "within {string} node {string} eventually reports deduplicator {string} owner equals \
             placeholder {string}"

@@ -32,6 +32,7 @@ deloxide-order = [
 ]
 # Selects Loom's primitives for the whole graph, and runs the Loom models of the server's owners.
 loom = [
+  "nervix-interconnect/loom",
   "nervix-consensus/loom",
   "nervix-execution/loom",
   "nervix-model-harness/loom",

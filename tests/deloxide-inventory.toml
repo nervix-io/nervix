@@ -87,6 +87,8 @@ tags = [
   "@memory_pressure_pause",
   "@client_io_03_consumer_restore",
   "@client_io_03_generation",
+  "@remote_ack_owners",
+  "@backup_wait",
   "@restarted_voter_observation",
   "@udf_column_builder",
   "@vhost_tls_rebinding",
@@ -376,6 +378,36 @@ scenario = "Diagnostic server processes record a running detector and stop grace
 selections = ["deloxide", "deloxide-order"]
 
 [[workload]]
+coverage = "Bounded remote delivery and peer admission owners under interleaved branches, attached sink acknowledgement and Kafka source offset commit."
+examples = 2
+feature = "tests/features/runtime/remote_ack_owners.feature"
+id = "scenario.remote-ack-branches"
+invariant = "On one and three nodes, two interleaved branches complete all attached deliveries and commit their source offsets while remote correlation and admission owners retire their rows."
+invocation = "scenarios"
+scenario = "Interleaved branches complete attached deliveries and commit their source offsets"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
+coverage = "A lost remote acknowledgement, source redelivery and bounded correlation retirement."
+examples = 1
+feature = "tests/features/cluster/lost_remote_acknowledgements.feature"
+id = "scenario.remote-ack-loss"
+invariant = "Losing an acknowledgement on the return path redelivers the record instead of stalling its source and leaves no diagnostic lock finding."
+invocation = "scenarios"
+scenario = "A record acknowledgement lost on its way back to the relay owner is redelivered instead of stalling its source"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
+coverage = "Producer restart fencing of an acknowledgement for an earlier process incarnation."
+examples = 1
+feature = "tests/features/cluster/producer_restart_acknowledgements.feature"
+id = "scenario.remote-ack-restart"
+invariant = "An acknowledgement addressed to the earlier producer incarnation leaves new records pending and does not strand or alias owner state."
+invocation = "scenarios"
+scenario = "An acknowledgement addressed to a restarted producer's earlier process leaves its new records pending"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
 coverage = "The local report tool's selection, export, review and qualification."
 examples = 1
 feature = "tests/features/cluster/deadlock_reports.feature"
@@ -412,6 +444,12 @@ feature = "tests/features/cluster/backup_generation.feature"
 id = "scenario.restore-generation"
 invariant = "A complete restore generation of two 20 MiB or forty 1 MiB saves on one and three nodes preserves branches and source offsets through publication and restart."
 invocation = "scenarios"
+order_tags = [
+  "@order_generation_two_saves_single",
+  "@order_generation_two_saves_cluster",
+  "@order_generation_many_saves_single",
+  "@order_generation_many_saves_cluster",
+]
 scenario = "A complete restore generation with <branches> saves of <save_mib> MiB on <cluster_size> nodes preserves branches and source offsets"
 selections = ["deloxide", "deloxide-order"]
 
@@ -482,6 +520,12 @@ feature = "tests/features/cluster/backup_materialized.feature"
 id = "scenario.materialized-bulk-generations"
 invariant = "Materialized generations larger than the bulk budget resume on every assigned owner and replica."
 invocation = "scenarios"
+order_tags = [
+  "@order_resume_fanout_single",
+  "@order_resume_fanout_cluster",
+  "@order_resume_tenants_single",
+  "@order_resume_tenants_cluster",
+]
 scenario = "Materialized generations larger than the bulk budget resume on every assigned owner and replica"
 selections = ["deloxide", "deloxide-order"]
 
@@ -492,6 +536,7 @@ feature = "tests/features/cluster/backup_materialized.feature"
 id = "scenario.materialized-delayed-coordinator"
 invariant = "A delayed coordinator cannot replace a resumed materialized generation larger than the bulk budget."
 invocation = "scenarios"
+order_tags = ["@order_materialized_fanout", "@order_materialized_tenants"]
 scenario = "A delayed coordinator cannot replace a resumed materialized generation larger than the bulk budget"
 selections = ["deloxide", "deloxide-order"]
 
@@ -646,6 +691,76 @@ scenario = "The <driver> driver fails clearly when reopening a <change_kind> <en
 selections = ["deloxide", "deloxide-order"]
 
 [[workload]]
+coverage = "Diagnostic domain capture, refusal and resumption around an ordinary CLI subprocess's second-domain cut expiry."
+examples = 2
+feature = "tests/features/cluster/backup_wait.feature"
+id = "scenario.backup-cut-expiry"
+invariant = "A second-domain cut expiry returns its bounded failure and resumes both domains on one and three nodes."
+invocation = "scenarios"
+scenario = "A second-domain quiesce expiry returns its failure and resumes both domains"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
+coverage = "Diagnostic node capture and retained-result recovery through a raw session, followed by ordinary CLI archive download to stdout."
+examples = 2
+feature = "tests/features/cluster/backup_wait.feature"
+id = "scenario.backup-destination-recovery"
+invariant = "One- and three-node clusters recover the same completed backup execution to another local destination and stdout."
+invocation = "scenarios"
+scenario = "A backup execution can be recovered to another local destination"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
+coverage = "Diagnostic cluster lifetimes and leader routing around an ordinary CLI capture spanning independently quiesced domain cuts."
+examples = 1
+feature = "tests/features/cluster/backup_wait.feature"
+id = "scenario.backup-leader-recovery"
+invariant = "A leader change between domain cuts preserves the execution reference and completes the original multi-domain capture."
+invocation = "scenarios"
+scenario = "A leader change between domain cuts preserves multi-domain backup recovery"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
+coverage = "Diagnostic session refusal for an ordinary CLI recovery under an expired execution reference."
+examples = 2
+feature = "tests/features/cluster/backup_wait.feature"
+id = "scenario.backup-reference-expiry"
+invariant = "An expired reference refuses recovery without starting a fresh capture on one and three nodes."
+invocation = "scenarios"
+scenario = "An expired reference refuses CLI recovery without starting another backup"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
+coverage = "Diagnostic harness and node lifetimes around an ordinary CLI subprocess's bounded wait, recovery and conflicting capture-input refusal."
+examples = 2
+feature = "tests/features/cluster/backup_wait.feature"
+id = "scenario.backup-bounded-recovery"
+invariant = "A bounded CLI wait preserves the original multi-domain execution for recovery to another file and rejects changed capture inputs."
+invocation = "scenarios"
+scenario = "A bounded CLI wait recovers the same multi-domain backup to another file"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
+coverage = "Diagnostic native-client pending-reply cancellation after wait expiry, followed by a fresh client's reference-preserving recovery and archive download."
+examples = 2
+feature = "tests/features/cluster/backup_wait.feature"
+id = "scenario.backup-native-recovery"
+invariant = "A bounded native wait preserves the original multi-domain execution for recovery by a fresh client on one and three nodes."
+invocation = "scenarios"
+scenario = "A bounded native wait recovers the original multi-domain backup"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
+coverage = "Client command and pending-reply lifetimes while two delayed domain cuts each stay within their own budget and together exceed the ordinary request budget."
+examples = 2
+feature = "tests/features/cluster/backup_wait.feature"
+id = "scenario.backup-multi-domain-wait"
+invariant = "One- and three-node cluster backups wait across independent domain cut budgets and retain both quiesced cuts."
+invocation = "scenarios"
+scenario = "An NSPL cluster backup waits across independent domain cut budgets"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
 coverage = "Whole-cluster teardown, node-owned store reopening and automatic scheduling after a voter's first relayed heartbeat. Watch channels and the test fault map are untracked."
 examples = 1
 feature = "tests/features/cluster/restarted_voter_observation.feature"
@@ -674,7 +789,12 @@ workloads = [
 
 [[owner]]
 path = "crates/client-core/src/client.rs"
-workloads = ["paced.reopen-generation", "paced.delayed-refusal"]
+workloads = [
+  "paced.reopen-generation",
+  "paced.delayed-refusal",
+  "scenario.backup-native-recovery",
+  "scenario.backup-multi-domain-wait",
+]
 
 [[owner]]
 path = "crates/client-core/src/consumer.rs"
@@ -696,7 +816,12 @@ workloads = [
 
 [[owner]]
 path = "crates/client-core/src/exchange.rs"
-workloads = ["scenario.client-alter-drain", "paced.reopen-generation"]
+workloads = [
+  "scenario.client-alter-drain",
+  "paced.reopen-generation",
+  "scenario.backup-native-recovery",
+  "scenario.backup-multi-domain-wait",
+]
 
 [[owner]]
 path = "crates/client-core/src/producer.rs"
@@ -749,6 +874,14 @@ path = "crates/interconnect/src/connection.rs"
 workloads = [
   "scenario.diagnostic-nodes",
   "scenario.diagnostic-server-processes",
+]
+
+[[owner]]
+path = "crates/interconnect/src/connection/relay_owner.rs"
+workloads = [
+  "scenario.remote-ack-branches",
+  "scenario.remote-ack-loss",
+  "scenario.remote-ack-restart",
 ]
 
 [[owner]]
@@ -924,6 +1057,14 @@ workloads = ["scenario.diagnostic-nodes"]
 [[owner]]
 path = "src/runtime/relay_channel.rs"
 workloads = ["scenario.diagnostic-nodes"]
+
+[[owner]]
+path = "src/runtime/remote_ack_owner.rs"
+workloads = [
+  "scenario.remote-ack-branches",
+  "scenario.remote-ack-loss",
+  "scenario.remote-ack-restart",
+]
 
 [[owner]]
 path = "src/runtime/state_store.rs"

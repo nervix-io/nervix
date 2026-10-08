@@ -119,6 +119,9 @@ struct Args {
     /// Password for the registry user; prompted for interactively when unset
     #[arg(long, env = "NERVIX_PASSWORD")]
     password: Option<String>,
+    /// Overall BACKUP command wait across all domain cuts, redirects and reconnects (default 10m)
+    #[arg(long, global = true, value_parser = nervix_models::parse_duration_text)]
+    backup_wait_timeout: Option<std::time::Duration>,
     /// Run NSPL statements once and exit instead of starting the interactive REPL
     #[arg(long, conflicts_with = "suggest")]
     command: Option<String>,
@@ -199,9 +202,12 @@ enum Command {
         /// Capture the latest published state without pausing domains
         #[arg(long)]
         without_pause: bool,
-        /// Maximum time to drain a running domain before its state cut
+        /// Maximum time for each running domain's quiesced capture
         #[arg(long, value_parser = nervix_models::parse_duration_text, conflicts_with_all = ["without_state", "without_pause"])]
         timeout: Option<std::time::Duration>,
+        /// Recover the same backup with its original domain and capture options
+        #[arg(long, value_parser = |value: &str| CommandExecutionReference::parse(value))]
+        execution_reference: Option<CommandExecutionReference>,
         /// How the backup's report is printed
         #[arg(long, value_enum, default_value_t = CliReportFormat::Text)]
         format: CliReportFormat,
@@ -508,6 +514,7 @@ async fn main() -> Result<(), StackReport<ClientError>> {
             without_state,
             without_pause,
             timeout,
+            execution_reference,
             format,
         }) => {
             let connect_options = connect_options_from_args(&args)?;
@@ -522,6 +529,7 @@ async fn main() -> Result<(), StackReport<ClientError>> {
                 without_state,
                 without_pause,
                 timeout,
+                execution_reference,
                 format,
             })
             .await;
@@ -1094,6 +1102,9 @@ fn connect_options_from_args(args: &Args) -> Result<ConnectOptions, StackReport<
         ca_certificate_pem,
         username: Some(args.username.clone()),
         password: Some(password),
+        backup_wait_timeout: args
+            .backup_wait_timeout
+            .unwrap_or(ConnectOptions::default().backup_wait_timeout),
         ..ConnectOptions::default()
     })
 }
@@ -1736,6 +1747,68 @@ mod tests {
     use meticulous::{OptionExt as _, ResultExt as _};
 
     use super::*;
+
+    #[test]
+    fn backup_wait_and_recovery_arguments_use_shared_connect_options() {
+        let args = Args::try_parse_from([
+            "nervix-cli",
+            "--password",
+            "secret",
+            "--backup-wait-timeout",
+            "7m",
+            "--command",
+            "BACKUP CLUSTER TO 'cluster.nvxb';",
+        ])
+        .assured("NSPL accepts the global backup wait option");
+        let options = connect_options_from_args(&args).assured("connect options are valid");
+        assert_eq!(
+            options.backup_wait_timeout,
+            std::time::Duration::from_secs(7 * 60)
+        );
+        assert_eq!(
+            options.request_timeout,
+            ConnectOptions::default().request_timeout
+        );
+        assert_eq!(
+            options.retry_timeout,
+            ConnectOptions::default().retry_timeout
+        );
+
+        let args = Args::try_parse_from([
+            "nervix-cli",
+            "--password",
+            "secret",
+            "backup",
+            "cluster",
+            "--output",
+            "-",
+            "--execution-reference",
+            "recovery.backup",
+            "--backup-wait-timeout",
+            "8m",
+        ])
+        .assured("the backup subcommand accepts recovery and global wait options");
+        let options = connect_options_from_args(&args).assured("connect options are valid");
+        assert_eq!(
+            options.backup_wait_timeout,
+            std::time::Duration::from_secs(8 * 60)
+        );
+        let Some(Command::Backup {
+            execution_reference: Some(reference),
+            ..
+        }) = args.subcommand
+        else {
+            panic!("the backup retains its explicit execution reference");
+        };
+        assert_eq!(reference.as_str(), "recovery.backup");
+        let args = Args::try_parse_from(["nervix-cli", "--password", "secret"])
+            .assured("the CLI's defaults parse");
+        let options = connect_options_from_args(&args).assured("default options are valid");
+        assert_eq!(
+            options.backup_wait_timeout,
+            std::time::Duration::from_secs(10 * 60)
+        );
+    }
 
     #[test]
     fn event_line_queue_bounds_records_and_bytes_without_waiting_for_the_printer() {

@@ -256,14 +256,14 @@ schema may declare only the Arrow types Nervix carries: integers of 8 to 64
 bits, 32- and 64-bit floats, booleans, UTF-8 text, binary, nanosecond
 timestamps, and lists and fixed-size lists of those, none dictionary-encoded.
 Every message must open with Arrow's continuation marker, `0xFFFFFFFF`, and
-declare metadata and body lengths that lie inside the stream; the earlier
-framing without the marker is not read. Its record batch must declare exactly
-the field nodes and buffers those fields take, every buffer inside the message
-body, a validity bitmap long enough for the nulls it counts and offsets buffers
-that hold whole offsets. Nervix checks all of this before it reads the batch or
-allocates anything from a declared length, and a stream that fails the check is
-invalid generated Arrow IPC. The empty byte string is the only valid empty
-generated pool; do not encode a zero-column Arrow stream.
+declare metadata and body lengths that lie inside the stream. Its record batch
+must declare exactly the field nodes and buffers those fields take, every
+buffer inside the message body, a validity bitmap long enough for the nulls it
+counts and offsets buffers that hold whole offsets. Nervix checks all of this
+before it reads the batch or allocates anything from a declared length, and a
+stream that fails the check is invalid generated Arrow IPC. The empty byte
+string is the only valid empty generated pool; do not encode a zero-column
+Arrow stream.
 When present, generated schema field names must be empty. Nervix compares every
 other field property with each referencing destination field, including data
 type, nullability, timestamp units and timezones, nested types, fixed lengths,

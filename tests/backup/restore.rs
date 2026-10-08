@@ -164,11 +164,13 @@ async fn then_restore_tenants_remain_isolated(
         .map(|tenant| format!("restore-tenant-{tenant}"))
         .collect::<BTreeSet<_>>();
     let mut pending = expected.clone();
+    let mut observed = BTreeSet::new();
     let session = world
         .active_session
         .as_mut()
         .assured("the restored output has a subscription");
     while !pending.is_empty() {
+        nervix_primitives::task::consume_budget().await;
         let now = Instant::now();
         assert!(
             now < deadline,
@@ -177,15 +179,21 @@ async fn then_restore_tenants_remain_isolated(
         let event = session
             .try_next_subscription(deadline.saturating_duration_since(now))
             .await
-            .assured("the subscription remains connected")
-            .unwrap_or_else(|| {
-                panic!(
-                    "missing isolated restored rows: {pending:?}; delivered rows: {:?}; frames \
-                     outside subscription lifetime: {:?}",
-                    session.delivered_payloads(),
-                    session.frames_outside_lifetime(),
-                )
-            });
+            .assured("the subscription remains connected");
+        let Some(event) = event else {
+            let server_error = session
+                .try_next_server_error(Duration::ZERO)
+                .await
+                .assured("the subscription's filed server errors remain readable");
+            panic!(
+                "missing isolated restored rows: {pending:?}; observed: {observed:?}; server \
+                 error: {server_error:?}; delivered rows: {:?}; frames outside subscription \
+                 lifetime: {:?}",
+                session.delivered_payloads(),
+                session.frames_outside_lifetime(),
+            );
+        };
+        observed.insert(event.payload.clone());
         world.last_subscription_payload = Some(event.payload.clone());
         // Domain offsets recover at least once, so a valid row may repeat while another branch
         // is still pending. Every observed row must still belong to an expected branch.

@@ -712,12 +712,11 @@ mod framing_tests {
     }
 
     #[nervix_primitives::test]
-    async fn a_message_without_its_continuation_marker_is_refused() {
+    async fn a_message_with_a_damaged_continuation_marker_is_refused() {
         let executor = Executor::default();
         let section = SealedSection::sealed(&executor).await;
         let mut damaged = section.bytes.clone();
-        // The stream format before the marker opened a message with its metadata length.
-        damaged.drain(..4);
+        damaged[0] = 0xfe;
 
         let result = section.open(&executor, damaged).await;
 

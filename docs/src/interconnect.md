@@ -29,7 +29,8 @@ including the subscription fan-out that feeds a client's Row frames.
 Source-local compiler contracts distinguish peer/slot installation from recurring stream,
 frame, admission and acknowledgement operations. Retained admission records and placement progress
 name their bounded protocol key and transition bound. Transport selection reads immutable target
-and connection publications; remote ACK tracking retains exact-operation repair expectations.
+and connection publications. Delivery generations own remote ACK rows; authenticated peer owners
+own relay protocol collections under short, peer-scoped transition guards.
 A retained slot admits one worker through an atomic claim; established operations read that claim. The compiler's
 contracts do not establish wire delivery or concurrency guarantees; those remain the protocols
 and checks described here. [Data-Plane Concurrency](./data-plane-concurrency.md#source-contracts)
@@ -370,8 +371,15 @@ operator-facing reason; callers decide retry and relocation from the class and s
 
 Relay metadata uses the same validated control encoding, while relay bodies remain Arrow IPC from
 the source relay to the destination runtime. Bulk operations transfer opaque byte chunks and let
-the owning resource, snapshot, or state protocol interpret the stream. The primary payload limits
-are:
+the owning resource, snapshot, or state protocol interpret the stream.
+
+Before the receiver gives a relay Arrow stream to Arrow's reader, the shared IPC framing owner
+checks every message's continuation marker, metadata, declared body and column buffers against the
+received bytes. A malformed stream reports `ArrowBodyError::Framing` before the reader can allocate
+or slice from an unchecked length. A reader panic on malformed metadata that passes framing is
+reported as `ArrowBodyError::Decode`.
+
+The primary payload limits are:
 
 | Payload | Maximum size |
 | --- | ---: |
@@ -685,13 +693,13 @@ it. From the moment the delivery that carries the acknowledgement is admitted, a
 counts the passes in which the receiver reported nothing about it, and fails the acknowledgement
 once fifteen seconds of such passes have gone by. The bound outlasts two consecutive reports that
 each exhaust their five-second deadline, so a receiver that is still working on the record is not
-mistaken for one that stopped. Before admission, the delivery's own admission wait decides its
-failure, and the sweep leaves its acknowledgements alone. The sweep counts its own passes rather
+mistaken for one that stopped. Before admission, the delivery guard resolves cancelled work and
+the sweep bounds an abandoned registration at the five-minute total admission wait. The sweep counts its own passes rather
 than elapsed time, so a registering node whose own execution stalled, such as a paused container,
 does not fail acknowledgements whose reports it could not receive meanwhile.
 
-A failed acknowledgement resolves negatively exactly once. The sweep's removal rechecks the count
-under the entry's exclusive map lock, so a report that arrives first keeps the acknowledgement
+A failed acknowledgement resolves negatively exactly once. The sweep and report transitions use
+the exact delivery generation's guard, so a report that arrives first keeps the acknowledgement
 pending, and a terminal outcome or the delivery's own failure that resolves it first leaves the
 sweep nothing to fail. The source attempt fails with it and redelivers the record along the current
 routes, so a sink that already completed the record can receive it again. A report or outcome that
@@ -706,6 +714,52 @@ fails the acknowledgement fifteen seconds after the consumer's node fell silent,
 the record, and the source's retry takes over. Each sweep that failed acknowledgements logs, at
 `warn`, one line per receiver with the number it failed.
 
+### Bounded Correlation And Peer Owners
+
+The sender has 8,192 delivery positions and a separate 8,192 admission positions. One delivery
+owns all its record rows, with independent outcomes; filling delivery capacity therefore leaves
+room to register its runtime admission. The opaque acknowledgement number encodes a position,
+generation and row. Resolution validates all three, together with the registrar's full discovery
+identity. An exhausted generation is sealed permanently. A delayed report, terminal reply or
+cleanup cannot change a replacement occupying the same position.
+Unused positions are claimed on demand; only retired positions enter the bounded free queues.
+Shutdown seals fresh claims before scanning positions that were ever claimed, so a concurrent
+registrar either occupies a position shutdown visits or finds it closed.
+
+Record storage and receiver ACK watches are charged to the relay memory budget. One task per
+admitted batch multiplexes its row watches, with a fixed charge per row plus one task charge; a
+wide frame therefore does not allocate one task per acknowledgement. Pending rows report progress
+every 100 milliseconds, below the registrar's fifteen-second silence bound even when two reports
+each exhaust their dispatch deadline. The same cadence keeps local emitter and message-error
+acknowledgements alive while a connector request is pending, giving a one-second source
+`ACK TIMEOUT` multiple chances to observe progress. Admission
+refusal is typed and occurs before runtime admission. Cancellation before admission resolves every
+held share negatively and returns its position. Completion of the last record returns the delivery
+storage and its charge. Watcher memory remains charged through its dispatch attempts and ends on
+completion, runtime shutdown, or the registrar run leaving or changing. The membership writer
+publishes immutable process identities; a watcher gives initial discovery five seconds and stops
+once a previously observed registrar is absent. Terminal delivery retains the five-second event
+deadline described above; this does not promise suppression of replay duplicates after lost outcomes.
+
+An authenticated connection retains its peer's protocol owner. That owner alone mutates ordinary
+grant, attempt, channel, admission and outbound-correlation collections. Each synchronous guard
+is scoped to that peer, is released before transport waits, and follows peer then record lock
+order. Runtime admission and cancellation use one irreversible atomic verdict. Peer removal or
+epoch replacement cancels unadmitted records and releases transport item and terminal permits,
+including when runtime still borrows an admitted intake. Its admitted verdict remains valid.
+Decoded metadata keeps its memory charge until its last borrower releases it.
+
+With incoming queue capacity `Q`, each peer holds at most `Q` grants, attempts, active channels and
+admission records, at most `2Q` channel watermarks, and at most `2Q` outbound attempts and admission
+correlations. New unrelated channels are refused when retained watermarks occupy their budget;
+they are never evicted early to admit a replay. Lost terminal replies remain reconcilable. A
+sixty-second sweep reclaims protocol state after ten minutes without progress or reconciliation;
+live admission reports renew retained records. Authentication before gossip membership permits
+discovery, while relay operations wait for live membership. An owner still awaiting membership
+ends after ten minutes and closes its bound intake connections. Routing publication has at most
+the configured peer limit; normal frame and ACK operations use retained owners rather than a
+node-wide shared-map guard.
+
 ### Ordering, Retry, And Reconciliation
 
 A delivery identity combines the sender process epoch, receiver process epoch, channel incarnation,
@@ -718,9 +772,8 @@ does not resend the body. Sequence watermarks reject reordering and duplicate en
 sender channels rotate after five minutes. A receiver keeps a channel's watermark while a batch
 granted on that channel is unresolved, and for at least ten minutes after the watermark was last
 recorded or consulted by a grant, status, or cancellation request, so ordinary reconnects can still
-reconcile. A consultation reads the watermark through a shared lookup and refreshes its retention
-with one atomic maximum, so checking a delivery against its channel takes no exclusive lock on the
-watermark.
+reconcile. A consultation refreshes retention under that peer's protocol guard, together with its
+sequence decision. Independent peers have independent guards.
 
 The [relay reconciliation and receiver-restart simulations](./interconnect-simulation.md#relay-reconciliation-and-cancellation)
 check this boundary through the production authenticated connection. They lose the reply after an
@@ -733,7 +786,7 @@ has delivered an attempt's terminal outcome, it retires that same attempt: it ad
 watermark and releases the attempt, its channel occupancy, and its admission without rebuilding
 either identity or looking the admission up again.
 
-Relay attempts, grants, watermarks, admission state, and record-acknowledgement maps are in-memory
+Relay attempts, grants, watermarks, admission state, and record-acknowledgement owners are in-memory
 hot-path state. A receiver process-epoch change therefore makes an unresolved delivery
 indeterminate. The transport does not replay it automatically against the new process. If the
 source's policy calls for another attempt, that attempt opens a new channel incarnation and is a new

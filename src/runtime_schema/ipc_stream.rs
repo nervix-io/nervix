@@ -571,7 +571,6 @@ impl<'a> IpcMessages<'a> {
                 "the message verifier admits a union type only beside its value, and the type was \
                  just checked to be a record batch",
             );
-            Self::check_buffers(&message, &batch).map_err(IpcStreamError::misframed)?;
             declared.check_record_batch(&batch, max_rows)?;
             record_batches = record_batches
                 .checked_add(1)
@@ -591,8 +590,8 @@ impl<'a> IpcMessages<'a> {
         })
     }
 
-    /// The next message's header, or `None` at the stream's end. The message's body lies within
-    /// the stream; nothing of it is read.
+    /// The next message's header, or `None` at the stream's end. Its body, and every column
+    /// buffer a record batch declares, lie within the stream before any caller reads them.
     fn next_message(&mut self) -> Result<Option<Message<'a>>, Report<IpcFramingDefect>> {
         if self.ending == StreamEnding::MarkerOrEnd && self.offset == self.stream.len() {
             return Ok(None);
@@ -626,6 +625,7 @@ impl<'a> IpcMessages<'a> {
             return Err(Report::new(IpcFramingDefect::BodyLength));
         };
         self.take(body_length)?;
+        Self::check_buffers(&message)?;
         Ok(Some(message))
     }
 
@@ -642,11 +642,12 @@ impl<'a> IpcMessages<'a> {
         Ok(bytes)
     }
 
-    /// Holds every column buffer `batch` declares to the body of its message.
-    fn check_buffers(
-        message: &Message<'_>,
-        batch: &RecordBatch<'_>,
-    ) -> Result<(), Report<IpcFramingDefect>> {
+    /// Holds every column buffer `message` declares to its body. Only a record batch declares any
+    /// in a stream of the field types Nervix carries.
+    fn check_buffers(message: &Message<'_>) -> Result<(), Report<IpcFramingDefect>> {
+        let Some(batch) = message.header_as_record_batch() else {
+            return Ok(());
+        };
         let Some(buffers) = batch.buffers() else {
             return Ok(());
         };

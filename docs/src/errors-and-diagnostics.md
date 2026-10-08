@@ -329,6 +329,13 @@ archive as `NX_ERROR_PROTOCOL`, and a write failure as `NX_ERROR_INVALID_ARGUMEN
 execution reference so a host can run the backup again. No diagnostic of a backup includes archive
 contents, password hashes, or resource bytes.
 
+The native backup command wait is bounded independently of each domain's quiesce budget and the
+archive's per-frame stall bound. An exhausted command wait reports `ClientError::UncertainCommand`
+with the durable reference. The CLI's JSON `BACKUP_FAILED` report includes
+`error.execution_reference` for that uncertainty and for `ClientError::BackupDownload`; its text
+report names `--execution-reference` as the recovery option. Reusing that reference preserves the
+server's conflict, expiry and retention authority.
+
 The web console owns its own typed download and restore failures. A download failure names the
 server's refusal, a transport failure, a stalled or interrupted stream, a missing leader or a
 redirect loop, frames out of order or undecodable, an archive that differs from the backup's
@@ -878,7 +885,15 @@ failure beneath the reason can quote the payload it evaluated, and is not render
 ## Cross-Node And Public Boundaries
 
 The interconnect validates and bounds the wire request before its operation handler runs. A
-transport error describes connection, admission, framing, deadline, or delivery failure. A remote
+delivery correlation that has no free position reports `CorrelationCapacity`; an exhausted
+generation reports `CorrelationIdentityExhausted`; failure to reserve record storage reports
+`CorrelationMemory`. A receiver unable to reserve a watcher reports `RemoteAckAdmission` with its
+execution admission cause, before runtime admission. These refusals judge no payload and preserve
+source retry ownership. Ending a registered delivery before admission or shutting its owner down
+resolves its held shares negatively once. Stale generations and registrar runs are ordinary
+unmatched reports logged at `debug`, and never resolve current work.
+
+A transport error describes connection, admission, framing, deadline, or delivery failure. A remote
 control response instead preserves a typed failure *subject* and one of four classes: rejected by
 the answering node, unavailable there, temporarily not ready, or executed and failed. A requester
 can use class and subject for routing, retry, and recovery without parsing text. Only an executed

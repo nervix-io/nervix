@@ -44,7 +44,7 @@ use nervix_primitives::{
     net::{TcpListener, TcpStream},
     publication::{ArcSwap, ArcSwapOption},
     sync::{
-        Arc, CancellationToken, Notify, OwnedSemaphorePermit, Semaphore, StdArc,
+        Arc, CancellationToken, Notify, OwnedSemaphorePermit, Semaphore, StdArc, StdWeak,
         atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
         mpsc,
     },
@@ -83,6 +83,9 @@ mod dial;
 mod duplex;
 mod published_tls;
 mod relay;
+mod relay_admission_choice;
+mod relay_owner;
+use relay_admission_choice::{AdmissionChoice, ChosenAdmission};
 mod stream;
 mod stream_releases;
 pub(crate) mod stream_slots;
@@ -94,6 +97,7 @@ pub(crate) use duplex::FrameReader;
 pub use duplex::{
     ChargedItem, DuplexItems, DuplexReceiver, DuplexResponses, DuplexSendProgress, DuplexSender,
 };
+use relay_owner::{RelayOwnersPublication, RelayPeerOwner};
 pub use stream::IncomingByteStream;
 pub(crate) use stream::OutboundByteStreamRequest;
 use stream_slots::{StreamSlotQuotas, configure_client_builder, configure_server_builder};
@@ -141,6 +145,7 @@ struct InboundPeer {
     advertised_host: String,
     process_epoch: u64,
     class: PoolClass,
+    relay_owner: StdArc<RelayPeerOwner>,
 }
 
 #[cfg_attr(
@@ -292,6 +297,8 @@ struct ClientConnection {
     sender: client::SendRequest<Bytes>,
     stream_slots: StreamSlotQuotas,
     peer_epoch: u64,
+    /// The authenticated connection retains the peer's protocol owner for all of its frames.
+    relay_owner: Option<StdArc<RelayPeerOwner>>,
     retiring: CancellationToken,
     cancel: CancellationToken,
     closed: CancellationToken,
@@ -381,6 +388,13 @@ struct InboundConnectionRegistration {
     key: InboundPoolKey,
 }
 
+struct InboundBinding {
+    peer_addr: SocketAddr,
+    peer_identity: CertificateIdentity,
+    handshake_permit: OwnedSemaphorePermit,
+    binding_sequence: u64,
+}
+
 struct BoundInboundConnection {
     peer: InboundPeer,
     _registration: InboundConnectionRegistration,
@@ -420,7 +434,7 @@ struct OutboundRelayKey {
 ///
 /// The attempt holds its channel's key, so the channel bookkeeping an attempt touches never
 /// rebuilds that key.
-#[derive(Debug, Clone, Hash, PartialEq, Eq)]
+#[derive(Debug, Clone, Hash, PartialEq, Eq, PartialOrd, Ord)]
 #[cfg_attr(
     nervix_lint,
     nervix::context(
@@ -442,7 +456,7 @@ impl RelayAttemptKey {
     }
 }
 
-#[derive(Debug, Clone, Hash, PartialEq, Eq)]
+#[derive(Debug, Clone, Hash, PartialEq, Eq, PartialOrd, Ord)]
 struct RelayChannelKey {
     peer_node_id: ClusterNodeName,
     sender_epoch: u64,
@@ -461,12 +475,7 @@ struct RelayChannelKey {
 struct RelayChannelWatermark {
     sequence: u64,
     status: RelayAdmissionStatus,
-    /// When this watermark was recorded for its channel.
-    recorded_at: Instant,
-    /// How long after `recorded_at` the watermark last reconciled a delivery of its channel, in
-    /// nanoseconds. An atomic lets a shared map guard refresh it, so checking a delivery against
-    /// its channel never takes the exclusive shard lock.
-    reconciled_after_nanos: AtomicU64,
+    last_reconciled: Instant,
 }
 
 impl RelayChannelWatermark {
@@ -474,80 +483,32 @@ impl RelayChannelWatermark {
         Self {
             sequence,
             status,
-            recorded_at: Instant::now(),
-            reconciled_after_nanos: AtomicU64::new(0),
+            last_reconciled: Instant::now(),
         }
     }
 
-    /// Record that the watermark reconciled a delivery now. Concurrent reconciliations keep the
-    /// latest.
-    fn mark_reconciled(&self) {
-        let reconciled_after = self.recorded_at.elapsed();
-        let reconciled_after_nanos = u64::try_from(reconciled_after.as_nanos()).assured(
-            "a transport process runs far less than the 584 years a u64 nanosecond offset spans",
-        );
-        self.reconciled_after_nanos
-            .fetch_max(reconciled_after_nanos, Ordering::AcqRel);
+    fn mark_reconciled(&mut self) {
+        self.last_reconciled = Instant::now();
     }
 
-    /// When the watermark last reconciled a delivery, or when it was recorded if it has not.
     fn last_reconciled_at(&self) -> Instant {
-        let reconciled_after =
-            Duration::from_nanos(self.reconciled_after_nanos.load(Ordering::Acquire));
-        self.recorded_at.checked_add(reconciled_after).assured(
-            "the offset was measured on the monotonic clock, so it names an instant the clock read",
-        )
+        self.last_reconciled
     }
-}
-
-#[derive(Clone)]
-#[cfg_attr(
-    nervix_lint,
-    nervix::context(
-        recurring,
-        reason = "this retained transport value services relay frames and their terminal outcomes"
-    )
-)]
-enum RelayAttemptEntry {
-    Active(StdArc<RelayAdmissionRecord>),
-    CancellationFence,
 }
 
 enum RelayGrantRegistration {
     Registered,
-    Existing(RelayAttemptEntry),
+    Existing(StdArc<RelayAdmissionRecord>),
     Retired(RelayGrantDisposition),
     InvalidSequence,
     ChannelBusy,
     AdmissionBusy,
 }
 
-impl RelayAttemptEntry {
-    fn progress_registration(&self) -> Option<RemoteAckRegistration> {
-        match self {
-            Self::Active(record) => record.progress_registration(),
-            Self::CancellationFence => None,
-        }
-    }
-
-    fn is_unadmitted(&self) -> bool {
-        match self {
-            Self::Active(record) => matches!(
-                record.status(),
-                RelayAdmissionStatus::Reserved | RelayAdmissionStatus::BodyReceived
-            ),
-            Self::CancellationFence => false,
-        }
-    }
-}
-
 #[derive(Debug, Clone)]
-enum RelayAdmissionState {
+enum RelayBodyPhase {
     Reserved { grant_id: u64 },
     BodyReceived,
-    Admitted,
-    Rejected(String),
-    Cancelled,
 }
 
 #[cfg_attr(
@@ -564,7 +525,10 @@ struct RelayAdmissionRecord {
     admission_key: RelayAdmissionKey,
     body_bytes: u64,
     metadata: wire::RelayMetadata,
-    state: nervix_primitives::sync::blocking::Mutex<RelayAdmissionState>,
+    /// Decoded metadata stays allocated until the last intake or protocol owner releases it.
+    _metadata_memory: Reservation,
+    choice: AdmissionChoice,
+    state: nervix_primitives::sync::blocking::Mutex<RelayAdmissionProtocol>,
     cancellation: CancellationToken,
     /// When the receiver accepted this attempt's reservation. Progress and admission latency are
     /// both measured from here, because that is when the sender's wait begins.
@@ -572,6 +536,18 @@ struct RelayAdmissionRecord {
     /// Also held by the transport, which outlives every attempt it reserved. The record resolves
     /// long after the call that created it returned, so it records its own outcome.
     observations: Arc<TransportObservations>,
+    /// Records borrow the transport owner weakly; the owner retains unresolved records.
+    owner: StdWeak<RelayPeerOwner>,
+}
+
+struct RelayAdmissionProtocol {
+    phase: RelayBodyPhase,
+    rejection: Option<String>,
+    capacity: Option<RelayAdmissionCapacity>,
+    last_progress: Instant,
+}
+
+struct RelayAdmissionCapacity {
     _item: OwnedSemaphorePermit,
     _terminal: OwnedSemaphorePermit,
 }
@@ -686,25 +662,34 @@ impl std::fmt::Debug for RelayAdmission {
 
 impl RelayAdmission {
     pub fn admit(&self) -> RelayAdmissionDecision {
-        let mut state = self.record.state.lock();
-        match &*state {
-            RelayAdmissionState::Reserved { .. } | RelayAdmissionState::BodyReceived => {
-                *state = RelayAdmissionState::Admitted;
-                self.record.observe(RelayAdmissionOutcome::Admitted);
-                RelayAdmissionDecision::Admitted
-            }
-            RelayAdmissionState::Admitted => RelayAdmissionDecision::Admitted,
-            RelayAdmissionState::Rejected(_) | RelayAdmissionState::Cancelled => {
-                RelayAdmissionDecision::Cancelled
+        self.record.mark_admitted();
+        match self.record.choice.current() {
+            ChosenAdmission::Admitted => RelayAdmissionDecision::Admitted,
+            ChosenAdmission::Cancelled => RelayAdmissionDecision::Cancelled,
+            ChosenAdmission::Pending => {
+                unreachable!("admission selected or observed an irreversible verdict")
             }
         }
     }
 }
 
 impl RelayAdmissionRecord {
+    fn release_capacity(&self) {
+        self.state.lock().capacity.take();
+    }
+    fn report_progress(&self) {
+        self.state.lock().last_progress = Instant::now();
+    }
+    fn last_progress(&self) -> Instant {
+        self.state.lock().last_progress
+    }
+
+    fn is_unadmitted(&self) -> bool {
+        self.choice.current() == ChosenAdmission::Pending
+    }
+
     fn progress_registration(&self) -> Option<RemoteAckRegistration> {
-        let state = self.state.lock();
-        if let RelayAdmissionState::Reserved { .. } | RelayAdmissionState::BodyReceived = &*state {
+        if self.is_unadmitted() {
             self.metadata.admission.clone()
         } else {
             None
@@ -712,43 +697,59 @@ impl RelayAdmissionRecord {
     }
 
     fn reserved_grant_id(&self) -> Option<u64> {
-        match &*self.state.lock() {
-            RelayAdmissionState::Reserved { grant_id } => Some(*grant_id),
-            RelayAdmissionState::BodyReceived
-            | RelayAdmissionState::Admitted
-            | RelayAdmissionState::Rejected(_)
-            | RelayAdmissionState::Cancelled => None,
+        let state = self.state.lock();
+        if !self.is_unadmitted() {
+            return None;
+        }
+        match state.phase {
+            RelayBodyPhase::Reserved { grant_id } => Some(grant_id),
+            RelayBodyPhase::BodyReceived => None,
+        }
+    }
+
+    fn status_under_guard(&self, state: &RelayAdmissionProtocol) -> RelayAdmissionStatus {
+        match self.choice.current() {
+            ChosenAdmission::Pending => match state.phase {
+                RelayBodyPhase::Reserved { .. } => RelayAdmissionStatus::Reserved,
+                RelayBodyPhase::BodyReceived => RelayAdmissionStatus::BodyReceived,
+            },
+            ChosenAdmission::Admitted => RelayAdmissionStatus::Admitted,
+            ChosenAdmission::Cancelled => match &state.rejection {
+                Some(reason) => RelayAdmissionStatus::Rejected(reason.clone()),
+                None => RelayAdmissionStatus::Cancelled,
+            },
         }
     }
 
     fn status(&self) -> RelayAdmissionStatus {
-        match &*self.state.lock() {
-            RelayAdmissionState::Reserved { .. } => RelayAdmissionStatus::Reserved,
-            RelayAdmissionState::BodyReceived => RelayAdmissionStatus::BodyReceived,
-            RelayAdmissionState::Admitted => RelayAdmissionStatus::Admitted,
-            RelayAdmissionState::Rejected(reason) => RelayAdmissionStatus::Rejected(reason.clone()),
-            RelayAdmissionState::Cancelled => RelayAdmissionStatus::Cancelled,
-        }
+        self.status_under_guard(&self.state.lock())
     }
 
     fn grant_disposition(&self) -> RelayGrantDisposition {
-        match &*self.state.lock() {
-            RelayAdmissionState::Reserved { grant_id } => RelayGrantDisposition::SendBody {
-                grant_id: *grant_id,
-            },
-            RelayAdmissionState::BodyReceived => RelayGrantDisposition::BodyReceived,
-            RelayAdmissionState::Admitted => RelayGrantDisposition::Admitted,
-            RelayAdmissionState::Rejected(reason) => {
-                RelayGrantDisposition::Rejected(reason.clone())
+        let state = self.state.lock();
+        match self.status_under_guard(&state) {
+            RelayAdmissionStatus::Reserved => {
+                let RelayBodyPhase::Reserved { grant_id } = state.phase else {
+                    unreachable!("the guarded body phase is reserved");
+                };
+                RelayGrantDisposition::SendBody { grant_id }
             }
-            RelayAdmissionState::Cancelled => RelayGrantDisposition::Cancelled,
+            RelayAdmissionStatus::BodyReceived => RelayGrantDisposition::BodyReceived,
+            RelayAdmissionStatus::Admitted => RelayGrantDisposition::Admitted,
+            RelayAdmissionStatus::Rejected(reason) => RelayGrantDisposition::Rejected(reason),
+            RelayAdmissionStatus::Cancelled => RelayGrantDisposition::Cancelled,
+            RelayAdmissionStatus::Retired
+            | RelayAdmissionStatus::Unknown
+            | RelayAdmissionStatus::Indeterminate => {
+                unreachable!("a live record has a concrete admission phase or verdict")
+            }
         }
     }
 
     fn mark_body_received(&self) -> bool {
         let mut state = self.state.lock();
-        if let RelayAdmissionState::Reserved { .. } = &*state {
-            *state = RelayAdmissionState::BodyReceived;
+        if self.is_unadmitted() && matches!(state.phase, RelayBodyPhase::Reserved { .. }) {
+            state.phase = RelayBodyPhase::BodyReceived;
             true
         } else {
             false
@@ -756,40 +757,29 @@ impl RelayAdmissionRecord {
     }
 
     fn mark_admitted(&self) {
-        let mut state = self.state.lock();
-        if let RelayAdmissionState::Reserved { .. } | RelayAdmissionState::BodyReceived = &*state {
-            *state = RelayAdmissionState::Admitted;
+        if self.choice.admit() {
             self.observe(RelayAdmissionOutcome::Admitted);
         }
     }
 
     fn reject(&self, reason: String) {
         let mut state = self.state.lock();
-        if let RelayAdmissionState::Reserved { .. } | RelayAdmissionState::BodyReceived = &*state {
-            *state = RelayAdmissionState::Rejected(reason);
+        if self.choice.cancel() {
+            state.rejection = Some(reason);
             self.observe(RelayAdmissionOutcome::Rejected);
             self.cancellation.cancel();
         }
     }
 
     fn cancel(&self) -> RelayAdmissionStatus {
-        let mut state = self.state.lock();
-        match &*state {
-            RelayAdmissionState::Reserved { .. } | RelayAdmissionState::BodyReceived => {
-                *state = RelayAdmissionState::Cancelled;
-                self.observe(RelayAdmissionOutcome::Cancelled);
-                self.cancellation.cancel();
-                RelayAdmissionStatus::Cancelled
-            }
-            RelayAdmissionState::Admitted => RelayAdmissionStatus::Admitted,
-            RelayAdmissionState::Rejected(reason) => RelayAdmissionStatus::Rejected(reason.clone()),
-            RelayAdmissionState::Cancelled => RelayAdmissionStatus::Cancelled,
+        let state = self.state.lock();
+        if self.choice.cancel() {
+            self.observe(RelayAdmissionOutcome::Cancelled);
+            self.cancellation.cancel();
         }
+        self.status_under_guard(&state)
     }
 
-    /// Count how this attempt left the unresolved set, and how long it waited to get there. Every
-    /// caller holds the state lock and has already checked that the attempt was unresolved, so an
-    /// attempt is counted exactly once.
     fn observe(&self, outcome: RelayAdmissionOutcome) {
         self.observations
             .relay_resolved(outcome, self.reserved_at.elapsed());
@@ -809,6 +799,7 @@ pub(crate) struct TransportStateInner {
     advertised_host: String,
     process_epoch: u64,
     next_coordination_sequence: AtomicU64,
+    next_binding_sequence: AtomicU64,
     local_addr: SocketAddr,
     resolver: PeerResolver,
     tls: PublishedTls,
@@ -826,14 +817,9 @@ pub(crate) struct TransportStateInner {
     handshake_permits: StdArc<Semaphore>,
     incoming_tx: mpsc::Sender<ReceivedEnvelope>,
     requests: super::RequestState,
-    grants: DashMap<u64, RelayGrant, RandomState>,
-    relay_attempts: DashMap<RelayAttemptKey, RelayAttemptEntry, RandomState>,
-    /// The sequence of the batch each channel has granted and not yet retired.
-    active_relay_channels: DashMap<RelayChannelKey, u64, RandomState>,
-    relay_admissions: DashMap<RelayAdmissionKey, StdArc<RelayAdmissionRecord>, RandomState>,
-    relay_watermarks: DashMap<RelayChannelKey, RelayChannelWatermark, RandomState>,
-    outbound_relay_epochs: DashMap<OutboundRelayKey, u64, RandomState>,
-    outbound_relay_admissions: DashMap<RelayAdmissionKey, OutboundRelayKey, RandomState>,
+    /// Immutable routing only. Connections and attempts retain their peer owner before recurring
+    /// protocol work, and only peer installation and withdrawal replace this publication.
+    relay_owners: ArcSwap<RelayOwnersPublication>,
     relay_items: StdArc<Semaphore>,
     terminal_outcomes: StdArc<Semaphore>,
     admission_closed: CancellationToken,
@@ -894,6 +880,7 @@ impl TransportState {
                 advertised_host,
                 process_epoch,
                 next_coordination_sequence: AtomicU64::new(1),
+                next_binding_sequence: AtomicU64::new(1),
                 local_addr,
                 resolver,
                 tls: PublishedTls::new(tls),
@@ -928,13 +915,7 @@ impl TransportState {
                     options.incoming_queue_capacity,
                     Arc::clone(&observations),
                 ),
-                grants: DashMap::default(),
-                relay_attempts: DashMap::default(),
-                active_relay_channels: DashMap::default(),
-                relay_admissions: DashMap::default(),
-                relay_watermarks: DashMap::default(),
-                outbound_relay_epochs: DashMap::default(),
-                outbound_relay_admissions: DashMap::default(),
+                relay_owners: ArcSwap::from_pointee(RelayOwnersPublication::default()),
                 relay_items: StdArc::new(Semaphore::new(options.incoming_queue_capacity)),
                 terminal_outcomes: StdArc::new(Semaphore::new(options.incoming_queue_capacity)),
                 admission_closed: CancellationToken::new(),
@@ -1040,11 +1021,15 @@ impl TransportState {
         }
 
         let mut oldest_unresolved_outcome = Duration::ZERO;
-        for entry in self.relay_attempts.iter() {
-            let RelayAttemptEntry::Active(record) = entry.value() else {
-                continue;
-            };
-            oldest_unresolved_outcome = oldest_unresolved_outcome.max(record.reserved_at.elapsed());
+        let mut relay_channels = 0;
+        let mut relay_attempts = 0;
+        let mut relay_grants = 0;
+        for owner in self.relay_owners.load().owners.values() {
+            let snapshot = owner.snapshot();
+            relay_channels = increment(relay_channels, snapshot.channels);
+            relay_attempts = increment(relay_attempts, snapshot.attempts);
+            relay_grants = increment(relay_grants, snapshot.grants);
+            oldest_unresolved_outcome = oldest_unresolved_outcome.max(snapshot.oldest);
         }
 
         TransportSnapshot {
@@ -1052,9 +1037,9 @@ impl TransportState {
             connections,
             leased_streams,
             pending_operations: self.requests.pending_operations(),
-            relay_channels: self.active_relay_channels.len(),
-            relay_attempts: self.relay_attempts.len(),
-            relay_grants: self.grants.len(),
+            relay_channels,
+            relay_attempts,
+            relay_grants,
             oldest_unresolved_outcome,
         }
     }
@@ -1125,6 +1110,7 @@ impl TransportState {
     }
 
     pub(crate) fn retire_departed_connections(&self, live_nodes: &BTreeSet<ClusterNodeName>) {
+        self.retire_departed_relay_owners(live_nodes);
         let departed = self
             .targets
             .load()
@@ -1409,11 +1395,28 @@ impl TransportState {
         }
     }
 
+    fn allocate_binding_sequence(&self) -> u64 {
+        loop {
+            let current = self.next_binding_sequence.load(Ordering::Relaxed);
+            let next = current
+                .checked_add(1)
+                .assured("a process cannot start u64::MAX connection bindings");
+            if self
+                .next_binding_sequence
+                .compare_exchange_weak(current, next, Ordering::Relaxed, Ordering::Relaxed)
+                .is_ok()
+            {
+                return current;
+            }
+        }
+    }
+
     async fn connect(
         &self,
         key: &ConnectionSlotKey,
         slot_cancel: &CancellationToken,
     ) -> Result<StdArc<ClientConnection>, Report<TransportError>> {
+        let binding_sequence = self.allocate_binding_sequence();
         let budget = ConnectionBudget::start(self.options.connection_setup_timeout);
         let setup = async {
             let DialedStream {
@@ -1472,6 +1475,7 @@ impl TransportState {
                 sender,
                 stream_slots: StreamSlotQuotas::new(key.class),
                 peer_epoch: 0,
+                relay_owner: None,
                 retiring: slot_cancel.clone(),
                 cancel,
                 closed,
@@ -1525,6 +1529,11 @@ impl TransportState {
                 sender: connection.sender.clone(),
                 stream_slots: connection.stream_slots.clone(),
                 peer_epoch: accepted.process_epoch,
+                relay_owner: Some(self.bind_relay_owner(
+                    &key.node_id,
+                    accepted.process_epoch,
+                    binding_sequence,
+                )?),
                 retiring: connection.retiring.clone(),
                 cancel: connection.cancel.clone(),
                 closed: connection.closed.clone(),
@@ -1672,35 +1681,7 @@ impl TransportState {
         if let Envelope::RelayPayload(payload) = envelope {
             return self.send_relay(node_id, payload).await;
         }
-        // A terminal acknowledgement resolves the reserved admission it names. The resolved record
-        // is retired once the acknowledgement is delivered, without looking the admission up again.
-        let completed_admission = if let Envelope::Ack(ack) = &envelope {
-            if ack.outcome.is_progress() {
-                None
-            } else {
-                let key = RelayAdmissionKey {
-                    peer_node_id: node_id.clone(),
-                    registration: ack.registration.clone(),
-                };
-                let record = nervix_primitives::expect_lint!(
-                    nervix::sync_acquisition,
-                    "Typed Ratchet 05 https://app.clickup.com/t/86bc9erep: retain pending request \
-                     ownership through the terminal response",
-                    self.relay_admissions.get(&key)
-                )
-                .map(|record| StdArc::clone(record.value()));
-                if let Some(record) = &record {
-                    if let RemoteAckOutcome::NoAck(reason) = &ack.outcome {
-                        record.reject(reason.clone());
-                    } else {
-                        record.mark_admitted();
-                    }
-                }
-                record
-            }
-        } else {
-            None
-        };
+        let mut completed_admission = None;
         let result = async {
             let class = envelope.pool_class();
             let subquota = match &envelope {
@@ -1723,6 +1704,20 @@ impl TransportState {
             let lease = self.lease(node_id, class, subquota, deadline).await?;
             match envelope {
                 Envelope::Ack(ack) => {
+                    {
+                        let owner = lease
+                            .connection
+                            .relay_owner
+                            .as_ref()
+                            .assured("a leased connection completed its authenticated binding");
+                        completed_admission = owner.completed_admission(
+                            &RelayAdmissionKey {
+                                peer_node_id: node_id.clone(),
+                                registration: ack.registration.clone(),
+                            },
+                            &ack.outcome,
+                        );
+                    }
                     let bytes = wire::encode_rkyv(
                         &self.executor,
                         class.memory_class(),
@@ -1906,6 +1901,7 @@ impl TransportState {
                         continue;
                     }
                 };
+            let binding_sequence = self.allocate_binding_sequence();
             let state = self.clone();
             self.tasks.spawn(async move {
                 nervix_primitives::select! {
@@ -1916,6 +1912,7 @@ impl TransportState {
                         peer_addr,
                         handshake_permit,
                         connection_permit,
+                        binding_sequence,
                     ) => {
                         if let Err(error) = result {
                             debug!(?error, %peer_addr, "interconnect connection rejected");
@@ -1932,6 +1929,7 @@ impl TransportState {
         peer_addr: SocketAddr,
         handshake_permit: OwnedSemaphorePermit,
         _connection_permit: OwnedSemaphorePermit,
+        binding_sequence: u64,
     ) -> Result<(), Report<TransportError>> {
         tcp.set_nodelay(true).map_err(TransportError::from)?;
         let ActiveTls {
@@ -1977,11 +1975,14 @@ impl TransportState {
         let bound = self
             .complete_inbound_binding(
                 &mut connection,
-                peer_addr,
-                peer_identity,
                 request,
                 respond,
-                handshake_permit,
+                InboundBinding {
+                    peer_addr,
+                    peer_identity,
+                    handshake_permit,
+                    binding_sequence,
+                },
             )
             .await?;
 
@@ -1998,15 +1999,19 @@ impl TransportState {
     async fn complete_inbound_binding<T>(
         &self,
         connection: &mut server::Connection<T, Bytes>,
-        peer_addr: SocketAddr,
-        peer_identity: CertificateIdentity,
         request: Request<RecvStream>,
         respond: server::SendResponse<Bytes>,
-        handshake_permit: OwnedSemaphorePermit,
+        binding: InboundBinding,
     ) -> Result<BoundInboundConnection, Report<TransportError>>
     where
         T: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
     {
+        let InboundBinding {
+            peer_addr,
+            peer_identity,
+            handshake_permit,
+            binding_sequence,
+        } = binding;
         let binding = async {
             if request.method() != Method::POST || request.uri().path() != CONNECT_PATH {
                 return Err(Report::new(TransportError::InvalidHandshake(
@@ -2074,6 +2079,8 @@ impl TransportState {
                 accepted,
             )
             .await?;
+            let relay_owner =
+                self.bind_relay_owner(&hello.node_id, hello.process_epoch, binding_sequence)?;
             send_response(
                 respond,
                 StatusCode::OK,
@@ -2088,6 +2095,7 @@ impl TransportState {
                     advertised_host: hello.advertised_host,
                     process_epoch: hello.process_epoch,
                     class: hello.class,
+                    relay_owner,
                 },
                 _registration: registration,
                 _non_management: non_management,
@@ -2136,6 +2144,7 @@ impl TransportState {
                 let deadline = drain_deadline
                     .verified("entering drain always records its force-close deadline");
                 nervix_primitives::select! {
+                    _ = peer.relay_owner.closed.cancelled() => break,
                     _ = self.force_close.cancelled() => break,
                     () = &mut health_probe => break,
                     _ = sleep_until(deadline) => break,
@@ -2168,6 +2177,7 @@ impl TransportState {
                         );
                         continue;
                     }
+                    _ = peer.relay_owner.closed.cancelled() => break,
                     _ = self.force_close.cancelled() => break,
                     () = &mut health_probe => break,
                     _ = sleep_until(certificate_expires_at) => {
@@ -2325,7 +2335,7 @@ impl TransportState {
                 .await?;
             }
             if let Some(admission_key) = terminal_admission {
-                self.retire_outbound_relay_admission(&admission_key);
+                peer.relay_owner.retire_outbound_admission(&admission_key);
             }
             send_response(
                 respond,
@@ -2351,6 +2361,7 @@ impl TransportState {
                 .handle_relay_admission_control(
                     peer.node_id,
                     peer.process_epoch,
+                    peer.relay_owner,
                     path == RELAY_CANCEL_PATH,
                     request.into_body(),
                     respond,
@@ -2372,6 +2383,7 @@ impl TransportState {
                 .handle_relay_grant(
                     peer.node_id,
                     peer.process_epoch,
+                    peer.relay_owner,
                     request.into_body(),
                     respond,
                 )
@@ -2385,15 +2397,8 @@ impl TransportState {
             let grant_id = grant_id.parse::<u64>().map_err(|error| {
                 TransportError::RelayGrant(format!("invalid grant id: {error}"))
             })?;
-            self.handle_relay_body(
-                peer.addr,
-                peer.node_id,
-                peer.process_epoch,
-                grant_id,
-                request,
-                respond,
-            )
-            .await?;
+            self.handle_relay_body(peer, grant_id, request, respond)
+                .await?;
             return Ok(());
         }
 
@@ -2628,13 +2633,18 @@ impl TransportState {
         self.admission_closed.cancel();
         self.requests.shutdown();
         self.cancel_all_slots();
-        self.grants.clear();
-        self.relay_attempts.clear();
-        self.active_relay_channels.clear();
-        self.relay_admissions.clear();
-        self.relay_watermarks.clear();
-        self.outbound_relay_epochs.clear();
-        self.outbound_relay_admissions.clear();
+        loop {
+            let current = self.relay_owners.load_full();
+            let observed = self
+                .relay_owners
+                .compare_and_swap(&current, StdArc::new(RelayOwnersPublication::default()));
+            if StdArc::ptr_eq(&current, &observed) {
+                for owner in current.owners.values() {
+                    owner.end();
+                }
+                break;
+            }
+        }
         self.tasks.close();
         if timeout(self.options.shutdown_drain_timeout, self.tasks.wait())
             .await

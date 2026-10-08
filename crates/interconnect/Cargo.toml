@@ -10,6 +10,11 @@ workspace = true
 
 [features]
 default = []
+loom = [
+  "nervix-execution/loom",
+  "nervix-model-harness/loom",
+  "nervix-primitives/loom",
+]
 shuttle = [
   "dep:shuttle",
   "nervix-execution/shuttle",
@@ -32,7 +37,6 @@ ahash = { workspace = true }
 arch-into = { workspace = true }
 bytes = { workspace = true }
 error-stack = { workspace = true }
-fastrand = { workspace = true }
 futures-util = { workspace = true }
 h2 = { workspace = true }
 http = { workspace = true }
@@ -71,5 +75,6 @@ rcgen = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 sha2 = { workspace = true }
+sorted-vec = { workspace = true }
 tempfile = { workspace = true }
 ubyte = { workspace = true }

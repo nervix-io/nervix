@@ -10,8 +10,7 @@ use arrow_array::{
 use arrow_ipc::{
     BodyCompression, BodyCompressionArgs, BodyCompressionMethod, CompressionType, DictionaryBatch,
     DictionaryBatchArgs, Message, MessageArgs, MessageHeader, MetadataVersion,
-    RecordBatch as IpcRecordBatch, RecordBatchArgs, root_as_message,
-    writer::{IpcWriteOptions, StreamWriter},
+    RecordBatch as IpcRecordBatch, RecordBatchArgs, root_as_message, writer::StreamWriter,
 };
 use arrow_schema::{DataType, Field, Schema};
 use bytes::Bytes;
@@ -327,19 +326,6 @@ async fn a_body_that_is_not_one_canonical_stream_is_malformed() {
     without_end.truncate(canonical.len() - 8);
     let mut trailing = canonical.clone();
     trailing.push(0);
-    let legacy = {
-        let options = IpcWriteOptions::try_new(8, true, MetadataVersion::V4)
-            .assured("the legacy format is a valid option set");
-        let mut writer = StreamWriter::try_new_with_options(Vec::new(), &arrow_schema(), options)
-            .assured("an in-memory writer opens");
-        writer
-            .write(&batch_of(arrow_schema(), &[1]))
-            .assured("an in-memory writer takes a batch");
-        writer.finish().assured("an in-memory writer finishes");
-        writer
-            .into_inner()
-            .assured("a finished writer yields its buffer")
-    };
     let batch_first = {
         let parts = messages(&canonical);
         let mut reordered = parts[1].clone();
@@ -352,7 +338,6 @@ async fn a_body_that_is_not_one_canonical_stream_is_malformed() {
         truncated,
         without_end,
         trailing,
-        legacy,
         batch_first,
     ] {
         assert_eq!(
@@ -360,6 +345,44 @@ async fn a_body_that_is_not_one_canonical_stream_is_malformed() {
             ClientBatchDefect::Malformed
         );
     }
+}
+
+#[nervix_primitives::test]
+async fn a_client_batch_buffer_outside_its_message_is_refused_before_decoding() {
+    let canonical = stream(&arrow_schema(), &[batch_of(arrow_schema(), &[1])]);
+    let parts = messages(&canonical);
+    let mut builder = FlatBufferBuilder::new();
+    let buffers = builder.create_vector(&[arrow_ipc::Buffer::new(0, 64)]);
+    let batch = IpcRecordBatch::create(
+        &mut builder,
+        &RecordBatchArgs {
+            length: 1,
+            buffers: Some(buffers),
+            ..RecordBatchArgs::default()
+        },
+    );
+    let message = Message::create(
+        &mut builder,
+        &MessageArgs {
+            version: MetadataVersion::V5,
+            header_type: MessageHeader::RecordBatch,
+            header: Some(batch.as_union_value()),
+            bodyLength: 0,
+            custom_metadata: None,
+        },
+    );
+    builder.finish(message, None);
+    let mut body = parts[0].clone();
+    body.extend_from_slice(&framed(builder.finished_data(), &[]));
+    body.extend_from_slice(&parts[2]);
+
+    let Err(ClientBatchError::Malformed { reason }) = decode(body, limits()).await else {
+        panic!("a column buffer outside its message must be malformed");
+    };
+    assert_eq!(
+        reason,
+        "a column buffer lies outside the body of its message"
+    );
 }
 
 #[nervix_primitives::test]

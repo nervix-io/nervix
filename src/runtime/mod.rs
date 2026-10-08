@@ -92,7 +92,7 @@ use nervix_primitives::{
     stream::StreamExt,
     sync::{
         Arc, CancellationToken, Mutex, Notify, StdArc,
-        atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
+        atomic::{AtomicU64, AtomicUsize, Ordering},
         broadcast, mpsc, oneshot, watch,
     },
     task::{AbortOnDropHandle, JoinHandle, TaskTracker},
@@ -283,6 +283,7 @@ pub mod relay_interaction_benchmark;
 mod relay_processor_node;
 mod relay_subscription;
 mod relay_transit;
+mod remote_ack_owner;
 mod remote_dispatch;
 mod reorderer;
 mod resources;
@@ -551,7 +552,8 @@ use relay_transit::{
     RelayAdmissions, RelayOwnerAdmission, RelayOwnerBatchCompletion, RelayRoutedAdmission,
     RelayTransit,
 };
-use remote_dispatch::{REMOTE_ACK_ALIVE_INTERVAL, RemoteDispatchRegistry, RemoteDispatcher};
+use remote_ack_owner::RemoteDispatchRegistry;
+use remote_dispatch::{REMOTE_ACK_ALIVE_INTERVAL, RemoteDispatcher};
 use reorderer::{ReordererFlushContext, flush_branch_reorderer_output, reorder_key_part};
 use schedule_apply::ScheduleApplication;
 use scheduled_node::{

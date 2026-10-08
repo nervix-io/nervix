@@ -151,7 +151,7 @@ impl Runtime {
                 fault_injection,
                 resource_store: ArcSwapOption::empty(),
                 remote_dispatcher: ArcSwapOption::empty(),
-                remote_dispatch: Arc::new(RemoteDispatchRegistry::new()),
+                remote_dispatch: Arc::new(RemoteDispatchRegistry::new(executor.clone())),
                 remote_ack_watcher_shutdown: CancellationToken::new(),
                 remote_ack_watcher_tasks: TaskTracker::new(),
                 state_replication_tasks: Default::default(),
@@ -665,6 +665,7 @@ impl Runtime {
         self.inner.remote_ack_watcher_shutdown.cancel();
         self.inner.remote_ack_watcher_tasks.close();
         self.inner.remote_ack_watcher_tasks.wait().await;
+        self.inner.remote_dispatch.shutdown();
         self.inner.state_replication_tasks.close();
         self.inner.state_replication_tasks.wait().await;
         self.inner.relay_branch_presences.clear();
