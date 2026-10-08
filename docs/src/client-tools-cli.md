@@ -277,9 +277,14 @@ nervix-cli --domain payments backup domain --output - --without-resources > paym
 nervix-cli backup domain payments --output payments.nvxb --format json
 ```
 
-`--output -` writes the archive to standard output and the report to standard error. `--format
-json` prints the report, or the failure, as one JSON document. `DESCRIBE BACKUP` reads a local
-archive without connecting to a server, whether it is typed in the REPL or passed to `--command`:
+`--output -` writes the archive to standard output and the report to standard error. The archive
+is downloaded and verified in a staging directory first; when standard output then fails, for
+example because its reader closed the pipe, the CLI keeps the verified archive there and reports
+`WRITE_FAILED` with the backup's execution reference and the kept file, which is the only copy
+left. [Backup And Restore](backup-and-restore.md#delivering-to-standard-output) describes how to
+recover it. `--format json` prints the report, or the failure, as one JSON document. `DESCRIBE
+BACKUP` reads a local archive without connecting to a server, whether it is typed in the REPL or
+passed to `--command`:
 
 ```bash
 nervix-cli --command "DESCRIBE BACKUP 'cluster.nvxb' FORMAT JSON;"

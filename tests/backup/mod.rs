@@ -24,6 +24,7 @@ use crate::common::{
 
 mod branch_state;
 mod console;
+mod delivery;
 mod fidelity;
 mod large_branch_state;
 mod materialized;
@@ -91,8 +92,12 @@ fn cli_json(output: &Output) -> serde_json::Value {
         .unwrap_or_else(|error| panic!("the CLI printed {document:?}, which is not JSON: {error}"))
 }
 
-/// Runs the CLI with `arguments` after the connection arguments for `node`.
-async fn run_cli(world: &mut ScenarioWorld, node: &str, arguments: Vec<String>) {
+/// The CLI with the connection arguments for `node`, followed by `arguments`.
+fn cli_command(
+    world: &mut ScenarioWorld,
+    node: &str,
+    arguments: Vec<String>,
+) -> tokio::process::Command {
     let node = expand_placeholders(world, node);
     let grpc_uri = world
         .cluster()
@@ -110,6 +115,12 @@ async fn run_cli(world: &mut ScenarioWorld, node: &str, arguments: Vec<String>) 
         TEST_AUTH_PASSWORD,
     ]);
     command.args(arguments);
+    command
+}
+
+/// Runs the CLI with `arguments` after the connection arguments for `node`.
+async fn run_cli(world: &mut ScenarioWorld, node: &str, arguments: Vec<String>) {
+    let mut command = cli_command(world, node, arguments);
     let output = nervix_primitives::time::timeout(CLI_BACKUP_TIMEOUT, command.output())
         .await
         .expect("the CLI finishes within its budget")

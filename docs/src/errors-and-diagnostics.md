@@ -336,6 +336,15 @@ with the durable reference. The CLI's JSON `BACKUP_FAILED` report includes
 report names `--execution-reference` as the recovery option. Reusing that reference preserves the
 server's conflict, expiry and retention authority.
 
+The CLI's delivery of a downloaded archive to standard output has failures of its own, which
+follow the complete download that released the server's copy. A staged archive that could not be
+read, or a write or flush of standard output that failed, is `WRITE_FAILED`: the report keeps the
+typed error and its I/O cause, and names the durable reference with the verified archive the CLI
+kept, `error.archive` in JSON, as the recovery, because running the backup again cannot download a
+collected archive. A staging directory that could not be removed after every byte was delivered is
+`CLEANUP_FAILED`, which names the reference and the directory, `error.staging` in JSON. A staging
+directory that could not be created is `WRITE_FAILED` before admission, without a reference.
+
 The web console owns its own typed download and restore failures. A download failure names the
 server's refusal, a transport failure, a stalled or interrupted stream, a missing leader or a
 redirect loop, frames out of order or undecodable, an archive that differs from the backup's
