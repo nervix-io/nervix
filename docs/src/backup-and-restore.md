@@ -148,8 +148,44 @@ delivered. With `--format json` the report is one JSON document:
 
 A failure prints `{"error": {"code": "...", "message": "..."}}` instead. The codes are
 `INVALID_ARGUMENTS`, `CONNECTION_FAILED`, `BACKUP_FAILED` for a failure between client and
-server, `BACKUP_REFUSED` for a backup the server refused, and `WRITE_FAILED` for an archive that
-could not be written to standard output.
+server, `BACKUP_REFUSED` for a backup the server refused, `WRITE_FAILED` for an archive that did
+not reach standard output, and `CLEANUP_FAILED` for an archive that reached standard output while
+its staging directory could not be removed.
+
+### Delivering To Standard Output
+
+With `--output -`, the CLI downloads the archive into a staging directory of its own under the
+system's temporary directory (`TMPDIR` on Unix), as a file only its owner may read and write
+(`0600`), and verifies it there before it copies a byte to standard output. The complete download
+releases the server's copy of the archive, so from then on the staged archive is the only one.
+
+- A staging directory that cannot be created fails with `WRITE_FAILED` before the backup is sent.
+  No backup was admitted, so the report names no execution reference.
+- A delivery that fails after the download fails with `WRITE_FAILED`: a reader that closed the
+  pipe, a full disk behind a redirection, a flush that failed, or a staged archive that could not
+  be read. A closed pipe does not end the CLI through `SIGPIPE`; its failed write is reported like
+  any other. Standard output may hold part of the archive, and the report goes to standard error as
+  always. The CLI keeps the verified archive in its staging directory, and the report names it
+  together with the backup's execution reference: JSON adds `error.execution_reference` and
+  `error.archive`, and text ends with
+  `recover backup REFERENCE from its verified archive at 'PATH'; ...`.
+- When every byte reached standard output and was flushed but the staging directory could not be
+  removed, the command fails with `CLEANUP_FAILED` and names the execution reference and, in JSON,
+  the directory as `error.staging`. The archive on standard output is complete; remove the
+  directory, which may still hold a copy of it.
+
+Recover an undelivered archive by delivering the kept file, for example by moving it to a working
+destination. It is the archive the backup assembled, with the summary and cuts its execution
+reference records, so no new capture is needed. Running the backup again with
+`--execution-reference` returns that recorded outcome, but its download is refused as
+`NotRetained`, because the first complete download collected the archive. Nothing removes a kept
+archive: delete it once it is delivered, and treat it as the secret it is.
+
+```sh
+nervix-cli backup cluster --output - --format json | ssh backup-host 'cat > cluster.nvxb'
+# {"error":{"code":"WRITE_FAILED","message":"the backup archive could not be written to standard output: Broken pipe (os error 32)","execution_reference":"0192d4e4-7b36-7c3e-9f00-5b2d8c3a1e44","archive":"/tmp/.tmpQ2x9Lk/backup.nvxb"}}
+mv /tmp/.tmpQ2x9Lk/backup.nvxb cluster.nvxb
+```
 
 ### Waiting And Recovering
 
@@ -172,11 +208,14 @@ nervix-cli --domain payments backup cluster --output recovered.nvxb --timeout 30
 
 Use the reference returned by the first command. Recovery waits for the applying command or
 returns its recorded outcome, then downloads the retained archive. `--output -` may also be used
-for recovery. Changing capture inputs conflicts with the bound request. A fresh reference starts
-a separate backup. Expiration of the client wait ends only that waiter; it does not cancel the
-admitted command or extend the server's retry validity or archive retention. A longer wait can
-therefore recover a terminal outcome whose archive is already unavailable, especially when the
-server has a shorter retry validity. Such a download is reported as a failure with its reference.
+for recovery. A `WRITE_FAILED` report that names a kept archive follows a complete download, which
+already collected the server's copy, so it is recovered from that file instead; see
+[Delivering To Standard Output](#delivering-to-standard-output). Changing capture inputs
+conflicts with the bound request. A fresh reference starts a separate backup. Expiration of the
+client wait ends only that waiter; it does not cancel the admitted command or extend the server's
+retry validity or archive retention. A longer wait can therefore recover a terminal outcome whose
+archive is already unavailable, especially when the server has a shorter retry validity. Such a
+download is reported as a failure with its reference.
 
 ## Downloading The Archive
 
