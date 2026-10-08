@@ -298,7 +298,7 @@ impl BranchRuntime {
                 .delete_materialized_stream_key(state, &self.key)
             {
                 warn!(domain = self.domain.as_str(), relay = relay.as_str(),
-                    branch = branch_key_display(&self.key), error = %error,
+                    branch = branch_key_display(&self.key), error = %format_args!("{error:#}"),
                     "materialized assignment changed during branch eviction");
             }
         }
@@ -379,7 +379,7 @@ impl BranchRuntime {
                     warn!(
                         domain = self.domain.as_str(),
                         relay = relay.as_str(),
-                        error = %error,
+                        error = %format_args!("{error:#}"),
                         "failed to place the branch-local materialized relay state"
                     );
                     return;
@@ -452,7 +452,7 @@ impl BranchRuntime {
                     domain = self.domain.as_str(),
                     relay = relay.as_str(),
                     branch = branch_key_display(&self.key),
-                    error = %error,
+                    error = %format_args!("{error:#}"),
                     "failed to decode branch-local materialized state batch"
                 );
                 return;
@@ -468,7 +468,7 @@ impl BranchRuntime {
                 domain = self.domain.as_str(),
                 relay = relay.as_str(),
                 branch = branch_key_display(&self.key),
-                error = %error,
+                error = %format_args!("{error:#}"),
                 "materialized relay assignment changed while applying a branch-local batch"
             );
         }
@@ -507,7 +507,7 @@ impl BranchRuntime {
 
     pub(super) async fn retry_processor_pending_materialized(&mut self, processor_id: &ModelName) {
         if let Err(error) = self.refresh_domain_routing() {
-            warn!(error = %error, "failed to refresh routing for pending processor work");
+            warn!(error = %format_args!("{error:#}"), "failed to refresh routing for pending processor work");
             return;
         }
         let Some(mut processor) = self.processors.remove(processor_id) else {
@@ -526,7 +526,7 @@ impl BranchRuntime {
 
     pub(super) async fn retry_materialized_waiters(&mut self, updated_relay: &RelayName) {
         if let Err(error) = self.refresh_domain_routing() {
-            warn!(error = %error, "failed to refresh routing for materialized-state waiters");
+            warn!(error = %format_args!("{error:#}"), "failed to refresh routing for materialized-state waiters");
             return;
         }
         let processor_ids = self
@@ -714,7 +714,7 @@ impl BranchRuntime {
 
     pub(super) async fn tick(&mut self, snapshot: &DomainExecutionSnapshot) {
         if let Err(error) = self.refresh_domain_routing() {
-            warn!(error = %error, "failed to refresh routing for processor tick");
+            warn!(error = %format_args!("{error:#}"), "failed to refresh routing for processor tick");
             return;
         }
         let processor_ids = self.processors.keys().cloned().collect::<Vec<_>>();
@@ -729,7 +729,7 @@ impl BranchRuntime {
 
     pub(super) async fn force_flush(&mut self, snapshot: &DomainExecutionSnapshot) {
         if let Err(error) = self.refresh_domain_routing() {
-            warn!(error = %error, "failed to refresh routing for processor flush");
+            warn!(error = %format_args!("{error:#}"), "failed to refresh routing for processor flush");
             return;
         }
         let now = snapshot.now();
@@ -2313,6 +2313,50 @@ mod tests {
         runtime_ack::{AckOutcome, AckRootTracker, AckSet},
         runtime_schema::{RuntimeValue, test_runtime_row},
     };
+
+    #[nervix_primitives::test]
+    async fn runtime_report_chain_branch_routing_logs() {
+        use crate::runtime::report_observer::ReportLogObserver;
+
+        let runtime = Runtime::default();
+        let domain = domain("default");
+        install_unpaced_test_domain(&runtime, &domain);
+        let mut branch = junction_branch_template("calculate", "orders")
+            .instantiate(&runtime, &domain, None, 1)
+            .await
+            .assured("the fixture installs its junction branch")
+            .into_inner();
+        let snapshot = runtime
+            .bind_domain_clock(&domain)
+            .assured("the fixture installs its clock")
+            .snapshot()
+            .assured("the fixture clock is running");
+        runtime.inner.domain_routings.remove(&domain);
+        branch.routing = None;
+        branch.routing_snapshot = None;
+        let mut logs = ReportLogObserver::new();
+        logs.observe(async {
+            branch
+                .retry_processor_pending_materialized(&named("calculate"))
+                .await;
+            branch.retry_materialized_waiters(&named("profiles")).await;
+            branch.tick(&snapshot).await;
+            branch.force_flush(&snapshot).await;
+        })
+        .await;
+        for message in [
+            "failed to refresh routing for pending processor work",
+            "failed to refresh routing for materialized-state waiters",
+            "failed to refresh routing for processor tick",
+            "failed to refresh routing for processor flush",
+        ] {
+            assert_eq!(
+                logs.next(message).fields["error"],
+                "domain 'default' is not instantiated"
+            );
+        }
+    }
+
     /// A branch that read its routing before a schedule made a relay materialized here, and that
     /// reconciles its materialized relays after the schedule published that routing and advanced
     /// the relay-state epoch, reconciles against the routing published with that epoch. The epoch

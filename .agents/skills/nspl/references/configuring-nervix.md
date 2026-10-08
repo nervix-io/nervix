@@ -452,3 +452,9 @@ public example. For a validation error, trace exact types, declaration order, do
 branch compatibility, construction completeness, and connector capabilities. For missing data,
 check domain lifecycle, source offsets, timestamps, filters, branch keys, route filters, flush
 boundaries, input collection boundaries, and external entity provisioning in that order.
+
+Runtime events and report-bearing log fields show the owning operation followed by its cause
+chain. Read the deepest cause together with the node or clock context when diagnosing cadence,
+partition inspection, relay delivery, checkpoint, or error-route failures. A failed error-route
+dispatch includes the same report chain in its runtime event and negative acknowledgement;
+the configured error policy and retry classification still determine recovery.
