@@ -15,7 +15,7 @@ use nervix_connector::{SourceAckPolicy, SourceConnector, SourcePlan};
 use nervix_connector_kafka::{
     KafkaDomainOffsetError, KafkaDomainOffsetHost, KafkaDomainOffsetInitialization,
     KafkaDomainOffsetResult, KafkaDomainOffsetServices, KafkaDomainOffsetStart,
-    KafkaOffsetPosition, KafkaSource, KafkaSourceOffsetMode, KafkaSourcePlan,
+    KafkaOffsetPosition, KafkaSource, KafkaSourceError, KafkaSourceOffsetMode, KafkaSourcePlan,
     TopicPartitionInspector,
 };
 
@@ -173,6 +173,14 @@ impl SourceCompanion for KafkaPartitionWatch {
 }
 
 impl KafkaPartitionWatch {
+    fn report_failure(&self, error: &Report<KafkaSourceError>) {
+        self.events.report_error(format!(
+            "failed to inspect Kafka partitions for ingestor '{}' in domain '{}': {error:#}",
+            self.ingestor.as_str(),
+            self.domain.as_str(),
+        ));
+    }
+
     async fn run(self: Box<Self>, mut shutdown: watch::Receiver<bool>) {
         let mut observed = match self.inspector.partitions(self.topic.as_str()).await {
             Ok(mut partitions) => {
@@ -180,11 +188,7 @@ impl KafkaPartitionWatch {
                 partitions
             }
             Err(error) => {
-                self.events.report_error(format!(
-                    "failed to inspect Kafka partitions for ingestor '{}' in domain '{}': {error}",
-                    self.ingestor.as_str(),
-                    self.domain.as_str(),
-                ));
+                self.report_failure(&error);
                 Vec::new()
             }
         };
@@ -201,12 +205,7 @@ impl KafkaPartitionWatch {
             let mut current = match self.inspector.partitions(self.topic.as_str()).await {
                 Ok(partitions) => partitions,
                 Err(error) => {
-                    self.events.report_error(format!(
-                        "failed to inspect Kafka partitions for ingestor '{}' in domain '{}': \
-                         {error}",
-                        self.ingestor.as_str(),
-                        self.domain.as_str(),
-                    ));
+                    self.report_failure(&error);
                     continue;
                 }
             };
@@ -354,5 +353,42 @@ impl KafkaIngestorStartPlan {
             client_mounts: resolved_client.mounts.into_iter().collect(),
             connector_label: "kafka",
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use nervix_primitives::time::timeout;
+
+    use super::*;
+
+    #[nervix_primitives::test]
+    async fn runtime_report_chain_kafka_partition_watch_event() {
+        let runtime = Runtime::default();
+        let mut events = runtime.subscribe_events();
+        let (rebalance, _changes) = watch::channel(0);
+        let watch = KafkaPartitionWatch {
+            inspector: TopicPartitionInspector::new(&[], "report-chain-test".into())
+                .assured("an inspector without brokers can be initialized without a lookup"),
+            domain: domain("orders"),
+            ingestor: named("source"),
+            topic: named("orders"),
+            events: runtime.events().clone(),
+            rebalance,
+        };
+        let report = Report::new(KafkaSourceError::MissingMetadata {
+            topic: "orders".into(),
+        })
+        .change_context(KafkaSourceError::InspectPartitions);
+        watch.report_failure(&report);
+        let RuntimeEvent::Error(event) = timeout(Duration::from_secs(1), events.recv())
+            .await
+            .assured("the partition inspection failure is queued before its observation deadline")
+            .assured("a partition inspection failure publishes its report");
+        assert_eq!(
+            event,
+            "failed to inspect Kafka partitions for ingestor 'source' in domain 'orders': Kafka \
+             partition inspection task failed: Kafka returned no metadata for topic 'orders'"
+        );
     }
 }

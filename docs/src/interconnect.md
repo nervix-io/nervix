@@ -333,10 +333,13 @@ clears the cordon that drain set. The leader acts for the node the authenticated
 to, so the certificate that admitted the connection is the whole authorization: a node can drain
 and uncordon only itself, and no user credential takes part. The answer is completed or failed, each
 with the leader's account of the action for the stopping node's log, or not the leader, from a node
-that changed nothing and leaves the sender to ask the leader it observes next. The leader runs the
-action in a service task of its own, so a drain that has begun finishes, and releases what it holds,
-even when the sender's deadline, which is what remains of its drain timeout, abandons the request
-first.
+that changed nothing and leaves the sender to ask the leader it observes next. A leader that loses
+its leadership while it writes a release also answers not the leader, because clearing a cordon
+again through the next leader is harmless. The leader runs the action in a service task of its own,
+so a drain that has begun finishes, and releases what it holds, even when the sender's deadline
+abandons the request first. For a drain that deadline is what remains of the sender's drain
+timeout; for a release it is the bound
+[Releasing The Drain Cordon](./shutdown.md#releasing-the-drain-cordon) states.
 [Topology Cases](./shutdown.md#topology-cases) owns when a node sends it.
 
 ## Wire Contract And Payloads
@@ -1493,6 +1496,11 @@ Local transport operations return `error_stack` reports. TLS and wire failures r
 causes beneath `TransportError`; typed requests and stream readers add `RequestError` context while
 retaining the transport report. Deadline, shutdown, quota, cancellation, relay-rejection, and
 indeterminate-delivery decisions inspect the current typed context, not formatted report text.
+Runtime dispatch, relay admission-response and remote acknowledgement logs render every context
+of those local reports. State synchronization, checkpoint announcement and replica catch-up logs
+also retain the underlying request, placement or storage cause when their owner adds context.
+When remote ACK registration cannot reserve correlation memory, the affected record's negative
+acknowledgement carries the registration report chain, including its admission cause.
 An answering node sends its established remote failure class or stream rejection text over the
 wire; a local report's cause chain is not serialized into an HTTP/2 response.
 

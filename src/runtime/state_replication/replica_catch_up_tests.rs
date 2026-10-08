@@ -81,13 +81,36 @@ impl StateOwner for InProcessOwner {
     ) -> error_stack::Result<OwnerCheckpointListing, StateReplicationError> {
         self.record(OwnerRequest::Listing);
         if self.listing_fails.load(Ordering::Relaxed) {
-            return Err(Report::new(StateReplicationError::Request {
+            return Err(Report::new(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                "the checkpoint catalog request timed out",
+            ))
+            .change_context(StateReplicationError::Request {
                 target: self.node.clone(),
                 placement: lifecycle.clone(),
             }));
         }
         Ok(self.runtime.branch_checkpoint_listing(lifecycle, after))
     }
+}
+
+#[nervix_primitives::test]
+async fn runtime_report_chain_replica_catalog_failure() {
+    use crate::runtime::report_observer::ReportLogObserver;
+
+    let mut replica = CaughtUpReplica::new(1);
+    replica.owner.listing_fails.store(true, Ordering::Relaxed);
+    let mut logs = ReportLogObserver::new();
+    let requests = logs.observe(replica.round()).await;
+    assert!(requests.contains(&OwnerRequest::Listing));
+    let record = logs.next("failed to read the owner's branch checkpoint catalog");
+    assert_eq!(
+        record.fields["error"],
+        format!(
+            "failed to request {} from node '{}': the checkpoint catalog request timed out",
+            replica.branch_lru, replica.owner.node
+        )
+    );
 }
 
 /// The owner of a deduplicator whose branch lifecycle names a number of branches, and a replica

@@ -296,8 +296,17 @@ enum ClientError {
     BackupArguments { reason: &'static str },
     #[error("the backup failed: {message}")]
     BackupFailed { message: String },
-    #[error("the backup archive could not be written")]
+    #[error("the backup archive could not be staged for standard output")]
+    StageArchive,
+    #[error("the backup archive could not be read from its private staging file")]
+    ReadStagedArchive,
+    #[error("the backup archive could not be written to standard output")]
     WriteArchive,
+    #[error(
+        "the backup archive reached standard output, but its staging directory could not be \
+         removed"
+    )]
+    RemoveStaging,
     #[error("the backup archive could not be described")]
     DescribeBackup,
     #[error("invalid restore arguments: {reason}")]

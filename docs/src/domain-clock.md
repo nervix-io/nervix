@@ -525,6 +525,12 @@ This produces the following failure behavior:
 | Mapping or tick arithmetic overflow | Projection, deadline conversion, boundary, and tick-id operations report typed clock errors instead of wrapping or changing anchors |
 | Missing mapping or authority | Paced access fails as uninstalled; it never falls back to actual UTC |
 
+The authority's projection, cadence, tick-boundary and rate-conversion failures render the full
+typed report in both the runtime event and the corresponding warning. Timestamp overflow includes
+the timestamp arithmetic cause beneath the clock operation. Clock attachment and progress-apply
+events, source cadence errors and message-error flush-clock failures preserve their supplied
+contexts in the same way, including the unavailable lifetime beneath a failed deadline wait.
+
 All nodes project from their local UTC observations. The shared mapping and per-node nondecrease
 rule keep one generation coherent, but they do not make simultaneous reads on different hosts
 identical and do not create a distributed total order. Operators must synchronize and monitor host
