@@ -628,7 +628,7 @@ impl Runtime {
                 warn!(
                     domain = domain.as_str(),
                     ingestor = key.identifier().as_str(),
-                    error = %error,
+                    error = %format_args!("{error:#}"),
                     "failed to stop domain ingestor during schedule rebuild"
                 );
             }

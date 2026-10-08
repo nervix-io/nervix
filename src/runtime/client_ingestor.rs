@@ -1917,7 +1917,7 @@ impl ClientIntake {
                 debug!(
                     domain = self.domain.as_str(),
                     ingestor = self.ingestor.as_str(),
-                    error = %error,
+                    error = %format_args!("{error:#}"),
                     "a client batch failed after it was admitted"
                 );
                 root.no_ack(error.current_context().to_string());

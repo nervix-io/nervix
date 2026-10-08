@@ -1335,7 +1335,7 @@ where
         flush_paced_source(host).await;
         if *ready {
             if let Err(error) = source.suspend().await {
-                host.report_error(error.to_string());
+                host.report_error(format!("{error:#}"));
             }
             *ready = false;
             host.mark_unready();
@@ -1371,7 +1371,7 @@ where
             Err(error) => {
                 *ready = false;
                 host.mark_unready();
-                host.record_poll_error(error.to_string());
+                host.record_poll_error(format!("{error:#}"));
                 return if wait_for_paced_retry(host, shutdown, SOURCE_ERROR_RETRY).await {
                     PacedSourceAction::Restart
                 } else {
@@ -1436,7 +1436,7 @@ async fn run_paced_source<C, H, D>(
         let due_at = match due_at {
             Ok(due_at) => due_at,
             Err(error) => {
-                host.report_error(format!("could not advance source cadence: {error}"));
+                host.report_error(format!("could not advance source cadence: {error:#}"));
                 break;
             }
         };
@@ -1459,7 +1459,7 @@ async fn run_paced_source<C, H, D>(
         let poll = match poll {
             Ok(poll) => poll,
             Err(error) => {
-                host.record_poll_error(error.to_string());
+                host.record_poll_error(format!("{error:#}"));
                 continue;
             }
         };
@@ -1479,7 +1479,7 @@ async fn run_paced_source<C, H, D>(
     )
     .await
     {
-        host.report_error(error.to_string());
+        host.report_error(format!("{error:#}"));
     }
     host.mark_unready();
 }
@@ -1933,6 +1933,7 @@ mod tests {
     use nervix_primitives::sync::{Notify, blocking::Mutex};
 
     use super::*;
+    use crate::runtime::domain_clock::DomainClockWaitError;
 
     #[derive(Default)]
     struct SourceLoopObservations {
@@ -2303,6 +2304,179 @@ mod tests {
             block_resume: false,
             observations,
         }
+    }
+
+    #[async_trait]
+    impl PacedSourceConnector for FakeSource {
+        async fn poll(&mut self, _scheduled_at: Timestamp) -> SourceResult<SourcePoll> {
+            panic!("the failed cadence ends the loop before its source is polled")
+        }
+    }
+
+    struct FailedCadence;
+
+    struct FailedPacedSource {
+        shutdown: watch::Sender<bool>,
+    }
+
+    #[async_trait]
+    impl SourceConnector for FailedPacedSource {
+        type Plan = ();
+
+        async fn open(_plan: &(), _instance_index: u64) -> SourceResult<Self> {
+            panic!("the test installs its source directly")
+        }
+
+        async fn resume(&mut self) -> SourceResult<SourceResume> {
+            Ok(SourceResume::Ready)
+        }
+
+        async fn suspend(&mut self) -> SourceResult<()> {
+            Err(
+                Report::new(std::io::Error::other("could not pause the connection"))
+                    .change_context(SourceError::Suspend { connector: "fake" }),
+            )
+        }
+
+        async fn close(&mut self) -> SourceResult<()> {
+            Err(
+                Report::new(std::io::Error::other("could not finish the connection"))
+                    .change_context(SourceError::Close { connector: "fake" }),
+            )
+        }
+    }
+
+    #[async_trait]
+    impl PacedSourceConnector for FailedPacedSource {
+        async fn poll(&mut self, _scheduled_at: Timestamp) -> SourceResult<SourcePoll> {
+            self.shutdown.send_replace(true);
+            Err(
+                Report::new(std::io::Error::other("the connection refused the poll"))
+                    .change_context(SourceError::Read { connector: "fake" }),
+            )
+        }
+    }
+
+    struct SingleOccurrenceCadence {
+        occurrence: Option<Timestamp>,
+    }
+
+    #[async_trait]
+    impl PacedSourceCadence for SingleOccurrenceCadence {
+        async fn next(
+            &mut self,
+            _cancellation: &CancellationToken,
+        ) -> DomainClockWaitResult<Timestamp> {
+            match self.occurrence.take() {
+                Some(occurrence) => Ok(occurrence),
+                None => std::future::pending().await,
+            }
+        }
+    }
+
+    #[nervix_primitives::test]
+    async fn runtime_report_chain_source_lifecycle() {
+        let observations = Arc::new(Mutex::new(SourceLoopObservations::default()));
+        let (shutdown_tx, mut shutdown) = watch::channel(false);
+        let mut source = FailedPacedSource {
+            shutdown: shutdown_tx,
+        };
+        let mut host = FakeHost::running(observations.clone());
+        host.suspend_intake = true;
+        host.wake_suspension = true;
+        let mut ready = true;
+        assert_eq!(
+            prepare_paced_source(&mut source, &mut host, &mut ready, &mut shutdown).await,
+            PacedSourceAction::Restart
+        );
+        host.suspend_intake = false;
+        run_paced_source(
+            source,
+            host,
+            SingleOccurrenceCadence {
+                occurrence: Some(Timestamp::from_unix_nanos(1)),
+            },
+            shutdown,
+        )
+        .await;
+
+        let observations = observations.lock();
+        assert_eq!(
+            observations.poll_errors,
+            ["failed to read from fake source: the connection refused the poll"]
+        );
+        assert_eq!(
+            observations.reported_errors,
+            [
+                "failed to suspend fake source: could not pause the connection",
+                "failed to read from fake source: the connection refused the poll",
+                "failed to close fake source: could not finish the connection",
+            ]
+        );
+    }
+
+    #[async_trait]
+    impl PacedSourceCadence for FailedCadence {
+        async fn next(
+            &mut self,
+            _cancellation: &CancellationToken,
+        ) -> DomainClockWaitResult<Timestamp> {
+            let domain = domain("orders");
+            Err(Report::new(DomainClockAccessError::Stopped {
+                domain: domain.clone(),
+                generation: 3,
+            })
+            .change_context(DomainClockWaitError::Clock { domain }))
+        }
+    }
+
+    #[nervix_primitives::test]
+    async fn runtime_report_chain_source_cadence() {
+        let observations = Arc::new(Mutex::new(SourceLoopObservations::default()));
+        let source = empty_source(observations.clone());
+        let host = FakeHost::running(observations.clone());
+        let (_shutdown_tx, shutdown) = watch::channel(false);
+
+        run_paced_source(source, host, FailedCadence, shutdown).await;
+
+        let observations = observations.lock();
+        assert_eq!(
+            observations.reported_errors,
+            [
+                "could not advance source cadence: domain 'orders' clock became unavailable while \
+                 waiting for a logical deadline: domain 'orders' clock generation 3 is stopped"
+            ]
+        );
+        assert_eq!(observations.closes, 1);
+        assert_eq!(observations.unready, 1);
+    }
+
+    #[nervix_primitives::test]
+    async fn runtime_report_chain_source_resume() {
+        let observations = Arc::new(Mutex::new(SourceLoopObservations::default()));
+        let mut source = empty_source(observations.clone());
+        source
+            .resume_results
+            .push_back(Err(Report::new(std::io::Error::new(
+                std::io::ErrorKind::ConnectionRefused,
+                "broker refused the connection",
+            ))
+            .change_context(SourceError::Resume { connector: "fake" })));
+        let mut host = FakeHost::running(observations.clone());
+        host.wake_quiesce = true;
+        let (_shutdown_tx, mut shutdown) = watch::channel(false);
+        let mut ready = false;
+
+        assert_eq!(
+            prepare_paced_source(&mut source, &mut host, &mut ready, &mut shutdown).await,
+            PacedSourceAction::Restart
+        );
+        let observations = observations.lock();
+        assert_eq!(
+            observations.poll_errors,
+            ["failed to resume fake source: broker refused the connection"]
+        );
+        assert_eq!(observations.reported_errors, observations.poll_errors);
     }
 
     #[nervix_primitives::test]
