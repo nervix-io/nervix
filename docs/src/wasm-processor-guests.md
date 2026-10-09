@@ -252,6 +252,11 @@ aligned destination field, and its row count comes from `acks.rows.len()`.
 `generated_arrow_ipc_batch` is either an empty byte string or exactly one Arrow
 IPC stream containing one schema and one record batch. The empty byte string is
 the only valid empty generated pool; do not encode a zero-column Arrow stream.
+Every message in a nonempty pool must start with the IPC continuation marker, end within the
+bytes the guest supplied, and lead to an end-of-stream marker with no bytes after it. Nervix
+checks each metadata length, body length and column-buffer range before Arrow reads the pool.
+A negative body length or a body declaration longer than the supplied bytes fails the callback
+with a typed invalid-generated-IPC error; it cannot make the host reserve the declared size.
 When present, generated schema field names must be empty. Nervix compares every
 other field property with each referencing destination field, including data
 type, nullability, timestamp units and timezones, nested types, fixed lengths,

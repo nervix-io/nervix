@@ -206,6 +206,11 @@ class InventoryTests(unittest.TestCase):
             "runtime-window-sealed-checkpoints",
             "runtime-arrow-bodies",
             "runtime-arrow-bodies-malformed",
+            "runtime-arrow-relay-malformed",
+            "runtime-arrow-snapshot-malformed",
+            "runtime-arrow-archive-malformed",
+            "runtime-wasm-generated-ipc",
+            "runtime-wasm-generated-ipc-malformed",
             "resource-store-layout",
         })
         self.assertEqual({target.package for target in inventory.targets}, {

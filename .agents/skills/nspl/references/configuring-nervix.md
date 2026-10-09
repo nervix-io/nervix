@@ -298,7 +298,9 @@ relay. Do not use them to scan across branches.
   `nervix_process_batch(ptr, size)`, validates that exact range against its reusable buffer, and
   declares positive `MAX FUEL` then `MAX MEMORY` limits immediately after `FILE`. Its
   Rust `nervix-wasm-sdk` `Processor` callbacks return `error_stack::Result<_, GuestError>`;
-  follow the `Rust WASM Guest SDK` chapter for the callback contract. Its
+  follow the `Rust WASM Guest SDK` chapter for the callback contract. A custom guest's generated
+  Arrow pool must finish its IPC stream and keep every declared message body within its emitted
+  bytes; malformed output fails its callback with a typed error. Its
   `nervix_dump_state` saves only durable computation state, never buffered input, ACK tokens,
   pending output, timeout handles, or latched error state, and reports a failed save with a
   negative code, after which Nervix keeps the state saved last. Its `nervix_load_state` rejects

@@ -10,6 +10,7 @@ use arrow_array::{
     ArrayRef, BinaryArray, BooleanArray, Int64Array, RecordBatch, StringArray,
     builder::{Int64Builder, ListBuilder},
 };
+use arrow_ipc::{Message, MessageHeader, root_as_message};
 use arrow_schema::{DataType, Field, Schema as ArrowSchema};
 use error_stack::Report;
 use meticulous::{OptionExt as _, ResultExt as _};
@@ -17,7 +18,7 @@ use nervix_arbitrary::{Arbitrary, Domain};
 use nervix_execution::{ChargedBytes, Executor, MemoryClass};
 use nervix_primitives::sync::StdArc;
 
-use super::{ArrowBodyError, RuntimeRecordBatch};
+use super::{ArrowBodyError, RuntimeRecordBatch, ipc_stream::IpcFramingDefect};
 
 /// The most rows, list elements and text or byte lengths one generated batch draws.
 const GENERATED_BOUND: usize = 4;
@@ -211,6 +212,44 @@ fn damaged(arbitrary: &mut Arbitrary<'_>, mut body: Vec<u8>) -> Vec<u8> {
     body
 }
 
+/// Change only the record message's declared body length in a current writer's stream.
+fn with_declared_record_body(mut body: Vec<u8>, declared: i64) -> Vec<u8> {
+    let schema_metadata = usize::try_from(i32::from_le_bytes(
+        body[4..8].try_into().assured("a writer's schema frame is complete"),
+    ))
+    .assured("a written schema has a nonnegative metadata length");
+    let record_start = 8_usize
+        .checked_add(schema_metadata)
+        .assured("the bounded schema metadata fits memory");
+    assert_eq!(&body[record_start..record_start + 4], &[0xff; 4]);
+    let metadata_start = record_start
+        .checked_add(8)
+        .assured("the bounded frame fits memory");
+    let metadata_length = usize::try_from(i32::from_le_bytes(
+        body[record_start + 4..metadata_start]
+            .try_into()
+            .assured("a writer's record frame is complete"),
+    ))
+    .assured("a written batch has a nonnegative metadata length");
+    let metadata_end = metadata_start
+        .checked_add(metadata_length)
+        .assured("the bounded batch metadata fits memory");
+    let message = root_as_message(&body[metadata_start..metadata_end])
+        .assured("the writer produced valid record metadata");
+    assert_eq!(message.header_type(), MessageHeader::RecordBatch);
+    let field = message._tab.vtable().get(Message::VT_BODYLENGTH);
+    assert_ne!(field, 0, "the writer records its body length");
+    let table = metadata_start
+        .checked_add(message._tab.loc())
+        .assured("the bounded table fits memory");
+    let start = table
+        .checked_add(usize::from(field))
+        .assured("the body length slot fits memory");
+    let end = start.checked_add(8).assured("the length field fits memory");
+    body[start..end].copy_from_slice(&declared.to_le_bytes());
+    body
+}
+
 /// Asserts that `bytes` either are refused for what they hold or decode to a batch like any
 /// other, which encodes and decodes back to itself.
 async fn assert_refused_typed_or_decodes_canonically(
@@ -328,4 +367,73 @@ fn bolero_damaged_arrow_bodies_are_refused_typed_or_decode_canonically() {
                 .await;
             });
         });
+}
+
+/// Exercises the same bounded decoder with one fixed carriage so fuzzing always reaches this
+/// path. Archive column sections use the snapshot-section decoder after archive verification.
+fn assert_malformed_carriage(carriage: Carriage, input: &[u8]) {
+    let runtime = nervix_primitives::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .assured("a property runtime opens");
+    let executor = Executor::default();
+    let mut arbitrary = Arbitrary::new(input, Domain::Vocabulary);
+    let batch = generated_batch(&mut arbitrary);
+    let schema = batch.batch().schema();
+    runtime.block_on(async {
+        let body = carriage
+            .encode(&batch, &executor)
+            .await
+            .assured("a bounded generated batch encodes");
+        for declared in [1_i64 << 60, -1_i64] {
+            let with_declaration = with_declared_record_body(body.as_ref().to_vec(), declared);
+            let report = carriage
+                .decode(&schema, &executor, with_declaration)
+                .await
+                .expect_err("an unbacked or negative body length fails before Arrow reads it");
+            assert!(
+                matches!(
+                    report.current_context(),
+                    ArrowBodyError::Framing {
+                        defect: IpcFramingDefect::Truncated | IpcFramingDefect::BodyLength
+                    }
+                ),
+                "a declared body outside its bytes fails at framing: {report:?}"
+            );
+        }
+        let damaged_body = damaged(&mut arbitrary, body.as_ref().to_vec());
+        assert_refused_typed_or_decodes_canonically(carriage, &schema, &executor, damaged_body)
+            .await;
+        assert_refused_typed_or_decodes_canonically(
+            carriage,
+            &schema,
+            &executor,
+            input.to_vec(),
+        )
+        .await;
+    });
+}
+
+#[test]
+fn bolero_malformed_relay_arrow_bodies_fail_typed() {
+    bolero::check!()
+        .with_iterations(256)
+        .with_max_len(2048)
+        .for_each(|input: &[u8]| assert_malformed_carriage(Carriage::Relay, input));
+}
+
+#[test]
+fn bolero_malformed_snapshot_arrow_sections_fail_typed() {
+    bolero::check!()
+        .with_iterations(256)
+        .with_max_len(2048)
+        .for_each(|input: &[u8]| assert_malformed_carriage(Carriage::SnapshotSection, input));
+}
+
+#[test]
+fn bolero_malformed_archived_arrow_columns_fail_typed() {
+    bolero::check!()
+        .with_iterations(256)
+        .with_max_len(2048)
+        .for_each(|input: &[u8]| assert_malformed_carriage(Carriage::SnapshotSection, input));
 }

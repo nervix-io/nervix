@@ -374,7 +374,9 @@ the owning resource, snapshot, or state protocol interpret the stream.
 Before the receiver gives a relay Arrow stream to Arrow's reader, the shared IPC framing owner
 checks every message's continuation marker, metadata, declared body and column buffers against the
 received bytes. A malformed stream reports `ArrowBodyError::Framing` before the reader can allocate
-or slice from an unchecked length. A reader panic on malformed metadata that passes framing is
+or slice from an unchecked length. This includes negative body lengths and positive declarations
+larger than the bytes the peer actually sent, even if the declaration is much larger than the
+encoded relay-batch limit. A reader panic on malformed metadata that passes framing is
 reported as `ArrowBodyError::Decode`.
 
 The primary payload limits are:

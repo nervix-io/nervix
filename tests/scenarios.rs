@@ -149,6 +149,7 @@ use crate::common::{
     tcp_forwarder::TcpForwarders,
 };
 
+mod crafted_ipc;
 mod backup;
 mod client_consumers;
 mod client_producers;

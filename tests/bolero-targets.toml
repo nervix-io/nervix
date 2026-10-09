@@ -1808,6 +1808,81 @@ test_target = "lib"
 
 [[target]]
 case_timeout_seconds = 10
+corpus = "src/runtime_schema/__fuzz__/runtime_schema__arrow_body_properties__bolero_malformed_relay_arrow_bodies_fail_typed/corpus"
+domain_version = 1
+features = []
+id = "runtime-arrow-relay-malformed"
+invariant = "Peer relay Arrow bodies with damaged message lengths, metadata or buffers fail with typed content errors or decode as complete current batches."
+manifest = "Cargo.toml"
+max_input_bytes = 2048
+package = "nervix-server"
+random_iterations = 256
+source = "src/runtime_schema/arrow_body_properties.rs"
+test = "runtime_schema::arrow_body_properties::bolero_malformed_relay_arrow_bodies_fail_typed"
+test_target = "lib"
+
+[[target]]
+case_timeout_seconds = 10
+corpus = "src/runtime_schema/__fuzz__/runtime_schema__arrow_body_properties__bolero_malformed_snapshot_arrow_sections_fail_typed/corpus"
+domain_version = 1
+features = []
+id = "runtime-arrow-snapshot-malformed"
+invariant = "Sealed snapshot Arrow sections with damaged message lengths, metadata or buffers fail with typed content errors or decode as complete current batches."
+manifest = "Cargo.toml"
+max_input_bytes = 2048
+package = "nervix-server"
+random_iterations = 256
+source = "src/runtime_schema/arrow_body_properties.rs"
+test = "runtime_schema::arrow_body_properties::bolero_malformed_snapshot_arrow_sections_fail_typed"
+test_target = "lib"
+
+[[target]]
+case_timeout_seconds = 10
+corpus = "src/runtime_schema/__fuzz__/runtime_schema__arrow_body_properties__bolero_malformed_archived_arrow_columns_fail_typed/corpus"
+domain_version = 1
+features = []
+id = "runtime-arrow-archive-malformed"
+invariant = "Restored archive Arrow column sections with damaged message lengths, metadata or buffers fail through the shared snapshot-section decoder with typed content errors or complete current batches."
+manifest = "Cargo.toml"
+max_input_bytes = 2048
+package = "nervix-server"
+random_iterations = 256
+source = "src/runtime_schema/arrow_body_properties.rs"
+test = "runtime_schema::arrow_body_properties::bolero_malformed_archived_arrow_columns_fail_typed"
+test_target = "lib"
+
+[[target]]
+case_timeout_seconds = 10
+corpus = "src/runtime/__fuzz__/runtime__wasm_output__ipc_tests__bolero_wasm_generated_ipc_restores_every_i32_value/corpus"
+domain_version = 1
+features = []
+id = "runtime-wasm-generated-ipc"
+invariant = "A current generated WASM Arrow pool preserves its schema, every I32 value, row count and acknowledgement row through output validation."
+manifest = "Cargo.toml"
+max_input_bytes = 32
+package = "nervix-server"
+random_iterations = 128
+source = "src/runtime/wasm_ipc_tests.rs"
+test = "runtime::wasm_output::ipc_tests::bolero_wasm_generated_ipc_restores_every_i32_value"
+test_target = "lib"
+
+[[target]]
+case_timeout_seconds = 10
+corpus = "src/runtime/__fuzz__/runtime__wasm_output__ipc_tests__bolero_malformed_wasm_generated_ipc_is_refused_typed/corpus"
+domain_version = 1
+features = []
+id = "runtime-wasm-generated-ipc-malformed"
+invariant = "A guest Arrow pool with damaged framing, declared lengths or schema metadata fails with a typed content error or retains its full current value, without process abort."
+manifest = "Cargo.toml"
+max_input_bytes = 1024
+package = "nervix-server"
+random_iterations = 256
+source = "src/runtime/wasm_ipc_tests.rs"
+test = "runtime::wasm_output::ipc_tests::bolero_malformed_wasm_generated_ipc_is_refused_typed"
+test_target = "lib"
+
+[[target]]
+case_timeout_seconds = 10
 corpus = "crates/interconnect/src/connection/__fuzz__/connection__relay_owner__tests__bolero_relay_owner_sequences_preserve_verdicts_and_bounded_capacity/corpus"
 domain_version = 1
 features = []

@@ -1556,6 +1556,35 @@ fn write_archive(copy: &ArchiveCopy, replaced: &BTreeMap<String, Vec<u8>>, targe
 }
 
 #[given(
+    expr = "backup archive {string} is copied to {string} with a materialized Arrow body declaring {int} bytes"
+)]
+fn given_archive_with_declared_arrow_body(
+    world: &mut ScenarioWorld,
+    source: String,
+    target: String,
+    declared: i64,
+) {
+    let source_path = archive_path(world, &source);
+    let target_path = archive_path(world, &target);
+    let copy = copy_of_archive(&source_path);
+    let manifest = copy.manifest.as_ref().assured("the verified archive has a manifest");
+    let entry = manifest
+        .sections
+        .iter()
+        .find(|entry| entry.content == SectionContent::MaterializedColumns)
+        .assured("the backed-up materialized relay has an Arrow section");
+    let bytes = copy
+        .sections
+        .get(entry.path.as_str())
+        .assured("the verified archive contains its materialized Arrow section");
+    let altered = crate::crafted_ipc::CraftedIpc::new(bytes.clone())
+        .declaring(declared)
+        .into_bytes();
+    let replaced = BTreeMap::from([(entry.path.to_string(), altered)]);
+    write_archive(&copy, &replaced, &target_path);
+}
+
+#[given(
     expr = "backup archive {string} is copied to {string} with native metadata above the bulk \
             budget"
 )]

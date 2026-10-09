@@ -405,7 +405,11 @@ a guest save in a second full-size buffer or reserves a file-read chunk inside a
 full checkpoint.
 Materialized payloads use archive-owned rkyv descriptors and scalar identity records with
 exact-schema Arrow IPC column sections. Planning, including a dry run, verifies their Arrow
-schema, row count and unique typed branch identities. Conversion stages bounded native header,
+schema, row count and unique typed branch identities. Before Arrow decodes a section, the same
+framing check used for relay and snapshot bodies verifies that every declared metadata, body and
+column-buffer length fits the section's actual bytes. An archive with a matching digest but a
+negative or inflated IPC body declaration is refused during planning, including a dry run, before
+any allocation can be sized from that declaration. Conversion stages bounded native header,
 identity and column pieces, then concatenates them into a quota-owned file with a 64 KiB buffer.
 That file uses the same streamed publisher as a guest save, including when one relay's container
 exceeds the 32 MiB bulk budget. It never enters encoded metadata installation. Temporary conversion

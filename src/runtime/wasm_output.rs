@@ -2,6 +2,10 @@ use error_stack::{Report, ResultExt as _};
 
 use super::*;
 
+#[cfg(test)]
+#[path = "wasm_ipc_tests.rs"]
+mod ipc_tests;
+
 pub(super) struct WasmOutputContext<'a> {
     pub(super) branch: &'a mut BranchRuntime,
     pub(super) node_kind: ModelKind,

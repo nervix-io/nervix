@@ -872,6 +872,10 @@ Each failure reports its owner's typed context above the cause it kept:
   for a WASM processor's instance and the output its guest emitted. The VM, Arrow, ONNX or relay
   batch failure stays beneath. A WASM output route's FILTER-MAP reports the `PlannedGeneralError`
   step a planned batch reports, and the callback whose output did not forward is named by its kind.
+  A generated Arrow pool whose IPC framing declares a negative body length or more body bytes than
+  the guest supplied is `WasmOutputError::InvalidGeneratedArrowIpc` with the shared
+  `IpcFramingDefect` beneath it. The guest's malformed output is a content failure of that
+  callback, even when Arrow's schema conversion itself cannot decode the metadata.
 - `ProcessorBranchTaskError`, `BranchEntrypointError` and `ReingestorError` for the concrete branch
   work of a processor, a branched entrypoint and a reingestor: the domain time of accepted input
   that cannot be read, a branch that cannot be instantiated, a branch task that is gone or whose
