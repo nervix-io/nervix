@@ -21,7 +21,7 @@ Feature: Graceful shutdown
       raft.cordoned_nodes: node-2
       """
 
-  @shutdown_cordon_release
+  @shutdown_cordon_release @deloxide_stress
   Scenario Outline: A stopping <role> whose cordon release outlasts one second completes its drain and leaves no cordon
     Given graceful shutdown drain is enabled
     And drain timeout is configured as "30s"

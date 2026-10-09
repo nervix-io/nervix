@@ -106,6 +106,8 @@ fn workload() {
         }
         "a_condition_handed_between_threads" => a_condition_handed_between_threads(),
         "readers_sharing_a_lock" => readers_sharing_a_lock(),
+        #[cfg(feature = "deloxide-stress")]
+        "nested_acquisitions_under_stress" => nested_acquisitions_under_stress(),
         "quiet_standard_output" => println!("probe output after the detector started"),
         // The diagnostic lane's supervision qualification starts these two directly: a process
         // that never ends on a wait the detector does not track, and one a signal ends.
@@ -727,6 +729,69 @@ fn readers_sharing_a_lock() {
     }
     let values: Vec<u8> = received.iter().collect();
     assert_eq!(values, [5, 5, 5]);
+}
+
+/// How many nested acquisitions the stress probe makes.
+#[cfg(feature = "deloxide-stress")]
+const STRESS_ROUNDS: u32 = 20_000;
+
+/// One thread that takes an inner mutex while it holds an outer one, for every round, and must
+/// spend at least the shortest delay for half the rounds the lane's configuration expects to
+/// preempt. With a probability of one twentieth over twenty thousand rounds, a thousand preemptions
+/// are expected and falling short of half of them is sixteen standard deviations away, so only an
+/// absent disturbance fails it; load only lengthens the time it measures. The bound, ten
+/// milliseconds, is twice what the same rounds take undisturbed on an idle host.
+#[cfg(feature = "deloxide-stress")]
+fn nested_acquisitions_under_stress() {
+    use nervix_primitives::{
+        deadlock::{PREEMPTION_SCALE, StressConfiguration},
+        time::Instant,
+    };
+
+    let outer = Mutex::new(0_u32);
+    let inner = Mutex::new(0_u32);
+    let started = Instant::now();
+    for _ in 0..STRESS_ROUNDS {
+        let mut outer = outer.lock();
+        let mut inner = inner.lock();
+        *outer = outer.checked_add(1).assured("the rounds fit a u32");
+        *inner = inner.checked_add(1).assured("the rounds fit a u32");
+    }
+    let elapsed = started.elapsed();
+    assert_eq!(*outer.lock(), STRESS_ROUNDS);
+    assert_eq!(*inner.lock(), STRESS_ROUNDS);
+    let lane = StressConfiguration::LANE;
+    let expected = u64::from(STRESS_ROUNDS)
+        .checked_mul(u64::from(lane.preemptions_per_million().get()))
+        .assured("rounds times millionths fit a u64")
+        / u64::from(PREEMPTION_SCALE);
+    let preempted_at_least =
+        u32::try_from(expected / 2).assured("at most half the rounds fit a u32");
+    let shortest = lane.shortest_delay();
+    let waited_at_least = shortest
+        .checked_mul(preempted_at_least)
+        .assured("half the expected preemptions of the shortest delay fit a duration");
+    assert!(
+        elapsed >= waited_at_least,
+        "{STRESS_ROUNDS} nested acquisitions took {elapsed:?}, less than the {waited_at_least:?} \
+         {preempted_at_least} preemptions of {shortest:?} would wait"
+    );
+}
+
+#[cfg(feature = "deloxide-stress")]
+#[test]
+fn stress_delays_nested_acquisitions_and_records_its_configuration() {
+    let directory = tempfile::tempdir().assured("temporary evidence directory");
+    let child = run_child("nested_acquisitions_under_stress", Some(directory.path()));
+    assert_eq!(child.exit_code(), 0, "{}", child.describe());
+    let evidence = only_evidence(directory.path(), &child);
+    assert_eq!(
+        evidence.process().selection,
+        nervix_primitives::deadlock::DiagnosticSelection::StressedActiveOnly(
+            nervix_primitives::deadlock::StressConfiguration::LANE
+        )
+    );
+    assert!(evidence.findings().is_empty(), "{:?}", evidence.findings());
 }
 
 /// What a child left behind.

@@ -175,7 +175,7 @@ test_target = "lib"
 [[target]]
 case_timeout_seconds = 10
 corpus = "crates/deadlock/src/__fuzz__/tests__bolero_deadlock_evidence_round_trips/corpus"
-domain_version = 2
+domain_version = 3
 features = []
 id = "deadlock-evidence"
 invariant = "Every deadlock evidence a diagnostic process can record, with every finding variant at the edges of its bounds, decodes from its own encoding to the complete original value."
@@ -190,7 +190,7 @@ test_target = "lib"
 [[target]]
 case_timeout_seconds = 10
 corpus = "crates/deadlock/src/__fuzz__/tests__bolero_malformed_deadlock_evidence_is_refused_or_round_trips/corpus"
-domain_version = 2
+domain_version = 3
 features = []
 id = "deadlock-evidence-malformed"
 invariant = "Arbitrary bytes, bare or behind a valid evidence header, free every decoding allocation and are refused with a typed error or decode to evidence within every bound that encodes back to itself."
@@ -205,10 +205,10 @@ test_target = "lib"
 [[target]]
 case_timeout_seconds = 10
 corpus = "crates/deadlock/src/__fuzz__/tests__bolero_deadlock_evidence_outside_its_bounds_is_refused/corpus"
-domain_version = 2
+domain_version = 3
 features = []
 id = "deadlock-evidence-bounds"
-invariant = "A valid evidence encoding that breaks one bound, of findings, cycle threads, omitted threads, identities, lost findings or kept texts, is refused as out of bounds."
+invariant = "A valid evidence encoding that breaks one bound, of findings, cycle threads, omitted threads, identities, lost findings, kept texts or the stress configuration, is refused as out of bounds."
 manifest = "Cargo.toml"
 max_input_bytes = 1024
 package = "nervix-deadlock"
@@ -220,7 +220,7 @@ test_target = "lib"
 [[target]]
 case_timeout_seconds = 10
 corpus = "crates/deadlock/src/__fuzz__/tests__bolero_evidence_summary_counts_every_finding_once/corpus"
-domain_version = 1
+domain_version = 2
 features = []
 id = "deadlock-evidence-summary"
 invariant = "The summary of every evidence a diagnostic process can record counts each finding once by kind, keeps repeated deliveries apart from lost findings, agrees with qualification, and prints every count once in its fixed order."

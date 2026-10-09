@@ -4,7 +4,8 @@ use std::{fmt, time::SystemTime};
 
 use error_stack::Report;
 use nervix_primitives::deadlock::{
-    BoundedText, CycleOutOfBounds, DiagnosticSelection, OrderOutOfBounds, TextOutOfBounds,
+    BoundedText, CycleOutOfBounds, DiagnosticSelection, OrderOutOfBounds, StressOutOfBounds,
+    TextOutOfBounds,
 };
 
 use crate::{EvidenceError, FindingSelection, RecordedFinding, TriageProof, TriageRefusal};
@@ -170,6 +171,8 @@ pub enum EvidenceOutOfBounds {
     Order(OrderOutOfBounds),
     InvalidReview,
     OccurrenceOverflow,
+    /// A stress configuration outside its bounds, or one a delay or probability cannot hold.
+    Stress(StressOutOfBounds),
 }
 
 impl fmt::Display for EvidenceOutOfBounds {
@@ -190,6 +193,7 @@ impl fmt::Display for EvidenceOutOfBounds {
             Self::OccurrenceOverflow => {
                 f.write_str("the finding repetition count exceeds its range")
             }
+            Self::Stress(stress) => write!(f, "{stress}"),
         }
     }
 }

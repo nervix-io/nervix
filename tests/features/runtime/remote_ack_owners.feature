@@ -1,6 +1,7 @@
 @remote_ack_owners
 Feature: Attached record outcomes across independent branch deliveries
 
+  @deloxide_stress
   Scenario Outline: Interleaved branches complete attached deliveries and commit their source offsets
     Given Kafka is running
     And a <cluster_size> node nervix cluster is started

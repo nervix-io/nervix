@@ -11,6 +11,7 @@ workspace = true
 [features]
 default = []
 deloxide-order = ["deloxide", "nervix-primitives/deloxide-order"]
+deloxide-stress = ["deloxide", "nervix-primitives/deloxide-stress"]
 report-tool = ["dep:clap"]
 shuttle = [
   "nervix-primitives/native",
