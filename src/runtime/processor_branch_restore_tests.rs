@@ -790,7 +790,7 @@ async fn handed_over_branches_resume_only_under_the_lifecycle_they_belong_to() {
             branch,
             incarnation: 6,
             lsm: 5,
-        } if branch == &alpha
+        } if *branch == BranchScope::from(&alpha)
     ));
     let kept = after_lifecycle.into_handoffs();
     assert_eq!(

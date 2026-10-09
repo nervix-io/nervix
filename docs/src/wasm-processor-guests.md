@@ -893,7 +893,10 @@ operations and saved state, in one shape:
 wasm processor '<processor>' <stage> failed (<branch>, resource '<resource>' version <version> file '<file>'[, export '<export>'][, saved state revision <revision>]): <cause>
 ```
 
-`<branch>` is `branch` followed by the concrete branch key, or `unbranched`. `<export>` names the
+`<branch>` is `branch` followed by the lowercase hexadecimal fingerprint of the concrete branch's
+key, or `unbranched`. The fingerprint is the one `DESCRIBE WASM PROCESSOR` prints beside the
+branch's checkpoint, and a diagnostic never contains the key's field values, which the branch
+schema may declare `SENSITIVE`. `<export>` names the
 guest export whose call failed, or the export that runs the failed operation. `<revision>` appears
 when the failure involves saved state: the revision being restored or the revision being persisted.
 `<cause>` is the complete chain of failures below the stage, ending with the guest's own reason when
@@ -918,11 +921,11 @@ another node reaches the session unchanged.
 | `state replication` | Waiting for every assigned replica to hold the checkpoint on its stable storage, or the schedule assigning fewer replicas than the checkpoint was captured for. |
 | `state authority check` | The state's authority refused it: a replica or peer that is not the state's authority, or this node after the branch's state generation or ownership moved on. |
 
-For example, a branch whose guest rejects its saved counters after an instance was recreated is
-reported as:
+For example, the branch keyed by tenant `alpha` whose guest rejects its saved counters after an
+instance was recreated is reported as:
 
 ```text
-wasm processor 'sessionizer' application state restoration failed (branch {"tenant":"alpha"}, resource 'sessionizer' version 3 file 'sessionizer.wasm', export 'nervix_load_state', saved state revision 12): wasm guest rejected the application state in its saved snapshot: counters header is truncated
+wasm processor 'sessionizer' application state restoration failed (branch 40238306d5ebf339fe640ae723e4705c5bb1743e39d0ec207ed8de19fead54b1, resource 'sessionizer' version 3 file 'sessionizer.wasm', export 'nervix_load_state', saved state revision 12): wasm guest rejected the application state in its saved snapshot: counters header is truncated
 ```
 
 ## Troubleshooting

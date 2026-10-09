@@ -258,7 +258,7 @@ impl Runtime {
         info!(
             domain = request.domain().as_str(),
             processor = request.processor().as_str(),
-            key = branch_key_display(&request.key),
+            scope = %BranchScope::from(&request.key),
             generation = %request.generation,
             "wasm guest requested a new branch state lifetime"
         );
@@ -303,6 +303,7 @@ mod tests {
     use std::collections::BTreeSet;
 
     use super::*;
+    use crate::captured_logs::CapturedLogs;
 
     fn tenant(tenant: &str) -> Option<BranchKey> {
         Some(
@@ -383,11 +384,20 @@ mod tests {
     fn repeated_requests_for_one_branch_are_held_as_one() {
         let runtime = Runtime::new();
 
-        runtime
-            .request_guest_wasm_state_reset(request(tenant("alpha"), WasmStateGeneration::FIRST));
-        runtime
-            .request_guest_wasm_state_reset(request(tenant("alpha"), WasmStateGeneration::FIRST));
-        runtime.request_guest_wasm_state_reset(request(tenant("beta"), WasmStateGeneration::FIRST));
+        CapturedLogs::of(|| {
+            runtime.request_guest_wasm_state_reset(request(
+                tenant("alpha"),
+                WasmStateGeneration::FIRST,
+            ));
+            runtime.request_guest_wasm_state_reset(request(
+                tenant("alpha"),
+                WasmStateGeneration::FIRST,
+            ));
+            runtime.request_guest_wasm_state_reset(request(
+                tenant("beta"),
+                WasmStateGeneration::FIRST,
+            ));
+        });
 
         let taken = runtime.take_guest_wasm_state_resets();
         let references = taken
@@ -403,5 +413,32 @@ mod tests {
             ])
         );
         assert!(runtime.take_guest_wasm_state_resets().is_empty());
+    }
+
+    /// The record a guest's request leaves names the branch by the fingerprint of its key, the
+    /// text `DESCRIBE` prints for it, because a branch schema may declare the key's fields
+    /// `SENSITIVE`.
+    #[test]
+    fn a_requested_reset_logs_its_branch_by_fingerprint() {
+        let runtime = Runtime::new();
+
+        let logs = CapturedLogs::of(|| {
+            runtime.request_guest_wasm_state_reset(request(
+                tenant("acme-secret"),
+                WasmStateGeneration::FIRST,
+            ));
+            runtime.request_guest_wasm_state_reset(request(None, WasmStateGeneration::FIRST));
+        });
+
+        let lines = logs.lines().collect::<Vec<_>>();
+        assert_eq!(lines.len(), 2, "{logs}");
+        assert!(
+            lines[0].contains(
+                "scope=branch 3525112b62a3c2262596c624543a4333a324f9e7bc945c6031936604e166af12"
+            ),
+            "{logs}"
+        );
+        assert!(lines[1].contains("scope=unbranched"), "{logs}");
+        assert!(!logs.contains("acme-secret"), "{logs}");
     }
 }

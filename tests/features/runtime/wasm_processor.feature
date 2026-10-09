@@ -485,7 +485,7 @@ Feature: WASM processor runtime behavior
     Then within "10s" the active session observes a server error
     And the last server error contains
       """
-      wasm processor 'limited_guest' batch processing failed (branch {"tenant":"alpha"}, resource 'wasm_limited_guest' version 1 file 'processors/filter_even.wasm', export 'nervix_process_batch'): wasm guest batch processing failed: <expected_error>
+      wasm processor 'limited_guest' batch processing failed (branch 40238306d5ebf339fe640ae723e4705c5bb1743e39d0ec207ed8de19fead54b1, resource 'wasm_limited_guest' version 1 file 'processors/filter_even.wasm', export 'nervix_process_batch'): wasm guest batch processing failed: <expected_error>
       """
     When http payload is posted to host "wasm-limits-{{test_id}}.example.com" path "/events"
       """
@@ -568,7 +568,7 @@ Feature: WASM processor runtime behavior
     Then within "10s" the active session observes a server error
     And the last server error contains
       """
-      wasm processor 'restoring_guest' batch processing failed (branch {"tenant":"alpha"}, resource 'wasm_restoring_guest' version 1 file 'processors/filter_even.wasm', export 'nervix_process_batch'): wasm guest batch processing failed: wasm guest exhausted MAX FUEL 100000
+      wasm processor 'restoring_guest' batch processing failed (branch 40238306d5ebf339fe640ae723e4705c5bb1743e39d0ec207ed8de19fead54b1, resource 'wasm_restoring_guest' version 1 file 'processors/filter_even.wasm', export 'nervix_process_batch'): wasm guest batch processing failed: wasm guest exhausted MAX FUEL 100000
       """
     When http payload is posted to host "wasm-restore-{{test_id}}.example.com" path "/events"
       """
@@ -577,7 +577,7 @@ Feature: WASM processor runtime behavior
     Then within "10s" the active session observes a server error
     And the last server error contains
       """
-      wasm processor 'restoring_guest' application state restoration failed (branch {"tenant":"alpha"}, resource 'wasm_restoring_guest' version 1 file 'processors/filter_even.wasm', export 'nervix_load_state', saved state revision 1): wasm guest rejected the application state in its saved snapshot: guest refuses its saved counters
+      wasm processor 'restoring_guest' application state restoration failed (branch 40238306d5ebf339fe640ae723e4705c5bb1743e39d0ec207ed8de19fead54b1, resource 'wasm_restoring_guest' version 1 file 'processors/filter_even.wasm', export 'nervix_load_state', saved state revision 1): wasm guest rejected the application state in its saved snapshot: guest refuses its saved counters
       """
     When http payload is posted to host "wasm-restore-{{test_id}}.example.com" path "/events"
       """
@@ -590,7 +590,7 @@ Feature: WASM processor runtime behavior
     Then within "10s" the active session observes a server error
     And the last server error contains
       """
-      wasm processor 'restoring_guest' application state restoration failed (branch {"tenant":"alpha"}, resource 'wasm_restoring_guest' version 1 file 'processors/filter_even.wasm', export 'nervix_load_state', saved state revision 1): wasm guest rejected the application state in its saved snapshot: guest refuses its saved counters
+      wasm processor 'restoring_guest' application state restoration failed (branch 40238306d5ebf339fe640ae723e4705c5bb1743e39d0ec207ed8de19fead54b1, resource 'wasm_restoring_guest' version 1 file 'processors/filter_even.wasm', export 'nervix_load_state', saved state revision 1): wasm guest rejected the application state in its saved snapshot: guest refuses its saved counters
       """
     And within "10s" the relay subscription receives payloads containing all fragments
       """
@@ -666,7 +666,7 @@ Feature: WASM processor runtime behavior
     Then within "10s" the active session observes a server error
     And the last server error contains
       """
-      wasm processor 'refusing_guest' initialization failed (branch {"tenant":"init-refused"}, resource 'wasm_refusing_guest' version 1 file 'processors/filter_even.wasm', export 'nervix_init'): wasm guest initialization failed: wasm guest reported global error: guest refuses its branch configuration
+      wasm processor 'refusing_guest' initialization failed (branch f505a5499591d0f12928e183f6c96c162e679705bc73095e70535685437a1630, resource 'wasm_refusing_guest' version 1 file 'processors/filter_even.wasm', export 'nervix_init'): wasm guest initialization failed: wasm guest reported global error: guest refuses its branch configuration
       """
     And the last server error does not contain
       """
@@ -676,6 +676,72 @@ Feature: WASM processor runtime behavior
       """
       "tenant":"beta" | "note":"ok"
       "tenant":"beta" | "note":"ok"
+      """
+
+    Examples:
+      | cluster_size | replica_count |
+      | 1            | 0             |
+      | 3            | 0             |
+
+  Scenario Outline: WASM processor names a branch with a sensitive key by its fingerprint
+    Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
+    And a <cluster_size> node nervix cluster is started
+    And node "node-1" has "initialization" failing WASM processor fixture resource directory "wasm_processor"
+    And the leader node is configured with these NSPL commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
+    When these NSPL commands are executed through the client on the leader node
+      """
+      CREATE RESOURCE wasm_refusing_guest;
+      UPLOAD RESOURCE wasm_refusing_guest VERSION '{{wasm_processor}}';
+      """
+    And these NSPL commands are executed on the leader node
+      """
+      CREATE SCHEMA secret_input_event ( tenant STRING SENSITIVE, message STRING );
+      CREATE SCHEMA secret_output_event ( note STRING OPTIONAL );
+      CREATE WIRE JSON SCHEMA secret_input_wire MODE STRICT ( tenant string, message string );
+      CREATE CODEC secret_input_codec FROM WIRE JSON SCHEMA secret_input_wire TO SCHEMA secret_input_event;
+      CREATE SCHEMA secret_branch_key ( tenant STRING SENSITIVE );
+      CREATE BRANCH by_secret_tenant SCHEMA secret_branch_key TTL 5m;
+      CREATE RELAY secret_input_events SCHEMA secret_input_event BRANCHED BY by_secret_tenant;
+      CREATE RELAY secret_events SCHEMA secret_output_event BRANCHED BY by_secret_tenant;
+      CREATE VHOST edge wasm-secret-{{test_id}}.example.com;
+      CREATE ENDPOINT ingress ON edge PATH '/events' TYPE HTTP;
+      CREATE INGESTOR secret_source
+        FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL
+        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING secret_input_codec
+        TO secret_input_events
+        INHERIT ALL
+        BRANCHED BY by_secret_tenant
+        SET tenant = message.tenant
+        FLUSH IMMEDIATE
+        ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
+      CREATE WASM PROCESSOR refusing_guest FROM secret_input_events
+        USING RESOURCE wasm_refusing_guest VERSION 1
+        FILE 'processors/filter_even.wasm'
+        MAX FUEL 1000000000
+        MAX MEMORY 1MiB
+        BRANCHED BY by_secret_tenant
+        TO secret_events
+        SET note = coalesce(note, "ok")
+        ON MESSAGE ERROR LOG
+        ON GLOBAL ERROR LOG;
+      START;
+      """
+    When http payload is posted to host "wasm-secret-{{test_id}}.example.com" path "/events"
+      """
+      {"tenant":"init-refused","message":"refused"}
+      """
+    Then within "10s" the active session observes a server error
+    And the last server error contains
+      """
+      wasm processor 'refusing_guest' initialization failed (branch f505a5499591d0f12928e183f6c96c162e679705bc73095e70535685437a1630, resource 'wasm_refusing_guest' version 1 file 'processors/filter_even.wasm', export 'nervix_init'): wasm guest initialization failed: wasm guest reported global error: guest refuses its branch configuration
+      """
+    And the last server error does not contain
+      """
+      init-refused
       """
 
     Examples:
@@ -744,7 +810,7 @@ Feature: WASM processor runtime behavior
     Then within "10s" the active session observes a server error
     And the last server error contains
       """
-      wasm processor 'failing_guest' <stage> failed (branch {"tenant":"alpha"}, resource 'wasm_failing_guest' version 1 file 'processors/filter_even.wasm', export '<export>'): wasm guest <stage> failed: wasm guest reported global error: <reason>
+      wasm processor 'failing_guest' <stage> failed (branch 40238306d5ebf339fe640ae723e4705c5bb1743e39d0ec207ed8de19fead54b1, resource 'wasm_failing_guest' version 1 file 'processors/filter_even.wasm', export '<export>'): wasm guest <stage> failed: wasm guest reported global error: <reason>
       """
     When http payload is posted to host "wasm-callback-{{test_id}}.example.com" path "/events"
       """
@@ -1341,7 +1407,7 @@ Feature: WASM processor runtime behavior
       """
     Then within "10s" the active session observes a server error containing
       """
-      wasm processor 'filter_even_rows' state snapshot failed (branch {"tenant":"acme"}, resource 'wasm_checkpointed_filter' version 1 file 'processors/filter_even.wasm', export 'nervix_dump_state'): wasm guest state snapshot failed: wasm guest reported global error: guest cannot serialize its state for value -400
+      wasm processor 'filter_even_rows' state snapshot failed (branch 0b81df3a911f3064575542ffb49387d11eb8958d1ba91bfeb77d99929d0c00c5, resource 'wasm_checkpointed_filter' version 1 file 'processors/filter_even.wasm', export 'nervix_dump_state'): wasm guest state snapshot failed: wasm guest reported global error: guest cannot serialize its state for value -400
       """
     When http payload is posted to host "http-{{test_id}}.example.com" path "/metrics"
       """
@@ -1349,7 +1415,7 @@ Feature: WASM processor runtime behavior
       """
     Then within "10s" the active session observes a server error containing
       """
-      wasm processor 'filter_even_rows' batch processing failed (branch {"tenant":"beta"}, resource 'wasm_checkpointed_filter' version 1 file 'processors/filter_even.wasm', export 'nervix_process_batch'): wasm guest batch processing failed: wasm guest reported global error: guest error state for value -300
+      wasm processor 'filter_even_rows' batch processing failed (branch a55dd7bc3c92ed26aff8b1647f0451bd90f8b8e5ea415e490fba33d1c5a19cb9, resource 'wasm_checkpointed_filter' version 1 file 'processors/filter_even.wasm', export 'nervix_process_batch'): wasm guest batch processing failed: wasm guest reported global error: guest error state for value -300
       """
     When the cluster is restarted
     Then node "node-1" eventually observes a stable leader

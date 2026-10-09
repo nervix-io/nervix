@@ -22,34 +22,32 @@ use error_stack::ResultExt as _;
 use super::{materialized_read::MaterializedStateWait, *};
 
 /// Every way starting or restoring a processor's branch tasks fails.
+///
+/// A variant that concerns one branch names it by its [`BranchScope`], never by its key's values.
 #[derive(Debug, thiserror::Error)]
 pub(super) enum ProcessorBranchTaskError {
-    #[error("failed to instantiate processor branch '{}'", branch_key_display(.branch))]
-    Instantiate { branch: Option<BranchKey> },
-    #[error("failed to initialize a new window branch '{}'", branch_key_display(.branch))]
-    InitializeWindow { branch: Option<BranchKey> },
+    #[error("failed to instantiate the processor ({branch})")]
+    Instantiate { branch: BranchScope },
+    #[error("failed to initialize a new window ({branch})")]
+    InitializeWindow { branch: BranchScope },
     #[error("failed to read the persisted processor branch LRU snapshot")]
     ReadLruSnapshot,
     #[error("failed to decode the persisted processor branch LRU snapshot")]
     DecodeLruSnapshot,
-    #[error(
-        "could not read the domain time of accepted input for branch '{}'",
-        branch_key_display(.branch)
-    )]
-    AcceptedInputClock { branch: Option<BranchKey> },
-    #[error("the task of branch '{}' is unavailable", branch_key_display(.branch))]
-    Unavailable { branch: Option<BranchKey> },
+    #[error("could not read the domain time of accepted input ({branch})")]
+    AcceptedInputClock { branch: BranchScope },
+    #[error("the processor task is unavailable ({branch})")]
+    Unavailable { branch: BranchScope },
     #[error("the processor has not restored its branches")]
     RestorePending,
     #[error("the branch lifecycle the handed-over processor branches belong to is unavailable")]
     HandedOffLifecycleUnavailable,
     #[error(
-        "handed-over processor branch '{}' began at lifecycle revision {incarnation}, after the \
-         lifecycle revision {lsm} it belongs to",
-        branch_key_display(.branch)
+        "the handed-over processor ({branch}) began at lifecycle revision {incarnation}, after \
+         the lifecycle revision {lsm} it belongs to"
     )]
     HandedOffLifetimeAfterLifecycle {
-        branch: Option<BranchKey>,
+        branch: BranchScope,
         incarnation: u64,
         lsm: u64,
     },
@@ -1161,7 +1159,7 @@ pub(super) async fn dispatch_processor_node_input(
                 &template.error_policies,
                 batch.acks.iter(),
                 &error.change_context(ProcessorBranchTaskError::AcceptedInputClock {
-                    branch: key.clone(),
+                    branch: BranchScope::from(&key),
                 }),
             );
             return;
@@ -1217,7 +1215,7 @@ pub(super) async fn dispatch_processor_node_input(
         debug!(
             domain = domain.as_str(),
             processor = template.source.as_str(),
-            key = branch_key_display(&key),
+            scope = %BranchScope::from(&key),
             "created processor branch task"
         );
         if let Some(max_instances) = template.branch_max_instances {
@@ -1263,7 +1261,7 @@ pub(super) async fn dispatch_processor_node_input(
             &template.error_policies,
             input.batch.acks.iter(),
             &Report::new(ProcessorBranchTaskError::Unavailable {
-                branch: key.clone(),
+                branch: BranchScope::from(&key),
             }),
         );
         if let Some(entry) = instances.remove(&key) {
@@ -1362,8 +1360,8 @@ impl PreparedProcessorBranch {
         let mut branch = template
             .instantiate(&context.runtime_handle, &context.domain, key, incarnation)
             .await
-            .change_context(ProcessorBranchTaskError::Instantiate {
-                branch: branch_key.clone(),
+            .change_context_lazy(|| ProcessorBranchTaskError::Instantiate {
+                branch: BranchScope::from(&branch_key),
             })?
             .into_inner();
         if template.source_kind == ModelKind::WindowProcessor
@@ -1376,7 +1374,7 @@ impl PreparedProcessorBranch {
             branch
                 .snapshot_processor_live_state(&processor)
                 .change_context_lazy(|| ProcessorBranchTaskError::InitializeWindow {
-                    branch: branch_key,
+                    branch: BranchScope::from(&branch_key),
                 })?;
         }
         Ok(Self {
@@ -1842,7 +1840,7 @@ pub(super) async fn stop_processor_branch_task(
             warn!(
                 domain = domain.as_str(),
                 processor = processor.as_str(),
-                key = branch_key_display(key),
+                scope = %BranchScope::from(key),
                 error = %error,
                 "processor branch task join failed"
             );
@@ -1851,7 +1849,7 @@ pub(super) async fn stop_processor_branch_task(
             warn!(
                 domain = domain.as_str(),
                 processor = processor.as_str(),
-                key = branch_key_display(key),
+                scope = %BranchScope::from(key),
                 grace_period = %humantime::format_duration(PROCESSOR_BRANCH_TASK_SHUTDOWN_GRACE),
                 "processor branch task exceeded shutdown grace period; aborting"
             );
@@ -1862,7 +1860,7 @@ pub(super) async fn stop_processor_branch_task(
                 warn!(
                     domain = domain.as_str(),
                     processor = processor.as_str(),
-                    key = branch_key_display(key),
+                    scope = %BranchScope::from(key),
                     error = %error,
                     "aborted processor branch task join failed"
                 );
@@ -1992,7 +1990,7 @@ pub(super) async fn expire_processor_branch_instances(
         debug!(
             domain = domain.as_str(),
             processor = processor.as_str(),
-            key = branch_key_display(&key),
+            scope = %BranchScope::from(&key),
             "expired processor branch task"
         );
     }
@@ -2043,7 +2041,7 @@ pub(super) async fn evict_processor_branch_instances_to_capacity(
         debug!(
             domain = domain.as_str(),
             processor = processor.as_str(),
-            key = branch_key_display(&key),
+            scope = %BranchScope::from(&key),
             max_instances,
             "evicted processor branch task by lru"
         );
@@ -2078,7 +2076,7 @@ pub(super) async fn shutdown_all_processor_branch_instances(
         debug!(
             domain = domain.as_str(),
             processor = processor.as_str(),
-            key = branch_key_display(&key),
+            scope = %BranchScope::from(&key),
             "stopped processor branch task"
         );
     }

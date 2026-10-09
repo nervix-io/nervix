@@ -324,7 +324,7 @@ use branch_buffering::{
     RouteOutputError, RuntimeFlushPolicy, RuntimeInputCollectPolicy, RuntimeInputCollector,
     RuntimeWake, wait_for_branch_buffer_deadlines,
 };
-use branch_key::branch_key_display;
+use branch_key::BranchScope;
 use branch_lifecycle_state::{BranchLifecycleCheckpoint, ReplicatedBranchLifecycle};
 use branch_lru_state::{
     BranchLruSnapshotError, decode_branch_lru_snapshot, encode_branch_lru_snapshot,

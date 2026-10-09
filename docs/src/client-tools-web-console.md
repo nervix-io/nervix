@@ -276,9 +276,12 @@ Branch groups are drawn as a tinted region with a stacked outline around the par
 runs per branch, containing exactly the items that run per branch and nothing else. Regions of
 different branches never touch, even where they share a column. The region is
 headed with the branch name, its key fields, and how many branch instances are currently live; the
-outline thickens with that count. The ingestors and reingestors that construct the branch, and the
-emitters and reingestors that collapse it, sit on the region's border rather than inside it.
-Clicking the header opens the branch's key schema and its live instances.
+outline thickens with that count. The count comes from the per-branch statistics of the graph
+snapshot, which name each concrete branch by the lowercase hexadecimal fingerprint of its key, so a
+snapshot never carries key values a branch schema may declare `SENSITIVE`. The ingestors and
+reingestors that construct the branch, and the emitters and reingestors that collapse it, sit on
+the region's border rather than inside it. Clicking the header opens the branch's key schema and
+its live instances.
 
 The toolbar controls framing. Search highlights matching items, dims the rest, and brings the
 matches into view; the zoom buttons step in tens and `Ctrl`/`Cmd` with the scroll wheel is

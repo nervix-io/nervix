@@ -120,6 +120,17 @@ impl BranchKey {
     pub(crate) fn fingerprint(&self) -> BranchKeyFingerprint {
         BranchKeyFingerprint::of_canonical_text(self.as_str())
     }
+
+    /// Orders two branch scopes by their canonical key text, the unbranched execution first, so
+    /// that reports and published generations list their branches in one stable order.
+    pub(crate) fn canonical_order(left: &Option<Self>, right: &Option<Self>) -> std::cmp::Ordering {
+        match (left, right) {
+            (None, None) => std::cmp::Ordering::Equal,
+            (None, Some(_)) => std::cmp::Ordering::Less,
+            (Some(_), None) => std::cmp::Ordering::Greater,
+            (Some(left), Some(right)) => left.as_str().cmp(right.as_str()),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -238,22 +249,111 @@ impl BranchKey {
     }
 }
 
-pub(super) fn branch_key_display(key: &Option<BranchKey>) -> &str {
-    match key {
-        Some(key) => key.as_str(),
-        None => "none",
+/// The execution a branch scope selects, as errors, runtime events, negative acknowledgements and
+/// logs name it: a concrete branch by the fingerprint of its key, or the unbranched execution.
+///
+/// A branch schema may declare its key fields `SENSITIVE`, and these texts reach sessions as server
+/// notices and logs as they are, so a branch is never named by its key's field values. It reads as
+/// `branch <fingerprint>`, with the lowercase hexadecimal fingerprint `DESCRIBE` and backup
+/// inspection print for the same branch, or as `unbranched`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct BranchScope(Option<BranchKeyFingerprint>);
+
+impl From<&Option<BranchKey>> for BranchScope {
+    fn from(key: &Option<BranchKey>) -> Self {
+        match key {
+            Some(key) => Self(Some(key.fingerprint())),
+            None => Self(None),
+        }
     }
 }
 
-impl std::fmt::Display for BranchKey {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(self.as_str())
+impl std::fmt::Display for BranchScope {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match &self.0 {
+            Some(fingerprint) => write!(formatter, "branch {fingerprint}"),
+            None => formatter.write_str("unbranched"),
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::runtime::{branch_runtime::BranchEntrypointError, test_fixtures::string_branch_key};
+
+    /// How every diagnostic names the branch keyed by tenant `acme-secret`.
+    const SECRET_TENANT_BRANCH: &str =
+        "branch 3525112b62a3c2262596c624543a4333a324f9e7bc945c6031936604e166af12";
+
+    /// A branch is named by the lowercase hexadecimal fingerprint of its key, the text `DESCRIBE`
+    /// prints for the same branch, and never by the key's values, which a branch schema may declare
+    /// `SENSITIVE`. Unbranched execution has no key to name.
+    #[test]
+    fn a_branch_scope_names_a_concrete_branch_by_the_fingerprint_of_its_key() {
+        let secret = string_branch_key("tenant", "acme-secret");
+
+        assert_eq!(BranchScope::from(&secret).to_string(), SECRET_TENANT_BRANCH);
+        assert_eq!(BranchScope::from(&None).to_string(), "unbranched");
+    }
+
+    /// Every error a branch-local failure is reported with names its branch through its scope, so
+    /// a key value never reaches the runtime events, negative acknowledgements and logs the failure
+    /// is rendered into.
+    #[test]
+    fn every_branch_local_failure_names_its_branch_by_fingerprint() {
+        let branch = BranchScope::from(&string_branch_key("tenant", "acme-secret"));
+        let processor = ModelName::parse("orders")
+            .assured("the fixed test literal satisfies the model name grammar");
+        let failures = [
+            ProcessorBranchTaskError::Instantiate { branch }.to_string(),
+            ProcessorBranchTaskError::InitializeWindow { branch }.to_string(),
+            ProcessorBranchTaskError::AcceptedInputClock { branch }.to_string(),
+            ProcessorBranchTaskError::Unavailable { branch }.to_string(),
+            ProcessorBranchTaskError::HandedOffLifetimeAfterLifecycle {
+                branch,
+                incarnation: 7,
+                lsm: 3,
+            }
+            .to_string(),
+            ProcessorMaterializedError::DomainRouting { branch }.to_string(),
+            ProcessorMaterializedError::Resolve { branch }.to_string(),
+            ProcessorMaterializedError::EvictedRequiredSkip { branch }.to_string(),
+            ProcessorMaterializedError::EvictedRequiredWait { branch }.to_string(),
+            ProcessorLiveStateError { branch }.to_string(),
+            ProcessorTemplateError::ReplicatedState {
+                kind: ModelKind::Deduplicator,
+                processor: processor.clone(),
+                branch,
+            }
+            .to_string(),
+            ProcessorTemplateError::WindowRestore { processor, branch }.to_string(),
+            CorrelatorError::MixedBranchKeys {
+                left: branch,
+                right: BranchScope::from(&None),
+            }
+            .to_string(),
+            BranchEntrypointError::Instantiate { branch }.to_string(),
+            BranchEntrypointError::DispatchTask { branch }.to_string(),
+        ];
+
+        for failure in failures {
+            assert!(failure.contains(SECRET_TENANT_BRANCH), "{failure}");
+            assert!(!failure.contains("acme-secret"), "{failure}");
+        }
+    }
+
+    /// Reports list branches by their canonical key text, with unbranched execution first.
+    #[test]
+    fn branch_scopes_order_by_canonical_key_text_with_unbranched_execution_first() {
+        let acme = string_branch_key("tenant", "acme");
+        let beta = string_branch_key("tenant", "beta");
+        let mut scopes = [beta.clone(), None, acme.clone(), beta.clone()];
+
+        scopes.sort_by(BranchKey::canonical_order);
+
+        assert_eq!(scopes, [None, acme, beta.clone(), beta]);
+    }
 
     #[test]
     fn branch_key_rejects_empty_fields() {
