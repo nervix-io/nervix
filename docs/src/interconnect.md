@@ -1039,6 +1039,10 @@ the receiving process after the first 64 KiB install chunk: its replacement refu
 finish and publishes only after a complete new 36 MiB transfer. The handlers retain counts and
 digests; these checks qualify the authenticated transport, while the public restore scenarios
 and storage checks qualify native containers, atomic publication and activation.
+Their 300-second simulated completion deadline follows two intentional request deadlines and
+allows the 64 KiB fetch and install chunks to traverse a seeded link at its 100 ms maximum
+latency. The enclosing 320-second simulated horizon, 400,000-step cap and 90-second wall cap
+still fail a transfer that does not complete.
 Capture fetch and state installation share the peer connection's one reserved snapshot stream
 slot. The archive staging phase finishes and releases its fetch stream before installation starts;
 an installer cannot retain a fetch stream while awaiting another snapshot request to that peer.
