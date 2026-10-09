@@ -962,8 +962,12 @@ its only subject is the authenticated sender: completed or failed, each with the
 the sender's log, or not the leader, which changed nothing and sends the sender to the leader it
 observes next. When that request fails in transport, the drain counts as requested but unanswered:
 the sender reports its drain-support phase abandoned and still clears the cordon the request may
-have set; see [Topology Cases](./shutdown.md#topology-cases). A
-listing that arrives but names a branch key that does not decode is a failure of its own, distinct
+have set; see [Topology Cases](./shutdown.md#topology-cases). A unit whose ownership handoff
+cannot prepare within its share of the stopping node's drain budget appears in the leader's failed
+drain report with its kind, name, former owner and typed entity-gate cause, including pending node
+and work counts when quiescence timed out. Exhausting the remaining unit budget is reported as a
+failed drain instead of waiting for the sender's outer timeout. A listing that arrives but names a
+branch key that does not decode is a failure of its own, distinct
 from a failed request. A relay payload that does not decode is `RuntimeError::DecodeRemoteRelay`,
 naming the domain and relay, with the `RemoteRelayDecodeError` that says what the payload got wrong
 beneath it: no admission registration, a body that is not one Arrow section of the relay's schema,

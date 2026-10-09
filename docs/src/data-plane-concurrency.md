@@ -1626,7 +1626,12 @@ locks' conformance checks of `nervix-primitives`, the diagnostic owner tests of 
 and the tagged scenarios with the number of example runs each must make. The three
 `@remote_ack_owners` scenarios add four example runs across interleaved branches, a lost
 acknowledgement and producer restart; both selections exercise the tracked correlation and peer
-admission owner locks. The inventory also bounds the lane: one real-time budget for a selection's
+admission owner locks. The `@shutdown_kafka_handoff` scenario runs in both selections and reaches
+the ingestor quiesce control's tracked locks while a stopping node closes intake, waits for its
+attached emitter's handoff, and finishes admitted Kafka acknowledgements. The async gate wait,
+remote delivery and scheduling order remain outside the detector's observation and have the
+Cucumber and chaos checks in [Shutdown And Recovery](./shutdown.md). The inventory also bounds the
+lane: one real-time budget for a selection's
 diagnostic compilation and execution after its prerequisites, a bound for every invocation, a stop
 grace period, the reserve the scenario binary keeps for its own teardown inside its invocation's
 bound, and how many scenarios run at once, which is the same on every machine.
