@@ -44,54 +44,108 @@ link_ping() {
     "${script_dir}/verify-degraded-evidence.sh" ping "${output}" "${output%.txt}.json"
 }
 
-# Times a 262,144-byte transfer from SENDER to RECEIVER that the receiver counts.
+# Times one 262,144-byte transfer, including TCP connection and retransmissions, within one total
+# budget. BusyBox nc half-closes after stdin ends and exits when the receiver closes its side;
+# an idle timeout would instead abandon a valid loss-stalled connection. Keep both helpers' raw
+# logs and outcomes even when no complete transfer can be measured.
 link_rate_probe() {
-    local output="$1"
-    local sender="$2"
-    local receiver="$3"
+    local output="$1" sender="$2" receiver="$3"
     local sender_id receiver_id receiver_ip server_id
+    local evidence="${output%.json}"
+    local transfer_deadline_seconds=90
     sender_id="$(owned_service_container "${sender}")"
     receiver_id="$(owned_service_container "${receiver}")"
     receiver_ip="$(node_address "${receiver}")"
+    local server_start_status=0 ready=false
     server_id="$(run_bounded 30 docker run --detach \
         --label "io.nervix.chaos.run=${run_id}" \
         --label io.nervix.chaos.role=link-probe \
         --network "container:${receiver_id}" --entrypoint sh "${CHAOS_PROBE_IMAGE}" \
-        -c 'nc -l -p 18081 | wc -c')"
-    local ready=false
-    local _
-    for _ in $(seq 1 10); do
-        if run_bounded 5 docker exec "${server_id}" sh -c \
-            'netstat -ltn | grep -q ":18081 "'; then
-            ready=true
-            break
-        fi
-        sleep 1
-    done
-    if [[ "${ready}" != true ]]; then
-        run_bounded 20 docker container rm --force "${server_id}" >/dev/null 2>&1 || true
-        link_degradation_fail observation 'rate receiver did not start listening within 10 seconds'
+        -c 'nc -l -p 18081 | wc -c' 2>"${evidence}.server-start.log")" \
+        || server_start_status=$?
+    if [[ "${server_start_status}" -eq 0 ]]; then
+        local readiness_deadline=$((SECONDS + 10))
+        while ((SECONDS < readiness_deadline)); do
+            if run_bounded 2 docker exec "${server_id}" sh -c \
+                'netstat -ltn | grep -q ":18081 "' \
+                >"${evidence}.readiness.log" 2>&1; then
+                ready=true
+                break
+            fi
+            sleep 0.2
+        done
     fi
-    local started finished status=0
-    started="$(epoch_ms)"
-    # The positional parameter belongs to the helper container's shell.
-    # shellcheck disable=SC2016
-    run_bounded 35 docker run --rm \
-        --label "io.nervix.chaos.run=${run_id}" \
-        --label io.nervix.chaos.role=link-probe \
-        --network "container:${sender_id}" --entrypoint sh "${CHAOS_PROBE_IMAGE}" \
-        -c 'dd if=/dev/zero bs=1024 count=256 2>/dev/null | nc -w 1 "$1" 18081' \
-        -- "${receiver_ip}" >"${output%.json}.log" 2>&1 || status=$?
-    local server_status=0 receiver_bytes=""
-    run_bounded 40 docker wait "${server_id}" >"${output%.json}.server-exit.txt" \
-        2>&1 || server_status=$?
-    finished="$(epoch_ms)"
-    receiver_bytes="$(run_bounded 20 docker logs "${server_id}" 2>/dev/null | tr -d '[:space:]')"
-    run_bounded 20 docker container rm --force "${server_id}" >/dev/null 2>&1 || true
-    [[ "${status}" -eq 0 ]] || link_degradation_fail observation "rate probe failed with ${status}"
-    [[ "${server_status}" -eq 0 && "${receiver_bytes}" == 262144 \
-        && "$(cat "${output%.json}.server-exit.txt")" == 0 ]] \
-        || link_degradation_fail observation "rate receiver got ${receiver_bytes:-no count} bytes instead of 262144"
+    local started=null finished=null status=null server_status=null receiver_exit_code=null
+    local sender_cleanup_status=0 server_cleanup_status=0 log_status=null receiver_bytes=""
+    local sender_helper_id=""
+    if [[ "${ready}" == true ]]; then
+        started="$(epoch_ms)"
+        status=0
+        # The positional parameter belongs to the helper container's shell.
+        # shellcheck disable=SC2016
+        run_bounded "${transfer_deadline_seconds}" docker run --rm \
+            --cidfile "${evidence}.sender-id.txt" \
+            --label "io.nervix.chaos.run=${run_id}" \
+            --label io.nervix.chaos.role=link-probe \
+            --network "container:${sender_id}" --entrypoint sh "${CHAOS_PROBE_IMAGE}" \
+            -c 'dd if=/dev/zero bs=1024 count=256 2>/dev/null | nc "$1" 18081' \
+            -- "${receiver_ip}" >"${evidence}.log" 2>&1 || status=$?
+        if [[ -s "${evidence}.sender-id.txt" ]]; then
+            sender_helper_id="$(cat "${evidence}.sender-id.txt")"
+            # Timing out the Docker client does not end the container. End this exact sender so
+            # its peer can finish; the run's exit trap remains responsible if cleanup fails.
+            if [[ "${status}" -ne 0 ]]; then
+                run_bounded 20 docker container rm --force "${sender_helper_id}" \
+                    >"${evidence}.sender-cleanup.log" 2>&1 || sender_cleanup_status=$?
+            fi
+        fi
+        server_status=0
+        run_bounded 10 docker wait "${server_id}" >"${evidence}.server-exit.txt" \
+            2>&1 || server_status=$?
+        finished="$(epoch_ms)"
+        if [[ "${server_status}" -eq 0 ]]; then
+            receiver_exit_code="$(tr -d '[:space:]' <"${evidence}.server-exit.txt")"
+        fi
+    fi
+    if [[ "${server_start_status}" -eq 0 ]]; then
+        log_status=0
+        run_bounded 20 docker logs "${server_id}" >"${evidence}.server.log" \
+            2>"${evidence}.server.stderr.log" || log_status=$?
+        receiver_bytes="$(tr -d '[:space:]' <"${evidence}.server.log")"
+        run_bounded 20 docker container rm --force "${server_id}" \
+            >"${evidence}.server-cleanup.log" 2>&1 || server_cleanup_status=$?
+    fi
+    jq -n --arg sender "${sender}" --arg receiver "${receiver}" --arg address "${receiver_ip}" \
+        --arg sender_container_id "${sender_id}" --arg receiver_container_id "${receiver_id}" \
+        --arg sender_helper_id "${sender_helper_id}" --arg receiver_helper_id "${server_id}" \
+        --argjson ready "${ready}" --argjson started "${started}" --argjson finished "${finished}" \
+        --argjson deadline "${transfer_deadline_seconds}" --argjson sender_status "${status}" \
+        --argjson start_status "${server_start_status}" --argjson wait_status "${server_status}" \
+        --arg exit_code "${receiver_exit_code}" --arg bytes "${receiver_bytes}" \
+        --argjson log_status "${log_status}" --argjson sender_cleanup "${sender_cleanup_status}" \
+        --argjson server_cleanup "${server_cleanup_status}" '
+        def count: if test("^[0-9]+$") then tonumber else null end;
+        {sender:$sender,receiver:$receiver,address:$address,port:18081,bytes:262144,
+         sender_container_id:$sender_container_id,receiver_container_id:$receiver_container_id,
+         sender_helper_id:$sender_helper_id,receiver_helper_id:$receiver_helper_id,
+         receiver_ready:$ready,transfer_deadline_seconds:$deadline,
+         started_at_ms:$started,finished_at_ms:$finished,
+         sender_status:$sender_status,receiver_start_status:$start_status,
+         receiver_wait_status:$wait_status,receiver_exit_code:($exit_code | count),
+         receiver_log_status:$log_status,received_bytes:($bytes | count),
+         sender_cleanup_status:$sender_cleanup,receiver_cleanup_status:$server_cleanup}' \
+        >"${evidence}.probe.json"
+    local endpoint="rate probe ${sender} -> ${receiver} (${receiver_ip}:18081)"
+    if [[ "${server_start_status}" -ne 0 || "${ready}" != true ]]; then
+        link_degradation_fail observation "${endpoint}: receiver did not listen; see ${evidence}.probe.json and receiver logs"
+        return 1
+    fi
+    if [[ "${status}" -ne 0 || "${server_status}" -ne 0 || "${receiver_exit_code}" != 0 \
+        || "${receiver_bytes}" != 262144 || "${log_status}" -ne 0 \
+        || "${sender_cleanup_status}" -ne 0 || "${server_cleanup_status}" -ne 0 ]]; then
+        link_degradation_fail observation "${endpoint}: sender=${status}, receiver wait=${server_status}, exit=${receiver_exit_code}, bytes=${receiver_bytes:-unknown}/262144, logs=${log_status}, cleanup=${sender_cleanup_status}/${server_cleanup_status}; see ${evidence}.probe.json and helper logs"
+        return 1
+    fi
     jq -n --argjson bytes 262144 --argjson received_bytes "${receiver_bytes}" \
         --argjson duration_ms "$((finished - started))" \
         '{bytes:$bytes,received_bytes:$received_bytes,duration_ms:$duration_ms,

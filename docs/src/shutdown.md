@@ -97,7 +97,9 @@ Inside that deadline sits the drain timeout, `--drain-timeout` (`NERVIX_DRAIN_TI
 `30s`), which bounds the drain-support phase alone. The two defaults are ordered so that a full
 drain still leaves time for terminal teardown. Every drain step waits for the smaller of its
 remaining drain budget and the remaining shutdown deadline, so shortening the shutdown timeout below
-the drain timeout makes the shutdown deadline the effective bound.
+the drain timeout makes the shutdown deadline the effective bound. The one exception is the release
+of the cordon the node's own drain set, which keeps a one-second grace when moving the node's work
+used the whole drain timeout; see [Releasing The Drain Cordon](#releasing-the-drain-cordon).
 
 Two bounds are deliberately outside the deadline. Terminal teardown's final stops — the runtime,
 consensus, cluster membership, and the interconnect — run to completion rather than being cut short,
@@ -180,6 +182,49 @@ and started again comes back cordoned. When the node never requested its drain, 
 timeout or shutdown deadline passed before it observed a leader, nothing was cordoned and nothing is
 cleared. A request the leader may have received counts as requested, even when its answer never
 arrived, so the node still clears the cordon that request may have set.
+
+### Releasing The Drain Cordon
+
+Releasing the cordon is one consensus write, made by the leader: by the node itself while it leads,
+and otherwise by the leader it asks over the cluster interconnect. The stopping node waits for that
+write for what remains of the drain timeout, and for at least one second when moving its work used
+the whole drain timeout, so a drain that timed out still clears the cordon its request may have set.
+The wait never reaches past the shutdown deadline. A consensus write that takes seconds on a loaded
+worker therefore still completes the release, and a node that handed all of its work over reports
+the drain-support phase `Completed`.
+
+That wait applies while the stopping node and the voters that are live and not terminating form a
+quorum, so the release can commit without voters that are stopping too. When they do not, as when
+the whole cluster stops together, the release keeps only the one-second grace: only voters that are
+about to stop could commit it, and waiting longer would only delay the stop of the last node of a
+cluster that is going away. The node decides this from its own gossip view when the release begins.
+
+The release runs beside the completion of admitted work in place, which waits for what remains of
+the same drain timeout, so a slow release does not shorten the time admitted work has to finish.
+Placement still excludes the node once the release commits, because its terminating incarnation is
+not a placement candidate whether or not it is cordoned.
+
+A stopping leader writes the release itself and waits until a quorum has committed it, so the
+release survives the node's stop like any other committed entry. It does not transfer leadership
+first: the release would still be one consensus write, and every stop of a leader would add a
+leadership change before its drain. A leader that loses its leadership while it writes the release
+answers as a node that does not lead, and the stopping node asks the leader it observes next within
+the same bound; clearing a cordon twice is harmless.
+
+When the release does not complete within its bound, the node logs `timed out clearing shutdown
+drain cordon` with the `timeout` it waited, reports the drain-support phase `Abandoned`, and
+continues to terminal teardown. A leader that refused the release or never answered it is logged as
+`failed to clear shutdown drain cordon before graceful shutdown` or `the leader did not answer the
+release of the shutdown drain cordon`, with the same outcome. What the cordon becomes then depends on
+the write:
+
+- A leader on another node that received the request finishes it in a service task of its own, so
+  the cordon still clears after the stopping node stops waiting.
+- A release the stopping leader appended but had not committed survives only if the node that leads
+  next holds it in its log, and that leader then commits it.
+- A release that never commits leaves the cordon in replicated state. The node starts again
+  cordoned, exactly as after an operator cordon: `raft.cordoned_nodes` lists it, it takes no new
+  placements, and `UNCORDON NODE <node_id>` clears it once the cluster has a leader.
 
 ## Stopping Intake
 
@@ -512,10 +557,10 @@ state; see [Forced Recovery](./wasm-state.md#forced-recovery).
 | --- | --- |
 | Single node | No replacement exists. Nothing is cordoned, no ownership moves, and all admitted work drains in place before the process exits. |
 | Follower with a reachable leader | The node asks the leader, over the cluster interconnect, to drain it, then completes what remains in place. |
-| Leader | The leader drains itself in process. Leadership is not transferred first; the cluster elects a new leader after it stops. |
+| Leader | The leader drains itself in process and commits the release of its own cordon before it stops. Leadership is not transferred first; the cluster elects a new leader after it stops. |
 | Last schedulable node | Same as a single node: no replacement candidate exists, so everything completes in place, including source offset commits. |
 | Only peer is itself terminating | A terminating incarnation is not a placement candidate, so the node takes the no-replacement path and completes its work in place. |
-| Every node at once | Each node advertises terminating, finds no eligible destination, and drains locally within its own drain timeout. |
+| Every node at once | Each node advertises terminating, finds no eligible destination, and drains locally within its own drain timeout. A node that asked for its drain before it saw the others terminating gives the release of its cordon only the one-second grace once it sees them terminating, because only voters that are stopping too could commit it. |
 | Leader unreachable, or no quorum | The node waits for a leader only until its drain budget runs out, reports the drain-support phase abandoned, and still completes its local drain. Nothing is cordoned. |
 
 The no-replacement path is explicit in the log: `no live schedulable replacement node remains;
@@ -961,11 +1006,14 @@ shutdown`, `no live schedulable replacement node remains; admitted work complete
 out reaching the leader before requesting a graceful shutdown drain`, `drained local node before
 graceful shutdown`, `failed to drain local node before graceful shutdown`, `the leader did not
 answer the graceful shutdown drain of the local node`, `timed out moving scheduled work off the
-local node before graceful shutdown`, `cleared shutdown drain cordon before graceful shutdown`, and
-the two drain-timeout records above. The drain and cordon records name the `leader` that acted,
-which is the node itself when it leads, and carry the leader's account of each moved unit as
-`message`. Each phase record carries its outcome, so `outcome=Completed` distinguishes a finished
-phase from an abandoned or forced one.
+local node before graceful shutdown`, `cleared shutdown drain cordon before graceful shutdown`,
+`failed to clear shutdown drain cordon before graceful shutdown`, `the leader did not answer the
+release of the shutdown drain cordon`, `timed out clearing shutdown drain cordon`, and the two
+drain-timeout records above. The drain and cordon records name the `leader` that acted, which is the
+node itself when it leads, and carry the leader's account of each moved unit as `message`;
+`timed out clearing shutdown drain cordon` carries the `timeout` the release waited. Each phase
+record carries its outcome, so `outcome=Completed` distinguishes a finished phase from an abandoned
+or forced one.
 
 Existing metric families move during shutdown without naming it. Interconnect stream resets count
 `reason="shutdown"`. The ingestor quiesce families change as intake stops, but they carry no cause
@@ -1012,6 +1060,14 @@ Start from the outcome on each phase record.
 - **`timed out moving scheduled work off the local node before graceful shutdown`.** The drain timeout
   or the shutdown deadline ended the wait for the leader's answer. A leader on another node still
   finishes the moves it began; whatever is not moved fails over once the node is gone.
+- **`timed out clearing shutdown drain cordon`, `failed to clear shutdown drain cordon before
+  graceful shutdown` or `the leader did not answer the release of the shutdown drain cordon`.** The
+  release of the cordon the node's own drain set did not complete, so the drain-support phase
+  reports `Abandoned` even when `drained local node before graceful shutdown` shows that every unit
+  was handed over. Read `raft.cordoned_nodes` through another node. When it no longer lists the
+  node, the release committed after all; when it still does once the cluster has a leader, the
+  node takes no new placements, and `UNCORDON NODE <node_id>` clears the cordon, before or after
+  the node starts again. See [Releasing The Drain Cordon](#releasing-the-drain-cordon).
 - **Work reappears after a restart.** That is redelivery, not duplication of committed work: the
   drain ended before those records were acknowledged, so their source offered them again.
 

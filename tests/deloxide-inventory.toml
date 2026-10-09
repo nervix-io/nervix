@@ -93,6 +93,7 @@ tags = [
   "@udf_column_builder",
   "@vhost_tls_rebinding",
   "@inferencer_branch_batches",
+  "@shutdown_cordon_release",
 ]
 target = "test:scenarios"
 
@@ -375,6 +376,16 @@ id = "scenario.diagnostic-server-processes"
 invariant = "Real diagnostic server processes on one and three nodes stop gracefully with status 0, keep the detector's start-up output out of their logs, and record a running detector with no findings."
 invocation = "scenarios"
 scenario = "Diagnostic server processes record a running detector and stop gracefully on a <nodes> node cluster"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
+coverage = "A graceful stop of a leader and of a follower that hands its work over through the leader, releases its drain cordon through a consensus write beside the in-place drain of its admitted work, and restarts. The release wait and the test delay map are untracked."
+examples = 2
+feature = "tests/features/cluster/graceful_shutdown.feature"
+id = "scenario.shutdown-cordon-release"
+invariant = "A stopping leader and a stopping follower whose cordon release outlasts one second complete the drain-support phase and leave no cordon after the stop or after the restart."
+invocation = "scenarios"
+scenario = "A stopping <role> whose cordon release outlasts one second completes its drain and leaves no cordon"
 selections = ["deloxide", "deloxide-order"]
 
 [[workload]]

@@ -210,6 +210,13 @@ mod tests {
             error.current_context(),
             MessageErrorHandlingError::FlushPolicy { .. }
         ));
+        assert!(
+            format!("{error:#}").starts_with(
+                "the message-error route for junction 'compute' to relay 'errors' has an invalid \
+                 flush policy: invalid flush_each 'not-a-duration': "
+            ),
+            "{error:#}"
+        );
 
         let mut invalid_set = spec(Some(FlushPolicy::Immediate));
         invalid_set.program = lowered_set(

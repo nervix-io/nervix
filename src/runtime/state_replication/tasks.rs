@@ -107,7 +107,7 @@ impl Runtime {
                             if let Err(error) = state.request_publication(&snapshot_requests).await {
                                 warn!(
                                     kind = state.placement().kind.as_str(),
-                                    error = %error,
+                                    error = %format_args!("{error:#}"),
                                     "failed to publish branch state during shutdown"
                                 );
                             }
@@ -125,7 +125,7 @@ impl Runtime {
                                 Ok(None) => {}
                                 Err(error) => warn!(
                                     kind = state.placement().kind.as_str(),
-                                    error = %error,
+                                    error = %format_args!("{error:#}"),
                                     "failed to flush branch state snapshot during shutdown"
                                 ),
                             }
@@ -136,7 +136,7 @@ impl Runtime {
                         if let Err(error) = state.request_publication(&snapshot_requests).await {
                             warn!(
                                 kind = state.placement().kind.as_str(),
-                                error = %error,
+                                error = %format_args!("{error:#}"),
                                 "failed to publish branch state"
                             );
                         }
@@ -158,7 +158,7 @@ impl Runtime {
                             Ok(None) => {}
                             Err(error) => warn!(
                                 kind = state.placement().kind.as_str(),
-                                error = %error,
+                                error = %format_args!("{error:#}"),
                                 "failed to persist branch state snapshot"
                             ),
                         }
@@ -280,7 +280,7 @@ impl Runtime {
                                     &state.placement, state.replication(), lsm,
                                 ),
                                 Ok(None) => {}
-                                Err(error) => warn!(error = format!("{error:#}"), "failed to flush branch-aggregated state snapshot during shutdown"),
+                                Err(error) => warn!(error = %format_args!("{error:#}"), "failed to flush branch-aggregated state snapshot during shutdown"),
                             }
                             break;
                         }
@@ -291,7 +291,7 @@ impl Runtime {
                                 &state.placement, state.replication(), lsm,
                             ),
                             Ok(None) => {}
-                            Err(error) => warn!(error = format!("{error:#}"), "failed to persist branch-aggregated state snapshot"),
+                            Err(error) => warn!(error = %format_args!("{error:#}"), "failed to persist branch-aggregated state snapshot"),
                         }
                     }
                 }
@@ -357,11 +357,11 @@ impl Runtime {
                                 )
                                 .await
                         {
-                            warn!(node_id = %dispatcher.local_node_id(), error = %error, "failed to acknowledge replicated kafka offset snapshot");
+                            warn!(node_id = %dispatcher.local_node_id(), error = %format_args!("{error:#}"), "failed to acknowledge replicated kafka offset snapshot");
                         }
                     }
                     Err(error) => {
-                        warn!(error = ?error, "failed to sync replicated kafka offsets");
+                        warn!(error = %format_args!("{error:#}"), "failed to sync replicated kafka offsets");
                     }
                 }
             }
@@ -411,7 +411,7 @@ impl Runtime {
         let mut shutdown_rx = shutdown_tx.subscribe();
         Ok(Some(nervix_primitives::task::spawn(async move {
             if let Err(error) = runtime.restore_replica_branch_lifecycle(&branch_lru, &lifecycle) {
-                warn!(error = %error, "failed to read the stored replicated branch lifecycle");
+                warn!(error = %format_args!("{error:#}"), "failed to read the stored replicated branch lifecycle");
             }
             let owner = RemoteStateOwner::new(runtime.clone(), primary_node);
             let mut checkpoints = ReplicaBranchCheckpoints::default();
@@ -497,12 +497,12 @@ impl Runtime {
                                 )
                                 .await
                         {
-                            warn!(node_id = %dispatcher.local_node_id(), error = %error, "failed to acknowledge replicated materialized relay snapshot");
+                            warn!(node_id = %dispatcher.local_node_id(), error = %format_args!("{error:#}"), "failed to acknowledge replicated materialized relay snapshot");
                         }
                     }
                     Ok(None) => {}
                     Err(error) => {
-                        warn!(error = %error, "failed to sync replicated materialized relay state");
+                        warn!(error = %format_args!("{error:#}"), "failed to sync replicated materialized relay state");
                     }
                 }
             }
@@ -572,12 +572,12 @@ impl Runtime {
                                 )
                                 .await
                         {
-                            warn!(node_id = %dispatcher.local_node_id(), error = %error, "failed to acknowledge replicated branch-aggregated state snapshot");
+                            warn!(node_id = %dispatcher.local_node_id(), error = %format_args!("{error:#}"), "failed to acknowledge replicated branch-aggregated state snapshot");
                         }
                     }
                     Ok(None) => {}
                     Err(error) => {
-                        warn!(error = %error, "failed to sync replicated branch-aggregated state");
+                        warn!(error = %format_args!("{error:#}"), "failed to sync replicated branch-aggregated state");
                     }
                 }
             }

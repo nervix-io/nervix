@@ -115,6 +115,9 @@ struct FaultInjectionState {
     /// One-shot entity-swap failures consumed by the selected runtime node and domain.
     failed_entity_schedule_swaps: DashMap<EntityScheduleSwapFailureKey, (), RandomState>,
     transaction_binding_drops: DashMap<ClusterNodeName, (), RandomState>,
+    /// One-shot waits, keyed by a stopping node, that the leader spends before it releases the
+    /// cordon that node's own graceful shutdown drain set.
+    delayed_shutdown_cordon_releases: DashMap<ClusterNodeName, Duration, RandomState>,
     /// One-shot installation failures, consumed by the next resource version a node installs.
     failed_resource_installations: DashMap<ClusterNodeName, (), RandomState>,
     /// One-shot failures after earlier restore checkpoints have reached the receiving node.
@@ -384,6 +387,7 @@ impl Default for FaultInjection {
                 forced_domain_drain_timeouts: DashMap::default(),
                 failed_entity_schedule_swaps: DashMap::default(),
                 transaction_binding_drops: DashMap::default(),
+                delayed_shutdown_cordon_releases: DashMap::default(),
                 failed_resource_installations: DashMap::default(),
                 failed_restore_state_installations: DashMap::default(),
                 native_metadata_interruptions: DashMap::default(),
@@ -1052,6 +1056,19 @@ impl FaultInjection {
 
     pub fn drop_transaction_bindings_on(&self, node_id: ClusterNodeName) {
         self.inner.transaction_binding_drops.insert(node_id, ());
+    }
+
+    /// Makes the leader wait `delay` before it releases the cordon that `stopping_node`'s own
+    /// graceful shutdown drain set, the next time it releases one, as a loaded worker whose
+    /// consensus writes take longer than usual would.
+    pub fn delay_shutdown_cordon_release_of(
+        &self,
+        stopping_node: ClusterNodeName,
+        delay: Duration,
+    ) {
+        self.inner
+            .delayed_shutdown_cordon_releases
+            .insert(stopping_node, delay);
     }
 
     /// Fails the next resource version `node_id` installs, after the node installed and published
@@ -2100,6 +2117,19 @@ impl FaultInjection {
             .transaction_binding_drops
             .remove(node_id)
             .is_some()
+    }
+
+    /// Consumes the wait armed for the release of `stopping_node`'s shutdown drain cordon, when
+    /// the leader is about to release it.
+    pub(crate) fn take_shutdown_cordon_release_delay(
+        &self,
+        stopping_node: &ClusterNodeName,
+    ) -> Option<Duration> {
+        let (_, delay) = self
+            .inner
+            .delayed_shutdown_cordon_releases
+            .remove(stopping_node)?;
+        Some(delay)
     }
 
     /// Record the executor whose workers a scenario may fill.

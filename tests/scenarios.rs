@@ -73,7 +73,8 @@ use nervix_primitives::{
 };
 use nervix_recovery::Discarded as _;
 use nervix_server::{
-    FaultInjection, SchedulerMode, WasmStateResetRequestError, application::InternalTransportMode,
+    FaultInjection, SchedulerMode, WasmStateResetRequestError,
+    application::{InternalTransportMode, ShutdownPhaseOutcome},
     memory_pressure::MemoryPressureConfig,
 };
 use nervix_test_environment::{TestParallelism, TestParallelismArgs};
@@ -10255,6 +10256,39 @@ async fn when_node_is_gracefully_stopped(world: &mut ScenarioWorld, node_id: Str
         .await
         .expect("failed to gracefully stop node");
     world.last_cluster_operation_elapsed = Some(started.elapsed());
+}
+
+#[given(expr = "the leader takes {string} to release the shutdown drain cordon of node {string}")]
+#[when(expr = "the leader takes {string} to release the shutdown drain cordon of node {string}")]
+async fn when_leader_takes_long_to_release_shutdown_drain_cordon(
+    world: &mut ScenarioWorld,
+    delay: String,
+    node_id: String,
+) {
+    let delay = parse_duration_text(&delay).expect("step duration must be a valid duration");
+    let node_id = expand_placeholders(world, &node_id);
+    world
+        .fault_injection
+        .delay_shutdown_cordon_release_of(crate::common::cluster::node_name(&node_id), delay);
+}
+
+#[then(expr = "the last shutdown of node {string} reports its drain-support phase {string}")]
+async fn then_last_shutdown_reports_drain_support_phase(
+    world: &mut ScenarioWorld,
+    node_id: String,
+    outcome: String,
+) {
+    let node_id = expand_placeholders(world, &node_id);
+    let expected = outcome
+        .parse::<ShutdownPhaseOutcome>()
+        .unwrap_or_else(|error| panic!("unknown shutdown phase outcome '{outcome}': {error}"));
+    let Some(shutdown) = world.cluster().last_shutdown_outcome(&node_id) else {
+        panic!("node '{node_id}' has no finished shutdown that the scenario waited for");
+    };
+    assert_eq!(
+        shutdown.drain_support, expected,
+        "node '{node_id}' finished its last shutdown with {shutdown:?}"
+    );
 }
 
 #[when("all nodes are stopped")]

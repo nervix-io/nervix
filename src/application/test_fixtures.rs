@@ -566,6 +566,22 @@ pub(in crate::application) async fn build_test_service_with_executor(
     .0
 }
 
+/// A service whose runtime consults `fault_injection`, so a test can arm the failures and waits
+/// the service's seams take.
+#[cfg(feature = "testing")]
+pub(in crate::application) async fn build_test_service_with_fault_injection(
+    create_default_domain_flag: bool,
+    fault_injection: crate::FaultInjection,
+) -> TestService {
+    build_test_service_inner(
+        create_default_domain_flag,
+        None,
+        Runtime::with_fault_injection(fault_injection),
+    )
+    .await
+    .0
+}
+
 #[cfg(feature = "testing")]
 pub(in crate::application) async fn build_test_service_with_probe(
     create_default_domain_flag: bool,

@@ -673,6 +673,8 @@ use window_state::{
 #[cfg(test)]
 use crate::registry::{PlannedModel, branched_node_specs_from_models};
 
+#[cfg(test)]
+pub(crate) mod report_observer;
 mod vm_compile;
 mod vm_input;
 mod wasm_checkpoint;
