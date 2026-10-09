@@ -22,6 +22,8 @@ serde_json = { workspace = true }
 thiserror = { workspace = true }
 
 [dev-dependencies]
+arrow-buffer = { workspace = true }
+bolero = { workspace = true }
 criterion = { workspace = true }
 nervix-primitives = { workspace = true }
 serde = { workspace = true }

@@ -80,6 +80,8 @@ mod arrow_body;
 #[cfg(test)]
 mod arrow_body_properties;
 mod batch_container;
+#[cfg(test)]
+mod bounded_encoding_properties;
 mod client_batch;
 #[cfg(test)]
 pub(crate) mod codec_properties;

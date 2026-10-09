@@ -235,7 +235,7 @@ impl RowRequestLimits {
 mod tests {
     use std::cell::RefCell;
 
-    use nervix_models::BatchMessageLimit;
+    use nervix_models::{BatchMessageLimit, PayloadSizeLimit};
 
     use super::*;
 
@@ -453,5 +453,215 @@ mod tests {
             "Postgres insert of one row measures 40 bytes, above the 32 bytes the destination \
              accepts in one request"
         );
+    }
+
+    /// A generated division: limits, native narrowing, and a measure that is not monotonic in the
+    /// members a candidate holds. A candidate's size is a base, the weights of its members, an
+    /// overhead chosen by its length and one chosen by its first member, so a shorter candidate can
+    /// measure more than a longer one, as an encoding that compresses or pads does.
+    #[derive(Debug, bolero::TypeGenerator)]
+    struct DivisionCase {
+        max_messages: u8,
+        max_size: u16,
+        native_rows: Option<u8>,
+        native_bytes: Option<u16>,
+        base: u8,
+        #[generator(bolero::generator::produce_with::<Vec<u8>>().len(0_usize..=160))]
+        weights: Vec<u8>,
+        #[generator(bolero::generator::produce_with::<Vec<u16>>().len(1_usize..=16))]
+        length_overheads: Vec<u16>,
+        #[generator(bolero::generator::produce_with::<Vec<u8>>().len(1_usize..=16))]
+        start_overheads: Vec<u8>,
+    }
+
+    /// The division the documented rule gives: the runs of members, in order, and the halvings
+    /// that found them.
+    struct ReferenceDivision {
+        runs: Vec<Range<usize>>,
+        subdivisions: u64,
+    }
+
+    impl DivisionCase {
+        /// `MAX MESSAGES`: one to sixty-four rows.
+        fn declared_row_limit(&self) -> u8 {
+            self.max_messages % 64 + 1
+        }
+
+        /// `MAX SIZE`: one to 2,048 bytes.
+        fn declared_byte_limit(&self) -> u16 {
+            self.max_size % 2048 + 1
+        }
+
+        /// The destination's own row limit, one to thirty-two rows, where it has one.
+        fn native_row_limit(&self) -> Option<u8> {
+            let rows = self.native_rows?;
+            Some(rows % 32 + 1)
+        }
+
+        /// The destination's own byte limit, one to 2,048 bytes, where it has one.
+        fn native_byte_limit(&self) -> Option<u16> {
+            let bytes = self.native_bytes?;
+            Some(bytes % 2048 + 1)
+        }
+
+        /// The rows one request holds: the smaller of the declared and native row limits.
+        fn max_rows(&self) -> usize {
+            let declared = usize::from(self.declared_row_limit());
+            match self.native_row_limit() {
+                Some(native) => declared.min(usize::from(native)),
+                None => declared,
+            }
+        }
+
+        /// The measured bytes one request holds: the smaller of the declared and native byte
+        /// limits.
+        fn max_bytes(&self) -> u64 {
+            let declared = u64::from(self.declared_byte_limit());
+            match self.native_byte_limit() {
+                Some(native) => declared.min(u64::from(native)),
+                None => declared,
+            }
+        }
+
+        fn declared_size(&self) -> PayloadSizeLimit {
+            let bytes = NonZeroU64::new(u64::from(self.declared_byte_limit()))
+                .assured("the declared limit is at least one byte");
+            PayloadSizeLimit::new(bytes, nervix_models::ByteSizeUnit::B)
+                .assured("a byte count of at most 2048 fits u64")
+        }
+
+        fn limits(&self) -> RowRequestLimits {
+            let mut limits = RowRequestLimits::from(EmitterBatchPolicy {
+                max_messages: BatchMessageLimit::try_from(u32::from(self.declared_row_limit()))
+                    .assured("1..=64 messages is within the declared range"),
+                max_size: self.declared_size(),
+            });
+            if let Some(rows) = self.native_row_limit() {
+                let rows = NonZeroUsize::new(usize::from(rows))
+                    .assured("the native row limit is at least one");
+                limits = limits.with_native_rows(rows);
+            }
+            if let Some(bytes) = self.native_byte_limit() {
+                let bytes = NonZeroU64::new(u64::from(bytes))
+                    .assured("the native byte limit is at least one");
+                limits = limits.with_native_bytes(bytes);
+            }
+            limits
+        }
+
+        fn measure(&self, members: Range<usize>) -> u64 {
+            let mut size = u64::from(self.base);
+            for weight in &self.weights[members.clone()] {
+                size += u64::from(*weight);
+            }
+            let overhead = self.length_overheads[members.len() % self.length_overheads.len()];
+            size += u64::from(overhead % 512);
+            size += u64::from(self.start_overheads[members.start % self.start_overheads.len()]);
+            size
+        }
+
+        /// The limit a single row measured above the request limit exceeds: a native limit below
+        /// the declared one where the row is within the declared one, and otherwise the declared
+        /// one, which a row above the request limit then exceeds.
+        fn exceeded_limit(&self, size: u64) -> ExceededLimit {
+            match self.native_byte_limit() {
+                Some(native) if size <= u64::from(self.declared_byte_limit()) => {
+                    let native = NonZeroU64::new(u64::from(native))
+                        .assured("the native byte limit is at least one");
+                    ExceededLimit::Native(native)
+                }
+                Some(_) | None => ExceededLimit::Declared(self.declared_size()),
+            }
+        }
+
+        /// The division the documented rule gives: the longest run within the row limit, halved
+        /// while it measures over the byte limit, and a single member over it rejected alone.
+        fn reference(&self) -> ReferenceDivision {
+            let max_rows = self.max_rows();
+            let max_bytes = self.max_bytes();
+            let mut runs = Vec::new();
+            let mut subdivisions = 0;
+            let mut start = 0;
+            while start < self.weights.len() {
+                let mut length = max_rows.min(self.weights.len() - start);
+                while self.measure(start..start + length) > max_bytes && length > 1 {
+                    length = length.div_ceil(2);
+                    subdivisions += 1;
+                }
+                runs.push(start..start + length);
+                start += length;
+            }
+            ReferenceDivision { runs, subdivisions }
+        }
+    }
+
+    #[test]
+    fn bolero_divisions_hold_every_member_once_within_both_limits() {
+        bolero::check!()
+            .with_iterations(256)
+            .with_max_len(1024)
+            .with_type::<DivisionCase>()
+            .for_each(|case| {
+                let limits = case.limits();
+                let max_rows = case.max_rows();
+                let max_bytes = case.max_bytes();
+                assert_eq!(limits.max_rows().get(), max_rows);
+
+                let measured = RefCell::new(Vec::new());
+                let divided = limits.divide(case.weights.len(), |members| {
+                    measured.borrow_mut().push(members.clone());
+                    MeasuredRequest {
+                        size: case.measure(members.clone()),
+                        request: members,
+                    }
+                });
+
+                let reference = case.reference();
+                assert_eq!(divided.requests.len(), reference.runs.len());
+                assert_eq!(divided.subdivisions, reference.subdivisions);
+                for (request, run) in divided.requests.iter().zip(&reference.runs) {
+                    match request {
+                        RowRequest::Write {
+                            members,
+                            size,
+                            request,
+                        } => {
+                            assert_eq!(members, run);
+                            assert_eq!(request, run, "the request measured is the one written");
+                            assert_eq!(*size, case.measure(run.clone()));
+                            assert!(*size <= max_bytes);
+                            assert!(members.len() <= max_rows);
+                        }
+                        RowRequest::Oversize { member, oversize } => {
+                            assert_eq!(*member..*member + 1, *run);
+                            let size = case.measure(run.clone());
+                            assert!(size > max_bytes);
+                            assert_eq!(oversize.size, size);
+                            assert_eq!(oversize.exceeded, case.exceeded_limit(size));
+                        }
+                    }
+                }
+
+                // Each run is measured once per halving and once more where it ends, at most
+                // ⌈log2(n)⌉ + 1 times for a first candidate of n members.
+                let measured = measured.into_inner();
+                let mut calls = measured.iter().peekable();
+                for run in &reference.runs {
+                    let first = max_rows.min(case.weights.len() - run.start);
+                    let bound = usize::try_from(first.next_power_of_two().trailing_zeros())
+                        .assured("a bit count fits usize")
+                        + 1;
+                    let mut count = 0;
+                    while let Some(call) = calls.next_if(|call| call.start == run.start) {
+                        assert!(call.end > call.start, "an empty candidate was measured");
+                        count += 1;
+                    }
+                    assert!(
+                        count >= 1 && count <= bound,
+                        "{count} measurements of {run:?}"
+                    );
+                }
+                assert!(calls.next().is_none(), "a measurement belongs to no run");
+            });
     }
 }

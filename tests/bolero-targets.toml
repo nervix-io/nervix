@@ -2075,3 +2075,318 @@ random_iterations = 256
 source = "crates/jaq/src/number_properties.rs"
 test = "number_properties::bolero_programs_and_native_formats_keep_every_number"
 test_target = "lib"
+
+[[target]]
+case_timeout_seconds = 10
+corpus = "crates/expiry-map/src/__fuzz__/tests__bolero_operation_sequences_match_a_safe_reference_model/corpus"
+domain_version = 1
+features = []
+id = "expiry-map-operations"
+invariant = "Bounded sequences of inserts, shared-key inserts, keyed and oldest removals, lookups, shared-key copies and clears over a small key space leave the map's iteration order, lengths, oldest entry, lookups and shared key allocations equal to an IndexMap reference, and drop every stored value exactly once."
+manifest = "Cargo.toml"
+max_input_bytes = 1024
+package = "nervix-expiry-map"
+random_iterations = 256
+source = "crates/expiry-map/src/lib.rs"
+test = "tests::bolero_operation_sequences_match_a_safe_reference_model"
+test_target = "lib"
+
+[[target]]
+case_timeout_seconds = 10
+corpus = "crates/nervix-vm/src/numeric/__fuzz__/numeric__decimal_rounding__tests__bolero_rounded_float_columns_match_the_exact_decimal_expansion/corpus"
+domain_version = 1
+features = []
+id = "vm-decimal-rounding-floats"
+invariant = "Every lane of generated F64 and F32 columns rounds to the float nearest the exact decimal expansion's rounding, halves away from zero, by bits; a value already holding no more fractional digits is unchanged, rounding is symmetric about zero, a digit count beyond the bound reads as its end, a null value or count nulls the lane without failing it, and only a non-finite result fails."
+manifest = "Cargo.toml"
+max_input_bytes = 1024
+package = "nervix-vm"
+random_iterations = 256
+source = "crates/nervix-vm/src/numeric/decimal_rounding_tests.rs"
+test = "numeric::decimal_rounding::tests::bolero_rounded_float_columns_match_the_exact_decimal_expansion"
+test_target = "lib"
+
+[[target]]
+case_timeout_seconds = 10
+corpus = "crates/nervix-vm/src/numeric/__fuzz__/numeric__decimal_rounding__tests__bolero_rounded_integer_columns_match_a_wide_reference/corpus"
+domain_version = 1
+features = []
+id = "vm-decimal-rounding-integers"
+invariant = "Every lane of a generated column of each integer width rounds to the multiple of a power of ten a 128-bit reference computes, halves away from zero, and fails exactly when that multiple leaves the type; a null value or count nulls the lane without failing it, and a digit column of any integer type reads each count clamped to the bound with its nulls kept."
+manifest = "Cargo.toml"
+max_input_bytes = 1024
+package = "nervix-vm"
+random_iterations = 256
+source = "crates/nervix-vm/src/numeric/decimal_rounding_tests.rs"
+test = "numeric::decimal_rounding::tests::bolero_rounded_integer_columns_match_a_wide_reference"
+test_target = "lib"
+
+[[target]]
+case_timeout_seconds = 10
+corpus = "crates/approx-into/src/__fuzz__/properties__bolero_conversions_round_to_the_nearest_value_or_name_no_integer/corpus"
+domain_version = 1
+features = []
+id = "approx-into-rounding"
+invariant = "Every integer of every width converts to the float a bit-level IEEE 754 reference rounds it to, halves to even and past the largest finite value to infinity; every F64 narrows to the F32 that reference gives, NaN to NaN; and every F64 and F32 truncates to an integer of each type exactly when its integer part lies within that type's range."
+manifest = "Cargo.toml"
+max_input_bytes = 64
+package = "nervix-approx-into"
+random_iterations = 256
+source = "crates/approx-into/src/properties.rs"
+test = "properties::bolero_conversions_round_to_the_nearest_value_or_name_no_integer"
+test_target = "lib"
+
+[[target]]
+case_timeout_seconds = 10
+corpus = "crates/approx-into/src/__fuzz__/properties__bolero_exactly_representable_values_convert_without_loss/corpus"
+domain_version = 1
+features = []
+id = "approx-into-exact"
+invariant = "An integer whose significant bits fit a float's significand converts to that float and back to the same integer, and every F32 but NaN widens to F64 and narrows back to its own bits."
+manifest = "Cargo.toml"
+max_input_bytes = 32
+package = "nervix-approx-into"
+random_iterations = 256
+source = "crates/approx-into/src/properties.rs"
+test = "properties::bolero_exactly_representable_values_convert_without_loss"
+test_target = "lib"
+
+[[target]]
+case_timeout_seconds = 10
+corpus = "crates/simd-kernels/src/__fuzz__/tests__bolero_json_escape_classification_matches_the_scalar_definition_at_every_level/corpus"
+domain_version = 1
+features = []
+id = "simd-json-escapes"
+invariant = "At every supported SIMD level and the scalar fallback, the 64-byte block masks of a generated sparse or dense buffer and the escape bit of every row its ascending offsets describe equal the scalar JSON escape class, and an empty, out-of-buffer or descending offset is refused with the first defect a reference finds."
+manifest = "Cargo.toml"
+max_input_bytes = 4096
+package = "nervix-simd-kernels"
+random_iterations = 256
+source = "crates/simd-kernels/src/lib.rs"
+test = "tests::bolero_json_escape_classification_matches_the_scalar_definition_at_every_level"
+test_target = "lib"
+
+[[target]]
+case_timeout_seconds = 10
+corpus = "crates/simd-kernels/src/__fuzz__/admission__tests__bolero_admission_matches_the_scalar_definition_at_every_level/corpus"
+domain_version = 1
+features = []
+id = "simd-paced-admission"
+invariant = "At every supported SIMD level, the packed admission bits of generated timestamps beside the reached edge and interior centers, across the whole signed range and every period reduction, equal the scalar definition, with the final byte's unused bits clear."
+manifest = "Cargo.toml"
+max_input_bytes = 2048
+package = "nervix-simd-kernels"
+random_iterations = 256
+source = "crates/simd-kernels/src/admission.rs"
+test = "admission::tests::bolero_admission_matches_the_scalar_definition_at_every_level"
+test_target = "lib"
+
+[[target]]
+case_timeout_seconds = 10
+corpus = "crates/simd-kernels/src/__fuzz__/elapsed__tests__bolero_elapsed_histograms_match_hdrhistogram_at_every_level/corpus"
+domain_version = 1
+features = []
+id = "simd-elapsed-histograms"
+invariant = "A generated layout is refused exactly when an integer reference finds its range inexact, and otherwise at every supported SIMD level the latest instant, the count of instants with an elapsed time and every bucket equal the integer rounding of each elapsed time counted at HdrHistogram's lowest equivalent value."
+manifest = "Cargo.toml"
+max_input_bytes = 4096
+package = "nervix-simd-kernels"
+random_iterations = 256
+source = "crates/simd-kernels/src/elapsed.rs"
+test = "elapsed::tests::bolero_elapsed_histograms_match_hdrhistogram_at_every_level"
+test_target = "lib"
+
+[[target]]
+case_timeout_seconds = 10
+corpus = "crates/simd-kernels/src/__fuzz__/flags__tests__bolero_packed_words_match_the_scalar_shifts_at_every_level/corpus"
+domain_version = 1
+features = []
+id = "simd-flag-packing"
+invariant = "At every supported SIMD level, packing a generated run of flag bytes appends to the words already held exactly the words a scalar shift per lane builds, with every bit past the run clear, and a lane mask covers exactly its first lanes."
+manifest = "Cargo.toml"
+max_input_bytes = 2048
+package = "nervix-simd-kernels"
+random_iterations = 256
+source = "crates/simd-kernels/src/flags.rs"
+test = "flags::tests::bolero_packed_words_match_the_scalar_shifts_at_every_level"
+test_target = "lib"
+
+[[target]]
+case_timeout_seconds = 10
+corpus = "crates/simd-kernels/src/__fuzz__/window__tests__bolero_window_runs_match_scalar_folds_at_every_level/corpus"
+domain_version = 1
+features = []
+id = "simd-window-runs"
+invariant = "Over a generated run with an unaligned validity bitmap, present counts, boolean counts, exact signed, unsigned and narrow integer sums at every SIMD level, first extremes, non-finite masks at every level and reverse visits equal scalar folds, and a compensated sum is exact for integers and within the compensated-summation bound of the exact sum for floats."
+manifest = "Cargo.toml"
+max_input_bytes = 4096
+package = "nervix-simd-kernels"
+random_iterations = 256
+source = "crates/simd-kernels/src/window.rs"
+test = "window::tests::bolero_window_runs_match_scalar_folds_at_every_level"
+test_target = "lib"
+
+[[target]]
+case_timeout_seconds = 10
+corpus = "crates/columnar-json/src/__fuzz__/properties__bolero_rows_match_an_independent_json_rendering_of_their_values/corpus"
+domain_version = 1
+features = []
+id = "columnar-json-rows"
+invariant = "Every row of a generated batch of every supported scalar, list, fixed-size and nested list column, sliced, with every null policy and number and bytes encoding, writes exactly the bytes an independent rendering of its logical values expects, floats as JSON numbers of at most their type's digits that read back to their bits, or fails with the first null a field's policy refuses; a row past the batch is out of bounds."
+manifest = "Cargo.toml"
+max_input_bytes = 8192
+package = "nervix-columnar-json"
+random_iterations = 256
+source = "crates/columnar-json/src/properties.rs"
+test = "properties::bolero_rows_match_an_independent_json_rendering_of_their_values"
+test_target = "lib"
+
+[[target]]
+case_timeout_seconds = 10
+corpus = "crates/bounded-write/src/__fuzz__/properties__bolero_writes_land_whole_within_the_limit_and_classify_the_encoding/corpus"
+domain_version = 1
+features = []
+id = "bounded-write-limits"
+invariant = "A generated encoder's writes land whole while they stay within the limit and are all refused from the first that would cross it, the buffer's capacity never exceeds the limit, and the outcome is the complete bytes, the limit reached, or the encoder's own failure exactly as a reference of the rule decides."
+manifest = "Cargo.toml"
+max_input_bytes = 1024
+package = "nervix-bounded-write"
+random_iterations = 256
+source = "crates/bounded-write/src/properties.rs"
+test = "properties::bolero_writes_land_whole_within_the_limit_and_classify_the_encoding"
+test_target = "lib"
+
+[[target]]
+case_timeout_seconds = 10
+corpus = "crates/connector/src/__fuzz__/row_requests__tests__bolero_divisions_hold_every_member_once_within_both_limits/corpus"
+domain_version = 1
+features = []
+id = "connector-row-request-division"
+invariant = "Under declared and native row and byte limits and a measure that is not monotonic in a candidate's rows, division ends every member once in order, as a request within both limits whose measured request is handed back, or alone as an oversize row naming the limit it exceeds, exactly as the documented halving rule does, measuring each run at most ceil(log2 n) + 1 times."
+manifest = "Cargo.toml"
+max_input_bytes = 1024
+package = "nervix-connector"
+random_iterations = 256
+source = "crates/connector/src/row_requests.rs"
+test = "row_requests::tests::bolero_divisions_hold_every_member_once_within_both_limits"
+test_target = "lib"
+
+[[target]]
+case_timeout_seconds = 10
+corpus = "src/runtime/__fuzz__/runtime__emitter_batch_packing__tests__bolero_subdivision_follows_the_documented_rule_for_any_encoding_size/corpus"
+domain_version = 1
+features = []
+id = "emitter-batch-subdivision"
+invariant = "For compatibility classes, failing containers and an encoding whose size is not monotonic in its members, subdivision yields exactly the candidates and halvings of the documented rule: at most MAX MESSAGES members compatible with their first, halved until they fit or hold one oversize member, a failed container failing its whole candidate, each first candidate encoded at most ceil(log2 n) + 1 times."
+manifest = "Cargo.toml"
+max_input_bytes = 1024
+package = "nervix-server"
+random_iterations = 256
+source = "src/runtime/emitter_batch_packing.rs"
+test = "runtime::emitter_batch_packing::tests::bolero_subdivision_follows_the_documented_rule_for_any_encoding_size"
+test_target = "lib"
+
+[[target]]
+case_timeout_seconds = 10
+corpus = "src/runtime/__fuzz__/runtime__emitter_batch_packing__tests__bolero_packed_payloads_hold_their_members_exactly_within_both_limits/corpus"
+domain_version = 1
+features = []
+id = "emitter-batch-packing"
+invariant = "Packing generated carriers of a generated schemaful codec across relays, concrete branches, envelopes and seals ends every selected row once in order: in a payload whose bytes are the format's container of exactly its members' own encodings, within MAX SIZE and MAX MESSAGES and one relay, branch and envelope, or alone when its own container exceeds MAX SIZE, as the documented rule packs them."
+manifest = "Cargo.toml"
+max_input_bytes = 4096
+package = "nervix-server"
+random_iterations = 256
+source = "src/runtime/emitter_batch_packing.rs"
+test = "runtime::emitter_batch_packing::tests::bolero_packed_payloads_hold_their_members_exactly_within_both_limits"
+test_target = "lib"
+
+[[target]]
+case_timeout_seconds = 10
+corpus = "src/runtime_schema/__fuzz__/runtime_schema__bounded_encoding_properties__bolero_bounded_encodings_are_the_exact_bytes_within_max_size/corpus"
+domain_version = 1
+features = []
+id = "codec-bounded-encodings"
+invariant = "Under limits one byte short of, at, one byte past and anywhere around an encoding, every bounded row encoding, batch member and batch container of a generated schemaful codec is the complete unbounded encoding exactly when it fits and otherwise oversize naming the limit, and a container frames exactly its members' own encodings as a JSON array, a definite-length CBOR array or one Avro block, at 24, 64 and 256 members as at the counts a batch reaches."
+manifest = "Cargo.toml"
+max_input_bytes = 4096
+package = "nervix-server"
+random_iterations = 256
+source = "src/runtime_schema/bounded_encoding_properties.rs"
+test = "runtime_schema::bounded_encoding_properties::bolero_bounded_encodings_are_the_exact_bytes_within_max_size"
+test_target = "lib"
+
+[[target]]
+case_timeout_seconds = 10
+corpus = "src/runtime/__fuzz__/runtime__emitter_record_writes__tests__bolero_preparations_are_kept_exactly_when_every_row_is_answered_once_in_order/corpus"
+domain_version = 1
+features = []
+id = "emitter-row-preparations"
+invariant = "A generated row request preparation, spoiled by repeated, swapped, dropped, foreign or refused members or an empty request, is kept request by request and byte for byte exactly when every selected row is one request's member or refused, no request is empty and members follow source order, and otherwise fails without a retry with the first violation a reference finds."
+manifest = "Cargo.toml"
+max_input_bytes = 256
+package = "nervix-server"
+random_iterations = 256
+source = "src/runtime/emitter_record_writes.rs"
+test = "runtime::emitter_record_writes::tests::bolero_preparations_are_kept_exactly_when_every_row_is_answered_once_in_order"
+test_target = "lib"
+
+[[target]]
+case_timeout_seconds = 10
+corpus = "src/runtime/__fuzz__/runtime__emitter_record_writes__tests__bolero_retained_payloads_are_written_unchanged_until_answered/corpus"
+domain_version = 1
+features = []
+id = "emitter-retained-payloads"
+invariant = "Across generated packing and write steps with delivered, rejected and unanswered records and failed writes, every write hands the sink the retained payloads in packing order with exactly the bytes, key, headers and group they were prepared with; a delivery resolves every member, a rejection rejects every member with one error and leaves them awaiting it, and an unanswered payload stays retained unchanged."
+manifest = "Cargo.toml"
+max_input_bytes = 512
+package = "nervix-server"
+random_iterations = 256
+source = "src/runtime/emitter_record_writes.rs"
+test = "runtime::emitter_record_writes::tests::bolero_retained_payloads_are_written_unchanged_until_answered"
+test_target = "lib"
+
+[[target]]
+case_timeout_seconds = 10
+corpus = "crates/connectors/sqs/src/__fuzz__/tests__bolero_batch_requests_hold_their_records_within_every_sqs_limit/corpus"
+domain_version = 1
+features = []
+id = "sqs-batch-requests"
+invariant = "A generated record measures exactly its body, every attribute's name, String data type and value, and its message group, and is refused with that size above 256 KiB; batch requests keep the accepted records in order, at most ten, at most 256 KiB together and never two of one FIFO group, ending only where the next record would break one of those limits."
+manifest = "Cargo.toml"
+max_input_bytes = 1024
+package = "nervix-connector-sqs"
+random_iterations = 256
+source = "crates/connectors/sqs/src/lib.rs"
+test = "tests::bolero_batch_requests_hold_their_records_within_every_sqs_limit"
+test_target = "lib"
+
+[[target]]
+case_timeout_seconds = 10
+corpus = "crates/connectors/mqtt/src/__fuzz__/tests__bolero_measured_packets_are_the_bytes_the_client_writes/corpus"
+domain_version = 1
+features = []
+id = "mqtt-publish-packets"
+invariant = "For generated topics, every quality of service and payloads beside every Remaining Length width and the protocol's largest, the measured PUBLISH size is exactly the packet the client writes, a payload past the largest Remaining Length has no packet, and the broker's latest declared maximum admits exactly the packets at most that size."
+manifest = "Cargo.toml"
+max_input_bytes = 512
+package = "nervix-connector-mqtt"
+random_iterations = 256
+source = "crates/connectors/mqtt/src/lib.rs"
+test = "tests::bolero_measured_packets_are_the_bytes_the_client_writes"
+test_target = "lib"
+
+[[target]]
+case_timeout_seconds = 10
+corpus = "crates/connectors/postgres/src/__fuzz__/tests__bolero_measured_inserts_are_the_statement_and_arrays_the_driver_encodes/corpus"
+domain_version = 1
+features = []
+id = "postgres-insert-measures"
+invariant = "An insert of any run of a write's generated text columns, NULLs, quotes and multi-byte characters included, measures exactly its statement text and the text arrays the driver encodes for that run, and never less than the Bind message carrying those arrays."
+manifest = "Cargo.toml"
+max_input_bytes = 1024
+package = "nervix-connector-postgres"
+random_iterations = 256
+source = "crates/connectors/postgres/src/lib.rs"
+test = "tests::bolero_measured_inserts_are_the_statement_and_arrays_the_driver_encodes"
+test_target = "lib"

@@ -183,6 +183,9 @@ checked_approx_from_float_pointer_width! {
 }
 
 #[cfg(test)]
+mod properties;
+
+#[cfg(test)]
 mod tests {
     use super::{ApproxInto as _, CheckedApproxInto as _};
 

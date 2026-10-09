@@ -6510,6 +6510,10 @@ checksum = "27b02d87554356db9e9a873add8782d4ea6e3e58ea071a9adb9a2e8ddb884a8b"
 [[package]]
 name = "nervix-approx-into"
 version = "0.1.0-dev"
+dependencies = [
+ "bolero",
+ "meticulous",
+]
 
 [[package]]
 name = "nervix-arbitrary"
@@ -6579,6 +6583,7 @@ dependencies = [
 name = "nervix-bounded-write"
 version = "0.1.0-dev"
 dependencies = [
+ "bolero",
  "meticulous",
  "thiserror 2.0.21",
 ]
@@ -6728,8 +6733,10 @@ name = "nervix-columnar-json"
 version = "0.1.0-dev"
 dependencies = [
  "arrow-array",
+ "arrow-buffer",
  "arrow-schema",
  "base64-simd",
+ "bolero",
  "chrono",
  "criterion 0.5.1",
  "error-stack",
@@ -6749,6 +6756,7 @@ version = "0.1.0-dev"
 dependencies = [
  "arrow-array",
  "async-trait",
+ "bolero",
  "error-stack",
  "meticulous",
  "nervix-dns",
@@ -6902,6 +6910,8 @@ version = "0.1.0-dev"
 dependencies = [
  "arch-into",
  "async-trait",
+ "bolero",
+ "bytes",
  "error-stack",
  "futures-util",
  "humantime",
@@ -7001,6 +7011,7 @@ dependencies = [
  "arrow-schema",
  "async-trait",
  "base64 0.22.1",
+ "bolero",
  "chrono",
  "error-stack",
  "faster-hex",
@@ -7129,6 +7140,7 @@ dependencies = [
  "aws-credential-types",
  "aws-sdk-sqs",
  "aws-smithy-http-client",
+ "bolero",
  "error-stack",
  "meticulous",
  "nervix-connector",
@@ -7318,6 +7330,8 @@ name = "nervix-expiry-map"
 version = "0.1.0-dev"
 dependencies = [
  "ahash",
+ "bolero",
+ "indexmap 2.14.2",
  "intrusive-collections",
  "meticulous",
  "nervix-primitives",
@@ -7800,6 +7814,7 @@ dependencies = [
  "arrow-select",
  "arrow-string",
  "base64-simd",
+ "bolero",
  "chrono",
  "criterion 0.5.1",
  "error-stack",

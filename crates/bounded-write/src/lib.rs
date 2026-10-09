@@ -128,6 +128,9 @@ impl io::Write for BoundedWriter {
 }
 
 #[cfg(test)]
+mod properties;
+
+#[cfg(test)]
 mod tests {
     use std::io::Write as _;
 
