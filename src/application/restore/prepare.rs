@@ -10,6 +10,7 @@
 //!   decision layer's restore and transaction planners.
 //! - **Must not know.** How a plan is applied, or which transport carried the stream.
 
+mod branch_keys;
 mod metadata;
 mod native;
 
@@ -25,21 +26,23 @@ use error_stack::{Report, ResultExt as _};
 use futures_util::Stream;
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_backup::{
-    ArchiveContents, ArchiveReadError, DescribedRuntimeState, DescribedSection,
+    ArchiveContents, ArchiveReadError, DescribedRuntimeState, DescribedSection, SectionPath,
     read_archive_contents,
 };
 use nervix_execution::{
     Cancellation, ChargedBytes, CpuClass, Executor, MemoryClass, Reservation, StorageClass,
 };
 use nervix_models::{
-    CreateStatement, DomainName, Model, RequestedResourceVersion, ResourceUpload,
-    ResourceUploadState, ResourceUploads, ResourceUploadsError, Restore, RestoreArchive,
-    RestoreStep, Statement, Timestamp, TransactionImpactReport, UserName,
+    CreateStatement, DomainName, Model, ModelKind, ModelName, RequestedResourceVersion,
+    ResourceUpload, ResourceUploadState, ResourceUploads, ResourceUploadsError, Restore,
+    RestoreArchive, RestoreStep, Statement, Timestamp, TransactionImpactReport, UserName,
 };
 use nervix_nspl::client_statement::{ClientStatement, parse_client_statement_sources};
 use nervix_primitives::sync::Arc;
 use thiserror::Error;
 
+use self::branch_keys::ArchivedKeyPlace;
+pub(in crate::application) use self::branch_keys::RestoredBranchDeclarations;
 use super::{
     archives::{
         RestoreStaging, RestoreStagingWriter, RestoreStreamPart, StagingFailure, StagingOutcome,
@@ -88,6 +91,28 @@ pub(in crate::application) enum RestoreRefusal {
     BranchState {
         domain: DomainName,
         entity: nervix_models::ModelName,
+    },
+    #[error(
+        "{place} in archive section '{section}' does not belong to the branching of {} '{entity}' \
+         in domain '{domain}'",
+        .kind.as_str()
+    )]
+    BranchKey {
+        domain: DomainName,
+        kind: ModelKind,
+        entity: ModelName,
+        section: SectionPath,
+        place: ArchivedKeyPlace,
+    },
+    #[error(
+        "the restored {} '{entity}' of domain '{domain}' declares no branching its archived branch \
+         keys could belong to",
+        .kind.as_str()
+    )]
+    UndeclaredBranching {
+        domain: DomainName,
+        kind: ModelKind,
+        entity: ModelName,
     },
 }
 
@@ -476,6 +501,11 @@ impl SessionServiceImpl {
                         }
                         _ => None,
                     });
+                if let Some(schedule) = schedule {
+                    archive
+                        .validate_branch_keys(&self.inner.runtime, &domain.source, schedule)
+                        .await?;
+                }
                 self.validate_branch_states(domain, archive, schedule)
                     .await?;
                 for captured in archive.states_for(&domain.source) {
@@ -487,12 +517,14 @@ impl SessionServiceImpl {
                     else {
                         continue;
                     };
+                    let Some(schedule) = schedule else {
+                        continue;
+                    };
                     let reference = nervix_models::NodeRef::new(
                         nervix_models::ModelKind::Relay,
                         descriptor.entity.clone(),
                     );
-                    let Some(node) = schedule.and_then(|schedule| schedule.nodes.get(&reference))
-                    else {
+                    let Some(node) = schedule.nodes.get(&reference) else {
                         continue;
                     };
                     if node.schema_fingerprint != descriptor.schema {
@@ -501,6 +533,12 @@ impl SessionServiceImpl {
                     let Some(schema) = domain.materialized_schemas.get(&descriptor.entity) else {
                         continue;
                     };
+                    let refusal = || RestoreRefusal::MaterializedState {
+                        domain: domain.source.clone(),
+                        entity: descriptor.entity.clone(),
+                    };
+                    let declarations = RestoredBranchDeclarations::of(schedule, &reference)
+                        .change_context_lazy(refusal)?;
                     // Validate the same bounded conversion used by installation before admission.
                     // Its temporary file drops here; no checkpoint namespace is published.
                     super::materialized::prepare_materialized_checkpoint(
@@ -509,14 +547,10 @@ impl SessionServiceImpl {
                         descriptor,
                         groups,
                         schema.clone(),
+                        Arc::new(declarations),
                     )
                     .await
-                    .change_context_lazy(|| {
-                        RestoreRefusal::MaterializedState {
-                            domain: domain.source.clone(),
-                            entity: descriptor.entity.clone(),
-                        }
-                    })?;
+                    .change_context_lazy(refusal)?;
                 }
             }
             reports.push(Some(report));
