@@ -4,7 +4,8 @@ Feature: Final delivery of a downloaded backup archive to standard output
   The CLI verifies a downloaded archive in a private staging file before it copies the archive to
   standard output. The complete download releases the server's copy, so a delivery that fails
   afterwards keeps the verified archive and reports it under the backup's durable execution
-  reference.
+  reference. A standard output that would discard the archive is refused before the backup is
+  taken.
 
   Scenario Outline: A closed standard output keeps the verified archive under its execution reference
     Given a <cluster_size> node nervix cluster is started
@@ -26,6 +27,29 @@ Feature: Final delivery of a downloaded backup archive to standard output
       | 1            | text   |
       | 3            | json   |
       | 3            | text   |
+
+  # A process started with standard output closed finds the null device there, which discards what
+  # it receives. The CLI refuses either standard output before it connects, so the cluster's
+  # topology plays no part.
+  Scenario Outline: A standard output that would discard the archive fails before a backup is taken
+    Given a 1 node nervix cluster is started
+    And the active domain is "{{domain}}"
+    When these NSPL commands are executed on the leader node
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      START;
+      """
+    Then the current leader node is saved as placeholder "leader"
+    When the CLI backs up the cluster from node "{{leader}}" <standard_output>, reporting <format>
+    Then the CLI's <format> report of the discarding standard output names no execution reference
+    And the CLI left nothing in its temporary directory
+
+    Examples:
+      | standard_output                       | format |
+      | with its standard output closed       | json   |
+      | with its standard output closed       | text   |
+      | to standard output on the null device | json   |
+      | to standard output on the null device | text   |
 
   # The CLI fails while it prepares its staging directory, before it connects, so the cluster's
   # topology plays no part.

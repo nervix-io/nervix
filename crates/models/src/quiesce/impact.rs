@@ -656,6 +656,14 @@ impl BranchKeyFingerprint {
     }
 }
 
+/// A branch key's fingerprint reads as its lowercase hexadecimal digest, the text every report,
+/// inspection, runtime event and log names a concrete branch by in place of its key's field values.
+impl std::fmt::Display for BranchKeyFingerprint {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        fingerprint_hex::write(&self.0, formatter)
+    }
+}
+
 /// Which concrete executions of a logical node participate in an impact.
 #[derive(
     Debug,
@@ -2262,6 +2270,7 @@ mod impact_report_tests {
         assert_eq!(restored, basis);
 
         let key = BranchKeyFingerprint::new([0x0f; 32]);
+        assert_eq!(key.to_string(), "0f".repeat(32));
         let json = serde_json::to_string(&key).assured("a branch key has a JSON representation");
         assert_eq!(json, format!("\"{}\"", "0f".repeat(32)));
 

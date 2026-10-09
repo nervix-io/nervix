@@ -8,7 +8,7 @@
 
 use std::{fs, path::PathBuf, time::Duration};
 
-use anyhow::{Context as _, Result, ensure};
+use anyhow::{Context as _, Result, anyhow, ensure};
 use nervix_client_core::Client;
 use nervix_primitives::time::{Instant, timeout};
 use serde::Serialize;
@@ -48,10 +48,14 @@ pub(crate) async fn capture(grpc_uri: &str, domain: &str) -> Result<PathBuf> {
         ),
     )
     .await
-    .context("client connection timed out")??;
+    .context("client connection timed out")?
+    .map_err(|report| anyhow!("TLS cost client did not connect: {report:#}"))?;
     let connect_nanoseconds = u64::try_from(started.elapsed().as_nanos())
         .context("connection timing does not fit u64")?;
-    let warmup = client.execute(COMMAND).await?;
+    let warmup = client
+        .execute(COMMAND)
+        .await
+        .map_err(|report| anyhow!("TLS cost warm-up command did not run: {report:#}"))?;
     ensure!(warmup.succeeded(), "TLS cost warm-up command failed");
     let mut command_microseconds = Vec::with_capacity(SAMPLES);
     for _ in 0..SAMPLES {
@@ -59,7 +63,8 @@ pub(crate) async fn capture(grpc_uri: &str, domain: &str) -> Result<PathBuf> {
         let started = Instant::now();
         let outcome = timeout(OPERATION_TIMEOUT, client.execute(COMMAND))
             .await
-            .context("TLS cost command timed out")??;
+            .context("TLS cost command timed out")?
+            .map_err(|report| anyhow!("TLS cost command did not run: {report:#}"))?;
         ensure!(outcome.succeeded(), "TLS cost command failed");
         command_microseconds.push(
             u64::try_from(started.elapsed().as_micros())
@@ -79,7 +84,8 @@ pub(crate) async fn capture(grpc_uri: &str, domain: &str) -> Result<PathBuf> {
         let started = Instant::now();
         let outcome = timeout(OPERATION_TIMEOUT, client.execute_prepared(&prepared))
             .await
-            .context("prepared TLS cost command timed out")??;
+            .context("prepared TLS cost command timed out")?
+            .map_err(|report| anyhow!("prepared TLS cost command did not run: {report:#}"))?;
         ensure!(outcome.succeeded(), "prepared TLS cost command failed");
         prepared_execution_microseconds.push(
             u64::try_from(started.elapsed().as_micros())

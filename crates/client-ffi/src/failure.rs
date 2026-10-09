@@ -14,6 +14,7 @@
 //! branches on.
 
 use error_stack::Report;
+use meticulous::OptionExt as _;
 use nervix_client_core::{
     BackupDownloadError, ClientError, CommandExecutionReference, DomainClockReadError, ProducerEnd,
     ProducerError,
@@ -98,10 +99,11 @@ impl Failure {
         self.open_refusal
     }
 
-    /// The kind a client error reports to a host. Every variant is named, so a new one has to be
-    /// classified before it can be returned.
-    fn classify(error: &ClientError) -> FailureKind {
-        match error {
+    /// The kind a client error reports to a host, from the report's current context and, for a
+    /// failed backup download, the download failure beneath it. Every variant is named, so a new
+    /// one has to be classified before it can be returned.
+    fn classify(report: &Report<ClientError>) -> FailureKind {
+        match report.current_context() {
             ClientError::InvalidServerUri(_)
             | ClientError::InvalidServerUrl(_)
             | ClientError::InvalidServerEndpoint
@@ -116,15 +118,13 @@ impl Failure {
             | ClientError::ReadRestoreArchive { .. }
             | ClientError::EmptyRestoreArchive { .. } => FailureKind::InvalidArgument,
             ClientError::TlsRequired
-            | ClientError::LoadDnsConfiguration(_)
+            | ClientError::LoadDnsConfiguration
             | ClientError::ConfigureTls(_)
             | ClientError::ConnectServer(_)
             | ClientError::StartSession(_)
             | ClientError::SessionOpenDeadline
-            | ClientError::BuildAuthenticationMetadata(_)
-            | ClientError::LoadTlsCaCertificate(_) => FailureKind::Connect,
+            | ClientError::BuildAuthenticationMetadata(_) => FailureKind::Connect,
             ClientError::SubscriptionTask(_)
-            | ClientError::SubscriptionOperation(_)
             | ClientError::Transport(_)
             | ClientError::RequestInterrupted { .. }
             | ClientError::UploadResource(_)
@@ -145,13 +145,19 @@ impl Failure {
             | ClientError::DeliveryReferenceExpired { .. } => FailureKind::Rejected,
             ClientError::RequestCancelled { .. } => FailureKind::Cancelled,
             ClientError::UnexpectedReply { .. }
-            | ClientError::InvalidUploadReply(_)
-            | ClientError::InvalidRestoreReply(_)
+            | ClientError::InvalidUploadReply
+            | ClientError::InvalidRestoreReply
             | ClientError::ExecutionReferenceMismatch { .. }
             | ClientError::UploadIdentityMismatch { .. } => FailureKind::Protocol,
             ClientError::SessionClosed => FailureKind::Closed,
             ClientError::ConsumerSessionUnavailable => FailureKind::Connect,
-            ClientError::BackupDownload { source, .. } => Self::classify_download(source),
+            ClientError::BackupDownload { .. } => {
+                let download = report.downcast_ref::<BackupDownloadError>().assured(
+                    "the Rust client reports a failed backup download above the download's own \
+                     BackupDownloadError",
+                );
+                Self::classify_download(download)
+            }
         }
     }
 
@@ -214,7 +220,7 @@ impl From<Report<ClientError>> for Failure {
             _ => None,
         };
         Self {
-            kind: Self::classify(error),
+            kind: Self::classify(&report),
             // The alternate form joins every context of the report, and a report holds the causes
             // of the error it was created from as contexts of their own.
             message: format!("{report:#}"),

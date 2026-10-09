@@ -487,7 +487,7 @@ impl SessionServiceImpl {
             .map_err(|error| {
                 Report::new(BackupError::CaptureDomain {
                     domain: domain.clone(),
-                    reason: error.to_string(),
+                    reason: format!("{error:#}"),
                 })
             })?;
             let cut_result = nervix_primitives::time::timeout_at(deadline, async {
@@ -530,7 +530,7 @@ impl SessionServiceImpl {
                 .map_err(|error| {
                     Report::new(BackupError::CaptureDomain {
                         domain: domain.clone(),
-                        reason: error.to_string(),
+                        reason: format!("{error:#}"),
                     })
                 });
             let (capture, domain_captured_at, inventories, after) = cut_result??;

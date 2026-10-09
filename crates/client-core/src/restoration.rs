@@ -107,10 +107,7 @@ impl RestorationChannel {
         let frame = match message.encode(&SESSION_LIMITS) {
             Ok(frame) => frame,
             Err(report) => {
-                return Err(Report::new(ClientError::EncodeRequest {
-                    request: kind,
-                    source: report.current_context().clone(),
-                }));
+                return Err(report.change_context(ClientError::EncodeRequest { request: kind }));
             }
         };
         if self.requests.frames.send(frame).await.is_err() {
@@ -490,7 +487,7 @@ impl ClockFollower {
                 }
                 // The exchange ended, and the next one attaches the clock again.
                 Err(report) if report.current_context().retryable_session_failure() => return,
-                Err(report) => report.current_context().to_string(),
+                Err(report) => format!("{report:#}"),
             };
             if !self.channel.is_open() {
                 return;
@@ -556,7 +553,7 @@ impl SubscriptionFollower {
                 }
                 Err(report) => {
                     self.desired.created(&attempt, None);
-                    report.current_context().to_string()
+                    format!("{report:#}")
                 }
             };
             if !self.channel.is_open() {

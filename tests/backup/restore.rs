@@ -1476,6 +1476,108 @@ fn write_archive(copy: &ArchiveCopy, replaced: &BTreeMap<String, Vec<u8>>, targe
         .unwrap_or_else(|report| panic!("the altered archive is written: {report:?}"));
 }
 
+/// Returns `stream` with the body length its first record batch message declares set to
+/// `declared`, leaving every other byte, and so the stream's actual body, as it was written.
+fn with_declared_record_batch_body(mut stream: Vec<u8>, declared: i64) -> Vec<u8> {
+    let mut offset = 0_usize;
+    loop {
+        let length_start = offset
+            .checked_add(4)
+            .assured("the archived stream is small");
+        let metadata_start = offset
+            .checked_add(8)
+            .assured("the archived stream is small");
+        assert_eq!(
+            stream[offset..length_start],
+            [0xff; 4],
+            "every archived message starts with the continuation marker"
+        );
+        let length_word: [u8; 4] = stream[length_start..metadata_start]
+            .try_into()
+            .assured("the length word is the four bytes after the continuation marker");
+        let metadata_length = usize::try_from(i32::from_le_bytes(length_word))
+            .assured("a written message declares a nonnegative metadata length");
+        assert_ne!(
+            metadata_length, 0,
+            "the archived section reaches a record batch before its end-of-stream marker"
+        );
+        let metadata_end = metadata_start
+            .checked_add(metadata_length)
+            .assured("the archived stream is small");
+        let message = arrow_ipc::root_as_message(&stream[metadata_start..metadata_end])
+            .assured("the archived message verifies before its declaration is altered");
+        if message.header_type() == arrow_ipc::MessageHeader::RecordBatch {
+            let field = message._tab.vtable().get(arrow_ipc::Message::VT_BODYLENGTH);
+            assert_ne!(
+                field, 0,
+                "the archived record batch declares its body length"
+            );
+            let table = metadata_start
+                .checked_add(message._tab.loc())
+                .assured("the message table lies within its metadata");
+            let field_start = table
+                .checked_add(usize::from(field))
+                .assured("the body length field lies within its metadata");
+            let field_end = field_start
+                .checked_add(8)
+                .assured("the body length field lies within its metadata");
+            stream[field_start..field_end].copy_from_slice(&declared.to_le_bytes());
+            return stream;
+        }
+        let body_length = usize::try_from(message.bodyLength())
+            .assured("a written message declares a nonnegative body length");
+        offset = metadata_end
+            .checked_add(body_length)
+            .assured("the archived stream is small");
+    }
+}
+
+#[given(
+    expr = "backup archive {string} is copied to {string} with a materialized Arrow body \
+            declaring {int} bytes"
+)]
+fn given_archive_with_declared_arrow_body(
+    world: &mut ScenarioWorld,
+    source: String,
+    target: String,
+    declared: i64,
+) {
+    let copy = copy_of_archive(&archive_path(world, &source));
+    let manifest = copy
+        .manifest
+        .as_ref()
+        .assured("a verified archive has a manifest");
+    let entry = manifest
+        .sections
+        .iter()
+        .find(|entry| entry.content == SectionContent::MaterializedColumns)
+        .assured("the backed-up materialized relay has an Arrow column section");
+    let section = copy
+        .sections
+        .get(entry.path.as_str())
+        .assured("the verified archive holds every section its manifest lists");
+    let altered = with_declared_record_batch_body(section.clone(), declared);
+    // The rewritten manifest carries the altered section's own digest, so only the Arrow scan
+    // can refuse it.
+    let replaced = BTreeMap::from([(entry.path.to_string(), altered)]);
+    write_archive(&copy, &replaced, &archive_path(world, &target));
+}
+
+#[then("every node still answers cluster status")]
+async fn then_every_node_answers_cluster_status(world: &mut ScenarioWorld) {
+    for node in world.cluster().node_ids() {
+        let status = world
+            .cluster()
+            .status_text(&node, PhaseDeadline::after(STATUS_REQUEST_TIMEOUT))
+            .await
+            .unwrap_or_else(|report| panic!("node '{node}' answers cluster status: {report:?}"));
+        assert!(
+            !status.is_empty(),
+            "node '{node}' returned an empty cluster status"
+        );
+    }
+}
+
 #[given(
     expr = "backup archive {string} is copied to {string} with native metadata above the bulk \
             budget"

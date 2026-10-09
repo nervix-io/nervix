@@ -171,7 +171,7 @@ impl SessionServiceImpl {
                     actual.fail(
                         attempt,
                         nervix_models::ImpactDiagnosticKind::Recovery,
-                        error.to_string(),
+                        format!("{error:#}"),
                     );
                     return Err(
                         error.change_context(TransactionCommitError::RecoverQuiescence {

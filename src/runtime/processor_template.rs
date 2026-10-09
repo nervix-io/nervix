@@ -42,24 +42,22 @@ pub(super) enum ProcessorTemplateError {
     #[error("dynamic {} update changed materialized-state dependencies", .kind.as_str())]
     MaterializedDependencies { kind: ModelKind },
     #[error(
-        "failed to open {} '{}' replicated state for branch '{}'",
+        "failed to open {} '{}' replicated state ({branch})",
         .kind.as_str(),
-        .processor.as_str(),
-        branch_key_display(.branch)
+        .processor.as_str()
     )]
     ReplicatedState {
         kind: ModelKind,
         processor: ModelName,
-        branch: Option<BranchKey>,
+        branch: BranchScope,
     },
     #[error(
-        "failed to restore window processor '{}' state for branch '{}'",
-        .processor.as_str(),
-        branch_key_display(.branch)
+        "failed to restore window processor '{}' state ({branch})",
+        .processor.as_str()
     )]
     WindowRestore {
         processor: ModelName,
-        branch: Option<BranchKey>,
+        branch: BranchScope,
     },
     #[error("could not bind branch domain clock")]
     BindDomainClock,
@@ -487,14 +485,14 @@ impl RelayProcessorTemplate {
                         .change_context_lazy(|| ProcessorTemplateError::ReplicatedState {
                             kind: self.kind,
                             processor: self.processor.clone(),
-                            branch: key.clone(),
+                            branch: BranchScope::from(key),
                         })?;
                     let state = runtime
                         .replicated_deduplicator_state(placement)
                         .change_context_lazy(|| ProcessorTemplateError::ReplicatedState {
                             kind: self.kind,
                             processor: self.processor.clone(),
-                            branch: key.clone(),
+                            branch: BranchScope::from(key),
                         })?;
                     RelayProcessorOperationNode::Deduplicator {
                         output_routes: Self::instantiate_outputs(output_routes),
@@ -526,21 +524,21 @@ impl RelayProcessorTemplate {
                         .change_context_lazy(|| ProcessorTemplateError::ReplicatedState {
                             kind: self.kind,
                             processor: self.processor.clone(),
-                            branch: key.clone(),
+                            branch: BranchScope::from(key),
                         })?;
                     let replicated_state = runtime
                         .replicated_window_processor_state(placement)
                         .change_context_lazy(|| ProcessorTemplateError::ReplicatedState {
                             kind: self.kind,
                             processor: self.processor.clone(),
-                            branch: key.clone(),
+                            branch: BranchScope::from(key),
                         })?;
                     let state = replicated_state
                         .restore_state(plan, input_schema, incarnation, &runtime.inner.executor)
                         .await
                         .change_context_lazy(|| ProcessorTemplateError::WindowRestore {
                             processor: self.processor.clone(),
-                            branch: key.clone(),
+                            branch: BranchScope::from(key),
                         })?;
                     RelayProcessorOperationNode::WindowProcessor {
                         output_routes: Self::instantiate_outputs(output_routes),
@@ -653,14 +651,14 @@ impl RelayProcessorTemplate {
                         .change_context_lazy(|| ProcessorTemplateError::ReplicatedState {
                             kind: self.kind,
                             processor: self.processor.clone(),
-                            branch: key.clone(),
+                            branch: BranchScope::from(key),
                         })?;
                     let replicated_state = runtime
                         .replicated_wasm_processor_state(placement)
                         .change_context_lazy(|| ProcessorTemplateError::ReplicatedState {
                             kind: self.kind,
                             processor: self.processor.clone(),
-                            branch: key.clone(),
+                            branch: BranchScope::from(key),
                         })?;
                     RelayProcessorOperationNode::WasmProcessor {
                         output_routes: Self::instantiate_outputs(output_routes),
@@ -761,7 +759,8 @@ impl BranchInstanceTemplate {
         }
         let dispatcher = runtime.inner.remote_dispatcher.load();
         let physical_node_id = dispatcher.as_deref().map(RemoteDispatcher::local_node_id);
-        let branch_key = branch_key_display(&key);
+        // Unbranched execution has no per-branch series: it records only the node's own.
+        let branch = key.as_ref().map(BranchKey::fingerprint);
         let source_metrics =
             runtime
                 .inner
@@ -773,19 +772,20 @@ impl BranchInstanceTemplate {
                     relay: &self.root_relay,
                     physical_node_id,
                     direction: "sent",
-                    branch_key: Some(branch_key),
+                    branch,
                 });
-        let source_input_metrics = if self.source_kind == ModelKind::Ingestor {
-            Some(runtime.inner.metrics.resolve_branch_node_message_metrics(
-                domain,
-                self.source_kind,
-                &ModelName::from(&self.source),
-                physical_node_id,
-                "received",
-                branch_key,
-            ))
-        } else {
-            None
+        let source_input_metrics = match branch {
+            Some(branch) if self.source_kind == ModelKind::Ingestor => {
+                Some(runtime.inner.metrics.resolve_branch_node_message_metrics(
+                    domain,
+                    self.source_kind,
+                    &ModelName::from(&self.source),
+                    physical_node_id,
+                    "received",
+                    branch,
+                ))
+            }
+            _ => None,
         };
         let processor_inputs = processors
             .iter()
@@ -800,7 +800,7 @@ impl BranchInstanceTemplate {
                             &processor.processor,
                             relay,
                             physical_node_id,
-                            Some(branch_key),
+                            branch,
                         );
                         (relay.clone(), metrics)
                     })
@@ -825,7 +825,7 @@ impl BranchInstanceTemplate {
                                 relay: &output.relay,
                                 physical_node_id,
                                 direction: "sent",
-                                branch_key: Some(branch_key),
+                                branch,
                             },
                         );
                         (output.relay.clone(), metrics)
