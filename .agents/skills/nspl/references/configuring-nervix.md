@@ -400,7 +400,9 @@ Choose checks relevant to the configured graph:
   starts empty and the restore warns about it. A Kafka source restored with its offsets reads again
   the rows its windows retained at the cut. `START` remains blocked until the complete state installation
   succeeds, including after a failed restore or restart. A domain name that exists is
-  refused, so copy a domain with `AS`. A fresh cluster already has its bootstrap user, so a cluster
+  refused, so copy a domain with `AS`. An archived branch key that is not a key of the branch its
+  restored entity declares refuses the restore before anything changes, naming the section, entry
+  and field. A fresh cluster already has its bootstrap user, so a cluster
   restore there needs `ON EXISTING USER SKIP` or `REPLACE`. Run `DRY RUN` first to see the plan and
   each domain's impact report without changing anything.
   Failed unpublished checkpoint data is reclaimed on every node while the failed target's

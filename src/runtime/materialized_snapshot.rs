@@ -1637,10 +1637,15 @@ where
     T::Archived: for<'a> rkyv::bytecheck::CheckBytes<rkyv::api::high::HighValidator<'a, rkyv::rancor::Error>>
         + RkyvDeserialize<T, rkyv::api::high::HighDeserializer<rkyv::rancor::Error>>,
 {
-    let mut aligned = rkyv::util::AlignedVec::<16>::with_capacity(bytes.len());
-    aligned.extend_from_slice(bytes);
-    rkyv::from_bytes::<T, rkyv::rancor::Error>(&aligned)
-        .map_err(MaterializedSnapshotError::decoding)
+    let decode = || {
+        let mut aligned = rkyv::util::AlignedVec::<16>::with_capacity(bytes.len());
+        aligned.extend_from_slice(bytes);
+        rkyv::from_bytes::<T, rkyv::rancor::Error>(&aligned)
+            .map_err(MaterializedSnapshotError::decoding)
+    };
+    #[cfg(test)]
+    crate::archive_allocation_tests::assert_decode_frees_allocations(decode);
+    decode()
 }
 
 /// What one record's identity costs in its group's identity record. A branch key's rendered form

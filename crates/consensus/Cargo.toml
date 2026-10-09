@@ -48,6 +48,7 @@ tokio = { workspace = true, features = ["full"] }
 tracing = { workspace = true }
 
 [dev-dependencies]
+alloc_count = { workspace = true }
 bolero = { workspace = true }
 nervix-arbitrary = { workspace = true }
 nervix-model-harness = { workspace = true }

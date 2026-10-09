@@ -17,6 +17,10 @@
 //!   The records are shaped by the archive's contract rather than by any internal store, and the
 //!   conversions into them are the only place an internal shape reaches the format.
 
+#[cfg(test)]
+#[global_allocator]
+static TEST_ALLOCATIONS: alloc_count::AllocCounter = alloc_count::AllocCounter(std::alloc::System);
+
 mod branch_state;
 mod describe;
 mod error;
