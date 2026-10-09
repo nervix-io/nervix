@@ -1939,7 +1939,7 @@ impl Cluster {
     pub(crate) async fn publish_kafka_payloads(
         &self,
         topic: &str,
-        payloads: &[String],
+        payloads: &[Vec<u8>],
     ) -> io::Result<()> {
         publish_kafka_payloads(&self.dependencies, topic, payloads).await
     }
@@ -4640,7 +4640,7 @@ async fn publish_kafka_with_headers(
 async fn publish_kafka_payloads(
     dependencies: &DependencyEndpoints,
     topic: &str,
-    payloads: &[String],
+    payloads: &[Vec<u8>],
 ) -> io::Result<()> {
     let mut client_config = kafka_client_config(dependencies)?;
     let producer: FutureProducer = client_config
@@ -4653,7 +4653,7 @@ async fn publish_kafka_payloads(
     for payload in payloads {
         nervix_primitives::task::consume_budget().await;
         deliveries.push(producer.send(
-            FutureRecord::<(), str>::to(topic).payload(payload.as_str()),
+            FutureRecord::<(), [u8]>::to(topic).payload(payload.as_slice()),
             Duration::from_secs(5),
         ));
     }

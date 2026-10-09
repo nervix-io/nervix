@@ -2122,6 +2122,71 @@ Feature: WASM processor runtime behavior
       | 1            | 0             |
       | 3            | 0             |
 
+  Scenario Outline: A WASM processor output whose generated column <defect> reports a runtime error
+    Given runtime replication is configured with replica count 0 and snapshot interval "100ms"
+    And a <cluster_size> node nervix cluster is started
+    And node "node-1" has a WASM fixture generating a column that <defect> for relay "generated_metrics" in resource directory "wasm_processor"
+    And the leader node is configured with these NSPL commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
+    When these NSPL commands are executed through the client on the leader node
+      """
+      CREATE RESOURCE wasm_overreaching_generator;
+      UPLOAD RESOURCE wasm_overreaching_generator VERSION '{{wasm_processor}}';
+      """
+    And these NSPL commands are executed on the leader node
+      """
+      CREATE SCHEMA metric ( value I64 );
+      CREATE WIRE JSON SCHEMA metric_wire MODE STRICT ( value integer );
+      CREATE CODEC metric_codec FROM WIRE JSON SCHEMA metric_wire TO SCHEMA metric;
+      CREATE RELAY raw_metrics SCHEMA metric UNBRANCHED;
+      CREATE RELAY generated_metrics SCHEMA metric UNBRANCHED;
+      CREATE VHOST edge http-{{test_id}}.example.com;
+      CREATE ENDPOINT ingress ON edge PATH '/metrics' TYPE HTTP;
+      CREATE INGESTOR metric_source
+        FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL
+        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING metric_codec
+        TO raw_metrics
+        INHERIT ALL
+        UNBRANCHED
+        FLUSH IMMEDIATE
+        ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
+      CREATE WASM PROCESSOR overreaching_generator FROM raw_metrics
+        USING RESOURCE wasm_overreaching_generator VERSION 1
+        FILE 'processors/filter_even.wasm'
+        MAX FUEL 1000000000
+        MAX MEMORY 64MiB
+        UNBRANCHED
+        TO generated_metrics
+        SET value = value
+        ON MESSAGE ERROR LOG
+        ON GLOBAL ERROR LOG;
+      CREATE SUBSCRIPTION generated_metrics_subscription TO generated_metrics;
+      START;
+      """
+    When http payload is posted to host "http-{{test_id}}.example.com" path "/metrics"
+      """
+      {"value":1}
+      """
+    Then within "10s" the active session observes a server error
+    And the last server error contains
+      """
+      WASM output group has invalid generated Arrow IPC: <reported>
+      """
+
+    Examples:
+      | cluster_size | defect                                        | reported                                                                            |
+      | 1            | reaches past its body                         | the IPC stream does not decode                                                      |
+      | 3            | reaches past its body                         | the IPC stream does not decode                                                      |
+      | 1            | is an integer of 7 bits                       | generated field 0 declares an integer of 7 bits, which no Nervix type is carried as |
+      | 3            | is an integer of 7 bits                       | generated field 0 declares an integer of 7 bits, which no Nervix type is carried as |
+      | 1            | counts a null its validity bitmap cannot hold | the IPC stream does not decode                                                      |
+      | 3            | counts a null its validity bitmap cannot hold | the IPC stream does not decode                                                      |
+      | 1            | declares a body longer than its stream        | the IPC stream does not decode                                                      |
+      | 3            | declares a body longer than its stream        | the IPC stream does not decode                                                      |
+
   Scenario Outline: Malformed WASM processor output reports a runtime error
     Given runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started

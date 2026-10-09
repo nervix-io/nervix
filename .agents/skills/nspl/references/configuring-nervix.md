@@ -383,7 +383,9 @@ Choose checks relevant to the configured graph:
   materialized relay generations, deduplicator keys and the rows windows retain. `WITHOUT
   PAUSE` reads published checkpoints while execution continues; `WITHOUT STATE` captures only
   configuration. `DESCRIBE BACKUP '<file>';` verifies one offline in `nervix-cli` and inventories
-  its state, domains, users, and resource versions. Treat an archive as a secret.
+  its state, domains, users, and resource versions. Treat an archive as a secret. Kafka offset and
+  branch lifecycle sections stream within the 32 MiB bulk budget up to the 64 MiB record limit;
+  their conversion is charged to the node's `restore_metadata` grant, sized below.
 - `RESTORE CLUSTER FROM '<file>' [RESUME] [ON EXISTING USER FAIL | SKIP | REPLACE] [DRY RUN]
   [WITHOUT STATE | WITHOUT SOURCE OFFSETS];` or
   `RESTORE DOMAIN <name> [AS <new_name>] FROM '<file>' [RESUME] [DRY RUN]

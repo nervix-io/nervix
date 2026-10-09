@@ -11,7 +11,7 @@
 use std::time::Duration;
 
 #[cfg(not(feature = "testing"))]
-use nervix_models::{ClusterNodeName, DomainName, EmitterName, IngestorName};
+use nervix_models::{ClusterNodeName, DomainName, EmitterName, IngestorName, ModelName};
 
 #[cfg(not(feature = "testing"))]
 use crate::ConfiguredFaultInjection;
@@ -67,6 +67,14 @@ impl ConfiguredFaultInjection {
 
     pub(in crate::runtime) fn state_replica_installation_fails(&self) -> bool {
         false
+    }
+
+    pub(in crate::runtime) fn native_metadata_capture_interruption(
+        &self,
+        _domain: &DomainName,
+        _entity: &ModelName,
+    ) -> Option<u64> {
+        None
     }
 
     pub(in crate::runtime) fn branch_instance_expiration_scan_interval(&self) -> Option<Duration> {

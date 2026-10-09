@@ -563,19 +563,20 @@ fn json_type_matches_parse_as(
         JsonType::Integer => parse_as_is_integer(ty),
         JsonType::Boolean => *ty == ParseAsType::Bool,
         JsonType::Array => parse_as_is_list(ty),
-        JsonType::Object
-        | JsonType::Null
-        | JsonType::U8
-        | JsonType::I8
-        | JsonType::U16
-        | JsonType::I16
-        | JsonType::U32
-        | JsonType::I32
-        | JsonType::U64
-        | JsonType::I64
-        | JsonType::Datetime
-        | JsonType::F32
-        | JsonType::F64 => false,
+        // An exact wire type names the one internal type it binds, so a DATETIME wire field needs
+        // no text encoding rule: its RFC 3339 text is the wire type itself.
+        JsonType::U8 => *ty == ParseAsType::U8,
+        JsonType::I8 => *ty == ParseAsType::I8,
+        JsonType::U16 => *ty == ParseAsType::U16,
+        JsonType::I16 => *ty == ParseAsType::I16,
+        JsonType::U32 => *ty == ParseAsType::U32,
+        JsonType::I32 => *ty == ParseAsType::I32,
+        JsonType::U64 => *ty == ParseAsType::U64,
+        JsonType::I64 => *ty == ParseAsType::I64,
+        JsonType::F32 => *ty == ParseAsType::F32,
+        JsonType::F64 => *ty == ParseAsType::F64,
+        JsonType::Datetime => *ty == ParseAsType::Datetime,
+        JsonType::Object | JsonType::Null => false,
     }
 }
 
@@ -1085,6 +1086,118 @@ mod tests {
         },
         CodecTypeExpectation::IncompatibleSchema
     )]
+    #[case::accepts_exact_json_u8_for_internal_u8(
+        CodecTypeCase::Json {
+            internal: ParseAsType::U8,
+            wire: JsonType::U8,
+            rfc3339_field: None,
+        },
+        CodecTypeExpectation::Accepted
+    )]
+    #[case::accepts_exact_json_i8_for_internal_i8(
+        CodecTypeCase::Json {
+            internal: ParseAsType::I8,
+            wire: JsonType::I8,
+            rfc3339_field: None,
+        },
+        CodecTypeExpectation::Accepted
+    )]
+    #[case::accepts_exact_json_u16_for_internal_u16(
+        CodecTypeCase::Json {
+            internal: ParseAsType::U16,
+            wire: JsonType::U16,
+            rfc3339_field: None,
+        },
+        CodecTypeExpectation::Accepted
+    )]
+    #[case::accepts_exact_json_i16_for_internal_i16(
+        CodecTypeCase::Json {
+            internal: ParseAsType::I16,
+            wire: JsonType::I16,
+            rfc3339_field: None,
+        },
+        CodecTypeExpectation::Accepted
+    )]
+    #[case::accepts_exact_json_u32_for_internal_u32(
+        CodecTypeCase::Json {
+            internal: ParseAsType::U32,
+            wire: JsonType::U32,
+            rfc3339_field: None,
+        },
+        CodecTypeExpectation::Accepted
+    )]
+    #[case::accepts_exact_json_i32_for_internal_i32(
+        CodecTypeCase::Json {
+            internal: ParseAsType::I32,
+            wire: JsonType::I32,
+            rfc3339_field: None,
+        },
+        CodecTypeExpectation::Accepted
+    )]
+    #[case::accepts_exact_json_u64_for_internal_u64(
+        CodecTypeCase::Json {
+            internal: ParseAsType::U64,
+            wire: JsonType::U64,
+            rfc3339_field: None,
+        },
+        CodecTypeExpectation::Accepted
+    )]
+    #[case::accepts_exact_json_i64_for_internal_i64(
+        CodecTypeCase::Json {
+            internal: ParseAsType::I64,
+            wire: JsonType::I64,
+            rfc3339_field: None,
+        },
+        CodecTypeExpectation::Accepted
+    )]
+    #[case::accepts_exact_json_f32_for_internal_f32(
+        CodecTypeCase::Json {
+            internal: ParseAsType::F32,
+            wire: JsonType::F32,
+            rfc3339_field: None,
+        },
+        CodecTypeExpectation::Accepted
+    )]
+    #[case::accepts_exact_json_f64_for_internal_f64(
+        CodecTypeCase::Json {
+            internal: ParseAsType::F64,
+            wire: JsonType::F64,
+            rfc3339_field: None,
+        },
+        CodecTypeExpectation::Accepted
+    )]
+    #[case::accepts_exact_json_datetime_for_internal_datetime_without_a_text_rule(
+        CodecTypeCase::Json {
+            internal: ParseAsType::Datetime,
+            wire: JsonType::Datetime,
+            rfc3339_field: None,
+        },
+        CodecTypeExpectation::Accepted
+    )]
+    #[case::rejects_exact_json_u8_for_internal_u16(
+        CodecTypeCase::Json {
+            internal: ParseAsType::U16,
+            wire: JsonType::U8,
+            rfc3339_field: None,
+        },
+        CodecTypeExpectation::IncompatibleSchema
+    )]
+    #[case::rejects_exact_json_f32_for_internal_f64(
+        CodecTypeCase::Json {
+            internal: ParseAsType::F64,
+            wire: JsonType::F32,
+            rfc3339_field: None,
+        },
+        CodecTypeExpectation::IncompatibleSchema
+    )]
+    #[case::rejects_exact_json_datetime_for_internal_text(
+        CodecTypeCase::Json {
+            internal: ParseAsType::String,
+            wire: JsonType::Datetime,
+            rfc3339_field: None,
+        },
+        CodecTypeExpectation::IncompatibleSchema
+    )]
     fn validates_codec_schema_type_matrix(
         #[case] codec_type: CodecTypeCase,
         #[case] expected: CodecTypeExpectation,
@@ -1220,5 +1333,40 @@ mod tests {
         );
 
         let _ = fs::remove_dir_all(path);
+    }
+
+    /// Every codec the schemaful codec properties generate is one this validation accepts, so the
+    /// properties cover only codecs a domain can declare and every shape a domain can declare is
+    /// one they may generate.
+    #[test]
+    fn generated_schemaful_codecs_are_accepted() {
+        use nervix_arbitrary::{Arbitrary, Domain};
+
+        use crate::runtime_schema::codec_properties::CodecCase;
+
+        let domain = DomainName::parse("generated").assured("a literal domain name");
+        for seed in 0..=u8::MAX {
+            let mut bytes = Vec::with_capacity(1024);
+            for index in 0..1024_usize {
+                let spread = index
+                    .checked_mul(31)
+                    .and_then(|spread| spread.checked_add(usize::from(seed)))
+                    .assured("a small index times a small factor fits in usize");
+                bytes.push(u8::try_from(spread % 256).assured("a remainder of 256 is one byte"));
+            }
+            let mut arbitrary = Arbitrary::new(&bytes, Domain::Vocabulary);
+            let case = CodecCase::new(&mut arbitrary);
+            let identifier = ModelName::from(&case.model.name);
+            ensure_codec_schema_compatibility(
+                &domain,
+                &identifier,
+                case.wire.resolved(),
+                &case.schema.model,
+                &case.model.encoding_rules,
+            )
+            .unwrap_or_else(|refused| {
+                panic!("seed {seed} generated a codec the registry refuses: {refused:#}")
+            });
+        }
     }
 }

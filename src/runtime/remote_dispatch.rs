@@ -1490,6 +1490,10 @@ impl Runtime {
 }
 
 #[cfg(test)]
+#[path = "remote_dispatch_properties.rs"]
+mod properties;
+
+#[cfg(test)]
 mod tests {
     use std::time::Duration;
 
