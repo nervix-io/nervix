@@ -15,7 +15,6 @@ use std::{
     time::Duration,
 };
 
-use error_stack::Report;
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_dns::{DnsConfiguration, DnsLookupError, DnsLookupFailure, DnsResolver, NameServers};
 use nervix_models::{
@@ -44,6 +43,7 @@ use tonic::{
 };
 use url::Url;
 
+use super::cause_beneath;
 #[cfg(feature = "autocomplete")]
 use crate::wire::{SuggestOutcome, Suggestion, SuggestionKind, SuggestionStatus, TextEdit};
 use crate::{
@@ -137,15 +137,6 @@ async fn within_deadline<F: Future>(future: F) -> F::Output {
     nervix_primitives::time::timeout(DEADLINE, future)
         .await
         .assured("the awaited step completes within the generous test deadline")
-}
-
-/// The client failure one level beneath the report's current context: the failure an uncertain
-/// outcome stands above.
-fn cause_beneath(report: &Report<ClientError>) -> Option<&ClientError> {
-    report
-        .frames()
-        .filter_map(|frame| frame.downcast_ref::<ClientError>())
-        .nth(1)
 }
 
 /// The server's side of one exchange the client opened.

@@ -73,6 +73,15 @@ fn domain(name: &str) -> DomainName {
     DomainName::parse(name).assured("the test domain is an accepted literal")
 }
 
+/// The client failure one level beneath the report's current context: the failure an uncertain
+/// outcome stands above.
+fn cause_beneath(report: &Report<ClientError>) -> Option<&ClientError> {
+    report
+        .frames()
+        .filter_map(|frame| frame.downcast_ref::<ClientError>())
+        .nth(1)
+}
+
 fn request_id(id: u64) -> RequestId {
     RequestId::new(NonZeroU64::new(id).assured("test request identities are non-zero"))
 }
@@ -1220,6 +1229,69 @@ fn a_transport_failure_names_its_status_once_in_its_chain() {
             "the status appears once, beneath its operation: {rendered}"
         );
     }
+}
+
+#[nervix_primitives::test]
+async fn a_command_whose_session_ends_unanswered_is_uncertain_above_the_interruption() {
+    let mut loopback = Loopback::new(Some(domain("tenant")));
+    let client = loopback.client.clone();
+    let execution = client.prepare_execution("SHOW CLUSTER STATUS;").await;
+    let expected = execution.reference().clone();
+    let command =
+        nervix_primitives::task::spawn(async move { client.execute_prepared(&execution).await });
+
+    let request = loopback.next_request().await;
+    assert!(matches!(request.request, ClientRequest::Command(_)));
+    loopback.pending.lock().close();
+
+    let error = command
+        .await
+        .assured("the command task completes")
+        .expect_err("a command whose session ended unanswered may have been admitted");
+    let ClientError::UncertainCommand { reference } = error.current_context() else {
+        panic!("the interruption leaves the command uncertain, not {error:?}");
+    };
+    assert_eq!(reference, &expected);
+    assert!(
+        matches!(
+            cause_beneath(&error),
+            Some(ClientError::RequestInterrupted {
+                request: RequestKind::Command
+            })
+        ),
+        "the interruption that left the outcome unknown stays beneath: {error:?}"
+    );
+}
+
+#[nervix_primitives::test]
+async fn a_failed_backup_download_keeps_the_download_failure_beneath() {
+    let client = test_client("tenant");
+    let directory = tempfile::tempdir().assured("a temporary directory can be created");
+    let destination = directory.path().join("backup.nvxb");
+    let reference = CommandExecutionReference::parse("download-reference")
+        .assured("the reference is an accepted literal");
+    let summary = nervix_models::BackupArchiveSummary {
+        total_bytes: std::num::NonZeroU64::new(4096).assured("a non-zero size"),
+        digest: nervix_models::ArchiveDigest::from_bytes([9; 32]),
+        captured_at: nervix_models::Timestamp::from_unix_nanos(1),
+        retained_until: nervix_models::Timestamp::from_unix_nanos(2),
+        resources: nervix_models::BackupResources::Included,
+        users: Some(1),
+        domains: Vec::new(),
+    };
+    let error = client
+        .download_backup(&reference, &summary, &destination)
+        .await
+        .expect_err("no server serves the download");
+    let ClientError::BackupDownload { reference: failed } = error.current_context() else {
+        panic!("the failed download is reported as such, not as {error:?}");
+    };
+    assert_eq!(failed, &reference);
+    assert!(
+        error.downcast_ref::<crate::BackupDownloadError>().is_some(),
+        "the download's own failure stays beneath: {error:?}"
+    );
+    assert!(!destination.exists(), "a failed download writes no archive");
 }
 
 #[nervix_primitives::test]
