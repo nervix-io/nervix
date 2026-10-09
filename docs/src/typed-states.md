@@ -237,6 +237,13 @@ fencing, and overflow handling.
 
 ## External Encodings And Conversion Failure
 
+The stopping-node drain action carries a required remaining `Duration` budget. Its sender deducts
+elapsed request time before each leader redirect; the receiving leader owns the typed budget for
+the handoffs it performs. Preparation and activation deadlines are derived from that one value,
+and exhaustion produces a failed drain outcome. The interconnect verifies the archived action
+and fences its current representation with the wire fingerprint. [Shutdown And Recovery](./shutdown.md)
+owns the lifecycle and deadline policy.
+
 At an external boundary, a protocol may require a raw tag, signature, null lane, or optional
 scalar. The adapter owns that encoding and turns it into a typed internal state. In the other
 direction it encodes the typed state once. A format signature or syslog boundary marker can remain
