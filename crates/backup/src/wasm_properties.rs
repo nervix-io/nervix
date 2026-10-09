@@ -195,6 +195,9 @@ fn bolero_malformed_wasm_descriptors_fail_at_the_owning_boundary() {
                     &wire,
                 )
                 .assured("a bounded current wire record encodes");
+                crate::malformed_properties::assert_decode_frees_allocations(|| {
+                    WasmStateDescriptor::decode("state/wasm.rkyv", &invalid)
+                });
                 let error = WasmStateDescriptor::decode("state/wasm.rkyv", &invalid)
                     .expect_err("the malformed field must fail");
                 assert_eq!(
@@ -208,6 +211,9 @@ fn bolero_malformed_wasm_descriptors_fail_at_the_owning_boundary() {
             let mut framed = encoded[..crate::section::RECORD_HEADER_BYTES].to_vec();
             framed.extend_from_slice(bytes);
             for input in [bytes, framed.as_slice(), &encoded[..encoded.len() / 2]] {
+                crate::malformed_properties::assert_decode_frees_allocations(|| {
+                    WasmStateDescriptor::decode("state/wasm.rkyv", input)
+                });
                 match WasmStateDescriptor::decode("state/wasm.rkyv", input) {
                     Ok(decoded) => {
                         let reencoded = decoded

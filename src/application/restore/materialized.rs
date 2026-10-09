@@ -8,16 +8,17 @@
 
 use ahash::HashSetExt as _;
 use error_stack::{Report, ResultExt as _};
-use meticulous::ResultExt as _;
+use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_backup::{
     ArchiveRecord, DescribedMaterializedGroup, DescribedSection, MATERIALIZED_COLUMNS_BYTES,
     MATERIALIZED_IDENTITIES_BYTES, MaterializedIdentitiesRecord, MaterializedRelayDescriptor,
+    SectionPath,
 };
 use nervix_execution::{ChargedBytes, CpuClass, MemoryClass};
-use nervix_primitives::sync::StdArc;
+use nervix_primitives::sync::{Arc, StdArc};
 use thiserror::Error;
 
-use super::prepare::{ArchiveSectionReadError, VerifiedArchive};
+use super::prepare::{ArchiveSectionReadError, RestoredBranchDeclarations, VerifiedArchive};
 use crate::{
     runtime::{
         Runtime, StagedArtifact, materialized_columns_frame, materialized_container_header,
@@ -36,6 +37,11 @@ pub(super) enum MaterializedRestoreError {
     SectionLength,
     #[error("materialized archive identity record is invalid")]
     Identities,
+    #[error(
+        "the branch key of record identity {record} in archive section '{section}' does not \
+         belong to the relay's branching"
+    )]
+    BranchKey { section: SectionPath, record: usize },
     #[error("materialized Arrow columns do not match the restored relay schema")]
     Columns,
     #[error("materialized Arrow row count does not match its identities")]
@@ -85,12 +91,15 @@ async fn stage_piece(
         .change_context(MaterializedRestoreError::Storage)
 }
 
+/// The native sealed checkpoint of one archived materialized relay. Every record identity's branch
+/// key is admitted under `declarations`, the branching of the restored relay, before it is staged.
 pub(super) async fn prepare_materialized_checkpoint(
     runtime: &Runtime,
     archive: &VerifiedArchive,
     descriptor: &MaterializedRelayDescriptor,
     groups: &[DescribedMaterializedGroup],
     schema: StdArc<arrow_schema::Schema>,
+    declarations: Arc<RestoredBranchDeclarations>,
 ) -> Result<StagedArtifact, Report<MaterializedRestoreError>> {
     let executor = runtime.executor();
     let identity_bytes = groups
@@ -141,21 +150,22 @@ pub(super) async fn prepare_materialized_checkpoint(
             MATERIALIZED_IDENTITIES_BYTES,
         )
         .await?;
-        let path = group.identities.path.to_string();
+        let section = group.identities.path.clone();
         let charge = executor
             .reserve(MemoryClass::Bulk, 4 * MATERIALIZED_IDENTITIES_BYTES)
             .await
             .change_context(MaterializedRestoreError::Admission)?;
         let descriptor_count = descriptor.record_count;
+        let declarations = declarations.clone();
         let decoded = executor
             .run_cpu(CpuClass::Bulk, charge, move |charge, cancellation| {
                 cancellation
                     .check()
                     .change_context(MaterializedRestoreError::Cancelled)?;
-                let record = MaterializedIdentitiesRecord::decode(&path, &identities)
+                let record = MaterializedIdentitiesRecord::decode(section.as_str(), &identities)
                     .change_context(MaterializedRestoreError::Identities)?;
                 let mut native_identities = Vec::with_capacity(record.identities.len());
-                for identity in record.identities {
+                for (index, identity) in record.identities.into_iter().enumerate() {
                     cancellation
                         .check()
                         .change_context(MaterializedRestoreError::Cancelled)?;
@@ -164,6 +174,15 @@ pub(super) async fn prepare_materialized_checkpoint(
                     {
                         return Err(Report::new(MaterializedRestoreError::Identities));
                     }
+                    let record_number = index.checked_add(1).assured(
+                        "an identity's index is below the length of the list that holds it",
+                    );
+                    declarations
+                        .admit(identity.branch.as_ref())
+                        .change_context_lazy(|| MaterializedRestoreError::BranchKey {
+                            section: section.clone(),
+                            record: record_number,
+                        })?;
                     native_identities.push((
                         identity.branch.map(|fields| {
                             fields

@@ -85,7 +85,7 @@
           "id": "mixed-seed-136",
           "shard": 3,
           "budget_minutes": 60,
-          "note": "Crashes a voter inside the crash of the bootstrap node, which Cluster Chaos 56 owns: fails while node-1 holds the step's role until that fix lands",
+          "note": "Crashes a voter inside the bootstrap node's crash to verify rejoin through recovered Raft peers",
           "run": ["mixed-instability", "--seed", "136", "--duration", "30m", "--policy", "temporary-quorum-loss"]
         },
         {

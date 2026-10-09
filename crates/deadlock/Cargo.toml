@@ -11,6 +11,7 @@ workspace = true
 [features]
 default = []
 deloxide-order = ["deloxide", "nervix-primitives/deloxide-order"]
+deloxide-stress = ["deloxide", "nervix-primitives/deloxide-stress"]
 report-tool = ["dep:clap"]
 shuttle = [
   "nervix-primitives/native",
@@ -38,6 +39,7 @@ signal-hook = { workspace = true, optional = true }
 thiserror = { workspace = true }
 
 [dev-dependencies]
+alloc_count = { workspace = true }
 bolero = { workspace = true }
 nervix-arbitrary = { workspace = true }
 nervix-model-harness = { workspace = true }

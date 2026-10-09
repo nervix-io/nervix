@@ -418,6 +418,7 @@ test-primitives-turmoil:
 test-primitives-deloxide:
     cargo test --package nervix-primitives --features 'deloxide native' --lib
     cargo test --package nervix-primitives --features 'deloxide-order native' --lib
+    cargo test --package nervix-primitives --features 'deloxide-stress native' --lib
 
 # The conformance checks that compile rather than run: the documentation tests that a runtime
 # attribute refuses a crate path, that a product binary has the forms each mode builds, and that the
@@ -427,6 +428,7 @@ test-primitives-compile:
     cargo test --package nervix-primitives --features native --doc
     cargo test --package nervix-primitives --features 'deloxide native' --doc
     cargo test --package nervix-primitives --features 'deloxide-order native' --doc
+    cargo test --package nervix-primitives --features 'deloxide-stress native' --doc
     cargo check --package nervix-primitives --lib --target wasm32-unknown-unknown
 
 # Run the Deloxide diagnostic lane in its active-only selection: every workload
@@ -456,6 +458,17 @@ test-deloxide: tests-deps test-deloxide-workloads
 # instrumentation and run the order-only probes.
 test-deloxide-order: tests-deps test-deloxide-order-workloads
 
+# The same lane in the `deloxide-stress` selection: the active-only build with Deloxide's bounded
+# scheduling disturbance compiled in. A thread that holds a tracked lock waits before one in twenty
+# of its further acquisitions, between 20µs and 200µs, as `StressConfiguration::LANE` records in
+# every process's evidence. Every probe, conformance check and owner test of the active-only
+# selection runs again under that disturbance, together with the probe that proves it is applied,
+# and the lifecycle scenarios tagged `@deloxide_stress` run one at a time, so the transactions,
+# drains, restores, reconnections and shutdowns they drive meet orders of nested acquisitions an
+# idle schedule rarely takes. Deloxide draws its delays from entropy it seeds itself, so a replay repeats the
+# workload and the configuration, not the schedule.
+test-deloxide-stress: tests-deps test-deloxide-stress-workloads
+
 # The part of each selection's lane that executes Nervix code. It has no dependencies, so the native
 # coverage collector runs exactly the lane inside its instrumentation.
 test-deloxide-workloads:
@@ -463,6 +476,9 @@ test-deloxide-workloads:
 
 test-deloxide-order-workloads:
     python3 -m scripts.deloxide_lane --target-dir {{ quote(cargo_target_dir) }} run deloxide-order
+
+test-deloxide-stress-workloads:
+    python3 -m scripts.deloxide_lane --target-dir {{ quote(cargo_target_dir) }} run deloxide-stress
 
 # Prove the lane's supervision on real failing processes: probe workloads that deadlock, fail their
 # diagnostics, hang on an untracked wait, abort, retain an unreviewed potential cycle or overflow
@@ -1941,7 +1957,12 @@ deloxide-clippy-targets: \
     (clippy-target "nervix-deadlock" ["--all-targets", "--features", "deloxide-order"]) \
     (clippy-target "nervix-paced-simulation" ["--all-targets", "--features", "deloxide-order"]) \
     (clippy-target "nervix-server" ["--lib", "--bins", "--features", "deloxide-order"]) \
-    (clippy-target "nervix-server" ["--all-targets", "--features", "deloxide-order testing"])
+    (clippy-target "nervix-server" ["--all-targets", "--features", "deloxide-order testing"]) \
+    (clippy-target "nervix-primitives" ["--all-targets", "--features", "deloxide-stress native"]) \
+    (clippy-target "nervix-deadlock" ["--all-targets", "--features", "deloxide-stress"]) \
+    (clippy-target "nervix-paced-simulation" ["--all-targets", "--features", "deloxide-stress"]) \
+    (clippy-target "nervix-server" ["--lib", "--bins", "--features", "deloxide-stress"]) \
+    (clippy-target "nervix-server" ["--all-targets", "--features", "deloxide-stress testing"])
 
 # The shared Clippy command accepts one package and its Cargo arguments. Target, feature,
 # profile and toolchain differences identify separate build directories. Keep kache configured.
@@ -2262,6 +2283,11 @@ validate-execution-mode-conflicts:
         '`shuttle` and `turmoil`'
     expect_conflict nervix-execution 'loom nervix-primitives/shuttle' '`loom` and `shuttle`'
     expect_conflict nervix-deadlock 'deloxide nervix-primitives/shuttle' '`shuttle` and `deloxide`'
+    # Stress disturbs only the active-only selection.
+    expect_failure "nervix-primitives with deloxide-order and deloxide-stress" \
+        cargo check --package nervix-primitives --features 'deloxide-order deloxide-stress native' --lib
+    expect_first_error "nervix-primitives with deloxide-order and deloxide-stress" \
+        'the `deloxide-order` and `deloxide-stress` diagnostic selections cannot be enabled together'
     expect_failure "nervix-primitives with deloxide alone" \
         cargo check --package nervix-primitives --features deloxide --lib
     expect_first_error "nervix-primitives with deloxide alone" \

@@ -236,6 +236,15 @@ fn bolero_malformed_runtime_state_identity_records_fail_typed() {
         .with_iterations(256)
         .with_max_len(4096)
         .for_each(|bytes: &[u8]| {
+            crate::archive_allocation_tests::assert_decode_frees_allocations(|| {
+                RuntimeStateStore::decode_handoff_preparation(bytes)
+            });
+            crate::archive_allocation_tests::assert_decode_frees_allocations(|| {
+                RuntimeStateStore::decode_forced_recovery_preparation(bytes)
+            });
+            crate::archive_allocation_tests::assert_decode_frees_allocations(|| {
+                RuntimeStateStore::decode_forced_recovery_completion(bytes)
+            });
             let is_decode_failure = |report: &Report<RuntimePersistenceError>| {
                 matches!(
                     report.current_context(),
@@ -287,4 +296,49 @@ fn bolero_malformed_runtime_state_identity_records_fail_typed() {
                 assert!(is_decode_failure(&report), "{report:?}");
             }
         });
+}
+
+#[test]
+fn a_handoff_refusing_its_second_checkpoint_frees_the_first() {
+    let entropy = [0u8; 512];
+    let mut arbitrary = Arbitrary::new(&entropy, Domain::Vocabulary);
+    let mut transition = Transition::generated(&mut arbitrary);
+    transition.checkpoints = vec![checkpoint(&mut arbitrary), checkpoint(&mut arbitrary)];
+    transition.checkpoints[0].0.identifier =
+        ModelName::parse("first_checkpoint").assured("the first checkpoint name is valid");
+    transition.checkpoints[1].0.identifier =
+        ModelName::parse("second_checkpoint").assured("the second checkpoint name is valid");
+
+    let mut encoded = RuntimeStateStore::encode_handoff_preparation(
+        &transition.handoff(),
+        &transition.checkpoints,
+    )
+    .assured("the current handoff preparation archives");
+    let target = b"second_checkpoint";
+    assert_eq!(
+        encoded
+            .windows(target.len())
+            .filter(|window| *window == target)
+            .count(),
+        1,
+        "the second checkpoint name occurs once"
+    );
+    let start = encoded
+        .windows(target.len())
+        .position(|window| window == target)
+        .assured("the second checkpoint name is archived");
+    encoded[start + 7] = b'!';
+
+    let mut aligned = rkyv::util::AlignedVec::<16>::with_capacity(encoded.len());
+    aligned.extend_from_slice(&encoded);
+    rkyv::access::<rkyv::Archived<StoredHandoffPreparation>, rkyv::rancor::Error>(&aligned)
+        .assured("the changed checkpoint leaves a valid archive shape");
+    crate::archive_allocation_tests::assert_decode_frees_allocations(|| {
+        let result = RuntimeStateStore::decode_handoff_preparation(&encoded);
+        assert!(matches!(
+            result.as_ref().map_err(|error| error.current_context()),
+            Err(RuntimePersistenceError::DecodeState)
+        ));
+        result
+    });
 }

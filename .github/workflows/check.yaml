@@ -282,7 +282,7 @@ jobs:
       # Each selection's verdict and evidence stand on their own.
       fail-fast: false
       matrix:
-        selection: [deloxide, deloxide-order]
+        selection: [deloxide, deloxide-order, deloxide-stress]
     permissions:
       contents: read
     env:

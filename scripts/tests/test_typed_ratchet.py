@@ -152,7 +152,7 @@ class ConfigurationTests(unittest.TestCase):
 
     def test_declared_modes_and_malformed_configuration(self) -> None:
         configurations = typed_ratchet.load_configurations(ROOT)
-        self.assertEqual({item.name for item in configurations}, {"ordinary", "testing", "shuttle", "loom", "turmoil", "deloxide", "deloxide-order", "deloxide-binaries", "deloxide-order-binaries"})
+        self.assertEqual({item.name for item in configurations}, {"ordinary", "testing", "shuttle", "loom", "turmoil", "deloxide", "deloxide-order", "deloxide-stress", "deloxide-binaries", "deloxide-order-binaries", "deloxide-stress-binaries"})
         with tempfile.TemporaryDirectory() as directory:
             root = pathlib.Path(directory)
             path = root / TOOLING / "configurations.toml"

@@ -55,6 +55,12 @@ deloxide = ["dep:deloxide", "dep:error-stack", "dep:nix", "dep:thiserror"]
 # Compile historical order instrumentation into the diagnostic locks. Runtime disabling retains
 # that instrumentation's cost; an active-only build selects `deloxide` alone.
 deloxide-order = ["deloxide", "deloxide/lock-order-graph"]
+# Compile Deloxide's bounded scheduling disturbance into the diagnostic locks: a thread that already
+# holds a tracked lock may sleep before it asks for another, so contention-prone lifecycle paths
+# meet orders an idle schedule rarely takes. Active detection only:
+# exclusive with `deloxide-order`, whose findings do not depend on timing. The configuration is
+# `deadlock::StressConfiguration::LANE`, recorded in every process's evidence.
+deloxide-stress = ["deloxide", "deloxide/stress-test"]
 
 [dependencies]
 # The `futures` channels, `select!` and abort handles of the unmodeled surface, and the waker

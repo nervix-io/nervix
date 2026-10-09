@@ -10,7 +10,7 @@
 //!   generators.
 //! - **Must not know.** Runtime branches, Arrow decoding or the transport's connection lifecycle.
 
-use std::num::NonZeroUsize;
+use std::{collections::VecDeque, num::NonZeroUsize};
 
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_arbitrary::{Arbitrary, Domain, Entropy};
@@ -20,12 +20,13 @@ use nervix_models::{
     RemoteAckOutcome, RemoteAckRegistration, RemoteAckResolution, RemoteRuntimeElementValue,
     RemoteRuntimeField, RemoteRuntimeRecordMetadata, RemoteRuntimeValue,
 };
+use nervix_primitives::sync::StdArc;
 use rkyv::{rancor::Error as RkyvError, util::AlignedVec};
 
 use super::{
-    ConnectionAccepted, ConnectionHello, ElementWise, RelayAdmissionRequest,
-    RelayAdmissionResponse, RelayGrantDisposition, RelayGrantRequest, RelayGrantResponse,
-    RelayMetadata, decode_aligned, decode_rkyv, encode_rkyv, validation_depth,
+    ConnectionAccepted, ConnectionHello, RelayAdmissionRequest, RelayAdmissionResponse,
+    RelayGrantDisposition, RelayGrantRequest, RelayGrantResponse, RelayMetadata, decode_aligned,
+    decode_rkyv, encode_rkyv, validation_depth,
 };
 use crate::{PoolClass, RelayAdmissionStatus, RelayDelivery, RelayPayload, RelayPayloadKind};
 
@@ -735,41 +736,94 @@ fn a_grant_request_refused_for_a_registrar_frees_the_registrations_read_before_i
     assert_decoding_frees_its_allocations::<RelayGrantRequest>(&bytes, max_depth);
 }
 
-/// A list read back element by element is archived exactly as rkyv archives a `Vec`: the wrapper
-/// changes how a refused list is freed, and nothing a peer reads.
+/// A plain archived vector must release its earlier elements when a later name is refused.
+/// This exercises rkyv's shared list reader, which is used by the other archive boundaries.
 #[test]
-fn a_list_read_back_element_by_element_archives_as_rkyv_archives_a_vec() {
-    #[derive(rkyv::Archive, rkyv::Serialize)]
-    struct AsVec {
-        list: Vec<Option<RemoteAckRegistration>>,
+fn a_refused_name_in_a_plain_archived_vector_frees_earlier_elements() {
+    #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
+    struct Registrations {
+        list: Vec<RemoteAckRegistration>,
     }
 
-    #[derive(rkyv::Archive, rkyv::Serialize)]
-    struct ElementByElement {
-        #[rkyv(with = ElementWise)]
-        list: Vec<Option<RemoteAckRegistration>>,
-    }
-
-    let registered_by = |ack_id: u64, registrar: &str| RemoteAckRegistration {
+    let registration = |ack_id, registrar: &str| RemoteAckRegistration {
         ack_id,
         registrar: ClusterNodeIdentity::new(
             ClusterNodeName::parse(registrar).assured("a literal node name"),
-            ClusterNodeIncarnation::new(ack_id),
+            ClusterNodeIncarnation::new(1),
         ),
     };
-    let list = vec![
-        Some(registered_by(1, "node-a")),
-        None,
-        Some(registered_by(
-            u64::MAX,
-            "a-registrar-whose-name-is-archived-out-of-line",
-        )),
+    let refused_name = "registrar-no-node-is-named-as";
+    let mut bytes = rkyv::to_bytes::<RkyvError>(&Registrations {
+        list: vec![
+            registration(1, "registrar-read-before-the-refused-one"),
+            registration(2, refused_name),
+        ],
+    })
+    .assured("a small list encodes");
+    let position = bytes
+        .windows(refused_name.len())
+        .position(|window| window == refused_name.as_bytes())
+        .assured("the archive holds the registrar's name as its text");
+    bytes[position] = b'!';
+    let max_depth = validation_depth(&Executor::default()).assured("a positive decoder depth");
+    assert_decoding_frees_its_allocations::<Registrations>(&bytes, max_depth);
+}
+
+/// Boxed and shared slices use the same partial slice reader but own their
+/// allocations through different paths. Both must release the initialized
+/// prefix and the outer allocation when a later name is refused.
+#[test]
+fn a_refused_name_in_boxed_and_shared_slices_frees_every_allocation() {
+    #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
+    struct Boxed {
+        list: Box<[RemoteAckRegistration]>,
+    }
+
+    #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
+    struct Shared {
+        list: StdArc<[RemoteAckRegistration]>,
+    }
+
+    #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
+    struct Deque {
+        list: VecDeque<RemoteAckRegistration>,
+    }
+
+    let registration = |ack_id, registrar: &str| RemoteAckRegistration {
+        ack_id,
+        registrar: ClusterNodeIdentity::new(
+            ClusterNodeName::parse(registrar).assured("a literal node name"),
+            ClusterNodeIncarnation::new(1),
+        ),
+    };
+    let refused_name = "registrar-no-node-is-named-as";
+    let registrations = vec![
+        registration(1, "registrar-read-before-the-refused-one"),
+        registration(2, refused_name),
     ];
-    let as_vec =
-        rkyv::to_bytes::<RkyvError>(&AsVec { list: list.clone() }).assured("a small list encodes");
-    let element_by_element =
-        rkyv::to_bytes::<RkyvError>(&ElementByElement { list }).assured("a small list encodes");
-    assert_eq!(element_by_element.as_slice(), as_vec.as_slice());
+    let mut boxed = rkyv::to_bytes::<RkyvError>(&Boxed {
+        list: registrations.clone().into_boxed_slice(),
+    })
+    .assured("a small boxed list encodes");
+    let mut shared = rkyv::to_bytes::<RkyvError>(&Shared {
+        list: StdArc::from(registrations.clone().into_boxed_slice()),
+    })
+    .assured("a small shared list encodes");
+    let mut deque = rkyv::to_bytes::<RkyvError>(&Deque {
+        list: VecDeque::from(registrations),
+    })
+    .assured("a small deque encodes");
+    for bytes in [&mut boxed, &mut shared, &mut deque] {
+        let position = bytes
+            .windows(refused_name.len())
+            .position(|window| window == refused_name.as_bytes())
+            .assured("the archive holds the registrar's name as its text");
+        bytes[position] = b'!';
+    }
+    let max_depth = validation_depth(&Executor::default()).assured("a positive decoder depth");
+    assert_decoding_frees_its_allocations::<Boxed>(&boxed, max_depth);
+    assert_decoding_frees_its_allocations::<Shared>(&shared, max_depth);
+    assert_decoding_frees_its_allocations::<Deque>(&deque, max_depth);
 }
 
 /// Damaged encodings of relay messages, and arbitrary bytes, either fail with the codec's typed

@@ -44,7 +44,7 @@ The suite is the `scenarios` test target, `tests/scenarios.rs`, running the feat
 | gRPC receivers | Tasks on the binary's runtime, one listener, one task per connection and one per call, owned by the scenario that started them | The gRPC receiver fixture, `tests/common/grpc_receiver.rs` |
 | Client probes | A child process per probe of another language, or one blocking task for the in-process probe of the shared Rust binding, owned by the scenario that started it | The client probe fixture, `tests/common/client_conformance.rs` |
 
-A scenario binary built for the `deloxide` mode, which `just test-deloxide` or `just test-deloxide-order` builds, starts its
+A scenario binary built for the `deloxide` mode, which `just test-deloxide`, `just test-deloxide-order` or `just test-deloxide-stress` builds, starts its
 deadlock diagnostics in `main`, right after it configures the lifecycle of its test dependencies and
 before it builds its runtime, so its one detector is installed before any tracked lock or runtime
 worker exists and every in-process node shares it; the helper process that holds a dependency
@@ -1203,9 +1203,9 @@ reporter updates its marked PR comment for the same PR head instead of adding a 
 
 ## Diagnostic Lane
 
-`just test-deloxide` and `just test-deloxide-order` run the Deloxide diagnostic lane: every workload
-`tests/deloxide-inventory.toml` registers, in its selection's own build, supervised by
-`scripts/deloxide_lane.py`. [Data-Plane Concurrency](./data-plane-concurrency.md#diagnostic-deadlock-detection)
+`just test-deloxide`, `just test-deloxide-order` and `just test-deloxide-stress` run the Deloxide
+diagnostic lane: every workload `tests/deloxide-inventory.toml` registers, in its selection's own
+build, supervised by `scripts/deloxide_lane.py`. [Data-Plane Concurrency](./data-plane-concurrency.md#diagnostic-deadlock-detection)
 owns what the lane proves, its failure classes and its applicability records; this section owns how
 it runs and how long it may take.
 
@@ -1217,7 +1217,7 @@ the owner tests are libtest executables, run directly so that a signal reaches t
 signal rather than as Cargo's status. The scenario binary runs the lane's tagged scenarios
 without retries, in two inventory invocations: the restore, client, diagnostic, remote ACK,
 Roto function, TLS rebinding and inferencer scenarios, then the paced-driver scenarios with the
-diagnostic Rust driver. Active mode runs each invocation as one process. Order mode starts a fresh
+diagnostic Rust driver. Active mode, with or without stress, runs each invocation as one process. Order mode starts a fresh
 process for each tagged feature in the first invocation; the materialized restore feature runs
 each scenario separately and its six large examples each have their own process, as do the four
 complete-generation restore examples, selected by the inventory's `order_tags`. The lane checks
@@ -1248,7 +1248,7 @@ closes.
 
 In CI the `deloxide` job, which runs only for a pull request labeled `deloxide`, runs each
 selection on its own 16-vCPU runner through
-`just coverage-native-extras test-deloxide` or `test-deloxide-order`, then
+`just coverage-native-extras test-deloxide`, `test-deloxide-order` or `test-deloxide-stress`, then
 `just test-deloxide-qualification` for the same selection, and uploads every attempt whatever the
 verdict.
 
@@ -1271,6 +1271,20 @@ scenario runs before those six scenario runs and seven conformance checks were a
 predates the four remote ACK examples and the order-mode per-example process split, so its
 durations are historical measurements rather than a timing claim for the current combined
 inventory; the inventory and job bounds remain enforced.
+
+The stress selection runs the active-only selection's probes, conformance checks and owner tests
+with the bounded disturbance of `StressConfiguration::LANE`, the probe that proves it, and the
+`stress-scenarios` invocation of lifecycle scenarios tagged `@deloxide_stress`. That invocation runs
+one scenario at a time: a stress build enters Deloxide's process-wide detector twice on every mutex
+and write acquisition, and with four scenarios in one process their nodes contended on it and
+missed startup and request deadlines that a plain diagnostic build of the same scenarios met. Its
+bound is 50 minutes inside the same 80-minute inventory budget and job limits. Measured locally on
+a 16-CPU host on 2026-10-09, the whole stress lane took 42 minutes with its prerequisites, its 33
+stressed scenario runs about 17 minutes one at a time, and its 57 workloads completed with seven
+qualifying evidence files and no finding. The disturbance
+delays one in twenty nested mutex and write acquisitions by at most 200µs, and the product's
+physical and logical deadlines are not widened for it. A stressed workload that misses a product deadline is a finding to reproduce and
+fix in its owner, not a bound to raise.
 
 When a step's `timeout` expires it sends `SIGTERM` to the step's process group. The collector
 records its attempt as interrupted and forwards the signal to the lane, which ends the process it is

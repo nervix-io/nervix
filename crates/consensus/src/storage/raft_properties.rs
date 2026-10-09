@@ -9,6 +9,7 @@
 //! - **Must not know.** Raft scheduling, transport, or how commands are applied.
 
 use nervix_arbitrary::{Arbitrary, Domain};
+use nervix_models::ClusterNodeName;
 
 use super::{
     generators::{entry, optional_log_id, stored_membership, vote},
@@ -21,6 +22,28 @@ const RECORD_LIMIT: u64 = 16 * 1024 * 1024;
 
 /// What one generated snapshot section may hold before the writer starts another.
 const SECTION_LIMIT: u64 = 64 * 1024;
+
+pub(super) fn assert_decode_frees_allocations<F, T>(decode: F)
+where
+    F: Fn() -> T,
+{
+    drop(decode());
+    let before = alloc_count::stats();
+    drop(decode());
+    let after = alloc_count::stats();
+    let allocated = after
+        .alloc_calls
+        .checked_sub(before.alloc_calls)
+        .assured("a thread's allocation count only grows");
+    let freed = after
+        .dealloc_calls
+        .checked_sub(before.dealloc_calls)
+        .assured("a thread's deallocation count only grows");
+    assert_eq!(
+        freed, allocated,
+        "a refused Raft archive retains no allocation"
+    );
+}
 
 /// `value` encoded through the storage codec and decoded back the way recovery reads it.
 fn stored_and_recovered<T>(value: &T) -> T
@@ -167,6 +190,14 @@ fn bolero_malformed_consensus_raft_records_fail_typed() {
         .with_iterations(256)
         .with_max_len(4096)
         .for_each(|bytes: &[u8]| {
+            assert_decode_frees_allocations(|| {
+                drop(StoreInner::decode_log_entry(&StoreInner::log_key(0), bytes));
+                drop(storage_decode::<VoteRecord>(bytes));
+                drop(storage_decode::<Option<LogIdRecord>>(bytes));
+                drop(storage_decode::<StateMetadataRecord>(bytes));
+                drop(storage_decode::<SnapshotManifestRecord>(bytes));
+                drop(storage_decode::<SnapshotSection>(bytes));
+            });
             match StoreInner::decode_log_entry(&StoreInner::log_key(0), bytes) {
                 Ok(entry) => {
                     assert_eq!(entry.log_id.index, 0);
@@ -214,4 +245,38 @@ fn bolero_malformed_consensus_raft_records_fail_typed() {
                 assert!(bytes.starts_with(&generation_prefix(generation)));
             }
         });
+}
+
+#[test]
+fn a_durable_batch_refusing_its_second_node_frees_the_first() {
+    let names = vec![
+        ClusterNodeName::parse("first_replica").assured("the first node name is valid"),
+        ClusterNodeName::parse("second_replica").assured("the second node name is valid"),
+    ];
+    let mut encoded = DurableBatch::encode(&names, RECORD_LIMIT)
+        .assured("a bounded node list fits the durable codec");
+    let target = b"second_replica";
+    assert_eq!(
+        encoded
+            .windows(target.len())
+            .filter(|window| *window == target)
+            .count(),
+        1,
+        "the second node name occurs once"
+    );
+    let start = encoded
+        .windows(target.len())
+        .position(|window| window == target)
+        .assured("the second node name is archived");
+    encoded[start + 6] = b'!';
+
+    let mut aligned = rkyv::util::AlignedVec::<16>::with_capacity(encoded.len());
+    aligned.extend_from_slice(&encoded);
+    rkyv::access::<rkyv::Archived<Vec<ClusterNodeName>>, rkyv::rancor::Error>(&aligned)
+        .assured("the changed name leaves a valid archive shape");
+    assert_decode_frees_allocations(|| {
+        let result = storage_decode::<Vec<ClusterNodeName>>(&encoded);
+        assert!(result.as_ref().is_err_and(is_invalid_storage));
+        result
+    });
 }

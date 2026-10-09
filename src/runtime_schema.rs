@@ -391,6 +391,19 @@ pub enum RemoteRuntimeValueError {
     Datetime,
 }
 
+/// Why a runtime value is not a value of a declared type. Neither variant carries the value, which
+/// may be sensitive. A list element names the element type it was held to.
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+pub(crate) enum RuntimeValueTypeError {
+    #[error("expected {expected}, found {actual}")]
+    Type {
+        expected: ParseAsType,
+        actual: RuntimeValueKind,
+    },
+    #[error("expected a fixed array of {expected} elements, found {actual}")]
+    ArrayLength { expected: u32, actual: usize },
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", content = "value")]
 enum SerializableRuntimeValue {
@@ -2636,6 +2649,52 @@ impl RuntimeValue {
             Self::Array(_) => RuntimeValueKind::Array,
             Self::Vec(_) => RuntimeValueKind::Vec,
         }
+    }
+
+    /// Checks that this value is exactly a value of `expected`: the same scalar type, or a list
+    /// whose every element is a value of the declared element type and which, for an `ARRAY`,
+    /// holds exactly the declared number of elements. No value converts to another type here.
+    pub(crate) fn conform_to(
+        &self,
+        expected: &ParseAsType,
+    ) -> error_stack::Result<(), RuntimeValueTypeError> {
+        let (elements, element) = match (self, expected) {
+            (Self::U8(_), ParseAsType::U8)
+            | (Self::I8(_), ParseAsType::I8)
+            | (Self::U16(_), ParseAsType::U16)
+            | (Self::I16(_), ParseAsType::I16)
+            | (Self::U32(_), ParseAsType::U32)
+            | (Self::I32(_), ParseAsType::I32)
+            | (Self::U64(_), ParseAsType::U64)
+            | (Self::I64(_), ParseAsType::I64)
+            | (Self::F32(_), ParseAsType::F32)
+            | (Self::F64(_), ParseAsType::F64)
+            | (Self::Bool(_), ParseAsType::Bool)
+            | (Self::String(_), ParseAsType::String)
+            | (Self::Datetime(_), ParseAsType::Datetime) => return Ok(()),
+            (Self::Array(elements), ParseAsType::Array { element, len }) => {
+                let length = usize::try_from(len.get())
+                    .assured("a u32 fixed-list length fits every supported target");
+                if elements.len() != length {
+                    return Err(Report::new(RuntimeValueTypeError::ArrayLength {
+                        expected: len.get(),
+                        actual: elements.len(),
+                    }));
+                }
+                (elements, element.as_ref())
+            }
+            (Self::Vec(elements), ParseAsType::Vec { element }) => (elements, element.as_ref()),
+            (value, expected) => {
+                return Err(Report::new(RuntimeValueTypeError::Type {
+                    expected: expected.clone(),
+                    actual: value.kind(),
+                }));
+            }
+        };
+        for value in elements {
+            value.conform_to(element)?;
+        }
+        Ok(())
     }
 
     pub fn to_remote(&self) -> RemoteRuntimeValue {
@@ -9876,6 +9935,79 @@ mod tests {
         assert_eq!(
             RuntimeValue::F64(OrderedFloat(f64::INFINITY)).to_key_fragment(),
             "\"Infinity\""
+        );
+    }
+
+    /// A value conforms only to its own exact type, and a list conforms when every element
+    /// conforms to the declared element type and an `ARRAY` holds exactly its declared length.
+    #[test]
+    fn a_runtime_value_conforms_only_to_its_exact_declared_type() {
+        let pair = ParseAsType::Array {
+            element: Box::new(ParseAsType::Vec {
+                element: Box::new(ParseAsType::I32),
+            }),
+            len: nonzero!(2u32),
+        };
+        let conforming = RuntimeValue::Array(vec![
+            RuntimeValue::Vec(vec![RuntimeValue::I32(1), RuntimeValue::I32(2)]),
+            RuntimeValue::Vec(Vec::new()),
+        ]);
+        conforming
+            .conform_to(&pair)
+            .assured("every element is a list of I32 and the array has its declared length");
+        RuntimeValue::String("north".to_string())
+            .conform_to(&ParseAsType::String)
+            .assured("a string conforms to STRING");
+
+        let narrower = RuntimeValue::I32(7)
+            .conform_to(&ParseAsType::I64)
+            .expect_err("an I32 is not widened to I64");
+        assert_eq!(
+            narrower.current_context(),
+            &RuntimeValueTypeError::Type {
+                expected: ParseAsType::I64,
+                actual: RuntimeValueKind::I32,
+            }
+        );
+        assert_eq!(
+            narrower.current_context().to_string(),
+            "expected I64, found I32"
+        );
+
+        let short = RuntimeValue::Array(vec![RuntimeValue::Vec(Vec::new())])
+            .conform_to(&pair)
+            .expect_err("an array of one element is not an array of two");
+        assert_eq!(
+            short.current_context(),
+            &RuntimeValueTypeError::ArrayLength {
+                expected: 2,
+                actual: 1,
+            }
+        );
+
+        let element = RuntimeValue::Array(vec![
+            RuntimeValue::Vec(vec![RuntimeValue::I32(1)]),
+            RuntimeValue::Vec(vec![RuntimeValue::String("2".to_string())]),
+        ])
+        .conform_to(&pair)
+        .expect_err("a nested element of another type does not conform");
+        assert_eq!(
+            element.current_context(),
+            &RuntimeValueTypeError::Type {
+                expected: ParseAsType::I32,
+                actual: RuntimeValueKind::String,
+            }
+        );
+
+        let list = RuntimeValue::Vec(vec![RuntimeValue::I32(1)])
+            .conform_to(&pair)
+            .expect_err("a VEC is not an ARRAY");
+        assert_eq!(
+            list.current_context(),
+            &RuntimeValueTypeError::Type {
+                expected: pair.clone(),
+                actual: RuntimeValueKind::Vec,
+            }
         );
     }
 }

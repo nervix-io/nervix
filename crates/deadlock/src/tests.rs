@@ -14,10 +14,29 @@ use crate::{
     DeadlockEvidence, EvidenceDirectory, EvidenceError, EvidenceOutOfBounds, MAX_FINDINGS,
     ProcessRecord, RecordedFinding as Finding, render_finding,
     wire::{
-        CycleWire, EvidenceWire, FindingWire, ProcessWire, TextWire, ThreadWire, WaitedLockWire,
-        decode_wire, encode_wire,
+        CycleWire, EvidenceWire, FindingWire, ProcessWire, SelectionWire, StressWire, TextWire,
+        ThreadWire, WaitedLockWire, decode_wire, encode_wire,
     },
 };
+
+fn assert_decode_frees_allocations<F, T>(decode: F)
+where
+    F: Fn() -> T,
+{
+    drop(decode());
+    let before = alloc_count::stats();
+    drop(decode());
+    let after = alloc_count::stats();
+    let allocated = after
+        .alloc_calls
+        .checked_sub(before.alloc_calls)
+        .assured("a thread's allocation count only grows");
+    let freed = after
+        .dealloc_calls
+        .checked_sub(before.dealloc_calls)
+        .assured("a thread's deallocation count only grows");
+    assert_eq!(freed, allocated, "evidence decoding retains no allocation");
+}
 
 fn id(number: u64) -> NonZeroU64 {
     NonZeroU64::new(number).assured("tests number threads and locks from one")
@@ -148,7 +167,7 @@ fn a_header_of_other_bytes_is_refused_before_the_payload_is_read() {
             other_version,
             EvidenceError::UnsupportedVersion {
                 found: 9,
-                supported: 2,
+                supported: 3,
             },
         ),
     ];
@@ -425,11 +444,7 @@ fn generated_evidence(entropy: &mut Entropy<'_>) -> DeadlockEvidence {
         id: u32::try_from(entropy.up_to(u64::from(u32::MAX))).assured("drawn below u32::MAX"),
         program: generated_optional_text(entropy),
         started_at: at(entropy.any_u64()),
-        selection: entropy.pick([
-            nervix_primitives::deadlock::DiagnosticSelection::ActiveOnly,
-            nervix_primitives::deadlock::DiagnosticSelection::OrderAnalysis,
-            nervix_primitives::deadlock::DiagnosticSelection::OrderInstrumentedActiveOnly,
-        ]),
+        selection: generated_selection(entropy),
     };
     DeadlockEvidence::new(process, findings)
         .assured("at most the bound of findings is drawn")
@@ -438,6 +453,43 @@ fn generated_evidence(entropy: &mut Entropy<'_>) -> DeadlockEvidence {
             crate::EvidenceScope::ActiveSelection,
             crate::EvidenceScope::PotentialSelection,
         ]))
+}
+
+fn generated_selection(
+    entropy: &mut Entropy<'_>,
+) -> nervix_primitives::deadlock::DiagnosticSelection {
+    use nervix_primitives::deadlock::DiagnosticSelection;
+
+    if entropy.byte().is_multiple_of(4) {
+        return DiagnosticSelection::StressedActiveOnly(generated_stress(entropy));
+    }
+    entropy.pick([
+        DiagnosticSelection::ActiveOnly,
+        DiagnosticSelection::OrderAnalysis,
+        DiagnosticSelection::OrderInstrumentedActiveOnly,
+    ])
+}
+
+/// A stress configuration within its bounds, reaching both ends of the probability and the delays.
+fn generated_stress(entropy: &mut Entropy<'_>) -> nervix_primitives::deadlock::StressConfiguration {
+    use nervix_primitives::deadlock::{MAX_STRESS_DELAY, PREEMPTION_SCALE, StressConfiguration};
+
+    let per_million = entropy.boundary_biased(1..=u64::from(PREEMPTION_SCALE));
+    let per_million = std::num::NonZeroU32::new(
+        u32::try_from(per_million).assured("drawn at most the scale, which fits a u32"),
+    )
+    .assured("drawn from one upward");
+    let longest_micros = u64::try_from(MAX_STRESS_DELAY.as_micros())
+        .assured("the longest delay is two milliseconds");
+    let longest = entropy.boundary_biased(1..=longest_micros);
+    let shortest = entropy.boundary_biased(1..=longest);
+    StressConfiguration::new(
+        per_million,
+        Duration::from_micros(shortest),
+        Duration::from_micros(longest),
+        entropy.flag(),
+    )
+    .assured("every drawn value is within the configuration's bounds")
 }
 
 fn generated_finding(entropy: &mut Entropy<'_>) -> Finding {
@@ -557,6 +609,7 @@ fn bolero_malformed_deadlock_evidence_is_refused_or_round_trips() {
             let mut headed = b"NVXDLEVD\x01\x00\x02\x00".to_vec();
             headed.extend_from_slice(bytes);
             for candidate in [bytes, headed.as_slice()] {
+                assert_decode_frees_allocations(|| DeadlockEvidence::decode(candidate));
                 // Whatever decodes is evidence within every bound, and encodes back to itself.
                 if let Ok(evidence) = DeadlockEvidence::decode(candidate) {
                     let encoded = evidence.encode().assured("decoded evidence encodes");
@@ -689,7 +742,7 @@ fn out_of_bounds_wire(entropy: &mut Entropy<'_>, evidence: &DeadlockEvidence) ->
         threads: vec![thread.clone()],
         omitted_threads: 0,
     };
-    match entropy.byte() % 9 {
+    match entropy.byte() % 10 {
         0 => {
             let past = MAX_FINDINGS.checked_add(1).assured("the bound is small");
             wire.findings = vec![
@@ -745,6 +798,12 @@ fn out_of_bounds_wire(entropy: &mut Entropy<'_>, evidence: &DeadlockEvidence) ->
                 ..wire.process
             };
         }
+        8 => {
+            wire.process = ProcessWire {
+                selection: SelectionWire::StressedActiveOnly(out_of_bounds_stress(entropy)),
+                ..wire.process
+            };
+        }
         _ => {
             let kept = entropy.count(MAX_TEXT_BYTES - 4);
             let original = u64::try_from(kept).assured("fits");
@@ -768,6 +827,56 @@ fn out_of_bounds_wire(entropy: &mut Entropy<'_>, evidence: &DeadlockEvidence) ->
         }
     }
     wire
+}
+
+/// A stress configuration that breaks exactly one of its bounds, chosen by `entropy`.
+fn out_of_bounds_stress(entropy: &mut Entropy<'_>) -> StressWire {
+    use nervix_primitives::deadlock::{MAX_STRESS_DELAY, PREEMPTION_SCALE};
+
+    let longest_micros = u64::try_from(MAX_STRESS_DELAY.as_micros())
+        .assured("the longest delay is two milliseconds");
+    let within = StressWire {
+        preemptions_per_million: PREEMPTION_SCALE,
+        shortest_delay_micros: 1,
+        longest_delay_micros: longest_micros,
+        yield_after_release: entropy.flag(),
+    };
+    let above_delay = entropy.boundary_biased(
+        longest_micros
+            .checked_add(1)
+            .assured("two milliseconds in microseconds is small")..=u64::MAX,
+    );
+    match entropy.byte() % 5 {
+        0 => StressWire {
+            preemptions_per_million: 0,
+            ..within
+        },
+        1 => StressWire {
+            preemptions_per_million: u32::try_from(
+                entropy.boundary_biased(
+                    u64::from(PREEMPTION_SCALE)
+                        .checked_add(1)
+                        .assured("the scale is a million")
+                        ..=u64::from(u32::MAX),
+                ),
+            )
+            .assured("drawn at most u32::MAX"),
+            ..within
+        },
+        2 => StressWire {
+            shortest_delay_micros: 0,
+            ..within
+        },
+        3 => StressWire {
+            longest_delay_micros: above_delay,
+            ..within
+        },
+        _ => StressWire {
+            shortest_delay_micros: entropy.boundary_biased(2..=longest_micros),
+            longest_delay_micros: 1,
+            ..within
+        },
+    }
 }
 
 #[test]
