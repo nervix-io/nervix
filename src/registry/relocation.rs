@@ -4,11 +4,14 @@
 //! those selections belong to, and which further groups their preferences capture. Owners,
 //! replicas, cluster liveness, and execution belong to the command that consumes this plan.
 
+use std::fmt;
+
 use ahash::{HashMap, HashMapExt, HashSet, HashSetExt};
+use error_stack::Report;
 use meticulous::OptionExt as _;
 use nervix_models::{
-    Model, NodeRef, PlacementName, PlacementPolicy, RelocationMember, RelocationPreferenceOverride,
-    RelocationPreferenceStrategy, RelocationSelection,
+    DomainName, Model, ModelName, NodeRef, PlacementName, PlacementPolicy, RelocationMember,
+    RelocationPreferenceOverride, RelocationPreferenceStrategy, RelocationSelection,
 };
 use strum::AsRefStr;
 use thiserror::Error;
@@ -70,25 +73,54 @@ pub(crate) struct RelocationUnit {
     pub(crate) preferences: Vec<RelocationPreference>,
 }
 
+/// Why the graph refuses to build a relocation unit. Each variant names the runtime nodes the
+/// operator has to correct.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub(crate) enum RelocationPlanError {
-    #[error("{kind} '{name}' does not exist in domain '{domain}'")]
-    UnknownRuntimeNode {
-        domain: String,
-        kind: &'static str,
-        name: String,
-    },
+    #[error(
+        "{kind} '{name}' does not exist in domain '{domain}'",
+        kind = .member.kind.as_str(),
+        name = .member.identifier.as_str()
+    )]
+    UnknownRuntimeNode { domain: DomainName, member: NodeRef },
     #[error(
         "ingestor '{name}' cannot be relocated: server-listener ingestors execute on every \
-         cluster node"
+         cluster node",
+        name = .ingestor.as_str()
     )]
-    ServerListenerIngestor { name: String },
+    ServerListenerIngestor { ingestor: ModelName },
     #[error("relocation covers no runtime node: no FROM/TO pair is connected")]
     DisconnectedCorridor,
-    #[error("conflicting preference strategies for hard group [{members}]")]
-    ConflictingGroupStrategies { members: String },
-    #[error("{kind} '{name}' is not part of the relocation")]
-    OverrideOutsideUnit { kind: &'static str, name: String },
+    #[error(
+        "conflicting preference strategies for hard group [{members}]",
+        members = HardGroupMembers(.members)
+    )]
+    ConflictingGroupStrategies { members: Vec<NodeRef> },
+    #[error(
+        "{kind} '{name}' is not part of the relocation",
+        kind = .member.kind.as_str(),
+        name = .member.identifier.as_str()
+    )]
+    OverrideOutsideUnit { member: NodeRef },
+}
+
+/// Renders the members of one hard group as `kind name` entries separated by commas.
+struct HardGroupMembers<'a>(&'a [NodeRef]);
+
+impl fmt::Display for HardGroupMembers<'_> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let mut separator = "";
+        for member in self.0 {
+            write!(
+                formatter,
+                "{separator}{} {}",
+                member.kind.as_str(),
+                member.identifier
+            )?;
+            separator = ", ";
+        }
+        Ok(())
+    }
 }
 
 /// A hard group while the unit is being built.
@@ -104,12 +136,12 @@ impl ActiveGraph {
     /// currently active graph.
     pub(crate) fn relocation_unit(
         &self,
-        domain: &nervix_models::DomainName,
+        domain: &DomainName,
         default_policy: PlacementPolicy,
         selection: &RelocationSelection,
         default_strategy: RelocationPreferenceStrategy,
         overrides: &[RelocationPreferenceOverride],
-    ) -> Result<RelocationUnit, RelocationPlanError> {
+    ) -> error_stack::Result<RelocationUnit, RelocationPlanError> {
         // Every named runtime node is resolved before anything is planned, so a misspelled member
         // reports that it does not exist rather than a consequence of leaving it out.
         let mut resolved_overrides = Vec::with_capacity(overrides.len());
@@ -120,7 +152,7 @@ impl ActiveGraph {
                 .entry(key.clone())
                 .or_insert_with(Vec::new)
                 .push(override_clause.strategy);
-            resolved_overrides.push((key, &override_clause.member));
+            resolved_overrides.push(key);
         }
 
         let (selected, coverage) = match selection {
@@ -181,14 +213,13 @@ impl ActiveGraph {
             &mut group_by_member,
         )?;
 
-        if let Some((_, member)) = resolved_overrides
+        if let Some(member) = resolved_overrides
             .iter()
-            .find(|(key, _)| !group_by_member.contains_key(key))
+            .find(|key| !group_by_member.contains_key(*key))
         {
-            return Err(RelocationPlanError::OverrideOutsideUnit {
-                kind: member.kind.as_str(),
-                name: member.name.as_str().to_string(),
-            });
+            return Err(Report::new(RelocationPlanError::OverrideOutsideUnit {
+                member: member.clone(),
+            }));
         }
 
         let selected_set = &selected_set;
@@ -226,23 +257,22 @@ impl ActiveGraph {
     /// Resolves one kind-qualified member against the active graph.
     fn resolve_relocation_member(
         &self,
-        domain: &nervix_models::DomainName,
+        domain: &DomainName,
         member: &RelocationMember,
-    ) -> Result<NodeRef, RelocationPlanError> {
+    ) -> error_stack::Result<NodeRef, RelocationPlanError> {
         let key = NodeRef::new(member.kind, member.name.clone());
         let Some(node) = self.node(member.kind, &member.name) else {
-            return Err(RelocationPlanError::UnknownRuntimeNode {
-                domain: domain.as_str().to_string(),
-                kind: member.kind.as_str(),
-                name: member.name.as_str().to_string(),
-            });
+            return Err(Report::new(RelocationPlanError::UnknownRuntimeNode {
+                domain: domain.clone(),
+                member: key,
+            }));
         };
         if let Model::Ingestor(_) = node.config.as_ref()
             && node.config.executes_on_every_cluster_node()
         {
-            return Err(RelocationPlanError::ServerListenerIngestor {
-                name: member.name.as_str().to_string(),
-            });
+            return Err(Report::new(RelocationPlanError::ServerListenerIngestor {
+                ingestor: member.name.clone(),
+            }));
         }
         Ok(key)
     }
@@ -250,10 +280,10 @@ impl ActiveGraph {
     /// Covers each `FROM`/`TO` pair with the path-gated coverage placement rules use.
     fn relocation_corridor_selection(
         &self,
-        domain: &nervix_models::DomainName,
+        domain: &DomainName,
         from: &[RelocationMember],
         to: &[RelocationMember],
-    ) -> Result<(Vec<NodeRef>, Vec<RelocationCoverage>), RelocationPlanError> {
+    ) -> error_stack::Result<(Vec<NodeRef>, Vec<RelocationCoverage>), RelocationPlanError> {
         let mut selected = Vec::new();
         let mut coverage = Vec::new();
         let mut connected_pairs = 0usize;
@@ -285,7 +315,7 @@ impl ActiveGraph {
             }
         }
         if connected_pairs == 0 {
-            return Err(RelocationPlanError::DisconnectedCorridor);
+            return Err(Report::new(RelocationPlanError::DisconnectedCorridor));
         }
         selected.sort();
         Ok((selected, coverage))
@@ -300,7 +330,7 @@ impl ActiveGraph {
         default_strategy: RelocationPreferenceStrategy,
         groups: &mut Vec<UnitGroup>,
         group_by_member: &mut HashMap<NodeRef, usize>,
-    ) -> Result<(), RelocationPlanError> {
+    ) -> error_stack::Result<(), RelocationPlanError> {
         loop {
             let mut candidates = Vec::new();
             let mut seen = HashSet::new();
@@ -400,7 +430,7 @@ impl ActiveGraph {
         members: &[NodeRef],
         override_by_key: &HashMap<NodeRef, Vec<RelocationPreferenceStrategy>>,
         default_strategy: RelocationPreferenceStrategy,
-    ) -> Result<RelocationPreferenceStrategy, RelocationPlanError> {
+    ) -> error_stack::Result<RelocationPreferenceStrategy, RelocationPlanError> {
         let mut chosen = None;
         for member in members {
             for strategy in override_by_key.get(member).into_iter().flatten() {
@@ -408,15 +438,11 @@ impl ActiveGraph {
                     None => chosen = Some(*strategy),
                     Some(existing) if existing == *strategy => {}
                     Some(_) => {
-                        return Err(RelocationPlanError::ConflictingGroupStrategies {
-                            members: members
-                                .iter()
-                                .map(|member| {
-                                    format!("{} {}", member.kind.as_str(), member.identifier)
-                                })
-                                .collect::<Vec<_>>()
-                                .join(", "),
-                        });
+                        return Err(Report::new(
+                            RelocationPlanError::ConflictingGroupStrategies {
+                                members: members.to_vec(),
+                            },
+                        ));
                     }
                 }
             }

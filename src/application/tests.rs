@@ -11,6 +11,7 @@ use session_service::{current_word_prefix, word_start};
 use test_fixtures::{test_addr, test_args, try_test_args};
 
 use super::*;
+use crate::memory_pressure::MemoryPressureConfigError;
 
 fn encode_hex(bytes: &[u8]) -> String {
     let mut out = String::with_capacity(bytes.len() * 2);
@@ -203,6 +204,29 @@ fn server_args_reject_incomplete_memory_pressure_watermarks() {
 
     let error = Application::try_from(args).expect_err("low watermark is required");
     assert!(format!("{error:?}").contains("memory high watermark requires"));
+}
+
+#[test]
+fn server_args_reject_a_low_watermark_at_or_above_the_high_one() {
+    let args = test_args(&[
+        "--memory-high-watermark",
+        "1MiB",
+        "--memory-low-watermark",
+        "2MiB",
+    ]);
+
+    let error = Application::try_from(args).expect_err("the low watermark must be lower");
+    assert!(matches!(
+        error.current_context(),
+        AppError::InvalidMemoryPressureConfig
+    ));
+    assert_eq!(
+        error.downcast_ref::<MemoryPressureConfigError>(),
+        Some(&MemoryPressureConfigError::LowWatermarkNotBelowHigh {
+            low: ubyte::ByteUnit::Mebibyte(2),
+            high: ubyte::ByteUnit::Mebibyte(1),
+        })
+    );
 }
 
 #[test]

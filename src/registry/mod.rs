@@ -88,9 +88,7 @@ pub(crate) use processor_plan::{
 #[cfg(test)]
 pub(crate) use processor_plan::{PlannedModel, branched_node_specs_from_models};
 pub(crate) use reingestor_plan::{ReingestorInputPlan, ReingestorPlan};
-pub(crate) use relocation::{
-    RelocationCoverage, RelocationMemberReason, RelocationPlanError, RelocationUnit,
-};
+pub(crate) use relocation::{RelocationCoverage, RelocationMemberReason, RelocationUnit};
 pub(crate) use resource_plan::{
     GeneratorExecutionPlan, GeneratorRoutePlan, LookupResourcePlan, ResourceExecutionPlans,
     WasmModulePlan, udf_program,

@@ -124,6 +124,32 @@ impl ApplicationStartup {
         Ok(consensus)
     }
 
+    /// Installs every domain's stored schedule on the runtime before the node serves. A failure
+    /// keeps the registry's or the runtime's report beneath the step that failed, which names the
+    /// domain once one is being installed.
+    pub(in crate::application) async fn apply_stored_runtime_changes(
+        &self,
+    ) -> error_stack::Result<(), AppError> {
+        let startup_runtime_changes = self
+            .registry
+            .startup_runtime_changes()
+            .change_context(AppError::ReadStartupRuntimeChanges)?;
+        for changes in startup_runtime_changes {
+            let revision = changes.execution_revision().change_context_lazy(|| {
+                AppError::PlanStartupRuntime {
+                    domain: changes.domain.clone(),
+                }
+            })?;
+            self.runtime
+                .apply_changes(&changes.domain, revision)
+                .await
+                .change_context_lazy(|| AppError::ApplyStartupRuntime {
+                    domain: changes.domain.clone(),
+                })?;
+        }
+        Ok(())
+    }
+
     pub(in crate::application) async fn terminate(self) {
         self.runtime.shutdown().await;
         if let Some(consensus) = &self.consensus {
@@ -274,9 +300,9 @@ impl TryFrom<Args> for Application {
                     .check_interval(args.memory_pressure_check_interval)
                     .resume_jitter(args.memory_pressure_resume_jitter)
                     .build();
-                config.validate().map_err(|error| {
-                    Report::new(AppError::InvalidMemoryPressureConfig).attach_printable(error)
-                })?;
+                config
+                    .validate()
+                    .change_context(AppError::InvalidMemoryPressureConfig)?;
                 Some(config)
             }
             (Some(_), None) => {
