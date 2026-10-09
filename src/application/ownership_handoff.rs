@@ -945,9 +945,10 @@ impl SessionServiceImpl {
             .collect::<Vec<_>>();
         let started_at = nervix_primitives::time::Instant::now();
         let phase_budget = self.inner.runtime.entity_gate_deadline();
-        let preparation_budget = shutdown_budget
-            .map(|budget| (budget - budget / 5).min(phase_budget))
-            .unwrap_or(phase_budget);
+        let preparation_budget = match shutdown_budget {
+            Some(budget) => (budget - budget / 5).min(phase_budget),
+            None => phase_budget,
+        };
         let preparation_deadline = started_at.checked_add(preparation_budget).ok_or_else(|| {
             Report::new(DomainAlterError::EntityGate {
                 domain: domain.clone(),
