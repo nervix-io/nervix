@@ -808,14 +808,25 @@ six later duplicates of milestone keys passed in each run, every record after re
 profile default, the guest counts started again from zero, and on the earlier image the open window
 rows were lost as well.
 
-One-node `cluster-restart` lost the four window rows open at the milestone in four of the five runs
-whose fault met them open, two on each image. On start the window processor took its branch
-lifecycle snapshot, then failed to restore it with `domain 'chaos_baseline' is not instantiated`,
-so both branches began new windows. [Cluster Chaos 43: Restore a restarted window owner's open
-windows instead of discarding its branch lifecycle snapshot](https://app.clickup.com/t/86bcdg30p)
-owns the fix. In each of those runs the deduplicator, the materialized relay and the WASM guest
-kept their state. The three-node owner in `cc08-s3-restart` logged the same warning for one branch,
-yet its rows survived.
+A restarted window owner restores the windows open at the milestone. These runs used the official
+AMD64 image
+`ghcr.io/nervix-io/nervix@sha256:a40e5a4eb13c34d0fbd18ed686cb8de8b1edd9b54bc11b39b6afde4507fe66ec`,
+built by the nightly Docker build of main `3351e1d5`. That is the first official image to include the
+processor branch restore of `365b707b`. The worker ran Ubuntu 26.04.1, Linux 7.0.0-38-generic,
+Docker 29.9.0 with Compose 5.6.0, 16 CPUs and 62 GB of memory. Four runs shared it at once.
+One-node `stateful --fault cluster-restart` passed five of five runs. Three-node `stateful` passed with
+`cluster-restart`, `owner-crash`, `owner-pause` and `owner-partition`; node-3 owned the stateful
+entities with one replica. Every window verdict found the four rows open at the milestone and
+aggregated all four exactly once after the fault. Eight runs lost only record 104, classified as
+volatile, and the `owner-partition` run lost no row. No row was replayed. The deduplicator,
+materialized relay and WASM guest verdicts passed in every run.
+
+No node logged `failed to restore processor branches` or `failed to restore processor branch lru
+snapshot`, so no restore was even delayed. One-node stateful output advanced again 48.1 to 52.6
+seconds after the restart, and three-node output advanced again 49.1 seconds after it. Right after the
+three-node restart, node-2 and node-3 each logged a single round of replica catch-up warnings: node-1
+did not yet serve the branch lifecycle and branch-aggregated state of its ingestors. All six warnings
+fell within the same 0.2 seconds and did not recur.
 
 On the earlier image three-node `domain-time` passed every fault and the run without one. In each
 rotation the third round, nervix-3, removed the authority. When that voter crashed, the survivors'
@@ -1104,9 +1115,9 @@ no longer matched its digest; and seed 42 with a five-minute duration failed as 
 the 1,546-second plan its required coverage needed. The refactored fault and link primitives kept the
 single scenarios passing: `degraded-links --profile combined`, `stateful` with `owner-pause`,
 `owner-crash` and `cluster-restart`, and `domain-time --fault voter-stop` each passed twice, except that
-the second three-node `stateful` `cluster-restart` lost the window rows open at the milestone with the
-restore error Cluster Chaos 43 owns, while its deduplicator, materialized relay and WASM guest kept their
-state.
+the second three-node `stateful` `cluster-restart` lost the window rows open at the milestone, because
+that image's processors failed to restore their branches. Its deduplicator, materialized relay and WASM
+guest kept their state. The stateful qualification above shows the restore on a later official image.
 
 The controller resolves the supplied reference to its immutable local image ID before Compose
 starts. If the reference is not local, it performs one bounded pull and then resolves the result.
