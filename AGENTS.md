@@ -1119,9 +1119,17 @@ build and the existing tests, and nothing in it changes behavior.
   namespace. `just test-typed-ratchet` and `just qualify-typed-ratchet-cache` qualify diagnostics,
   current paired API doctests and completion/cache behavior. Tooling Bolero targets use the shared
   inventory and current ordinary/fuzz CI policy; native coverage uses matching LLVM tools.
-- Every Rust build, check, lint, and test invocation must use the repository-configured kache
-  compiler wrapper. Never unset, clear, or override `RUSTC_WRAPPER`, including for diagnostics,
-  benchmarks, cache troubleshooting, or retries.
+- Every Rust build, check, lint, and test invocation must run through kache, the compiler wrapper
+  the host configures with `RUSTC_WRAPPER` or Cargo's `build.rustc-wrapper`. The requirement has
+  no exceptions: diagnostics, benchmarks, cache troubleshooting, and retries run through it too.
+  Kache serves compiled artifacts from the host's shared cache. A build that bypasses it compiles
+  from source what the cache already holds, which puts extra CPU load on the host, and writes a
+  private full copy of every artifact, so its target directory consumes a lot of disk space.
+  Never unset, clear, or override `RUSTC_WRAPPER`, `CARGO_BUILD_RUSTC_WRAPPER`, or
+  `build.rustc-wrapper`, and never run Cargo with a `HOME` or `CARGO_HOME` that hides the host's
+  Cargo configuration: the host may set the wrapper there, and an empty `RUSTC_WRAPPER` switches
+  it off. When kache is unavailable or a build fails under it, stop and report that instead of
+  building without it.
 - Use `just validate-skill` to validate the public NSPL skill against the Agent Skills publication
   checks. CI runs this validation but does not create GitHub releases; the public default branch is
   the install source.
