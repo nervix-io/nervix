@@ -22,6 +22,7 @@ use crate::common::{
     raw_session::{TestDownload, TestDownloadEnd, download_backup},
 };
 
+mod branch_keys;
 mod branch_state;
 mod console;
 mod delivery;

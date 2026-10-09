@@ -65,7 +65,13 @@ rounding past an `F32` field's range, an Avro float or a producer's Arrow batch 
 an infinity in, and every JSON rendering of a record, such as a materialized report, a hash map
 answer or a hash map key, writes one as the string `NaN`, `Infinity` or `-Infinity`. A key read from a stored checkpoint or a peer that holds one
 fails with `BranchKeyError::NonFiniteFloat`, and one holding a datetime that is not RFC 3339 text
-fails with `BranchKeyError::RemoteFieldValue`; both name the field. Materialized-state reads use the
+fails with `BranchKeyError::RemoteFieldValue`; both name the field. A concrete key is a key of a
+branch schema when it holds exactly the schema's fields, each with a value of exactly its declared
+type; a missing or undeclared field and a value of another type are distinct
+`BranchKeyShapeError` states naming the field, never a value converted to fit. The subscription
+Row encoder holds each key to its relay's branch with that one check, and a restore holds every
+archived key it installs to the branching its restored entity declares before staging it; see
+[Backup And Restore](./backup-and-restore.md#archived-branch-keys). Materialized-state reads use the
 incoming concrete branch, or the actual unbranched state, and reporting keeps the optional branch
 identity until the display boundary. The structural ASCII graph projection is domain-free; a
 serialized graph retains its real typed domain.
@@ -482,7 +488,8 @@ generation fields are validated at their wire boundary, including the valid gene
 Materialized archive descriptors and row identities are archive-owned types. Their raw schema
 fingerprint binds once to the archived start generation for native storage, independently of the
 installation authority; payload values stay exact-schema Arrow columns. Typed branch identities,
-watermark ordering, counts and framing are validated before those values reach the runtime.
+watermark ordering, counts and framing are validated before those values reach the runtime, and
+each record identity's branch must be a key of the restored relay's branching.
 
 A materialized capture carries either current rows or stored checkpoints as distinct variants.
 A captured materialized checkpoint is a selected immutable source. Opening it produces a reader

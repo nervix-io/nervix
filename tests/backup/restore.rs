@@ -1444,7 +1444,11 @@ fn when_restore_conversion_is_released(world: &mut ScenarioWorld, domain: String
 }
 
 /// Writes `copy` to `target` with `sections` in place of the sections of the same path.
-fn write_archive(copy: &ArchiveCopy, replaced: &BTreeMap<String, Vec<u8>>, target: &Path) {
+pub(super) fn write_archive(
+    copy: &ArchiveCopy,
+    replaced: &BTreeMap<String, Vec<u8>>,
+    target: &Path,
+) {
     let mut manifest = copy
         .manifest
         .clone()
