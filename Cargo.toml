@@ -773,6 +773,9 @@ x509-parser = "0.18"
 zeromq = "0.4"
 
 [patch.crates-io]
+# rkyv 0.8.18 leaks partial allocations when semantic deserialization refuses
+# an element. Pin its 0.8.18 ownership fix until https://github.com/rkyv/rkyv/pull/710 ships.
+rkyv = { git = "https://github.com/glebpom/rkyv.git", rev = "868fa9c3c268560ad3459ddb95e271c7167bc097" }
 # The archived 2.0.1 release triggers Rust's future-incompatibility lint; this is the focused fix
 # from https://github.com/GnomedDev/proc-macro-error-2/pull/14.
 proc-macro-error2 = { git = "https://github.com/fgardt/proc-macro-error-2.git", rev = "53ff94b61c678593158db1a3d50269c6f0de0db7" }
