@@ -3,9 +3,10 @@
 //!
 //! Layer: edges.
 //!
-//! - **Owns.** Turning the subcommand's arguments into a `BACKUP` statement, delivering its archive
-//!   to a file or to standard output, keeping an archive whose delivery to standard output failed,
-//!   reporting the backup as text or JSON, and describing a local archive as text or JSON.
+//! - **Owns.** Turning the subcommand's arguments into a `BACKUP` statement, refusing a standard
+//!   output that would discard the archive, delivering the archive to a file or to standard output,
+//!   keeping an archive whose delivery to standard output failed, reporting the backup as text or
+//!   JSON, and describing a local archive as text or JSON.
 //! - **Depends on.** The client core, which runs the backup and downloads its archive, the archive
 //!   format's reader, and the vocabulary.
 //! - **Must not know.** How the server assembles or retains an archive.
@@ -13,13 +14,18 @@
 //! A backup whose archive goes to standard output keeps standard output for the archive alone, so
 //! its report goes to standard error. Every failure ends the process with a nonzero status.
 //!
-//! An archive bound for standard output is downloaded into a staging directory first, and its
-//! complete download releases the server's copy. A delivery that fails after that keeps the staged
-//! archive, the only copy left, and reports it under the backup's execution reference.
+//! A standard output that would discard the archive is refused before the backup is taken. An
+//! archive bound for any other standard output is downloaded into a staging directory first, and
+//! its complete download releases the server's copy. A delivery that fails after that keeps the
+//! staged archive, the only copy left, and reports it under the backup's execution reference.
 
 use std::{
     fs::File,
     io::{self, BufReader, Read as _, Write},
+    os::{
+        fd::AsFd as _,
+        unix::fs::{FileTypeExt as _, MetadataExt as _},
+    },
     path::{Path, PathBuf},
     time::Duration,
 };
@@ -79,7 +85,10 @@ enum ArchiveOutput {
     /// A file the operator named.
     File(PathBuf),
     /// Standard output, through a staging directory the download is verified in first.
-    Stdout { staged: StagedArchive },
+    Stdout {
+        staged: StagedArchive,
+        stdout: StandardOutput,
+    },
 }
 
 /// The name of the archive in its staging directory.
@@ -89,20 +98,26 @@ const STAGED_ARCHIVE: &str = "backup.nvxb";
 /// default capacity.
 const DELIVERY_CHUNK_BYTES: usize = 64 * 1024;
 
+/// The device that keeps nothing written to it.
+const NULL_DEVICE: &str = "/dev/null";
+
 impl ArchiveOutput {
     fn from_argument(output: &str) -> Result<Self, StackReport<ClientError>> {
         if output != "-" {
             return Ok(Self::File(PathBuf::from(output)));
         }
+        // Standard output is taken before the archive is staged, so a standard output that would
+        // discard the archive leaves nothing behind.
+        let stdout = StandardOutput::take()?;
         let staged = StagedArchive::create()?;
-        Ok(Self::Stdout { staged })
+        Ok(Self::Stdout { staged, stdout })
     }
 
     /// The file the download writes.
     fn download_path(&self) -> PathBuf {
         match self {
             Self::File(path) => path.clone(),
-            Self::Stdout { staged } => staged.path(),
+            Self::Stdout { staged, .. } => staged.path(),
         }
     }
 
@@ -115,11 +130,59 @@ impl ArchiveOutput {
     }
 
     /// Hands a downloaded archive to its output. A file is already in place.
-    fn deliver(self, stdout: &mut impl Write) -> Result<(), DeliveryFailure> {
+    fn deliver(self) -> Result<(), DeliveryFailure> {
         match self {
             Self::File(_) => Ok(()),
-            Self::Stdout { staged } => staged.deliver(stdout),
+            Self::Stdout { staged, mut stdout } => staged.deliver(&mut stdout),
         }
+    }
+}
+
+/// Standard output as the destination of an archive: a descriptor of the CLI's own for the file
+/// standard output has open, written without a buffer, so every write reaches the operating system
+/// and every failure is reported.
+///
+/// The null device takes every byte and keeps none, so an archive written to it would be lost
+/// while every write succeeds. A process started with standard output closed finds the null device
+/// there, because the standard library opens it before `main`, and cannot tell that from a
+/// redirection to it. Standard output that is the null device therefore cannot receive an archive.
+struct StandardOutput {
+    file: File,
+}
+
+impl StandardOutput {
+    /// Takes standard output for an archive, unless it would discard it.
+    fn take() -> Result<Self, StackReport<ClientError>> {
+        let descriptor = io::stdout()
+            .as_fd()
+            .try_clone_to_owned()
+            .change_context(ClientError::InspectStandardOutput)?;
+        Self::receiving(File::from(descriptor))
+    }
+
+    /// `file` as the destination of an archive, unless it is the null device.
+    fn receiving(file: File) -> Result<Self, StackReport<ClientError>> {
+        let opened = file
+            .metadata()
+            .change_context(ClientError::InspectStandardOutput)?;
+        let null_device = std::fs::metadata(NULL_DEVICE)
+            .change_context(ClientError::IdentifyNullDevice)
+            .change_context(ClientError::InspectStandardOutput)?;
+        // A device is identified by its type and number, whichever node opened it.
+        if opened.file_type().is_char_device() && opened.rdev() == null_device.rdev() {
+            return Err(StackReport::new(ClientError::DiscardingStandardOutput));
+        }
+        Ok(Self { file })
+    }
+}
+
+impl Write for StandardOutput {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        self.file.write(bytes)
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        self.file.flush()
     }
 }
 
@@ -164,9 +227,8 @@ impl StagedArchive {
         }
     }
 
-    /// Copies the staged archive to `stdout` and flushes it. Standard output is line-buffered, so
-    /// without the flush the archive's last partial line would wait for the flush at exit, which
-    /// reports no failure.
+    /// Copies the staged archive to `stdout` and flushes it, so a writer that buffers hands on the
+    /// archive's last bytes, and reports their failure, before the delivery counts as complete.
     fn copy(&self, stdout: &mut impl Write) -> Result<(), StackReport<ClientError>> {
         let mut file = File::open(self.path()).change_context(ClientError::ReadStagedArchive)?;
         let mut chunk = vec![0_u8; DELIVERY_CHUNK_BYTES];
@@ -254,8 +316,9 @@ pub(super) async fn run_backup(request: BackupRequest) -> Result<(), StackReport
     let output = match ArchiveOutput::from_argument(&request.output) {
         Ok(output) => output,
         Err(error) => {
-            // Only an archive bound for standard output is staged, so the report goes to standard
-            // error. No backup was admitted yet, so it names no execution reference.
+            // Only an archive bound for standard output takes standard output and is staged, so the
+            // report goes to standard error. No backup was admitted yet, so it names no execution
+            // reference.
             report_failure(
                 ReportStream::Stderr,
                 format,
@@ -378,7 +441,7 @@ pub(super) async fn run_backup(request: BackupRequest) -> Result<(), StackReport
         ArchiveOutput::File(path) => path.display().to_string(),
         ArchiveOutput::Stdout { .. } => "-".to_string(),
     };
-    let delivered = output.deliver(&mut io::stdout().lock());
+    let delivered = output.deliver();
     if let Err(failure) = delivered {
         report.print(&failure.rendered(format, execution.reference()));
         return Err(failure.into_report());
@@ -1039,6 +1102,8 @@ fn resource_version_json(version: &DescribedResourceVersion) -> Value {
 
 #[cfg(test)]
 mod tests {
+    use std::os::fd::OwnedFd;
+
     use meticulous::ResultExt as _;
 
     use super::*;
@@ -1144,8 +1209,8 @@ mod tests {
     fn a_complete_delivery_flushes_every_byte_and_removes_the_staging_directory() {
         let staged = staged(ARCHIVE);
         let staging = staging_directory(&staged);
-        // Standard output is line-buffered, so a delivery that did not flush would leave the
-        // archive's last partial line in the buffer.
+        // A writer that buffers by line holds the archive's last partial line until it is
+        // flushed, so a delivery that did not flush would leave it in the buffer.
         let mut stdout = io::LineWriter::new(Vec::new());
         staged
             .deliver(&mut stdout)
@@ -1158,11 +1223,64 @@ mod tests {
     fn an_archive_written_to_a_file_is_already_delivered() {
         let output = ArchiveOutput::from_argument("cluster.nvxb")
             .assured("an archive bound for a file needs no staging");
-        let mut stdout = Vec::new();
         output
-            .deliver(&mut stdout)
+            .deliver()
             .assured("the download already wrote the file");
-        assert!(stdout.is_empty(), "standard output stays untouched");
+    }
+
+    #[test]
+    fn the_null_device_cannot_receive_an_archive() {
+        let null_device = File::options()
+            .write(true)
+            .open(NULL_DEVICE)
+            .assured("a Unix system has a null device");
+        match StandardOutput::receiving(null_device) {
+            Err(report) => assert!(
+                matches!(
+                    report.current_context(),
+                    ClientError::DiscardingStandardOutput
+                ),
+                "{report:?}"
+            ),
+            Ok(_) => panic!("the null device would discard the archive"),
+        }
+    }
+
+    #[test]
+    fn a_file_on_standard_output_receives_the_whole_archive() {
+        let directory = tempfile::tempdir()
+            .assured("the test creates a directory in the system's temporary directory");
+        let received = directory.path().join("received.nvxb");
+        let file = File::create(&received).assured("the test creates the file it delivers to");
+        let stdout = StandardOutput::receiving(file).assured("a file keeps what it receives");
+        let staged = staged(ARCHIVE);
+        let staging = staging_directory(&staged);
+        ArchiveOutput::Stdout { staged, stdout }
+            .deliver()
+            .assured("a file takes the whole archive");
+        let delivered = std::fs::read(&received).assured("the test reads the delivered archive");
+        assert_eq!(delivered.as_slice(), ARCHIVE);
+        assert!(!staging.exists(), "a delivered archive leaves no staging");
+    }
+
+    #[test]
+    fn a_pipe_on_standard_output_receives_the_whole_archive() {
+        let (mut reader, writer) = io::pipe().assured("the test creates a pipe");
+        let stdout = StandardOutput::receiving(File::from(OwnedFd::from(writer)))
+            .assured("a pipe hands what it receives to its reader");
+        // The archive is smaller than a pipe's capacity, so the whole delivery fits in the pipe
+        // before the test reads it, and delivering it closes the pipe's only writer.
+        ArchiveOutput::Stdout {
+            staged: staged(ARCHIVE),
+            stdout,
+        }
+        .deliver()
+        .assured("a pipe takes the whole archive");
+        let mut delivered = Vec::new();
+        reader
+            .read_to_end(&mut delivered)
+            .assured("the test reads the pipe to its end");
+        assert_eq!(delivered.as_slice(), ARCHIVE);
     }
 
     #[test]

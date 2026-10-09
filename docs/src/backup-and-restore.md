@@ -154,25 +154,32 @@ its staging directory could not be removed.
 
 ### Delivering To Standard Output
 
-With `--output -`, the CLI downloads the archive into a staging directory of its own under the
-system's temporary directory (`TMPDIR` on Unix), as a file only its owner may read and write
-(`0600`), and verifies it there before it copies a byte to standard output. The complete download
-releases the server's copy of the archive, so from then on the staged archive is the only one.
+With `--output -`, the CLI first makes sure standard output can receive the archive. It then
+downloads the archive into a staging directory of its own under the system's temporary directory
+(`TMPDIR` on Unix), as a file only its owner may read and write (`0600`), and verifies it there
+before it copies a byte to standard output. The complete download releases the server's copy of
+the archive, so from then on the staged archive is the only one. The copy goes through a
+descriptor of the CLI's own for standard output, without a buffer, so every write reaches the
+operating system and every failed write is reported.
 
+- A standard output that would discard the archive fails with `WRITE_FAILED` before anything is
+  staged or sent: the null device, which accepts every byte and keeps none, and a standard output
+  that was closed when the CLI started, where the CLI finds the null device instead. The CLI cannot
+  tell the two apart and refuses both. No backup was taken, so the report names no execution
+  reference; give the CLI a pipe, a file or a terminal and run the backup again.
 - A staging directory that cannot be created fails with `WRITE_FAILED` before the backup is sent.
   No backup was admitted, so the report names no execution reference.
 - A delivery that fails after the download fails with `WRITE_FAILED`: a reader that closed the
-  pipe, a full disk behind a redirection, a flush that failed, or a staged archive that could not
-  be read. A closed pipe does not end the CLI through `SIGPIPE`; its failed write is reported like
-  any other. Standard output may hold part of the archive, and the report goes to standard error as
-  always. The CLI keeps the verified archive in its staging directory, and the report names it
-  together with the backup's execution reference: JSON adds `error.execution_reference` and
-  `error.archive`, and text ends with
-  `recover backup REFERENCE from its verified archive at 'PATH'; ...`.
-- When every byte reached standard output and was flushed but the staging directory could not be
-  removed, the command fails with `CLEANUP_FAILED` and names the execution reference and, in JSON,
-  the directory as `error.staging`. The archive on standard output is complete; remove the
-  directory, which may still hold a copy of it.
+  pipe, a full disk behind a redirection, or a staged archive that could not be read. A closed pipe
+  does not end the CLI through `SIGPIPE`; its failed write is reported like any other. Standard
+  output may hold part of the archive, and the report goes to standard error as always. The CLI
+  keeps the verified archive in its staging directory, and the report names it together with the
+  backup's execution reference: JSON adds `error.execution_reference` and `error.archive`, and
+  text ends with `recover backup REFERENCE from its verified archive at 'PATH'; ...`.
+- When every byte reached standard output but the staging directory could not be removed, the
+  command fails with `CLEANUP_FAILED` and names the execution reference and, in JSON, the directory
+  as `error.staging`. The archive on standard output is complete; remove the directory, which may
+  still hold a copy of it.
 
 Recover an undelivered archive by delivering the kept file, for example by moving it to a working
 destination. It is the archive the backup assembled, with the summary and cuts its execution

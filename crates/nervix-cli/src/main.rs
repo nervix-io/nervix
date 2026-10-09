@@ -296,6 +296,15 @@ enum ClientError {
     BackupArguments { reason: &'static str },
     #[error("the backup failed: {message}")]
     BackupFailed { message: String },
+    #[error("standard output could not be inspected for the backup archive")]
+    InspectStandardOutput,
+    #[error("the null device could not be identified")]
+    IdentifyNullDevice,
+    #[error(
+        "standard output was closed when the CLI started or is the null device, either of which \
+         would discard the backup archive"
+    )]
+    DiscardingStandardOutput,
     #[error("the backup archive could not be staged for standard output")]
     StageArchive,
     #[error("the backup archive could not be read from its private staging file")]
