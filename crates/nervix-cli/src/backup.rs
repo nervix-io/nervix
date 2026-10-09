@@ -79,7 +79,7 @@ enum ArchiveOutput {
     /// A file the operator named.
     File(PathBuf),
     /// Standard output, through a staging directory the download is verified in first.
-    Stdout { staging: tempfile::TempDir },
+    Stdout { staged: StagedArchive },
 }
 
 /// The name of the archive in its staging directory.
@@ -94,15 +94,15 @@ impl ArchiveOutput {
         if output != "-" {
             return Ok(Self::File(PathBuf::from(output)));
         }
-        let staging = tempfile::tempdir().change_context(ClientError::StageArchive)?;
-        Ok(Self::Stdout { staging })
+        let staged = StagedArchive::create()?;
+        Ok(Self::Stdout { staged })
     }
 
     /// The file the download writes.
     fn download_path(&self) -> PathBuf {
         match self {
             Self::File(path) => path.clone(),
-            Self::Stdout { staging } => staging.path().join(STAGED_ARCHIVE),
+            Self::Stdout { staged } => staged.path(),
         }
     }
 
@@ -115,24 +115,47 @@ impl ArchiveOutput {
     }
 
     /// Hands a downloaded archive to its output. A file is already in place.
+    fn deliver(self, stdout: &mut impl Write) -> Result<(), DeliveryFailure> {
+        match self {
+            Self::File(_) => Ok(()),
+            Self::Stdout { staged } => staged.deliver(stdout),
+        }
+    }
+}
+
+/// An archive bound for standard output, downloaded into a private staging directory and verified
+/// there before a byte of it is delivered.
+struct StagedArchive {
+    staging: tempfile::TempDir,
+}
+
+impl StagedArchive {
+    fn create() -> Result<Self, StackReport<ClientError>> {
+        let staging = tempfile::tempdir().change_context(ClientError::StageArchive)?;
+        Ok(Self { staging })
+    }
+
+    /// The file the archive is staged in.
+    fn path(&self) -> PathBuf {
+        self.staging.path().join(STAGED_ARCHIVE)
+    }
+
+    /// Copies the staged archive to `stdout`.
     ///
     /// The archive's complete download released the server's copy, so the staged archive is the
     /// only one left: a delivery that does not flush every byte to `stdout` keeps it, and only a
     /// complete delivery removes its staging directory.
     fn deliver(self, stdout: &mut impl Write) -> Result<(), DeliveryFailure> {
-        let Self::Stdout { staging } = self else {
-            return Ok(());
-        };
-        let copied = copy_staged_archive(&staging.path().join(STAGED_ARCHIVE), stdout);
+        let copied = self.copy(stdout);
         if let Err(report) = copied {
-            let kept = staging.keep();
+            let kept = self.staging.keep();
             return Err(DeliveryFailure::NotDelivered {
                 archive: kept.join(STAGED_ARCHIVE),
                 report,
             });
         }
-        let directory = staging.path().to_path_buf();
-        match staging.close() {
+        let directory = self.staging.path().to_path_buf();
+        match self.staging.close() {
             Ok(()) => Ok(()),
             Err(error) => Err(DeliveryFailure::StagingRemains {
                 staging: directory,
@@ -140,31 +163,30 @@ impl ArchiveOutput {
             }),
         }
     }
-}
 
-/// Copies the staged `archive` to `stdout` and flushes it. Standard output is line-buffered, so
-/// without the flush the archive's last partial line would wait for the flush at exit, which
-/// reports no failure.
-fn copy_staged_archive(
-    archive: &Path,
-    stdout: &mut impl Write,
-) -> Result<(), StackReport<ClientError>> {
-    let mut file = File::open(archive).change_context(ClientError::ReadStagedArchive)?;
-    let mut chunk = vec![0_u8; DELIVERY_CHUNK_BYTES];
-    loop {
-        let read = match file.read(&mut chunk) {
-            Ok(0) => break,
-            Ok(read) => read,
-            Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
-            Err(error) => {
-                return Err(StackReport::new(error).change_context(ClientError::ReadStagedArchive));
-            }
-        };
-        stdout
-            .write_all(&chunk[..read])
-            .change_context(ClientError::WriteArchive)?;
+    /// Copies the staged archive to `stdout` and flushes it. Standard output is line-buffered, so
+    /// without the flush the archive's last partial line would wait for the flush at exit, which
+    /// reports no failure.
+    fn copy(&self, stdout: &mut impl Write) -> Result<(), StackReport<ClientError>> {
+        let mut file = File::open(self.path()).change_context(ClientError::ReadStagedArchive)?;
+        let mut chunk = vec![0_u8; DELIVERY_CHUNK_BYTES];
+        loop {
+            let read = match file.read(&mut chunk) {
+                Ok(0) => break,
+                Ok(read) => read,
+                Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+                Err(error) => {
+                    return Err(
+                        StackReport::new(error).change_context(ClientError::ReadStagedArchive)
+                    );
+                }
+            };
+            stdout
+                .write_all(&chunk[..read])
+                .change_context(ClientError::WriteArchive)?;
+        }
+        stdout.flush().change_context(ClientError::WriteArchive)
     }
-    stdout.flush().change_context(ClientError::WriteArchive)
 }
 
 /// Why a downloaded archive did not reach standard output cleanly.
@@ -1032,17 +1054,17 @@ mod tests {
 
     /// An archive bound for standard output whose staged copy holds `bytes`, as a complete
     /// download leaves it.
-    fn staged(bytes: &[u8]) -> ArchiveOutput {
-        let output = ArchiveOutput::from_argument("-")
+    fn staged(bytes: &[u8]) -> StagedArchive {
+        let staged = StagedArchive::create()
             .assured("the test stages its archive in the system's temporary directory");
-        std::fs::write(output.download_path(), bytes).assured("the test writes the staged archive");
-        output
+        std::fs::write(staged.path(), bytes).assured("the test writes the staged archive");
+        staged
     }
 
     /// The directory an archive bound for standard output is staged in.
-    fn staging_directory(output: &ArchiveOutput) -> PathBuf {
-        output
-            .download_path()
+    fn staging_directory(staged: &StagedArchive) -> PathBuf {
+        staged
+            .path()
             .parent()
             .assured("a staged archive lies in its staging directory")
             .to_path_buf()
@@ -1120,12 +1142,12 @@ mod tests {
 
     #[test]
     fn a_complete_delivery_flushes_every_byte_and_removes_the_staging_directory() {
-        let output = staged(ARCHIVE);
-        let staging = staging_directory(&output);
+        let staged = staged(ARCHIVE);
+        let staging = staging_directory(&staged);
         // Standard output is line-buffered, so a delivery that did not flush would leave the
         // archive's last partial line in the buffer.
         let mut stdout = io::LineWriter::new(Vec::new());
-        output
+        staged
             .deliver(&mut stdout)
             .assured("a reader that reads everything takes the whole archive");
         assert_eq!(stdout.get_ref().as_slice(), ARCHIVE);
@@ -1145,13 +1167,13 @@ mod tests {
 
     #[test]
     fn a_closed_standard_output_keeps_the_verified_archive() {
-        let output = staged(ARCHIVE);
-        let staged_archive = output.download_path();
+        let staged = staged(ARCHIVE);
+        let staged_archive = staged.path();
         let mut stdout = ClosingReader {
             received: Vec::new(),
             capacity: 5,
         };
-        match output.deliver(&mut stdout) {
+        match staged.deliver(&mut stdout) {
             Err(DeliveryFailure::NotDelivered { archive, report }) => {
                 assert!(
                     matches!(report.current_context(), ClientError::WriteArchive),
@@ -1169,11 +1191,11 @@ mod tests {
 
     #[test]
     fn a_failed_flush_keeps_the_verified_archive() {
-        let output = staged(ARCHIVE);
+        let staged = staged(ARCHIVE);
         let mut stdout = FailingFlush {
             received: Vec::new(),
         };
-        match output.deliver(&mut stdout) {
+        match staged.deliver(&mut stdout) {
             Err(DeliveryFailure::NotDelivered { archive, report }) => {
                 assert!(
                     matches!(report.current_context(), ClientError::WriteArchive),
@@ -1189,11 +1211,11 @@ mod tests {
 
     #[test]
     fn a_missing_staged_archive_is_a_read_failure_that_keeps_its_staging() {
-        let output = staged(ARCHIVE);
-        let staged_archive = output.download_path();
+        let staged = staged(ARCHIVE);
+        let staged_archive = staged.path();
         std::fs::remove_file(&staged_archive).assured("the test removes the staged archive");
         let mut stdout = Vec::new();
-        match output.deliver(&mut stdout) {
+        match staged.deliver(&mut stdout) {
             Err(DeliveryFailure::NotDelivered { archive, report }) => {
                 assert!(
                     matches!(report.current_context(), ClientError::ReadStagedArchive),
@@ -1210,13 +1232,13 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn a_staged_archive_that_fails_to_read_is_a_read_failure() {
-        let output = ArchiveOutput::from_argument("-")
+        let staged = StagedArchive::create()
             .assured("the test stages its archive in the system's temporary directory");
         // A directory opens for reading on Unix, and every read of it fails.
-        std::fs::create_dir(output.download_path())
+        std::fs::create_dir(staged.path())
             .assured("the test puts a directory where the archive belongs");
         let mut stdout = Vec::new();
-        match output.deliver(&mut stdout) {
+        match staged.deliver(&mut stdout) {
             Err(DeliveryFailure::NotDelivered { archive, report }) => {
                 assert!(
                     matches!(report.current_context(), ClientError::ReadStagedArchive),
@@ -1232,15 +1254,15 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn a_staging_directory_that_cannot_be_removed_follows_a_complete_delivery() {
-        let output = staged(ARCHIVE);
-        let staging = staging_directory(&output);
+        let staged = staged(ARCHIVE);
+        let staging = staging_directory(&staged);
         // Unix keeps an open file readable after its directory is removed, so standard output
         // receives every byte and only the removal of the staging directory fails.
         let mut stdout = RemovingStaging {
             staging: staging.clone(),
             received: Vec::new(),
         };
-        match output.deliver(&mut stdout) {
+        match staged.deliver(&mut stdout) {
             Err(DeliveryFailure::StagingRemains {
                 staging: remaining,
                 report,
