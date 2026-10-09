@@ -347,6 +347,12 @@ current archive, or incomplete or inconsistent current state fails with `invalid
 storage; recreate the node's stored state`. Recreate the node's stored state and let it rejoin from
 the cluster.
 
+Archive shape and nesting are validated before a durable batch or state record is read back.
+Vocabulary values inside a valid shape are checked as each value is read. If one is refused after
+earlier list or fixed-array elements or a boxed or shared value have been read, the archive reader
+drops those values and releases their allocation. The whole record fails; no partial record is
+installed or retained during replay, catch-up, or snapshot installation.
+
 Recovery accepts exactly the records the state writer stores. Each state record sits under the
 canonical encoding of its key, so a key spelled another way, or one with bytes after its encoding,
 is refused instead of being read as a neighbouring record. A record whose value names its own
