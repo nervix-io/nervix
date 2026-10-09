@@ -23,7 +23,6 @@ use error_stack::{Report, ResultExt as _};
 use nervix_client_wire::{
     BackupArchiveStart, BackupDownloadFailure, BackupDownloadFrame, BackupDownloadMessage,
     BackupDownloadRequest, BackupDownloadRequestFrame, EncodedFrame, LeaderRedirect, VerifiedFrame,
-    WireDecodeError, WireEncodeError,
     grpc::{ClientBackupDownloadCodec, DOWNLOAD_BACKUP_PATH},
 };
 use nervix_models::{ArchiveDigest, BackupArchiveSummary, CommandExecutionReference};
@@ -73,12 +72,12 @@ pub enum BackupDownloadError {
     /// The server sent frames in an order the download protocol does not allow.
     #[error("the server sent download frames out of order")]
     OutOfOrder,
-    /// A frame did not decode.
+    /// A frame did not decode. The decoder's report is beneath it.
     #[error("a download frame does not decode")]
-    InvalidFrame(#[source] WireDecodeError),
-    /// The download request did not encode.
+    InvalidFrame,
+    /// The download request did not encode. The encoder's report is beneath it.
     #[error("the download request does not encode")]
-    EncodeRequest(#[source] WireEncodeError),
+    EncodeRequest,
     /// The archive the server sent is not the one the backup reported.
     #[error("the downloaded archive does not match the backup's summary")]
     Mismatch,
@@ -107,8 +106,8 @@ impl BackupDownloadError {
             | Self::RedirectLoop
             | Self::SessionLost
             | Self::OutOfOrder
-            | Self::InvalidFrame(_)
-            | Self::EncodeRequest(_)
+            | Self::InvalidFrame
+            | Self::EncodeRequest
             | Self::Mismatch
             | Self::Write { .. } => false,
         }
@@ -166,10 +165,7 @@ impl Client {
         .encode(&SESSION_LIMITS);
         let request = match encoded {
             Ok(request) => request,
-            Err(report) => {
-                let context = BackupDownloadError::EncodeRequest(report.current_context().clone());
-                return Err(report.change_context(context));
-            }
+            Err(report) => return Err(report.change_context(BackupDownloadError::EncodeRequest)),
         };
         for attempt in 0..Self::MAX_LEADER_ROUTING_ATTEMPTS {
             nervix_primitives::task::consume_budget().await;
@@ -325,10 +321,7 @@ impl Client {
         };
         match BackupDownloadMessage::decode(&frame) {
             Ok(message) => Ok(message),
-            Err(report) => {
-                let context = BackupDownloadError::InvalidFrame(report.current_context().clone());
-                Err(report.change_context(context))
-            }
+            Err(report) => Err(report.change_context(BackupDownloadError::InvalidFrame)),
         }
     }
 }

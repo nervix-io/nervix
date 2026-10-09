@@ -24,7 +24,9 @@ use nervix_connector::{
     SinkRecord, SinkRecordId, SinkStartResult, client_tls_paths, optional_client_config_value,
     read_tls_file,
 };
-use nervix_dns::{DnsLookupError, DnsLookupFailure, DnsResolver, HOOK_LOOKUP_BUDGET};
+use nervix_dns::{
+    DnsLookupError, DnsLookupFailure, DnsLookupReport, DnsResolver, HOOK_LOOKUP_BUDGET,
+};
 use nervix_models::{ChannelName, ClientConfigEntry, ClientPoolBounds};
 use nervix_primitives::sync::Arc;
 use redis::{
@@ -58,7 +60,7 @@ impl AsyncDNSResolver for RedisDns {
                         Box::new(addresses.into_iter());
                     Ok(iter)
                 }
-                Err(error) => Err(io::Error::other(error.current_context().clone()).into()),
+                Err(error) => Err(io::Error::other(DnsLookupReport::from(error)).into()),
             }
         })
     }

@@ -550,3 +550,55 @@ async fn a_connection_closes_on_the_first_malformed_frame() {
     assert!(error.contains::<SyslogFrameError>());
     assert_eq!(delivered, frames(&[b"tls!"]));
 }
+
+#[test]
+fn listener_connection_and_frame_failures_name_their_cause_once() {
+    let refused = || std::io::Error::other("the peer reset the connection");
+    let parse_failure = "4294967296000000000000"
+        .parse::<usize>()
+        .expect_err("the count exceeds every usize");
+    let rendered = [
+        format!(
+            "{:#}",
+            Report::new(SyslogListenerError::Bind {
+                transport: "UDP",
+                addr: "127.0.0.1:5514".to_string(),
+                source: refused(),
+            })
+        ),
+        format!(
+            "{:#}",
+            Report::new(SyslogListenerError::UdpReceive { source: refused() })
+        ),
+        format!(
+            "{:#}",
+            Report::new(SyslogListenerError::StreamAccept { source: refused() })
+        ),
+        format!(
+            "{:#}",
+            Report::new(SyslogConnectionError::TlsHandshake { source: refused() })
+        ),
+        format!(
+            "{:#}",
+            Report::new(SyslogConnectionError::StreamRead { source: refused() })
+        ),
+        format!(
+            "{:#}",
+            Report::new(SyslogFrameError::InvalidOctetCount {
+                source: parse_failure.clone(),
+            })
+        ),
+    ];
+
+    assert_eq!(
+        rendered,
+        [
+            "Syslog UDP bind '127.0.0.1:5514' failed: the peer reset the connection".to_string(),
+            "Syslog UDP listener receive failed: the peer reset the connection".to_string(),
+            "Syslog stream listener accept failed: the peer reset the connection".to_string(),
+            "TLS handshake failed: the peer reset the connection".to_string(),
+            "stream read failed: the peer reset the connection".to_string(),
+            format!("malformed Syslog octet count: {parse_failure}"),
+        ]
+    );
+}

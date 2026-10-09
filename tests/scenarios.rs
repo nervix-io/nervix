@@ -16611,6 +16611,34 @@ async fn then_last_command_error_contains(world: &mut ScenarioWorld, #[step] ste
     );
 }
 
+/// The message a failed command returned, without the diagnostics the harness appends after it,
+/// whose messages repeat it.
+fn command_error_message(error: &str) -> &str {
+    let message = error.strip_prefix("command failed: ").unwrap_or(error);
+    match message.split_once("\ndiagnostics: ") {
+        Some((message, _diagnostics)) => message,
+        None => message,
+    }
+}
+
+#[then(expr = "the last command error message contains {string} exactly once")]
+async fn then_last_command_error_message_contains_exactly_once(
+    world: &mut ScenarioWorld,
+    expected: String,
+) {
+    let expected = expand_placeholders(world, &expected);
+    let error = world
+        .last_command_error
+        .as_deref()
+        .expect("a command error must exist before assertion");
+    let message = command_error_message(error);
+    assert_eq!(
+        message.matches(&expected).count(),
+        1,
+        "expected command error message fragment {expected:?} exactly once, got: {message}"
+    );
+}
+
 #[then(expr = "selector {string} contains {string} exactly {int} times")]
 async fn then_selector_contains_text_exactly_times(
     world: &mut ScenarioWorld,

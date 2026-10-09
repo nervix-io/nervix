@@ -2,13 +2,15 @@
 //!
 //! Layer: engines and infrastructure.
 //!
-//! - **Owns.** The closed set of lookup failures, their classification from Hickory's errors, and
-//!   finding a failed lookup among the causes of a client library's error.
-//! - **Depends on.** Hickory's error types.
+//! - **Owns.** The closed set of lookup failures, their classification from Hickory's errors, the
+//!   report a failed lookup reaches a client library's DNS hook in, and finding a failed lookup
+//!   among the causes of a client library's error.
+//! - **Depends on.** Hickory's error types and `error-stack`.
 //! - **Must not know.** Whether a caller retries, or what it would have connected to.
 
-use std::error::Error;
+use std::{error::Error, fmt};
 
+use error_stack::Report;
 use hickory_resolver::net::{DnsError, NetError};
 use nervix_primitives::sync::StdArc;
 use strum::AsRefStr;
@@ -81,8 +83,30 @@ impl DnsLookupError {
     /// The failed lookup among `error` and its causes, if resolving a host is what failed.
     ///
     /// A client library that resolved through one of the resolver's DNS hooks keeps the lookup's
-    /// own failure among the causes of the connection error it reports, however many errors of its
-    /// own it wraps around it.
+    /// report among the causes of the connection error it reports, however many errors of its own
+    /// it wraps around it.
+    pub fn find_in<'a>(error: &'a (dyn Error + 'static)) -> Option<&'a Self> {
+        let carried = DnsLookupReport::find_in(error)?;
+        Some(carried.report().current_context())
+    }
+}
+
+/// A failed lookup as a client library's DNS hook hands it to the library.
+///
+/// Every hook's trait takes a standard error, and a [`Report`] is not one. This keeps the lookup's
+/// whole report through that boundary, with what the name servers answered and the budget that ran
+/// out, rather than a copy of its top context. It shows the lookup's message, its alternate form
+/// shows the report's chain, and its `Debug` form shows every frame with its attachments.
+#[derive(Debug)]
+pub struct DnsLookupReport(Report<DnsLookupError>);
+
+impl DnsLookupReport {
+    /// The report of the lookup that failed.
+    pub fn report(&self) -> &Report<DnsLookupError> {
+        &self.0
+    }
+
+    /// The failed lookup's report among `error` and its causes, if resolving a host is what failed.
     pub fn find_in<'a>(error: &'a (dyn Error + 'static)) -> Option<&'a Self> {
         let mut current = Some(error);
         while let Some(cause) = current {
@@ -97,7 +121,8 @@ impl DnsLookupError {
                 return Some(lookup);
             }
             // `std::io::Error::other` holds its custom error in `get_ref`, but its `source`
-            // implementation does not expose that value. Redis's DNS hook crosses this boundary.
+            // implementation does not expose that value. The MQTT and Redis DNS hooks cross this
+            // boundary.
             if let Some(inner) = cause
                 .downcast_ref::<std::io::Error>()
                 .and_then(std::io::Error::get_ref)
@@ -111,20 +136,67 @@ impl DnsLookupError {
     }
 }
 
+impl From<Report<DnsLookupError>> for DnsLookupReport {
+    fn from(report: Report<DnsLookupError>) -> Self {
+        Self(report)
+    }
+}
+
+impl fmt::Display for DnsLookupReport {
+    /// The report's own rendering: the lookup's message, or with `{:#}` the chain beneath it.
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt::Display::fmt(&self.0, formatter)
+    }
+}
+
+/// The report's frames are not standard errors, so nothing is offered as a source; the lookup is
+/// found through [`DnsLookupError::find_in`] instead, and naming it as a source would print its
+/// message twice where a library renders a chain.
+impl Error for DnsLookupReport {}
+
 #[cfg(test)]
 mod tests {
+    use error_stack::{AttachmentKind, FrameKind};
+
     use super::*;
+
+    fn name_not_found() -> Report<DnsLookupError> {
+        Report::new(DnsLookupError::new(
+            "redis.nervix.test",
+            DnsLookupFailure::NameNotFound,
+        ))
+        .attach_printable("the name servers answered NXDOMAIN")
+    }
 
     #[test]
     fn a_lookup_wrapped_by_an_io_error_remains_discoverable() {
-        let io = std::io::Error::other(DnsLookupError::new(
-            "redis.nervix.test",
-            DnsLookupFailure::NameNotFound,
-        ));
+        let io = std::io::Error::other(DnsLookupReport::from(name_not_found()));
         let arc: StdArc<dyn Error + Send + Sync> = StdArc::new(io);
         let lookup = DnsLookupError::find_in(&arc)
             .expect("the typed cause survives Redis's Arc and io::Error wrappers");
         assert_eq!(lookup.name(), "redis.nervix.test");
         assert_eq!(lookup.failure(), DnsLookupFailure::NameNotFound);
+    }
+
+    #[test]
+    fn the_report_keeps_what_the_lookup_recorded_through_a_hook() {
+        let io = std::io::Error::other(DnsLookupReport::from(name_not_found()));
+
+        let carried = DnsLookupReport::find_in(&io).expect("the hook's report is a cause");
+        let mut attachments = Vec::new();
+        for frame in carried.report().frames() {
+            if let FrameKind::Attachment(AttachmentKind::Printable(attachment)) = frame.kind() {
+                attachments.push(attachment.to_string());
+            }
+        }
+        assert_eq!(attachments, ["the name servers answered NXDOMAIN"]);
+        assert_eq!(
+            carried.to_string(),
+            "resolving 'redis.nervix.test' failed: the name does not exist"
+        );
+        assert!(
+            format!("{carried:?}").contains("the name servers answered NXDOMAIN"),
+            "{carried:?}"
+        );
     }
 }

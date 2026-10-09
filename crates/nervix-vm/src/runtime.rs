@@ -6228,6 +6228,18 @@ mod tests {
             RuntimeError::CollectionArrow { operation: "VEC concat", source }
                 if source.to_string().contains("child arrays cannot interleave")
         ));
+        assert_eq!(
+            format!("{arrow:#}"),
+            "VEC concat Arrow kernel failed: Compute error: child arrays cannot interleave"
+        );
+        let text = Report::new(RuntimeError::TextKernel {
+            operation: "like",
+            source: ArrowError::ComputeError("pattern is too long".to_string()),
+        });
+        assert_eq!(
+            format!("{text:#}"),
+            "like Arrow string kernel failed: Compute error: pattern is too long"
+        );
         let capacity = collection_too_large("concat", CollectionLimit::VectorOffsets);
         assert!(matches!(
             capacity.current_context(),
