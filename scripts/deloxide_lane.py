@@ -3,8 +3,10 @@
 """Run the Deloxide diagnostic lane, qualify its supervision, replay its invocations, and hold
 the owners of tracked locks to their applicability records.
 
-`just test-deloxide` and `just test-deloxide-order` run `run deloxide` and `run deloxide-order` after
-their prerequisites. The inventory in `tests/deloxide-inventory.toml` registers every workload a
+`just test-deloxide`, `just test-deloxide-order` and `just test-deloxide-stress` run `run deloxide`,
+`run deloxide-order` and `run deloxide-stress` after their prerequisites. The stress selection is the
+active-only build with Deloxide's bounded scheduling disturbance compiled in, so the same lifecycle
+workloads meet orders of nested acquisitions an idle schedule rarely takes. The inventory in `tests/deloxide-inventory.toml` registers every workload a
 selection runs: the disposable-process probes of `nervix-deadlock`, the diagnostic owner tests of the
 server library, and the tagged scenarios the scenario binary runs on diagnostic nodes. For each
 invocation the lane builds its executable for the selection, discovers what the build and the
@@ -114,7 +116,7 @@ TRACKED_RECEIVERS = frozenset({
     "nervix_primitives::sync::blocking::tracked::Mutex",
     "nervix_primitives::sync::blocking::tracked::RwLock",
 })
-DIAGNOSTIC_FEATURES = frozenset({"deloxide", "deloxide-order"})
+DIAGNOSTIC_FEATURES = frozenset({"deloxide", "deloxide-order", "deloxide-stress"})
 _WORKLOAD_ID = re.compile(r"^[a-z]+(?:\.[a-z0-9]+(?:-[a-z0-9]+)*)+$")
 _LISTED_TEST = re.compile(r"^(?P<name>\S+): test$")
 _SCENARIO_SUMMARY = re.compile(r"^(?P<total>\d+) scenarios? \((?P<parts>[^)]*)\)$")
@@ -199,6 +201,8 @@ class Invocation:
     artifacts: bool
     # How many scenarios the scenario binary runs at once, whatever the machine's CPU count.
     concurrency: int | None
+    # The selections that run this invocation: every selection unless the inventory names some.
+    selections: frozenset[str]
 
     def cargo_target(self) -> list[str]:
         if self.target == "lib":
@@ -333,7 +337,7 @@ def parse_inventory(text: str) -> Inventory:
         _known_keys(
             table,
             {"id", "kind", "package", "target", "features", "bound_seconds", "evidence", "ignored",
-             "marker", "inputs", "tags", "driver", "artifacts", "concurrency"},
+             "marker", "inputs", "tags", "driver", "artifacts", "concurrency", "selections"},
             where,
         )
         try:
@@ -381,6 +385,15 @@ def parse_inventory(text: str) -> Inventory:
                 raise LaneError(f"{where}: one process per test needs the `marker` its tests carry")
             if marker is not None and any(marker not in test for test in ignored):
                 raise LaneError(f"{where}: an ignored test does not carry its marker")
+        if "selections" in table:
+            invocation_selections = _strings(table, "selections", where)
+            if not invocation_selections:
+                raise LaneError(f"{where}: `selections` names no selection")
+            for name in invocation_selections:
+                if name not in selections:
+                    raise LaneError(f"{where} names the unknown selection `{name}`")
+        else:
+            invocation_selections = tuple(selections)
         invocations[invocation_id] = Invocation(
             id=invocation_id,
             kind=kind,
@@ -396,6 +409,7 @@ def parse_inventory(text: str) -> Inventory:
             driver=driver,
             artifacts=artifacts,
             concurrency=concurrency,
+            selections=frozenset(invocation_selections),
         )
         if kind is Kind.CUCUMBER and invocations[invocation_id].bound_seconds <= bounds.suite_teardown_reserve_seconds:
             raise LaneError(f"{where}: its bound leaves the suite no budget after its teardown reserve")
@@ -407,6 +421,8 @@ def parse_inventory(text: str) -> Inventory:
             f"the inventory needs the `{PROBES}` libtest invocation that retains its children's "
             "artifacts; the supervision qualification starts its cases from it"
         )
+    if probes.selections != frozenset(selections):
+        raise LaneError(f"invocation {PROBES} runs in every selection; the qualification needs it there")
 
     workloads: dict[str, Workload] = {}
     tests_seen: set[tuple[str, str]] = set()
@@ -434,6 +450,8 @@ def parse_inventory(text: str) -> Inventory:
         for name in names:
             if name not in selections:
                 raise LaneError(f"{where} names the unknown selection `{name}`")
+            if name not in invocation.selections:
+                raise LaneError(f"{where} names `{name}`, which does not run invocation {invocation.id}")
         test = table.get("test")
         feature = table.get("feature")
         scenario = table.get("scenario")
@@ -459,8 +477,9 @@ def parse_inventory(text: str) -> Inventory:
             if order_tags and (len(order_tags) != examples or len(set(order_tags)) != len(order_tags)
                                or any(not re.fullmatch(r"@[A-Za-z_][A-Za-z_0-9]*", tag) for tag in order_tags)):
                 raise LaneError(f"{where}: `order_tags` must be distinct example tags, one per run")
-            # Tags select the same scenarios in every build, so every selection runs them.
-            if set(names) != set(selections):
+            # Tags select the same scenarios in every build, so every selection of the invocation
+            # runs them.
+            if set(names) != invocation.selections:
                 raise LaneError(f"{where}: a scenario runs in every selection its tags reach")
             if (invocation.id, feature, scenario) in scenarios_seen:
                 raise LaneError(f"{where}: the scenario is registered twice")
@@ -478,7 +497,7 @@ def parse_inventory(text: str) -> Inventory:
             order_tags=order_tags,
         )
     for invocation in invocations.values():
-        for name in selections:
+        for name in sorted(invocation.selections):
             if not any(
                 workload.invocation == invocation.id and name in workload.selections
                 for workload in workloads.values()
@@ -1523,6 +1542,8 @@ class Lane:
                 )
             onnx = self.onnx_runtime()
             for invocation in self.inventory.invocations.values():
+                if self.selection.name not in invocation.selections:
+                    continue
                 self.run_invocation(invocation, onnx)
             if self.totals.observations == 0:
                 raise LaneFailed(Failure.EVIDENCE_MISSING, "no process recorded evidence")
@@ -2082,16 +2103,16 @@ class Case:
     signal: int | None = None
 
 
-BOTH_SELECTIONS = frozenset(DIAGNOSTIC_FEATURES)
+EVERY_SELECTION = frozenset(DIAGNOSTIC_FEATURES)
 CASES = (
-    Case("two_mutexes_in_one_order", BOTH_SELECTIONS, None, 120, Expected(readable=True)),
-    Case("two_mutexes_in_opposite_orders", BOTH_SELECTIONS, Failure.ACTIVE_DEADLOCK, 120,
+    Case("two_mutexes_in_one_order", EVERY_SELECTION, None, 120, Expected(readable=True)),
+    Case("two_mutexes_in_opposite_orders", EVERY_SELECTION, Failure.ACTIVE_DEADLOCK, 120,
          Expected(readable=True, active=1)),
-    Case("evidence_that_cannot_be_recorded", BOTH_SELECTIONS, Failure.DIAGNOSTIC_FAILURE, 120,
+    Case("evidence_that_cannot_be_recorded", EVERY_SELECTION, Failure.DIAGNOSTIC_FAILURE, 120,
          Expected(readable=False)),
-    Case("an_untracked_wait_that_never_ends", BOTH_SELECTIONS, Failure.TIMED_OUT, 15,
+    Case("an_untracked_wait_that_never_ends", EVERY_SELECTION, Failure.TIMED_OUT, 15,
          Expected(readable=True)),
-    Case("an_aborted_process", BOTH_SELECTIONS, Failure.SIGNALED, 120, Expected(readable=True),
+    Case("an_aborted_process", EVERY_SELECTION, Failure.SIGNALED, 120, Expected(readable=True),
          signal=signal.SIGABRT),
     Case("serial_inversion", frozenset({"deloxide-order"}), Failure.EVIDENCE_UNQUALIFIED, 120,
          Expected(readable=True, unreviewed=True)),

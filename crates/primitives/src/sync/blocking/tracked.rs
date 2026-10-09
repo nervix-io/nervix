@@ -8,6 +8,12 @@
 //! held/requested witnesses and actual guard lifetimes, including immediate acquisitions, through
 //! the primitive diagnostic owner.
 //!
+//! A `deloxide-stress` build has no immediate path of its own: Deloxide applies its scheduling
+//! disturbance only inside its blocking acquisitions, which disable its own optimistic fast paths
+//! for mutexes and writers, so a blocking acquisition here goes straight to Deloxide's and records
+//! where it may wait first. Deloxide keeps its reader fast path, so a shared acquisition that finds
+//! no writer is not delayed.
+//!
 //! The surface is the part of `parking_lot`'s that keeps its meaning over Deloxide. A lock is never
 //! poisoned, and `Debug` never waits: it tries the lock and prints `<locked>` when it is held, as
 //! `parking_lot` does. Deloxide's locks hold sized values, construct at run time and have no timed,
@@ -41,6 +47,10 @@ use meticulous::OptionExt as _;
 use crate::deadlock::{
     Access, LockKind, detector::require_installed, order_history::HeldLease, registry::Registry,
 };
+
+/// Whether a blocking acquisition first tries the lock without Deloxide's blocking path. A
+/// `deloxide-stress` build never does, so every acquisition meets Deloxide's disturbance.
+const TRIES_IMMEDIATELY: bool = !cfg!(feature = "deloxide-stress");
 
 /// Keeps a lock's construction site in the registry for as long as the lock lives.
 struct Registered {
@@ -137,7 +147,12 @@ impl<T> Mutex<T> {
         registry
             .history
             .attempting(registry, self.inner.id(), Access::Exclusive, at);
-        let inner = match self.inner.try_lock() {
+        let immediate = if TRIES_IMMEDIATELY {
+            self.inner.try_lock()
+        } else {
+            None
+        };
+        let inner = match immediate {
             Some(inner) => inner,
             None => {
                 let waiting = registry.waiting(self.inner.id(), Access::Exclusive, at);
@@ -268,7 +283,12 @@ impl<T> RwLock<T> {
         registry
             .history
             .attempting(registry, self.inner.id(), Access::Shared, at);
-        if let Some(inner) = self.inner.try_read() {
+        let immediate = if TRIES_IMMEDIATELY {
+            self.inner.try_read()
+        } else {
+            None
+        };
+        if let Some(inner) = immediate {
             return RwLockReadGuard {
                 inner,
                 _held: registry
@@ -296,7 +316,12 @@ impl<T> RwLock<T> {
         registry
             .history
             .attempting(registry, self.inner.id(), Access::Exclusive, at);
-        if let Some(inner) = self.inner.try_write() {
+        let immediate = if TRIES_IMMEDIATELY {
+            self.inner.try_write()
+        } else {
+            None
+        };
+        if let Some(inner) = immediate {
             return RwLockWriteGuard {
                 inner,
                 _held: registry

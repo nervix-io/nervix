@@ -68,7 +68,7 @@ struct SelfWaitHandoff {
 
 /// A failed mutex acquisition by a thread with its own live exclusive guard is an active cycle
 /// of one. The upstream common-lock filter cannot establish infeasibility for one participant:
-/// when order instrumentation records its held set, it filters this real cycle. The boundary
+/// when order instrumentation or stress records its held set, it filters this real cycle. The boundary
 /// reports the actual guard/failed-acquisition pair through its ordinary findings handoff.
 pub(crate) fn report_self_wait(registry: &Registry, lock: usize) {
     if !registry.history.holds_exclusively(lock) {
@@ -166,7 +166,7 @@ pub fn install_selected<Sink>(
 where
     Sink: FnMut(Finding) + Send + 'static,
 {
-    if selection != DiagnosticSelection::for_build(!selection.checks_order()) {
+    if !selection.is_available() {
         return Err(Report::new(InstallError::SelectionUnavailable {
             selection,
         }));
@@ -231,7 +231,14 @@ where
     } else {
         detector.no_lock_order_checking()
     };
-    #[cfg(not(feature = "deloxide-order"))]
+    #[cfg(feature = "deloxide-stress")]
+    let detector = match selection.stress() {
+        Some(configuration) => detector
+            .with_random_stress()
+            .with_stress_config(vendor_stress(configuration)),
+        None => detector,
+    };
+    #[cfg(not(any(feature = "deloxide-order", feature = "deloxide-stress")))]
     let _selection = selection;
     let started = detector.start();
     // The banner ends with a line break, which flushed it; whatever remains goes to `/dev/null`.
@@ -241,6 +248,23 @@ where
     match started {
         Ok(()) => Ok(()),
         Err(error) => Err(Report::new(InstallError::Start).attach_printable(format!("{error:#}"))),
+    }
+}
+
+/// Deloxide's own form of a stress configuration. The probability is exact: a count of millionths
+/// is at most a million, which a double represents exactly, and the delays are whole microseconds.
+#[cfg(feature = "deloxide-stress")]
+fn vendor_stress(configuration: super::StressConfiguration) -> deloxide::StressConfig {
+    let per_million = f64::from(configuration.preemptions_per_million().get());
+    let scale = f64::from(super::PREEMPTION_SCALE);
+    let micros = |delay: std::time::Duration| {
+        u64::try_from(delay.as_micros()).assured("a stress delay is at most two milliseconds")
+    };
+    deloxide::StressConfig {
+        preemption_probability: per_million / scale,
+        min_delay_us: micros(configuration.shortest_delay()),
+        max_delay_us: micros(configuration.longest_delay()),
+        preempt_after_release: configuration.yield_after_release(),
     }
 }
 

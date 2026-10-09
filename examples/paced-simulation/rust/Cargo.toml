@@ -20,6 +20,11 @@ deloxide-order = [
   "nervix-deadlock/deloxide-order",
   "nervix-primitives/deloxide-order",
 ]
+deloxide-stress = [
+  "deloxide",
+  "nervix-deadlock/deloxide-stress",
+  "nervix-primitives/deloxide-stress",
+]
 
 [lib]
 path = "src/lib.rs"

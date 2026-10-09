@@ -115,7 +115,7 @@ class InventoryTests(unittest.TestCase):
              "test-primitives-shuttle", "test-primitives-loom", "test-primitives-turmoil",
              "test-primitives-deloxide", "nspl-completion-walk", "test-shuttle", "test-loom",
              "test-deadlock-evidence-order", "test-deadlock-report", "test-deloxide",
-             "test-deloxide-order"],
+             "test-deloxide-order", "test-deloxide-stress"],
         )
         for producer in native_coverage.PRODUCERS:
             self.assertEqual(producer.rerun(), f"just coverage-native-extras {producer.name}")
@@ -202,7 +202,7 @@ class InventoryTests(unittest.TestCase):
                     selected_job = job_section(workflow, "loom")
                 elif producer.diagnostic_lane:
                     lane = job_section(workflow, "deloxide")
-                    self.assertRegex(lane, r"selection: \[deloxide, deloxide-order\]")
+                    self.assertRegex(lane, r"selection: \[deloxide, deloxide-order, deloxide-stress\]")
                     self.assertIn("SELECTION: ${{ matrix.selection }}", lane)
                     self.assertRegex(lane, r"tool: [^\n]*\bcargo-llvm-cov\b")
                     self.assertIn('just coverage-native-extras "test-${SELECTION}"\n', lane)
