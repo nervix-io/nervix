@@ -29,8 +29,10 @@ use nervix_models::{
 use thiserror::Error;
 
 use crate::{
-    runtime::BranchKey,
-    runtime_schema::{RuntimeValue, RuntimeValueKind, parse_as_type_from_arrow},
+    runtime::{BranchKey, BranchKeyShapeError},
+    runtime_schema::{
+        RuntimeValue, RuntimeValueKind, RuntimeValueTypeError, parse_as_type_from_arrow,
+    },
 };
 
 /// The declared branch schema needed to describe concrete branch keys to a client.
@@ -684,26 +686,47 @@ impl<'a> ValidatedBranchKey<'a> {
             }
             (Some(schema), Some(key)) => (schema, key),
         };
-        if key.field_count() != schema.fields().len() {
-            return Err(Report::new(
-                SubscriptionRowEncodingError::BranchFieldCount {
+        if let Err(error) = key.conform_to(schema.fields()) {
+            let context = match error.current_context() {
+                BranchKeyShapeError::MissingField { field } => {
+                    SubscriptionRowEncodingError::MissingBranchField {
+                        row,
+                        field: field.clone(),
+                    }
+                }
+                BranchKeyShapeError::UndeclaredField { .. } => {
+                    SubscriptionRowEncodingError::BranchFieldCount {
+                        row,
+                        expected: schema.fields().len(),
+                        actual: key.field_count(),
+                    }
+                }
+                BranchKeyShapeError::FieldValue {
+                    field,
+                    mismatch: RuntimeValueTypeError::Type { expected, actual },
+                } => SubscriptionRowEncodingError::BranchFieldType {
                     row,
-                    expected: schema.fields().len(),
-                    actual: key.field_count(),
+                    field: field.clone(),
+                    expected: expected.clone(),
+                    actual: *actual,
                 },
-            ));
+                BranchKeyShapeError::FieldValue {
+                    field,
+                    mismatch: RuntimeValueTypeError::ArrayLength { expected, actual },
+                } => SubscriptionRowEncodingError::BranchArrayLength {
+                    row,
+                    field: field.clone(),
+                    expected: *expected,
+                    actual: *actual,
+                },
+            };
+            return Err(error.change_context(context));
         }
         let mut cells = Vec::with_capacity(schema.fields().len());
         for field in schema.fields() {
-            let Some(value) = key.field_value(field.name.as_str()) else {
-                return Err(Report::new(
-                    SubscriptionRowEncodingError::MissingBranchField {
-                        row,
-                        field: field.name.clone(),
-                    },
-                ));
-            };
-            validate_runtime_value(row, &field.name, value, &field.ty)?;
+            let value = key
+                .field_value(field.name.as_str())
+                .verified("the key was checked above to hold every field of its branch schema");
             cells.push(BranchCell { field, value });
         }
         Ok(Self::Branched(BranchCells { cells }))
@@ -730,57 +753,6 @@ impl BranchCells<'_> {
 struct BranchCell<'a> {
     field: &'a SchemaField,
     value: &'a RuntimeValue,
-}
-
-fn validate_runtime_value(
-    row: usize,
-    field: &FieldName,
-    value: &RuntimeValue,
-    expected: &ParseAsType,
-) -> Result<(), Report<SubscriptionRowEncodingError>> {
-    let elements = match (value, expected) {
-        (RuntimeValue::U8(_), ParseAsType::U8)
-        | (RuntimeValue::I8(_), ParseAsType::I8)
-        | (RuntimeValue::U16(_), ParseAsType::U16)
-        | (RuntimeValue::I16(_), ParseAsType::I16)
-        | (RuntimeValue::U32(_), ParseAsType::U32)
-        | (RuntimeValue::I32(_), ParseAsType::I32)
-        | (RuntimeValue::U64(_), ParseAsType::U64)
-        | (RuntimeValue::I64(_), ParseAsType::I64)
-        | (RuntimeValue::F32(_), ParseAsType::F32)
-        | (RuntimeValue::F64(_), ParseAsType::F64)
-        | (RuntimeValue::Bool(_), ParseAsType::Bool)
-        | (RuntimeValue::String(_), ParseAsType::String)
-        | (RuntimeValue::Datetime(_), ParseAsType::Datetime) => return Ok(()),
-        (RuntimeValue::Array(elements), ParseAsType::Array { element, len }) => {
-            let expected_length = usize::try_from(len.get())
-                .assured("a u32 fixed-list length fits every supported target");
-            if elements.len() != expected_length {
-                return Err(Report::new(
-                    SubscriptionRowEncodingError::BranchArrayLength {
-                        row,
-                        field: field.clone(),
-                        expected: len.get(),
-                        actual: elements.len(),
-                    },
-                ));
-            }
-            (elements, element.as_ref())
-        }
-        (RuntimeValue::Vec(elements), ParseAsType::Vec { element }) => (elements, element.as_ref()),
-        (value, expected) => {
-            return Err(Report::new(SubscriptionRowEncodingError::BranchFieldType {
-                row,
-                field: field.clone(),
-                expected: expected.clone(),
-                actual: value.kind(),
-            }));
-        }
-    };
-    for element in elements.0 {
-        validate_runtime_value(row, field, element, elements.1)?;
-    }
-    Ok(())
 }
 
 fn write_runtime_value(
@@ -1285,12 +1257,13 @@ mod tests {
     use nervix_primitives::sync::StdArc;
 
     use super::{
-        SubscriptionBranchSchema, SubscriptionRowEncoder, SubscriptionRowFrame,
-        SubscriptionRowOpening, SubscriptionRowSelection, subscription_row_schema,
+        SubscriptionBranchSchema, SubscriptionRowEncoder, SubscriptionRowEncodingError,
+        SubscriptionRowFrame, SubscriptionRowOpening, SubscriptionRowSelection,
+        subscription_row_schema,
     };
     use crate::{
         runtime::BranchKey,
-        runtime_schema::{RuntimeRecordBatch, RuntimeValue, compile_schema},
+        runtime_schema::{RuntimeRecordBatch, RuntimeValue, RuntimeValueKind, compile_schema},
     };
 
     fn named<N>(raw: &str) -> N
@@ -1466,6 +1439,104 @@ mod tests {
             ),
         ])
         .assured("the test branch key is nonempty")
+    }
+
+    /// A concrete key that is not a key of the announced branch fails the batch with the error
+    /// naming the row and the field, before any frame is written.
+    #[test]
+    fn a_branch_key_of_another_shape_fails_naming_its_row_and_field() {
+        let payload = payload_schema();
+        let mut branch = branch_schema();
+        branch.fields.push(field(
+            "zone",
+            ParseAsType::Array {
+                element: Box::new(ParseAsType::I32),
+                len: NonZeroU32::new(2).assured("the test array length is nonzero"),
+            },
+            false,
+            false,
+        ));
+        let branch_name: BranchName = named("by_tenant");
+        let branch_fields: Vec<FieldName> = ["tenant", "shard", "credential", "zone"]
+            .into_iter()
+            .map(named)
+            .collect();
+        let schema = subscription_row_schema(
+            &payload,
+            Some(SubscriptionBranchSchema {
+                name: &branch_name,
+                schema: &branch,
+                fields: &branch_fields,
+            }),
+        )
+        .assured("the branch fields exist");
+        let (_, encoder) = open(schema, 8);
+        let batch = runtime_batch(&payload);
+        let refused = |fields: Vec<(&str, RuntimeValue)>| {
+            let fields = fields
+                .into_iter()
+                .map(|(name, value)| (named::<FieldName>(name), value));
+            let key = BranchKey::from_fields(fields).assured("the test branch key is nonempty");
+            let keys = vec![Some(key); batch.batch().num_rows()];
+            match encoder.encode(batch.batch(), &keys, SubscriptionRowSelection::All) {
+                Ok(frames) => panic!("{} frames encoded a key of another shape", frames.len()),
+                Err(error) => error.current_context().clone(),
+            }
+        };
+        let tenant = || ("tenant", RuntimeValue::String("acme".to_string()));
+        let shard = || ("shard", RuntimeValue::U16(17));
+        let credential = || ("credential", RuntimeValue::String("withheld".to_string()));
+        let zone = |elements: usize| {
+            (
+                "zone",
+                RuntimeValue::Array(vec![RuntimeValue::I32(1); elements]),
+            )
+        };
+
+        assert_eq!(
+            refused(vec![tenant(), shard(), credential()]),
+            SubscriptionRowEncodingError::MissingBranchField {
+                row: 0,
+                field: named("zone"),
+            }
+        );
+        assert_eq!(
+            refused(vec![
+                tenant(),
+                shard(),
+                credential(),
+                zone(2),
+                ("region", RuntimeValue::U8(1)),
+            ]),
+            SubscriptionRowEncodingError::BranchFieldCount {
+                row: 0,
+                expected: 4,
+                actual: 5,
+            }
+        );
+        assert_eq!(
+            refused(vec![
+                tenant(),
+                ("shard", RuntimeValue::U32(17)),
+                credential(),
+                zone(2),
+            ]),
+            SubscriptionRowEncodingError::BranchFieldType {
+                row: 0,
+                field: named("shard"),
+                expected: ParseAsType::U16,
+                actual: RuntimeValueKind::U32,
+            }
+        );
+        assert_eq!(
+            refused(vec![tenant(), shard(), credential(), zone(3)]),
+            SubscriptionRowEncodingError::BranchArrayLength {
+                row: 0,
+                field: named("zone"),
+                expected: 2,
+                actual: 3,
+            }
+        );
     }
 
     #[test]

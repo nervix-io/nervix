@@ -19,6 +19,10 @@
     )
 )]
 
+#[cfg(test)]
+#[global_allocator]
+static TEST_ALLOCATIONS: alloc_count::AllocCounter = alloc_count::AllocCounter(std::alloc::System);
+
 use std::{
     collections::{BTreeMap, BTreeSet},
     future::Future,

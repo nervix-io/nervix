@@ -10,7 +10,8 @@ compiler's matching LLVM tools; `bench-smoke` exercises every Criterion body onc
 walks the NSPL completion graph. `test-shuttle` and `test-loom` collect the canonical inventories,
 `test-deadlock-evidence-order` executes diagnostic owners and disposable-process probes,
 `test-deadlock-report` exercises the ordinary local report command in its own build, and
-`test-deloxide` and `test-deloxide-order` run the whole Deloxide diagnostic lane of each selection.
+`test-deloxide`, `test-deloxide-order` and `test-deloxide-stress` run the whole Deloxide diagnostic
+lane of each selection.
 `test-primitives` selects the native conformance producers of every mode. Without names every producer runs. A producer runs
 its check exactly as `just <producer>` does and fails when the check fails, which is why CI's
 jobs run those checks through this command instead of beside it.
@@ -276,7 +277,7 @@ PRODUCERS: tuple[Producer, ...] = (
             instrumented=f"test-{mode}-workloads", finish=(), diagnostic_lane=True,
             instrumented_crates=InstrumentedCrates.WORKSPACE,
         )
-        for mode in ("deloxide", "deloxide-order")
+        for mode in ("deloxide", "deloxide-order", "deloxide-stress")
     ),
 )
 

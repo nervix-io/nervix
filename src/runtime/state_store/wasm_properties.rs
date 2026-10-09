@@ -150,19 +150,24 @@ fn bolero_malformed_stored_wasm_checkpoints_fail_within_bounds() {
     bolero::check!()
         .with_iterations(256)
         .with_max_len(4096)
-        .for_each(|bytes| match StoredCheckpoint::decode(bytes) {
-            Ok(value) => assert_eq!(
-                StoredCheckpoint::decode(
-                    &value
-                        .encode()
-                        .assured("a bounded decoded checkpoint encodes")
-                )
-                .assured("an accepted checkpoint decodes"),
-                value
-            ),
-            Err(error) => assert!(matches!(
-                error.current_context(),
-                RuntimePersistenceError::DecodeState
-            )),
+        .for_each(|bytes| {
+            crate::archive_allocation_tests::assert_decode_frees_allocations(|| {
+                StoredCheckpoint::decode(bytes)
+            });
+            match StoredCheckpoint::decode(bytes) {
+                Ok(value) => assert_eq!(
+                    StoredCheckpoint::decode(
+                        &value
+                            .encode()
+                            .assured("a bounded decoded checkpoint encodes")
+                    )
+                    .assured("an accepted checkpoint decodes"),
+                    value
+                ),
+                Err(error) => assert!(matches!(
+                    error.current_context(),
+                    RuntimePersistenceError::DecodeState
+                )),
+            }
         });
 }

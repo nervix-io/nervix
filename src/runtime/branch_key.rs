@@ -1,6 +1,8 @@
 use error_stack::ResultExt as _;
+use nervix_models::SchemaField;
 
 use super::*;
+use crate::runtime_schema::RuntimeValueTypeError;
 
 #[derive(Debug, PartialEq, Eq, Hash)]
 struct BranchKeyInner {
@@ -28,6 +30,21 @@ pub(crate) enum BranchKeyError {
     NonFiniteFloat { field: FieldName },
 }
 
+/// Why a concrete branch key is not a key of a declared branch schema. No variant carries a field
+/// value, which the schema may declare sensitive.
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+pub(crate) enum BranchKeyShapeError {
+    #[error("the key has no field '{field}'")]
+    MissingField { field: FieldName },
+    #[error("the key has field '{field}', which its branch schema does not declare")]
+    UndeclaredField { field: FieldName },
+    #[error("field '{field}' does not hold a value of its declared type")]
+    FieldValue {
+        field: FieldName,
+        mismatch: RuntimeValueTypeError,
+    },
+}
+
 impl std::fmt::Debug for BranchKey {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("BranchKey")
@@ -44,6 +61,50 @@ impl BranchKey {
 
     pub(crate) fn field_count(&self) -> usize {
         self.0.fields.len()
+    }
+
+    /// Checks that this key is a key of the branch schema that declares `fields`: it holds every
+    /// declared field and no other, each with a value of exactly the field's declared type.
+    ///
+    /// A key keeps its fields in name order, its canonical order, so a declared field is found by
+    /// its name whatever order the schema declares the fields in.
+    pub(crate) fn conform_to(
+        &self,
+        fields: &[SchemaField],
+    ) -> error_stack::Result<(), BranchKeyShapeError> {
+        for field in fields {
+            let Some(value) = self.field_value(field.name.as_str()) else {
+                return Err(Report::new(BranchKeyShapeError::MissingField {
+                    field: field.name.clone(),
+                }));
+            };
+            if let Err(mismatch) = value.conform_to(&field.ty) {
+                let context = BranchKeyShapeError::FieldValue {
+                    field: field.name.clone(),
+                    mismatch: mismatch.current_context().clone(),
+                };
+                return Err(mismatch.change_context(context));
+            }
+        }
+        if self.field_count() == fields.len() {
+            return Ok(());
+        }
+        // Every declared field is present, so the key holds another field. The declared names are
+        // collected only on this failure, which keeps the conforming case free of allocation.
+        let declared = fields
+            .iter()
+            .map(|field| &field.name)
+            .collect::<BTreeSet<_>>();
+        for name in self.0.fields.keys() {
+            if !declared.contains(name) {
+                return Err(Report::new(BranchKeyShapeError::UndeclaredField {
+                    field: name.clone(),
+                }));
+            }
+        }
+        // A schema that declared one name twice leaves nothing undeclared: the key holds exactly
+        // the fields it names.
+        Ok(())
     }
 
     #[cfg_attr(
@@ -460,6 +521,106 @@ mod tests {
             BranchKeyFingerprint::of_canonical_text(acme.as_str())
         );
         assert_ne!(acme.fingerprint(), tenant("beta").fingerprint());
+    }
+
+    fn declared(name: &str, ty: ParseAsType) -> SchemaField {
+        SchemaField {
+            name: FieldName::parse(name)
+                .assured("the fixed test literal satisfies the field name grammar"),
+            ty,
+            optional: false,
+            sensitive: false,
+        }
+    }
+
+    fn tenant_shard_key(fields: &[(&str, RuntimeValue)]) -> BranchKey {
+        let fields = fields.iter().map(|(name, value)| {
+            (
+                FieldName::parse(name)
+                    .assured("the fixed test literal satisfies the field name grammar"),
+                value.clone(),
+            )
+        });
+        BranchKey::from_fields(fields).assured("every test key names at least one field")
+    }
+
+    /// A key conforms to its branch schema when it holds exactly the declared fields, found by
+    /// name whatever order the schema declares them in, each with a value of the declared type.
+    #[test]
+    fn a_branch_key_conforms_only_to_a_schema_of_exactly_its_fields_and_types() {
+        let schema = [
+            declared("tenant", ParseAsType::String),
+            declared("shard", ParseAsType::I32),
+        ];
+        let field = |name: &str| {
+            FieldName::parse(name)
+                .assured("the fixed test literal satisfies the field name grammar")
+        };
+
+        tenant_shard_key(&[
+            ("shard", RuntimeValue::I32(4)),
+            ("tenant", RuntimeValue::String("north".to_string())),
+        ])
+        .conform_to(&schema)
+        .assured("the key holds exactly the declared fields with their declared types");
+
+        let missing = tenant_shard_key(&[("tenant", RuntimeValue::String("north".to_string()))])
+            .conform_to(&schema)
+            .expect_err("a key without a declared field does not conform");
+        assert_eq!(
+            missing.current_context(),
+            &BranchKeyShapeError::MissingField {
+                field: field("shard"),
+            }
+        );
+
+        let renamed = tenant_shard_key(&[
+            ("tenant", RuntimeValue::String("north".to_string())),
+            ("zone", RuntimeValue::I32(4)),
+        ])
+        .conform_to(&schema)
+        .expect_err("a key whose field has another name does not conform");
+        assert_eq!(
+            renamed.current_context(),
+            &BranchKeyShapeError::MissingField {
+                field: field("shard"),
+            }
+        );
+
+        let extra = tenant_shard_key(&[
+            ("region", RuntimeValue::String("west".to_string())),
+            ("shard", RuntimeValue::I32(4)),
+            ("tenant", RuntimeValue::String("north".to_string())),
+        ])
+        .conform_to(&schema)
+        .expect_err("a key with an undeclared field does not conform");
+        assert_eq!(
+            extra.current_context(),
+            &BranchKeyShapeError::UndeclaredField {
+                field: field("region"),
+            }
+        );
+
+        let retyped = tenant_shard_key(&[
+            ("shard", RuntimeValue::String("4".to_string())),
+            ("tenant", RuntimeValue::String("north".to_string())),
+        ])
+        .conform_to(&schema)
+        .expect_err("a key whose field holds another type does not conform");
+        assert_eq!(
+            retyped.current_context(),
+            &BranchKeyShapeError::FieldValue {
+                field: field("shard"),
+                mismatch: RuntimeValueTypeError::Type {
+                    expected: ParseAsType::I32,
+                    actual: crate::runtime_schema::RuntimeValueKind::String,
+                },
+            }
+        );
+        assert_eq!(
+            format!("{retyped:#}"),
+            "field 'shard' does not hold a value of its declared type: expected I32, found STRING"
+        );
     }
 
     #[test]

@@ -377,13 +377,10 @@ def quietly(function: Callable[[], int]) -> int:
 class InventoryTests(unittest.TestCase):
     def test_the_repository_inventory_registers_every_selection_and_workload(self) -> None:
         inventory = deloxide_lane.load_inventory(REPOSITORY)
-        self.assertEqual(list(inventory.selections), ["deloxide", "deloxide-order"])
-        self.assertEqual(
-            list(inventory.invocations),
-            ["probes", "primitive-conformance", "owner-tests", "scenarios", "paced-simulation"],
-        )
+        self.assertEqual(list(inventory.selections), ["deloxide", "deloxide-order", "deloxide-stress"])
         self.assertEqual(inventory.selections["deloxide"].recorded, "ActiveOnly")
         self.assertEqual(inventory.selections["deloxide-order"].recorded, "OrderAnalysis")
+        self.assertEqual(inventory.selections["deloxide-stress"].recorded, "StressedActiveOnly")
         for workload in inventory.workloads.values():
             with self.subTest(workload=workload.id):
                 self.assertTrue(workload.invariant.endswith("."), workload.invariant)
@@ -396,6 +393,40 @@ class InventoryTests(unittest.TestCase):
         self.assertEqual(len(inventory.workloads_of("probes", "deloxide")), 14)
         self.assertEqual(len(inventory.workloads_of("probes", "deloxide-order")), 22)
         self.assertEqual(len(order_only), 8)
+        stress_only = {
+            workload.id
+            for workload in inventory.workloads.values()
+            if workload.selections == {"deloxide-stress"}
+        }
+        self.assertEqual(
+            {workload for workload in stress_only if not workload.startswith("stress.")},
+            {"probe.stress-disturbance"},
+        )
+        # Every active-only probe, conformance check and owner test runs again under disturbance,
+        # and each stressed scenario is one the active-only selection runs too.
+        self.assertEqual(
+            list(inventory.invocations),
+            ["probes", "primitive-conformance", "owner-tests", "scenarios", "paced-simulation",
+             "stress-scenarios"],
+        )
+        self.assertEqual(inventory.invocations["stress-scenarios"].selections, {"deloxide-stress"})
+        self.assertEqual(inventory.invocations["stress-scenarios"].concurrency, 1)
+        for name in ("scenarios", "paced-simulation"):
+            self.assertEqual(inventory.invocations[name].selections, {"deloxide", "deloxide-order"})
+        active_scenarios = {
+            (workload.feature, workload.scenario, workload.examples)
+            for workload in inventory.workloads.values()
+            if workload.invocation == "scenarios"
+        }
+        for workload in inventory.workloads.values():
+            with self.subTest(stressed=workload.id):
+                if workload.invocation in {"probes", "primitive-conformance", "owner-tests"} and "deloxide" in workload.selections:
+                    self.assertIn("deloxide-stress", workload.selections)
+                if workload.invocation == "stress-scenarios":
+                    self.assertTrue(workload.id.startswith("stress."))
+                    self.assertIn((workload.feature, workload.scenario, workload.examples), active_scenarios)
+        self.assertEqual(len(inventory.workloads_of("probes", "deloxide-stress")), 15)
+        self.assertEqual(len(inventory.workloads_of("stress-scenarios", "deloxide-stress")), 13)
         for path, owner in inventory.owners.items():
             with self.subTest(owner=path):
                 self.assertTrue((REPOSITORY / path).is_file(), path)
@@ -408,7 +439,8 @@ class InventoryTests(unittest.TestCase):
                 continue
             with self.subTest(invocation=invocation.id):
                 discovered = deloxide_lane.discover_scenarios(REPOSITORY, invocation.inputs, invocation.tags)
-                registered = inventory.workloads_of(invocation.id, "deloxide")
+                selection = sorted(invocation.selections)[0]
+                registered = inventory.workloads_of(invocation.id, selection)
                 self.assertEqual(deloxide_lane.scenario_problems(invocation, registered, discovered), [])
                 self.assertGreater(sum(scenario.runs for scenario in discovered), 0)
 
@@ -478,6 +510,34 @@ class InventoryTests(unittest.TestCase):
         )
         with self.assertRaisesRegex(LaneError, "order_tags.*one per run"):
             deloxide_lane.parse_inventory(bad_tags)
+
+    def test_an_invocation_can_run_in_some_selections_only(self) -> None:
+        restricted = INVENTORY.replace(
+            'id = "scenarios"', 'id = "scenarios"\n    selections = ["deloxide-order"]', 1
+        ).replace(
+            'scenario = "Nodes on <nodes> nodes"\nselections = ["deloxide", "deloxide-order"]',
+            'scenario = "Nodes on <nodes> nodes"\nselections = ["deloxide-order"]',
+            1,
+        )
+        inventory = deloxide_lane.parse_inventory(restricted)
+        self.assertEqual(inventory.invocations["scenarios"].selections, {"deloxide-order"})
+        self.assertEqual(inventory.invocations["probes"].selections, {"deloxide", "deloxide-order"})
+        self.assertEqual(inventory.workloads_of("scenarios", "deloxide"), [])
+        # A scenario of a restricted invocation runs in every selection of that invocation.
+        partial = INVENTORY.replace(
+            'id = "scenarios"', 'id = "scenarios"\n    selections = ["deloxide-order"]', 1
+        )
+        with self.assertRaisesRegex(LaneError, "names `deloxide`, which does not run invocation scenarios"):
+            deloxide_lane.parse_inventory(partial)
+        unknown = INVENTORY.replace('id = "scenarios"', 'id = "scenarios"\n    selections = ["loom"]', 1)
+        with self.assertRaisesRegex(LaneError, "invocation scenarios names the unknown selection `loom`"):
+            deloxide_lane.parse_inventory(unknown)
+        empty = INVENTORY.replace('id = "scenarios"', 'id = "scenarios"\n    selections = []', 1)
+        with self.assertRaisesRegex(LaneError, "`selections` names no selection"):
+            deloxide_lane.parse_inventory(empty)
+        probes = INVENTORY.replace('id = "probes"', 'id = "probes"\n    selections = ["deloxide"]', 1)
+        with self.assertRaisesRegex(LaneError, "invocation probes runs in every selection"):
+            deloxide_lane.parse_inventory(probes)
 
     def test_every_malformed_entry_is_refused_naming_it(self) -> None:
         def edited(old: str, new: str) -> str:
@@ -1500,7 +1560,7 @@ class ContractTests(unittest.TestCase):
         return [str(dependency["recipe"]) for dependency in self.recipes[recipe]["dependencies"]]
 
     def test_each_selection_is_its_prerequisites_then_the_lane_alone(self) -> None:
-        for selection in ("deloxide", "deloxide-order"):
+        for selection in ("deloxide", "deloxide-order", "deloxide-stress"):
             with self.subTest(selection=selection):
                 self.assertEqual(self.dependencies(f"test-{selection}"), ["tests-deps", f"test-{selection}-workloads"])
                 self.assertEqual(self.dependencies(f"test-{selection}-workloads"), [])
@@ -1512,11 +1572,11 @@ class ContractTests(unittest.TestCase):
         for target in ("validate-targets", "validate-ci-targets"):
             self.assertIn("validate-deloxide-applicability", self.dependencies(target))
 
-    def test_the_ci_lane_runs_both_selections_bounded_with_their_evidence_retained(self) -> None:
+    def test_the_ci_lane_runs_every_selection_bounded_with_its_evidence_retained(self) -> None:
         match = re.search(r"^  deloxide:\n(?P<body>(?:    .*\n|\n)+)", self.workflow, re.MULTILINE)
         assert match is not None
         job = match.group("body")
-        self.assertIn("selection: [deloxide, deloxide-order]", job)
+        self.assertIn("selection: [deloxide, deloxide-order, deloxide-stress]", job)
         self.assertIn("fail-fast: false", job)
         job_limit = int(re.search(r"timeout-minutes: (\d+)", job).group(1))  # type: ignore[union-attr]
         lane_limit = int(re.search(r'--kill-after=60 (\d+)m just coverage-native-extras "test-\$\{SELECTION\}"', job).group(1))  # type: ignore[union-attr]

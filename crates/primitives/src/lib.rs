@@ -135,6 +135,13 @@ compile_error!(
     "nervix-primitives: the `deloxide` diagnostic mode tracks the thread-blocking locks of the \
      `native` capability, so it is requested together with `native`."
 );
+#[cfg(all(feature = "deloxide-order", feature = "deloxide-stress"))]
+compile_error!(
+    "nervix-primitives: the `deloxide-order` and `deloxide-stress` diagnostic selections cannot \
+     be enabled together. Order analysis reports historical cycles whatever the schedule, so \
+     stress disturbs only the active-only selection; build each selection in its own build \
+     invocation."
+);
 #[cfg(all(feature = "deloxide", not(unix)))]
 compile_error!(
     "nervix-primitives: the `deloxide` diagnostic mode runs on Unix targets only: it keeps the \

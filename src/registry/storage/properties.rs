@@ -208,6 +208,12 @@ fn bolero_corrupt_registry_records_fail_typed_or_list_canonically() {
                     .assured("a temporary test keyspace stores any key and value");
             }
 
+            for value in raw.values() {
+                crate::archive_allocation_tests::assert_decode_frees_allocations(|| {
+                    deserialize_value(value)
+                });
+            }
+
             let listed = match storage.list_records() {
                 Ok(listed) => listed,
                 Err(report) => {
@@ -237,6 +243,62 @@ fn bolero_corrupt_registry_records_fail_typed_or_list_canonically() {
             }
             assert_eq!(keys, raw.into_keys().collect::<Vec<_>>());
         });
+}
+
+#[test]
+fn a_model_archive_refusing_its_second_schema_field_frees_the_first() {
+    let name =
+        |value| nervix_models::FieldName::parse(value).assured("a fixture field name is valid");
+    let model = Model::Schema(nervix_models::CreateSchema {
+        name: nervix_models::SchemaName::parse("events")
+            .assured("the fixture schema name is valid"),
+        fields: vec![
+            nervix_models::SchemaField {
+                name: name("first_field"),
+                ty: nervix_models::ParseAsType::Bytes,
+                optional: false,
+                sensitive: false,
+            },
+            nervix_models::SchemaField {
+                name: name("second_field"),
+                ty: nervix_models::ParseAsType::Bytes,
+                optional: false,
+                sensitive: false,
+            },
+        ],
+    });
+    let mut encoded = serialize_value(&model).assured("the current model archives");
+    let target = b"second_field";
+    let occurrences = encoded
+        .windows(target.len())
+        .filter(|window| *window == target)
+        .count();
+    assert_eq!(
+        occurrences, 1,
+        "the target field occurs once in the archive"
+    );
+    let start = encoded
+        .windows(target.len())
+        .position(|window| window == target)
+        .assured("the target field is archived");
+    encoded[start + 6] = b'!';
+
+    let archive = encoded
+        .strip_prefix(MODEL_ARCHIVE_HEADER)
+        .assured("the archive keeps its header");
+    let mut aligned = rkyv::util::AlignedVec::<16>::with_capacity(archive.len());
+    aligned.extend_from_slice(archive);
+    rkyv::access::<rkyv::Archived<Model>, rkyv::rancor::Error>(&aligned)
+        .assured("the changed field leaves a valid archive shape");
+
+    crate::archive_allocation_tests::assert_decode_frees_allocations(|| {
+        let result = deserialize_value(&encoded);
+        assert!(matches!(
+            result.as_ref().map_err(|error| error.current_context()),
+            Err(RegistryError::DeserializeValue)
+        ));
+        result
+    });
 }
 
 /// Lists a store holding one schema record of domain `readings` named `events`, after `rewrite`

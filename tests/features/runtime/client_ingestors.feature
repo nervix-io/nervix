@@ -512,7 +512,7 @@ Feature: Client ingestors
       | 1            |
       | 3            |
 
-  @client_ingestor @client_ingestor_alter_drain
+  @client_ingestor @client_ingestor_alter_drain @deloxide_stress
   Scenario Outline: An alteration drains buffered branches on a shared relay before replacing its client contract
     Given HTTP receiver "sink" is running
     And HTTP receiver "sink" answers with
@@ -649,7 +649,7 @@ Feature: Client ingestors
       | WebSocket session "app" | 1            |
       | WebSocket session "app" | 3            |
 
-  @client_ingestor @client_ingestor_alter_drain
+  @client_ingestor @client_ingestor_alter_drain @deloxide_stress
   Scenario Outline: A rejected <failure> releases buffered client admission and retains its committed contract
     Given HTTP receiver "sink" is running
     And HTTP receiver "sink" answers with
