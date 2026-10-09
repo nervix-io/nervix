@@ -338,6 +338,10 @@ RESTORE DOMAIN payments FROM './payments.nvxb' WITHOUT SOURCE OFFSETS;
 - A state section whose entity is absent or whose schema fingerprint differs from the published
   schedule is skipped. The restore succeeds and reports a warning naming the skipped state in its
   command diagnostics and CLI output; that entity starts without the skipped checkpoint.
+- Every other archived branch key must be a key of the branching its restored entity declares:
+  each branch lifecycle entry, the branch each WASM, deduplicator and window descriptor names, and
+  the branch of each materialized record identity. See
+  [Archived Branch Keys](#archived-branch-keys).
 - A window whose restored window processor is not the archived window model, or whose branch
   incarnation is not the one the restored branch lifecycle holds for that branch, is skipped with a
   warning naming the reason, and that branch's window starts empty.
@@ -414,6 +418,38 @@ A normal `START` after a default stopped restore, or after `STOP`, advances the 
 and clears materialized state. It preserves compatible WASM state, source positions, branch
 lifecycle, deduplicator keys and windows. To establish a new clock at the saved logical frontier instead, leave the domain stopped
 and use `START AT '<frontier>' TIME RATE <rate>` explicitly.
+
+### Archived Branch Keys
+
+A restore installs an archived branch key only when it is a key of the branching its restored
+entity declares in the schedule the restore publishes. A processor runs every branch under its one
+declaration, and a relay's materialized records carry its declared branch. An ingestor or a
+reingestor keeps one branch lifecycle for all of its routes, and each route writes the branch of
+the relay it targets, so a key it archived may belong to the branching of any of those relays,
+unbranched included. A key belongs to a branching when it is absent exactly where the branching is
+unbranched, and otherwise holds exactly the fields of the branch's key schema, each with a value of
+exactly the field's declared type: the same integer width, a float that is finite, a datetime that
+reads as RFC 3339 text, and an `ARRAY` of its declared length. A key lists its fields in field-name
+order, the order the archive reader requires. No value is converted to fit, and a key that does not
+belong is never staged, so no installed checkpoint names a branch the restored entity's branch
+routing could not reach.
+
+Planning checks every branch lifecycle entry and the branch of every WASM, deduplicator and window
+descriptor whose entity the planned schedule holds under the archived schema fingerprint; a section
+the restore skips is not checked. The conversion of a materialized relay checks the branch of each
+record identity as it reads it. A dry run runs the same checks, and a restore `WITHOUT STATE`
+installs no archived key and checks none. A key that does not belong refuses the whole restore
+before it changes anything. The refusal names the archive section, the lifecycle entry, descriptor
+or record identity, numbered from 1, the entity, the branches it runs in and, for a key of another
+shape, the field that is missing, undeclared or of another type. It never includes a key value,
+which a branch schema may declare `SENSITIVE`:
+
+```text
+restore refused: the branch key of lifecycle entry 1 in archive section 'domains/payments/state/branch_lifecycle/deduplicator/unique_payment_filter/branches.rkyv' does not belong to the branching of deduplicator 'unique_payment_filter' in domain 'payments': it is not a key of branch 'by_tenant': field 'tenant' does not hold a value of its declared type: expected STRING, found I64
+```
+
+Installation checks the same keys against the schedule it installs under before it stages any
+state, so a restore resumed by a new leader or a retry stages none that does not belong either.
 
 ### Publishing The State Generation
 
@@ -1041,6 +1077,9 @@ A refused restore reports `restore refused:` and the reason, and changed nothing
   version's bytes that do not match its root checksum
 - a model binds a resource version the restore does not import as completed
 - a domain's models do not form a valid configuration, as the transaction planner finds
+- an archived branch key the restore would install is not a key of the branching its restored
+  entity declares, naming the section, the lifecycle entry, descriptor or record identity, the
+  entity, the branch and the field; see [Archived Branch Keys](#archived-branch-keys)
 - an archived materialized relay, deduplicator keyspace or window does not convert under the shape
   its restored model gives it, or its conversion cannot be admitted, naming the entity; a dry run
   runs the same conversion. A deduplicator or window conversion the node refuses only for room is

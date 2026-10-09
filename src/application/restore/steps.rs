@@ -28,7 +28,7 @@ use nervix_models::{
 use nervix_primitives::sync::Arc;
 
 use super::{
-    prepare::{VerifiedArchive, create_statements},
+    prepare::{RestoredBranchDeclarations, VerifiedArchive, create_statements},
     runner::{RestoreSteps, StepFailure},
 };
 use crate::{
@@ -205,6 +205,16 @@ impl SessionServiceImpl {
             .collect::<std::collections::BTreeMap<_, _>>();
         let schedule = self.inner.consensus.current_schedule().await;
         let scheduled = schedule.domain(&domain.target);
+        // Planning checked these keys against the schedule it planned; the published schedule is
+        // the one installation stages under, so no key it would not route is staged.
+        if state != RestoreState::ConfigurationOnly
+            && let Some(scheduled) = scheduled
+        {
+            archive
+                .validate_branch_keys(&self.inner.runtime, &domain.source, scheduled)
+                .await
+                .map_err(|refusal| StepFailure::Failed(format!("{refusal:#}")))?;
+        }
         let mut lifecycles = Vec::new();
         for archived in archive.states_for(&domain.source) {
             if let DescribedRuntimeState::BranchLifecycle { lifecycle, .. } = archived {
@@ -353,6 +363,11 @@ impl SessionServiceImpl {
                         else {
                             continue;
                         };
+                        let Some(scheduled) = scheduled else {
+                            continue;
+                        };
+                        let declarations = RestoredBranchDeclarations::of(scheduled, &reference)
+                            .map_err(|error| StepFailure::Failed(format!("{error:#}")))?;
                         let artifact = Arc::new(
                             super::materialized::prepare_materialized_checkpoint(
                                 &self.inner.runtime,
@@ -360,9 +375,10 @@ impl SessionServiceImpl {
                                 descriptor,
                                 groups,
                                 schema.clone(),
+                                Arc::new(declarations),
                             )
                             .await
-                            .map_err(|error| StepFailure::Failed(error.to_string()))?,
+                            .map_err(|error| StepFailure::Failed(format!("{error:#}")))?,
                         );
                         let length = artifact.length();
                         let digest = artifact.digest();

@@ -33,7 +33,7 @@ delivery can fail during schedule application.
 | Registry, placement, and planning | Invalid domain models, references, capabilities, branch relationships, flush contracts, schedules, and placements | Reject the command before activating an invalid graph or refuse a relocation plan. |
 | Runtime installation | A committed revision this node cannot plan or apply, a domain execution it cannot build or change (`RuntimeError::BuildDomainExecution` above the `ExecutionBuildError` step that failed), and ingestors that do not start once their revision is prepared | Keep the previously applied schedule as the predecessor for a retry, and report the whole chain with the failed command, the domain's instantiation error and the runtime event. |
 | Backup archive format | Records that do not encode or exceed their size limit, and archives whose structure, record headers, record values, section lengths or digests do not match what the manifest declares | Refuse to write an archive, or refuse a whole archive naming the section and the check that failed. |
-| Restore planning | Archives a restore cannot apply to the cluster: the wrong scope, a domain the archive lacks or the cluster has, an archived user the cluster has under `ON EXISTING USER FAIL`, resource versions the archive does not hold consistently, and models that bind no restored version | Refuse the restore before it changes anything, naming the domain, user, resource, version, or model. |
+| Restore planning | Archives a restore cannot apply to the cluster: the wrong scope, a domain the archive lacks or the cluster has, an archived user the cluster has under `ON EXISTING USER FAIL`, resource versions the archive does not hold consistently, models that bind no restored version, and archived branch keys that are not keys of the branching their restored entity declares | Refuse the restore before it changes anything, naming the domain, user, resource, version, or model, or the archive section, entry, entity, branch and field of the key. |
 | Interconnect | Authentication, framing, limits, transport, and the class and subject of a remote operation failure | Distinguish a transport failure from a peer's rejection, absence, unreadiness, or executed failure. |
 | Deadlock detector and diagnostic run | A detector that cannot be installed or is installed twice (`InstallError`), a diagnostic run that cannot install it or record its starting evidence (`DiagnosticError`), and evidence that does not encode, decode, fit its bounds, write or read (`EvidenceError`) | Refuse to start a diagnostic process, or refuse a whole evidence file naming the check that failed. A deadlock finding is not one of these errors: it is a diagnostic result that ends the process with its own status. |
 | Native client and its edges | A call that could not connect, was refused or cancelled, was answered outside the protocol, or lost its session (`ClientError`), above the transport status, the codec's report, a local archive's I/O error, or the failure that left a command or upload uncertain | Retry, recover the session, recover an uncertain command or upload by its reference or identity, or display the whole chain; the CLI and the C binding classify from the current context. |
@@ -392,8 +392,9 @@ Materialized archive descriptors and identities reject invalid counts, names, ty
 watermark order and supported record headers before runtime installation. `RestorePlanError::MissingClock`
 refuses a paced `RESUME` without its committed mapping. `RestoreRefusal::MaterializedState` names
 the domain and relay when preflight conversion fails; `MaterializedRestoreError` distinguishes
-invalid section lengths, identities, Arrow schema or row counts, metadata limits, admission,
-cancellation, framing and staging. A preflight admission refusal records no restore progress and
+invalid section lengths, identities, a record identity whose branch key is not a key of the
+relay's branching (`BranchKey`, naming the section and the identity), Arrow schema or row counts,
+metadata limits, admission, cancellation, framing and staging. A preflight admission refusal records no restore progress and
 can be presented again; it is reported as preparation refusal without judging the archive invalid.
 Native `MaterializedSnapshotError` checks framing, metadata bounds, unique keys,
 counts, exact schemas and complete container consumption. Diagnostics carry typed causes and
@@ -410,7 +411,17 @@ admission failure beneath it), one that does not verify,
 with the archive format's `ArchiveReadError` beneath it, a domain whose `models.nspl` does not
 parse, with the line and the parser's diagnostic, a statement that creates no model, with its
 number and line, a restore that cannot apply to this cluster, and a domain whose models do not form
-a valid configuration, with the transaction planner's report beneath it. Beneath a restore that
+a valid configuration, with the transaction planner's report beneath it. `BranchKey` names the
+archive section, the lifecycle entry or descriptor, the entity and the domain of an archived branch
+key that is not a key of the branching its restored entity declares, with `ArchivedBranchKeyError`
+beneath it: a key that is no typed branch key, with the runtime's `BranchKeyError` naming the field
+beneath that, a key that is unbranched where the entity runs in a branch or concrete where it runs
+unbranched, a key of none of the branches an ingestor's or reingestor's routes write, or a key that
+is not a key of the entity's one branch, with `BranchKeyShapeError` naming the missing, undeclared
+or mistyped field and `RuntimeValueTypeError` the declared and found types beneath it.
+`UndeclaredBranching` names an entity for which the restored schedule resolves no branching, with
+`RestoredBranchDeclarationError` beneath it. Installation repeats both checks before it stages any
+state and keeps the same chain beneath the failed step. Beneath a restore that
 cannot apply, the decision layer's `RestorePlanError` names the domain, user, resource, version,
 or model: a domain archive given to `RESTORE CLUSTER`, a domain the archive does not hold or the
 cluster already has, an archived user the cluster has under `ON EXISTING USER FAIL`, a resource the
