@@ -57,7 +57,7 @@ Feature: Deduplicator and window state in backup archives
       START;
       """
 
-  @restore_installation
+  @restore_installation @deloxide_stress
   Scenario Outline: Deduplicator keys and half-filled windows captured at a quiesced cut continue per branch after RESUME
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "10m"
     And the production sticky scheduler is configured
@@ -297,7 +297,7 @@ Feature: Deduplicator and window state in backup archives
       | 1            | 0             |
       | 3            | 1             |
 
-  @restore_installation
+  @restore_installation @deloxide_stress
   Scenario: A delayed coordinator cannot replace resumed deduplicator keys and windows
     Given runtime replication is configured with replica count 1 and snapshot interval "10m"
     And the production sticky scheduler is configured

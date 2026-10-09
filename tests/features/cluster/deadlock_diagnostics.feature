@@ -8,6 +8,7 @@ Feature: Diagnostic nodes track their blocking locks for active deadlocks
   Deadlocks are provoked only in the disposable processes of nervix-deadlock's probes: no node can be
   made to deadlock on request.
 
+  @deloxide_stress
   Scenario Outline: In-process diagnostic nodes run a workload with every blocking lock tracked on a <nodes> node cluster
     Given the scenario process tracks its blocking locks for deadlocks
     And a <nodes> node nervix cluster is started
@@ -88,6 +89,7 @@ Feature: Diagnostic nodes track their blocking locks for active deadlocks
       | 1     |
       | 3     |
 
+  @deloxide_stress
   Scenario Outline: Diagnostic server processes record a running detector and stop gracefully on a <nodes> node cluster
     Given a <nodes> node diagnostic nervix-server process cluster is started with deadlock evidence
     And the server process cluster is configured with these NSPL commands

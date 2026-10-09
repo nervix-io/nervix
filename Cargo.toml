@@ -30,6 +30,13 @@ deloxide-order = [
   "nervix-deadlock/deloxide-order",
   "nervix-primitives/deloxide-order",
 ]
+# The same diagnostic mode with Deloxide's bounded scheduling disturbance before nested acquisitions
+# of tracked locks, for active detection on contention-prone lifecycle paths.
+deloxide-stress = [
+  "deloxide",
+  "nervix-deadlock/deloxide-stress",
+  "nervix-primitives/deloxide-stress",
+]
 # Selects Loom's primitives for the whole graph, and runs the Loom models of the server's owners.
 loom = [
   "nervix-interconnect/loom",

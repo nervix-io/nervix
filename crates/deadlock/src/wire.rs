@@ -11,7 +11,7 @@
 //! the evidence, so it also raises the format version.
 
 use std::{
-    num::NonZeroU64,
+    num::{NonZeroU32, NonZeroU64},
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
@@ -19,7 +19,8 @@ use error_stack::Report;
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_primitives::deadlock::{
     Access, ActiveCycle, BlockedAttempt, BlockedThread, BoundedText, DiagnosticSelection, LockKind,
-    LockSite, SourceSite, TrackedLockId, TrackedThreadId, WaitedLock,
+    LockSite, SourceSite, StressConfiguration, StressOutOfBounds, TrackedLockId, TrackedThreadId,
+    WaitedLock,
 };
 use rkyv::{Archive, Deserialize, Serialize, rancor, util::AlignedVec};
 
@@ -37,7 +38,7 @@ const MAGIC: [u8; 8] = *b"NVXDLEVD";
 const EVIDENCE_KIND: u16 = 1;
 
 /// The format version this crate writes and reads.
-const EVIDENCE_VERSION: u16 = 2;
+const EVIDENCE_VERSION: u16 = 3;
 
 /// The magic, the kind and the version.
 const HEADER_BYTES: usize = MAGIC.len() + 2 + 2;
@@ -96,6 +97,16 @@ pub(crate) enum SelectionWire {
     ActiveOnly,
     OrderAnalysis,
     OrderInstrumentedActiveOnly,
+    StressedActiveOnly(StressWire),
+}
+
+/// A stress configuration, its delays in whole microseconds.
+#[derive(Debug, Clone, Copy, PartialEq, Archive, Serialize, Deserialize)]
+pub(crate) struct StressWire {
+    pub(crate) preemptions_per_million: u32,
+    pub(crate) shortest_delay_micros: u64,
+    pub(crate) longest_delay_micros: u64,
+    pub(crate) yield_after_release: bool,
 }
 
 impl From<DiagnosticSelection> for SelectionWire {
@@ -104,17 +115,59 @@ impl From<DiagnosticSelection> for SelectionWire {
             DiagnosticSelection::ActiveOnly => Self::ActiveOnly,
             DiagnosticSelection::OrderAnalysis => Self::OrderAnalysis,
             DiagnosticSelection::OrderInstrumentedActiveOnly => Self::OrderInstrumentedActiveOnly,
+            DiagnosticSelection::StressedActiveOnly(configuration) => {
+                Self::StressedActiveOnly(StressWire::from(configuration))
+            }
         }
     }
 }
 
-impl From<SelectionWire> for DiagnosticSelection {
-    fn from(selection: SelectionWire) -> Self {
-        match selection {
-            SelectionWire::ActiveOnly => Self::ActiveOnly,
-            SelectionWire::OrderAnalysis => Self::OrderAnalysis,
-            SelectionWire::OrderInstrumentedActiveOnly => Self::OrderInstrumentedActiveOnly,
+impl From<StressConfiguration> for StressWire {
+    fn from(configuration: StressConfiguration) -> Self {
+        Self {
+            preemptions_per_million: configuration.preemptions_per_million().get(),
+            shortest_delay_micros: whole_micros(configuration.shortest_delay()),
+            longest_delay_micros: whole_micros(configuration.longest_delay()),
+            yield_after_release: configuration.yield_after_release(),
         }
+    }
+}
+
+/// A stress delay in microseconds. Exact: a configuration's delays are whole microseconds of at
+/// most two milliseconds.
+fn whole_micros(delay: Duration) -> u64 {
+    u64::try_from(delay.as_micros()).assured("a stress delay is at most two milliseconds")
+}
+
+impl TryFrom<SelectionWire> for DiagnosticSelection {
+    type Error = EvidenceOutOfBounds;
+
+    fn try_from(selection: SelectionWire) -> Result<Self, Self::Error> {
+        match selection {
+            SelectionWire::ActiveOnly => Ok(Self::ActiveOnly),
+            SelectionWire::OrderAnalysis => Ok(Self::OrderAnalysis),
+            SelectionWire::OrderInstrumentedActiveOnly => Ok(Self::OrderInstrumentedActiveOnly),
+            SelectionWire::StressedActiveOnly(stress) => Ok(Self::StressedActiveOnly(
+                StressConfiguration::try_from(stress)?,
+            )),
+        }
+    }
+}
+
+impl TryFrom<StressWire> for StressConfiguration {
+    type Error = EvidenceOutOfBounds;
+
+    fn try_from(stress: StressWire) -> Result<Self, Self::Error> {
+        let per_million = NonZeroU32::new(stress.preemptions_per_million).ok_or(
+            EvidenceOutOfBounds::Stress(StressOutOfBounds::Probability { per_million: 0 }),
+        )?;
+        Self::new(
+            per_million,
+            Duration::from_micros(stress.shortest_delay_micros),
+            Duration::from_micros(stress.longest_delay_micros),
+            stress.yield_after_release,
+        )
+        .map_err(EvidenceOutOfBounds::Stress)
     }
 }
 
@@ -439,7 +492,7 @@ impl TryFrom<EvidenceWire> for DeadlockEvidence {
             id: wire.process.id,
             program,
             started_at: system_time(wire.process.started_at_unix_nanos),
-            selection: DiagnosticSelection::from(wire.process.selection),
+            selection: DiagnosticSelection::try_from(wire.process.selection)?,
         };
         Ok(Self::new(process, findings)?.with_scope(EvidenceScope::from(wire.scope)))
     }

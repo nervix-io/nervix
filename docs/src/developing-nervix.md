@@ -499,8 +499,11 @@ primitive probe on its benchmark worker and retains the probe output with the be
 
 ### Deadlock diagnostics
 
-Diagnostic builds select `deloxide` for active cycles or `deloxide-order` for active and historical
-order analysis. Build and run one with an existing local evidence directory:
+Diagnostic builds select `deloxide` for active cycles, `deloxide-order` for active and historical
+order analysis, or `deloxide-stress` for active cycles under Deloxide's bounded scheduling
+disturbance, which delays one in twenty of the acquisitions a thread makes while it holds a tracked
+lock by 20µs to 200µs. Build and run one with an existing local evidence
+directory:
 
 ```bash
 just build-diagnostic-server deloxide-order
@@ -512,13 +515,14 @@ instrumentation and its cost. Ordinary product performance is measured separatel
 exits `3`; a potential cycle retains evidence and continues; lost evidence or failed diagnostics
 exit `4`.
 
-Run both selections of the diagnostic lane after any change that adds or alters thread-blocking
+Run every selection of the diagnostic lane after any change that adds or alters thread-blocking
 synchronization, the order of tracked acquisitions, or a shutdown, drain, restore, cancellation,
 handoff or other lifecycle path that uses tracked locks:
 
 ```bash
 just test-deloxide
 just test-deloxide-order
+just test-deloxide-stress
 just deadlock-report inspect target/deloxide/test-deloxide/deloxide-order/run.XXXX/evidence/scenarios/deadlock-PID-TIME.rkyv --source potential
 ```
 
@@ -548,8 +552,9 @@ renamed there in the same change. A source file that starts acquiring tracked bl
 an `[[owner]]` record naming the workloads that reach them or the path the lane does not reach and
 why: `just validate-deloxide-applicability`, part of `just validate`, holds the records to the
 compiler's acquisition catalog. For a pull request labeled `deloxide`, which every change the
-Deloxide rule applies to carries, CI's `deloxide` job runs both selections through the native
-coverage collector, as `just coverage-native-extras test-deloxide test-deloxide-order` does locally,
+Deloxide rule applies to carries, CI's `deloxide` job runs every selection through the native
+coverage collector, as `just coverage-native-extras test-deloxide test-deloxide-order
+test-deloxide-stress` does locally,
 and keeps their attempts, completion records and diagnostic coverage reports as artifacts. The
 ordinary report tool also exports selected artifacts, records explicit proofs in reviewed copies and
 qualifies whole-process evidence. `just coverage-deadlock` measures the diagnostic implementation
@@ -640,9 +645,10 @@ just coverage-native-extras
 
 Name producers to run only those: `test-typed-ratchet`, `bench-smoke`, `nspl-completion-walk`,
 `test-shuttle`, `test-loom`, `test-deadlock-evidence-order`, `test-deadlock-report`,
-`test-deloxide`, `test-deloxide-order`, or an individual `test-primitives-<mode>` recipe. The
-focused diagnostic owner and probes use the `deloxide-order` build; the local report command uses
-the ordinary build; the two diagnostic lanes build in their own modes and export only after their
+`test-deloxide`, `test-deloxide-order`, `test-deloxide-stress`, or an individual
+`test-primitives-<mode>` recipe. The focused diagnostic owner and probes use the `deloxide-order`
+build; the local report command uses the ordinary build; the three diagnostic lanes build in their
+own selections and export only after their
 `lane.json` records a complete run. `test-primitives`
 selects native conformance in ordinary, Shuttle, Loom, Turmoil and Deloxide execution:
 
@@ -661,8 +667,8 @@ link, is built normally. The recipe
 that executes Nervix code then runs in the environment `cargo llvm-cov show-env --sh
 --no-rustc-wrapper` describes: every crate is compiled with source coverage instrumentation into
 `target/native-coverage-build` for ordinary mode and `target/native-coverage-build-<mode>` for
-each other mode, and the configured kache wrapper stays in place. The `test-deloxide` and
-`test-deloxide-order` lanes instrument only workspace crates: the collector moves the
+each other mode, and the configured kache wrapper stays in place. The `test-deloxide`,
+`test-deloxide-order` and `test-deloxide-stress` lanes instrument only workspace crates: the collector moves the
 instrumentation flags into `scripts/coverage_workspace_wrapper.py`, which Cargo runs beneath kache
 as the workspace compiler wrapper, the scope `cargo llvm-cov` gives the ordinary coverage build.
 Their nodes must meet product deadlines while they compile WASM processors and process Arrow state,
