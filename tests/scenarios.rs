@@ -332,6 +332,8 @@ struct ScenarioWorld {
     leadership_move: Option<AbortOnDropHandle<std::io::Result<()>>>,
     /// The restore step pause a scenario armed and has not released.
     restore_step_pause: Option<backup::restore::ArmedRestorePause>,
+    /// What the last measured CLI backup's memory sampler observed, until a step checks it.
+    backup_memory: Option<backup::memory::SampledMemory>,
     /// The outcome of the last command a scenario sent through its own session.
     last_session_command: Option<nervix_client_wire::CommandOutcome>,
     /// Candidates collected by a public session completion paging scenario.

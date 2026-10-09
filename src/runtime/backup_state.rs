@@ -1,12 +1,16 @@
 //! Capturing the runtime checkpoint kinds and fresh materialized generations at a domain cut.
 //!
 //! Layer: data plane.
-//! - **Owns.** Forcing Kafka and branch-lifecycle publications, then reading one database
-//!   snapshot, reattaching typed branch keys from lifecycle checkpoints, selecting stored
-//!   materialized readers for stopped domains or fresh shared Arrow rows under the assignment
-//!   barrier for running and paused domains, and taking each active deduplicator and window
-//!   branch from the generation its branch task published or, without one, from its checkpoint.
-//! - **Depends on.** Branch-local state, the runtime state store, and typed placement envelopes.
+//! - **Owns.** Forcing Kafka and branch-lifecycle publications, then listing one database
+//!   snapshot and reading only the checkpoints the cut archives, reattaching typed branch keys
+//!   from lifecycle checkpoints for the branches that need them, handing Kafka offset and
+//!   lifecycle checkpoints on in that snapshot and reading each one whole under its own admitted
+//!   charge, selecting stored materialized readers for stopped domains or fresh shared Arrow rows
+//!   under the assignment barrier for running and paused domains, and taking each active
+//!   deduplicator and window branch from the generation its branch task published or, without
+//!   one, from its checkpoint.
+//! - **Depends on.** Branch-local state, the runtime state store, the bounded executor's memory
+//!   classes, and typed placement envelopes.
 //! - **Must not know.** Archive records, backup command execution, or restore planning.
 
 #![cfg_attr(
@@ -20,8 +24,9 @@
 
 use std::io::{Read, Write};
 
+use arch_into::ArchInto as _;
 use error_stack::{Report, ResultExt as _};
-use nervix_execution::Cancellation;
+use nervix_execution::{Cancellation, MemoryClass};
 use nervix_interconnect::StatePlacementEnvelope;
 use nervix_models::{
     BranchKeyFingerprint, DomainName, DomainStatus, ModelName, NodeRef, RemoteRuntimeField,
@@ -30,19 +35,23 @@ use nervix_models::{
 use thiserror::Error;
 
 use super::{
-    BranchKey, CapturedDeduplicatorKeyspace, CapturedWindow, MaterializedGeneration,
-    OwnershipHandoffError, OwnershipHandoffResult, ReplicatedKafkaOffsetState,
-    ReplicatedMaterializedRelayState, Runtime, RuntimeStateKind, RuntimeStatePlacement,
-    ScheduledNodeTask,
+    BranchInstanceSnapshotEntry, BranchKey, CapturedDeduplicatorKeyspace, CapturedWindow,
+    MaterializedGeneration, OwnershipHandoffError, OwnershipHandoffResult,
+    ReplicatedKafkaOffsetState, ReplicatedMaterializedRelayState, Runtime, RuntimeStateKind,
+    RuntimeStatePlacement, ScheduledNodeTask,
     backup_capture_fence::{BackupCaptureFence, BackupPublication},
-    branch_lru_state::write_branch_lru_snapshot,
-    decode_branch_lru_snapshot,
-    kafka_offset_state::{backup_offset_positions, write_offset_payload},
-    state_store::{RuntimePersistenceError, StoredPlacement, generation::CheckpointMetadata},
+    branch_lru_state::{LifecycleBranches, NativeBranchLifecycle, write_branch_lru_snapshot},
+    kafka_offset_state::{KafkaOffsetPositions, NativeKafkaOffsets, write_offset_payload},
+    state_store::{
+        RuntimePersistenceError, StoredPlacement,
+        checkpoint_reader::{AlignedCheckpoint, ListedCheckpoint},
+        generation::CheckpointMetadata,
+    },
 };
 
+/// One WASM branch's durable guest save at the cut, read whole.
 #[derive(Debug, Clone)]
-pub(crate) struct CapturedRuntimeState {
+pub(crate) struct CapturedGuestSave {
     pub(crate) placement: StatePlacementEnvelope,
     pub(crate) branch_fingerprint: Option<BranchKeyFingerprint>,
     pub(crate) revision: u64,
@@ -51,10 +60,153 @@ pub(crate) struct CapturedRuntimeState {
 
 /// One domain cut, including the materialized source selected by the domain's lifecycle.
 pub(crate) struct CapturedDomainState {
-    pub(crate) checkpoints: Vec<CapturedRuntimeState>,
+    pub(crate) guest_saves: Vec<CapturedGuestSave>,
+    /// The Kafka offset and branch lifecycle checkpoints, still in the cut's database snapshot.
+    pub(crate) native_metadata: Vec<CapturedNativeMetadata>,
     pub(crate) materialized: CapturedMaterializedState,
     /// The deduplicator keyspaces and windows of the branches the captured lifecycles hold.
     pub(crate) branch_states: Vec<CapturedBranchState>,
+}
+
+/// A Kafka offset or branch lifecycle checkpoint of the cut. It stays in the cut's database
+/// snapshot until its section is written, and is then read whole under an admitted charge, one
+/// checkpoint at a time, rather than with the rest of the cut.
+pub(crate) struct CapturedNativeMetadata {
+    pub(crate) placement: StatePlacementEnvelope,
+    checkpoint: ListedCheckpoint,
+}
+
+impl CapturedNativeMetadata {
+    /// The memory reading this checkpoint and converting it takes, which its reader's
+    /// `restore_metadata` charge must cover.
+    pub(crate) fn conversion_bytes(&self) -> error_stack::Result<u64, BackupStateCaptureError> {
+        native_conversion_bytes(self.checkpoint.stored_bytes()).ok_or_else(|| {
+            Report::new(BackupStateCaptureError::Admission {
+                entity: self.checkpoint.placement.identifier.clone(),
+            })
+        })
+    }
+
+    /// Reads and validates a branch lifecycle checkpoint. The caller holds its conversion charge.
+    pub(crate) fn read_branch_lifecycle(
+        &self,
+        cancellation: &Cancellation,
+    ) -> error_stack::Result<NativeLifecycleCheckpoint, BackupStateCaptureError> {
+        read_native_lifecycle(&self.checkpoint, cancellation)
+    }
+
+    /// Reads and validates a Kafka offset checkpoint and orders its partitions. The caller holds
+    /// its conversion charge.
+    pub(crate) fn read_kafka_offsets(
+        &self,
+        cancellation: &Cancellation,
+    ) -> error_stack::Result<NativeKafkaCheckpoint, BackupStateCaptureError> {
+        let entity = &self.checkpoint.placement.identifier;
+        let aligned = self
+            .checkpoint
+            .read_aligned(|| {
+                cancellation
+                    .check()
+                    .change_context(RuntimePersistenceError::Cancelled)
+            })
+            .change_context_lazy(|| BackupStateCaptureError::KafkaOffsets {
+                entity: entity.clone(),
+            })?;
+        NativeKafkaCheckpoint::validate(aligned, entity, cancellation)
+    }
+}
+
+/// A stored branch lifecycle checkpoint read for one section: its revision and its validated
+/// branches.
+pub(crate) struct NativeLifecycleCheckpoint {
+    pub(crate) revision: u64,
+    lifecycle: NativeBranchLifecycle,
+}
+
+impl NativeLifecycleCheckpoint {
+    /// Validates the lifecycle checkpoint of `entity` read into alignment.
+    pub(in crate::runtime) fn validate(
+        checkpoint: AlignedCheckpoint,
+        entity: &ModelName,
+        cancellation: &Cancellation,
+    ) -> error_stack::Result<Self, BackupStateCaptureError> {
+        let lifecycle = NativeBranchLifecycle::validate(checkpoint.payload, cancellation)
+            .change_context_lazy(|| BackupStateCaptureError::Lifecycle {
+                entity: entity.clone(),
+            })?;
+        Ok(Self {
+            revision: checkpoint.lsm,
+            lifecycle,
+        })
+    }
+
+    /// Hands `visit` the branches in LRU order, through an iterator it may clone and walk again.
+    pub(crate) fn with_branches<R>(
+        &self,
+        visit: impl FnOnce(BackupLifecycleBranches<'_>) -> R,
+    ) -> R {
+        self.lifecycle
+            .with_branches(|branches| visit(BackupLifecycleBranches(branches)))
+    }
+}
+
+/// The branches of a captured lifecycle in LRU order, each converted when it is reached.
+#[derive(Clone)]
+pub(crate) struct BackupLifecycleBranches<'a>(LifecycleBranches<'a>);
+
+impl Iterator for BackupLifecycleBranches<'_> {
+    type Item = BackupBranchLifecycleEntry;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let branch = self.0.next()?;
+        Some(branch.stored())
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        self.0.size_hint()
+    }
+}
+
+impl ExactSizeIterator for BackupLifecycleBranches<'_> {
+    fn len(&self) -> usize {
+        self.0.len()
+    }
+}
+
+/// A stored Kafka offset checkpoint read for one section: its revision and its validated
+/// partitions in topic and partition order.
+pub(crate) struct NativeKafkaCheckpoint {
+    pub(crate) revision: u64,
+    offsets: NativeKafkaOffsets,
+}
+
+impl NativeKafkaCheckpoint {
+    /// Validates the Kafka offset checkpoint of `entity` read into alignment, and orders its
+    /// partitions.
+    pub(in crate::runtime) fn validate(
+        checkpoint: AlignedCheckpoint,
+        entity: &ModelName,
+        cancellation: &Cancellation,
+    ) -> error_stack::Result<Self, BackupStateCaptureError> {
+        let offsets = NativeKafkaOffsets::validate(checkpoint.payload, || {
+            cancellation
+                .check()
+                .change_context(RuntimePersistenceError::Cancelled)
+        })
+        .change_context_lazy(|| BackupStateCaptureError::KafkaOffsets {
+            entity: entity.clone(),
+        })?;
+        Ok(Self {
+            revision: checkpoint.lsm,
+            offsets,
+        })
+    }
+
+    /// Hands `visit` every partition's position in topic and partition order, through an
+    /// iterator it may clone and walk again.
+    pub(crate) fn with_positions<R>(&self, visit: impl FnOnce(KafkaOffsetPositions<'_>) -> R) -> R {
+        self.offsets.with_positions(visit)
+    }
 }
 
 /// One active branch's deduplicator keyspace or window at the cut.
@@ -69,11 +221,20 @@ pub(crate) enum CapturedBranchStateKind {
     Window(CapturedWindow),
 }
 
-/// A deduplicator or window state's entity and branch, which names it once in a cut.
+/// A branch-local state's entity and branch, which names it once in a cut.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct BranchStateIdentity {
     node: NodeRef,
     branch: Option<BranchKeyFingerprint>,
+}
+
+impl BranchStateIdentity {
+    fn of_stored(stored: &StoredPlacement) -> Self {
+        Self {
+            node: NodeRef::new(stored.kind, stored.identifier.clone()),
+            branch: stored.branch,
+        }
+    }
 }
 
 pub(crate) enum CapturedMaterializedState {
@@ -114,6 +275,24 @@ pub struct BackupBranchLifecycleEntry {
     pub incarnation: u64,
 }
 
+impl From<BranchInstanceSnapshotEntry<Option<BranchKey>>> for BackupBranchLifecycleEntry {
+    fn from(branch: BranchInstanceSnapshotEntry<Option<BranchKey>>) -> Self {
+        Self {
+            key: BranchKey::to_remote_key(&branch.key),
+            last_ingestion: branch.last_ingestion,
+            incarnation: branch.incarnation,
+        }
+    }
+}
+
+/// One Kafka source partition's next offset in a captured checkpoint.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct BackupKafkaPartitionOffset {
+    pub(crate) topic: String,
+    pub(crate) partition: i32,
+    pub(crate) next_offset: i64,
+}
+
 #[derive(Debug, Error)]
 pub enum BackupStateCaptureError {
     #[error("runtime state storage is unavailable")]
@@ -128,6 +307,12 @@ pub enum BackupStateCaptureError {
     Placement,
     #[error("the deduplicator keyspace of '{entity}' could not be read")]
     Keyspace { entity: ModelName },
+    #[error("the Kafka domain offsets of ingestor '{entity}' could not be read")]
+    KafkaOffsets { entity: ModelName },
+    #[error("reading the native metadata of '{entity}' could not be admitted")]
+    Admission { entity: ModelName },
+    #[error("the cut was cancelled between bounded units")]
+    Cancelled,
 }
 
 impl Runtime {
@@ -371,6 +556,7 @@ impl Runtime {
         domain: &DomainName,
         quiesced: bool,
         status: DomainStatus,
+        cancellation: &Cancellation,
     ) -> error_stack::Result<CapturedDomainState, BackupStateCaptureError> {
         let Some(store) = self.inner.state_store.as_ref() else {
             return Err(Report::new(BackupStateCaptureError::Unavailable));
@@ -426,47 +612,27 @@ impl Runtime {
                 RuntimeStateKind::WindowProcessor,
             ],
         };
-        let stored_snapshots = store
+        let listed = store
             .snapshot_backup_domain(domain, kinds)
             .change_context(BackupStateCaptureError::Storage)?;
-        let mut snapshots = Vec::new();
-        for (placement, snapshot) in stored_snapshots.checkpoints {
-            let node = NodeRef::new(placement.kind, placement.identifier.clone()).in_domain(domain);
-            let Some(slot) = self.inner.state_identities.get(&node) else {
-                continue;
-            };
-            let Some(assignment) = slot.load_full() else {
-                continue;
-            };
-            if assignment
-                .identity
-                .names(placement.state, placement.branch.as_ref())
-            {
-                snapshots.push((placement, snapshot));
+        let mut current = Vec::new();
+        for checkpoint in listed.checkpoints {
+            if self.names_stored_state(domain, &checkpoint.placement) {
+                current.push(checkpoint);
             }
         }
-        let mut keys =
-            ahash::HashMap::<(NodeRef, Option<BranchKeyFingerprint>), Option<BranchKey>>::default();
-        for (placement, snapshot) in &snapshots {
-            if placement.state.kind() != RuntimeStateKind::BranchLru {
-                continue;
-            }
-            let branches =
-                decode_branch_lru_snapshot(&snapshot.payload).change_context_lazy(|| {
-                    BackupStateCaptureError::Lifecycle {
-                        entity: placement.identifier.clone(),
-                    }
-                })?;
-            for branch in branches {
-                keys.insert(
-                    (
-                        NodeRef::new(placement.kind, placement.identifier.clone()),
-                        branch.key.as_ref().map(BranchKey::fingerprint),
-                    ),
-                    branch.key,
-                );
+        // A branch-local checkpoint takes its typed key from its entity's captured lifecycle. Only
+        // the branches with such a checkpoint, or with a published generation, are looked up.
+        let mut needed = ahash::HashSet::default();
+        for checkpoint in &current {
+            if checkpoint.placement.state.kind().is_branch_local() {
+                needed.insert(BranchStateIdentity::of_stored(&checkpoint.placement));
             }
         }
+        for identity in self.published_branch_state_identities(domain) {
+            needed.insert(identity);
+        }
+        let keys = self.lifecycle_keys(&current, &needed, cancellation)?;
         let mut branch_states = self.capture_published_branch_states(domain, &keys);
         let mut published = ahash::HashSet::default();
         for captured in &branch_states {
@@ -478,76 +644,75 @@ impl Runtime {
                 branch: captured.branch_fingerprint,
             });
         }
-        let mut captured = Vec::new();
-        for (stored, snapshot) in snapshots {
-            let kind = stored.state.kind();
-            let branch_state = matches!(
+        let mut guest_saves = Vec::new();
+        let mut native_metadata = Vec::new();
+        let mut stored_materialized = Vec::new();
+        for checkpoint in current {
+            let kind = checkpoint.placement.state.kind();
+            let publishes = matches!(
                 kind,
                 RuntimeStateKind::Deduplicator | RuntimeStateKind::WindowProcessor
             );
-            if branch_state
-                && published.contains(&BranchStateIdentity {
-                    node: NodeRef::new(stored.kind, stored.identifier.clone()),
-                    branch: stored.branch,
-                })
+            // A stored keyspace or window that a published generation supersedes is never read.
+            if publishes
+                && published.contains(&BranchStateIdentity::of_stored(&checkpoint.placement))
             {
                 continue;
             }
-            let Some(placement) = restored_placement(domain, stored, &keys) else {
+            let Some(placement) = restored_placement(domain, &checkpoint.placement, &keys) else {
                 continue;
             };
             let branch_fingerprint = placement.branch_key.as_ref().map(BranchKey::fingerprint);
-            let state = match kind {
-                RuntimeStateKind::Deduplicator => CapturedBranchStateKind::Deduplicator(
-                    CapturedDeduplicatorKeyspace::stored(snapshot.lsm, &snapshot.payload)
-                        .change_context_lazy(|| BackupStateCaptureError::Keyspace {
-                            entity: placement.identifier.clone(),
-                        })?,
-                ),
-                RuntimeStateKind::WindowProcessor => CapturedBranchStateKind::Window(
-                    CapturedWindow::stored(snapshot.lsm, snapshot.payload),
-                ),
-                _ => {
-                    captured.push(CapturedRuntimeState {
+            match kind {
+                RuntimeStateKind::KafkaOffset | RuntimeStateKind::BranchLru => {
+                    native_metadata.push(CapturedNativeMetadata {
+                        placement: placement.to_remote(),
+                        checkpoint,
+                    });
+                }
+                RuntimeStateKind::WasmProcessor => {
+                    let snapshot = checkpoint
+                        .read_entry()
+                        .change_context(BackupStateCaptureError::Storage)?;
+                    guest_saves.push(CapturedGuestSave {
                         placement: placement.to_remote(),
                         branch_fingerprint,
                         revision: snapshot.lsm,
                         payload: snapshot.payload,
                     });
-                    continue;
                 }
-            };
-            branch_states.push(CapturedBranchState {
-                placement: placement.to_remote(),
-                branch_fingerprint,
-                state,
-            });
-        }
-        let materialized = match status {
-            DomainStatus::Stopped => {
-                let mut stored_materialized = Vec::new();
-                for (placement, reader) in stored_snapshots.materialized {
-                    let node = NodeRef::new(placement.kind, placement.identifier.clone())
-                        .in_domain(domain);
-                    let Some(slot) = self.inner.state_identities.get(&node) else {
-                        continue;
-                    };
-                    let Some(assignment) = slot.load_full() else {
-                        continue;
-                    };
-                    if !assignment
-                        .identity
-                        .names(placement.state, placement.branch.as_ref())
-                    {
-                        continue;
-                    }
-                    let placement = RuntimeStatePlacement {
-                        domain: domain.clone(),
-                        state: placement.state,
-                        kind: placement.kind,
-                        identifier: placement.identifier,
-                        branch_key: None,
-                    };
+                RuntimeStateKind::Deduplicator => {
+                    let snapshot = checkpoint
+                        .read_entry()
+                        .change_context(BackupStateCaptureError::Storage)?;
+                    let keyspace =
+                        CapturedDeduplicatorKeyspace::stored(snapshot.lsm, &snapshot.payload)
+                            .change_context_lazy(|| BackupStateCaptureError::Keyspace {
+                                entity: placement.identifier.clone(),
+                            })?;
+                    branch_states.push(CapturedBranchState {
+                        placement: placement.to_remote(),
+                        branch_fingerprint,
+                        state: CapturedBranchStateKind::Deduplicator(keyspace),
+                    });
+                }
+                RuntimeStateKind::WindowProcessor => {
+                    let snapshot = checkpoint
+                        .read_entry()
+                        .change_context(BackupStateCaptureError::Storage)?;
+                    branch_states.push(CapturedBranchState {
+                        placement: placement.to_remote(),
+                        branch_fingerprint,
+                        state: CapturedBranchStateKind::Window(CapturedWindow::stored(
+                            snapshot.lsm,
+                            snapshot.payload,
+                        )),
+                    });
+                }
+                RuntimeStateKind::MaterializedRelay => {
+                    let reader = checkpoint
+                        .open()
+                        .change_context(BackupStateCaptureError::Storage)?;
                     stored_materialized.push(CapturedStoredMaterializedRelay {
                         placement: placement.to_remote(),
                         checkpoint:
@@ -557,8 +722,11 @@ impl Runtime {
                             ),
                     });
                 }
-                CapturedMaterializedState::Stored(stored_materialized)
+                RuntimeStateKind::BranchAggregated | RuntimeStateKind::Correlator => {}
             }
+        }
+        let materialized = match status {
+            DomainStatus::Stopped => CapturedMaterializedState::Stored(stored_materialized),
             DomainStatus::Running | DomainStatus::Paused => {
                 let mut materialized = Vec::new();
                 for state in self.inner.replicated_materialized_stream_states.iter() {
@@ -582,10 +750,99 @@ impl Runtime {
             }
         };
         Ok(CapturedDomainState {
-            checkpoints: captured,
+            guest_saves,
+            native_metadata,
             materialized,
             branch_states,
         })
+    }
+
+    /// Whether a stored checkpoint of `domain` is state its entity's current identity names.
+    fn names_stored_state(&self, domain: &DomainName, stored: &StoredPlacement) -> bool {
+        let node = NodeRef::new(stored.kind, stored.identifier.clone()).in_domain(domain);
+        let Some(slot) = self.inner.state_identities.get(&node) else {
+            return false;
+        };
+        let Some(assignment) = slot.load_full() else {
+            return false;
+        };
+        assignment
+            .identity
+            .names(stored.state, stored.branch.as_ref())
+    }
+
+    /// The typed keys of the `needed` branches, read from the captured lifecycles of `current`.
+    /// A lifecycle is read only when one of its branches is needed, one lifecycle at a time and
+    /// under its own conversion charge, and only the needed keys are kept. A branch its lifecycle
+    /// no longer holds was evicted and has no key.
+    fn lifecycle_keys(
+        &self,
+        current: &[ListedCheckpoint],
+        needed: &ahash::HashSet<BranchStateIdentity>,
+        cancellation: &Cancellation,
+    ) -> error_stack::Result<
+        ahash::HashMap<BranchStateIdentity, Option<BranchKey>>,
+        BackupStateCaptureError,
+    > {
+        let mut nodes = ahash::HashSet::default();
+        for identity in needed {
+            nodes.insert(&identity.node);
+        }
+        let mut keys = ahash::HashMap::default();
+        for checkpoint in current {
+            let stored = &checkpoint.placement;
+            let node = NodeRef::new(stored.kind, stored.identifier.clone());
+            if stored.state.kind() != RuntimeStateKind::BranchLru || !nodes.contains(&node) {
+                continue;
+            }
+            let entity = || BackupStateCaptureError::Lifecycle {
+                entity: stored.identifier.clone(),
+            };
+            let Some(conversion) = native_conversion_bytes(checkpoint.stored_bytes()) else {
+                return Err(Report::new(entity()));
+            };
+            let _charge = self
+                .executor()
+                .try_reserve(MemoryClass::RestoreMetadata, conversion)
+                .change_context_lazy(|| BackupStateCaptureError::Admission {
+                    entity: stored.identifier.clone(),
+                })?;
+            let lifecycle = read_native_lifecycle(checkpoint, cancellation)?;
+            lifecycle.lifecycle.with_branches(|branches| {
+                for branch in branches {
+                    cancellation
+                        .check()
+                        .change_context(BackupStateCaptureError::Cancelled)?;
+                    let branch = branch.typed();
+                    let identity = BranchStateIdentity {
+                        node: node.clone(),
+                        branch: branch.key.as_ref().map(BranchKey::fingerprint),
+                    };
+                    if needed.contains(&identity) {
+                        keys.insert(identity, branch.key);
+                    }
+                }
+                Ok::<_, Report<BackupStateCaptureError>>(())
+            })?;
+        }
+        Ok(keys)
+    }
+
+    /// The identities of the deduplicator and window generations this node's branch tasks of
+    /// `domain` published, whichever branches the cut's lifecycles hold.
+    fn published_branch_state_identities(&self, domain: &DomainName) -> Vec<BranchStateIdentity> {
+        let mut identities = Vec::new();
+        for state in self.inner.replicated_deduplicator_states.iter() {
+            if let Some(identity) = self.names_published_branch_state(domain, state.key()) {
+                identities.push(identity);
+            }
+        }
+        for state in self.inner.replicated_window_processor_states.iter() {
+            if let Some(identity) = self.names_published_branch_state(domain, state.key()) {
+                identities.push(identity);
+            }
+        }
+        identities
     }
 
     /// The generation each deduplicator and window branch task of `domain` on this node published
@@ -594,7 +851,7 @@ impl Runtime {
     fn capture_published_branch_states(
         &self,
         domain: &DomainName,
-        keys: &ahash::HashMap<(NodeRef, Option<BranchKeyFingerprint>), Option<BranchKey>>,
+        keys: &ahash::HashMap<BranchStateIdentity, Option<BranchKey>>,
     ) -> Vec<CapturedBranchState> {
         let mut deduplicators = Vec::new();
         for state in self.inner.replicated_deduplicator_states.iter() {
@@ -646,32 +903,74 @@ impl Runtime {
         &self,
         domain: &DomainName,
         placement: &RuntimeStatePlacement,
-        keys: &ahash::HashMap<(NodeRef, Option<BranchKeyFingerprint>), Option<BranchKey>>,
+        keys: &ahash::HashMap<BranchStateIdentity, Option<BranchKey>>,
     ) -> bool {
+        let Some(identity) = self.names_published_branch_state(domain, placement) else {
+            return false;
+        };
+        keys.contains_key(&identity)
+    }
+
+    /// The identity of a published branch state that is this node's state of `domain`, named by
+    /// its entity's current identity.
+    fn names_published_branch_state(
+        &self,
+        domain: &DomainName,
+        placement: &RuntimeStatePlacement,
+    ) -> Option<BranchStateIdentity> {
         if &placement.domain != domain
             || !self.runtime_state_placement_is_assigned_locally(placement)
         {
-            return false;
+            return None;
         }
         let branch = placement.branch_key.as_ref().map(BranchKey::fingerprint);
         let node = NodeRef::new(placement.kind, placement.identifier.clone());
-        if !keys.contains_key(&(node.clone(), branch)) {
-            return false;
+        let slot = self
+            .inner
+            .state_identities
+            .get(&node.clone().in_domain(domain))?;
+        let assignment = slot.load_full()?;
+        if !assignment.identity.names(placement.state, branch.as_ref()) {
+            return None;
         }
-        let Some(slot) = self.inner.state_identities.get(&node.in_domain(domain)) else {
-            return false;
-        };
-        let Some(assignment) = slot.load_full() else {
-            return false;
-        };
-        assignment.identity.names(placement.state, branch.as_ref())
+        Some(BranchStateIdentity { node, branch })
     }
 }
 
+/// The memory reading one native checkpoint into alignment and converting it takes: an inline
+/// payload and its aligned copy at once, or a segmented payload beside the stored chunk being
+/// copied, and afterwards the payload with the order of a Kafka checkpoint's partitions, which is
+/// never larger than the payload. Absent when that is not addressable.
+fn native_conversion_bytes(stored_bytes: u64) -> Option<u64> {
+    let chunk: u64 = RESTORE_STATE_CHUNK_BYTES.arch_into();
+    stored_bytes.checked_mul(2)?.checked_add(chunk)
+}
+
+fn read_native_lifecycle(
+    checkpoint: &ListedCheckpoint,
+    cancellation: &Cancellation,
+) -> error_stack::Result<NativeLifecycleCheckpoint, BackupStateCaptureError> {
+    let entity = &checkpoint.placement.identifier;
+    let aligned = checkpoint
+        .read_aligned(|| {
+            cancellation
+                .check()
+                .change_context(RuntimePersistenceError::Cancelled)
+        })
+        .change_context_lazy(|| BackupStateCaptureError::Lifecycle {
+            entity: entity.clone(),
+        })?;
+    NativeLifecycleCheckpoint::validate(aligned, entity, cancellation)
+}
+
+/// A stored Kafka offset checkpoint's positions decoded whole, for inspection and properties that
+/// compare complete values.
+#[cfg(any(test, feature = "testing"))]
 pub(crate) fn decode_backup_kafka_offsets(
     payload: &[u8],
 ) -> error_stack::Result<Vec<(String, i32, i64)>, BackupStateCaptureError> {
-    backup_offset_positions(payload).change_context(BackupStateCaptureError::Storage)
+    super::kafka_offset_state::backup_offset_positions(payload)
+        .change_context(BackupStateCaptureError::Storage)
 }
 
 pub(crate) fn write_restored_kafka_offsets(
@@ -683,21 +982,21 @@ pub(crate) fn write_restored_kafka_offsets(
         .change_context(BackupStateCaptureError::Storage)
 }
 
+/// A stored lifecycle checkpoint's branches decoded whole, for inspection and properties that
+/// compare complete values.
+#[cfg(any(test, feature = "testing"))]
 pub(crate) fn decode_backup_branch_lifecycle(
     payload: &[u8],
     entity: &ModelName,
 ) -> error_stack::Result<Vec<BackupBranchLifecycleEntry>, BackupStateCaptureError> {
-    let entries =
-        decode_branch_lru_snapshot(payload).change_context(BackupStateCaptureError::Lifecycle {
+    let entries = super::decode_branch_lru_snapshot(payload).change_context(
+        BackupStateCaptureError::Lifecycle {
             entity: entity.clone(),
-        })?;
+        },
+    )?;
     Ok(entries
         .into_iter()
-        .map(|entry| BackupBranchLifecycleEntry {
-            key: BranchKey::to_remote_key(&entry.key),
-            last_ingestion: entry.last_ingestion,
-            incarnation: entry.incarnation,
-        })
+        .map(BackupBranchLifecycleEntry::from)
         .collect())
 }
 
@@ -716,23 +1015,13 @@ pub(crate) fn write_restored_branch_lifecycle(
 
 fn restored_placement(
     domain: &DomainName,
-    stored: StoredPlacement,
-    keys: &ahash::HashMap<(NodeRef, Option<BranchKeyFingerprint>), Option<BranchKey>>,
+    stored: &StoredPlacement,
+    keys: &ahash::HashMap<BranchStateIdentity, Option<BranchKey>>,
 ) -> Option<RuntimeStatePlacement> {
-    let branch_local = matches!(
-        stored.state.kind(),
-        RuntimeStateKind::WasmProcessor
-            | RuntimeStateKind::Deduplicator
-            | RuntimeStateKind::WindowProcessor
-    );
-    let branch_key = if branch_local {
+    let branch_key = if stored.state.kind().is_branch_local() {
         // Eviction removes the lifecycle entry, while a branch's durable checkpoint may remain.
         // Only a currently active execution has a typed key worth reconstructing for this cut.
-        keys.get(&(
-            NodeRef::new(stored.kind, stored.identifier.clone()),
-            stored.branch,
-        ))?
-        .clone()
+        keys.get(&BranchStateIdentity::of_stored(stored))?.clone()
     } else {
         None
     };
@@ -740,7 +1029,7 @@ fn restored_placement(
         domain: domain.clone(),
         state: stored.state,
         kind: stored.kind,
-        identifier: stored.identifier,
+        identifier: stored.identifier.clone(),
         branch_key,
     })
 }
@@ -752,20 +1041,107 @@ mod branch_state_shuttle_tests;
 #[cfg(test)]
 mod tests {
     use meticulous::{OptionExt as _, ResultExt as _};
+    use nervix_execution::StorageClass;
     use nervix_interconnect::RuntimeState;
     use nervix_models::{ModelKind, SchemaFingerprint, WasmStateGeneration};
 
     use super::*;
     use crate::runtime::encode_branch_lru_snapshot;
 
+    /// Runs `work` as one admitted storage job, as the owner's capture runs it.
+    async fn in_storage_job<T: Send + 'static>(
+        runtime: &Runtime,
+        work: impl FnOnce(&Cancellation) -> T + Send + 'static,
+    ) -> T {
+        let executor = runtime.executor().clone();
+        let reservation = executor
+            .reserve(MemoryClass::Bulk, 1)
+            .await
+            .assured("the storage job is admitted");
+        executor
+            .run_storage(
+                StorageClass::Filesystem,
+                reservation,
+                move |_charge, cancellation| work(cancellation),
+            )
+            .await
+            .assured("the storage job runs to completion")
+    }
+
+    async fn capture(
+        runtime: &Runtime,
+        domain: &DomainName,
+    ) -> error_stack::Result<CapturedDomainState, BackupStateCaptureError> {
+        let capturing = runtime.clone();
+        let domain = domain.clone();
+        in_storage_job(runtime, move |cancellation| {
+            capturing.capture_backup_state(&domain, true, DomainStatus::Stopped, cancellation)
+        })
+        .await
+    }
+
+    fn schedule(runtime: &Runtime, domain: &DomainName, kind: ModelKind, entity: &ModelName) {
+        runtime.publish_state_assignment(
+            nervix_models::DomainNodeRef::node_in(domain.clone(), kind, entity.clone()),
+            super::super::ScheduledStateAssignment {
+                identity: super::super::ScheduledStateIdentity {
+                    schema_fingerprint: SchemaFingerprint::from_digest([4; 32]),
+                    wasm_state_generations: Some(nervix_models::WasmStateGenerations::first()),
+                },
+                checkpoint_owners: None,
+            },
+        );
+    }
+
+    fn persisted_runtime(dir: &std::path::Path) -> Runtime {
+        let db = fjall::Database::builder(dir)
+            .open()
+            .assured("database opens");
+        Runtime::with_persistence(Some(db), std::time::Duration::from_secs(60))
+            .assured("runtime opens")
+    }
+
+    fn lifecycle_of(
+        domain: &DomainName,
+        kind: ModelKind,
+        entity: &ModelName,
+    ) -> RuntimeStatePlacement {
+        RuntimeStatePlacement {
+            domain: domain.clone(),
+            kind,
+            identifier: entity.clone(),
+            state: RuntimeState::BranchLru {
+                schema: SchemaFingerprint::from_digest([4; 32]),
+            },
+            branch_key: None,
+        }
+    }
+
+    fn guest_of(lifecycle: &RuntimeStatePlacement, tenant: &str) -> RuntimeStatePlacement {
+        RuntimeStatePlacement {
+            state: RuntimeState::WasmProcessor {
+                schema: SchemaFingerprint::from_digest([4; 32]),
+                generation: WasmStateGeneration::FIRST,
+            },
+            branch_key: super::super::string_branch_key("tenant", tenant),
+            ..lifecycle.clone()
+        }
+    }
+
+    fn branch(tenant: &str, incarnation: u64) -> BranchInstanceSnapshotEntry<Option<BranchKey>> {
+        BranchInstanceSnapshotEntry {
+            key: super::super::string_branch_key("tenant", tenant),
+            last_ingestion: Timestamp::from_unix_nanos(
+                1_000 + i64::try_from(incarnation).assured("a small incarnation fits"),
+            ),
+            incarnation,
+        }
+    }
+
     #[nervix_primitives::test]
     async fn backup_omits_a_guest_checkpoint_after_its_branch_leaves_the_lifecycle() {
         let dir = tempfile::tempdir().assured("state directory opens");
-        let db = fjall::Database::builder(dir.path())
-            .open()
-            .assured("database opens");
-        let runtime = Runtime::with_persistence(Some(db), std::time::Duration::from_secs(60))
-            .assured("runtime opens");
+        let runtime = persisted_runtime(dir.path());
         let store = runtime
             .inner
             .state_store
@@ -773,39 +1149,10 @@ mod tests {
             .assured("state store is configured");
         let domain = DomainName::parse("orders").assured("domain is valid");
         let entity = ModelName::parse("accumulator").assured("processor is valid");
-        let schema = SchemaFingerprint::from_digest([4; 32]);
-        runtime.publish_state_assignment(
-            nervix_models::DomainNodeRef::node_in(
-                domain.clone(),
-                ModelKind::WasmProcessor,
-                entity.clone(),
-            ),
-            super::super::ScheduledStateAssignment {
-                identity: super::super::ScheduledStateIdentity {
-                    schema_fingerprint: schema,
-                    wasm_state_generations: Some(nervix_models::WasmStateGenerations::first()),
-                },
-                checkpoint_owners: None,
-            },
-        );
-        let key = super::super::string_branch_key("tenant", "alpha");
-        let lifecycle = RuntimeStatePlacement {
-            domain: domain.clone(),
-            kind: ModelKind::WasmProcessor,
-            identifier: entity,
-            state: RuntimeState::BranchLru { schema },
-            branch_key: None,
-        };
-        let guest = RuntimeStatePlacement {
-            state: RuntimeState::WasmProcessor {
-                schema,
-                generation: WasmStateGeneration::FIRST,
-            },
-            branch_key: key,
-            ..lifecycle.clone()
-        };
+        schedule(&runtime, &domain, ModelKind::WasmProcessor, &entity);
+        let lifecycle = lifecycle_of(&domain, ModelKind::WasmProcessor, &entity);
         store
-            .publish_sealed_snapshot(&guest, 8, b"saved-alpha")
+            .publish_sealed_snapshot(&guest_of(&lifecycle, "alpha"), 8, b"saved-alpha")
             .assured("guest persists");
         store
             .publish_sealed_snapshot(
@@ -814,27 +1161,176 @@ mod tests {
                 &encode_branch_lru_snapshot(&[]).assured("empty current lifecycle encodes"),
             )
             .assured("eviction persists");
-        let captured = runtime
-            .capture_backup_state(&domain, true, DomainStatus::Stopped)
+        let captured = capture(&runtime, &domain)
+            .await
             .assured("a retained inactive guest does not fail the cut");
+        assert!(
+            captured.guest_saves.is_empty(),
+            "the evicted branch's guest save is not archived"
+        );
         assert_eq!(
-            captured.checkpoints.len(),
+            captured.native_metadata.len(),
             1,
             "the scheduled current lifecycle is retained"
         );
-        assert!(
-            captured
-                .checkpoints
-                .iter()
-                .all(|entry| entry.placement.state.kind() != RuntimeStateKind::WasmProcessor)
+        assert_eq!(
+            captured.native_metadata[0].placement.state.kind(),
+            RuntimeStateKind::BranchLru
         );
         runtime.clear_state_identities(&domain);
-        assert!(
+        let captured = capture(&runtime, &domain)
+            .await
+            .assured("removed entities do not contribute retained checkpoints");
+        assert!(captured.guest_saves.is_empty());
+        assert!(captured.native_metadata.is_empty());
+    }
+
+    #[nervix_primitives::test]
+    async fn a_cut_reattaches_only_the_keys_its_branch_local_checkpoints_need() {
+        let dir = tempfile::tempdir().assured("state directory opens");
+        let runtime = persisted_runtime(dir.path());
+        let store = runtime
+            .inner
+            .state_store
+            .as_ref()
+            .assured("state store is configured");
+        let domain = DomainName::parse("orders").assured("domain is valid");
+        let processor = ModelName::parse("accumulator").assured("processor is valid");
+        let ingestor = ModelName::parse("source").assured("ingestor is valid");
+        schedule(&runtime, &domain, ModelKind::WasmProcessor, &processor);
+        schedule(&runtime, &domain, ModelKind::Ingestor, &ingestor);
+        let lifecycle = lifecycle_of(&domain, ModelKind::WasmProcessor, &processor);
+        let branches = [branch("alpha", 3), branch("beta", 5), branch("gamma", 7)];
+        store
+            .publish_sealed_snapshot(
+                &lifecycle,
+                9,
+                &encode_branch_lru_snapshot(&branches).assured("the lifecycle encodes"),
+            )
+            .assured("the lifecycle persists");
+        store
+            .publish_sealed_snapshot(&guest_of(&lifecycle, "beta"), 8, b"saved-beta")
+            .assured("the guest persists");
+        // No branch-local state of the ingestor needs its lifecycle, so the cut never reads it.
+        store
+            .publish_sealed_snapshot(
+                &lifecycle_of(&domain, ModelKind::Ingestor, &ingestor),
+                4,
+                b"not a lifecycle snapshot",
+            )
+            .assured("the ingestor lifecycle persists");
+        let captured = capture(&runtime, &domain)
+            .await
+            .assured("an unread lifecycle does not fail the cut");
+        let [guest] = captured.guest_saves.as_slice() else {
+            panic!("exactly the saved guest is archived");
+        };
+        assert_eq!(guest.payload, b"saved-beta");
+        assert_eq!(guest.revision, 8);
+        let beta = super::super::string_branch_key("tenant", "beta");
+        assert_eq!(
+            guest.placement.branch_key,
+            BranchKey::to_remote_key(&beta),
+            "the guest takes its typed key from the lifecycle"
+        );
+        assert_eq!(
+            guest.branch_fingerprint,
+            beta.as_ref().map(BranchKey::fingerprint)
+        );
+        let mut native = captured.native_metadata;
+        native.sort_by_key(|metadata| metadata.placement.kind == ModelKind::Ingestor);
+        let Ok([processor_lifecycle, ingestor_lifecycle]) =
+            <[CapturedNativeMetadata; 2]>::try_from(native)
+        else {
+            panic!("both lifecycles are captured for their sections");
+        };
+        /// What reading both captured lifecycles produced.
+        struct ReadLifecycles {
+            revision: u64,
+            branches: Vec<BackupBranchLifecycleEntry>,
+            ingestor: error_stack::Result<NativeLifecycleCheckpoint, BackupStateCaptureError>,
+        }
+        let read = in_storage_job(&runtime, move |cancellation| {
+            let read = processor_lifecycle
+                .read_branch_lifecycle(cancellation)
+                .assured("the processor lifecycle reads");
+            ReadLifecycles {
+                revision: read.revision,
+                branches: read.with_branches(|branches| branches.collect()),
+                ingestor: ingestor_lifecycle.read_branch_lifecycle(cancellation),
+            }
+        })
+        .await;
+        assert_eq!(read.revision, 9);
+        assert_eq!(read.branches.len(), branches.len());
+        for (actual, expected) in read.branches.iter().zip(&branches) {
+            assert_eq!(actual.key, BranchKey::to_remote_key(&expected.key));
+            assert_eq!(actual.last_ingestion, expected.last_ingestion);
+            assert_eq!(actual.incarnation, expected.incarnation);
+        }
+        let failure = read
+            .ingestor
+            .err()
+            .assured("an invalid lifecycle fails when its section reads it");
+        assert!(matches!(
+            failure.current_context(),
+            BackupStateCaptureError::Lifecycle { entity } if *entity == ingestor
+        ));
+    }
+
+    #[nervix_primitives::test]
+    async fn a_lifecycle_the_restore_metadata_class_cannot_hold_refuses_the_cut() {
+        let dir = tempfile::tempdir().assured("state directory opens");
+        let runtime = persisted_runtime(dir.path());
+        let store = runtime
+            .inner
+            .state_store
+            .as_ref()
+            .assured("state store is configured");
+        let domain = DomainName::parse("orders").assured("domain is valid");
+        let processor = ModelName::parse("accumulator").assured("processor is valid");
+        schedule(&runtime, &domain, ModelKind::WasmProcessor, &processor);
+        let lifecycle = lifecycle_of(&domain, ModelKind::WasmProcessor, &processor);
+        store
+            .publish_sealed_snapshot(
+                &lifecycle,
+                9,
+                &encode_branch_lru_snapshot(&[branch("alpha", 3)]).assured("the lifecycle encodes"),
+            )
+            .assured("the lifecycle persists");
+        store
+            .publish_sealed_snapshot(&guest_of(&lifecycle, "alpha"), 8, b"saved-alpha")
+            .assured("the guest persists");
+        let capacity = runtime
+            .executor()
+            .snapshot()
+            .restore_metadata_memory
+            .capacity_bytes;
+        let held = runtime
+            .executor()
+            .try_reserve(MemoryClass::RestoreMetadata, capacity)
+            .assured("the test holds the whole class");
+        let failure = capture(&runtime, &domain)
+            .await
+            .err()
+            .assured("a lifecycle read is refused rather than read uncharged");
+        assert!(matches!(
+            failure.current_context(),
+            BackupStateCaptureError::Admission { entity } if *entity == processor
+        ));
+        drop(held);
+        let captured = capture(&runtime, &domain)
+            .await
+            .assured("the same cut is admitted once the class has room");
+        assert_eq!(captured.guest_saves.len(), 1);
+        assert_eq!(
             runtime
-                .capture_backup_state(&domain, true, DomainStatus::Stopped)
-                .assured("removed entities do not contribute retained checkpoints")
-                .checkpoints
-                .is_empty()
+                .executor()
+                .snapshot()
+                .restore_metadata_memory
+                .reserved_bytes,
+            0,
+            "the lifecycle charge ends with its read"
         );
     }
 }
