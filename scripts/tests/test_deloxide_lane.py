@@ -426,7 +426,7 @@ class InventoryTests(unittest.TestCase):
                     self.assertTrue(workload.id.startswith("stress."))
                     self.assertIn((workload.feature, workload.scenario, workload.examples), active_scenarios)
         self.assertEqual(len(inventory.workloads_of("probes", "deloxide-stress")), 15)
-        self.assertEqual(len(inventory.workloads_of("stress-scenarios", "deloxide-stress")), 13)
+        self.assertEqual(len(inventory.workloads_of("stress-scenarios", "deloxide-stress")), 14)
         for path, owner in inventory.owners.items():
             with self.subTest(owner=path):
                 self.assertTrue((REPOSITORY / path).is_file(), path)
