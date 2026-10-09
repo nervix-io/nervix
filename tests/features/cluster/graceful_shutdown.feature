@@ -1,6 +1,45 @@
 @shutdown_qualification
 Feature: Graceful shutdown
 
+  @shutdown_leader_change
+  Scenario: A stopping follower resumes its remaining ownership moves after the leader changes
+    Given graceful shutdown drain is enabled
+    And drain timeout is configured as "30s"
+    And runtime replication is configured with replica count 0 and snapshot interval "10m"
+    And the production sticky scheduler is configured
+    And a 3 node nervix cluster is started
+    And the leader node is configured with these NSPL commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      CREATE SCHEMA drain_event ( id I64 );
+      CREATE RELAY drain_input SCHEMA drain_event UNBRANCHED;
+      CREATE RELAY drain_output SCHEMA drain_event UNBRANCHED;
+      CREATE JUNCTION drain_route FROM drain_input UNBRANCHED
+        TO drain_output INHERIT ALL FLUSH IMMEDIATE ON MESSAGE ERROR LOG;
+      START;
+      RELOCATE JUNCTION drain_route ONTO NODE node-2 IGNORE PREFERENCES;
+      """
+    Then node "node-1" eventually reports status containing "kind=junction name=drain_route owner=node-2"
+    When leadership is transferred to node "node-3"
+    Given ownership handoff for domain "{{domain}}" pauses after preparation
+    When node "node-2" begins stopping
+    Then the ownership handoff preparation pause for domain "{{domain}}" is reached
+    When leadership is transferred to node "node-1"
+    Then node "node-3" eventually reports leader "node-1"
+    When the ownership handoff preparation pause for domain "{{domain}}" is released
+    And node "node-2" is stopped
+    Then the last shutdown of node "node-2" reports its drain-support phase "Completed"
+    And node "node-1" eventually reports status containing "raft.cordoned_nodes: (none)"
+    When these NSPL commands are executed through the client on node "node-1"
+      """
+      SHOW CLUSTER STATUS;
+      """
+    Then the last cluster status owner for scheduled "junction" "drain_route" is saved as placeholder "drain_route_destination"
+    And the last command output contains
+      """
+      kind=junction name=drain_route owner={{drain_route_destination}} replicas=- transition_from=node-2 state_recovery=complete
+      """
+
   Scenario: Graceful shutdown preserves an operator cordon across restart
     Given graceful shutdown drain is enabled
     And the production sticky scheduler is configured

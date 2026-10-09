@@ -1639,7 +1639,11 @@ admission owner locks. The `@shutdown_kafka_handoff` scenario runs in both selec
 the ingestor quiesce control's tracked locks while a stopping node closes intake, waits for its
 attached emitter's handoff, and finishes admitted Kafka acknowledgements. The async gate wait,
 remote delivery and scheduling order remain outside the detector's observation and have the
-Cucumber and chaos checks in [Shutdown And Recovery](./shutdown.md). The inventory also bounds the
+Cucumber and chaos checks in [Shutdown And Recovery](./shutdown.md). The
+`@shutdown_leader_change` scenario also runs in both selections and reaches the tracked entity-gate
+state while a stopping follower repeats the remaining handoff through a new leader. Its leadership
+observation, transport waits and shared shutdown deadline remain outside the detector's observation.
+The inventory also bounds the
 lane: one real-time budget for a selection's
 diagnostic compilation and execution after its prerequisites, a bound for every invocation, a stop
 grace period, the reserve the scenario binary keeps for its own teardown inside its invocation's

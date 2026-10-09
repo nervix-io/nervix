@@ -246,7 +246,12 @@ fencing, and overflow handling.
 The stopping-node drain action carries a required remaining `Duration` budget. Its sender deducts
 elapsed request time before each leader redirect; the receiving leader owns the typed budget for
 the handoffs it performs. Preparation and activation deadlines are derived from that one value,
-and exhaustion produces a failed drain outcome. The interconnect verifies the archived action
+and exhaustion produces a failed drain outcome. The stopping-node answer distinguishes a failure
+while its coordinator still leads from an interrupted drain whose coordinator no longer leads.
+The latter routes the remaining moves through the next leader without resetting the budget or
+repeating committed moves. Classification consumes the typed command disposition and consensus
+leadership observation rather than matching diagnostic text. The interconnect verifies the archived
+action
 and fences its current representation with the wire fingerprint. [Shutdown And Recovery](./shutdown.md)
 owns the lifecycle and deadline policy.
 

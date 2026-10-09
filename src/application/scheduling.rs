@@ -1255,9 +1255,11 @@ impl SessionServiceImpl {
     }
 
     /// Asks `leader` to act on this stopping node's own scheduled work, and asks the leader this
-    /// node observes next whenever the node asked does not lead, which changed nothing, or lost
-    /// its leadership while it released the cordon. While this node leads, it acts for itself.
+    /// node observes next whenever the node asked does not lead, or lost its leadership while
+    /// draining or releasing the cordon. While this node leads, it acts for itself.
     ///
+    /// A leader that loses leadership during a drain preserves committed moves and lets the next
+    /// leader plan the remaining ones within the same budget.
     /// Another leader hears the request over the interconnect, which authenticates this node by its
     /// certificate, so asking needs no user credential.
     async fn ask_shutdown_drain_leader(
@@ -1384,12 +1386,22 @@ impl SessionServiceImpl {
         match action {
             StoppingNodeDrainAction::Drain { budget } => {
                 let drained = self
-                    .drain_node_with_budget(node_id, None, Some(budget))
+                    .drain_node_with_budget(node_id.clone(), None, Some(budget))
                     .await;
                 if drained.succeeded() {
                     StoppingNodeDrainResponse::Completed {
                         report: drained.message,
                     }
+                } else if drained.is_not_leader()
+                    || self.inner.consensus.current_leader().await.as_ref()
+                        != Some(self.inner.consensus.local_node_id())
+                {
+                    info!(
+                        node_id = %node_id,
+                        report = %drained.message,
+                        "stopping-node drain lost leadership; remaining work needs the next leader"
+                    );
+                    StoppingNodeDrainResponse::NotLeader
                 } else {
                     StoppingNodeDrainResponse::Failed {
                         report: drained.message,

@@ -592,8 +592,13 @@ node: the leader acts for the node whose certificate authenticated the connectio
 drain only itself, and no user credential takes part. A follower started without
 `--init-default-user-password`, as every node but the bootstrap node is in the documented
 [Docker deployments](./installation-docker.md), therefore drains through the leader like any other.
-A node that receives the request without leading changes nothing and says so, and the follower asks
-the leader it observes next, within the same drain timeout. The leader runs the drain in a task of
+A node that receives the request without leading changes nothing and says so. A leader that loses
+leadership before it completes the drain also answers as not leading, including when a participant
+fences its coordination identity during a handoff. It logs the interrupted drain report before
+answering. The stopping node asks the leader it observes next within the same shrinking drain
+budget. Already committed moves remain committed; the next leader reads the current schedule and
+moves only the work still owned by the stopping node. A failed drain from a node that still leads
+remains a failed outcome. The leader runs the drain in a task of
 its own, so a drain that has begun finishes, and releases the gates it engaged, even when the
 follower's drain timeout ends its wait first. The interconnect resolves the leader's advertised
 endpoint through the follower's loaded resolver, described in [Name Resolution](./name-resolution.md),
@@ -1022,7 +1027,8 @@ The phase records are the primary signal:
 | `warn` | `repeated termination signal received; abandoning graceful shutdown` |
 | `warn` | `shutdown deadline expired; abandoning graceful shutdown` |
 
-Drain decisions and failures are logged beside them: `preserving operator cordon across graceful
+Drain decisions and failures are logged beside them: `stopping-node drain lost leadership; remaining
+work needs the next leader`, `preserving operator cordon across graceful
 shutdown`, `no live schedulable replacement node remains; admitted work completes in place`, `timed
 out reaching the leader before requesting a graceful shutdown drain`, `drained local node before
 graceful shutdown`, `failed to drain local node before graceful shutdown`, `the leader did not

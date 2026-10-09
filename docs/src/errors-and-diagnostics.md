@@ -997,8 +997,13 @@ promoted owner. A commit that lacks its required replica acknowledgement still r
 existing quorum deadline; catch-up retries do not turn that deadline into a successful commit.
 A stopping node's `stopping_node_drain` request answers with outcomes of its own instead, because
 its only subject is the authenticated sender: completed or failed, each with the leader's report for
-the sender's log, or not the leader, which changed nothing and sends the sender to the leader it
-observes next. When that request fails in transport, the drain counts as requested but unanswered:
+the sender's log, or not the leader, which sends the sender to the leader it observes next. A node
+that receives the request without leading changes nothing. If leadership is lost during a drain,
+the interrupted report remains in the former leader's log and the new leader continues from the
+committed schedule within the original remaining budget. This classification uses the typed
+command disposition and the retained consensus leadership observation; it never interprets report
+text. A failed drain while the answering node still leads remains failed. When that request fails
+in transport, the drain counts as requested but unanswered:
 the sender reports its drain-support phase abandoned and still clears the cordon the request may
 have set; see [Topology Cases](./shutdown.md#topology-cases). A unit whose ownership handoff
 cannot prepare within its share of the stopping node's drain budget appears in the leader's failed

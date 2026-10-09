@@ -400,6 +400,16 @@ scenario = "A stopping Kafka ingestor closes intake while its attached emitter h
 selections = ["deloxide", "deloxide-order"]
 
 [[workload]]
+coverage = "Tracked entity-gate state during a stopping follower's ownership handoff across a leader change. Async leadership observation, transport waits and the shared shutdown deadline are untracked."
+examples = 1
+feature = "tests/features/cluster/graceful_shutdown.feature"
+id = "scenario.shutdown-leader-change"
+invariant = "A stopping follower resumes the remaining committed-schedule ownership moves through the new leader within its original drain budget and completes its drain-support phase."
+invocation = "scenarios"
+scenario = "A stopping follower resumes its remaining ownership moves after the leader changes"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
 coverage = "Bounded remote delivery and peer admission owners under interleaved branches, attached sink acknowledgement and Kafka source offset commit."
 examples = 2
 feature = "tests/features/runtime/remote_ack_owners.feature"
@@ -1038,7 +1048,11 @@ workloads = ["scenario.client-alter-drain", "scenario.wasm-kafka-restore"]
 
 [[owner]]
 path = "src/runtime/entity_gate.rs"
-workloads = ["scenario.client-alter-drain", "scenario.client-alter-rejection"]
+workloads = [
+  "scenario.client-alter-drain",
+  "scenario.client-alter-rejection",
+  "scenario.shutdown-leader-change",
+]
 
 [[owner]]
 path = "src/runtime/force_flush.rs"

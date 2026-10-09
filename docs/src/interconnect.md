@@ -338,10 +338,14 @@ ownership handoffs, and release, which clears the cordon that drain set. The lea
 the node the authenticated connection belongs
 to, so the certificate that admitted the connection is the whole authorization: a node can drain
 and uncordon only itself, and no user credential takes part. The answer is completed or failed, each
-with the leader's account of the action for the stopping node's log, or not the leader, from a node
-that changed nothing and leaves the sender to ask the leader it observes next. A leader that loses
-its leadership while it writes a release also answers not the leader, because clearing a cordon
-again through the next leader is harmless. The leader runs the action in a service task of its own,
+with the leader's account of the action for the stopping node's log, or not the leader, which leaves
+the sender to ask the leader it observes next. A node that does not lead when the request arrives
+changes nothing. A leader that loses leadership before completing a drain also answers not the
+leader, logs its interrupted report, and preserves any moves already committed. The next leader
+plans the remaining moves from the current schedule, within the sender's remaining budget. A
+leader that loses its leadership while it writes a release also answers not the leader, because
+clearing a cordon again through the next leader is harmless. The leader runs the action in a service
+task of its own,
 so a drain that has begun finishes, and releases what it holds, even when the sender's deadline
 abandons the request first. For a drain that deadline is what remains of the sender's drain
 timeout; the leader also uses the budget carried by the drain action to bound each unit's gate,
