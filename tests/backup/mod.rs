@@ -28,6 +28,8 @@ mod delivery;
 mod fidelity;
 mod large_branch_state;
 mod materialized;
+pub(crate) mod memory;
+mod native_metadata;
 pub(crate) mod restore;
 mod staging;
 mod wait;

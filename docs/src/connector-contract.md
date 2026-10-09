@@ -335,7 +335,8 @@ schemaful JSON codec, that group also owns mutable payload scratch and simd-json
 the connector continues lending immutable payload bytes, and the host reuses its storage until the
 group closes. Compiled field keys direct borrowed JSON values into typed columns without a serde
 tree or an intermediate row representation. A rejected payload abandons only the partial Arrow row
-it started, preserving the accepted rows and transport positions around it.
+it started, including any list value it left half-filled at any depth, preserving the accepted rows
+and transport positions around it: every payload decodes into its group exactly as it would alone.
 At group execution, the host resolves event timestamps into one Arrow column and tests paced-domain
 admission with one bitmap. It selects the accepted batch and its ACK and metadata sidecars together.
 Each timestamp rejection retains the source row's ACK for its route-local message-error delivery;
@@ -599,7 +600,8 @@ Syslog sends a completed codec payload as one transport frame. Its UDP writer re
 65,507 bytes, octet-counted TCP and TLS reject a count needing more than ten digits, and
 non-transparent TCP rejects one containing LF. The Sentry writer accepts one
 JSON event per envelope and checks the final event after default fields are added against the
-1 MB decompressed event limit. Both classify a definite local refusal as a record rejection;
+1 MB decompressed event limit. It writes every other member as the codec wrote it, a number to
+its last digit. Both classify a definite local refusal as a record rejection;
 their transport and service failures retain their existing retry boundaries.
 
 The host owns that membership. It keeps every payload it offers the sink, with its exact bytes,
@@ -884,7 +886,8 @@ sequenceDiagram
   frames become payload; the host still owns intake and routing. Domain activation resolves the
   endpoint's VHOST and signaling reference first. The runtime binds the pinned protobuf resource,
   when present, and passes the protocol's typed format and connect steps to the WebSocket compiler.
-  The compiler never chooses a graph route or an endpoint listener.
+  The compiler never chooses a graph route or an endpoint listener. A number keeps its value
+  between a frame and the programs that read and write it: a protobuf `double` to its bits.
 - **Server endpoint intake.** The endpoint source binds one prepared intake lifetime to all of its
   configured routes before reporting readiness. Domain definitions and bound lifetimes share one
   immutable publication. HTTP resolves it once per request; a WebSocket retains its route and

@@ -71,14 +71,6 @@ impl RemoteAckOutcome {
 }
 
 #[derive(
-    Debug, Clone, PartialEq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
-)]
-pub struct RemoteRuntimeRecord {
-    pub fields: Vec<RemoteRuntimeField>,
-    pub metadata: RemoteRuntimeRecordMetadata,
-}
-
-#[derive(
     Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
 )]
 pub struct RemoteRuntimeRecordMetadata {
