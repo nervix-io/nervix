@@ -9,10 +9,9 @@
 use std::{collections::BTreeMap, num::NonZeroU64, time::Duration};
 
 use ahash::HashMap;
-#[cfg(test)]
 use arch_into::ArchInto as _;
 use error_stack::{Report, ResultExt as _};
-use meticulous::OptionExt as _;
+use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_checkpoint_replication::{CheckpointReplication, ReplicaProgress};
 use nervix_connector_kafka::KafkaOffsetPosition;
 use nervix_models::ClusterNodeName;
@@ -33,8 +32,8 @@ use super::KafkaDomainOffsetDescribe;
 #[cfg(test)]
 use super::observability::kafka_domain_offset_describe_from_schedule;
 use super::{
-    PersistedRuntimeStateEntry, RuntimePersistenceError, RuntimeStateKind,
-    RuntimeStateOperationError, RuntimeStatePlacement, StateAssignmentAuthority,
+    BackupKafkaPartitionOffset, PersistedRuntimeStateEntry, RuntimePersistenceError,
+    RuntimeStateKind, RuntimeStateOperationError, RuntimeStatePlacement, StateAssignmentAuthority,
     StateAssignmentToken, StateAuthorityError, StateCapability, StateReplicationRoles,
     lsm_sequence::LsmSequence, state_replication::StateReplicationError,
 };
@@ -731,6 +730,107 @@ pub(in crate::runtime) fn backup_offset_positions(
     Ok(offsets)
 }
 
+/// A stored Kafka offset checkpoint validated once in its aligned allocation, beside the order its
+/// partitions are archived in. A partition the checkpoint records twice keeps its later record, as
+/// decoding the checkpoint into a table keeps it.
+pub(crate) struct NativeKafkaOffsets {
+    payload: rkyv::util::AlignedVec<16>,
+    /// One index into the archived offsets for every partition, in topic and partition order.
+    order: Vec<u32>,
+}
+
+// The order holds at most one index per archived entry, and an archived entry is never smaller
+// than an index, so the order never takes more memory than the payload it indexes.
+const _: () =
+    assert!(std::mem::size_of::<ArchivedKafkaOffsetEntrySnapshot>() >= std::mem::size_of::<u32>());
+
+impl NativeKafkaOffsets {
+    /// Validates the archived checkpoint and orders its partitions, running `check` before each.
+    pub(super) fn validate(
+        payload: rkyv::util::AlignedVec<16>,
+        mut check: impl FnMut() -> error_stack::Result<(), RuntimePersistenceError>,
+    ) -> error_stack::Result<Self, RuntimePersistenceError> {
+        let snapshot = access_offset_snapshot(&payload)?;
+        let offsets = &snapshot.offsets;
+        let count = u32::try_from(offsets.len())
+            .verified("an archived vector counts its entries in 32 bits");
+        let mut order = Vec::with_capacity(offsets.len());
+        for index in 0..count {
+            check()?;
+            order.push(index);
+        }
+        // A partition recorded twice sorts its later record first, and the deduplication below
+        // keeps the first of each run.
+        order.sort_unstable_by(|left, right| {
+            let left_key = offsets[left.arch_into()].partition_key();
+            let right_key = offsets[right.arch_into()].partition_key();
+            left_key.cmp(&right_key).then(right.cmp(left))
+        });
+        order.dedup_by(|current, kept| {
+            offsets[current.arch_into()].partition_key()
+                == offsets[kept.arch_into()].partition_key()
+        });
+        Ok(Self { payload, order })
+    }
+
+    /// Hands `visit` every partition's position in topic and partition order, through an
+    /// iterator it may clone and walk again.
+    pub(crate) fn with_positions<R>(&self, visit: impl FnOnce(KafkaOffsetPositions<'_>) -> R) -> R {
+        let snapshot = access_offset_snapshot(&self.payload)
+            .verified("the offsets were validated when they were read and have not changed since");
+        visit(KafkaOffsetPositions {
+            offsets: &snapshot.offsets,
+            order: self.order.iter(),
+        })
+    }
+}
+
+fn access_offset_snapshot(
+    payload: &[u8],
+) -> error_stack::Result<&ArchivedKafkaOffsetSnapshot, RuntimePersistenceError> {
+    rkyv::access::<ArchivedKafkaOffsetSnapshot, rkyv::rancor::Error>(payload)
+        .change_context(RuntimePersistenceError::DecodeState)
+}
+
+impl ArchivedKafkaOffsetEntrySnapshot {
+    /// The topic and partition the entry records, which order an archive's offsets.
+    fn partition_key(&self) -> (&str, i32) {
+        (self.topic.as_str(), self.partition.to_native())
+    }
+}
+
+/// The partitions of a validated offset checkpoint in topic and partition order, each converted
+/// when it is reached.
+#[derive(Clone)]
+pub(crate) struct KafkaOffsetPositions<'a> {
+    offsets: &'a rkyv::vec::ArchivedVec<ArchivedKafkaOffsetEntrySnapshot>,
+    order: std::slice::Iter<'a, u32>,
+}
+
+impl Iterator for KafkaOffsetPositions<'_> {
+    type Item = BackupKafkaPartitionOffset;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let index = *self.order.next()?;
+        let entry = &self.offsets[index.arch_into()];
+        Some(BackupKafkaPartitionOffset {
+            topic: entry.topic.as_str().to_owned(),
+            partition: entry.partition.to_native(),
+            next_offset: entry.next_offset.to_native(),
+        })
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        self.order.size_hint()
+    }
+}
+
+impl ExactSizeIterator for KafkaOffsetPositions<'_> {
+    fn len(&self) -> usize {
+        self.order.len()
+    }
+}
+
 /// A serialization view of the current archived offset root. Restore carries positions only;
 /// topic scheduling is established by the restored execution plan.
 #[derive(Archive, RkyvSerialize)]
@@ -1074,12 +1174,111 @@ pub(in crate::runtime) fn assert_offset_payload_decodes_typed(payload: &[u8]) {
 #[cfg(test)]
 mod tests {
     use ahash::HashMap;
-    use meticulous::ResultExt as _;
     use nervix_models::{ClusterNodeName, DomainName, ModelKind, ModelName};
     use nervix_primitives::sync::{Arc, oneshot};
 
     use super::*;
     use crate::runtime::{RuntimeState, StateReplicationRoles};
+
+    fn aligned(payload: &[u8]) -> rkyv::util::AlignedVec<16> {
+        let mut aligned = rkyv::util::AlignedVec::<16>::with_capacity(payload.len());
+        aligned.extend_from_slice(payload);
+        aligned
+    }
+
+    fn entry(topic: &str, partition: i32, next_offset: i64) -> KafkaOffsetEntrySnapshot {
+        KafkaOffsetEntrySnapshot {
+            topic: topic.to_string(),
+            partition,
+            next_offset,
+        }
+    }
+
+    fn position(topic: &str, partition: i32, next_offset: i64) -> BackupKafkaPartitionOffset {
+        BackupKafkaPartitionOffset {
+            topic: topic.to_string(),
+            partition,
+            next_offset,
+        }
+    }
+
+    #[test]
+    fn native_offsets_walk_partitions_in_order_and_keep_a_partition_s_later_record() {
+        let snapshot = KafkaOffsetSnapshot {
+            offsets: vec![
+                entry("beta", 1, 10),
+                entry("alpha", 2, 20),
+                entry("beta", 0, 30),
+                entry("alpha", 2, 40),
+                entry("alpha", 10, 50),
+            ],
+            schedules: Vec::new(),
+        };
+        let payload = rkyv::to_bytes::<rkyv::rancor::Error>(&snapshot)
+            .assured("the unordered current shape encodes")
+            .to_vec();
+        let offsets = NativeKafkaOffsets::validate(aligned(&payload), || Ok(()))
+            .assured("a current offset checkpoint validates");
+        let walked = offsets.with_positions(|positions| {
+            assert_eq!(positions.len(), 4, "every partition is walked once");
+            assert_eq!(positions.clone().count(), 4, "a clone walks them again");
+            positions.collect::<Vec<_>>()
+        });
+        let expected = vec![
+            position("alpha", 2, 40),
+            position("alpha", 10, 50),
+            position("beta", 0, 30),
+            position("beta", 1, 10),
+        ];
+        assert_eq!(walked, expected);
+        let decoded = backup_offset_positions(&payload)
+            .assured("the table decoding reads the same checkpoint");
+        let mut tabled = Vec::new();
+        for (topic, partition, next_offset) in decoded {
+            tabled.push(BackupKafkaPartitionOffset {
+                topic,
+                partition,
+                next_offset,
+            });
+        }
+        assert_eq!(tabled, expected, "the walk agrees with the table decoding");
+    }
+
+    #[test]
+    fn validating_native_offsets_checks_between_entries_and_refuses_foreign_bytes() {
+        let snapshot = KafkaOffsetSnapshot {
+            offsets: vec![
+                entry("alpha", 0, 1),
+                entry("alpha", 1, 2),
+                entry("alpha", 2, 3),
+            ],
+            schedules: Vec::new(),
+        };
+        let payload = rkyv::to_bytes::<rkyv::rancor::Error>(&snapshot)
+            .assured("the current shape encodes")
+            .to_vec();
+        let mut checks = 0;
+        let failure = NativeKafkaOffsets::validate(aligned(&payload), || {
+            checks += 1;
+            if checks > 2 {
+                return Err(Report::new(RuntimePersistenceError::Cancelled));
+            }
+            Ok(())
+        })
+        .err()
+        .assured("the third check stops validation");
+        assert!(matches!(
+            failure.current_context(),
+            RuntimePersistenceError::Cancelled
+        ));
+        let failure = NativeKafkaOffsets::validate(aligned(b"not an offset checkpoint"), || Ok(()))
+            .err()
+            .assured("foreign bytes are refused");
+        assert!(matches!(
+            failure.current_context(),
+            RuntimePersistenceError::DecodeState
+        ));
+    }
 
     #[test]
     fn a_current_kafka_replica_recovers_a_lost_progress_report_without_another_snapshot() {

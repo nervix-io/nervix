@@ -295,8 +295,9 @@ failure, which the emitter retries on its backoff.
 
 A backup's failures are owned where they are decided. The archive format reports an
 `ArchiveWriteError` for a record that does not encode, a record above the 64 MiB record limit, a
-section path a tar header cannot name, or bytes that differ from the manifest entry they were
-written for, and an `ArchiveReadError` for an archive whose first entry is not the manifest, a
+streamed record whose caller stopped it or whose destination failed, a section path a tar header
+cannot name, or bytes that differ from the manifest entry they were written for, and an
+`ArchiveReadError` for an archive whose first entry is not the manifest, a
 record with a foreign magic, kind, or format version, an invalid record value, a missing,
 misplaced, unexpected, or out-of-order section, and a section whose length or digest differs from
 the manifest. Each names the section path and the check as typed fields, and none carries section
@@ -307,7 +308,10 @@ leader or differs from its catalog entry, a record that does not encode, and an 
 staging area cannot hold. A quiesced capture also names its domain when the mutation lease, pause,
 drain, owner capture, or resume fails or times out, or when its coordinator loses the leader tenure
 under which it acquired the cut. Owner capture failures are classified at the
-interconnect boundary without guest bytes in the failure. Stored materialized capture refuses
+interconnect boundary without guest bytes in the failure. A branch lifecycle or Kafka offset
+section names its entity when its checkpoint does not decode, its serializer scratch or conversion
+cannot be admitted to `restore_metadata`, or its record cannot be written; the failure renders every
+context of its report. Stored materialized capture refuses
 malformed headers, inconsistent group or row counts, oversized identity or column frames,
 truncated checkpoints and failed stored chunk digests. These
 typed codec/storage failures follow the same domain capture failure path without column bytes.

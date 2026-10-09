@@ -79,6 +79,13 @@ enum NodeDatabaseFlush {
     Flushed,
 }
 
+/// The entity of one domain whose native metadata a backup captures.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct NativeMetadataOwner {
+    domain: DomainName,
+    entity: ModelName,
+}
+
 /// One cloneable handle for every fault and override a server test can inject.
 ///
 /// Every clone points at the same state, so a Cucumber world can arm a seam after handing the
@@ -112,6 +119,9 @@ struct FaultInjectionState {
     failed_resource_installations: DashMap<ClusterNodeName, (), RandomState>,
     /// One-shot failures after earlier restore checkpoints have reached the receiving node.
     failed_restore_state_installations: DashMap<DomainName, RestoreStateFailure, RandomState>,
+    /// One-shot interruptions of a backup's next native metadata section of an entity, after
+    /// this many of its entries.
+    native_metadata_interruptions: DashMap<NativeMetadataOwner, u64, RandomState>,
     /// One-shot failures, consumed by the next HTTPS listener configuration a node installs.
     failed_https_listener_installations: DashMap<ClusterNodeName, (), RandomState>,
     consensus_probes: DashMap<ClusterNodeName, ConsensusProbeState, RandomState>,
@@ -376,6 +386,7 @@ impl Default for FaultInjection {
                 transaction_binding_drops: DashMap::default(),
                 failed_resource_installations: DashMap::default(),
                 failed_restore_state_installations: DashMap::default(),
+                native_metadata_interruptions: DashMap::default(),
                 failed_https_listener_installations: DashMap::default(),
                 consensus_probes: DashMap::default(),
                 startup_consensus_faults: DashMap::default(),
@@ -442,6 +453,19 @@ impl FaultInjection {
         self.inner
             .failed_restore_state_installations
             .insert(domain, RestoreStateFailure::BranchStateStaging);
+    }
+
+    /// Interrupt the next branch lifecycle or Kafka offset section of `entity` that a backup of
+    /// `domain` streams, once, after it has asked for `entries` of its entries.
+    pub fn interrupt_native_metadata_capture(
+        &self,
+        domain: DomainName,
+        entity: ModelName,
+        entries: u64,
+    ) {
+        self.inner
+            .native_metadata_interruptions
+            .insert(NativeMetadataOwner { domain, entity }, entries);
     }
 
     pub fn fail_after_durable_restore_publication(&self, domain: DomainName) {
@@ -569,6 +593,19 @@ impl FaultInjection {
             .clone();
         pause.wait_until_delivered().await;
         self.inner.command_pauses.remove(&point);
+    }
+
+    pub(crate) fn native_metadata_capture_interruption(
+        &self,
+        domain: &DomainName,
+        entity: &ModelName,
+    ) -> Option<u64> {
+        let owner = NativeMetadataOwner {
+            domain: domain.clone(),
+            entity: entity.clone(),
+        };
+        let (_, entries) = self.inner.native_metadata_interruptions.remove(&owner)?;
+        Some(entries)
     }
 
     pub(crate) fn restored_wasm_checkpoint_fails(&self, domain: &DomainName) -> bool {

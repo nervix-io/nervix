@@ -350,6 +350,18 @@ impl Runtime {
             .await;
     }
 
+    /// After how many entries a test interrupts the next branch lifecycle or Kafka offset section
+    /// of `entity` that a backup of `domain` streams, once. A product build never interrupts one.
+    pub(crate) fn native_metadata_capture_interruption(
+        &self,
+        domain: &DomainName,
+        entity: &ModelName,
+    ) -> Option<u64> {
+        self.inner
+            .fault_injection
+            .native_metadata_capture_interruption(domain, entity)
+    }
+
     #[cfg(feature = "testing")]
     pub(crate) async fn pause_backup_cut_if_armed(&self, domain: &DomainName) {
         self.inner

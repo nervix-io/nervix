@@ -1,15 +1,19 @@
 //! Sequential reads of a checkpoint selected from one immutable database view.
 //!
 //! Layer: engines and infrastructure.
-//! - **Owns.** Pinning checkpoint namespace, metadata and chunks to one snapshot and checking
-//!   length and digest while reading at most one stored chunk at a time.
+//! - **Owns.** Pinning checkpoint namespace, metadata and chunks to one snapshot, checking length
+//!   and digest while reading at most one stored chunk at a time, and the checkpoints a listed
+//!   view opens only when its owner reads them.
 //! - **Depends on.** Current checkpoint shapes and Fjall snapshot reads.
 //! - **Must not know.** Archive records, schemas or runtime activation.
 
 use std::io::{self, Cursor, Read};
 
 use super::{
-    generation::{CheckpointMetadata, RESTORE_STATE_CHUNK_BYTES, StoredCheckpoint, chunk_prefix},
+    generation::{
+        ArchivedStoredCheckpoint, CheckpointMetadata, RESTORE_STATE_CHUNK_BYTES, StoredCheckpoint,
+        chunk_prefix, read_checkpoint,
+    },
     *,
 };
 
@@ -27,6 +31,27 @@ pub(in crate::runtime) enum CheckpointReader {
 }
 
 impl CheckpointReader {
+    /// The reader of `checkpoint`, stored under `key`, whose chunks `view` holds.
+    fn select(
+        view: fjall::Snapshot,
+        chunks: Keyspace,
+        key: &[u8],
+        checkpoint: StoredCheckpoint,
+    ) -> Self {
+        match checkpoint {
+            StoredCheckpoint::Inline(entry) => Self::Inline(Cursor::new(entry.payload)),
+            StoredCheckpoint::Segmented(metadata) => Self::Segmented {
+                prefix: chunk_prefix(key, metadata.lsm),
+                metadata,
+                view,
+                chunks,
+                offset: 0,
+                buffer: Cursor::new(Vec::new()),
+                hasher: Box::new(blake3::Hasher::new()),
+            },
+        }
+    }
+
     pub(in crate::runtime) fn remaining(&self) -> u64 {
         match self {
             Self::Inline(reader) => u64::try_from(reader.get_ref().len())
@@ -121,19 +146,164 @@ impl RuntimeStateStore {
         key: &[u8],
         raw: &[u8],
     ) -> error_stack::Result<CheckpointReader, RuntimePersistenceError> {
-        let reader = match StoredCheckpoint::decode(raw)? {
-            StoredCheckpoint::Inline(entry) => CheckpointReader::Inline(Cursor::new(entry.payload)),
-            StoredCheckpoint::Segmented(metadata) => CheckpointReader::Segmented {
-                prefix: chunk_prefix(key, metadata.lsm),
-                metadata,
-                view,
-                chunks: self.checkpoint_chunks.clone(),
-                offset: 0,
-                buffer: Cursor::new(Vec::new()),
-                hasher: Box::new(blake3::Hasher::new()),
-            },
+        let checkpoint = StoredCheckpoint::decode(raw)?;
+        Ok(CheckpointReader::select(
+            view,
+            self.checkpoint_chunks.clone(),
+            key,
+            checkpoint,
+        ))
+    }
+}
+
+/// One checkpoint a database view listed. Listing read only its key and stored header; its
+/// payload is read through that same view when its owner opens it, so every checkpoint read from
+/// one listing belongs to one cut, however late it is read.
+pub(in crate::runtime) struct ListedCheckpoint {
+    pub(in crate::runtime) placement: StoredPlacement,
+    view: fjall::Snapshot,
+    latest: Keyspace,
+    chunks: Keyspace,
+    key: Vec<u8>,
+    stored_bytes: u64,
+}
+
+/// A checkpoint's revision and its whole payload in one allocation aligned for archived access.
+pub(in crate::runtime) struct AlignedCheckpoint {
+    pub(in crate::runtime) lsm: u64,
+    pub(in crate::runtime) payload: rkyv::util::AlignedVec<16>,
+}
+
+impl ListedCheckpoint {
+    /// Lists the checkpoint `view` stores under `key` with the stored value `raw`. Only a value no
+    /// larger than a segmented header is decoded: a larger one is an inline checkpoint, and its
+    /// length is all a listing needs.
+    pub(super) fn new(
+        placement: StoredPlacement,
+        view: fjall::Snapshot,
+        latest: Keyspace,
+        chunks: Keyspace,
+        key: Vec<u8>,
+        raw: &[u8],
+    ) -> error_stack::Result<Self, RuntimePersistenceError> {
+        let raw_bytes =
+            u64::try_from(raw.len()).verified("a stored value is addressed within 64 bits");
+        let stored_bytes = if raw.len() > StoredCheckpoint::SEGMENTED_BYTES {
+            raw_bytes
+        } else {
+            match StoredCheckpoint::decode(raw)? {
+                StoredCheckpoint::Inline(_) => raw_bytes,
+                StoredCheckpoint::Segmented(metadata) => metadata.length,
+            }
         };
-        Ok(reader)
+        Ok(Self {
+            placement,
+            view,
+            latest,
+            chunks,
+            key,
+            stored_bytes,
+        })
+    }
+
+    /// What the checkpoint occupies as stored: a segmented checkpoint's payload, or an inline
+    /// checkpoint's whole stored value, which holds its payload beside its header.
+    pub(in crate::runtime) fn stored_bytes(&self) -> u64 {
+        self.stored_bytes
+    }
+
+    fn raw(&self) -> error_stack::Result<fjall::Slice, RuntimePersistenceError> {
+        let raw = self
+            .view
+            .get(&self.latest, &self.key)
+            .map_err(|_| RuntimePersistenceError::ReadValue)?;
+        // A value the listing's snapshot listed stays readable through it, so its absence is a
+        // storage failure rather than a checkpoint that ended.
+        raw.ok_or_else(|| Report::new(RuntimePersistenceError::ReadValue))
+    }
+
+    /// A bounded reader of the checkpoint's payload. An inline checkpoint's payload is held by the
+    /// reader; a segmented one is read one stored chunk at a time.
+    pub(in crate::runtime) fn open(
+        &self,
+    ) -> error_stack::Result<CheckpointReader, RuntimePersistenceError> {
+        let checkpoint = StoredCheckpoint::decode(&self.raw()?)?;
+        Ok(CheckpointReader::select(
+            self.view.clone(),
+            self.chunks.clone(),
+            &self.key,
+            checkpoint,
+        ))
+    }
+
+    /// The whole checkpoint and its revision.
+    pub(in crate::runtime) fn read_entry(
+        &self,
+    ) -> error_stack::Result<PersistedRuntimeStateEntry, RuntimePersistenceError> {
+        read_checkpoint(&self.view, &self.chunks, &self.key, &self.raw()?)
+    }
+
+    /// The whole checkpoint in one allocation aligned for archived access. An inline payload is
+    /// copied once out of its aligned stored value; a segmented one is read one stored chunk at a
+    /// time, running `check` before each. The caller's admission covers the copy: at most twice
+    /// [`Self::stored_bytes`] while an inline payload moves into alignment, and the payload itself
+    /// afterwards.
+    pub(in crate::runtime) fn read_aligned(
+        &self,
+        mut check: impl FnMut() -> error_stack::Result<(), RuntimePersistenceError>,
+    ) -> error_stack::Result<AlignedCheckpoint, RuntimePersistenceError> {
+        let raw = self.raw()?;
+        let mut stored = rkyv::util::AlignedVec::<16>::with_capacity(raw.len());
+        stored.extend_from_slice(&raw);
+        drop(raw);
+        let metadata = {
+            let header = rkyv::access::<ArchivedStoredCheckpoint, rkyv::rancor::Error>(&stored)
+                .change_context(RuntimePersistenceError::DecodeState)?;
+            match header {
+                ArchivedStoredCheckpoint::Inline(entry) => {
+                    let mut payload =
+                        rkyv::util::AlignedVec::<16>::with_capacity(entry.payload.len());
+                    payload.extend_from_slice(entry.payload.as_slice());
+                    return Ok(AlignedCheckpoint {
+                        lsm: entry.lsm.to_native(),
+                        payload,
+                    });
+                }
+                ArchivedStoredCheckpoint::Segmented(metadata) => {
+                    rkyv::deserialize::<CheckpointMetadata, rkyv::rancor::Error>(metadata)
+                        .change_context(RuntimePersistenceError::DecodeState)?
+                }
+            }
+        };
+        drop(stored);
+        let length = usize::try_from(metadata.length)
+            .map_err(|_| Report::new(RuntimePersistenceError::InvalidCheckpointChunks))?;
+        let lsm = metadata.lsm;
+        let mut reader = CheckpointReader::select(
+            self.view.clone(),
+            self.chunks.clone(),
+            &self.key,
+            StoredCheckpoint::Segmented(metadata),
+        );
+        let mut payload = rkyv::util::AlignedVec::<16>::with_capacity(length);
+        let mut block = vec![0_u8; RESTORE_STATE_CHUNK_BYTES.min(length).max(1)];
+        loop {
+            check()?;
+            let read = reader
+                .read(&mut block)
+                .map_err(Report::new)
+                .change_context(RuntimePersistenceError::InvalidCheckpointChunks)?;
+            if read == 0 {
+                break;
+            }
+            payload.extend_from_slice(&block[..read]);
+        }
+        if payload.len() != length {
+            return Err(Report::new(
+                RuntimePersistenceError::InvalidCheckpointChunks,
+            ));
+        }
+        Ok(AlignedCheckpoint { lsm, payload })
     }
 }
 

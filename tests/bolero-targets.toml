@@ -159,6 +159,21 @@ test_target = "lib"
 
 [[target]]
 case_timeout_seconds = 10
+corpus = "crates/backup/src/__fuzz__/stream__tests__bolero_streamed_records_match_their_wire_encoding/corpus"
+domain_version = 1
+features = []
+id = "backup-streamed-state-records"
+invariant = "Kafka offsets and branch lifecycle records written from iterators equal the canonical rkyv encoding of their complete wire shape byte for byte and decode to the complete original records."
+manifest = "Cargo.toml"
+max_input_bytes = 4096
+package = "nervix-backup"
+random_iterations = 256
+source = "crates/backup/src/stream.rs"
+test = "stream::tests::bolero_streamed_records_match_their_wire_encoding"
+test_target = "lib"
+
+[[target]]
+case_timeout_seconds = 10
 corpus = "crates/deadlock/src/__fuzz__/tests__bolero_deadlock_evidence_round_trips/corpus"
 domain_version = 2
 features = []
@@ -1472,6 +1487,36 @@ package = "nervix-server"
 random_iterations = 256
 source = "src/runtime/native_checkpoint_properties.rs"
 test = "runtime::native_checkpoint_properties::bolero_streamed_kafka_preserves_every_partition_and_offset"
+test_target = "lib"
+
+[[target]]
+case_timeout_seconds = 10
+corpus = "src/runtime/__fuzz__/runtime__native_checkpoint_properties__bolero_captured_lifecycle_streams_its_complete_archive_record/corpus"
+domain_version = 1
+features = []
+id = "backup-native-lifecycle"
+invariant = "A stored native lifecycle streams the archive record of every branch's typed key, nested arrays, vector kinds and float bits, last ingestion and incarnation in LRU order, with its revision and identity."
+manifest = "Cargo.toml"
+max_input_bytes = 2048
+package = "nervix-server"
+random_iterations = 256
+source = "src/runtime/native_checkpoint_properties.rs"
+test = "runtime::native_checkpoint_properties::bolero_captured_lifecycle_streams_its_complete_archive_record"
+test_target = "lib"
+
+[[target]]
+case_timeout_seconds = 10
+corpus = "src/runtime/__fuzz__/runtime__native_checkpoint_properties__bolero_captured_kafka_offsets_stream_in_archive_order/corpus"
+domain_version = 1
+features = []
+id = "backup-native-kafka"
+invariant = "A stored native Kafka offset checkpoint in any partition order, with partitions recorded more than once, streams the archive record of every partition in topic and partition order with its last recorded next offset, as the runtime's own decoding reads it."
+manifest = "Cargo.toml"
+max_input_bytes = 2048
+package = "nervix-server"
+random_iterations = 256
+source = "src/runtime/native_checkpoint_properties.rs"
+test = "runtime::native_checkpoint_properties::bolero_captured_kafka_offsets_stream_in_archive_order"
 test_target = "lib"
 
 [[target]]

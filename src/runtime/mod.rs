@@ -309,10 +309,10 @@ mod subscription_predicate;
 mod test_fixtures;
 
 pub(crate) use backup_state::{
-    BackupBranchLifecycleEntry, CapturedBranchState, CapturedBranchStateKind, CapturedDomainState,
-    CapturedMaterializedRelay, CapturedMaterializedState, CapturedRuntimeState,
-    CapturedStoredMaterializedRelay, RESTORE_STATE_CHUNK_BYTES, RESTORE_STATE_WORKING_BYTES,
-    RestoredRuntimeState, decode_backup_branch_lifecycle, decode_backup_kafka_offsets,
+    BackupBranchLifecycleEntry, BackupKafkaPartitionOffset, CapturedBranchState,
+    CapturedBranchStateKind, CapturedDomainState, CapturedGuestSave, CapturedMaterializedRelay,
+    CapturedMaterializedState, CapturedNativeMetadata, CapturedStoredMaterializedRelay,
+    RESTORE_STATE_CHUNK_BYTES, RESTORE_STATE_WORKING_BYTES, RestoredRuntimeState,
     write_restored_branch_lifecycle, write_restored_kafka_offsets,
 };
 use branch_aggregated_state::{
