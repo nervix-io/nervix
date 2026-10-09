@@ -210,6 +210,19 @@ class InventoryTests(unittest.TestCase):
             "runtime-arrow-bodies",
             "runtime-arrow-bodies-malformed",
             "resource-store-layout",
+            "client-producer-batches",
+            "client-producer-batches-malformed",
+            "codec-schemaful-rows",
+            "codec-schemaful-payload-groups",
+            "codec-json-non-finite-floats",
+            "codec-transforming-numbers",
+            "jaq-native-numbers",
+            "remote-relay-rows",
+            "remote-relay-rows-malformed",
+            "relay-wire-messages",
+            "relay-wire-messages-malformed",
+            "wasm-generated-pools",
+            "wasm-generated-pools-malformed",
         })
         self.assertEqual({target.package for target in inventory.targets}, {
             "nervix-client-wire",
@@ -232,6 +245,7 @@ class InventoryTests(unittest.TestCase):
             "nervix-wasm-protocol",
             "nervix-wasm",
             "nervix-wasm-sdk",
+            "nervix-jaq",
         })
         for target in inventory.targets:
             self.assertTrue(target.source.is_file())

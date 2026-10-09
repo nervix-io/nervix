@@ -431,6 +431,12 @@ to bulk memory only while it converts. Conversion checks the key and row counts,
 appears twice, and checks each delayed histogram bucket against the restored histogram's bucket
 count.
 
+Every Arrow section of an archive is scanned before Arrow's reader reads it, whatever digests the
+archive carries for its own bytes. A section whose stream is not framed within its bytes is refused
+as misframed, and one that declares a field type Nervix does not carry, or a record batch at odds
+with its own schema, as undecodable, when planning reads it, a dry run included. Nothing is
+allocated from a length the section only declares.
+
 A deduplicator conversion holds the keyspace as the runtime holds a restored one: every key
 normalized as the restored `DEDUPLICATE ON` expressions key it, in an expiry map. That is how a key
 the archive holds twice is found. The parts and values of the keys follow their Arrow columns, and
@@ -854,8 +860,9 @@ and a window group must hold both its input rows and its argument columns.
 Every `.arrow` section is one canonical Arrow IPC stream: its schema message, one record batch
 and the end-of-stream marker, which ends the section. Every message opens with the continuation
 marker, and every length the stream declares, a message's metadata, its body and each column
-buffer, lies within the section. A restore refuses a section framed otherwise before it decodes
-or allocates anything from it.
+buffer, lies within the section. Its schema declares only the field types Nervix carries, without
+a dictionary encoding, and its record batch declares the field nodes and buffers that schema's
+fields take. A restore refuses any other section before it decodes or allocates anything from it.
 
 A resource named `.` or `..` appears in a section path as `%2E` or `%2E%2E`.
 

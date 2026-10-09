@@ -28,8 +28,11 @@ both modes. All retained inputs contain synthetic data and describe the current 
 ## Contract Boundaries
 
 - Protocol IPC and application-state vectors are opaque. Arrow interpretation belongs to the SDK
-  and host execution boundaries. Metadata-only column references can describe any `u32` index;
-  actual pool/input indices and row/token membership are validated before host output effects.
+  and host execution boundaries; the host's decoding of a guest's generated pool is covered by
+  `wasm-generated-pools` and `wasm-generated-pools-malformed` in the
+  [Arrow representation coverage map](./arrow-representation-coverage.md). Metadata-only column
+  references can describe any `u32` index; actual pool/input indices and row/token membership are
+  validated before host output effects.
 - The host schema deliberately exposes name/type/nullability. Sensitivity stays in the host's
   execution plan and leakage validation. The generated pool deliberately has unnamed fields;
   the SDK preserves their exact data type and nullability.

@@ -362,6 +362,11 @@ and nesting depth, before exposing it to an operation handler. Encoded and decod
 to the traffic class before decoding begins. Unknown operations, a pool mismatch, malformed
 archives, and values above the operation limit fail at the transport boundary.
 
+Validation checks an archive's shape. A typed name inside it is checked when the record is read
+back, so a record can be refused after part of it was read. A relay grant request refused that way
+frees everything it had read: its acknowledgement registrations, each of which names its registrar,
+are read back one by one, and the request is refused at the first registrar that is no node's name.
+
 Control-operation responses preserve a typed failure class and subject across the wire. A receiver
 can distinguish a node that rejects ownership, an unavailable subject, a subject that is not ready,
 and an operation that ran and failed without parsing display text. Only the final class carries an
@@ -395,8 +400,10 @@ canonical IPC stream: every message opens with the continuation marker, and the 
 marker ends the body. Every length the stream declares must lie within the bytes the body carries:
 each message's metadata, its body, and each column buffer inside that body. A body that is framed
 otherwise is refused as misframed, so a declared length never sizes an allocation the body does not
-back, and a column buffer is never sliced outside its message. The same check opens every Arrow
-section of a sealed snapshot, a checkpoint or a backup archive.
+back, and a column buffer is never sliced outside its message. The same scan refuses, as
+undecodable, a body whose schema declares a field type Nervix does not carry, a dictionary encoding
+among them, or whose record batch is at odds with that schema. It opens every Arrow section of a
+sealed snapshot, a checkpoint or a backup archive.
 
 HTTP/2 flow control adds another bound. Each stream begins with a 64 KiB receive window, each
 connection begins with a 256 KiB receive window, and request headers are limited to 16 KiB. A
@@ -614,8 +621,11 @@ A delivery proceeds as follows:
 5. The receiver reads exactly the granted length under the reservation, records body receipt, and
    places the work in its bounded application queue. The HTTP/2 body response confirms receipt by
    the receiving process only.
-6. The application lane validates the exact schema, metadata, branch, and record-acknowledgement
-   count, then resolves the configured concrete runtime branch. Work for one channel remains ordered,
+6. The application lane validates the body's Arrow IPC stream, which must hold a schema message
+   of the field types Nervix carries, one uncompressed record batch that declares the field nodes
+   and buffers that schema's fields take with every buffer inside its body, and the end-of-stream
+   marker, and then the exact schema, metadata, branch, and record-acknowledgement count, then
+   resolves the configured concrete runtime branch. Work for one channel remains ordered,
    while other channels continue independently. A payload that fails this validation never reaches
    the branch. The receiver keeps the failure as a report of `RuntimeError::DecodeRemoteRelay`
    with the typed `RemoteRelayDecodeError` beneath it, which names what the payload got wrong and

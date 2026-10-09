@@ -34,7 +34,6 @@ use arrow_array::{
     },
     new_empty_array, new_null_array,
 };
-use arrow_ipc::reader::StreamReader;
 use arrow_schema::DataType as ArrowDataType;
 use arrow_select::{
     concat::concat as concat_arrow_arrays, filter::filter as filter_arrow_array,

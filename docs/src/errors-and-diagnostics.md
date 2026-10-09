@@ -980,10 +980,13 @@ marker, a stream cut inside a message, a negative length, metadata that is not a
 column buffer outside its message's body, or bytes behind the end-of-stream marker. The decoder
 refuses it before it allocates or reads anything from a declared length, for a relay body and for
 an Arrow section of a sealed snapshot or a backup archive alike. A client batch names the same
-defects as the reason of its `Malformed` defect. A stream the framing admits and Arrow's reader
-then panics on ends its decode job, and the decoder reports that as `ArrowBodyError::Decode`, a
-defect of the body, rather than as work the node could not execute: decoding the same body again
-would panic again. A decoded batch the local relay boundary refuses is the separate
+defects as the reason of its `Malformed` defect. A stream that is framed within its bytes and
+declares what Arrow's reader would panic on, a field type Nervix does not carry or a record batch
+at odds with its own schema, is refused by the same scan as `ArrowBodyError::Decode`, a defect of
+the body, before the reader reads it. Should the reader still panic on a body the scan admitted,
+that ends its decode job, and the decoder reports it as `ArrowBodyError::Decode` too rather than
+as work the node could not execute: decoding the same body again would panic again. A decoded
+batch the local relay boundary refuses is the separate
 `RuntimeError::DispatchRemoteRelay`. Remote payload handling returns these as `error-stack`
 reports: the receiver logs the whole chain, and a payload it refused before admitting it is
 answered with the chain rendered as the reason.
@@ -1207,7 +1210,25 @@ only way the rest of Nervix reaches the dependency. The vocabulary's duration pa
 with `DurationTextError::TooLong`, and every reader of duration text uses it: NSPL literals, Model
 settings, window aggregate arguments, node command-line options and their environment variables,
 benchmark settings and test harnesses. Clippy rejects a direct call to `humantime::parse_duration`
-and any use of `humantime::Duration`, whose text conversion reads through the same parser.
+and any use of `humantime::Duration`, whose text conversion reads through the same parser. Arrow's
+IPC stream reader trusts what a stream declares: it panics on a field type or a type parameter it
+does not implement, on a list without its child, on a buffer that reaches past its message body,
+on a validity bitmap shorter than the nulls it is declared to hold, on an offsets buffer that ends
+inside an offset, on variadic buffer counts no field takes and on a fixed-size list too long to
+count, and it allocates a message's metadata and body from their declared lengths before reading
+them. Every reader of an Arrow IPC stream from outside the node, a relay body, a snapshot section,
+a producer's batch or a WASM guest's generated pool, therefore first scans the stream: the
+continuation markers and lengths inside the stream, the schema message first with only the field
+types Nervix carries, uncompressed record batches that declare exactly the field nodes and buffers
+that schema's fields take with every buffer inside its message body, and the end-of-stream marker
+ending the stream, where a generated pool may instead end after its last message, as the Arrow
+format allows. The scan alone opens Arrow's reader over such a stream. A stream it refuses fails
+before the reader sees it: as misframed or undecodable for a relay body or a snapshot section; as
+malformed, of another schema or of invalid data for a producer's batch; and as unreadable, or as
+declaring a field Nervix does not carry, for a generated pool. Two readers of Arrow IPC stay
+outside the scan because neither reads a stream from outside the node: the Iceberg sink reads back
+the staged files the node itself wrote, inside a storage job whose panic the executor reports as a
+failed commit, and the Rust client reads the deliveries a node wrote.
 `DurationTextError` describes only the reason, `humantime`'s own for malformed text or
 `it is longer than a duration can be`, so each owner keeps its diagnostic around it: the setting,
 the text it could not read, then that reason. An owner with a typed error of its own, such as the
