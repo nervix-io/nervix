@@ -75,7 +75,7 @@ Feature: Recovery from a rejected WASM guest snapshot
       """
     Then within "20s" the active session observes a server error containing
       """
-      wasm processor 'recovering_guest' application state restoration failed (branch {"tenant":"alpha"}, resource 'wasm_recovering_guest' version 1 file 'processors/filter_even.wasm', export 'nervix_load_state', saved state revision 1)
+      wasm processor 'recovering_guest' application state restoration failed (branch 40238306d5ebf339fe640ae723e4705c5bb1743e39d0ec207ed8de19fead54b1, resource 'wasm_recovering_guest' version 1 file 'processors/filter_even.wasm', export 'nervix_load_state', saved state revision 1)
       """
     When http payload is posted to host "wasm-recovery-{{test_id}}.example.com" path "/events"
       """

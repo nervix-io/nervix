@@ -66,6 +66,18 @@ reference. An `https://` server is verified only against `ca_certificate_pem`: t
 system roots, so a TLS connection needs the certificate authority that signed the server's
 certificate.
 
+Every call returns its failure as an `error_stack::Report<ClientError>`. The report's current
+context, `report.current_context()`, is the failure a caller acts on, and the frames beneath it
+keep its cause: a call's transport status, the wire codec's report beneath `EncodeRequest`,
+`InvalidUploadReply` or `InvalidRestoreReply`, the name's report beneath `InvalidResourceName`, a
+local archive's I/O error beneath `BuildUploadArchive` or `ReadRestoreArchive`, and the
+`BackupDownloadError` beneath `BackupDownload`. A failure that may hide an admitted command or an
+installed upload is `UncertainCommand` or `UncertainUpload` above the failure that left the
+outcome unknown, so the execution reference or upload identity is read from the current context
+and the cause from the frame beneath it. The client decides retries, session recovery and
+uncertainty from those typed contexts, and a caller needs no text to decide either; `{report:#}`
+renders the whole chain for display.
+
 Native connections resolve a hostname through Hickory. By default the client loads the host's
 resolver configuration and hosts file once at connection setup. `ConnectOptions::dns` can name a
 different `DnsConfiguration` or an already loaded `DnsResolver` shared with the caller's runtime.
@@ -152,8 +164,8 @@ from the first byte while the server retains the archive.
 The outcome's `backup` field carries the summary: the archive's size and digest, the capture time,
 the instant the server stops retaining it, whether resource bytes are included, the number of
 users, and each domain's revision, section count and bytes. A download that still fails returns
-`ClientError::BackupDownload` with the backup's execution reference and a typed
-`BackupDownloadError`. Running the same `ExecutionHandle` again returns the recorded outcome and
+`ClientError::BackupDownload` with the backup's execution reference, above the typed
+`BackupDownloadError` that says why. Running the same `ExecutionHandle` again returns the recorded outcome and
 downloads the archive again, and `Client::download_backup(reference, summary, destination)`
 downloads a summary's archive directly. A download that receives the whole archive releases it on
 the server, and a later download of it is refused.

@@ -45,7 +45,9 @@ use tonic::{
 };
 
 use super::{InboundFrame, SessionTransport, outbound};
-use crate::application::session_service::SessionServiceImpl;
+use crate::application::{
+    authentication::GrpcAuthenticationError, session_service::SessionServiceImpl,
+};
 
 /// The session service a gRPC server hosts.
 #[derive(Clone)]
@@ -136,7 +138,8 @@ impl StreamingService<VerifiedFrame<ClientFrame>> for Exchange {
         Box::pin(async move {
             let user = service
                 .authenticate_grpc_metadata(request.metadata())
-                .await?;
+                .await
+                .map_err(GrpcAuthenticationError::status)?;
             let (failure_sender, failure) = oneshot::channel();
             let mut failure_report = FailureReport {
                 sender: Some(failure_sender),
@@ -212,7 +215,8 @@ impl ClientStreamingService<VerifiedFrame<UploadFrame>> for Upload {
         Box::pin(async move {
             let user = service
                 .authenticate_grpc_metadata(request.metadata())
-                .await?;
+                .await
+                .map_err(GrpcAuthenticationError::status)?;
             let reply = service.serve_upload(user, request.into_inner()).await?;
             match reply.encode(&limits) {
                 Ok(frame) => Ok(Response::new(frame)),
@@ -240,7 +244,8 @@ impl ClientStreamingService<VerifiedFrame<RestoreFrame>> for Restore {
         Box::pin(async move {
             let user = service
                 .authenticate_grpc_metadata(request.metadata())
-                .await?;
+                .await
+                .map_err(GrpcAuthenticationError::status)?;
             let reply = service.serve_restore(user, request.into_inner()).await?;
             match reply.encode(&limits) {
                 Ok(frame) => Ok(Response::new(frame)),
@@ -275,7 +280,8 @@ impl ServerStreamingService<VerifiedFrame<BackupDownloadRequestFrame>> for Downl
         Box::pin(async move {
             let user = service
                 .authenticate_grpc_metadata(request.metadata())
-                .await?;
+                .await
+                .map_err(GrpcAuthenticationError::status)?;
             let frames = service
                 .serve_backup_download(user, request.get_ref(), limits)
                 .await

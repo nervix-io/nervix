@@ -8,10 +8,11 @@
 use std::{str::FromStr as _, time::Duration};
 
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
+use error_stack::{Report, ResultExt as _};
 use hyper_util::client::legacy::connect::HttpConnector;
 use indexmap::IndexSet;
 use meticulous::OptionExt as _;
-use nervix_dns::{DnsConfiguration, DnsConfigurationError, DnsResolver};
+use nervix_dns::{DnsConfiguration, DnsResolver};
 use nervix_recovery::Discarded as _;
 use rustls::crypto::aws_lc_rs;
 use tonic::{
@@ -31,12 +32,15 @@ pub(crate) enum EndpointValidationError {
     TlsRequired,
 }
 
-impl From<error_stack::Report<EndpointValidationError>> for ClientError {
-    fn from(report: error_stack::Report<EndpointValidationError>) -> Self {
-        match report.current_context() {
-            EndpointValidationError::InvalidOrigin => Self::InvalidServerEndpoint,
-            EndpointValidationError::TlsRequired => Self::TlsRequired,
-        }
+impl EndpointValidationError {
+    /// The client failure a rejected server endpoint stands for, above the report of why it was
+    /// rejected.
+    pub(crate) fn into_client(report: Report<Self>) -> Report<ClientError> {
+        let failure = match report.current_context() {
+            Self::InvalidOrigin => ClientError::InvalidServerEndpoint,
+            Self::TlsRequired => ClientError::TlsRequired,
+        };
+        report.change_context(failure)
     }
 }
 
@@ -131,24 +135,23 @@ impl GrpcConnector {
     }
 
     /// Load DNS at the client's safe setup boundary, or reuse its owner's resolver.
-    pub(crate) async fn load_dns(
-        &mut self,
-    ) -> Result<(), error_stack::Report<DnsConfigurationError>> {
+    pub(crate) async fn load_dns(&mut self) -> error_stack::Result<(), ClientError> {
         let dns = match &self.options.dns {
-            ConnectDns::Configuration(configuration) => {
-                DnsResolver::load(configuration.clone()).await?
-            }
+            ConnectDns::Configuration(configuration) => DnsResolver::load(configuration.clone())
+                .await
+                .change_context(ClientError::LoadDnsConfiguration)?,
             ConnectDns::Resolver(dns) => dns.clone(),
         };
         self.dns = Some(dns);
         Ok(())
     }
 
-    pub(crate) async fn connect(&self, server: &Url) -> Result<Channel, ClientError> {
-        self.validate_server(server)?;
+    pub(crate) async fn connect(&self, server: &Url) -> error_stack::Result<Channel, ClientError> {
+        self.validate_server(server)
+            .map_err(EndpointValidationError::into_client)?;
         let is_https = server.scheme() == "https";
         let mut endpoint = Channel::from_shared(server.as_str().to_string())
-            .map_err(ClientError::InvalidServerUri)?;
+            .map_err(|error| Report::new(ClientError::InvalidServerUri(error)))?;
         endpoint = endpoint.connect_timeout(self.options.connect_timeout);
         if is_https {
             aws_lc_rs::default_provider().install_default().discarded(
@@ -161,7 +164,7 @@ impl GrpcConnector {
             }
             endpoint = endpoint
                 .tls_config(tls)
-                .map_err(ClientError::ConfigureTls)?;
+                .map_err(|error| Report::new(ClientError::ConfigureTls(error)))?;
         }
         let dns = self
             .dns
@@ -175,7 +178,7 @@ impl GrpcConnector {
         endpoint
             .connect_with_connector(connector)
             .await
-            .map_err(ClientError::ConnectServer)
+            .map_err(|error| Report::new(ClientError::ConnectServer(error)))
     }
 
     pub(crate) fn validate_server(

@@ -1098,7 +1098,9 @@ impl Subject {
                 let outcome = client
                     .execute("SHOW CLUSTER STATUS;")
                     .await
-                    .context("failed to query Nervix cluster status")?;
+                    .map_err(|report| {
+                        anyhow!("failed to query Nervix cluster status: {report:#}")
+                    })?;
                 Ok::<_, anyhow::Error>((client, outcome))
             }
             .await;
@@ -1183,10 +1185,9 @@ impl Subject {
         let mut transcript = String::new();
         for statement in statements {
             let source = statement.trim();
-            let outcome = client
-                .execute(source)
-                .await
-                .context("failed to execute a Nervix benchmark command")?;
+            let outcome = client.execute(source).await.map_err(|report| {
+                anyhow!("failed to execute a Nervix benchmark command: {report:#}")
+            })?;
             transcript.push_str(&format!("{source}\n{outcome:#?}\n\n"));
             if !outcome.succeeded() {
                 fs::write(output_path, &transcript)?;
@@ -1218,7 +1219,7 @@ impl Subject {
             ConnectOptions::default().with_basic_auth(DEFAULT_USERNAME, password),
         )
         .await
-        .with_context(|| format!("failed to connect to Nervix at {control_url}"))
+        .map_err(|report| anyhow!("failed to connect to Nervix at {control_url}: {report:#}"))
     }
 
     async fn execute_checked(
@@ -1227,10 +1228,9 @@ impl Subject {
         query: &str,
         output_path: &Path,
     ) -> Result<()> {
-        let outcome = client
-            .execute(query)
-            .await
-            .context("failed to execute a Nervix benchmark command")?;
+        let outcome = client.execute(query).await.map_err(|report| {
+            anyhow!("failed to execute a Nervix benchmark command: {report:#}")
+        })?;
         fs::write(output_path, format!("{outcome:#?}\n"))?;
         ensure!(
             outcome.succeeded(),

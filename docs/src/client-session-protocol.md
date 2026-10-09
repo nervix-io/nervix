@@ -1781,7 +1781,10 @@ The binding's lifecycle follows from that choice:
   a failed connection, a failed session, an uncertain outcome that carries the execution reference
   or leaves a settlement unconfirmed, a server refusal, a deadline, a cancellation, a protocol
   violation, a type mismatch, a session or handle that ended, an interrupted consumer, and an
-  endpoint that has to be opened again.
+  endpoint that has to be opened again. The binding classifies the Rust client's
+  `error_stack::Report<ClientError>` by its current context, and a failed backup download by the
+  `BackupDownloadError` beneath that context, never by text, and `nx_error_message` returns the
+  report's whole chain.
 
 The binding connects with the Rust client's default options. It exposes no seeds, timeouts, or
 certificate authority, so it reaches a node over plaintext and connects to it directly. It exposes

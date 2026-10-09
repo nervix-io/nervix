@@ -108,8 +108,9 @@ bounded overall backup wait (CLI `--backup-wait-timeout`, default `10m`). If tha
 retain its execution reference and recover with CLI `backup --execution-reference` and the same
 selected domain, scope, resources and capture options; the output file or stdout may change.
 Waiting again does not extend server retry validity or archive retention. A `WRITE_FAILED` from
-`--output -` follows a complete download that released the server's copy: deliver the verified
-archive the report names (`error.archive`) instead of recovering by reference.
+`--output -` that names `error.archive` follows a complete download that released the server's
+copy: deliver that verified archive instead of recovering by reference. One without a reference
+took no backup, as when stdout is `/dev/null` or closed: fix stdout and run the backup again.
 
 Use `BEGIN; ... COMMIT;` when sending multiple queueable configuration statements. A transaction
 belongs to one already-existing domain: `BEGIN` binds it to the selected domain and every queued

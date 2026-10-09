@@ -26,7 +26,7 @@ use std::{collections::BTreeMap, fmt, num::NonZeroU64, time::Duration};
 use ahash::HashMap;
 use arch_into::ArchInto as _;
 use bytes::Bytes;
-use error_stack::Report;
+use error_stack::{Report, ResultExt as _};
 use meticulous::ResultExt as _;
 use nervix_client_wire::{
     ClientMessage, ClientRequest, CloseIngestorRequest, OpenIngestorDisposition,
@@ -623,12 +623,9 @@ pub(crate) async fn send_on_exchange(
         request_id: registered.request_id,
         request,
     };
-    let frame = message.encode(&SESSION_LIMITS).map_err(|report| {
-        Report::new(ClientError::EncodeRequest {
-            request: kind,
-            source: report.current_context().clone(),
-        })
-    })?;
+    let frame = message
+        .encode(&SESSION_LIMITS)
+        .change_context(ClientError::EncodeRequest { request: kind })?;
     if exchange.frames.send(frame).await.is_err() {
         return Err(Report::new(exchange.pending.lock().failure()));
     }

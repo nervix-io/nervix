@@ -645,8 +645,11 @@ async fn measure_prepared_native_commands(
         client_connect_options(&grpc_uri)?,
     )
     .await
-    .context("failed to connect prepared command client")?;
-    let warmup = client.execute(COMMAND_QUERY).await?;
+    .map_err(|report| anyhow!("failed to connect prepared command client: {report:#}"))?;
+    let warmup = client
+        .execute(COMMAND_QUERY)
+        .await
+        .map_err(|report| anyhow!("prepared command warm-up did not run: {report:#}"))?;
     ensure!(warmup.succeeded(), "prepared command warm-up failed");
     let mut prepare = Samples::new()?;
     let mut execute = Samples::new()?;
@@ -658,7 +661,8 @@ async fn measure_prepared_native_commands(
         let started = Instant::now();
         let outcome = timeout(OPERATION_TIMEOUT, client.execute_prepared(&prepared))
             .await
-            .context("prepared command timed out")??;
+            .context("prepared command timed out")?
+            .map_err(|report| anyhow!("prepared command did not run: {report:#}"))?;
         execute.record_duration(started.elapsed())?;
         ensure!(outcome.succeeded(), "prepared command failed");
     }
@@ -682,7 +686,7 @@ async fn measure_subscriptions(
         client_connect_options(&grpc_uri)?,
     )
     .await
-    .context("failed to connect native subscription client")?;
+    .map_err(|report| anyhow!("failed to connect native subscription client: {report:#}"))?;
     let subscription_name = "client_wire_seen";
     let outcome = client
         .subscribe(&SubscriptionRequest::new(
@@ -690,7 +694,7 @@ async fn measure_subscriptions(
             "client_wire_records",
         ))
         .await
-        .context("failed to create native subscription")?;
+        .map_err(|report| anyhow!("failed to create native subscription: {report:#}"))?;
     ensure!(
         outcome.succeeded(),
         "failed to create subscription: {}",
@@ -715,7 +719,8 @@ async fn measure_subscriptions(
             .context("failed to publish subscription baseline payload")?;
         let event = timeout(OPERATION_TIMEOUT, client.next_subscription())
             .await
-            .context("subscription baseline timed out")??;
+            .context("subscription baseline timed out")?
+            .map_err(|report| anyhow!("subscription baseline read failed: {report:#}"))?;
         observations.latency.record_duration(started.elapsed())?;
         observations.request_bytes.record_usize(payload.len())?;
         let SubscriptionEvent::Rows(rows) = event else {
@@ -813,14 +818,14 @@ async fn measure_control_with_slow_subscriber(
         client_connect_options(&grpc_uri)?,
     )
     .await
-    .context("failed to connect slow native subscription client")?;
+    .map_err(|report| anyhow!("failed to connect slow native subscription client: {report:#}"))?;
     let outcome = client
         .subscribe(&SubscriptionRequest::new(
             "client_wire_slow",
             "client_wire_records",
         ))
         .await
-        .context("failed to create slow native subscription")?;
+        .map_err(|report| anyhow!("failed to create slow native subscription: {report:#}"))?;
     ensure!(outcome.succeeded(), "slow subscriber did not open");
 
     let mut control = process.open_session(domain).await?;
@@ -867,7 +872,9 @@ async fn measure_control_with_slow_subscriber(
             )) => {
                 return Err(anyhow!("slow subscriber ended during control measurement"));
             }
-            Ok(Err(error)) => return Err(error).context("slow subscriber read failed"),
+            Ok(Err(report)) => {
+                return Err(anyhow!("slow subscriber read failed: {report:#}"));
+            }
             Err(_) => drain_timeouts += 1,
         }
     }
@@ -998,7 +1005,7 @@ async fn measure_uploads(
         client_connect_options(&grpc_uri)?,
     )
     .await
-    .context("failed to connect resource upload client")?;
+    .map_err(|report| anyhow!("failed to connect resource upload client: {report:#}"))?;
     let directory = tempfile::Builder::new()
         .prefix("client-wire-upload-")
         .tempdir()
@@ -1030,7 +1037,8 @@ async fn measure_uploads(
             ),
         )
         .await
-        .context("resource upload baseline timed out")??;
+        .context("resource upload baseline timed out")?
+        .map_err(|report| anyhow!("resource upload baseline did not run: {report:#}"))?;
         observations.latency.record_duration(started.elapsed())?;
         ensure!(
             outcome.succeeded(),

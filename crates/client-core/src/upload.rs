@@ -13,6 +13,7 @@ use std::{
 
 use arch_into::ArchInto as _;
 use async_tar::{Builder as AsyncTarBuilder, EntryType, Header, HeaderMode};
+use error_stack::{Report, ResultExt as _};
 use meticulous::ResultExt as _;
 use nervix_client_wire::{
     EncodedFrame, RequestId, UploadChunk, UploadDisposition, UploadFrame, UploadReply,
@@ -56,9 +57,9 @@ impl Client {
         identifier: &str,
         directory: impl AsRef<Path>,
         on_progress: impl Fn(u64) + Send + Sync + Clone + 'static,
-    ) -> Result<CommandOutcome, ClientError> {
+    ) -> error_stack::Result<CommandOutcome, ClientError> {
         let Some(domain) = self.domain().await else {
-            return Err(ClientError::NoActiveDomain);
+            return Err(Report::new(ClientError::NoActiveDomain));
         };
         self.upload_resource_from_directory_with_identity(
             identifier,
@@ -81,11 +82,10 @@ impl Client {
         domain: DomainName,
         upload_identity: ResourceUploadIdentity,
         on_progress: impl Fn(u64) + Send + Sync + Clone + 'static,
-    ) -> Result<CommandOutcome, ClientError> {
+    ) -> error_stack::Result<CommandOutcome, ClientError> {
         let resource =
-            ResourceName::parse(identifier).map_err(|report| ClientError::InvalidResourceName {
+            ResourceName::parse(identifier).change_context(ClientError::InvalidResourceName {
                 name: identifier.to_string(),
-                source: report.current_context().clone(),
             })?;
         let archive = UploadArchive::build(directory.as_ref()).await?;
         let result =
@@ -100,13 +100,12 @@ impl Client {
                         total_bytes: archive.total_bytes,
                     }
                     .encode(&SESSION_LIMITS)
-                    .map_err(|report| ClientError::EncodeRequest {
+                    .change_context(ClientError::EncodeRequest {
                         request: RequestKind::UploadResource,
-                        source: report.current_context().clone(),
                     })?;
                     let reader = File::open(&archive.path)
                         .await
-                        .map_err(|_| ClientError::BuildUploadArchive)?;
+                        .change_context(ClientError::BuildUploadArchive)?;
                     let stream = UploadAttempt {
                         channel: self.current_channel().await,
                         start,
@@ -130,21 +129,22 @@ impl Client {
                             match self.recover_session(RecoveryMode::Replace).await? {
                                 SessionRecovery::Ready => continue,
                                 SessionRecovery::Unavailable => {
-                                    return Err(ClientError::UploadResource(status));
+                                    return Err(Report::new(ClientError::UploadResource(status)));
                                 }
                             }
                         }
-                        Err(status) => return Err(ClientError::UploadResource(status)),
+                        Err(status) => {
+                            return Err(Report::new(ClientError::UploadResource(status)));
+                        }
                     };
-                    let reply = UploadReply::decode(response.get_ref()).map_err(|report| {
-                        ClientError::InvalidUploadReply(report.current_context().clone())
-                    })?;
+                    let reply = UploadReply::decode(response.get_ref())
+                        .change_context(ClientError::InvalidUploadReply)?;
                     if let Some(request_id) = reply.request_id
                         && request_id != UPLOAD_REQUEST_ID
                     {
-                        return Err(ClientError::UnexpectedReply {
+                        return Err(Report::new(ClientError::UnexpectedReply {
                             request: RequestKind::UploadResource,
-                        });
+                        }));
                     }
                     let received = match &reply.disposition {
                         UploadDisposition::Installed {
@@ -158,10 +158,10 @@ impl Client {
                     if let Some(received) = received
                         && received != &upload_identity
                     {
-                        return Err(ClientError::UploadIdentityMismatch {
+                        return Err(Report::new(ClientError::UploadIdentityMismatch {
                             expected: upload_identity.clone(),
                             received: received.clone(),
-                        });
+                        }));
                     }
                     let outcome = CommandOutcome::from_upload(reply, upload_identity.clone());
                     match outcome.routing() {
@@ -184,17 +184,17 @@ impl Client {
             .await;
         match result {
             Ok(Ok(outcome)) => Ok(outcome),
-            Ok(Err(error)) if error.can_hide_installed_upload() => {
-                Err(ClientError::UncertainUpload {
+            Ok(Err(report)) if report.current_context().can_hide_installed_upload() => Err(report
+                .change_context(ClientError::UncertainUpload {
                     identity: upload_identity,
-                    source: Box::new(error),
-                })
+                })),
+            Ok(Err(report)) => Err(report),
+            Err(_) => {
+                let expired = Report::new(ClientError::RetryDeadline);
+                Err(expired.change_context(ClientError::UncertainUpload {
+                    identity: upload_identity,
+                }))
             }
-            Ok(Err(error)) => Err(error),
-            Err(_) => Err(ClientError::UncertainUpload {
-                identity: upload_identity,
-                source: Box::new(ClientError::RetryDeadline),
-            }),
         }
     }
 }
@@ -207,26 +207,26 @@ struct UploadArchive {
 }
 
 impl UploadArchive {
-    async fn build(directory: &Path) -> Result<Self, ClientError> {
+    async fn build(directory: &Path) -> error_stack::Result<Self, ClientError> {
         let directory = expand_user_path(directory);
         if !directory.is_dir() {
-            return Err(ClientError::BuildUploadArchive);
+            return Err(Report::new(ClientError::BuildUploadArchive));
         }
         let path = tempfile::NamedTempFile::new()
-            .map_err(|_| ClientError::BuildUploadArchive)?
+            .change_context(ClientError::BuildUploadArchive)?
             .into_temp_path();
         let file = File::create(&path)
             .await
-            .map_err(|_| ClientError::BuildUploadArchive)?;
+            .change_context(ClientError::BuildUploadArchive)?;
         Self::write(&directory, file)
             .await
-            .map_err(|_| ClientError::BuildUploadArchive)?;
+            .change_context(ClientError::BuildUploadArchive)?;
         let length = tokio::fs::metadata(&path)
             .await
-            .map_err(|_| ClientError::BuildUploadArchive)?
+            .change_context(ClientError::BuildUploadArchive)?
             .len();
         let Some(total_bytes) = NonZeroU64::new(length) else {
-            return Err(ClientError::BuildUploadArchive);
+            return Err(Report::new(ClientError::BuildUploadArchive));
         };
         Ok(Self { path, total_bytes })
     }
