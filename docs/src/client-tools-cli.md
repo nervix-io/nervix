@@ -152,10 +152,10 @@ a new one; the client also opens one at once while a subscription or a followed 
 restored. Server notices then resume with the new session, rows arrive from every subscription
 restored on it or opened after it, and a followed clock prints its state again once it is attached
 there. When the client cannot open a session within its 120-second retry deadline, a line names
-what is waiting and why, and the client keeps trying:
+what is waiting and the whole chain of why, and the client keeps trying:
 
 ```text
-[events] notice: subscription events could not resume yet: failed to connect to server; the client keeps trying
+[events] notice: subscription events could not resume yet: failed to connect to server: transport error: tcp connect error: tcp connect error: Connection refused (os error 111); the client keeps trying
 ```
 
 After a reconnect the CLI opens every subscription and attaches every clock again. When the new
@@ -233,7 +233,9 @@ nervix-cli --domain production --command \
 For a standalone `--command` inspection with `FORMAT JSON`, stdout contains exactly one JSON
 document serialized from the typed report, without terminal decoration or unrelated events.
 Failures print one JSON object with `error.code` and `error.message` on stdout and exit nonzero;
-diagnostic details and unrelated events go to stderr. `FORMAT TEXT` uses the normal readable
+a configuration, connection or request failure's message is the whole chain of causes, such as
+`invalid server URL: relative URL without a base`. Diagnostic details and unrelated events go to
+stderr. `FORMAT TEXT` uses the normal readable
 terminal output. Inspection output is complete rather than paginated or truncated, so redirect a
 large text or JSON report to a file or downstream process when terminal output is impractical.
 After a stale-preview `COMMIT` refusal, run `DESCRIBE TRANSACTION` for the

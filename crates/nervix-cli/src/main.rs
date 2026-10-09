@@ -264,8 +264,16 @@ struct GrpcCompleter {
 
 #[derive(Debug, Error)]
 enum ClientError {
-    #[error(transparent)]
-    Core(#[from] CoreClientError),
+    /// The client's report of why no session opened is beneath.
+    #[error("failed to connect to the server")]
+    Connect,
+    /// The client's report of why the request failed is beneath.
+    #[error("the request to the server failed")]
+    Request,
+    #[error("failed to read the TLS CA certificate")]
+    LoadTlsCaCertificate,
+    #[error("failed to wait for the interrupt signal")]
+    InterruptSignal,
     #[error("failed to initialize history")]
     InitHistory,
     #[error("failed to read user input")]
@@ -337,7 +345,7 @@ async fn collect_suggestions(
         let page = client
             .suggest(input.clone(), cursor, 100, continuation.take())
             .await
-            .map_err(|error| StackReport::new(ClientError::from(error)))?;
+            .change_context(ClientError::Request)?;
         if page.status != nervix_client_core::SuggestionStatus::Ready {
             return Ok(page);
         }
@@ -484,7 +492,7 @@ async fn main() -> Result<(), StackReport<ClientError>> {
                 connect_options,
             )
             .await
-            .map_err(|err| StackReport::new(ClientError::from(err)))?;
+            .change_context(ClientError::Connect)?;
             execute_and_print(&client, format!("DROP NODE {node_id};")).await?;
             return Ok(());
         }
@@ -496,7 +504,7 @@ async fn main() -> Result<(), StackReport<ClientError>> {
                 connect_options,
             )
             .await
-            .map_err(|err| StackReport::new(ClientError::from(err)))?;
+            .change_context(ClientError::Connect)?;
             execute_and_print(&client, format!("CORDON NODE {node_id};")).await?;
             return Ok(());
         }
@@ -508,7 +516,7 @@ async fn main() -> Result<(), StackReport<ClientError>> {
                 connect_options,
             )
             .await
-            .map_err(|err| StackReport::new(ClientError::from(err)))?;
+            .change_context(ClientError::Connect)?;
             execute_and_print(&client, format!("UNCORDON NODE {node_id};")).await?;
             return Ok(());
         }
@@ -520,7 +528,7 @@ async fn main() -> Result<(), StackReport<ClientError>> {
                 connect_options,
             )
             .await
-            .map_err(|err| StackReport::new(ClientError::from(err)))?;
+            .change_context(ClientError::Connect)?;
             execute_and_print(&client, format!("DRAIN NODE {node_id};")).await?;
             return Ok(());
         }
@@ -600,7 +608,7 @@ async fn main() -> Result<(), StackReport<ClientError>> {
     let client =
         Client::connect_with_options(&args.server, Some(args.domain.clone()), connect_options)
             .await
-            .map_err(|err| StackReport::new(ClientError::from(err)))?;
+            .change_context(ClientError::Connect)?;
     if let Some(input) = args.suggest.as_deref() {
         let cursor = args.cursor.unwrap_or(input.len());
         let outcome = collect_suggestions(&client, input.to_string(), cursor).await?;
@@ -747,7 +755,7 @@ async fn run_json_inspection_mode(
     let options = match connect_options_from_args(args) {
         Ok(options) => options,
         Err(error) => {
-            print_json_inspection_error("CLIENT_CONFIGURATION", &error.to_string());
+            print_json_inspection_error("CLIENT_CONFIGURATION", &format!("{error:#}"));
             return Err(error);
         }
     };
@@ -760,16 +768,16 @@ async fn run_json_inspection_mode(
     {
         Ok(client) => client,
         Err(error) => {
-            print_json_inspection_error("CONNECTION_FAILED", &error.to_string());
-            return Err(StackReport::new(ClientError::from(error)));
+            print_json_inspection_error("CONNECTION_FAILED", &format!("{error:#}"));
+            return Err(error.change_context(ClientError::Connect));
         }
     };
     spawn_event_loggers(client.clone(), EventOutput::Stderr);
     let outcome = match client.execute(query).await {
         Ok(outcome) => outcome,
         Err(error) => {
-            print_json_inspection_error("REQUEST_FAILED", &error.to_string());
-            return Err(StackReport::new(ClientError::from(error)));
+            print_json_inspection_error("REQUEST_FAILED", &format!("{error:#}"));
+            return Err(error.change_context(ClientError::Request));
         }
     };
     if !outcome.succeeded() {
@@ -970,7 +978,7 @@ async fn run_subscribe_mode(options: SubscribeModeOptions) -> Result<(), StackRe
         options.connect_options,
     )
     .await
-    .map_err(|err| StackReport::new(ClientError::from(err)))?;
+    .change_context(ClientError::Connect)?;
     spawn_event_loggers(client.clone(), EventOutput::Stdout);
     let request = subscribe_request(
         &options.name,
@@ -983,7 +991,7 @@ async fn run_subscribe_mode(options: SubscribeModeOptions) -> Result<(), StackRe
     let result = client
         .subscribe(&request)
         .await
-        .map_err(|err| StackReport::new(ClientError::from(err)))?;
+        .change_context(ClientError::Request)?;
     if !result.succeeded() {
         println!("error: {}", result.message);
         if result.diagnostics.is_empty() {
@@ -1001,7 +1009,7 @@ async fn run_subscribe_mode(options: SubscribeModeOptions) -> Result<(), StackRe
     );
     signal::ctrl_c()
         .await
-        .map_err(|_| StackReport::new(ClientError::from(CoreClientError::SessionClosed)))?;
+        .change_context(ClientError::InterruptSignal)?;
     Ok(())
 }
 
@@ -1010,7 +1018,7 @@ async fn run_domain_clock_mode(args: &Args) -> Result<(), StackReport<ClientErro
     let client =
         Client::connect_with_options(&args.server, Some(args.domain.clone()), connect_options)
             .await
-            .map_err(|error| StackReport::new(ClientError::from(error)))?;
+            .change_context(ClientError::Connect)?;
     let outcome = client
         .attach_domain_clock(args.domain.clone())
         .await
@@ -1030,7 +1038,7 @@ async fn run_domain_clock_mode(args: &Args) -> Result<(), StackReport<ClientErro
                 }
             }
             interrupted = &mut interrupt => {
-                interrupted.map_err(|_| StackReport::new(ClientError::from(CoreClientError::SessionClosed)))?;
+                interrupted.change_context(ClientError::InterruptSignal)?;
                 let outcome = client
                     .detach_domain_clock(args.domain.clone())
                     .await
@@ -1090,12 +1098,7 @@ fn print_completions(shell: Shell) {
 
 fn connect_options_from_args(args: &Args) -> Result<ConnectOptions, StackReport<ClientError>> {
     let ca_certificate_pem = match args.tls_ca_cert.as_ref() {
-        Some(path) => Some(
-            std::fs::read(path)
-                .map_err(CoreClientError::LoadTlsCaCertificate)
-                .map_err(ClientError::from)
-                .map_err(StackReport::new)?,
-        ),
+        Some(path) => Some(std::fs::read(path).change_context(ClientError::LoadTlsCaCertificate)?),
         None => None,
     };
     let password = match args.password.clone() {
@@ -1148,7 +1151,7 @@ async fn execute_and_print(client: &Client, query: String) -> Result<(), StackRe
     let result = client
         .execute(query)
         .await
-        .map_err(|err| StackReport::new(ClientError::from(err)))?;
+        .change_context(ClientError::Request)?;
     if !result.statements.is_empty() {
         for statement in &result.statements {
             print_outcome(&PrintedOutcome::of_statement(statement), &query_source);
@@ -1321,7 +1324,7 @@ async fn execute_upload_and_print(
         .reported("rendering the upload progress line");
     let total_uploaded = uploaded.load(Ordering::Relaxed);
     clear_progress_line();
-    let result = outcome.map_err(|err| StackReport::new(ClientError::from(err)))?;
+    let result = outcome.change_context(ClientError::Request)?;
     if result.succeeded() {
         emit_terminal_line(format!(
             "upload resource '{}' finished: {} sent, installed on every live node",
@@ -1486,7 +1489,7 @@ impl EventStream {
                     }
                 }
                 Err(error) => {
-                    let failure = self.failure(error.current_context());
+                    let failure = self.failure(&error);
                     sender.push(failure.line);
                     if failure.ended {
                         return;
@@ -1503,7 +1506,7 @@ impl EventStream {
     ) -> Result<Vec<String>, StackReport<CoreClientError>> {
         match self {
             Self::Subscriptions => {
-                let event = client.next_subscription().await.map_err(StackReport::new)?;
+                let event = client.next_subscription().await?;
                 Ok(format_subscription_event(&event))
             }
             Self::DomainClocks => {
@@ -1511,7 +1514,7 @@ impl EventStream {
                 Ok(vec![format_domain_clock_event(&event)])
             }
             Self::ServerNotices => {
-                let event = client.next_server_event().await.map_err(StackReport::new)?;
+                let event = client.next_server_event().await?;
                 Ok(vec![format_server_event(&event)])
             }
         }
@@ -1519,9 +1522,9 @@ impl EventStream {
 
     /// What the terminal prints when a read of the stream fails. Only a session that no known
     /// server can reopen ends the stream.
-    fn failure(self, error: &CoreClientError) -> StreamFailure {
+    fn failure(self, error: &StackReport<CoreClientError>) -> StreamFailure {
         let stream = self.as_ref();
-        match error {
+        match error.current_context() {
             CoreClientError::SessionClosed => StreamFailure {
                 line: format!(
                     "[events] notice: {stream} stopped because the session closed and no known \
@@ -1536,9 +1539,9 @@ impl EventStream {
                 ),
                 ended: false,
             },
-            other => StreamFailure {
+            _ => StreamFailure {
                 line: format!(
-                    "[events] notice: {stream} could not resume yet: {other}; the client keeps \
+                    "[events] notice: {stream} could not resume yet: {error:#}; the client keeps \
                      trying"
                 ),
                 ended: false,
@@ -2834,7 +2837,7 @@ mod tests {
     #[test]
     fn a_failed_event_read_is_printed_and_only_an_unrecoverable_session_ends_the_stream() {
         assert_eq!(
-            EventStream::DomainClocks.failure(&CoreClientError::RetryDeadline),
+            EventStream::DomainClocks.failure(&StackReport::new(CoreClientError::RetryDeadline)),
             StreamFailure {
                 line: "[events] notice: domain clock events could not resume yet: session retry \
                        deadline expired; the client keeps trying"
@@ -2843,9 +2846,9 @@ mod tests {
             }
         );
         assert_eq!(
-            EventStream::ServerNotices.failure(&CoreClientError::EventOverflow {
+            EventStream::ServerNotices.failure(&StackReport::new(CoreClientError::EventOverflow {
                 stream: nervix_client_core::EventStreamKind::ServerNotice,
-            }),
+            })),
             StreamFailure {
                 line: "[events] notice: server notices were dropped because they arrived faster \
                        than they were read"
@@ -2854,13 +2857,25 @@ mod tests {
             }
         );
         assert_eq!(
-            EventStream::Subscriptions.failure(&CoreClientError::SessionClosed),
+            EventStream::Subscriptions.failure(&StackReport::new(CoreClientError::SessionClosed)),
             StreamFailure {
                 line: "[events] notice: subscription events stopped because the session closed \
                        and no known server can reopen it"
                     .to_string(),
                 ended: true,
             }
+        );
+        let unreadable = StackReport::new(std::io::Error::from(std::io::ErrorKind::NotFound))
+            .change_context(CoreClientError::LoadDnsConfiguration);
+        assert_eq!(
+            EventStream::ServerNotices.failure(&unreadable),
+            StreamFailure {
+                line: "[events] notice: server notices could not resume yet: failed to load \
+                       native DNS configuration: entity not found; the client keeps trying"
+                    .to_string(),
+                ended: false,
+            },
+            "a failed read prints every context of its report"
         );
     }
 

@@ -1158,10 +1158,13 @@ fn every_command_disposition_has_the_header_value() {
 #[test]
 fn client_errors_are_classified_and_keep_their_causes() {
     let reference = CommandExecutionReference::parse("reference-2").assured("a valid reference");
-    let uncertain = crate::Failure::from(ClientError::UncertainCommand {
-        reference: reference.clone(),
-        source: Box::new(ClientError::RetryDeadline),
-    });
+    let uncertain = crate::Failure::from(
+        error_stack::Report::new(ClientError::RetryDeadline).change_context(
+            ClientError::UncertainCommand {
+                reference: reference.clone(),
+            },
+        ),
+    );
     assert_eq!(uncertain.kind(), FailureKind::Uncertain);
     assert_eq!(uncertain.execution_reference(), Some(&reference));
     assert!(
@@ -1243,11 +1246,12 @@ fn client_errors_are_classified_and_keep_their_causes() {
             FailureKind::InvalidArgument,
         ),
     ];
-    for (source, kind) in downloads {
-        let failure = crate::Failure::from(ClientError::BackupDownload {
-            reference: reference.clone(),
-            source,
-        });
+    for (download, kind) in downloads {
+        let failure = crate::Failure::from(error_stack::Report::new(download).change_context(
+            ClientError::BackupDownload {
+                reference: reference.clone(),
+            },
+        ));
         assert_eq!(failure.kind(), kind);
         assert_eq!(failure.execution_reference(), Some(&reference));
     }

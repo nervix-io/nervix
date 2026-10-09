@@ -6066,7 +6066,7 @@ async fn when_node_starts_durable_catch_up(
             // A stop ends the next iteration. Collect the admitted command's response first so
             // the completed-write count includes a command committed before catch-up finished.
             let outcome = client.execute(format!("CREATE DOMAIN {name};")).await;
-            let outcome = outcome.map_err(|error| error.to_string())?;
+            let outcome = outcome.map_err(|error| format!("{error:#}"))?;
             if !outcome.succeeded() {
                 return Err(format!(
                     "command failed with {:?}: {}; diagnostics: {:?}",
@@ -13891,7 +13891,7 @@ async fn when_named_client_fails_to_execute_commands(
                 return;
             }
             Err(error) => {
-                world.last_command_error = Some(error.to_string());
+                world.last_command_error = Some(format!("{error:#}"));
                 return;
             }
         }
@@ -14566,7 +14566,7 @@ async fn when_named_client_fails_to_attach_to_transaction(
             );
             world.last_command_error = Some(outcome.message);
         }
-        Err(error) => world.last_command_error = Some(error.to_string()),
+        Err(error) => world.last_command_error = Some(format!("{error:#}")),
     }
 }
 
@@ -14661,11 +14661,11 @@ async fn when_the_client_attempts_to_connect_to_the_leader_node_as_user_with_pas
                     world.last_command_error = Some(outcome.message);
                 }
                 Err(error) => {
-                    world.last_command_error = Some(error.to_string());
+                    world.last_command_error = Some(format!("{error:#}"));
                 }
             },
             Err(error) => {
-                world.last_command_error = Some(error.to_string());
+                world.last_command_error = Some(format!("{error:#}"));
             }
         }
     }
@@ -14714,11 +14714,11 @@ async fn connect_to_node_with_credentials(
                 world.last_command_error = Some(outcome.message);
             }
             Err(error) => {
-                world.last_command_error = Some(error.to_string());
+                world.last_command_error = Some(format!("{error:#}"));
             }
         },
         Err(error) => {
-            world.last_command_error = Some(error.to_string());
+            world.last_command_error = Some(format!("{error:#}"));
         }
     }
 }

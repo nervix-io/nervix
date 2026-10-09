@@ -244,9 +244,14 @@ async fn when_native_backup_wait_is_recovered(world: &mut ScenarioWorld) {
         .await
         .assured("the bounded native wait ends before the ordinary request budget")
         .assured("the native command task finishes");
-    let Err(nervix_client_core::ClientError::UncertainCommand { reference, .. }) = result else {
+    let Err(report) = &result else {
         panic!("the unanswered native backup preserves its uncertain identity: {result:?}");
     };
+    let nervix_client_core::ClientError::UncertainCommand { reference } = report.current_context()
+    else {
+        panic!("the unanswered native backup preserves its uncertain identity: {result:?}");
+    };
+    let reference = reference.clone();
     assert_eq!(reference, expected);
     assert!(
         !initial_archive.exists(),
