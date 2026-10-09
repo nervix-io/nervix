@@ -497,6 +497,13 @@ impl ReplicatedWasmProcessorState {
         self.committed.load_full().snapshot()
     }
 
+    /// Serve a retained committed revision without cloning a large save when the request names
+    /// the newer published checkpoint instead.
+    pub(super) fn committed_snapshot_at(&self, lsm: u64) -> Option<PersistedRuntimeStateEntry> {
+        let committed = self.committed.load();
+        (committed.revision == lsm).then(|| committed.snapshot())
+    }
+
     /// The newest checkpoint on this node's stable storage when its revision is after `after_lsm`,
     /// as a replica synchronizes it.
     pub(super) fn snapshot_after(

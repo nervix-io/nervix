@@ -988,6 +988,12 @@ use this envelope, and local errors retain the remote class alongside their targ
 Checkpoint and branch catalog request failures keep the typed interconnect request cause beneath
 that target and placement context. Their replica diagnostics render the cause chain, distinguishing
 deadline, admission, connection and framing failures without retaining checkpoint payloads.
+The checkpoint description carries only revision, length and digest. Its subsequent bulk fetch
+retains the target and placement context on a transport, memory admission, declared-length,
+truncation or digest failure; none can publish or acknowledge a partial checkpoint. An ownership
+handoff destination converts the same fetch failure to a checkpoint preparation failure before
+persisting or activating the candidate state. Diagnostics include the revision and lengths when
+useful, never guest bytes.
 Kafka offset replica catch-up uses the same typed envelope for its revision description. A
 subsequent bulk stream failure remains a transport request failure, with the target, placement and
 typed staging, admission, verification or native conversion cause retained beneath it. The

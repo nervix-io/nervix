@@ -282,7 +282,12 @@ it would save is the state the reset discards.
 5. **Committed.** The checkpoint becomes the committed checkpoint, and the acknowledgements the
    callback held back are released. Only then does the branch run its next callback.
 
-The whole checkpoint, from the guest's save to the last replica's confirmation, has ten seconds.
+The whole checkpoint, from the guest's save to the last replica's confirmation, has ninety seconds.
+The replica first receives a small revision, length, and digest description, then fetches that
+revision through the bulk pool in 64 KiB chunks. It verifies the complete byte count and digest
+before writing the checkpoint to its own storage. A save up to the host's 64 MiB guest buffer can
+therefore cross the 2 MiB replication-message limit. The bulk fetch has a sixty-second progress
+deadline inside the checkpoint's ninety-second completion budget.
 
 ### Local Durability
 
@@ -306,7 +311,8 @@ round after the one-second replication poll interval, so a lost announcement is 
 periodic synchronization. Lifecycle, catalog and checkpoint requests each retain their typed
 five-second response deadline, including time waiting for transport capacity; the poll interval
 does not cancel a request still within that deadline. A busy or failing replica can take longer
-than one interval to catch up. The owner's whole checkpoint still has ten seconds to complete.
+than one interval to catch up. The subsequent bulk fetch has a sixty-second deadline, and the
+owner's whole checkpoint has ninety seconds to complete.
 The replica installs a revision newer than the one it holds, synchronizes its storage, and only then
 acknowledges; a replica that already holds the announced revision or a newer one synchronizes and
 acknowledges what it holds, so a lost acknowledgement is replaced by the next announcement. Each
@@ -385,10 +391,12 @@ schedule, so a former owner cannot resume a branch the cluster moved while it wa
 boundary check at the start of every checkpoint, and the schedule rereads while it waits for
 replicas, refuse a checkpoint whose placement or ownership moved on while its callback ran.
 
-A planned ownership handoff keeps the generation. The source flushes each branch, checkpoints it,
-and transfers the checkpoints; the destination restores every one of them into a guest before the
-handoff activates, and a restore that fails fails the handoff before the schedule changes. The
-replacement instances then restore the transferred checkpoints. See [Planned Ownership Handoffs And
+A planned ownership handoff keeps the generation. The source flushes each branch and checkpoints
+it, then sends the destination a small revision, length and digest description for each branch.
+The destination fetches each exact checkpoint that capture retained in the source's stable storage
+through the bulk stream and verifies it before restoring the guest. A fetch or restore failure ends
+the handoff before the schedule changes. The replacement instances then restore the transferred
+checkpoints. See [Planned Ownership Handoffs And
 Failover](./control-plane.md#planned-ownership-handoffs-and-failover).
 
 ### Forced Recovery
@@ -718,9 +726,12 @@ Nervix does not provide, and these limits apply:
 - **Exactly-once processing or delivery.** See [Replay, Duplicates, And
   Exactly-Once](#replay-duplicates-and-exactly-once).
 - **Guest state across module versions.** A binding change always starts a new lifetime.
-- **A checkpoint deadline of ten seconds**, from the save to the last replica, and one callback per
+- **A checkpoint deadline of ninety seconds**, from the save to the last replica, and one callback per
   branch at a time, whose acknowledgements are held for at most that long.
 - **A save of at most 64 MiB**, the host's guest buffer limit.
+- **Prepared handoff memory grows with its branch inventory.** The destination retains every
+  verified branch checkpoint until activation; the 256 MiB limit applies to each transfer, not the
+  entity's aggregate state.
 - **Loss of state without replicas.** Recovering a processor without its owner resets every branch
   whose only checkpoints were on that owner.
 - **Forced recovery can reset state without a verdict.** A recovery preparation that fails or runs

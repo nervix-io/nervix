@@ -298,6 +298,7 @@ mod task_status;
 mod scheduled_node;
 mod shared_clients;
 mod state_assignment;
+mod state_checkpoint_transfer;
 mod state_replication;
 mod state_snapshot_exchange;
 mod state_snapshot_transfer;
