@@ -328,8 +328,9 @@ therefore neither release nor erase a replacement lease occupying the same logic
 
 A stopping node moves its own scheduled work with one typed commands-pool request to the current
 leader, `stopping_node_drain`. It names no node and carries one of two actions: drain, which cordons
-the sender and moves its scheduled work through planned ownership handoffs, and release, which
-clears the cordon that drain set. The leader acts for the node the authenticated connection belongs
+the sender, carries its remaining drain budget, and moves its scheduled work through planned
+ownership handoffs, and release, which clears the cordon that drain set. The leader acts for
+the node the authenticated connection belongs
 to, so the certificate that admitted the connection is the whole authorization: a node can drain
 and uncordon only itself, and no user credential takes part. The answer is completed or failed, each
 with the leader's account of the action for the stopping node's log, or not the leader, from a node
@@ -338,7 +339,9 @@ its leadership while it writes a release also answers not the leader, because cl
 again through the next leader is harmless. The leader runs the action in a service task of its own,
 so a drain that has begun finishes, and releases what it holds, even when the sender's deadline
 abandons the request first. For a drain that deadline is what remains of the sender's drain
-timeout; for a release it is the bound
+timeout; the leader also uses the budget carried by the drain action to bound each unit's gate,
+state preparation, and activation waits, leaving a window for later units and the sender's in-place
+drain. For a release it is the bound
 [Releasing The Drain Cordon](./shutdown.md#releasing-the-drain-cordon) states.
 [Topology Cases](./shutdown.md#topology-cases) owns when a node sends it.
 

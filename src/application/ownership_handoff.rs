@@ -763,8 +763,28 @@ impl SessionServiceImpl {
         current: Option<&nervix_models::DomainSchedule>,
         planned: Option<&nervix_models::DomainSchedule>,
     ) -> Result<Option<PlannedOwnershipHandoff>, Report<DomainAlterError>> {
-        self.begin_planned_ownership_handoff_with_gate(domain, current, planned, None, None)
+        self.begin_planned_ownership_handoff_with_gate(domain, current, planned, None, None, None)
             .await
+    }
+
+    /// Gives a stopping node's one planned move its own bound within the node's drain budget.
+    /// Preparation takes at most four fifths; activation keeps the rest of the same bound.
+    pub(in crate::application) async fn begin_shutdown_ownership_handoff(
+        &self,
+        domain: &DomainName,
+        current: Option<&nervix_models::DomainSchedule>,
+        planned: Option<&nervix_models::DomainSchedule>,
+        budget: Duration,
+    ) -> Result<Option<PlannedOwnershipHandoff>, Report<DomainAlterError>> {
+        self.begin_planned_ownership_handoff_with_gate(
+            domain,
+            current,
+            planned,
+            None,
+            None,
+            Some(budget),
+        )
+        .await
     }
 
     pub(in crate::application) async fn begin_planned_ownership_handoff_with_exact_gate(
@@ -778,8 +798,15 @@ impl SessionServiceImpl {
             nervix_models::PauseRequirement,
         )>,
     ) -> Result<Option<PlannedOwnershipHandoff>, Report<DomainAlterError>> {
-        self.begin_planned_ownership_handoff_with_gate(domain, current, planned, Some(gate), impact)
-            .await
+        self.begin_planned_ownership_handoff_with_gate(
+            domain,
+            current,
+            planned,
+            Some(gate),
+            impact,
+            None,
+        )
+        .await
     }
 
     async fn begin_planned_ownership_handoff_with_gate(
@@ -792,6 +819,7 @@ impl SessionServiceImpl {
             &TransactionStepImpactRecorder,
             nervix_models::PauseRequirement,
         )>,
+        shutdown_budget: Option<Duration>,
     ) -> Result<Option<PlannedOwnershipHandoff>, Report<DomainAlterError>> {
         let moves = planned_ownership_moves(current, planned);
         if moves.is_empty() {
@@ -917,7 +945,11 @@ impl SessionServiceImpl {
             .collect::<Vec<_>>();
         let started_at = nervix_primitives::time::Instant::now();
         let phase_budget = self.inner.runtime.entity_gate_deadline();
-        let preparation_deadline = started_at.checked_add(phase_budget).ok_or_else(|| {
+        let preparation_budget = match shutdown_budget {
+            Some(budget) => (budget - budget / 5).min(phase_budget),
+            None => phase_budget,
+        };
+        let preparation_deadline = started_at.checked_add(preparation_budget).ok_or_else(|| {
             Report::new(DomainAlterError::EntityGate {
                 domain: domain.clone(),
                 operation: EntityGatePurpose::OwnershipHandoff.operation_name(),
@@ -925,18 +957,20 @@ impl SessionServiceImpl {
                     .to_string(),
             })
         })?;
-        let activation_deadline =
-            preparation_deadline
-                .checked_add(phase_budget)
-                .ok_or_else(|| {
-                    Report::new(DomainAlterError::EntityGate {
-                        domain: domain.clone(),
-                        operation: EntityGatePurpose::OwnershipHandoff.operation_name(),
-                        reason: "ownership handoff activation deadline exceeds the runtime \
-                                 instant range"
-                            .to_string(),
-                    })
-                })?;
+        let activation_budget = shutdown_budget
+            .map(|budget| budget.min(phase_budget.checked_mul(2).unwrap_or(Duration::MAX)));
+        let activation_deadline = match activation_budget {
+            Some(budget) => started_at.checked_add(budget),
+            None => preparation_deadline.checked_add(phase_budget),
+        }
+        .ok_or_else(|| {
+            Report::new(DomainAlterError::EntityGate {
+                domain: domain.clone(),
+                operation: EntityGatePurpose::OwnershipHandoff.operation_name(),
+                reason: "ownership handoff activation deadline exceeds the runtime instant range"
+                    .to_string(),
+            })
+        })?;
         let gate = self
             .engage_cluster_entity_gates(
                 domain,
