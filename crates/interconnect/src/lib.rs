@@ -74,9 +74,10 @@ use request::{RequestEnvelope, RequestState, ResponseEnvelope};
 pub use runtime_state::{
     BranchCheckpointCursor, BranchCheckpointListing, BranchCheckpointListingRequest,
     BranchCheckpointListingResponse, BranchCheckpointPage, BranchCheckpointRevision,
-    DescribeKafkaOffsets, KafkaOffsetRevision, OwnershipHandoffCheckpoint, RuntimeState,
-    RuntimeStateKind, StateCheckpointAvailable, StatePlacementEnvelope, StateReplicationAck,
-    StateSchema, StateSnapshotEnvelope, StateSyncRequest, StateSyncResponse, SyncKafkaOffsets,
+    DescribeKafkaOffsets, FetchStateCheckpoint, KafkaOffsetRevision, OwnershipHandoffCheckpoint,
+    RuntimeState, RuntimeStateKind, StateCheckpointAvailable, StateCheckpointRead,
+    StatePlacementEnvelope, StateReplicationAck, StateSchema, StateSnapshotEnvelope,
+    StateSyncRequest, StateSyncResponse, SyncKafkaOffsets,
 };
 pub use wasm_state::{
     CoordinateWasmStateResetRequest, CoordinateWasmStateResetResponse,

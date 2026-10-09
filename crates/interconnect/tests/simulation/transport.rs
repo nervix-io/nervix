@@ -399,7 +399,8 @@ fn exchange_typed_arrow_batch(run: ScenarioRun) -> Result<(), SimulationError> {
                             StateSyncResponse {
                                 result: Ok(Some(StateSnapshotEnvelope {
                                     lsm: 1,
-                                    payload: vec![7],
+                                    length: 1,
+                                    digest: *blake3::hash(&[7]).as_bytes(),
                                 })),
                             }
                         })
@@ -544,7 +545,8 @@ fn exchange_typed_arrow_batch(run: ScenarioRun) -> Result<(), SimulationError> {
                             snapshot.result,
                             Ok(Some(StateSnapshotEnvelope {
                                 lsm: 1,
-                                payload: vec![7]
+                                length: 1,
+                                digest: *blake3::hash(&[7]).as_bytes(),
                             }))
                         );
                         client

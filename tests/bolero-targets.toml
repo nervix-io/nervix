@@ -594,6 +594,21 @@ test_target = "lib"
 
 [[target]]
 case_timeout_seconds = 10
+corpus = "crates/interconnect/src/__fuzz__/runtime_state__wire_properties__bolero_checkpoint_descriptions_round_trip_through_the_replication_wire/corpus"
+domain_version = 1
+features = []
+id = "runtime-checkpoint-description-wire"
+invariant = "A current checkpoint description preserves presence, revision, full byte length and digest through the production replication response encoder and decoder."
+manifest = "Cargo.toml"
+max_input_bytes = 64
+package = "nervix-interconnect"
+random_iterations = 256
+source = "crates/interconnect/src/runtime_state.rs"
+test = "runtime_state::wire_properties::bolero_checkpoint_descriptions_round_trip_through_the_replication_wire"
+test_target = "lib"
+
+[[target]]
+case_timeout_seconds = 10
 corpus = "src/runtime/state_store/__fuzz__/runtime__state_store__backup__tests__bolero_restore_staging_and_publication_records_round_trip/corpus"
 domain_version = 1
 features = []
