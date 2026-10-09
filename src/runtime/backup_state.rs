@@ -41,10 +41,7 @@ use super::{
     RuntimeStatePlacement, ScheduledNodeTask,
     backup_capture_fence::{BackupCaptureFence, BackupPublication},
     branch_lru_state::{LifecycleBranches, NativeBranchLifecycle, write_branch_lru_snapshot},
-    decode_branch_lru_snapshot,
-    kafka_offset_state::{
-        KafkaOffsetPositions, NativeKafkaOffsets, backup_offset_positions, write_offset_payload,
-    },
+    kafka_offset_state::{KafkaOffsetPositions, NativeKafkaOffsets, write_offset_payload},
     state_store::{
         RuntimePersistenceError, StoredPlacement,
         checkpoint_reader::{AlignedCheckpoint, ListedCheckpoint},
@@ -966,10 +963,14 @@ fn read_native_lifecycle(
     NativeLifecycleCheckpoint::validate(aligned, entity, cancellation)
 }
 
+/// A stored Kafka offset checkpoint's positions decoded whole, for inspection and properties that
+/// compare complete values.
+#[cfg(any(test, feature = "testing"))]
 pub(crate) fn decode_backup_kafka_offsets(
     payload: &[u8],
 ) -> error_stack::Result<Vec<(String, i32, i64)>, BackupStateCaptureError> {
-    backup_offset_positions(payload).change_context(BackupStateCaptureError::Storage)
+    super::kafka_offset_state::backup_offset_positions(payload)
+        .change_context(BackupStateCaptureError::Storage)
 }
 
 pub(crate) fn write_restored_kafka_offsets(
@@ -981,14 +982,18 @@ pub(crate) fn write_restored_kafka_offsets(
         .change_context(BackupStateCaptureError::Storage)
 }
 
+/// A stored lifecycle checkpoint's branches decoded whole, for inspection and properties that
+/// compare complete values.
+#[cfg(any(test, feature = "testing"))]
 pub(crate) fn decode_backup_branch_lifecycle(
     payload: &[u8],
     entity: &ModelName,
 ) -> error_stack::Result<Vec<BackupBranchLifecycleEntry>, BackupStateCaptureError> {
-    let entries =
-        decode_branch_lru_snapshot(payload).change_context(BackupStateCaptureError::Lifecycle {
+    let entries = super::decode_branch_lru_snapshot(payload).change_context(
+        BackupStateCaptureError::Lifecycle {
             entity: entity.clone(),
-        })?;
+        },
+    )?;
     Ok(entries
         .into_iter()
         .map(BackupBranchLifecycleEntry::from)

@@ -714,8 +714,10 @@ impl KafkaOffsetTable {
     }
 }
 
-/// Convert the internal offset checkpoint into typed partition positions for an archive. The
-/// scheduling cache is recomputed at START and therefore does not cross the archive boundary.
+/// Convert the internal offset checkpoint into typed partition positions, decoded whole for
+/// inspection and properties that compare complete values. The scheduling cache is recomputed at
+/// START and is not among them.
+#[cfg(any(test, feature = "testing"))]
 pub(in crate::runtime) fn backup_offset_positions(
     payload: &[u8],
 ) -> error_stack::Result<Vec<(String, i32, i64)>, RuntimePersistenceError> {
