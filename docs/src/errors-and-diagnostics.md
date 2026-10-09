@@ -356,12 +356,16 @@ server's conflict, expiry and retention authority.
 
 The CLI's delivery of a downloaded archive to standard output has failures of its own, which
 follow the complete download that released the server's copy. A staged archive that could not be
-read, or a write or flush of standard output that failed, is `WRITE_FAILED`: the report keeps the
-typed error and its I/O cause, and names the durable reference with the verified archive the CLI
-kept, `error.archive` in JSON, as the recovery, because running the backup again cannot download a
+read, or a write to standard output that failed, is `WRITE_FAILED`: the report keeps the typed
+error and its I/O cause, and names the durable reference with the verified archive the CLI kept,
+`error.archive` in JSON, as the recovery, because running the backup again cannot download a
 collected archive. A staging directory that could not be removed after every byte was delivered is
 `CLEANUP_FAILED`, which names the reference and the directory, `error.staging` in JSON. A staging
-directory that could not be created is `WRITE_FAILED` before admission, without a reference.
+directory that could not be created is `WRITE_FAILED` before admission, without a reference. So is
+a standard output that would discard the archive, checked before anything is staged: the null
+device, and a standard output that was closed when the CLI started, which the CLI finds holding the
+null device and cannot tell apart from it. A standard output the CLI could not inspect is
+`WRITE_FAILED` before admission as well, with its I/O cause.
 
 The web console owns its own typed download and restore failures. A download failure names the
 server's refusal, a transport failure, a stalled or interrupted stream, a missing leader or a
