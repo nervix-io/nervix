@@ -674,6 +674,9 @@ fn jaq_num_to_json(value: JaqNum) -> error_stack::Result<JsonValue, JaqProgramEr
 }
 
 #[cfg(test)]
+mod number_properties;
+
+#[cfg(test)]
 mod tests {
     use std::io;
 

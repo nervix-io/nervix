@@ -271,7 +271,12 @@ exact branch. Error construction never recursively invokes the same policy.
 A producer payload is one canonical Arrow IPC stream: schema message, exactly one record batch
 and end-of-stream marker, uncompressed, with no dictionary or extension encoding and no field
 metadata. Every column is present, in declared order, with Nervix's exact Arrow representation,
-nullability and valid array lengths, nesting and buffer ranges. Sensitivity flags are compared
+nullability and valid array lengths, nesting and buffer ranges. The node scans the stream before
+Arrow's reader reads any of it: its framing, that its schema declares only field types Nervix
+carries, and that its record batch declares the field nodes and buffers that schema's fields take,
+every buffer inside the message body. A field of another type, such as a dictionary-encoded or a
+view column, is refused as a `schema mismatch`, and a record batch at odds with its own schema as
+`invalid data`. Sensitivity flags are compared
 through the opened field description rather than invented Arrow metadata. A one-row payload is
 still a batch. There is no inference, coercion, numeric widening, timestamp parsing or partial
 admission to make a mismatched stream fit.

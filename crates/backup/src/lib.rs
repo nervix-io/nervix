@@ -28,6 +28,7 @@ mod reader;
 mod records;
 mod section;
 mod state;
+mod stream;
 mod wire;
 
 pub use branch_state::{
@@ -63,6 +64,7 @@ pub use state::{
     BranchLifecycleEntry, BranchLifecycleRecord, KafkaOffsetsRecord, KafkaPartitionOffset,
     WasmStateDescriptor,
 };
+pub use stream::{StreamedBranchLifecycle, StreamedKafkaOffsets};
 pub use wire::{StateField, StateValue};
 
 #[cfg(test)]

@@ -80,14 +80,16 @@ checks.
 
 The `@restarted_voter_observation` scenario runs in both selections, reaching whole-cluster teardown, reopening each node's store, and automatic scheduling after the first relayed voter heartbeat. Its watch-channel barrier and concurrent fault map are untracked; the diagnostic evidence covers blocking locks reached by restart and scheduling. The native metadata restore scenario also runs in both selections after its Kafka replication stream and acknowledgement boundaries are repaired, retaining complete primary and replica metadata comparisons and distributed placement checks.
 
-The measured restore steps sample each node's public bulk and restore-metadata executor gauges
-every 20 milliseconds while the ordinary CLI runs. They also record the harness process's
-jemalloc allocated and resident bytes. The executor measurements separate the fixed checkpoint
-I/O and publication grant from retained archive descriptions, typed native values and planning
-allocations. Process measurements include every in-process node, dependency fixture and harness
-allocation; isolated one-node and three-node runs provide attributable comparisons. Sampled peaks
-are observations, not continuous maxima, and allocator resident bytes exclude mappings outside
-jemalloc. The scenarios also compare bulk refusal counters before and after each restore.
+The measured restore and backup steps sample each node's public bulk and restore-metadata
+executor gauges every 20 milliseconds while the ordinary CLI runs. They also record the harness
+process's jemalloc allocated and resident bytes. The executor measurements separate the fixed
+checkpoint I/O and publication grant from retained archive descriptions, typed native values and
+planning allocations. Process measurements include every in-process node, dependency fixture and
+harness allocation; isolated one-node and three-node runs provide attributable comparisons.
+Sampled peaks are observations, not continuous maxima, and allocator resident bytes exclude
+mappings outside jemalloc. The scenarios also compare bulk refusal counters before and after each
+restore, and a measured backup's check compares them and every node's sampled bulk peak with that
+node's published bulk budget.
 The large-native-metadata oracle stops the cluster after public restore and exact replay, then
 opens each node's database through the production snapshot reader. It compares every lifecycle
 key, timestamp, incarnation, revision and Kafka topic/partition/offset on primary and replica

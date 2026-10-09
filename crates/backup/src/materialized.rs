@@ -21,7 +21,7 @@ pub const MATERIALIZED_IDENTITIES_BYTES: u64 = 1024 * 1024;
 pub const MATERIALIZED_COLUMNS_BYTES: u64 = 8 * 1024 * 1024;
 
 /// One immutable generation of a materialized relay. Each group has an identity record and an
-/// Arrow IPC stream using the relay's exact schema, including field sensitivity metadata.
+/// Arrow IPC stream of the relay's exact Arrow schema, which carries no schema or field metadata.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MaterializedRelayDescriptor {
     pub domain: DomainName,
