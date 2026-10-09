@@ -7513,6 +7513,7 @@ version = "0.1.0-dev"
 dependencies = [
  "arc-swap",
  "concurrent-queue",
+ "criterion 0.5.1",
  "dashmap 6.2.1",
  "deloxide",
  "error-stack",

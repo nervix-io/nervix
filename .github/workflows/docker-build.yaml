@@ -231,6 +231,12 @@ jobs:
           "${NERVIX_BENCHMARK_IMAGE}"
           "${RUNNER_TEMP}/nervix-benchmarks"
 
+      - name: Measure ordinary primitive costs
+        run: |
+          mkdir -p "${RUNNER_TEMP}/nervix-benchmarks/primitives"
+          just bench-primitives --sample-size 20 --warm-up-time 1 --measurement-time 1 \
+            > "${RUNNER_TEMP}/nervix-benchmarks/primitives/ordinary-cost.txt" 2>&1
+
       - name: Publish kache report
         if: always()
         run: python3 scripts/publish_kache_report.py "${RUNNER_TEMP}/kache-report"
@@ -267,6 +273,19 @@ jobs:
               echo '```'
             done
           } >> "${GITHUB_STEP_SUMMARY}"
+
+      - name: Publish ordinary primitive costs
+        if: always()
+        run: |
+          report="${RUNNER_TEMP}/nervix-benchmarks/primitives/ordinary-cost.txt"
+          if [[ -f "${report}" ]]; then
+            {
+              echo '## Ordinary primitive costs'
+              echo '```text'
+              cat "${report}"
+              echo '```'
+            } >> "${GITHUB_STEP_SUMMARY}"
+          fi
 
       - name: Upload benchmark artifacts
         if: always()
@@ -554,10 +573,12 @@ jobs:
           docs_url="https://docs.nervix.io/${docs_target}/"
           llms_url="https://docs.nervix.io/${docs_target}/llms.txt"
           pdf_url="https://docs.nervix.io/${docs_target}/nervix.pdf"
-          echo "target=${docs_target}" >> "$GITHUB_OUTPUT"
-          echo "url=${docs_url}" >> "$GITHUB_OUTPUT"
-          echo "llms_url=${llms_url}" >> "$GITHUB_OUTPUT"
-          echo "pdf_url=${pdf_url}" >> "$GITHUB_OUTPUT"
+          {
+            echo "target=${docs_target}"
+            echo "url=${docs_url}"
+            echo "llms_url=${llms_url}"
+            echo "pdf_url=${pdf_url}"
+          } >> "$GITHUB_OUTPUT"
 
       - name: Publish Book
         env:

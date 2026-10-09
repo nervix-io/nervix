@@ -76,6 +76,12 @@ an individual implementation fails, retains successful measurements, and lists f
 the same PR report while keeping CI failed. Fork PRs remain excluded because their untrusted
 workflow tokens cannot push the image that this job consumes.
 
+The same benchmark worker also runs `just bench-primitives` in the ordinary native mode. Its
+atomic, publication, uncontended lock and shared-reference timings are retained as
+`primitives/ordinary-cost.txt` in the benchmark artifact and in the job summary. These component
+samples supplement the catalog's same-host product comparison; an instrumented model build is
+never a performance baseline.
+
 The underlying image-only entry point is available for reproducing that CI path:
 
 ```bash

@@ -1449,6 +1449,15 @@ it does not broaden the ordering or interleaving guarantee. Mode reports remain 
 the ordinary coverage and CRAP gate. See [native extra coverage](developing-nervix.md) for
 collection, artifacts, filtering and replay commands.
 
+The integrated ordinary cost probe is `just bench-primitives`. It measures the boundary's atomic
+access, `ArcSwap` publication, an uncontended blocking mutex, and shared-reference clone/drop
+without a model or diagnostic build's scheduling points. The production relay and admitted-work
+benches measure their owners, and `just bench-task-handles`
+retains timing and allocation samples. Compare uninstrumented builds on one host with the same
+profile and load; a model run or coverage build cannot serve as a throughput baseline. The
+[integrated qualification procedure](developing-nervix.md#integrated-primitive-qualification)
+keeps those measurements beside revision-bound model and external fault evidence.
+
 `just validate-execution-mode-dependencies` resolves the normal dependency graph of the workspace
 and of every package on its own, the way a consumer builds it, with default features and without
 them, and rejects Loom, Shuttle, a Shuttle wrapper, Turmoil or Deloxide in any of them, and an

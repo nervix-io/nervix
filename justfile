@@ -1541,6 +1541,7 @@ coverage-model-runner:
 # The server benches link the console the server serves, so the console is built first rather than
 # left to whatever ran before them.
 bench *args: build-web-console
+    cargo bench --package nervix-primitives --features native --bench ordinary_cost -- {{ args }}
     cargo bench --package nervix-server --bench relay_interaction --features benchmarks -- {{ args }}
     cargo bench --package nervix-branch-instances --bench owned_branches -- {{ args }}
     cargo bench --package nervix-server --bench subscription_row_encoding --features benchmarks -- {{ args }}
@@ -1555,6 +1556,7 @@ bench-smoke: build-web-console wasm-processor-guests download-onnxruntime bench-
 # The Criterion bodies `bench-smoke` exercises, without the console build that precedes them there.
 # `coverage-native-extras` builds the console outside its instrumentation and then runs these in it.
 bench-smoke-bodies:
+    cargo bench --profile dev --package nervix-primitives --features native --bench ordinary_cost -- --test
     cargo bench --profile dev --package nervix-server --bench relay_interaction --features benchmarks -- --test
     cargo bench --profile dev --package nervix-server --bench admitted_work --features benchmarks -- --test
     cargo bench --profile dev --package nervix-branch-instances --bench owned_branches -- --test
@@ -1576,6 +1578,16 @@ bench-smoke-bodies:
 # transformation. Extra arguments are forwarded to Criterion.
 bench-admitted-work *args: build-web-console
     cargo bench --package nervix-server --bench admitted_work --features benchmarks -- {{ args }}
+
+# Measure ordinary native atomic, publication, lock and reference-count costs on this host.
+# Model and diagnostic builds have different instrumentation and are not performance baselines.
+bench-primitives *args:
+    cargo bench --package nervix-primitives --features native --bench ordinary_cost -- {{ args }}
+
+# Cover the primitive cost probe's executable paths without treating instrumented time as a
+# performance measurement.
+coverage-bench-primitives output="target/primitives-ordinary-cost.lcov":
+    cargo llvm-cov --package nervix-primitives --features native --bench ordinary_cost --no-default-ignore-filename-regex --lcov --output-path {{ quote(output) }} -- --test
 
 # Exercise the admission benchmark's current emitter context while measuring its line coverage.
 coverage-admitted-work output="target/admitted-work.lcov": build-web-console
@@ -1752,8 +1764,9 @@ benchmark-ci nervix_image artifacts_root *args: benchmark-flink-image
 cargo-fmt:
     cargo +nightly fmt
 
+# Ripgrep honors the repository ignore rules, so generated target trees are not formatted.
 taplo-format:
-    taplo format
+    rg --files --hidden --null --glob '*.toml' --glob '!**/.git/**' | xargs -0 taplo format
 
 [parallel]
 fmt: cargo-fmt fmt-typed-ratchet taplo-format dockerfmt gherkin-fmt nspl-fmt autoinherit
@@ -1762,7 +1775,7 @@ cargo-fmt-check:
     cargo +nightly fmt --check
 
 taplo-format-check:
-    taplo format --check
+    rg --files --hidden --null --glob '*.toml' --glob '!**/.git/**' | xargs -0 taplo format --check
 
 [parallel]
 fmt-check: cargo-fmt-check fmt-check-typed-ratchet taplo-format-check dockerfmt-check gherkin-fmt-check nspl-fmt-check autoinherit-check
