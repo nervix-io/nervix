@@ -1270,6 +1270,7 @@ pub async fn start_cluster(settings: ClusterSettings) -> io::Result<ClusterHandl
         .addr;
     let mut seed_targets = BTreeMap::new();
     let mut seed_nodes = BTreeSet::new();
+    let has_recovered_peers = !settings.recovery_endpoints.is_empty();
     let recovered = join_all(settings.recovery_endpoints.into_iter().map(|endpoint| {
         let interconnect = &settings.interconnect;
         async move { (endpoint.clone(), interconnect.resolve(&endpoint).await) }
@@ -1292,14 +1293,17 @@ pub async fn start_cluster(settings: ClusterSettings) -> io::Result<ClusterHandl
         let seed = seed
             .parse::<NodeEndpoint>()
             .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
-        let targets = settings
-            .interconnect
-            .resolve(&seed)
-            .await
-            .map_err(|report| io::Error::other(report.into_error()))?;
-        for target in targets {
-            seed_nodes.insert(target.addr.to_string());
-            seed_targets.insert(target.addr, target);
+        match settings.interconnect.resolve(&seed).await {
+            Ok(targets) => {
+                for target in targets {
+                    seed_nodes.insert(target.addr.to_string());
+                    seed_targets.insert(target.addr, target);
+                }
+            }
+            Err(error) if has_recovered_peers => {
+                warn!(%seed, %error, "could not resolve the configured bootstrap host for gossip");
+            }
+            Err(error) => return Err(io::Error::other(error.into_error())),
         }
     }
     let transport = InterconnectGossipTransport::build(
