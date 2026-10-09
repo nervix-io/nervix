@@ -190,9 +190,11 @@ clock() {
           | [$authority_stalls[] | . as $stall
              | ([$faults[] | . as $round | select(any($stall.rounds[]; .ordinal == $round.ordinal))
                  | .unavailable_ms | select(. != null)] | min) as $unavailable_ms
-             | select($unavailable_ms != null and $stall.end_ms > $unavailable_ms + $replace_bound_ms)
+             | select($unavailable_ms != null)
+             | ([$stall.start_ms, $unavailable_ms] | max) as $replacement_start_ms
+             | select($stall.end_ms > $replacement_start_ms + $replace_bound_ms)
              | . + {unavailable_ms: $unavailable_ms,
-                    stalled_after_unavailable_ms: ($stall.end_ms - $unavailable_ms)}] as $not_replaced
+                    stalled_after_unavailable_ms: ($stall.end_ms - $replacement_start_ms)}] as $not_replaced
           | ([$authority_stalls[].rounds[].ordinal] | unique) as $authority_rounds
           | [$faults[] | . as $round
              | ($all | map(.host) | unique)[] as $host

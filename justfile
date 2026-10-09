@@ -1680,6 +1680,10 @@ benchmark *args:
 test-benchmark-framework *args:
     cargo test --package nervix-benchmark {{ args }}
 
+# Measure the load driver's preparation controls with ordinary native coverage.
+coverage-benchmark-load output="target/benchmark-load.lcov":
+    cargo llvm-cov --package nervix-benchmark --bin nervix-benchmark-load --no-default-ignore-filename-regex --lcov --output-path {{ quote(output) }} -- empty_topic_setup
+
 # Build the pinned Flink image with its matching Kafka SQL connector.
 benchmark-flink-image:
     docker build --file "{{ justfile_directory() }}/benches/flink/Dockerfile" \
@@ -2438,6 +2442,24 @@ chaos *args:
 # Exercise the actual rate-probe owner with delayed connects, partial bytes and unreachable peers.
 test-chaos-rate-probe:
     exec bash scripts/chaos/tests/rate-probe-self-test.sh
+
+# Judge retained public clock transcripts through the external verifier.
+verify-chaos-clock *args:
+    exec bash scripts/chaos/verify-clock-evidence.sh {{ args }}
+
+# Run the state, clock and window verifier controls without the other external harness checks.
+test-chaos-stateful-verifiers:
+    exec bash scripts/chaos/tests/stateful-self-test.sh
+
+# Retain shell coverage of the state, clock and window verifier controls.
+coverage-chaos-stateful-verifiers:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    descriptor_limit="$(ulimit -n)"
+    if [[ "${descriptor_limit}" == unlimited ]] || ((descriptor_limit > 65536)); then
+        ulimit -n 65536
+    fi
+    kcov --clean --include-path={{ quote(invocation_directory() / "scripts/chaos/verify-clock-evidence.sh") }},{{ quote(invocation_directory() / "scripts/chaos/tests/stateful-self-test.sh") }} {{ quote(cargo_target_dir / "chaos-stateful-verifier-coverage") }} scripts/chaos/tests/stateful-self-test.sh
 
 # Requires kcov; retains shell Cobertura coverage for the probe and its regression controls.
 coverage-chaos-rate-probe:

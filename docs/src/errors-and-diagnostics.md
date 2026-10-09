@@ -1320,6 +1320,13 @@ subsequent successful qualification. The controller's measurement budget does no
 product's recovery budget. [The external Chaos runner](https://github.com/nervix-io/nervix/blob/main/scripts/chaos/README.md) owns the
 commands, measurement interpretation and retained artifact paths.
 
+The end-to-end benchmark driver distinguishes fresh Kafka partition leader readiness from a
+failed measurement. Before any warm-up input, its empty-topic preparation retries only the
+driver's typed `NotLeaderForPartition` and `LeaderNotAvailable` metadata failures within one
+thirty-second query budget per topic. A nonempty topic, another query failure, or an exhausted
+budget fails preparation with the Kafka cause retained. Measured delivery and output auditing
+keep their own failure boundaries and are never repeated by this preparation check.
+
 A diagnostic node's findings retain a typed source. `WaitForGraph`/`ActiveCycle` establishes an
 active tracked-lock cycle and ends the diagnostic process with status `3` after recording.
 `LockOrderViolation`/`PotentialCycle` is historical order, retained as unreviewed evidence while the
