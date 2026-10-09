@@ -517,7 +517,7 @@ selections = ["deloxide", "deloxide-order"]
 [[workload]]
 coverage = "A three-node WASM processor commits two branch saves above the replication-message limit, then drains its owner through checkpoint capture, bulk fetch, verification, and successor installation while state-store locks are tracked. Async stream waits and interconnect transport scheduling remain outside Deloxide."
 examples = 1
-feature = "tests/features/runtime/wasm_large_state_replication.feature"
+feature = "tests/features/runtime/large_wasm_state_replication.feature"
 id = "scenario.wasm-large-handoff"
 invariant = "The planned handoff completes after both branches reach a replica-confirmed checkpoint, and the successor restores each branch once without a tracked-lock cycle."
 invocation = "scenarios"

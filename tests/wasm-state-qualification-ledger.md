@@ -13,7 +13,7 @@ just test-scenarios --input tests/features/runtime/wasm_state_qualification.feat
 just test-scenarios --input tests/features/runtime/wasm_checkpoint_durability.feature
 just test-scenarios --input tests/features/runtime/wasm_state_reset.feature
 just test-scenarios --input tests/features/runtime/wasm_state_recovery.feature
-just test-scenarios --input tests/features/runtime/wasm_large_state_replication.feature --tags @wasm_state_qualification
+just test-scenarios --input tests/features/runtime/large_wasm_state_replication.feature --tags @wasm_state_qualification
 just test-scenarios --input tests/features/runtime/wasm_processor.feature
 just test-shuttle wasm_checkpoint
 just test-shuttle durability
@@ -61,7 +61,7 @@ with one replica.
 | Stable-storage completion | Shuttle `shuttle_concurrent_writers_are_reported_durable_only_after_a_covering_synchronization`, `shuttle_a_failed_synchronization_refuses_every_uncovered_writer`, `shuttle_an_abandoned_synchronization_frees_the_barrier` over the production `DurabilityBarrier`. |
 | Shutdown and deadline expiry | "A cluster stopped while its owner holds a checkpoint ends the held branch with its node" and the unit test `a_branch_task_ends_with_the_handle_its_processor_task_holds`. |
 | Full restart and rejoin | The single-node crash-window outline, the three-node cluster-stop scenario, the reset outline, and `wasm_processor.feature` "WASM processor restores guest state after cluster restart". |
-| Saves above the replication message limit | `wasm_large_state_replication.feature` checkpoints two interleaved branches with 3 and 40 MiB saves, verifies replica-confirmed revisions, then exercises promotion and planned drain with 3 MiB saves and no duplicate output. The bulk stream checks length and digest before replica installation. |
+| Saves above the replication message limit | `large_wasm_state_replication.feature` checkpoints two interleaved branches with 3 and 40 MiB saves, verifies replica-confirmed revisions, then exercises promotion and planned drain with 3 MiB saves and no duplicate output. The bulk stream checks length and digest before replica installation. |
 
 ## Defects found and fixed
 

@@ -1,5 +1,5 @@
 @wasm_state_qualification
-Feature: WASM guest saves across the replication message limit
+Feature: Large WASM guest saves across the replication message limit
   A guest save fits the host's buffer even when it cannot fit in one replication message. Each
   branch must reach the replica-confirmed boundary before the next callback completes.
 
