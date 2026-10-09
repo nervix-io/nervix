@@ -176,10 +176,10 @@ impl Runtime {
             if offset >= bytes.len() {
                 return None;
             }
-            let end = offset.saturating_add(chunk_bytes).min(bytes.len());
+            let end = offset + chunk_bytes.min(bytes.len() - offset);
             let chunk = bytes
                 .slice(offset, end)
-                .expect("bounded chunk is within the checkpoint");
+                .assured("bounded chunk is within the checkpoint");
             Some((Ok(chunk), (bytes, end)))
         });
         Ok(StreamingResponse::new(length, chunks))
@@ -246,7 +246,7 @@ impl Runtime {
         let mut hasher = blake3::Hasher::new();
         while let Some(chunk) = body.next_chunk().await.change_context_lazy(failure)? {
             nervix_primitives::task::consume_budget().await;
-            if chunk.len() > capacity.saturating_sub(payload.len()) {
+            if chunk.len() > capacity - payload.len() {
                 return Err(Report::new(CheckpointTransferError::ExcessBytes {
                     lsm: descriptor.lsm,
                     described: descriptor.length,
