@@ -524,7 +524,7 @@ impl SessionServiceImpl {
                 }
             }
             Err(rollback_failure) => {
-                format!("{failure}; rolling the model batch back also failed: {rollback_failure}")
+                format!("{failure}; rolling the model batch back also failed: {rollback_failure:#}")
             }
         };
         warn!(
@@ -1325,12 +1325,12 @@ impl SessionServiceImpl {
                 let attempt = match pause {
                     Ok(attempt) => attempt,
                     Err(error) => {
+                        let message = format!("{error:#}");
                         let response = match error.downcast_ref::<ConsensusError>() {
                             Some(cause) => {
-                                Box::pin(self.consensus_error_response(cause, error.to_string()))
-                                    .await
+                                Box::pin(self.consensus_error_response(cause, message)).await
                             }
-                            None => command_error(error.to_string()),
+                            None => command_error(message),
                         };
                         if response.is_not_leader()
                             && let Some(step) = transaction_step.as_ref()
@@ -1502,7 +1502,7 @@ impl SessionServiceImpl {
                         );
                         if let Some(resume_error) = resume_error {
                             return command_error(format!(
-                                "failed to apply model mutation batch: {err}; {resume_error}"
+                                "failed to apply model mutation batch: {err}; {resume_error:#}"
                             ));
                         }
                         return create_registry_error_response(query, &domain, &error_target, &err);
@@ -1662,7 +1662,7 @@ impl SessionServiceImpl {
                             };
                             let error = match resume_error {
                                 Some(resume) => error
-                                    .attach(format!("the domain also remains paused: {resume}")),
+                                    .attach(format!("the domain also remains paused: {resume:#}")),
                                 None => error,
                             };
                             let message = format!(
@@ -1714,7 +1714,7 @@ impl SessionServiceImpl {
                                 error.current_context(),
                                 format!(
                                     "failed to publish model alteration schedule for domain '{}': \
-                                     {err}; {rollback_error}",
+                                     {err}; {rollback_error:#}",
                                     domain.as_str()
                                 ),
                             ))
@@ -1766,7 +1766,7 @@ impl SessionServiceImpl {
                             {
                                 Ok(()) => String::new(),
                                 Err(resume) => {
-                                    format!("; the domain also remains paused: {resume}")
+                                    format!("; the domain also remains paused: {resume:#}")
                                 }
                             }
                         } else {
@@ -1803,7 +1803,7 @@ impl SessionServiceImpl {
                             {
                                 Ok(()) => String::new(),
                                 Err(resume) => {
-                                    format!("; the domain also remains paused: {resume}")
+                                    format!("; the domain also remains paused: {resume:#}")
                                 }
                             }
                         } else {
@@ -1823,18 +1823,18 @@ impl SessionServiceImpl {
                             impact.fail(
                                 attempt,
                                 ImpactDiagnosticKind::Quiescence,
-                                error.to_string(),
+                                format!("{error:#}"),
                             );
                         }
                         if transaction_step.is_some() {
                             transaction_application_failure = Some(format!(
                                 "committed transaction model step in domain '{}' failed to drain \
-                                 its pause: {error}",
+                                 its pause: {error:#}",
                                 domain.as_str()
                             ));
                             self.broadcast_error(format!(
                                 "committed transaction model step in domain '{}' is waiting for \
-                                 quiescence recovery: {error}",
+                                 quiescence recovery: {error:#}",
                                 domain.as_str()
                             ));
                         } else {
@@ -1848,9 +1848,9 @@ impl SessionServiceImpl {
                                     ))
                                     .await
                             {
-                                return command_error(format!("{error}; {rollback_error}"));
+                                return command_error(format!("{error:#}; {rollback_error:#}"));
                             }
-                            return command_error(error.to_string());
+                            return command_error(format!("{error:#}"));
                         }
                     }
                     if let Err(error) = Box::pin(self.resume_domain_after_alter_with_impact(
@@ -1863,11 +1863,12 @@ impl SessionServiceImpl {
                         if transaction_step.is_some() {
                             transaction_application_failure = Some(format!(
                                 "committed transaction model step in domain '{}' failed to \
-                                 release its pause: {error}",
+                                 release its pause: {error:#}",
                                 domain.as_str()
                             ));
                             self.broadcast_error(format!(
-                                "failed to release transaction-owned pause in domain '{}': {error}",
+                                "failed to release transaction-owned pause in domain '{}': \
+                                 {error:#}",
                                 domain.as_str()
                             ));
                         } else {
@@ -1881,9 +1882,9 @@ impl SessionServiceImpl {
                                     ))
                                     .await
                             {
-                                return command_error(format!("{error}; {rollback_error}"));
+                                return command_error(format!("{error:#}; {rollback_error:#}"));
                             }
-                            return command_error(error.to_string());
+                            return command_error(format!("{error:#}"));
                         }
                     }
                 }

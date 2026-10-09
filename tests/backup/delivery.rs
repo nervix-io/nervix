@@ -1,9 +1,9 @@
 //! The CLI's final delivery of a downloaded archive to standard output.
 //!
 //! Layer: test harness.
-//! - **Owns.** Standard outputs whose reader closed before the CLI wrote to them, staging
-//!   directories the CLI cannot use, and the checks of the reports and kept archives those
-//!   failures leave.
+//! - **Owns.** Standard outputs whose reader closed before the CLI wrote to them, standard outputs
+//!   that were closed or are the null device when the CLI starts, staging directories the CLI
+//!   cannot use, and the checks of the reports and kept archives those failures leave.
 //! - **Depends on.** The public CLI, the harness's own session, and the archive format's reader.
 //! - **Must not know.** How the CLI stages or copies an archive.
 
@@ -11,10 +11,23 @@ use std::process::Stdio;
 
 use super::*;
 
+/// The scenario's file that serves the CLI as its temporary directory, where it stages an archive
+/// bound for standard output.
+const CLI_TEMPORARY_DIRECTORY: &str = "cli-staging";
+
 /// The archive a failed delivery kept, as the CLI's report names it.
 struct KeptArchive {
     reference: String,
     archive: String,
+}
+
+/// Creates the CLI's temporary directory under the scenario's directory, which removes what the CLI
+/// keeps there.
+fn cli_temporary_directory(world: &mut ScenarioWorld) -> PathBuf {
+    let directory = archive_path(world, CLI_TEMPORARY_DIRECTORY);
+    std::fs::create_dir(&directory)
+        .assured("the scenario creates the CLI's temporary directory once");
+    directory
 }
 
 /// The arguments of a cluster backup to standard output, reported in `format`.
@@ -49,9 +62,7 @@ async fn when_cli_backs_up_to_closed_standard_output(
     node: String,
     format: String,
 ) {
-    // The CLI stages its archive under the scenario's directory, which removes what it keeps.
-    let staging = archive_path(world, "cli-staging");
-    std::fs::create_dir(&staging).assured("the scenario creates its CLI staging directory once");
+    let staging = cli_temporary_directory(world);
     let (reader, writer) = std::io::pipe().assured("the harness creates a pipe");
     // Standard output has no reader before the CLI starts, so the CLI's first write of the
     // archive fails however long the backup and its download take.
@@ -60,6 +71,45 @@ async fn when_cli_backs_up_to_closed_standard_output(
     command
         .env("TMPDIR", &staging)
         .stdout(Stdio::from(writer))
+        .stderr(Stdio::piped());
+    run_cli_with_streams(world, command).await;
+}
+
+#[when(
+    expr = "the CLI backs up the cluster from node {string} with its standard output closed, \
+            reporting {word}"
+)]
+async fn when_cli_backs_up_with_standard_output_closed(
+    world: &mut ScenarioWorld,
+    node: String,
+    format: String,
+) {
+    let temporary = cli_temporary_directory(world);
+    let cli = cli_command(world, &node, cluster_backup_to_standard_output(&format));
+    let cli = cli.as_std();
+    // The shell closes its standard output and then replaces itself with the CLI, its arguments
+    // passed on as `"$@"`, so the CLI starts with standard output closed.
+    let mut command = tokio::process::Command::new("sh");
+    command
+        .args(["-c", "exec \"$@\" >&-", "sh"])
+        .arg(cli.get_program())
+        .args(cli.get_args())
+        .env("TMPDIR", &temporary)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    run_cli_with_streams(world, command).await;
+}
+
+#[when(
+    expr = "the CLI backs up the cluster from node {string} to standard output on the null \
+            device, reporting {word}"
+)]
+async fn when_cli_backs_up_to_null_device(world: &mut ScenarioWorld, node: String, format: String) {
+    let temporary = cli_temporary_directory(world);
+    let mut command = cli_command(world, &node, cluster_backup_to_standard_output(&format));
+    command
+        .env("TMPDIR", &temporary)
+        .stdout(Stdio::null())
         .stderr(Stdio::piped());
     run_cli_with_streams(world, command).await;
 }
@@ -236,9 +286,10 @@ async fn then_archive_is_the_recovered_backup(world: &mut ScenarioWorld, file: S
     );
 }
 
-#[then(expr = "the CLI's {word} report of the staging failure names no execution reference")]
-fn then_staging_failure_names_no_reference(world: &mut ScenarioWorld, format: String) {
-    let output = last_cli_output(world);
+/// Checks a failure the CLI reported before it admitted a backup: the status of an error, nothing on
+/// standard output, and a `WRITE_FAILED` report in `format` whose message starts with `message` and
+/// that names neither an execution reference nor a kept archive.
+fn assert_unadmitted_write_failure(output: &Output, format: &str, message: &str) {
     let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
     assert_eq!(
         output.status.code(),
@@ -255,22 +306,27 @@ fn then_staging_failure_names_no_reference(world: &mut ScenarioWorld, format: St
         .lines()
         .next()
         .assured("the CLI reports on standard error");
-    match format.as_str() {
+    match format {
         "json" => {
             let report: serde_json::Value = serde_json::from_str(first).unwrap_or_else(|error| {
                 panic!("standard error starts with the JSON report ({error}): {stderr}")
             });
             assert_eq!(report["error"]["code"], "WRITE_FAILED", "{report}");
+            let Some(reported) = report["error"]["message"].as_str() else {
+                panic!("the report carries a message: {report}");
+            };
+            assert!(reported.starts_with(message), "{report}");
             assert!(
                 report["error"].get("execution_reference").is_none(),
                 "no backup was admitted, so none has a reference: {report}"
             );
+            assert!(
+                report["error"].get("archive").is_none(),
+                "no backup was admitted, so no archive was kept: {report}"
+            );
         }
         "text" => {
-            assert!(
-                first.starts_with("error: the backup archive could not be staged"),
-                "{stderr}"
-            );
+            assert!(first.starts_with(&format!("error: {message}")), "{stderr}");
             assert!(
                 !stderr.lines().any(|line| line.starts_with("recover ")),
                 "no backup was admitted, so there is nothing to recover: {stderr}"
@@ -278,4 +334,38 @@ fn then_staging_failure_names_no_reference(world: &mut ScenarioWorld, format: St
         }
         other => panic!("the scenario names a report format the CLI prints, not '{other}'"),
     }
+}
+
+#[then(expr = "the CLI's {word} report of the staging failure names no execution reference")]
+fn then_staging_failure_names_no_reference(world: &mut ScenarioWorld, format: String) {
+    assert_unadmitted_write_failure(
+        last_cli_output(world),
+        &format,
+        "the backup archive could not be staged",
+    );
+}
+
+#[then(
+    expr = "the CLI's {word} report of the discarding standard output names no execution reference"
+)]
+fn then_discarding_standard_output_names_no_reference(world: &mut ScenarioWorld, format: String) {
+    assert_unadmitted_write_failure(
+        last_cli_output(world),
+        &format,
+        "standard output was closed when the CLI started or is the null device",
+    );
+}
+
+#[then(expr = "the CLI left nothing in its temporary directory")]
+fn then_cli_left_nothing_in_its_temporary_directory(world: &mut ScenarioWorld) {
+    let directory = archive_path(world, CLI_TEMPORARY_DIRECTORY);
+    let mut left = Vec::new();
+    for entry in std::fs::read_dir(&directory).assured("a preceding step created the directory") {
+        let entry = entry.assured("the scenario's own directory lists its entries");
+        left.push(entry.path());
+    }
+    assert!(
+        left.is_empty(),
+        "the CLI stages nothing for a backup it did not take: {left:?}"
+    );
 }

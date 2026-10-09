@@ -7342,6 +7342,7 @@ dependencies = [
  "http",
  "imbl",
  "meticulous",
+ "nervix-arbitrary",
  "nervix-dns",
  "nervix-execution",
  "nervix-model-harness",
@@ -7375,6 +7376,7 @@ dependencies = [
 name = "nervix-jaq"
 version = "0.1.0-dev"
 dependencies = [
+ "bolero",
  "bytes",
  "ciborium",
  "error-stack",
@@ -7382,6 +7384,7 @@ dependencies = [
  "jaq-fmts",
  "jaq-json",
  "jaq-std",
+ "meticulous",
  "nervix-models",
  "serde",
  "serde_json",
@@ -7709,6 +7712,7 @@ dependencies = [
  "rumqttc-next",
  "rustls",
  "rustls-pki-types",
+ "ryu",
  "serde",
  "serde_json",
  "shuttle",

@@ -498,7 +498,9 @@ case's record is its own artifact. The job runs `just test-turmoil`, then
 measures its lines locally.
 
 The job uses the shared native [CI linker](./developing-nervix.md#validation-and-tests), so
-adding `--cfg tokio_unstable` to `RUSTFLAGS` preserves Wild linking.
+adding `--cfg tokio_unstable` to `RUSTFLAGS` preserves Wild linking. It installs `flatc`, because
+the interconnect's test build takes its generated vocabulary values from `nervix-arbitrary`, whose
+WASM protocol bindings are generated when that crate is built.
 
 Every bound nests inside the next, so the innermost expired bound names the stuck run, and the job
 still has time to upload what it found. This follows the convention of [The Suite

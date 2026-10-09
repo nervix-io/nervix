@@ -90,7 +90,9 @@ CREATE IF NOT EXISTS WIRE AVRO SCHEMA notification_wire MODE STRICT (
 JSON, CBOR, and AVRO wire schemas must declare at least one field.
 JSON and CBOR also accept exact numeric and datetime wire types (`U8` through `I64`, `F32`,
 `F64`, and `DATETIME`) alongside the generic JSON types. The exact variants retain their type in
-the canonical definition and in completion suggestions.
+the canonical definition and in completion suggestions. A codec binds an exact wire type only to
+the internal type of the same name: a `U8` wire field to a `U8` field, and a `DATETIME` wire field,
+whose value is RFC 3339 text, to a `DATETIME` field without an `ENCODE ... AS RFC3339` rule.
 
 The web console's **Create** menu provides structured editors for internal schemas and each of
 these three declared wire formats. Internal collection controls build nested `ARRAY` and `VEC`
@@ -314,6 +316,41 @@ Current JAQ-native codec formats are:
 Current protobuf codec format:
 
 - `PROTOBUF`, with resource-backed `.proto` files, inline compile config, and message name
+
+### Value Fidelity
+
+A schemaful codec decodes every row it encodes back to the same values: every integer width to its
+extremes, booleans, any Unicode text, bytes, datetimes to the nanosecond, nested `ARRAY` and `VEC`
+values, and nulls of optional fields. The formats themselves set the bounds of that promise:
+
+- JSON has no number for a NaN or an infinity. `WIRE JSON` writes a non-finite float as `null`,
+  which reads back as a null of an optional field and refuses a required field or a list element.
+  `WIRE CBOR` writes the float itself but reads every value through the same JSON model, so it reads
+  a non-finite float as a null.
+- A JSON or CBOR number read into an `F32` field becomes the nearest `F32`, and the shortest
+  decimal a writer prints for an `F32` reads back as that same `F32`, also where the number lies
+  exactly halfway between two of them once read as a 64-bit float. A number beyond the type's range
+  rounds to an infinity. Every finite float the codec writes reads back to its exact bits.
+- `WIRE AVRO` keeps every float bit pattern. It writes an unsigned element of an `ARRAY` or `VEC` as
+  an Avro `long`, so an element above 9223372036854775807 fails to encode.
+- A datetime travels as RFC 3339 text in UTC; text written with another offset reads as the same
+  instant.
+- A `WIRE AVRO` payload is one raw Avro datum, without an object container or a schema registry
+  header, and a `WIRE CBOR` payload is one CBOR data item.
+
+The JAQ-native and protobuf codecs are transformations rather than encodings of a row: a program
+decides the shape in each direction. A number a program passes on unchanged keeps its value: a
+64-bit integer exactly, and a finite float to its bits through `JSON`, `YAML`, `TOML`, `CBOR` and
+the `double` and `float` fields of a protobuf message, because every decimal is read as the float
+nearest to it. The formats set two bounds of their own:
+
+- `TOML` holds signed 64-bit integers. A larger unsigned value is written as it stands and refused
+  when it is read.
+- A protobuf message does not carry a field that holds its default value, so its JSON view omits
+  such a field: a zero of either sign, `false`, empty text or an empty list. An ingestion program
+  that needs one restores it, as `(.level // 0)` does; a negative zero comes back positive.
+
+`SYSLOG` writes its timestamp to the microsecond in UTC; see [Syslog](syslog.md).
 
 ## JAQ Transformations
 

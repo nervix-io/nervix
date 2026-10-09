@@ -13,7 +13,7 @@
 
 use std::{collections::BTreeMap, path::PathBuf, time::Duration};
 
-use error_stack::Report;
+use error_stack::{Report, ResultExt as _};
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_client_wire::{
     AttachDisposition, AttachDomainClockRequest, AttachTransactionRequest, ClientMessage,
@@ -37,7 +37,9 @@ use url::Url;
 #[cfg(feature = "autocomplete")]
 use crate::events::{AutocompleteOutcome, AutocompleteSuggestion};
 use crate::{
-    connection::{ConnectOptions, GrpcConnector, ServerDirectory, TlsRequirement},
+    connection::{
+        ConnectOptions, EndpointValidationError, GrpcConnector, ServerDirectory, TlsRequirement,
+    },
     domain_clock::{AttachedDomainClock, DomainClockEvent},
     error::{ClientError, EventStreamKind, RequestKind},
     events::{ServerEvent, SubscriptionEvent, SubscriptionRequest},
@@ -243,22 +245,21 @@ impl Client {
         server: impl AsRef<str>,
         domain: Option<DomainName>,
     ) -> error_stack::Result<Self, ClientError> {
-        Self::connect_with_options(server, domain, ConnectOptions::default())
-            .await
-            .map_err(error_stack::Report::new)
+        Self::connect_with_options(server, domain, ConnectOptions::default()).await
     }
 
     pub async fn connect_with_options(
         server: impl AsRef<str>,
         domain: Option<DomainName>,
         mut options: ConnectOptions,
-    ) -> Result<Self, ClientError> {
-        let server = Url::parse(server.as_ref()).map_err(ClientError::InvalidServerUrl)?;
+    ) -> error_stack::Result<Self, ClientError> {
+        let server = Url::parse(server.as_ref())
+            .map_err(|error| Report::new(ClientError::InvalidServerUrl(error)))?;
         const MAX_DEADLINE: Duration = Duration::from_secs(24 * 60 * 60);
         if options.seed_servers.len() > 32 {
-            return Err(ClientError::TooManySeedServers {
+            return Err(Report::new(ClientError::TooManySeedServers {
                 count: options.seed_servers.len(),
-            });
+            }));
         }
         for (field, value) in [
             ("connect_timeout", options.connect_timeout),
@@ -267,7 +268,7 @@ impl Client {
             ("backup_wait_timeout", options.backup_wait_timeout),
         ] {
             if value < Duration::from_millis(1) || value > MAX_DEADLINE {
-                return Err(ClientError::InvalidDeadline { field });
+                return Err(Report::new(ClientError::InvalidDeadline { field }));
             }
         }
         if server.scheme() == "https" {
@@ -275,16 +276,17 @@ impl Client {
             // the caller did not explicitly request TLS for every seed and redirect.
             options.tls_requirement = Some(TlsRequirement::Required);
         }
-        let mut connector =
-            GrpcConnector::new(options).map_err(ClientError::BuildAuthenticationMetadata)?;
-        connector.validate_server(&server)?;
-        for seed in connector.seed_servers() {
-            connector.validate_server(seed)?;
-        }
+        let mut connector = GrpcConnector::new(options)
+            .map_err(|error| Report::new(ClientError::BuildAuthenticationMetadata(error)))?;
         connector
-            .load_dns()
-            .await
-            .map_err(ClientError::LoadDnsConfiguration)?;
+            .validate_server(&server)
+            .map_err(EndpointValidationError::into_client)?;
+        for seed in connector.seed_servers() {
+            connector
+                .validate_server(seed)
+                .map_err(EndpointValidationError::into_client)?;
+        }
+        connector.load_dns().await?;
         let mut servers = ServerDirectory::with_seeds(server, connector.seed_servers());
         let events = SessionEvents::new();
         let mut last_error = None;
@@ -296,8 +298,12 @@ impl Client {
                 Exchange::open(channel, &connector, events.sinks.clone()).await
             };
             match nervix_primitives::time::timeout_at(deadline, attempt).await {
-                Err(_) => return Err(last_error.unwrap_or(ClientError::RetryDeadline)),
-                Ok(Err(error)) => last_error = Some(error),
+                Err(_) => {
+                    return Err(
+                        last_error.unwrap_or_else(|| Report::new(ClientError::RetryDeadline))
+                    );
+                }
+                Ok(Err(report)) => last_error = Some(report),
                 Ok(Ok(exchange)) => {
                     servers.connected(&candidate);
                     return Ok(Self::assemble(exchange, events, connector, domain, servers));
@@ -314,11 +320,8 @@ impl Client {
         domain: Option<DomainName>,
     ) -> error_stack::Result<Self, ClientError> {
         let mut connector = GrpcConnector::new(ConnectOptions::default())
-            .map_err(ClientError::BuildAuthenticationMetadata)?;
-        connector
-            .load_dns()
-            .await
-            .map_err(ClientError::LoadDnsConfiguration)?;
+            .map_err(|error| Report::new(ClientError::BuildAuthenticationMetadata(error)))?;
+        connector.load_dns().await?;
         let events = SessionEvents::new();
         let exchange = Exchange::open(channel, &connector, events.sinks.clone()).await?;
         Ok(Self::assemble(
@@ -387,7 +390,10 @@ impl Client {
             .filter(|status| status.lifecycle().is_active())
     }
 
-    pub async fn execute(&self, query: impl Into<String>) -> Result<CommandOutcome, ClientError> {
+    pub async fn execute(
+        &self,
+        query: impl Into<String>,
+    ) -> error_stack::Result<CommandOutcome, ClientError> {
         let query = query.into();
         let route = Self::route(&query);
         let deadline = Instant::now() + route.wait_timeout(&self.inner.connector);
@@ -398,7 +404,7 @@ impl Client {
         let _command_guard =
             nervix_primitives::time::timeout_at(deadline, self.inner.command_lock.lock())
                 .await
-                .map_err(|_| ClientError::RetryDeadline)?;
+                .map_err(|_| Report::new(ClientError::RetryDeadline))?;
         let execution = self.prepare_execution_with_route(query, route).await;
         self.execute_prepared_after_lock(&execution, deadline).await
     }
@@ -459,7 +465,7 @@ impl Client {
     pub async fn execute_prepared(
         &self,
         execution: &ExecutionHandle,
-    ) -> Result<CommandOutcome, ClientError> {
+    ) -> error_stack::Result<CommandOutcome, ClientError> {
         let deadline = Instant::now() + execution.route.wait_timeout(&self.inner.connector);
         if execution.route.is_subscription() {
             return self.execute_prepared_after_lock(execution, deadline).await;
@@ -467,7 +473,7 @@ impl Client {
         let _command_guard =
             nervix_primitives::time::timeout_at(deadline, self.inner.command_lock.lock())
                 .await
-                .map_err(|_| ClientError::RetryDeadline)?;
+                .map_err(|_| Report::new(ClientError::RetryDeadline))?;
         self.execute_prepared_after_lock(execution, deadline).await
     }
 
@@ -475,7 +481,7 @@ impl Client {
         &self,
         execution: &ExecutionHandle,
         deadline: Instant,
-    ) -> Result<CommandOutcome, ClientError> {
+    ) -> error_stack::Result<CommandOutcome, ClientError> {
         if let StatementRoute::Restore(restore) = &execution.route {
             // A client bound to a transaction refuses a restore, as it refuses every client-local
             // statement.
@@ -498,29 +504,28 @@ impl Client {
         .await;
         let outcome = match result {
             Ok(Ok(outcome)) => outcome,
-            Ok(Err(error))
-                if execution.can_have_admitted_command() && error.can_hide_admitted_work() =>
+            Ok(Err(report))
+                if execution.can_have_admitted_command()
+                    && report.current_context().can_hide_admitted_work() =>
             {
-                return Err(ClientError::UncertainCommand {
+                return Err(report.change_context(ClientError::UncertainCommand {
                     reference: execution.reference.clone(),
-                    source: Box::new(error),
-                });
+                }));
             }
-            Ok(Err(error)) => return Err(error),
+            Ok(Err(report)) => return Err(report),
             Err(_) if execution.can_have_admitted_command() => {
-                return Err(ClientError::UncertainCommand {
+                let expired = Report::new(ClientError::RetryDeadline);
+                return Err(expired.change_context(ClientError::UncertainCommand {
                     reference: execution.reference.clone(),
-                    source: Box::new(ClientError::RetryDeadline),
-                });
+                }));
             }
-            Err(_) => return Err(ClientError::RetryDeadline),
+            Err(_) => return Err(Report::new(ClientError::RetryDeadline)),
         };
         match self.download_backup_of(execution, outcome).await {
             Ok(outcome) => Ok(outcome),
-            Err(report) => Err(ClientError::BackupDownload {
+            Err(report) => Err(report.change_context(ClientError::BackupDownload {
                 reference: execution.reference.clone(),
-                source: report.current_context().clone(),
-            }),
+            })),
         }
     }
 
@@ -554,7 +559,7 @@ impl Client {
     async fn execute_prepared_within_budget(
         &self,
         execution: &ExecutionHandle,
-    ) -> Result<CommandOutcome, ClientError> {
+    ) -> error_stack::Result<CommandOutcome, ClientError> {
         let outcome = self.execute_with_redirects(execution).await?;
         self.record_commit_basis(&outcome).await;
         if let Some(transaction) = outcome.transaction.clone() {
@@ -618,7 +623,7 @@ impl Client {
     pub async fn attach_transaction(
         &self,
         id: impl Into<String>,
-    ) -> Result<CommandOutcome, ClientError> {
+    ) -> error_stack::Result<CommandOutcome, ClientError> {
         let id = id.into();
         match nervix_primitives::time::timeout(self.inner.connector.retry_timeout(), async {
             let _command_guard = self.inner.command_lock.lock().await;
@@ -632,18 +637,18 @@ impl Client {
         .await
         {
             Ok(result) => result,
-            Err(_) => Err(ClientError::RetryDeadline),
+            Err(_) => Err(Report::new(ClientError::RetryDeadline)),
         }
     }
 
-    pub async fn list_domains(&self) -> Result<Vec<DomainInfo>, ClientError> {
+    pub async fn list_domains(&self) -> error_stack::Result<Vec<DomainInfo>, ClientError> {
         let body = self.request(ClientRequest::ListDomains, None, None).await?;
         match body {
             ReplyBody::DomainList(list) => Ok(list.domains),
-            other => Err(ClientError::unexpected_reply(
+            other => Err(Report::new(ClientError::unexpected_reply(
                 RequestKind::ListDomains,
                 other,
-            )),
+            ))),
         }
     }
 
@@ -653,7 +658,7 @@ impl Client {
         &self,
         target: TransactionInspectionTarget,
         operation: Option<TransactionOperationNumber>,
-    ) -> Result<InspectionOutcome, ClientError> {
+    ) -> error_stack::Result<InspectionOutcome, ClientError> {
         let inspected =
             nervix_primitives::time::timeout(self.inner.connector.retry_timeout(), async {
                 let _command_guard = self.inner.command_lock.lock().await;
@@ -665,21 +670,21 @@ impl Client {
                     });
                     let body = match self.request(request, None, None).await {
                         Ok(body) => body,
-                        Err(error) if error.retryable_session_failure() => {
+                        Err(report) if report.current_context().retryable_session_failure() => {
                             match self.recover_session(RecoveryMode::IfClosed).await? {
                                 SessionRecovery::Ready => continue,
-                                SessionRecovery::Unavailable => return Err(error),
+                                SessionRecovery::Unavailable => return Err(report),
                             }
                         }
-                        Err(error) => return Err(error),
+                        Err(report) => return Err(report),
                     };
                     let outcome = match body {
                         ReplyBody::Inspection(outcome) => outcome,
                         other => {
-                            return Err(ClientError::unexpected_reply(
+                            return Err(Report::new(ClientError::unexpected_reply(
                                 RequestKind::InspectTransaction,
                                 other,
-                            ));
+                            )));
                         }
                     };
                     match Routing::for_inspection(&outcome) {
@@ -704,30 +709,30 @@ impl Client {
                     }
                 }
                 // Only a session that closed again on the last attempt leaves the loop.
-                Err(ClientError::SessionClosed)
+                Err(Report::new(ClientError::SessionClosed))
             })
             .await;
         match inspected {
             Ok(result) => result,
-            Err(_) => Err(ClientError::RetryDeadline),
+            Err(_) => Err(Report::new(ClientError::RetryDeadline)),
         }
     }
 
     async fn execute_with_redirects(
         &self,
         execution: &ExecutionHandle,
-    ) -> Result<CommandOutcome, ClientError> {
+    ) -> error_stack::Result<CommandOutcome, ClientError> {
         for attempt in 0..Self::MAX_LEADER_ROUTING_ATTEMPTS {
             nervix_primitives::task::consume_budget().await;
             let outcome = match self.execute_once(execution).await {
                 Ok(outcome) => outcome,
-                Err(error) if error.retryable_session_failure() => {
+                Err(report) if report.current_context().retryable_session_failure() => {
                     match self.recover_session(RecoveryMode::IfClosed).await? {
                         SessionRecovery::Ready => continue,
-                        SessionRecovery::Unavailable => return Err(error),
+                        SessionRecovery::Unavailable => return Err(report),
                     }
                 }
-                Err(error) => return Err(error),
+                Err(report) => return Err(report),
             };
             match outcome.routing() {
                 Routing::Complete => return Ok(outcome),
@@ -748,7 +753,7 @@ impl Client {
     async fn execute_once(
         &self,
         execution: &ExecutionHandle,
-    ) -> Result<CommandOutcome, ClientError> {
+    ) -> error_stack::Result<CommandOutcome, ClientError> {
         let query = execution.query.as_str();
         let route = &execution.route;
         if let StatementRoute::Local(_) = route
@@ -775,33 +780,33 @@ impl Client {
             }
             StatementRoute::Local(LocalStatement::AttachDomainClock) => {
                 let Some(domain) = execution.domain.clone() else {
-                    return Err(ClientError::NoActiveDomain);
+                    return Err(Report::new(ClientError::NoActiveDomain));
                 };
                 let request = ClientRequest::AttachDomainClock(AttachDomainClockRequest { domain });
                 match self.request(request, None, None).await? {
                     ReplyBody::DomainClockAttach(outcome) => Ok(CommandOutcome::from(outcome)),
-                    other => Err(ClientError::unexpected_reply(
+                    other => Err(Report::new(ClientError::unexpected_reply(
                         RequestKind::AttachDomainClock,
                         other,
-                    )),
+                    ))),
                 }
             }
             StatementRoute::Local(LocalStatement::DetachDomainClock) => {
                 let Some(domain) = execution.domain.clone() else {
-                    return Err(ClientError::NoActiveDomain);
+                    return Err(Report::new(ClientError::NoActiveDomain));
                 };
                 let request = ClientRequest::DetachDomainClock(DetachDomainClockRequest { domain });
                 match self.request(request, None, None).await? {
                     ReplyBody::DomainClockDetach(outcome) => Ok(CommandOutcome::from(outcome)),
-                    other => Err(ClientError::unexpected_reply(
+                    other => Err(Report::new(ClientError::unexpected_reply(
                         RequestKind::DetachDomainClock,
                         other,
-                    )),
+                    ))),
                 }
             }
             StatementRoute::Local(LocalStatement::UploadResource(upload)) => {
                 let Some(domain) = execution.domain.clone() else {
-                    return Err(ClientError::NoActiveDomain);
+                    return Err(Report::new(ClientError::NoActiveDomain));
                 };
                 self.upload_resource_from_directory_with_identity(
                     upload.identifier.as_str(),
@@ -818,7 +823,7 @@ impl Client {
                 offset,
             } => {
                 let Some(domain) = execution.domain.clone() else {
-                    return Err(ClientError::NoActiveDomain);
+                    return Err(Report::new(ClientError::NoActiveDomain));
                 };
                 let contract = SubscriptionContract {
                     domain,
@@ -839,14 +844,13 @@ impl Client {
                 let client = self.clone();
                 let statement = statement.clone();
                 let offset = *offset;
-                let result = nervix_primitives::task::spawn(async move {
+                nervix_primitives::task::spawn(async move {
                     client
                         .create_subscription(attempt, requests, statement, offset)
                         .await
                 })
                 .await
-                .map_err(ClientError::SubscriptionTask)?;
-                result.map_err(ClientError::subscription_operation)
+                .map_err(|error| Report::new(ClientError::SubscriptionTask(error)))?
             }
             StatementRoute::Unsubscribe(subscription) => {
                 let exchange = self.inner.exchange.lock().await;
@@ -875,12 +879,11 @@ impl Client {
                     Cancellation::Delete(attempt) => attempt,
                 };
                 let client = self.clone();
-                let result = nervix_primitives::task::spawn(async move {
+                nervix_primitives::task::spawn(async move {
                     client.delete_subscription(attempt, requests).await
                 })
                 .await
-                .map_err(ClientError::SubscriptionTask)?;
-                result.map_err(ClientError::subscription_operation)
+                .map_err(|error| Report::new(ClientError::SubscriptionTask(error)))?
             }
             StatementRoute::Restore(restore) => {
                 self.run_restore(restore, &execution.reference, |_| {})
@@ -901,14 +904,17 @@ impl Client {
                 match self.request(request, None, wait).await? {
                     ReplyBody::Command(outcome) => {
                         if outcome.execution_reference != execution.reference {
-                            return Err(ClientError::ExecutionReferenceMismatch {
+                            return Err(Report::new(ClientError::ExecutionReferenceMismatch {
                                 expected: execution.reference.clone(),
                                 received: outcome.execution_reference,
-                            });
+                            }));
                         }
                         Ok(CommandOutcome::from(*outcome))
                     }
-                    other => Err(ClientError::unexpected_reply(RequestKind::Command, other)),
+                    other => Err(Report::new(ClientError::unexpected_reply(
+                        RequestKind::Command,
+                        other,
+                    ))),
                 }
             }
         }
@@ -957,14 +963,14 @@ impl Client {
             Ok(ReplyBody::Subscribe(outcome)) => outcome,
             Ok(other) => {
                 self.inner.events.sinks.desired.created(&attempt, None);
-                return Err(error_stack::Report::new(ClientError::unexpected_reply(
+                return Err(Report::new(ClientError::unexpected_reply(
                     RequestKind::Subscribe,
                     other,
                 )));
             }
-            Err(error) => {
+            Err(report) => {
                 self.inner.events.sinks.desired.created(&attempt, None);
-                return Err(error_stack::Report::new(error));
+                return Err(report);
             }
         };
         let opened = match &outcome.disposition {
@@ -1018,21 +1024,21 @@ impl Client {
             }
             Ok(other) => {
                 desired.deleted(&attempt, DeletionResolution::Refused);
-                Err(error_stack::Report::new(ClientError::unexpected_reply(
+                Err(Report::new(ClientError::unexpected_reply(
                     RequestKind::Unsubscribe,
                     other,
                 )))
             }
-            Err(error) if error.retryable_session_failure() => {
+            Err(report) if report.current_context().retryable_session_failure() => {
                 desired.deleted(&attempt, DeletionResolution::SessionEnded);
                 if attempt.tracked {
                     return Ok(Self::closed_with_session(&attempt.name));
                 }
-                Err(error_stack::Report::new(error))
+                Err(report)
             }
-            Err(error) => {
+            Err(report) => {
                 desired.deleted(&attempt, DeletionResolution::Refused);
-                Err(error_stack::Report::new(error))
+                Err(report)
             }
         }
     }
@@ -1040,7 +1046,7 @@ impl Client {
     async fn attach_with_redirects(
         &self,
         transaction_id: &str,
-    ) -> Result<nervix_client_wire::AttachOutcome, ClientError> {
+    ) -> error_stack::Result<nervix_client_wire::AttachOutcome, ClientError> {
         for attempt in 0..Self::MAX_LEADER_ROUTING_ATTEMPTS {
             nervix_primitives::task::consume_budget().await;
             let request = ClientRequest::AttachTransaction(AttachTransactionRequest {
@@ -1048,28 +1054,31 @@ impl Client {
             });
             let body = match self.request(request, None, None).await {
                 Ok(body) => body,
-                Err(error) if error.retryable_session_failure() => {
+                Err(report) if report.current_context().retryable_session_failure() => {
                     match Box::pin(self.recover_session(RecoveryMode::TransportOnlyIfClosed))
                         .await?
                     {
                         SessionRecovery::Ready => continue,
-                        SessionRecovery::Unavailable => return Err(error),
+                        SessionRecovery::Unavailable => return Err(report),
                     }
                 }
-                Err(error) => return Err(error),
+                Err(report) => return Err(report),
             };
             let outcome = match body {
                 ReplyBody::Attach(outcome) => outcome,
                 other => {
-                    return Err(ClientError::unexpected_reply(
+                    return Err(Report::new(ClientError::unexpected_reply(
                         RequestKind::AttachTransaction,
                         other,
-                    ));
+                    )));
                 }
             };
             match Routing::for_attach(&outcome) {
                 Routing::Redirect(leader) if Self::retries_remain(attempt) => {
-                    self.inner.connector.validate_server(leader)?;
+                    self.inner
+                        .connector
+                        .validate_server(leader)
+                        .map_err(EndpointValidationError::into_client)?;
                     self.inner.servers.lock().await.remember(leader);
                     self.reconnect(leader).await?;
                 }
@@ -1078,11 +1087,11 @@ impl Client {
             }
         }
         // Only a session that closed again on the last attempt leaves the loop.
-        Err(ClientError::SessionClosed)
+        Err(Report::new(ClientError::SessionClosed))
     }
 
     /// Attaches the session's active transaction again on the node now serving it.
-    async fn restore_transaction_binding(&self) -> Result<(), ClientError> {
+    async fn restore_transaction_binding(&self) -> error_stack::Result<(), ClientError> {
         let Some(previous) = self.active_transaction_status().await else {
             return Ok(());
         };
@@ -1096,7 +1105,7 @@ impl Client {
             }
             AttachDisposition::Failed | AttachDisposition::NotLeader(_) => {
                 *self.inner.transaction.lock().await = None;
-                Err(ClientError::AttachTransaction(outcome.message))
+                Err(Report::new(ClientError::AttachTransaction(outcome.message)))
             }
         }
     }
@@ -1109,7 +1118,7 @@ impl Client {
         request: ClientRequest,
         captured: Option<Arc<ExchangeRequests>>,
         timeout: Option<Duration>,
-    ) -> Result<ReplyBody, ClientError> {
+    ) -> error_stack::Result<ReplyBody, ClientError> {
         let kind = RequestKind::from(&request);
         let read_only = matches!(
             kind,
@@ -1127,29 +1136,28 @@ impl Client {
                 async {
                     // Register before sending so a prompt reply always finds its waiter.
                     let Some(mut registered) = exchange.register() else {
-                        return Err(exchange.pending.lock().failure());
+                        return Err(Report::new(exchange.pending.lock().failure()));
                     };
                     let message = ClientMessage {
                         request_id: registered.request_id,
                         request: request.clone(),
                     };
-                    let frame = message.encode(&SESSION_LIMITS).map_err(|report| {
-                        ClientError::EncodeRequest {
-                            request: kind,
-                            source: report.current_context().clone(),
-                        }
-                    })?;
+                    let frame = message
+                        .encode(&SESSION_LIMITS)
+                        .change_context(ClientError::EncodeRequest { request: kind })?;
                     if exchange.frames.send(frame).await.is_err() {
                         exchange.pending.lock().close();
-                        return Err(exchange.pending.lock().failure());
+                        return Err(Report::new(exchange.pending.lock().failure()));
                     }
                     match registered.receive().await {
                         Some(body) => Ok(body),
                         None => match exchange.pending.lock().failure() {
                             ClientError::SessionClosed => {
-                                Err(ClientError::RequestInterrupted { request: kind })
+                                Err(Report::new(ClientError::RequestInterrupted {
+                                    request: kind,
+                                }))
                             }
-                            error => Err(error),
+                            failure => Err(Report::new(failure)),
                         },
                     }
                 },
@@ -1157,7 +1165,7 @@ impl Client {
             let sent = if read_only {
                 nervix_primitives::time::timeout_at(deadline, sent)
                     .await
-                    .map_err(|_| ClientError::RetryDeadline)?
+                    .map_err(|_| Report::new(ClientError::RetryDeadline))?
             } else {
                 sent.await
             };
@@ -1165,7 +1173,7 @@ impl Client {
                 Ok(result) => result,
                 Err(_) => {
                     exchange.pending.lock().close();
-                    Err(ClientError::RequestDeadline { request: kind })
+                    Err(Report::new(ClientError::RequestDeadline { request: kind }))
                 }
             };
             if !read_only {
@@ -1173,38 +1181,41 @@ impl Client {
             }
             match sent {
                 Ok(body) => return Ok(body),
-                Err(error) if error.retryable_session_failure() => {
+                Err(report) if report.current_context().retryable_session_failure() => {
                     let recovered = nervix_primitives::time::timeout_at(
                         deadline,
                         Box::pin(self.recover_session(RecoveryMode::IfClosed)),
                     )
                     .await
-                    .map_err(|_| ClientError::RetryDeadline)??;
+                    .map_err(|_| Report::new(ClientError::RetryDeadline))??;
                     if let SessionRecovery::Unavailable = recovered {
-                        return Err(error);
+                        return Err(report);
                     }
                     let allowed =
                         nervix_primitives::time::timeout_at(deadline, Self::await_retry(attempt))
                             .await
-                            .map_err(|_| ClientError::RetryDeadline)?;
+                            .map_err(|_| Report::new(ClientError::RetryDeadline))?;
                     if !allowed {
-                        return Err(error);
+                        return Err(report);
                     }
                 }
-                Err(error) => return Err(error),
+                Err(report) => return Err(report),
             }
         }
-        Err(ClientError::RetryDeadline)
+        Err(Report::new(ClientError::RetryDeadline))
     }
 
     pub async fn subscribe(
         &self,
         request: &SubscriptionRequest,
-    ) -> Result<CommandOutcome, ClientError> {
+    ) -> error_stack::Result<CommandOutcome, ClientError> {
         self.execute(request.to_query()).await
     }
 
-    pub async fn unsubscribe(&self, name: &str) -> Result<CommandOutcome, ClientError> {
+    pub async fn unsubscribe(
+        &self,
+        name: &str,
+    ) -> error_stack::Result<CommandOutcome, ClientError> {
         self.execute(nervix_nspl::subscribe::delete_subscription_query(name))
             .await
     }
@@ -1229,7 +1240,7 @@ impl Client {
     /// of the subscriptions opened there. A failure to open a session is returned, and the next
     /// call tries again; [`ClientError::SessionClosed`] means the session ended and the client
     /// knows no server to open another on.
-    pub async fn next_subscription(&self) -> Result<SubscriptionEvent, ClientError> {
+    pub async fn next_subscription(&self) -> error_stack::Result<SubscriptionEvent, ClientError> {
         loop {
             nervix_primitives::task::consume_budget().await;
             let mut desired_changed = match self.inner.events.sinks.desired.next_event_or_changes()
@@ -1253,10 +1264,10 @@ impl Client {
                         return Ok(event);
                     }
                 }
-                Err(error) if *error.current_context() == EventQueueError::Overflow => {
-                    return Err(ClientError::EventOverflow {
+                Err(report) if *report.current_context() == EventQueueError::Overflow => {
+                    return Err(report.change_context(ClientError::EventOverflow {
                         stream: EventStreamKind::Subscription,
-                    });
+                    }));
                 }
                 Err(_) => {
                     if let Some(event) = self.inner.events.sinks.desired.take_event() {
@@ -1266,14 +1277,14 @@ impl Client {
                         match self.recover_session(RecoveryMode::IfClosed).await? {
                             SessionRecovery::Ready => continue,
                             SessionRecovery::Unavailable => {
-                                return Err(ClientError::SessionClosed);
+                                return Err(Report::new(ClientError::SessionClosed));
                             }
                         }
                     }
                     // Nothing waits to be restored, so the stream follows whichever session the
                     // client opens next.
                     if !self.can_reconnect().await {
-                        return Err(ClientError::SessionClosed);
+                        return Err(Report::new(ClientError::SessionClosed));
                     }
                     nervix_primitives::select! {
                         () = self.inner.events.sinks.subscriptions.resumed() => {}
@@ -1297,21 +1308,21 @@ impl Client {
     /// the ones the client held were dropped; the next call returns the notices that arrived after
     /// that gap. [`ClientError::SessionClosed`] means the session ended and the client knows no
     /// server to open another on.
-    pub async fn next_server_event(&self) -> Result<ServerEvent, ClientError> {
+    pub async fn next_server_event(&self) -> error_stack::Result<ServerEvent, ClientError> {
         let notices = &self.inner.events.sinks.notices;
         loop {
             nervix_primitives::task::consume_budget().await;
             match notices.next().await {
                 Ok(event) => return Ok(event),
-                Err(error) if *error.current_context() == EventQueueError::Overflow => {
-                    return Err(ClientError::EventOverflow {
+                Err(report) if *report.current_context() == EventQueueError::Overflow => {
+                    return Err(report.change_context(ClientError::EventOverflow {
                         stream: EventStreamKind::ServerNotice,
-                    });
+                    }));
                 }
                 Err(_) => {}
             }
             if !self.can_reconnect().await {
-                return Err(ClientError::SessionClosed);
+                return Err(Report::new(ClientError::SessionClosed));
             }
             notices.resumed().await;
         }
@@ -1388,10 +1399,7 @@ impl Client {
                 let exchange = self.inner.exchange.lock().await.requests();
                 let open = exchange.pending.lock().is_open();
                 if !open {
-                    let recovered = self
-                        .recover_session(RecoveryMode::IfClosed)
-                        .await
-                        .map_err(Report::new)?;
+                    let recovered = self.recover_session(RecoveryMode::IfClosed).await?;
                     if let SessionRecovery::Unavailable = recovered {
                         return Err(Report::new(ClientError::SessionClosed));
                     }
@@ -1417,33 +1425,33 @@ impl Client {
                     nervix_primitives::task::consume_budget().await;
                     match self.request(request.clone(), None, None).await {
                         Ok(body) => return Ok(body),
-                        Err(error) if error.retryable_session_failure() => {
+                        Err(report) if report.current_context().retryable_session_failure() => {
                             match self.recover_session(RecoveryMode::IfClosed).await? {
                                 SessionRecovery::Ready => {}
-                                SessionRecovery::Unavailable => return Err(error),
+                                SessionRecovery::Unavailable => return Err(report),
                             }
                         }
-                        Err(error) => return Err(error),
+                        Err(report) => return Err(report),
                     }
                 }
                 // Only a session that closed again on the last attempt leaves the loop.
-                Err(ClientError::SessionClosed)
+                Err(Report::new(ClientError::SessionClosed))
             })
             .await;
         match answered {
-            Ok(result) => result.map_err(Report::new),
+            Ok(result) => result,
             Err(_) => Err(Report::new(ClientError::RetryDeadline)),
         }
     }
 
     /// Waits for the next complete domain list the server observes. Only the latest list is kept,
     /// so a caller that reads late gets the current list rather than every list in between.
-    pub async fn next_domain_list(&self) -> Result<Vec<DomainInfo>, ClientError> {
+    pub async fn next_domain_list(&self) -> error_stack::Result<Vec<DomainInfo>, ClientError> {
         let mut observed = self.inner.events.domains.lock().await;
         loop {
             nervix_primitives::task::consume_budget().await;
             if observed.changed().await.is_err() {
-                return Err(ClientError::SessionClosed);
+                return Err(Report::new(ClientError::SessionClosed));
             }
             let latest = Option::clone(&observed.borrow_and_update());
             if let Some(domains) = latest {
@@ -1459,15 +1467,15 @@ impl Client {
         cursor: usize,
         page_size: u16,
         continuation: Option<String>,
-    ) -> Result<AutocompleteOutcome, ClientError> {
+    ) -> error_stack::Result<AutocompleteOutcome, ClientError> {
         let input = input.into();
         let length = input.len();
         let domain = self.domain().await;
         let request = nervix_client_wire::SuggestRequest::new(input, cursor, domain)
-            .map_err(|_| ClientError::InvalidCursor { cursor, length })?;
+            .change_context(ClientError::InvalidCursor { cursor, length })?;
         let request = request
             .with_page(page_size, continuation)
-            .map_err(|_| ClientError::InvalidCompletionPageSize { size: page_size })?;
+            .change_context(ClientError::InvalidCompletionPageSize { size: page_size })?;
         match self
             .request(ClientRequest::Suggest(request), None, None)
             .await?
@@ -1481,7 +1489,10 @@ impl Client {
                     .map(AutocompleteSuggestion::from)
                     .collect(),
             }),
-            other => Err(ClientError::unexpected_reply(RequestKind::Suggest, other)),
+            other => Err(Report::new(ClientError::unexpected_reply(
+                RequestKind::Suggest,
+                other,
+            ))),
         }
     }
 
@@ -1492,11 +1503,10 @@ impl Client {
     ) -> error_stack::Result<nervix_client_wire::ChoiceOutcome, ClientError> {
         match self
             .request(ClientRequest::Choice(request), None, None)
-            .await
-            .map_err(error_stack::Report::new)?
+            .await?
         {
             ReplyBody::Choice(outcome) => Ok(outcome),
-            other => Err(error_stack::Report::new(ClientError::unexpected_reply(
+            other => Err(Report::new(ClientError::unexpected_reply(
                 RequestKind::Choice,
                 other,
             ))),
@@ -1531,26 +1541,29 @@ impl Client {
 
     /// Moves the session to the leader at `leader`, so the request that needs it can be sent
     /// again there.
-    pub(crate) async fn follow_leader(&self, leader: &Url) -> Result<(), ClientError> {
-        self.inner.connector.validate_server(leader)?;
+    pub(crate) async fn follow_leader(&self, leader: &Url) -> error_stack::Result<(), ClientError> {
+        self.inner
+            .connector
+            .validate_server(leader)
+            .map_err(EndpointValidationError::into_client)?;
         self.inner.servers.lock().await.remember(leader);
         match self.reconnect(leader).await {
             Ok(()) => self.restore_transaction_binding().await,
-            Err(error) => match self.recover_session(RecoveryMode::Replace).await? {
+            Err(report) => match self.recover_session(RecoveryMode::Replace).await? {
                 SessionRecovery::Ready => Ok(()),
-                SessionRecovery::Unavailable => Err(error),
+                SessionRecovery::Unavailable => Err(report),
             },
         }
     }
 
     /// Replaces the exchange with a new one on `server`. Every request still waiting on the
     /// previous exchange observes the closed session.
-    async fn reconnect(&self, server: &Url) -> Result<(), ClientError> {
+    async fn reconnect(&self, server: &Url) -> error_stack::Result<(), ClientError> {
         let _reconnect_guard = self.inner.reconnect_lock.lock().await;
         self.reconnect_unlocked(server).await
     }
 
-    async fn reconnect_unlocked(&self, server: &Url) -> Result<(), ClientError> {
+    async fn reconnect_unlocked(&self, server: &Url) -> error_stack::Result<(), ClientError> {
         let channel = self.inner.connector.connect(server).await?;
         let exchange = Exchange::open(
             channel,
@@ -1598,7 +1611,7 @@ impl Client {
     pub(crate) async fn recover_session(
         &self,
         mode: RecoveryMode,
-    ) -> Result<SessionRecovery, ClientError> {
+    ) -> error_stack::Result<SessionRecovery, ClientError> {
         let recovered = 'recovery: {
             let _reconnect_guard = self.inner.reconnect_lock.lock().await;
             let exchange = self.inner.exchange.lock().await.requests();
@@ -1629,13 +1642,18 @@ impl Client {
                     .await
                     {
                         Ok(Ok(())) => break 'recovery SessionRecovery::Ready,
-                        Ok(Err(error)) => last_error = Some(error),
-                        Err(_) => return Err(last_error.unwrap_or(ClientError::RetryDeadline)),
+                        Ok(Err(report)) => last_error = Some(report),
+                        Err(_) => {
+                            return Err(last_error
+                                .unwrap_or_else(|| Report::new(ClientError::RetryDeadline)));
+                        }
                     }
                 }
                 let remaining = deadline.saturating_duration_since(Instant::now());
                 if remaining.is_zero() {
-                    return Err(last_error.unwrap_or(ClientError::RetryDeadline));
+                    return Err(
+                        last_error.unwrap_or_else(|| Report::new(ClientError::RetryDeadline))
+                    );
                 }
                 sleep(delay.min(remaining)).await;
                 delay = delay

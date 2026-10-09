@@ -13,7 +13,6 @@
 //! This crate breaks its own contract. It also carries replicated control-plane state —
 //! `ClusterSchedule`, `DomainState`, `ResourceVersionStatus` and their neighbours — which belongs to
 //! consensus, and the interconnect's wire values in `remote`, which belong to the transport.
-//! `RemoteRuntimeRecord` is row-oriented besides, which the columnar rule forbids of a payload.
 
 mod archived_count;
 #[cfg(feature = "arrow")]
@@ -149,7 +148,7 @@ pub use quiesce::{
 pub use rebind_resource::{RebindResource, RebindResourceMembers, RebindResourceSelection};
 pub use remote::{
     RemoteAckOutcome, RemoteAckRegistration, RemoteAckResolution, RemoteRuntimeElementValue,
-    RemoteRuntimeField, RemoteRuntimeRecord, RemoteRuntimeRecordMetadata, RemoteRuntimeValue,
+    RemoteRuntimeField, RemoteRuntimeRecordMetadata, RemoteRuntimeValue,
 };
 pub use reset_wasm_state::{
     ResetWasmBranchField, ResetWasmState, ResetWasmStateScope, ResetWasmStateSelectionError,

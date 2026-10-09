@@ -38,8 +38,11 @@ BACKUP CLUSTER TO './cluster-config.nvxb' WITHOUT STATE;
 - `WITHOUT PAUSE` includes published runtime checkpoints without pausing a running domain. Its
   state and configuration need not be from one quiesced cut.
 - `TIMEOUT <duration>` bounds each running domain's quiesce wait. It is valid with the normal
-  quiesced capture. Domains are captured in sequence and each receives its own budget. The
-  command's total wait includes all cuts, admission and archive assembly.
+  quiesced capture. Domains are captured in sequence and each receives its own budget. Each owner
+  stages its share of a domain's state within that same budget, however long its state takes to
+  stage; a stopped domain's owners stage within the budget too, and a `WITHOUT PAUSE` capture's
+  owners within the default one. The command's total wait includes all cuts, admission and
+  archive assembly.
 - The path names a file on the client's machine. A leading `~/` refers to the client user's home
   directory. In the web console it names the file the browser saves the archive as.
 
@@ -62,6 +65,16 @@ checkpoint contributes no lifecycle state. It seals those checkpoints and the cu
 durably before opening one database snapshot that also
 contains the already durable WASM guest saves. A stopped domain reads its stored checkpoints
 without active task requests.
+The cut lists that snapshot's checkpoints without reading their payloads, and reads only those it
+archives, all from the same snapshot however late they are read. A branch lifecycle is read while
+the cut is taken only when a WASM, deduplicator or window branch of its entity needs a typed key,
+one lifecycle at a time, and only the keys those branches need are kept.
+Each Kafka offset and branch lifecycle checkpoint then becomes its own archive section. It is read
+whole into one aligned allocation charged to `restore_metadata`, its entries convert one at a time,
+and its record streams through a 64 KiB bulk buffer into a quota-owned staged file that seals the
+section's exact length and digest. The record's serializer scratch, one resolver per entry, is
+charged to `restore_metadata` beside the checkpoint. Neither the converted entries nor the encoded
+record are held whole, so native metadata larger than the bulk budget is archived within it.
 Materialized relays capture shared Arrow row views, typed branch keys, per-row watermarks, revision,
 ownership fence and branch generation under their assignment barrier. Capture reads the current
 entries at the cut, including updates since the periodic snapshot; it never waits for that interval.
@@ -154,25 +167,32 @@ its staging directory could not be removed.
 
 ### Delivering To Standard Output
 
-With `--output -`, the CLI downloads the archive into a staging directory of its own under the
-system's temporary directory (`TMPDIR` on Unix), as a file only its owner may read and write
-(`0600`), and verifies it there before it copies a byte to standard output. The complete download
-releases the server's copy of the archive, so from then on the staged archive is the only one.
+With `--output -`, the CLI first makes sure standard output can receive the archive. It then
+downloads the archive into a staging directory of its own under the system's temporary directory
+(`TMPDIR` on Unix), as a file only its owner may read and write (`0600`), and verifies it there
+before it copies a byte to standard output. The complete download releases the server's copy of
+the archive, so from then on the staged archive is the only one. The copy goes through a
+descriptor of the CLI's own for standard output, without a buffer, so every write reaches the
+operating system and every failed write is reported.
 
+- A standard output that would discard the archive fails with `WRITE_FAILED` before anything is
+  staged or sent: the null device, which accepts every byte and keeps none, and a standard output
+  that was closed when the CLI started, where the CLI finds the null device instead. The CLI cannot
+  tell the two apart and refuses both. No backup was taken, so the report names no execution
+  reference; give the CLI a pipe, a file or a terminal and run the backup again.
 - A staging directory that cannot be created fails with `WRITE_FAILED` before the backup is sent.
   No backup was admitted, so the report names no execution reference.
 - A delivery that fails after the download fails with `WRITE_FAILED`: a reader that closed the
-  pipe, a full disk behind a redirection, a flush that failed, or a staged archive that could not
-  be read. A closed pipe does not end the CLI through `SIGPIPE`; its failed write is reported like
-  any other. Standard output may hold part of the archive, and the report goes to standard error as
-  always. The CLI keeps the verified archive in its staging directory, and the report names it
-  together with the backup's execution reference: JSON adds `error.execution_reference` and
-  `error.archive`, and text ends with
-  `recover backup REFERENCE from its verified archive at 'PATH'; ...`.
-- When every byte reached standard output and was flushed but the staging directory could not be
-  removed, the command fails with `CLEANUP_FAILED` and names the execution reference and, in JSON,
-  the directory as `error.staging`. The archive on standard output is complete; remove the
-  directory, which may still hold a copy of it.
+  pipe, a full disk behind a redirection, or a staged archive that could not be read. A closed pipe
+  does not end the CLI through `SIGPIPE`; its failed write is reported like any other. Standard
+  output may hold part of the archive, and the report goes to standard error as always. The CLI
+  keeps the verified archive in its staging directory, and the report names it together with the
+  backup's execution reference: JSON adds `error.execution_reference` and `error.archive`, and
+  text ends with `recover backup REFERENCE from its verified archive at 'PATH'; ...`.
+- When every byte reached standard output but the staging directory could not be removed, the
+  command fails with `CLEANUP_FAILED` and names the execution reference and, in JSON, the directory
+  as `error.staging`. The archive on standard output is complete; remove the directory, which may
+  still hold a copy of it.
 
 Recover an undelivered archive by delivering the kept file, for example by moving it to a working
 destination. It is the archive the backup assembled, with the summary and cuts its execution
@@ -417,6 +437,12 @@ models give it, one bounded group at a time on the bulk CPU workers. Each decode
 to bulk memory only while it converts. Conversion checks the key and row counts, rejects a key that
 appears twice, and checks each delayed histogram bucket against the restored histogram's bucket
 count.
+
+Every Arrow section of an archive is scanned before Arrow's reader reads it, whatever digests the
+archive carries for its own bytes. A section whose stream is not framed within its bytes is refused
+as misframed, and one that declares a field type Nervix does not carry, or a record batch at odds
+with its own schema, as undecodable, when planning reads it, a dry run included. Nothing is
+allocated from a length the section only declares.
 
 A deduplicator conversion holds the keyspace as the runtime holds a restored one: every key
 normalized as the restored `DEDUPLICATE ON` expressions key it, in an expiry map. That is how a key
@@ -841,8 +867,9 @@ and a window group must hold both its input rows and its argument columns.
 Every `.arrow` section is one canonical Arrow IPC stream: its schema message, one record batch
 and the end-of-stream marker, which ends the section. Every message opens with the continuation
 marker, and every length the stream declares, a message's metadata, its body and each column
-buffer, lies within the section. A restore refuses a section framed otherwise before it decodes
-or allocates anything from it.
+buffer, lies within the section. Its schema declares only the field types Nervix carries, without
+a dictionary encoding, and its record batch declares the field nodes and buffers that schema's
+fields take. A restore refuses any other section before it decodes or allocates anything from it.
 
 A resource named `.` or `..` appears in a section path as `%2E` or `%2E%2E`.
 
@@ -911,6 +938,15 @@ every descriptor field, identity and Arrow byte, including generations larger th
 Its acknowledged materialized inputs retain an explicit event timestamp across retries. An
 identical successful replay must preserve the exact revision count and all archived fields, even
 when a failed earlier attempt reached only part of the relay fan-out.
+Kafka offsets and branch lifecycle records are written by one streamed writer, whose output a
+registered property compares byte for byte with rkyv's encoding of the complete wire shape, and
+two more properties stream records from stored native lifecycles and from Kafka offset checkpoints
+in any partition order, with partitions recorded twice, comparing every archived value. The
+native metadata backup scenario restores lifecycle and Kafka metadata above the bulk budget
+stopped, interrupts its first re-export partway through a section, which publishes no archive, and
+re-exports it again with every value identical while each node stays within its bulk budget. It
+then restores that archive with `RESUME` and backs up the running domain, whose every lifecycle
+branch and partition offset is the same.
 The deduplicator and window one-node and three-node scenarios re-export a stopped restore with
 identical descriptors and Arrow groups, stop an installation before its first deduplicator or
 window checkpoint, which leaves `START` gated, and release a delayed coordinator's publication
@@ -937,6 +973,8 @@ production-owner concurrency and recovery evidence.
 | Restore frames the Rust client queues ahead of the transport | 8 |
 | Restore archive retention | Until the restore finishes, or the retry validity of the execution reference ends |
 | State section staging on an owner | Charged to the same node staging quota until fetched or expired |
+| Kafka offset or branch lifecycle section capture | One checkpoint at a time per owner: `restore_metadata` holds twice the stored checkpoint plus 64 KiB for the whole section, beside serializer scratch of one resolver per entry; a 64 KiB bulk buffer streams the record |
+| One Kafka offset or branch lifecycle section | The 64 MiB record limit |
 | Native conversion I/O, checkpoint installation and complete generation publication per node | Fixed 2 MiB bulk working-memory reservation; 64 KiB buffers and checkpoint chunks |
 | Retained archive metadata and preparation per node | 2 GiB default independent admission class; 16 times record bytes plus 64 times NSPL bytes plus 2 MiB |
 | Native conversion serializer scratch | Fixed-capacity entry resolvers plus the largest entry's nested resolvers, covered by the retained preparation charge |
@@ -979,7 +1017,12 @@ contents. The reasons are:
 - a domain's clock mapping cannot be read at the capture time
 - a resource version's bytes are not installed on the leader, or do not match their catalog entry
 - the archive is larger than one archive may be, or a record does not encode
+- a captured branch lifecycle or Kafka offset checkpoint does not decode, its record exceeds the
+  64 MiB record limit, or `restore_metadata` cannot admit its conversion now, naming the entity
 - a quiesced domain cannot pause, drain, capture its owners or resume within its timeout
+
+A capture that fails or is interrupted drops every section its owners staged for it. No archive is
+assembled from a partial capture, and the backup can be sent again.
 
 A refused restore reports `restore refused:` and the reason, and changed nothing. The reasons are:
 

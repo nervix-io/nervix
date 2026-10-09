@@ -18,6 +18,7 @@
 use std::{collections::VecDeque, fmt::Display, num::NonZeroU64};
 
 use ahash::{HashMap, HashSet};
+use error_stack::Report;
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_client_wire::{
     self as wire, ClientFrame, DomainInfo, EncodedFrame, Leadership, OpenIngestorDisposition,
@@ -566,7 +567,7 @@ impl Exchange {
         channel: Channel,
         connector: &GrpcConnector,
         sinks: EventSinks,
-    ) -> Result<Self, ClientError> {
+    ) -> error_stack::Result<Self, ClientError> {
         let mut client = tonic::client::Grpc::new(channel.clone())
             .max_decoding_message_size(SESSION_LIMITS.frame_bytes())
             .max_encoding_message_size(SESSION_LIMITS.frame_bytes());
@@ -574,7 +575,10 @@ impl Exchange {
         let mut request = Request::new(ReceiverStream::new(outbound));
         connector.authorize(&mut request);
         let response = nervix_primitives::time::timeout(connector.connect_timeout(), async {
-            client.ready().await.map_err(ClientError::ConnectServer)?;
+            client
+                .ready()
+                .await
+                .map_err(|error| Report::new(ClientError::ConnectServer(error)))?;
             client
                 .streaming(
                     request,
@@ -582,10 +586,10 @@ impl Exchange {
                     ClientExchangeCodec::new(SESSION_LIMITS),
                 )
                 .await
-                .map_err(|status| ClientError::StartSession(Box::new(status)))
+                .map_err(|status| Report::new(ClientError::StartSession(Box::new(status))))
         })
         .await
-        .map_err(|_| ClientError::SessionOpenDeadline)??;
+        .map_err(|_| Report::new(ClientError::SessionOpenDeadline))??;
         let pending = Arc::new(SyncMutex::new(PendingReplies::new()));
         let generation = sinks.begin_generation();
         let reader = ExchangeReader::new(pending.clone(), sinks.clone(), generation.clone());

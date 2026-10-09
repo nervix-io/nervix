@@ -159,6 +159,21 @@ test_target = "lib"
 
 [[target]]
 case_timeout_seconds = 10
+corpus = "crates/backup/src/__fuzz__/stream__tests__bolero_streamed_records_match_their_wire_encoding/corpus"
+domain_version = 1
+features = []
+id = "backup-streamed-state-records"
+invariant = "Kafka offsets and branch lifecycle records written from iterators equal the canonical rkyv encoding of their complete wire shape byte for byte and decode to the complete original records."
+manifest = "Cargo.toml"
+max_input_bytes = 4096
+package = "nervix-backup"
+random_iterations = 256
+source = "crates/backup/src/stream.rs"
+test = "stream::tests::bolero_streamed_records_match_their_wire_encoding"
+test_target = "lib"
+
+[[target]]
+case_timeout_seconds = 10
 corpus = "crates/deadlock/src/__fuzz__/tests__bolero_deadlock_evidence_round_trips/corpus"
 domain_version = 2
 features = []
@@ -1491,6 +1506,36 @@ test_target = "lib"
 
 [[target]]
 case_timeout_seconds = 10
+corpus = "src/runtime/__fuzz__/runtime__native_checkpoint_properties__bolero_captured_lifecycle_streams_its_complete_archive_record/corpus"
+domain_version = 1
+features = []
+id = "backup-native-lifecycle"
+invariant = "A stored native lifecycle streams the archive record of every branch's typed key, nested arrays, vector kinds and float bits, last ingestion and incarnation in LRU order, with its revision and identity."
+manifest = "Cargo.toml"
+max_input_bytes = 2048
+package = "nervix-server"
+random_iterations = 256
+source = "src/runtime/native_checkpoint_properties.rs"
+test = "runtime::native_checkpoint_properties::bolero_captured_lifecycle_streams_its_complete_archive_record"
+test_target = "lib"
+
+[[target]]
+case_timeout_seconds = 10
+corpus = "src/runtime/__fuzz__/runtime__native_checkpoint_properties__bolero_captured_kafka_offsets_stream_in_archive_order/corpus"
+domain_version = 1
+features = []
+id = "backup-native-kafka"
+invariant = "A stored native Kafka offset checkpoint in any partition order, with partitions recorded more than once, streams the archive record of every partition in topic and partition order with its last recorded next offset, as the runtime's own decoding reads it."
+manifest = "Cargo.toml"
+max_input_bytes = 2048
+package = "nervix-server"
+random_iterations = 256
+source = "src/runtime/native_checkpoint_properties.rs"
+test = "runtime::native_checkpoint_properties::bolero_captured_kafka_offsets_stream_in_archive_order"
+test_target = "lib"
+
+[[target]]
+case_timeout_seconds = 10
 corpus = "crates/backup/src/__fuzz__/archive_properties__bolero_complete_archives_preserve_every_record_section_and_payload/corpus"
 domain_version = 3
 features = []
@@ -1794,12 +1839,12 @@ test_target = "lib"
 [[target]]
 case_timeout_seconds = 10
 corpus = "src/runtime_schema/__fuzz__/runtime_schema__arrow_body_properties__bolero_arrow_bodies_restore_every_column_value_and_null/corpus"
-domain_version = 1
+domain_version = 2
 features = []
 id = "runtime-arrow-bodies"
-invariant = "A batch read back from its relay body and from its sealed snapshot section has the schema it was written with, every value of every column and every null."
+invariant = "Every relay body and snapshot section of a generated batch, cut from a larger batch with nulls, nested lists and boundary values, decodes to the exact schema and every value and null with floats by their bits; several sections are refused by the one-section decoders and concatenated by the schema-free decoder, and no charge outlives a body."
 manifest = "Cargo.toml"
-max_input_bytes = 1024
+max_input_bytes = 2048
 package = "nervix-server"
 random_iterations = 128
 source = "src/runtime_schema/arrow_body_properties.rs"
@@ -1809,10 +1854,10 @@ test_target = "lib"
 [[target]]
 case_timeout_seconds = 10
 corpus = "src/runtime_schema/__fuzz__/runtime_schema__arrow_body_properties__bolero_damaged_arrow_bodies_are_refused_typed_or_decode_canonically/corpus"
-domain_version = 1
+domain_version = 2
 features = []
 id = "runtime-arrow-bodies-malformed"
-invariant = "A relay body or a sealed snapshot section damaged once, and arbitrary bytes, are refused for what they hold or decode to a batch that encodes and decodes back to itself, and no damage makes the decoder allocate from a length the body does not carry."
+invariant = "A truncated, bit-flipped, word-overwritten, shifted or trailing relay body or sealed snapshot section, and arbitrary bytes, are refused for what they hold, as misframed or undecodable and never as work the node could not admit or execute, or decode to a batch of the expected schema that encodes and decodes back to itself; no damage makes the decoder allocate from a length the body does not carry."
 manifest = "Cargo.toml"
 max_input_bytes = 2048
 package = "nervix-server"
@@ -1849,4 +1894,199 @@ package = "nervix-server"
 random_iterations = 64
 source = "src/runtime/window_state.rs"
 test = "runtime::window_state::tests::bolero_sealed_window_checkpoints_match_their_resident_encoding"
+test_target = "lib"
+
+[[target]]
+case_timeout_seconds = 10
+corpus = "src/runtime_schema/__fuzz__/runtime_schema__client_batch__properties__bolero_producer_batches_decode_to_the_submitted_rows/corpus"
+domain_version = 1
+features = []
+id = "client-producer-batches"
+invariant = "A batch the client library writes for a producer decodes on the node to the same schema, rows, values and nulls with floats by their bits; limits equal to its rows and bytes admit it, and one row or byte less refuses it with the size and the limit."
+manifest = "Cargo.toml"
+max_input_bytes = 2048
+package = "nervix-server"
+random_iterations = 128
+source = "src/runtime_schema/client_batch_properties.rs"
+test = "runtime_schema::client_batch::properties::bolero_producer_batches_decode_to_the_submitted_rows"
+test_target = "lib"
+
+[[target]]
+case_timeout_seconds = 10
+corpus = "src/runtime_schema/__fuzz__/runtime_schema__client_batch__properties__bolero_damaged_producer_batches_fail_with_their_defect_or_decode_within_their_limits/corpus"
+domain_version = 1
+features = []
+id = "client-producer-batches-malformed"
+invariant = "A damaged producer stream, and arbitrary bytes, are refused with a defect of the batch, never as a busy node, or decode to a batch of the ingestor's exact schema within the row limit that the client library writes and the node decodes back to itself."
+manifest = "Cargo.toml"
+max_input_bytes = 2048
+package = "nervix-server"
+random_iterations = 256
+source = "src/runtime_schema/client_batch_properties.rs"
+test = "runtime_schema::client_batch::properties::bolero_damaged_producer_batches_fail_with_their_defect_or_decode_within_their_limits"
+test_target = "lib"
+
+[[target]]
+case_timeout_seconds = 10
+corpus = "src/runtime_schema/__fuzz__/runtime_schema__codec_properties__bolero_schemaful_codecs_decode_every_row_they_encode/corpus"
+domain_version = 1
+features = []
+id = "codec-schemaful-rows"
+invariant = "Every row a generated WIRE JSON, WIRE CBOR or WIRE AVRO codec of an accepted shape encodes decodes, in one group builder, back to the exact schema, values and nulls, floats by their bits, datetimes to the nanosecond, bytes, text and nested lists, whatever order the wire schema lists the fields in."
+manifest = "Cargo.toml"
+max_input_bytes = 4096
+package = "nervix-server"
+random_iterations = 256
+source = "src/runtime_schema/codec_properties.rs"
+test = "runtime_schema::codec_properties::bolero_schemaful_codecs_decode_every_row_they_encode"
+test_target = "lib"
+
+[[target]]
+case_timeout_seconds = 10
+corpus = "src/runtime_schema/__fuzz__/runtime_schema__codec_properties__bolero_damaged_payloads_leave_a_group_as_its_payloads_decode_alone/corpus"
+domain_version = 1
+features = []
+id = "codec-schemaful-payload-groups"
+invariant = "Damaged payloads interleaved with a codec's own payloads are each accepted or refused in a group exactly as alone, with a typed failure of their own bytes, and the group's batch holds exactly the rows its accepted payloads decode to alone, in order."
+manifest = "Cargo.toml"
+max_input_bytes = 4096
+package = "nervix-server"
+random_iterations = 256
+source = "src/runtime_schema/codec_properties.rs"
+test = "runtime_schema::codec_properties::bolero_damaged_payloads_leave_a_group_as_its_payloads_decode_alone"
+test_target = "lib"
+
+[[target]]
+case_timeout_seconds = 10
+corpus = "src/runtime/__fuzz__/runtime__remote_dispatch__properties__bolero_routed_batches_arrive_with_their_rows_branch_and_watermarks/corpus"
+domain_version = 1
+features = []
+id = "remote-relay-rows"
+invariant = "A relay batch a node routes to a consumer on another node decodes on the receiver into the same rows of the relay's exact schema with floats by their bits, the same concrete branch or its absence with key values to the bit, every row's watermarks and one registration per row."
+manifest = "Cargo.toml"
+max_input_bytes = 2048
+package = "nervix-server"
+random_iterations = 128
+source = "src/runtime/remote_dispatch_properties.rs"
+test = "runtime::remote_dispatch::properties::bolero_routed_batches_arrive_with_their_rows_branch_and_watermarks"
+test_target = "lib"
+
+[[target]]
+case_timeout_seconds = 10
+corpus = "src/runtime/__fuzz__/runtime__remote_dispatch__properties__bolero_routed_payloads_whose_parts_disagree_are_refused_with_their_defect/corpus"
+domain_version = 1
+features = []
+id = "remote-relay-rows-malformed"
+invariant = "A routed payload with a foreign body, a watermark or registration count that differs from its rows, or a branch key with no field, an invalid field name, a datetime that is not RFC 3339 text or a non-finite float is refused with that defect, checked body first, then counts, then key, before its rows form a batch."
+manifest = "Cargo.toml"
+max_input_bytes = 2048
+package = "nervix-server"
+random_iterations = 128
+source = "src/runtime/remote_dispatch_properties.rs"
+test = "runtime::remote_dispatch::properties::bolero_routed_payloads_whose_parts_disagree_are_refused_with_their_defect"
+test_target = "lib"
+
+[[target]]
+case_timeout_seconds = 10
+corpus = "crates/interconnect/src/__fuzz__/wire__properties__bolero_relay_messages_reach_the_receiver_whole/corpus"
+domain_version = 1
+features = []
+id = "relay-wire-messages"
+invariant = "Every relay grant request with its delivery position, body length, branch key fields to the bit, row watermarks, registrations and admission, the payload the receiver rebuilds from it, and every grant reply, admission exchange, acknowledgement resolution and connection binding round trip through the bounded codec, and nothing stays charged."
+manifest = "Cargo.toml"
+max_input_bytes = 2048
+package = "nervix-interconnect"
+random_iterations = 256
+source = "crates/interconnect/src/wire_properties.rs"
+test = "wire::properties::bolero_relay_messages_reach_the_receiver_whole"
+test_target = "lib"
+
+[[target]]
+case_timeout_seconds = 10
+corpus = "crates/interconnect/src/__fuzz__/wire__properties__bolero_damaged_relay_messages_fail_typed_or_decode_to_a_message/corpus"
+domain_version = 1
+features = []
+id = "relay-wire-messages-malformed"
+invariant = "Truncated, bit-flipped or overwritten encodings of every relay message, and arbitrary bytes, fail with the codec's typed decode failure within the depth bound, or decode to a message that encodes and decodes back to itself, and either way leave no charge and no allocation of the decoder behind."
+manifest = "Cargo.toml"
+max_input_bytes = 2048
+package = "nervix-interconnect"
+random_iterations = 256
+source = "crates/interconnect/src/wire_properties.rs"
+test = "wire::properties::bolero_damaged_relay_messages_fail_typed_or_decode_to_a_message"
+test_target = "lib"
+
+[[target]]
+case_timeout_seconds = 10
+corpus = "src/runtime_schema/__fuzz__/runtime_schema__codec_properties__bolero_non_finite_floats_follow_the_json_projection/corpus"
+domain_version = 1
+features = []
+id = "codec-json-non-finite-floats"
+invariant = "Over every float bit pattern a WIRE JSON or WIRE CBOR row reads back with each non-finite float of an optional top-level field as a null and every other value intact, and a row holding one in a required field or a list element is refused with a typed failure of its own payload."
+manifest = "Cargo.toml"
+max_input_bytes = 4096
+package = "nervix-server"
+random_iterations = 256
+source = "src/runtime_schema/codec_properties.rs"
+test = "runtime_schema::codec_properties::bolero_non_finite_floats_follow_the_json_projection"
+test_target = "lib"
+
+[[target]]
+case_timeout_seconds = 10
+corpus = "src/runtime/__fuzz__/runtime__wasm_output__properties__bolero_generated_pools_decode_to_the_columns_the_guest_wrote/corpus"
+domain_version = 1
+features = []
+id = "wasm-generated-pools"
+invariant = "A generated column pool a WASM guest writes as one Arrow IPC stream, ending with the end-of-stream marker or closed after its record batch, decodes on the node to its unnamed fields with their types, nullability and metadata, every row, and every value and null with floats by their bits."
+manifest = "Cargo.toml"
+max_input_bytes = 2048
+package = "nervix-server"
+random_iterations = 128
+source = "src/runtime/wasm_output_properties.rs"
+test = "runtime::wasm_output::properties::bolero_generated_pools_decode_to_the_columns_the_guest_wrote"
+test_target = "lib"
+
+[[target]]
+case_timeout_seconds = 10
+corpus = "src/runtime/__fuzz__/runtime__wasm_output__properties__bolero_damaged_generated_pools_fail_typed_or_decode_to_a_pool/corpus"
+domain_version = 1
+features = []
+id = "wasm-generated-pools-malformed"
+invariant = "A truncated, bit-flipped, word-overwritten, shifted or trailing generated pool, and arbitrary bytes, fail with a typed defect of the guest's generated Arrow IPC or its record batch count, or decode to one record batch of unnamed columns that writes and decodes back to itself; only the empty byte string is the empty pool."
+manifest = "Cargo.toml"
+max_input_bytes = 2048
+package = "nervix-server"
+random_iterations = 256
+source = "src/runtime/wasm_output_properties.rs"
+test = "runtime::wasm_output::properties::bolero_damaged_generated_pools_fail_typed_or_decode_to_a_pool"
+test_target = "lib"
+
+[[target]]
+case_timeout_seconds = 10
+corpus = "src/runtime_schema/__fuzz__/runtime_schema__transforming_codec_properties__bolero_transforming_codecs_decode_every_number_they_encode/corpus"
+domain_version = 1
+features = []
+id = "codec-transforming-numbers"
+invariant = "Every row of a generated batch of numbers that a JAQ-native JSON, YAML, TOML or CBOR codec or a protobuf codec encodes through unchanged programs decodes back to the same row: a finite F64 and F32 of any bit pattern to its bits, alone and as an element of a list, and an I64 to its value; a protobuf singular zero of either sign reads back as positive zero."
+manifest = "Cargo.toml"
+max_input_bytes = 1024
+package = "nervix-server"
+random_iterations = 256
+source = "src/runtime_schema/transforming_codec_properties.rs"
+test = "runtime_schema::transforming_codec_properties::bolero_transforming_codecs_decode_every_number_they_encode"
+test_target = "lib"
+
+[[target]]
+case_timeout_seconds = 10
+corpus = "crates/jaq/src/__fuzz__/number_properties__bolero_programs_and_native_formats_keep_every_number/corpus"
+domain_version = 1
+features = []
+id = "jaq-native-numbers"
+invariant = "Every finite float of any bit pattern keeps its bits, and every 64-bit integer its value and signedness, through the identity program, through the writer and reader of each native format that holds numbers (JSON, YAML, TOML within its signed integers, and CBOR), and through a payload read and handed to the identity program."
+manifest = "Cargo.toml"
+max_input_bytes = 256
+package = "nervix-jaq"
+random_iterations = 256
+source = "crates/jaq/src/number_properties.rs"
+test = "number_properties::bolero_programs_and_native_formats_keep_every_number"
 test_target = "lib"

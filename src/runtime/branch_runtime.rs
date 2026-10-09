@@ -31,10 +31,10 @@ pub(super) const BRANCH_INSTANCE_EXPIRATION_SCAN_INTERVAL: Duration = Duration::
 pub(super) enum BranchEntrypointError {
     #[error("could not read the domain time of accepted input")]
     AcceptedInputClock,
-    #[error("failed to instantiate branch '{}'", branch_key_display(.branch))]
-    Instantiate { branch: Option<BranchKey> },
-    #[error("the dispatch task of branch '{}' failed", branch_key_display(.branch))]
-    DispatchTask { branch: Option<BranchKey> },
+    #[error("failed to instantiate the branch runtime ({branch})")]
+    Instantiate { branch: BranchScope },
+    #[error("the branch dispatch task failed ({branch})")]
+    DispatchTask { branch: BranchScope },
     #[error("failed to prepare the route input")]
     PrepareRouteInput,
     #[error("failed to prepare an output branch batch")]
@@ -298,7 +298,7 @@ impl BranchRuntime {
                 .delete_materialized_stream_key(state, &self.key)
             {
                 warn!(domain = self.domain.as_str(), relay = relay.as_str(),
-                    branch = branch_key_display(&self.key), error = %format_args!("{error:#}"),
+                    scope = %BranchScope::from(&self.key), error = %format_args!("{error:#}"),
                     "materialized assignment changed during branch eviction");
             }
         }
@@ -451,7 +451,7 @@ impl BranchRuntime {
                 warn!(
                     domain = self.domain.as_str(),
                     relay = relay.as_str(),
-                    branch = branch_key_display(&self.key),
+                    scope = %BranchScope::from(&self.key),
                     error = %format_args!("{error:#}"),
                     "failed to decode branch-local materialized state batch"
                 );
@@ -467,7 +467,7 @@ impl BranchRuntime {
             warn!(
                 domain = self.domain.as_str(),
                 relay = relay.as_str(),
-                branch = branch_key_display(&self.key),
+                scope = %BranchScope::from(&self.key),
                 error = %format_args!("{error:#}"),
                 "materialized relay assignment changed while applying a branch-local batch"
             );
@@ -1250,7 +1250,7 @@ impl BranchExecutionRuntime {
                             template,
                             message.acks.iter(),
                             &error.change_context(BranchEntrypointError::Instantiate {
-                                branch: key.clone(),
+                                branch: BranchScope::from(&key),
                             }),
                         );
                         continue;
@@ -1275,7 +1275,7 @@ impl BranchExecutionRuntime {
                 debug!(
                     domain = domain.as_str(),
                     ingestor = ingestor.as_str(),
-                    key = branch_key_display(&key),
+                    scope = %BranchScope::from(&key),
                     "created branch runtime"
                 );
             }
@@ -1421,7 +1421,7 @@ impl BranchExecutionRuntime {
                     &template.error_policies,
                     completion.acks.iter(),
                     &Report::new(error).change_context(BranchEntrypointError::DispatchTask {
-                        branch: completion.key.clone(),
+                        branch: BranchScope::from(&completion.key),
                     }),
                 );
             }
@@ -1974,7 +1974,7 @@ pub(super) async fn expire_branch_instance_instances(
         debug!(
             domain = domain.as_str(),
             ingestor = ingestor.as_str(),
-            key = branch_key_display(&key),
+            scope = %BranchScope::from(&key),
             "expired branched processor root"
         );
         expired_keys.push(key);
@@ -2018,7 +2018,7 @@ pub(super) async fn evict_branch_instance_instances_to_capacity(
         debug!(
             domain = domain.as_str(),
             ingestor = ingestor.as_str(),
-            key = branch_key_display(&key),
+            scope = %BranchScope::from(&key),
             max_instances,
             "evicted branch runtime by lru"
         );
@@ -2048,7 +2048,7 @@ pub(super) async fn shutdown_all_branch_instance_instances(
         debug!(
             domain = domain.as_str(),
             ingestor = ingestor.as_str(),
-            key = branch_key_display(&key),
+            scope = %BranchScope::from(&key),
             "stopped branch runtime"
         );
     }

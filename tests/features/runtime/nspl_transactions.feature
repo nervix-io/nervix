@@ -472,6 +472,7 @@ Feature: NSPL transactions
     Then the last command output is a JSON document where
       """
       /error/code = "CONNECTION_FAILED"
+      /error/message = "invalid server URL: relative URL without a base"
       """
 
     Examples:

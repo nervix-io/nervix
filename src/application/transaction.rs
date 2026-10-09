@@ -380,16 +380,21 @@ pub(in crate::application) enum TransactionPreflightError {
 }
 
 impl SessionTransactionBindingError {
-    pub(in crate::application) fn into_command_result(self) -> CommandResult {
-        let mut result = command_error(self.to_string());
-        match self {
+    /// The failed command a refused binding answers with: its message, and the disposition that
+    /// tells the client to attach the transaction again or that another session took it over.
+    pub(in crate::application) fn command_result(report: &Report<Self>) -> CommandResult {
+        let mut result = command_error(format!("{report:#}"));
+        match report.current_context() {
             Self::Unbound | Self::DomainMismatch { .. } | Self::MissingSelectedDomain { .. } => {}
             Self::TakenOver { id } => {
-                result.disposition =
-                    CommandDisposition::TransactionTakenOver { transaction_id: id };
+                result.disposition = CommandDisposition::TransactionTakenOver {
+                    transaction_id: id.clone(),
+                };
             }
             Self::Detached { id } => {
-                result.disposition = CommandDisposition::TransactionDetached { transaction_id: id };
+                result.disposition = CommandDisposition::TransactionDetached {
+                    transaction_id: id.clone(),
+                };
             }
         }
         result
@@ -723,8 +728,7 @@ impl SessionServiceImpl {
         let Some(id) = binding.transaction_id else {
             return Ok(QueuedConfiguration::default());
         };
-        self.validate_session_transaction_binding(binding)
-            .map_err(Report::new)?;
+        self.validate_session_transaction_binding(binding)?;
         let Some(domain) = domain else {
             return Err(Report::new(
                 SessionTransactionBindingError::MissingSelectedDomain { id: id.to_string() },
@@ -826,14 +830,18 @@ impl SessionServiceImpl {
     pub(in crate::application) fn validate_session_transaction_binding(
         &self,
         session: SessionBinding<'_>,
-    ) -> Result<(), SessionTransactionBindingError> {
+    ) -> error_stack::Result<(), SessionTransactionBindingError> {
         let Some(id) = session.transaction_id else {
-            return Err(SessionTransactionBindingError::Unbound);
+            return Err(Report::new(SessionTransactionBindingError::Unbound));
         };
         match self.inner.transaction_bindings.get(id) {
             Some(binding) if binding.value() == session.session_id => Ok(()),
-            Some(_) => Err(SessionTransactionBindingError::TakenOver { id: id.to_string() }),
-            None => Err(SessionTransactionBindingError::Detached { id: id.to_string() }),
+            Some(_) => Err(Report::new(SessionTransactionBindingError::TakenOver {
+                id: id.to_string(),
+            })),
+            None => Err(Report::new(SessionTransactionBindingError::Detached {
+                id: id.to_string(),
+            })),
         }
     }
 
@@ -978,7 +986,7 @@ impl SessionServiceImpl {
         subscriptions: &mut SessionSubscriptions,
     ) -> CommandResult {
         if let Err(error) = self.validate_session_transaction_binding(subscriptions.binding()) {
-            return error.into_command_result();
+            return SessionTransactionBindingError::command_result(&error);
         }
         let Some(id) = subscriptions.transaction_id() else {
             return command_error("no transaction is attached to this session".to_string());
@@ -1795,7 +1803,7 @@ impl SessionServiceImpl {
         subscriptions: &mut SessionSubscriptions,
     ) -> CommandResult {
         if let Err(error) = self.validate_session_transaction_binding(subscriptions.binding()) {
-            return error.into_command_result();
+            return SessionTransactionBindingError::command_result(&error);
         }
         let Some(id) = subscriptions.transaction_id().map(ToOwned::to_owned) else {
             return command_error("REVERT requires an active transaction".to_string());
@@ -1830,7 +1838,7 @@ impl SessionServiceImpl {
         expected_preview: Option<TransactionPreviewIdentity>,
     ) -> CommandResult {
         if let Err(error) = self.validate_session_transaction_binding(subscriptions.binding()) {
-            return error.into_command_result();
+            return SessionTransactionBindingError::command_result(&error);
         }
         let Some(id) = subscriptions.transaction_id().map(ToOwned::to_owned) else {
             return command_error("COMMIT requires an active transaction".to_string());

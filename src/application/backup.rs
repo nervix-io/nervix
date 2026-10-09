@@ -19,6 +19,7 @@ mod assembly;
 mod branch_state_sections;
 pub(in crate::application) mod interconnect;
 mod materialized_sections;
+mod native_metadata_sections;
 pub(in crate::application) mod restore_storage;
 pub(in crate::application) mod retained;
 mod state_sections;
@@ -354,8 +355,12 @@ impl SessionServiceImpl {
                     .await
                     .ok_or_else(|| Report::new(BackupError::NoConfiguration))?;
                 let domain_captured_at = current_timestamp();
+                // A live capture has no cut of its own to bound it, and takes the budget a
+                // quiesced cut without TIMEOUT has.
+                let deadline = nervix_primitives::time::Instant::now()
+                    + self.inner.runtime.domain_drain_timeout();
                 let inventories = self
-                    .capture_owner_state(domain, capture.applied.index, false)
+                    .capture_owner_state(domain, capture.applied.index, false, deadline)
                     .await?;
                 return Ok((capture, BackupCut::Live, domain_captured_at, inventories));
             }
@@ -427,7 +432,7 @@ impl SessionServiceImpl {
             if domain_state.status == DomainStatus::Stopped {
                 let domain_captured_at = current_timestamp();
                 let inventories = self
-                    .capture_owner_state(domain, before_cut.applied.index, false)
+                    .capture_owner_state(domain, before_cut.applied.index, false, deadline)
                     .await?;
                 return Ok((
                     before_cut,
@@ -482,7 +487,7 @@ impl SessionServiceImpl {
             .map_err(|error| {
                 Report::new(BackupError::CaptureDomain {
                     domain: domain.clone(),
-                    reason: error.to_string(),
+                    reason: format!("{error:#}"),
                 })
             })?;
             let cut_result = nervix_primitives::time::timeout_at(deadline, async {
@@ -503,7 +508,7 @@ impl SessionServiceImpl {
                     .ok_or_else(|| Report::new(BackupError::NoConfiguration))?;
                 let domain_captured_at = current_timestamp();
                 let inventories = self
-                    .capture_owner_state(domain, capture.applied.index, true)
+                    .capture_owner_state(domain, capture.applied.index, true, deadline)
                     .await?;
                 let after = self
                     .read_backup_quiesce_counters(domain, schedule.domain(domain))
@@ -525,7 +530,7 @@ impl SessionServiceImpl {
                 .map_err(|error| {
                     Report::new(BackupError::CaptureDomain {
                         domain: domain.clone(),
-                        reason: error.to_string(),
+                        reason: format!("{error:#}"),
                     })
                 });
             let (capture, domain_captured_at, inventories, after) = cut_result??;
@@ -632,12 +637,15 @@ impl SessionServiceImpl {
     }
 
     /// Makes every owner, including this leader, stage its state while the domain cut is held.
-    /// Inventory arrives in the same publication round; transfer waits until after resume.
+    /// Inventory arrives in the same publication round; transfer waits until after resume. A
+    /// remote owner's capture shares the cut's budget, which ends at `deadline`, rather than a
+    /// request deadline of its own: staging a domain's state takes as long as that state is large.
     async fn capture_owner_state(
         &self,
         domain: &DomainName,
         revision: u64,
         quiesced: bool,
+        deadline: nervix_primitives::time::Instant,
     ) -> error_stack::Result<Vec<StateInventory>, BackupError> {
         let coordination = self
             .inner
@@ -675,9 +683,15 @@ impl SessionServiceImpl {
                     self.handle_backup_capture_request(&node, capture_request)
                         .await
                 } else {
+                    let now = nervix_primitives::time::Instant::now();
+                    let remaining = if deadline > now {
+                        deadline - now
+                    } else {
+                        Duration::ZERO
+                    };
                     self.inner
                         .interconnect
-                        .request(&node, capture_request)
+                        .request_with_timeout(&node, capture_request, remaining)
                         .await
                         .map_err(|error| failed(error.to_string()))?
                 };

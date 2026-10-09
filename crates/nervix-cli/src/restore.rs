@@ -14,7 +14,7 @@
 
 use std::io::{IsTerminal as _, Write as _};
 
-use error_stack::Report as StackReport;
+use error_stack::{Report as StackReport, ResultExt as _};
 use meticulous::ResultExt as _;
 use nervix_client_core::{
     Client, CommandOutcome, ConnectOptions, ExistingUserPolicy, Restore, RestoreMode,
@@ -153,8 +153,8 @@ pub(super) async fn run_restore(request: RestoreRequest) -> Result<(), StackRepo
     {
         Ok(client) => client,
         Err(error) => {
-            report_failure(format, "CONNECTION_FAILED", &error.to_string(), None);
-            return Err(StackReport::new(ClientError::from(error)));
+            report_failure(format, "CONNECTION_FAILED", &format!("{error:#}"), None);
+            return Err(error.change_context(ClientError::Connect));
         }
     };
     let progress = ProgressLine::start(&restore.source);
@@ -163,8 +163,8 @@ pub(super) async fn run_restore(request: RestoreRequest) -> Result<(), StackRepo
     let outcome = match restored {
         Ok(outcome) => outcome,
         Err(error) => {
-            report_failure(format, "RESTORE_FAILED", &error_chain(&error), None);
-            return Err(StackReport::new(ClientError::from(error)));
+            report_failure(format, "RESTORE_FAILED", &format!("{error:#}"), None);
+            return Err(error.change_context(ClientError::Request));
         }
     };
     if !outcome.succeeded() {
@@ -212,7 +212,7 @@ pub(super) async fn execute_restore_and_print(
     let progress = ProgressLine::start(&restore.source);
     let restored = client.restore(restore, progress.counter()).await;
     progress.finish().await;
-    let outcome = restored.map_err(|error| StackReport::new(ClientError::from(error)))?;
+    let outcome = restored.change_context(ClientError::Request)?;
     if outcome.succeeded() {
         println!("{}", report_text(&outcome));
     } else {
@@ -324,18 +324,6 @@ fn step_outcome_label(outcome: RestoreStepOutcome) -> &'static str {
         RestoreStepOutcome::Failed => "failed",
         RestoreStepOutcome::NotAttempted => "not attempted",
     }
-}
-
-/// The error and every cause behind it, as one line.
-fn error_chain(error: &nervix_client_core::ClientError) -> String {
-    let mut message = error.to_string();
-    let mut cause = std::error::Error::source(error);
-    while let Some(current) = cause {
-        message.push_str(": ");
-        message.push_str(&current.to_string());
-        cause = current.source();
-    }
-    message
 }
 
 /// Prints a failure: an error line, or a JSON error document that carries the report of a

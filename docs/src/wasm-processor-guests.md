@@ -250,8 +250,20 @@ or generated-pool index; its type and nullability come from the positionally
 aligned destination field, and its row count comes from `acks.rows.len()`.
 
 `generated_arrow_ipc_batch` is either an empty byte string or exactly one Arrow
-IPC stream containing one schema and one record batch. The empty byte string is
-the only valid empty generated pool; do not encode a zero-column Arrow stream.
+IPC stream containing one schema and one uncompressed record batch. The stream
+ends with the end-of-stream marker, or where its record batch message ends. Its
+schema may declare only the Arrow types Nervix carries: integers of 8 to 64
+bits, 32- and 64-bit floats, booleans, UTF-8 text, binary, nanosecond
+timestamps, and lists and fixed-size lists of those, none dictionary-encoded.
+Every message must open with Arrow's continuation marker, `0xFFFFFFFF`, and
+declare metadata and body lengths that lie inside the stream. Its record batch
+must declare exactly the field nodes and buffers those fields take, every
+buffer inside the message body, a validity bitmap long enough for the nulls it
+counts and offsets buffers that hold whole offsets. Nervix checks all of this
+before it reads the batch or allocates anything from a declared length, and a
+stream that fails the check is invalid generated Arrow IPC. The empty byte
+string is the only valid empty generated pool; do not encode a zero-column
+Arrow stream.
 When present, generated schema field names must be empty. Nervix compares every
 other field property with each referencing destination field, including data
 type, nullability, timestamp units and timezones, nested types, fixed lengths,
@@ -893,7 +905,10 @@ operations and saved state, in one shape:
 wasm processor '<processor>' <stage> failed (<branch>, resource '<resource>' version <version> file '<file>'[, export '<export>'][, saved state revision <revision>]): <cause>
 ```
 
-`<branch>` is `branch` followed by the concrete branch key, or `unbranched`. `<export>` names the
+`<branch>` is `branch` followed by the lowercase hexadecimal fingerprint of the concrete branch's
+key, or `unbranched`. The fingerprint is the one `DESCRIBE WASM PROCESSOR` prints beside the
+branch's checkpoint, and a diagnostic never contains the key's field values, which the branch
+schema may declare `SENSITIVE`. `<export>` names the
 guest export whose call failed, or the export that runs the failed operation. `<revision>` appears
 when the failure involves saved state: the revision being restored or the revision being persisted.
 `<cause>` is the complete chain of failures below the stage, ending with the guest's own reason when
@@ -918,11 +933,11 @@ another node reaches the session unchanged.
 | `state replication` | Waiting for every assigned replica to hold the checkpoint on its stable storage, or the schedule assigning fewer replicas than the checkpoint was captured for. |
 | `state authority check` | The state's authority refused it: a replica or peer that is not the state's authority, or this node after the branch's state generation or ownership moved on. |
 
-For example, a branch whose guest rejects its saved counters after an instance was recreated is
-reported as:
+For example, the branch keyed by tenant `alpha` whose guest rejects its saved counters after an
+instance was recreated is reported as:
 
 ```text
-wasm processor 'sessionizer' application state restoration failed (branch {"tenant":"alpha"}, resource 'sessionizer' version 3 file 'sessionizer.wasm', export 'nervix_load_state', saved state revision 12): wasm guest rejected the application state in its saved snapshot: counters header is truncated
+wasm processor 'sessionizer' application state restoration failed (branch 40238306d5ebf339fe640ae723e4705c5bb1743e39d0ec207ed8de19fead54b1, resource 'sessionizer' version 3 file 'sessionizer.wasm', export 'nervix_load_state', saved state revision 12): wasm guest rejected the application state in its saved snapshot: counters header is truncated
 ```
 
 ## Troubleshooting

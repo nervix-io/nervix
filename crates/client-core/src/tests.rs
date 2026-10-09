@@ -11,6 +11,8 @@
 // Shuttle test, so the tests over a real connection, and those that pause Tokio's clock, drive the
 // production build only.
 #[cfg(not(feature = "shuttle"))]
+mod reports;
+#[cfg(not(feature = "shuttle"))]
 mod restoration;
 #[cfg(not(feature = "shuttle"))]
 mod session;
@@ -70,6 +72,16 @@ const DEADLINE: Duration = Duration::from_secs(10);
 
 fn domain(name: &str) -> DomainName {
     DomainName::parse(name).assured("the test domain is an accepted literal")
+}
+
+/// The client failure one level beneath the report's current context: the failure an uncertain
+/// outcome stands above.
+#[cfg(not(feature = "shuttle"))]
+fn cause_beneath(report: &error_stack::Report<ClientError>) -> Option<&ClientError> {
+    report
+        .frames()
+        .filter_map(|frame| frame.downcast_ref::<ClientError>())
+        .nth(1)
 }
 
 fn request_id(id: u64) -> RequestId {
@@ -745,7 +757,7 @@ async fn connect_rejects_plain_server_when_tls_is_required() {
         .connect(&server)
         .await
         .expect_err("plain server should be rejected when tls is required");
-    assert!(matches!(error, ClientError::TlsRequired));
+    assert!(matches!(error.current_context(), ClientError::TlsRequired));
 }
 
 #[nervix_primitives::test]
@@ -1108,11 +1120,14 @@ async fn connection_options_reject_unbounded_seeds_and_deadlines_before_connecti
             },
         )
         .await;
+        let Err(error) = result else {
+            panic!("an unbounded backup wait is rejected before connecting");
+        };
         assert!(matches!(
-            result,
-            Err(ClientError::InvalidDeadline {
+            error.current_context(),
+            ClientError::InvalidDeadline {
                 field: "backup_wait_timeout"
-            })
+            }
         ));
     }
     let endpoint = Url::parse("http://127.0.0.1:9").assured("the test endpoint is a URL");
@@ -1125,7 +1140,7 @@ async fn connection_options_reject_unbounded_seeds_and_deadlines_before_connecti
         panic!("too many seeds are rejected before connecting");
     };
     assert!(matches!(
-        error,
+        error.current_context(),
         ClientError::TooManySeedServers { count: 33 }
     ));
 
@@ -1138,7 +1153,7 @@ async fn connection_options_reject_unbounded_seeds_and_deadlines_before_connecti
         panic!("a zero request deadline is rejected before connecting");
     };
     assert!(matches!(
-        error,
+        error.current_context(),
         ClientError::InvalidDeadline {
             field: "request_timeout"
         }
@@ -1152,7 +1167,7 @@ async fn connection_options_reject_unbounded_seeds_and_deadlines_before_connecti
     else {
         panic!("a TLS session rejects a plaintext recovery seed");
     };
-    assert!(matches!(error, ClientError::TlsRequired));
+    assert!(matches!(error.current_context(), ClientError::TlsRequired));
 }
 
 #[nervix_primitives::test]
@@ -1784,7 +1799,10 @@ async fn execute_returns_session_closed_when_request_channel_is_closed() {
         .execute("SHOW CLUSTER STATUS;")
         .await
         .expect_err("must fail");
-    assert!(matches!(error, ClientError::SessionClosed));
+    assert!(matches!(
+        error.current_context(),
+        ClientError::SessionClosed
+    ));
 }
 
 #[nervix_primitives::test]
@@ -1860,7 +1878,10 @@ async fn a_subscription_needs_a_selected_domain() {
         .await
         .expect_err("a subscription is refused without a domain");
 
-    assert!(matches!(error, ClientError::NoActiveDomain));
+    assert!(matches!(
+        error.current_context(),
+        ClientError::NoActiveDomain
+    ));
 }
 
 #[nervix_primitives::test]
@@ -2689,13 +2710,13 @@ async fn a_rejected_request_surfaces_as_a_typed_error() {
         rejection,
         field,
         message,
-    } = error
+    } = error.current_context()
     else {
         panic!("the rejection is reported as such, not as {error:?}");
     };
-    assert_eq!(request, RequestKind::ListDomains);
-    assert_eq!(rejection, RequestRejection::TooManyRequestsInFlight);
-    assert_eq!(field, None);
+    assert_eq!(*request, RequestKind::ListDomains);
+    assert_eq!(*rejection, RequestRejection::TooManyRequestsInFlight);
+    assert_eq!(*field, None);
     assert_eq!(message, "too many requests in flight");
 }
 
@@ -2732,13 +2753,19 @@ async fn event_streams_end_with_a_session_that_no_known_server_can_reopen() {
         .next_subscription()
         .await
         .expect_err("must fail once channel is closed");
-    assert!(matches!(subscription_error, ClientError::SessionClosed));
+    assert!(matches!(
+        subscription_error.current_context(),
+        ClientError::SessionClosed
+    ));
 
     let server_error = client
         .next_server_event()
         .await
         .expect_err("must fail once channel is closed");
-    assert!(matches!(server_error, ClientError::SessionClosed));
+    assert!(matches!(
+        server_error.current_context(),
+        ClientError::SessionClosed
+    ));
 }
 
 #[nervix_primitives::test]
@@ -2783,7 +2810,10 @@ async fn an_acknowledged_subscription_that_no_known_server_can_restore_ends_afte
         .next_subscription()
         .await
         .expect_err("no known server can reopen the session");
-    assert!(matches!(error, ClientError::SessionClosed), "{error:?}");
+    assert!(
+        matches!(error.current_context(), ClientError::SessionClosed),
+        "{error:?}"
+    );
 }
 
 #[nervix_primitives::test]
@@ -2805,7 +2835,7 @@ async fn the_client_reports_a_notice_gap_once_and_returns_the_notices_after_it()
         .expect_err("the dropped notices are reported as a gap");
     assert!(
         matches!(
-            gap,
+            gap.current_context(),
             ClientError::EventOverflow {
                 stream: crate::EventStreamKind::ServerNotice
             }
@@ -2827,7 +2857,10 @@ async fn suggest_returns_session_closed_when_request_channel_is_closed() {
         .suggest("CREATE ", 7, 64, None)
         .await
         .expect_err("must fail");
-    assert!(matches!(error, ClientError::SessionClosed));
+    assert!(matches!(
+        error.current_context(),
+        ClientError::SessionClosed
+    ));
 }
 
 #[cfg(feature = "autocomplete")]
@@ -2839,7 +2872,7 @@ async fn suggest_refuses_a_cursor_inside_a_character() {
         .await
         .expect_err("must fail");
     assert!(matches!(
-        error,
+        error.current_context(),
         ClientError::InvalidCursor {
             cursor: 1,
             length: 2

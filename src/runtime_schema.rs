@@ -81,15 +81,25 @@ mod arrow_body;
 mod arrow_body_properties;
 mod batch_container;
 mod client_batch;
+#[cfg(test)]
+pub(crate) mod codec_properties;
+#[cfg(test)]
+pub(crate) mod crafted_streams;
+#[cfg(test)]
+pub(crate) mod generated_batches;
 mod ipc_stream;
 mod jaq_unfold;
 mod syslog;
+#[cfg(test)]
+mod transforming_codec_properties;
 
 pub(crate) use arrow_body::ArrowBodyError;
 pub(crate) use batch_container::{
     BatchContainerError, BatchMember, BatchMemberEncoding, BoundedBatchEncoding,
 };
 pub use client_batch::{ClientBatchError, ClientBatchLimits, ClientSchemaDifference};
+pub use ipc_stream::UnsupportedFieldKind;
+pub(crate) use ipc_stream::{IpcMessages, IpcStreamError, StreamEnding};
 pub use jaq_unfold::UnfoldPosition;
 
 #[derive(Debug, Clone, PartialEq)]
@@ -2777,6 +2787,24 @@ impl RuntimeValue {
         }
     }
 
+    /// A float as JSON: its number, or, for a non-finite float JSON has no number for, the string
+    /// a proto3 JSON reader reads it from. A non-finite float reaches a record from a payload whose
+    /// number rounds past the type's range, an Avro or CBOR float, or a client's Arrow batch; only
+    /// a float the VM computes is refused when it is not finite.
+    fn json_float(value: f64) -> JsonValue {
+        if let Some(number) = JsonNumber::from_f64(value) {
+            return JsonValue::Number(number);
+        }
+        let name = if value.is_nan() {
+            "NaN"
+        } else if value.is_sign_negative() {
+            "-Infinity"
+        } else {
+            "Infinity"
+        };
+        JsonValue::String(name.to_string())
+    }
+
     pub(crate) fn to_json_value(&self) -> JsonValue {
         match self {
             Self::U8(v) => JsonValue::Number(JsonNumber::from(*v)),
@@ -2790,16 +2818,8 @@ impl RuntimeValue {
             Self::Bool(v) => JsonValue::Bool(*v),
             Self::String(v) => JsonValue::String(v.clone()),
             Self::Datetime(v) => JsonValue::String(v.to_rfc3339()),
-            Self::F32(v) => {
-                JsonValue::Number(JsonNumber::from_f64(f64::from(v.into_inner())).verified(
-                    "the VM turns a non-finite float result into a row error, so a stored float \
-                     is finite",
-                ))
-            }
-            Self::F64(v) => JsonValue::Number(JsonNumber::from_f64(v.into_inner()).verified(
-                "the VM turns a non-finite float result into a row error, so a stored float is \
-                 finite",
-            )),
+            Self::F32(v) => Self::json_float(f64::from(v.into_inner())),
+            Self::F64(v) => Self::json_float(v.into_inner()),
             Self::Array(values) | Self::Vec(values) => {
                 JsonValue::Array(values.iter().map(RuntimeValue::to_json_value).collect())
             }
@@ -3991,9 +4011,7 @@ fn append_json_value_to_arrow(
                 None
             }
         ),
-        ParseAsType::F32 => {
-            append_primitive!(Float32Builder, value.as_f64().map(ApproxInto::approx_into))
-        }
+        ParseAsType::F32 => append_primitive!(Float32Builder, value.as_f64().map(json_number_f32)),
         ParseAsType::F64 => append_primitive!(Float64Builder, value.as_f64()),
         ParseAsType::Array { element, len } => {
             let values = value.as_array().ok_or_else(incompatible)?;
@@ -4040,18 +4058,54 @@ fn append_json_value_to_arrow(
                     parent: location,
                     index,
                 };
-                append_json_value_to_arrow(
+                if let Err(error) = append_json_value_to_arrow(
                     builder.values().as_mut(),
                     element,
                     element_expected,
                     value,
                     &element_location,
-                )?;
+                ) {
+                    close_partial_list(builder);
+                    return Err(error);
+                }
             }
             builder.append(true);
             Ok(())
         }
     }
+}
+
+/// The `F32` a JSON number names, given the `f64` a JSON reader parsed it as.
+///
+/// Narrowing the `f64` rounds a second time, which names the nearest `F32` except where the `f64`
+/// lies exactly halfway between two `F32` values: the decimal lay just beside that midpoint, and
+/// rounding half to even can name the neighbour of the value it was written for. `7.038531e-26`
+/// is one such decimal. A writer spells an `F32` with its shortest decimal, so at a midpoint the
+/// number names the `F32` whose shortest decimal reads as the same `f64`; every other number names
+/// the nearest `F32`.
+fn json_number_f32(wide: f64) -> f32 {
+    let nearest: f32 = wide.approx_into();
+    let nearest_wide = f64::from(nearest);
+    if !nearest.is_finite() || nearest_wide == wide {
+        return nearest;
+    }
+    let other = if nearest_wide < wide {
+        nearest.next_up()
+    } else {
+        nearest.next_down()
+    };
+    // Two adjacent `F32` values widen exactly, and so does the point halfway between them.
+    let midpoint = (nearest_wide + f64::from(other)) / 2.0;
+    if midpoint != wide {
+        return nearest;
+    }
+    let mut digits = ryu::Buffer::new();
+    let other_reads_as_wide = digits.format(other).parse::<f64>() == Ok(wide);
+    let nearest_reads_as_wide = digits.format(nearest).parse::<f64>() == Ok(wide);
+    if other_reads_as_wide && !nearest_reads_as_wide {
+        return other;
+    }
+    nearest
 }
 
 fn append_borrowed_json_value_to_arrow(
@@ -4120,10 +4174,9 @@ fn append_borrowed_json_value_to_arrow(
                 .append_value(value);
             Ok(())
         }
-        ParseAsType::F32 => append_primitive!(
-            Float32Builder,
-            value.cast_f64().map(ApproxInto::approx_into)
-        ),
+        ParseAsType::F32 => {
+            append_primitive!(Float32Builder, value.cast_f64().map(json_number_f32))
+        }
         ParseAsType::F64 => append_primitive!(Float64Builder, value.cast_f64()),
         ParseAsType::Array { element, len } => {
             let values = value.as_array().ok_or_else(incompatible)?;
@@ -4170,13 +4223,16 @@ fn append_borrowed_json_value_to_arrow(
                     parent: location,
                     index,
                 };
-                append_borrowed_json_value_to_arrow(
+                if let Err(error) = append_borrowed_json_value_to_arrow(
                     builder.values().as_mut(),
                     element,
                     element_expected,
                     value,
                     &element_location,
-                )?;
+                ) {
+                    close_partial_list(builder);
+                    return Err(error);
+                }
             }
             builder.append(true);
             Ok(())
@@ -4379,12 +4435,15 @@ fn append_avro_value_to_arrow(
                     parent: location,
                     index,
                 };
-                append_avro_value_to_arrow(
+                if let Err(error) = append_avro_value_to_arrow(
                     builder.values().as_mut(),
                     element,
                     value,
                     &element_location,
-                )?;
+                ) {
+                    close_partial_list(builder);
+                    return Err(error);
+                }
             }
             builder.append(true);
             Ok(())
@@ -4425,6 +4484,15 @@ fn avro_value_payload(value: &AvroValue) -> &AvroValue {
 
 fn avro_value_is_null(value: &AvroValue) -> bool {
     matches!(avro_value_payload(value), AvroValue::Null)
+}
+
+/// Closes the list value a failed element append left open.
+///
+/// The elements written before the failure stay in the child builder, so the list that holds them
+/// must be closed now: left open, they would become the first elements of the next row's list
+/// value. The row they belong to is abandoned and dropped, so its list never reaches a batch.
+fn close_partial_list(builder: &mut ListBuilder<Box<dyn ArrayBuilder>>) {
+    builder.append(true);
 }
 
 /// Closes the fixed-size list value an element append failed part-way through.
@@ -9760,5 +9828,52 @@ mod tests {
             error.current_context(),
             CodecError::InvalidCodec { .. }
         ));
+    }
+
+    /// JSON has no number for a non-finite float, so the JSON a materialized report, a hash map
+    /// answer or a hash map key is rendered from spells one as the string a proto3 JSON reader
+    /// takes for it, and keeps every finite float a number.
+    #[test]
+    fn non_finite_floats_render_as_their_json_names() {
+        for (value, expected) in [
+            (
+                RuntimeValue::F32(OrderedFloat(f32::INFINITY)),
+                serde_json::json!("Infinity"),
+            ),
+            (
+                RuntimeValue::F32(OrderedFloat(f32::NEG_INFINITY)),
+                serde_json::json!("-Infinity"),
+            ),
+            (
+                RuntimeValue::F32(OrderedFloat(f32::NAN)),
+                serde_json::json!("NaN"),
+            ),
+            (
+                RuntimeValue::F64(OrderedFloat(f64::INFINITY)),
+                serde_json::json!("Infinity"),
+            ),
+            (
+                RuntimeValue::F64(OrderedFloat(f64::NEG_INFINITY)),
+                serde_json::json!("-Infinity"),
+            ),
+            (
+                RuntimeValue::F64(OrderedFloat(-f64::NAN)),
+                serde_json::json!("NaN"),
+            ),
+            (RuntimeValue::F64(OrderedFloat(0.5)), serde_json::json!(0.5)),
+            (
+                RuntimeValue::Vec(vec![
+                    RuntimeValue::F32(OrderedFloat(1.5)),
+                    RuntimeValue::F32(OrderedFloat(f32::NAN)),
+                ]),
+                serde_json::json!([1.5, "NaN"]),
+            ),
+        ] {
+            assert_eq!(value.to_json_value(), expected);
+        }
+        assert_eq!(
+            RuntimeValue::F64(OrderedFloat(f64::INFINITY)).to_key_fragment(),
+            "\"Infinity\""
+        );
     }
 }

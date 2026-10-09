@@ -332,6 +332,8 @@ struct ScenarioWorld {
     leadership_move: Option<AbortOnDropHandle<std::io::Result<()>>>,
     /// The restore step pause a scenario armed and has not released.
     restore_step_pause: Option<backup::restore::ArmedRestorePause>,
+    /// What the last measured CLI backup's memory sampler observed, until a step checks it.
+    backup_memory: Option<backup::memory::SampledMemory>,
     /// The outcome of the last command a scenario sent through its own session.
     last_session_command: Option<nervix_client_wire::CommandOutcome>,
     /// Candidates collected by a public session completion paging scenario.
@@ -6064,7 +6066,7 @@ async fn when_node_starts_durable_catch_up(
             // A stop ends the next iteration. Collect the admitted command's response first so
             // the completed-write count includes a command committed before catch-up finished.
             let outcome = client.execute(format!("CREATE DOMAIN {name};")).await;
-            let outcome = outcome.map_err(|error| error.to_string())?;
+            let outcome = outcome.map_err(|error| format!("{error:#}"))?;
             if !outcome.succeeded() {
                 return Err(format!(
                     "command failed with {:?}: {}; diagnostics: {:?}",
@@ -8593,6 +8595,34 @@ async fn given_node_has_malformed_output_wasm_processor_fixture_resource_directo
 }
 
 #[given(
+    regex = r#"^node "([^"]+)" has a WASM fixture generating a column that (reaches past its body|is an integer of 7 bits|counts a null its validity bitmap cannot hold|declares a body longer than its stream) for relay "([^"]+)" in resource directory "([^"]+)"$"#
+)]
+async fn given_node_has_unreadable_generated_column_wasm_processor_fixture_resource_directory(
+    world: &mut ScenarioWorld,
+    node_id: String,
+    defect: String,
+    output_relay: String,
+    placeholder: String,
+) {
+    let defect = match defect.as_str() {
+        "reaches past its body" => GeneratedColumnDefect::BufferPastBody,
+        "is an integer of 7 bits" => GeneratedColumnDefect::IntegerOfSevenBits,
+        "counts a null its validity bitmap cannot hold" => {
+            GeneratedColumnDefect::NullWithoutValidity
+        }
+        "declares a body longer than its stream" => GeneratedColumnDefect::BodyLongerThanStream,
+        other => panic!("unsupported generated column defect '{other}'"),
+    };
+    place_generated_wasm_processor_fixture(
+        world,
+        &node_id,
+        &placeholder,
+        unreadable_generated_column_wasm_fixture(&output_relay, defect),
+    )
+    .await;
+}
+
+#[given(
     expr = "node {string} has a WASM fixture returning an uninitialized column to relay {string} \
             in resource directory {string}"
 )]
@@ -8921,6 +8951,195 @@ fn historical_time_tokenless_wasm_fixture(output_relay: &str) -> Vec<u8> {
               global.set $emitted
             end
             i32.const 0)
+          (func (export "nervix_flush") (result i32) (i32.const 0))
+          (func (export "nervix_read_emit") (result i32)
+            global.get $emitted
+            if (result i32)
+              i32.const 0
+              global.set $emitted
+              i32.const {encoded_len}
+            else
+              i32.const 0
+            end)
+          (func (export "nervix_dump_state") (result i32) (i32.const 0))
+          (func (export "nervix_load_state") (param i32 i32) (result i32) (i32.const 0))
+          (func (export "nervix_reset_state") (result i32)
+            i32.const 0
+            global.set $emitted
+            i32.const 0)
+        )"#
+    )
+    .into_bytes()
+}
+
+/// What the generated column pool of a guest declares that no valid Arrow IPC stream does.
+#[derive(Debug, Clone, Copy)]
+enum GeneratedColumnDefect {
+    /// The record batch declares its values buffer past the eight-byte body of its message.
+    BufferPastBody,
+    /// The schema declares the column as an integer seven bits wide.
+    IntegerOfSevenBits,
+    /// The record batch counts one null and declares an empty validity bitmap.
+    NullWithoutValidity,
+    /// The record batch message declares a body of 2^60 bytes before the eight that follow it.
+    BodyLongerThanStream,
+}
+
+impl GeneratedColumnDefect {
+    /// The pool: one Arrow IPC stream of one unnamed `I64` column and one record batch of one row,
+    /// with the schema message or the record batch message declaring the defect.
+    fn stream(self) -> Vec<u8> {
+        use arrow_ipc::{
+            Buffer as IpcBuffer, Endianness, Field as IpcField, FieldArgs, FieldNode, Int, IntArgs,
+            Message, MessageArgs, MessageHeader, MetadataVersion, RecordBatch as IpcRecordBatch,
+            RecordBatchArgs, Schema as IpcSchema, SchemaArgs, Type as IpcType,
+        };
+
+        let bits = match self {
+            Self::IntegerOfSevenBits => 7,
+            Self::BufferPastBody | Self::NullWithoutValidity | Self::BodyLongerThanStream => 64,
+        };
+        let mut builder = flatbuffers::FlatBufferBuilder::new();
+        let integer = Int::create(
+            &mut builder,
+            &IntArgs {
+                bitWidth: bits,
+                is_signed: true,
+            },
+        );
+        let children = builder.create_vector::<flatbuffers::ForwardsUOffset<IpcField<'_>>>(&[]);
+        let name = builder.create_string("");
+        let field = IpcField::create(
+            &mut builder,
+            &FieldArgs {
+                name: Some(name),
+                nullable: false,
+                type_type: IpcType::Int,
+                type_: Some(integer.as_union_value()),
+                dictionary: None,
+                children: Some(children),
+                custom_metadata: None,
+            },
+        );
+        let fields = builder.create_vector(&[field]);
+        let schema = IpcSchema::create(
+            &mut builder,
+            &SchemaArgs {
+                endianness: Endianness::Little,
+                fields: Some(fields),
+                custom_metadata: None,
+                features: None,
+            },
+        );
+        let message = Message::create(
+            &mut builder,
+            &MessageArgs {
+                version: MetadataVersion::V5,
+                header_type: MessageHeader::Schema,
+                header: Some(schema.as_union_value()),
+                bodyLength: 0,
+                custom_metadata: None,
+            },
+        );
+        builder.finish(message, None);
+        let mut stream = Vec::new();
+        Self::frame(&mut stream, builder.finished_data(), 0);
+
+        let (node, values) = match self {
+            Self::BufferPastBody => (FieldNode::new(1, 0), IpcBuffer::new(0, 1 << 40)),
+            Self::IntegerOfSevenBits | Self::BodyLongerThanStream => {
+                (FieldNode::new(1, 0), IpcBuffer::new(0, 8))
+            }
+            Self::NullWithoutValidity => (FieldNode::new(1, 1), IpcBuffer::new(0, 8)),
+        };
+        let declared_body = match self {
+            Self::BodyLongerThanStream => 1 << 60,
+            Self::BufferPastBody | Self::IntegerOfSevenBits | Self::NullWithoutValidity => 8,
+        };
+        let mut builder = flatbuffers::FlatBufferBuilder::new();
+        let nodes = builder.create_vector(&[node]);
+        let buffers = builder.create_vector(&[IpcBuffer::new(0, 0), values]);
+        let batch = IpcRecordBatch::create(
+            &mut builder,
+            &RecordBatchArgs {
+                length: 1,
+                nodes: Some(nodes),
+                buffers: Some(buffers),
+                ..RecordBatchArgs::default()
+            },
+        );
+        let message = Message::create(
+            &mut builder,
+            &MessageArgs {
+                version: MetadataVersion::V5,
+                header_type: MessageHeader::RecordBatch,
+                header: Some(batch.as_union_value()),
+                bodyLength: declared_body,
+                custom_metadata: None,
+            },
+        );
+        builder.finish(message, None);
+        Self::frame(&mut stream, builder.finished_data(), 8);
+        stream.extend_from_slice(&[0xff, 0xff, 0xff, 0xff, 0, 0, 0, 0]);
+        stream
+    }
+
+    /// Appends one message: the continuation marker, the padded metadata length, the metadata, its
+    /// padding and a body of `body` zero bytes.
+    fn frame(stream: &mut Vec<u8>, metadata: &[u8], body: usize) {
+        let padded = metadata.len().div_ceil(8) * 8;
+        stream.extend_from_slice(&[0xff; 4]);
+        stream.extend_from_slice(
+            &i32::try_from(padded)
+                .expect("a small message length fits i32")
+                .to_le_bytes(),
+        );
+        stream.extend_from_slice(metadata);
+        stream.resize(stream.len() + padded - metadata.len() + body, 0);
+    }
+}
+
+/// A guest emitting one output row from a generated column pool that declares `defect`.
+fn unreadable_generated_column_wasm_fixture(
+    output_relay: &str,
+    defect: GeneratedColumnDefect,
+) -> Vec<u8> {
+    let generated_arrow_ipc_batch = defect.stream();
+    let encoded = WasmEnvelope::output(
+        generated_arrow_ipc_batch,
+        vec![WasmRoutedOutput::new(
+            output_relay,
+            vec![WasmOutputColumnRef::generated(0)],
+            WasmAckSidecar {
+                rows: vec![WasmOutputRow::default()],
+                ..WasmAckSidecar::default()
+            },
+        )],
+    )
+    .encode()
+    .expect("the WASM output fixture must encode");
+    let encoded_wat = encoded
+        .iter()
+        .map(|byte| format!("\\{byte:02x}"))
+        .collect::<String>();
+    let encoded_len = encoded.len();
+
+    format!(
+        r#"(module
+          (memory (export "memory") 2)
+          (global $emitted (mut i32) (i32.const 0))
+          (data (i32.const 32768) "{encoded_wat}")
+          (func (export "nervix_buffer_ptr") (result i32) (i32.const 32768))
+          (func (export "nervix_buffer_len") (result i32) (i32.const {encoded_len}))
+          (func (export "nervix_buffer_capacity") (result i32) (i32.const 131072))
+          (func (export "nervix_alloc") (param i32) (result i32) (i32.const 0))
+          (func (export "nervix_init") (param i32 i32) (result i32) (i32.const 0))
+          (func (export "nervix_current_domain_time_nanos") (result i64) (i64.const 0))
+          (func (export "nervix_process_batch") (param i32 i32) (result i32)
+            i32.const 1
+            global.set $emitted
+            i32.const 0)
+          (func (export "nervix_on_timeout") (param i64) (result i32) (i32.const 0))
           (func (export "nervix_flush") (result i32) (i32.const 0))
           (func (export "nervix_read_emit") (result i32)
             global.get $emitted
@@ -13698,7 +13917,7 @@ async fn when_named_client_fails_to_execute_commands(
                 return;
             }
             Err(error) => {
-                world.last_command_error = Some(error.to_string());
+                world.last_command_error = Some(format!("{error:#}"));
                 return;
             }
         }
@@ -14373,7 +14592,7 @@ async fn when_named_client_fails_to_attach_to_transaction(
             );
             world.last_command_error = Some(outcome.message);
         }
-        Err(error) => world.last_command_error = Some(error.to_string()),
+        Err(error) => world.last_command_error = Some(format!("{error:#}")),
     }
 }
 
@@ -14468,11 +14687,11 @@ async fn when_the_client_attempts_to_connect_to_the_leader_node_as_user_with_pas
                     world.last_command_error = Some(outcome.message);
                 }
                 Err(error) => {
-                    world.last_command_error = Some(error.to_string());
+                    world.last_command_error = Some(format!("{error:#}"));
                 }
             },
             Err(error) => {
-                world.last_command_error = Some(error.to_string());
+                world.last_command_error = Some(format!("{error:#}"));
             }
         }
     }
@@ -14521,11 +14740,11 @@ async fn connect_to_node_with_credentials(
                 world.last_command_error = Some(outcome.message);
             }
             Err(error) => {
-                world.last_command_error = Some(error.to_string());
+                world.last_command_error = Some(format!("{error:#}"));
             }
         },
         Err(error) => {
-            world.last_command_error = Some(error.to_string());
+            world.last_command_error = Some(format!("{error:#}"));
         }
     }
 }
@@ -22222,7 +22441,7 @@ async fn when_json_messages_with_user_id_are_rapidly_published_to_input(
     match source_kind.as_str() {
         "KAFKA" => world
             .cluster()
-            .publish_kafka_payloads(&input, &vec![payload.clone(); count])
+            .publish_kafka_payloads(&input, &vec![payload.as_bytes().to_vec(); count])
             .await
             .expect("failed to publish kafka message burst"),
         "MQTT" => world
@@ -22255,7 +22474,7 @@ async fn when_these_kafka_messages_are_rapidly_published(
         .lines()
         .map(str::trim)
         .filter(|line| !line.is_empty())
-        .map(ToOwned::to_owned)
+        .map(|line| line.as_bytes().to_vec())
         .collect::<Vec<_>>();
     assert!(
         !payloads.is_empty(),
@@ -22266,6 +22485,37 @@ async fn when_these_kafka_messages_are_rapidly_published(
         .publish_kafka_payloads(&topic, &payloads)
         .await
         .expect("failed to publish kafka messages");
+}
+
+/// Publishes each JSON line of the docstring encoded in a schemaful wire format, through one
+/// producer, so the ingestor polls them as one group.
+#[when(expr = "these Kafka messages encoded as {string} are rapidly published to topic {string}")]
+async fn when_these_encoded_kafka_messages_are_rapidly_published(
+    world: &mut ScenarioWorld,
+    wire_format: String,
+    topic: String,
+    #[step] step: &Step,
+) {
+    let topic = expand_placeholders(world, &topic);
+    let lines = expand_placeholders(world, docstring(step));
+    let mut payloads = Vec::new();
+    for line in lines.lines().map(str::trim).filter(|line| !line.is_empty()) {
+        payloads.push(encode_http_payload_for_codec(
+            &wire_format,
+            line,
+            &world.avro_http_field_order,
+            &world.avro_http_optional_fields,
+        ));
+    }
+    assert!(
+        !payloads.is_empty(),
+        "at least one Kafka payload is required"
+    );
+    world
+        .cluster()
+        .publish_kafka_payloads(&topic, &payloads)
+        .await
+        .expect("failed to publish encoded kafka messages");
 }
 
 #[when(expr = "Pulsar message is published to topic {string}")]

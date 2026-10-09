@@ -68,7 +68,10 @@ runtime plan cannot pair a present branch schema with an independently missing s
 Unbranched execution has no branch key; a concrete key has a nonempty declared shape. An empty
 field list or synthetic root identifier does not select a branch. A concrete key holds only finite
 floats, because the VM turns a non-finite float result into a row error and a non-finite float has
-no canonical text to key a branch by. A key read from a stored checkpoint or a peer that holds one
+no canonical text to key a branch by. A record's fields are not held to that rule: a payload number
+rounding past an `F32` field's range, an Avro float or a producer's Arrow batch can bring a NaN or
+an infinity in, and every JSON rendering of a record, such as a materialized report, a hash map
+answer or a hash map key, writes one as the string `NaN`, `Infinity` or `-Infinity`. A key read from a stored checkpoint or a peer that holds one
 fails with `BranchKeyError::NonFiniteFloat`, and one holding a datetime that is not RFC 3339 text
 fails with `BranchKeyError::RemoteFieldValue`; both name the field. Materialized-state reads use the
 incoming concrete branch, or the actual unbranched state, and reporting keeps the optional branch
