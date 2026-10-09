@@ -124,6 +124,12 @@ it beneath their own failure, as the paragraphs below describe. HTTP polling, Pr
 OTEL and Iceberg report their failed request, export or catalog call without it, so their
 diagnostics do not name the lookup failure.
 
+During cluster startup, a node that has recovered Raft peer endpoints logs a failed lookup of its
+configured bootstrap host at `warn` and continues with the recovered seeds. A node without recovered
+peer endpoints keeps the lookup error beneath `AppError::StartCluster`, because it needs the
+configured bootstrap host for first contact. A failed lookup of the node's own advertised endpoint
+also fails startup.
+
 The node's own trace export waits for the resolver installed by startup. Its connector's
 `TraceConnectError` distinguishes a closed installation, a connection timeout, and a Hyper
 connection failure retaining its `DnsLookupError` cause. Tonic and the OTLP SDK report the failed

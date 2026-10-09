@@ -94,7 +94,9 @@ On restart, the node also uses the peer endpoints in its recovered Raft membersh
 excluding its own endpoint. These are contact hints, not current discovery advertisements: the
 bootstrap exchange authenticates the answering node, and gossip then replaces the hint with that
 node's current incarnation and advertised endpoint. This lets a former bootstrap node contact
-survivors even when its deployment has no configured bootstrap host.
+survivors even when its deployment has no configured bootstrap host. A node with recovered peer
+endpoints can also start when its configured bootstrap host does not resolve: it logs that lookup
+failure and contacts the peers whose recovered endpoints do resolve.
 
 A peer advertises three endpoints independently: its interconnect endpoint as a host and port, and
 its client and web-console endpoints as URLs. Discovery converges field by field, so each one is
@@ -152,11 +154,14 @@ lookup means for a peer.
 
 At startup a node resolves its own advertised interconnect endpoint, whose first address becomes
 its gossip identity address, and its configured bootstrap endpoint, every address of which becomes a
-gossip seed. Each lookup has the connection setup timeout, five seconds; failure of either required
-lookup fails startup with `failed to start cluster membership`. It also resolves the recovered Raft
-members' advertised endpoints in parallel. Their successful answers become additional gossip seeds;
-an unavailable recovered endpoint is logged at `warn` and skipped so it does not prevent the node
-from starting or using another reachable member. These startup answers are not looked up again:
+gossip seed. Each lookup has the connection setup timeout, five seconds. Failure to resolve the
+node's own endpoint fails startup with `failed to start cluster membership`. A configured bootstrap
+endpoint must resolve when the node has no recovered Raft peer endpoints; otherwise its lookup
+failure is logged at `warn` and skipped. An invalid configured bootstrap endpoint still fails
+startup. The node also resolves the recovered Raft members' advertised endpoints in parallel. Their
+successful answers become additional gossip seeds; an unavailable recovered endpoint is logged at
+`warn` and skipped so it does not prevent the node from starting or using another reachable member.
+These startup answers are not looked up again:
 gossip keeps dialling the seed addresses they produced, and the gossip identity address stays the
 one resolved at startup. Once gossip discovers a live peer, the interconnect replaces the recovery
 hint with that peer's current advertised endpoint.

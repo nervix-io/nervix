@@ -1063,10 +1063,10 @@ Seed 136 under `temporary-quorum-loss` failed as a product failure in its second
 of the ingestor owner. The runner crashed the leader nervix-1, crashed nervix-2 six seconds later and
 observed the lost quorum as the policy requires. Started again while nervix-1 was still stopped, nervix-2
 exited at startup with `failed to start cluster membership … resolving 'nervix-1' failed: the name does
-not exist`: Docker's DNS does not resolve a stopped container, and a node fails startup when its
-bootstrap host does not resolve, although its recovered Raft members would let it rejoin. [Cluster Chaos
+not exist`: Docker's DNS did not resolve the stopped container, and at that revision the node required
+its configured bootstrap host even though its recovered Raft members could have found a survivor. [Cluster Chaos
 56: Start a restarting voter from its recovered Raft members when its bootstrap host does not
-resolve](https://app.clickup.com/t/86bcdk4tn) owns that. An explicit one-step plan, a crash of the leader
+resolve](https://app.clickup.com/t/86bcdk4tn) tracks that failure. An explicit one-step plan, a crash of the leader
 with a crash of its peer inside it, reproduced the failure on its first run, within four and a half
 minutes. That run, which ended inside its fault phase, still wrote its incomplete trace verdict and its
 resource summary. Seed 45's double outage paused its first node, whose name stays resolvable, so it did
@@ -1379,10 +1379,10 @@ scenario: both topologies of the baseline, backup, rolling-restart, leader-crash
 cluster-restart scenarios, every other crash role, the pause cases, each partition case and each
 degradation profile on its own, stale-follower and former-owner-restart, and every fault of the
 stateful and domain-time scenarios. Its mixed-instability runs last 30 minutes each: the fixed
-seeds 42 under `preserve-quorum` and 45 under `temporary-quorum-loss`, the failure seed 136, and
-two rotating seeds, one per policy, that every run draws and records. Seed 136 crashes a voter
-inside the crash of the bootstrap node, and it fails whenever node-1 holds that step's role until
-[Cluster Chaos 56](https://app.clickup.com/t/86bcdk4tn) is fixed.
+seeds 42 under `preserve-quorum` and 45 and 136 under `temporary-quorum-loss`, and two rotating
+seeds, one per policy, that every run draws and records. Seed 136 crashes a voter inside the crash
+of the bootstrap node, exercising the recovered peer contact path when that bootstrap name no
+longer resolves.
 
 Beside what a run needs, a suite needs `setsid` from util-linux and a `tee` that takes `-p`, as the
 one of GNU coreutils does, and refuses to start without them; its cleanup reads process state from
@@ -1581,7 +1581,7 @@ Every failure of the two runs is a product defect or a harness limitation with i
 - seed 136 under `temporary-quorum-loss` failed in both runs, and so did both rotating
   `temporary-quorum-loss` seeds, 1048352328 and 349485620. Each time a voter restarted during a double
   outage and exited with `resolving 'nervix-1' failed: the name does not exist`, which [Cluster Chaos
-  56](https://app.clickup.com/t/86bcdk4tn) owns;
+  56](https://app.clickup.com/t/86bcdk4tn) tracks;
 - seed 42 and the rotating `preserve-quorum` seed 600180860 in the first run, and seed 45 in the
   second, failed because a stopping node's Kafka ingestor stayed quiesced for its ownership handoff
   until the 30-second drain timeout, so the drain was abandoned. [Cluster Chaos
