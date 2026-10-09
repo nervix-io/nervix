@@ -75,18 +75,18 @@ impl ProcessorMaterializedState<'_> {
             )
             .await
             .change_context_lazy(|| ProcessorMaterializedError::Resolve {
-                branch: branch_key.clone(),
+                branch: BranchScope::from(branch_key),
             })?;
         match resolution {
             MaterializedDependencyResolution::Ready(values) => Ok(values),
             MaterializedDependencyResolution::Skip => Err(Report::new(
                 ProcessorMaterializedError::EvictedRequiredSkip {
-                    branch: branch_key.clone(),
+                    branch: BranchScope::from(branch_key),
                 },
             )),
             MaterializedDependencyResolution::Wait => Err(Report::new(
                 ProcessorMaterializedError::EvictedRequiredWait {
-                    branch: branch_key.clone(),
+                    branch: BranchScope::from(branch_key),
                 },
             )),
         }

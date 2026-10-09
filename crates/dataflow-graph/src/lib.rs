@@ -138,8 +138,11 @@ impl DataflowStatistics {
     }
 }
 
+/// The statistics of one concrete branch of a node, relay or edge.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct DataflowBranchStatistics {
+    /// The lowercase hexadecimal fingerprint of the branch's key. A branch's key fields may be
+    /// sensitive, so the description never carries their values.
     pub branch: String,
     pub statistics: DataflowStatistics,
 }

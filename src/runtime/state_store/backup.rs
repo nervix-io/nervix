@@ -21,10 +21,11 @@ use nervix_models::RestoreStateAuthority;
 
 use super::{generation::*, *};
 
+/// One domain's stored checkpoints of the selected kinds, listed from one database snapshot. The
+/// listing reads no payload: a checkpoint is read through the same snapshot when its owner opens
+/// it, and one the cut does not archive is never read.
 pub(in crate::runtime) struct BackupCheckpointView {
-    pub(in crate::runtime) checkpoints: Vec<(StoredPlacement, PersistedRuntimeStateEntry)>,
-    pub(in crate::runtime) materialized:
-        Vec<(StoredPlacement, checkpoint_reader::CheckpointReader)>,
+    pub(in crate::runtime) checkpoints: Vec<checkpoint_reader::ListedCheckpoint>,
 }
 
 #[derive(Debug, PartialEq, Archive, RkyvSerialize, RkyvDeserialize)]
@@ -385,7 +386,8 @@ impl RuntimeStateStore {
         Ok(())
     }
 
-    /// The active pointer, checkpoint headers and materialized/guest chunks share this one view.
+    /// The active pointer, checkpoint headers and every listed checkpoint's chunks share this one
+    /// view.
     pub(in crate::runtime) fn snapshot_backup_domain(
         &self,
         domain: &DomainName,
@@ -393,29 +395,26 @@ impl RuntimeStateStore {
     ) -> error_stack::Result<BackupCheckpointView, RuntimePersistenceError> {
         let view = self.db.snapshot();
         let namespace = active_namespace(&view, &self.restore_publications, domain)?;
-        let mut entries = Vec::new();
-        let mut materialized = Vec::new();
+        let mut checkpoints = Vec::new();
         for item in view.prefix(&self.latest, namespace.prefix(domain)) {
             let (key, raw) = item
                 .into_inner()
                 .map_err(|_| RuntimePersistenceError::ReadValue)?;
             let (_, stored) = physical_placement(&key)?;
-            // The runtime supplies the fixed three- or four-kind backup selection.
+            // The runtime supplies the fixed backup selection of at most six kinds.
             if !kinds.contains(&stored.state.kind()) {
                 continue;
             }
-            if stored.state.kind() == RuntimeStateKind::MaterializedRelay {
-                let reader = self.checkpoint_reader_at(view.clone(), &key, &raw)?;
-                materialized.push((stored, reader));
-                continue;
-            }
-            let entry = read_checkpoint(&view, &self.checkpoint_chunks, &key, &raw)?;
-            entries.push((stored, entry));
+            checkpoints.push(checkpoint_reader::ListedCheckpoint::new(
+                stored,
+                view.clone(),
+                self.latest.clone(),
+                self.checkpoint_chunks.clone(),
+                key.to_vec(),
+                &raw,
+            )?);
         }
-        Ok(BackupCheckpointView {
-            checkpoints: entries,
-            materialized,
-        })
+        Ok(BackupCheckpointView { checkpoints })
     }
 }
 
@@ -888,21 +887,26 @@ mod tests {
                 ],
             )
             .assured("one database view opens");
-        assert_eq!(view.materialized.len(), 1);
-        let mut read = view.checkpoints;
-        read.sort_by_key(|(placement, _)| u8::from(placement.state.kind()));
-        assert_eq!(read.len(), 3);
-        assert!(read.iter().any(|(placement, entry)| placement.state.kind()
-            == RuntimeStateKind::KafkaOffset
-            && entry.lsm == 5
-            && entry.payload == b"current"));
-        assert!(
-            read.iter()
-                .any(|(placement, _)| placement.state.kind() == RuntimeStateKind::BranchLru)
-        );
-        assert!(
-            read.iter()
-                .any(|(placement, _)| placement.state.kind() == RuntimeStateKind::WasmProcessor)
+        let mut listed = std::collections::BTreeMap::new();
+        for checkpoint in view.checkpoints {
+            let kind = checkpoint.placement.state.kind();
+            assert!(
+                listed.insert(u8::from(kind), checkpoint).is_none(),
+                "each selected kind is listed once"
+            );
+        }
+        let mut selected = [
+            RuntimeStateKind::WasmProcessor,
+            RuntimeStateKind::KafkaOffset,
+            RuntimeStateKind::BranchLru,
+            RuntimeStateKind::MaterializedRelay,
+        ]
+        .map(u8::from);
+        selected.sort_unstable();
+        assert_eq!(
+            listed.keys().copied().collect::<Vec<_>>(),
+            selected,
+            "the selected kinds of the domain are listed and the unselected one is not"
         );
         store
             .publish_checkpoint_set(&domain, &authority(), RestoreStateInventory::default())
@@ -922,16 +926,32 @@ mod tests {
                 .checkpoints
                 .is_empty()
         );
-        let (captured, mut reader) = view
-            .materialized
-            .into_iter()
-            .next()
+        // Each listed checkpoint is read only now, after the purge, through the listing's view.
+        let offsets = listed
+            .get(&u8::from(RuntimeStateKind::KafkaOffset))
+            .assured("the Kafka checkpoint is listed")
+            .read_entry()
+            .assured("publication cleanup cannot change a listed checkpoint");
+        assert_eq!(offsets.lsm, 5, "the newer revision survived the late write");
+        assert_eq!(offsets.payload, b"current");
+        let captured = listed
+            .remove(&u8::from(RuntimeStateKind::MaterializedRelay))
+            .assured("the materialized checkpoint is listed");
+        assert_eq!(captured.placement.identifier, materialized.identifier);
+        let mut reader = captured
+            .open()
             .assured("the materialized checkpoint retains its database view");
-        assert_eq!(captured.identifier, materialized.identifier);
         let mut bytes = Vec::new();
         std::io::Read::read_to_end(&mut reader, &mut bytes)
             .assured("publication cleanup cannot change the selected materialized checkpoint");
         assert_eq!(bytes, b"current");
+        let aligned = listed
+            .get(&u8::from(RuntimeStateKind::BranchLru))
+            .assured("the lifecycle checkpoint is listed")
+            .read_aligned(|| Ok(()))
+            .assured("an inline checkpoint reads into alignment");
+        assert_eq!(aligned.lsm, 3);
+        assert_eq!(aligned.payload.as_slice(), b"current");
         assert_eq!(
             store
                 .latest_snapshot(&other_domain)

@@ -34,7 +34,6 @@ use arrow_array::{
     },
     new_empty_array, new_null_array,
 };
-use arrow_ipc::reader::StreamReader;
 use arrow_schema::DataType as ArrowDataType;
 use arrow_select::{
     concat::concat as concat_arrow_arrays, filter::filter as filter_arrow_array,
@@ -309,10 +308,10 @@ mod subscription_predicate;
 mod test_fixtures;
 
 pub(crate) use backup_state::{
-    BackupBranchLifecycleEntry, CapturedBranchState, CapturedBranchStateKind, CapturedDomainState,
-    CapturedMaterializedRelay, CapturedMaterializedState, CapturedRuntimeState,
-    CapturedStoredMaterializedRelay, RESTORE_STATE_CHUNK_BYTES, RESTORE_STATE_WORKING_BYTES,
-    RestoredRuntimeState, decode_backup_branch_lifecycle, decode_backup_kafka_offsets,
+    BackupBranchLifecycleEntry, BackupKafkaPartitionOffset, CapturedBranchState,
+    CapturedBranchStateKind, CapturedDomainState, CapturedGuestSave, CapturedMaterializedRelay,
+    CapturedMaterializedState, CapturedNativeMetadata, CapturedStoredMaterializedRelay,
+    RESTORE_STATE_CHUNK_BYTES, RESTORE_STATE_WORKING_BYTES, RestoredRuntimeState,
     write_restored_branch_lifecycle, write_restored_kafka_offsets,
 };
 use branch_aggregated_state::{
@@ -324,7 +323,7 @@ use branch_buffering::{
     RouteOutputError, RuntimeFlushPolicy, RuntimeInputCollectPolicy, RuntimeInputCollector,
     RuntimeWake, wait_for_branch_buffer_deadlines,
 };
-use branch_key::branch_key_display;
+use branch_key::BranchScope;
 use branch_lifecycle_state::{BranchLifecycleCheckpoint, ReplicatedBranchLifecycle};
 use branch_lru_state::{
     BranchLruSnapshotError, decode_branch_lru_snapshot, encode_branch_lru_snapshot,

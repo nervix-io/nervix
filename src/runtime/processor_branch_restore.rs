@@ -198,7 +198,7 @@ impl RestoredBranches {
             if handoff.incarnation > lifecycle.lsm() {
                 return Err(Report::new(
                     ProcessorBranchTaskError::HandedOffLifetimeAfterLifecycle {
-                        branch: handoff.key.clone(),
+                        branch: BranchScope::from(&handoff.key),
                         incarnation: handoff.incarnation,
                         lsm: lifecycle.lsm(),
                     },

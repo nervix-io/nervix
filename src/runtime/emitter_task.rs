@@ -819,7 +819,7 @@ impl EmitterTask {
                         relay,
                         physical_node_id,
                         direction: "sent",
-                        branch_key: None,
+                        branch: None,
                     },
                 ))
             }

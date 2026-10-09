@@ -24,7 +24,7 @@
 
 use std::{
     cmp::Ordering,
-    collections::VecDeque,
+    collections::{BTreeMap, VecDeque},
     num::NonZeroU64,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
@@ -35,8 +35,8 @@ use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_approx_into::{ApproxInto as _, CheckedApproxInto as _};
 use nervix_dataflow_graph::{DataflowBranchStatistics, DataflowMetricRef, DataflowStatistics};
 use nervix_models::{
-    BranchName, ClusterNodeName, DomainName, EmitterName, IngestorName, ModelKind, ModelName,
-    RelayName, Timestamp,
+    BranchKeyFingerprint, BranchName, ClusterNodeName, DomainName, EmitterName, IngestorName,
+    ModelKind, ModelName, RelayName, Timestamp,
 };
 use nervix_primitives::{
     collections::{DashMap, dash_map::Entry},
@@ -254,9 +254,11 @@ impl MetricKey {
     }
 }
 
+/// A series recorded for one concrete branch, which it names by the fingerprint of its key: the
+/// statistics it feeds reach sessions, and a branch's key fields may be `SENSITIVE`.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 struct BranchMetricKey {
-    branch_key: String,
+    branch: BranchKeyFingerprint,
     key: MetricKey,
 }
 
@@ -1584,7 +1586,7 @@ struct BranchInstanceMetricKey {
     domain: String,
     branch: String,
     physical_node_id: Option<ClusterNodeName>,
-    concrete_key: String,
+    concrete_branch: Option<BranchKeyFingerprint>,
 }
 
 #[derive(Debug)]
@@ -2876,10 +2878,10 @@ impl RelayMetricsHandle {
 }
 
 #[derive(Debug, Clone, Copy)]
-enum RecordingScope<'a> {
+enum RecordingScope {
     Global,
-    Branch(&'a str),
-    GlobalAndBranch(&'a str),
+    Branch(BranchKeyFingerprint),
+    GlobalAndBranch(BranchKeyFingerprint),
 }
 
 pub(crate) struct NodeBatchMetricsSpec<'a> {
@@ -2889,7 +2891,8 @@ pub(crate) struct NodeBatchMetricsSpec<'a> {
     pub(crate) relay: &'a RelayName,
     pub(crate) physical_node_id: Option<&'a ClusterNodeName>,
     pub(crate) direction: &'static str,
-    pub(crate) branch_key: Option<&'a str>,
+    /// The concrete branch the series also records per branch, by the fingerprint of its key.
+    pub(crate) branch: Option<BranchKeyFingerprint>,
 }
 
 impl RuntimeMetrics {
@@ -2904,10 +2907,10 @@ impl RuntimeMetrics {
             relay,
             physical_node_id,
             direction,
-            branch_key,
+            branch,
         } = spec;
-        let scope = match branch_key {
-            Some(branch_key) => RecordingScope::GlobalAndBranch(branch_key),
+        let scope = match branch {
+            Some(branch) => RecordingScope::GlobalAndBranch(branch),
             None => RecordingScope::Global,
         };
         self.resolve_batch_metrics(
@@ -2952,7 +2955,7 @@ impl RuntimeMetrics {
         node: &ModelName,
         physical_node_id: Option<&ClusterNodeName>,
         direction: &'static str,
-        branch_key: &str,
+        branch: BranchKeyFingerprint,
     ) -> MessageMetricsHandle {
         self.resolve_message_metrics(
             MetricKey::node_without_stream(
@@ -2963,7 +2966,7 @@ impl RuntimeMetrics {
                 direction,
                 MESSAGES_TOTAL,
             ),
-            RecordingScope::Branch(branch_key),
+            RecordingScope::Branch(branch),
         )
     }
 
@@ -2974,10 +2977,10 @@ impl RuntimeMetrics {
         node: &ModelName,
         relay: &RelayName,
         physical_node_id: Option<&ClusterNodeName>,
-        branch_key: Option<&str>,
+        branch: Option<BranchKeyFingerprint>,
     ) -> NodeInputMetricsHandle {
-        let scope = match branch_key {
-            Some(branch_key) => RecordingScope::GlobalAndBranch(branch_key),
+        let scope = match branch {
+            Some(branch) => RecordingScope::GlobalAndBranch(branch),
             None => RecordingScope::Global,
         };
         let messages_key = MetricKey::node(
@@ -3010,7 +3013,7 @@ impl RuntimeMetrics {
         relay: &RelayName,
         physical_node_id: Option<&ClusterNodeName>,
         direction: &'static str,
-        branch_key: Option<&str>,
+        branch: Option<BranchKeyFingerprint>,
     ) -> RelayMetricsHandle {
         RelayMetricsHandle {
             inner: Arc::new(self.resolve_relay_metric_recorders(
@@ -3018,7 +3021,7 @@ impl RuntimeMetrics {
                 relay,
                 physical_node_id,
                 direction,
-                branch_key,
+                branch,
             )),
         }
     }
@@ -3029,10 +3032,10 @@ impl RuntimeMetrics {
         relay: &RelayName,
         physical_node_id: Option<&ClusterNodeName>,
         direction: &'static str,
-        branch_key: Option<&str>,
+        branch: Option<BranchKeyFingerprint>,
     ) -> RelayMetricRecorders {
-        let scope = match branch_key {
-            Some(branch_key) => RecordingScope::GlobalAndBranch(branch_key),
+        let scope = match branch {
+            Some(branch) => RecordingScope::GlobalAndBranch(branch),
             None => RecordingScope::Global,
         };
         let messages_key =
@@ -3049,7 +3052,7 @@ impl RuntimeMetrics {
     fn resolve_batch_metrics(
         &self,
         messages_key: MetricKey,
-        scope: RecordingScope<'_>,
+        scope: RecordingScope,
     ) -> BatchMetricsHandle {
         let recorders = self.resolve_batch_metric_recorders(messages_key, scope);
         BatchMetricsHandle {
@@ -3060,7 +3063,7 @@ impl RuntimeMetrics {
     fn resolve_batch_metric_recorders(
         &self,
         messages_key: MetricKey,
-        scope: RecordingScope<'_>,
+        scope: RecordingScope,
     ) -> BatchMetricRecorders {
         BatchMetricRecorders {
             messages: self.resolve_counter_recorders(messages_key.clone(), scope),
@@ -3075,7 +3078,7 @@ impl RuntimeMetrics {
     fn resolve_message_metrics(
         &self,
         messages_key: MetricKey,
-        scope: RecordingScope<'_>,
+        scope: RecordingScope,
     ) -> MessageMetricsHandle {
         let recorders = MessageMetricRecorders {
             messages: self.resolve_counter_recorders(messages_key.clone(), scope),
@@ -3086,23 +3089,19 @@ impl RuntimeMetrics {
         }
     }
 
-    fn resolve_counter_recorders(
-        &self,
-        key: MetricKey,
-        scope: RecordingScope<'_>,
-    ) -> CounterRecorders {
+    fn resolve_counter_recorders(&self, key: MetricKey, scope: RecordingScope) -> CounterRecorders {
         match scope {
             RecordingScope::Global => CounterRecorders {
                 primary: self.resolve_global_counter(key),
                 secondary: None,
             },
-            RecordingScope::Branch(branch_key) => CounterRecorders {
-                primary: self.resolve_branch_counter(branch_key, key),
+            RecordingScope::Branch(branch) => CounterRecorders {
+                primary: self.resolve_branch_counter(branch, key),
                 secondary: None,
             },
-            RecordingScope::GlobalAndBranch(branch_key) => CounterRecorders {
+            RecordingScope::GlobalAndBranch(branch) => CounterRecorders {
                 primary: self.resolve_global_counter(key.clone()),
-                secondary: Some(self.resolve_branch_counter(branch_key, key)),
+                secondary: Some(self.resolve_branch_counter(branch, key)),
             },
         }
     }
@@ -3110,20 +3109,20 @@ impl RuntimeMetrics {
     fn resolve_histogram_recorders(
         &self,
         key: MetricKey,
-        scope: RecordingScope<'_>,
+        scope: RecordingScope,
     ) -> HistogramRecorders {
         match scope {
             RecordingScope::Global => HistogramRecorders {
                 primary: self.resolve_global_histogram(key),
                 secondary: None,
             },
-            RecordingScope::Branch(branch_key) => HistogramRecorders {
-                primary: self.resolve_branch_histogram(branch_key, key),
+            RecordingScope::Branch(branch) => HistogramRecorders {
+                primary: self.resolve_branch_histogram(branch, key),
                 secondary: None,
             },
-            RecordingScope::GlobalAndBranch(branch_key) => HistogramRecorders {
+            RecordingScope::GlobalAndBranch(branch) => HistogramRecorders {
                 primary: self.resolve_global_histogram(key.clone()),
-                secondary: Some(self.resolve_branch_histogram(branch_key, key)),
+                secondary: Some(self.resolve_branch_histogram(branch, key)),
             },
         }
     }
@@ -3164,11 +3163,12 @@ impl RuntimeMetrics {
                       an explicit lifetime boundary"
         )
     )]
-    fn resolve_branch_counter(&self, branch_key: &str, key: MetricKey) -> CounterRecorder {
-        let key = BranchMetricKey {
-            branch_key: branch_key.to_string(),
-            key,
-        };
+    fn resolve_branch_counter(
+        &self,
+        branch: BranchKeyFingerprint,
+        key: MetricKey,
+    ) -> CounterRecorder {
+        let key = BranchMetricKey { branch, key };
         let series = match self.series.branch_counters.entry(key) {
             Entry::Occupied(entry) => Arc::clone(entry.get()),
             Entry::Vacant(entry) => {
@@ -3219,12 +3219,13 @@ impl RuntimeMetrics {
                       an explicit lifetime boundary"
         )
     )]
-    fn resolve_branch_histogram(&self, branch_key: &str, key: MetricKey) -> HistogramRecorder {
+    fn resolve_branch_histogram(
+        &self,
+        branch: BranchKeyFingerprint,
+        key: MetricKey,
+    ) -> HistogramRecorder {
         let buckets = internal_buckets_for_metric(key.metric);
-        let key = BranchMetricKey {
-            branch_key: branch_key.to_string(),
-            key,
-        };
+        let key = BranchMetricKey { branch, key };
         let series = match self.series.branch_histograms.entry(key) {
             Entry::Occupied(entry) => Arc::clone(entry.get()),
             Entry::Vacant(entry) => {
@@ -3470,14 +3471,14 @@ impl RuntimeMetrics {
         domain: &DomainName,
         branch: &BranchName,
         physical_node_id: Option<&ClusterNodeName>,
-        concrete_key: &str,
+        concrete_branch: Option<BranchKeyFingerprint>,
     ) {
         let physical_node = physical_node_label(physical_node_id);
         let metric_key = BranchInstanceMetricKey {
             domain: domain.as_str().to_string(),
             branch: branch.as_str().to_string(),
             physical_node_id: physical_node_id.cloned(),
-            concrete_key: concrete_key.to_string(),
+            concrete_branch,
         };
         match self.series.branch_instance_references.entry(metric_key) {
             Entry::Occupied(mut entry) => {
@@ -3515,7 +3516,7 @@ impl RuntimeMetrics {
         domain: &DomainName,
         branch: &BranchName,
         physical_node_id: Option<&ClusterNodeName>,
-        concrete_key: &str,
+        concrete_branch: Option<BranchKeyFingerprint>,
         reason: BranchEvictionReason,
     ) {
         let physical_node = physical_node_label(physical_node_id);
@@ -3523,7 +3524,7 @@ impl RuntimeMetrics {
             domain: domain.as_str().to_string(),
             branch: branch.as_str().to_string(),
             physical_node_id: physical_node_id.cloned(),
-            concrete_key: concrete_key.to_string(),
+            concrete_branch,
         };
         let (removed_key, record_eviction) =
             match self.series.branch_instance_references.entry(metric_key) {
@@ -3576,14 +3577,14 @@ impl RuntimeMetrics {
         domain: &DomainName,
         branch: &BranchName,
         physical_node_id: Option<&ClusterNodeName>,
-        concrete_key: &str,
+        concrete_branch: Option<BranchKeyFingerprint>,
     ) {
         let physical_node = physical_node_label(physical_node_id);
         let metric_key = BranchInstanceMetricKey {
             domain: domain.as_str().to_string(),
             branch: branch.as_str().to_string(),
             physical_node_id: physical_node_id.cloned(),
-            concrete_key: concrete_key.to_string(),
+            concrete_branch,
         };
         let removed_key = match self.series.branch_instance_references.entry(metric_key) {
             Entry::Occupied(mut entry) if entry.get().count > 1 => {
@@ -3735,7 +3736,7 @@ impl RuntimeMetrics {
 
     pub fn snapshot_branch_target(
         &self,
-        branch_key: &str,
+        branch: BranchKeyFingerprint,
         domain: &DomainName,
         kind: ModelKind,
         target: &ModelName,
@@ -3747,7 +3748,7 @@ impl RuntimeMetrics {
             .branch_counters
             .iter()
             .filter(|entry| {
-                entry.key().branch_key == branch_key
+                entry.key().branch == branch
                     && key_matches_target(
                         &entry.key().key,
                         domain,
@@ -3764,7 +3765,7 @@ impl RuntimeMetrics {
             .branch_histograms
             .iter()
             .filter(|entry| {
-                entry.key().branch_key == branch_key
+                entry.key().branch == branch
                     && entry.value().was_observed()
                     && key_matches_target(
                         &entry.key().key,
@@ -3899,7 +3900,7 @@ impl RuntimeMetrics {
 
     pub fn apply_branch_target_snapshot(
         &self,
-        branch_key: &str,
+        branch: BranchKeyFingerprint,
         domain: &DomainName,
         kind: ModelKind,
         target: &ModelName,
@@ -3912,7 +3913,7 @@ impl RuntimeMetrics {
             .branch_counters
             .iter()
             .filter(|entry| {
-                entry.key().branch_key == branch_key
+                entry.key().branch == branch
                     && key_matches_target(
                         &entry.key().key,
                         domain,
@@ -3931,7 +3932,7 @@ impl RuntimeMetrics {
             .branch_histograms
             .iter()
             .filter(|entry| {
-                entry.key().branch_key == branch_key
+                entry.key().branch == branch
                     && key_matches_target(
                         &entry.key().key,
                         domain,
@@ -3951,10 +3952,7 @@ impl RuntimeMetrics {
                 continue;
             };
             self.series.branch_counters.insert(
-                BranchMetricKey {
-                    branch_key: branch_key.to_string(),
-                    key,
-                },
+                BranchMetricKey { branch, key },
                 Arc::new(CounterSeries::from_snapshot(&counter)),
             );
         }
@@ -3963,10 +3961,7 @@ impl RuntimeMetrics {
                 continue;
             };
             self.series.branch_histograms.insert(
-                BranchMetricKey {
-                    branch_key: branch_key.to_string(),
-                    key,
-                },
+                BranchMetricKey { branch, key },
                 Arc::new(HistogramSeries::from_snapshot(&histogram)),
             );
         }
@@ -4173,59 +4168,11 @@ impl RuntimeMetrics {
         kind: &str,
         target: &ModelName,
     ) -> Vec<DataflowBranchStatistics> {
-        let mut branches = Vec::<(String, DataflowStatistics)>::new();
-        for entry in self.series.branch_counters.iter() {
-            let branch_key = entry.key();
-            if branch_key.key.domain != domain.as_str()
-                || branch_key.key.target_kind != kind
-                || branch_key.key.target != target.as_str()
-            {
-                continue;
-            }
-            let Some(statistics) =
-                counter_dataflow_statistics(&branch_key.key, &entry.value().summary())
-            else {
-                continue;
-            };
-            if let Some((_, existing)) = branches
-                .iter_mut()
-                .find(|(branch, _)| branch == &branch_key.branch_key)
-            {
-                add_dataflow_statistics(existing, statistics);
-            } else {
-                branches.push((branch_key.branch_key.clone(), statistics));
-            }
-        }
-        for entry in self.series.branch_histograms.iter() {
-            if !entry.value().was_observed() {
-                continue;
-            }
-            let branch_key = entry.key();
-            if branch_key.key.domain != domain.as_str()
-                || branch_key.key.target_kind != kind
-                || branch_key.key.target != target.as_str()
-            {
-                continue;
-            }
-            let Some(statistics) =
-                histogram_dataflow_statistics(&branch_key.key, &entry.value().summary())
-            else {
-                continue;
-            };
-            if let Some((_, existing)) = branches
-                .iter_mut()
-                .find(|(branch, _)| branch == &branch_key.branch_key)
-            {
-                add_dataflow_statistics(existing, statistics);
-            } else {
-                branches.push((branch_key.branch_key.clone(), statistics));
-            }
-        }
-        branches.sort_by(|left, right| left.0.cmp(&right.0));
-        branches
-            .into_iter()
-            .map(|(branch, statistics)| DataflowBranchStatistics { branch, statistics })
-            .collect()
+        self.dataflow_statistics_by_branch(|key| {
+            key.domain == domain.as_str()
+                && key.target_kind == kind
+                && key.target == target.as_str()
+        })
     }
 
     pub fn dataflow_edge_branch_statistics(
@@ -4233,52 +4180,50 @@ impl RuntimeMetrics {
         domain: &DomainName,
         metric: &DataflowMetricRef,
     ) -> Vec<DataflowBranchStatistics> {
-        let mut branches = Vec::<(String, DataflowStatistics)>::new();
+        self.dataflow_statistics_by_branch(|key| key.matches_dataflow_metric_ref(domain, metric))
+    }
+
+    /// The statistics of every concrete branch whose series `include` selects, in fingerprint
+    /// order. Each branch is named by the fingerprint of its key, because these statistics reach
+    /// sessions and a branch's key fields may be `SENSITIVE`.
+    fn dataflow_statistics_by_branch(
+        &self,
+        include: impl Fn(&MetricKey) -> bool,
+    ) -> Vec<DataflowBranchStatistics> {
+        let mut branches = BTreeMap::<BranchKeyFingerprint, DataflowStatistics>::new();
         for entry in self.series.branch_counters.iter() {
-            let branch_key = entry.key();
-            if !branch_key.key.matches_dataflow_metric_ref(domain, metric) {
+            let series = entry.key();
+            if !include(&series.key) {
                 continue;
             }
             let Some(statistics) =
-                counter_dataflow_statistics(&branch_key.key, &entry.value().summary())
+                counter_dataflow_statistics(&series.key, &entry.value().summary())
             else {
                 continue;
             };
-            if let Some((_, existing)) = branches
-                .iter_mut()
-                .find(|(branch, _)| branch == &branch_key.branch_key)
-            {
-                add_dataflow_statistics(existing, statistics);
-            } else {
-                branches.push((branch_key.branch_key.clone(), statistics));
-            }
+            add_dataflow_statistics(branches.entry(series.branch).or_default(), statistics);
         }
         for entry in self.series.branch_histograms.iter() {
             if !entry.value().was_observed() {
                 continue;
             }
-            let branch_key = entry.key();
-            if !branch_key.key.matches_dataflow_metric_ref(domain, metric) {
+            let series = entry.key();
+            if !include(&series.key) {
                 continue;
             }
             let Some(statistics) =
-                histogram_dataflow_statistics(&branch_key.key, &entry.value().summary())
+                histogram_dataflow_statistics(&series.key, &entry.value().summary())
             else {
                 continue;
             };
-            if let Some((_, existing)) = branches
-                .iter_mut()
-                .find(|(branch, _)| branch == &branch_key.branch_key)
-            {
-                add_dataflow_statistics(existing, statistics);
-            } else {
-                branches.push((branch_key.branch_key.clone(), statistics));
-            }
+            add_dataflow_statistics(branches.entry(series.branch).or_default(), statistics);
         }
-        branches.sort_by(|left, right| left.0.cmp(&right.0));
         branches
             .into_iter()
-            .map(|(branch, statistics)| DataflowBranchStatistics { branch, statistics })
+            .map(|(branch, statistics)| DataflowBranchStatistics {
+                branch: branch.to_string(),
+                statistics,
+            })
             .collect()
     }
 
@@ -5415,12 +5360,17 @@ mod tests {
         })
     }
 
+    /// The fingerprint the runtime names the branch keyed by one tenant with.
+    fn tenant_branch(tenant: &str) -> BranchKeyFingerprint {
+        BranchKeyFingerprint::of_canonical_text(&format!(r#"{{"tenant":"{tenant}"}}"#))
+    }
+
     fn branch_relay_batch_metrics(
         metrics: &RuntimeMetrics,
         domain: &DomainName,
         relay: &RelayName,
         physical_node_id: &ClusterNodeName,
-        branch_key: &str,
+        branch: BranchKeyFingerprint,
     ) -> BatchMetricsHandle {
         metrics.resolve_batch_metrics(
             MetricKey::relay(
@@ -5430,7 +5380,7 @@ mod tests {
                 "received",
                 MESSAGES_TOTAL,
             ),
-            RecordingScope::Branch(branch_key),
+            RecordingScope::Branch(branch),
         )
     }
 
@@ -5503,7 +5453,7 @@ mod tests {
                     "received",
                     MESSAGES_TOTAL,
                 ),
-                RecordingScope::Branch(r#"{"tenant":"alpha"}"#),
+                RecordingScope::Branch(tenant_branch("alpha")),
             )
             .observe(2, 64, None);
 
@@ -5519,7 +5469,10 @@ mod tests {
 
         let branch_statistics = metrics.dataflow_branch_statistics(&domain, "DEDUPLICATOR", &node);
         assert_eq!(branch_statistics.len(), 1);
-        assert_eq!(branch_statistics[0].branch, r#"{"tenant":"alpha"}"#);
+        assert_eq!(
+            branch_statistics[0].branch,
+            tenant_branch("alpha").to_string()
+        );
         assert_eq!(branch_statistics[0].statistics.messages_total, 2);
         assert_eq!(branch_statistics[0].statistics.bytes_total, 64);
         assert_eq!(branch_statistics[0].statistics.batches_total, 1);
@@ -5532,7 +5485,10 @@ mod tests {
         assert_eq!(edge_statistics.batches_total, 1);
         let edge_branch_statistics = metrics.dataflow_edge_branch_statistics(&domain, &edge_metric);
         assert_eq!(edge_branch_statistics.len(), 1);
-        assert_eq!(edge_branch_statistics[0].branch, r#"{"tenant":"alpha"}"#);
+        assert_eq!(
+            edge_branch_statistics[0].branch,
+            tenant_branch("alpha").to_string()
+        );
     }
 
     #[test]
@@ -5557,7 +5513,7 @@ mod tests {
                 &ModelName::from(&ingestor),
                 Some(&physical_node),
                 "received",
-                r#"{"tenant":"alpha"}"#,
+                tenant_branch("alpha"),
             )
             .observe(2, 34, None);
 
@@ -5985,7 +5941,7 @@ mod tests {
             &relay,
             Some(&ClusterNodeName::parse("node-1").expect("valid name")),
             "concrete",
-            Some(r#"{"tenant":"acme"}"#),
+            Some(tenant_branch("acme")),
         );
         relay_metrics.observe_batch(2, 64, None);
         relay_metrics.observe_buffer(1, 2);
@@ -6028,7 +5984,7 @@ mod tests {
         let metrics = RuntimeMetrics::default();
         let domain = DomainName::parse("main").expect("valid domain");
         let branch = BranchName::parse("by_tenant").expect("valid identifier");
-        let concrete_key = r#"{"tenant":"acme"}"#;
+        let concrete_branch = tenant_branch("acme");
         let has_sample = |rendered: &str, metric: &str, label_fragments: &[&str], value: u64| {
             let expected_suffix = format!(" {value}");
             rendered.lines().any(|line| {
@@ -6049,13 +6005,13 @@ mod tests {
             &domain,
             &branch,
             Some(&ClusterNodeName::parse("node-1").expect("valid name")),
-            concrete_key,
+            Some(concrete_branch),
         );
         metrics.observe_branch_instance_created(
             &domain,
             &branch,
             Some(&ClusterNodeName::parse("node-1").expect("valid name")),
-            concrete_key,
+            Some(concrete_branch),
         );
 
         let rendered = metrics.prometheus_text();
@@ -6069,13 +6025,13 @@ mod tests {
             ],
             1,
         ));
-        assert!(!rendered.contains(concrete_key));
+        assert!(!rendered.contains(&concrete_branch.to_string()));
 
         metrics.observe_branch_instance_removed(
             &domain,
             &branch,
             Some(&ClusterNodeName::parse("node-1").expect("valid name")),
-            concrete_key,
+            Some(concrete_branch),
             BranchEvictionReason::Lru,
         );
         let rendered = metrics.prometheus_text();
@@ -6105,7 +6061,7 @@ mod tests {
             &domain,
             &branch,
             Some(&ClusterNodeName::parse("node-1").expect("valid name")),
-            concrete_key,
+            Some(concrete_branch),
             BranchEvictionReason::Ttl,
         );
 
@@ -6244,12 +6200,12 @@ mod tests {
             &domain,
             &relay,
             &ClusterNodeName::parse("node-1").expect("valid name"),
-            r#"{"tenant":"acme"}"#,
+            tenant_branch("acme"),
         )
         .observe(9, 128, None);
 
         let rendered = metrics.prometheus_text();
-        assert!(!rendered.contains(r#"{"tenant":"acme"}"#));
+        assert!(!rendered.contains(&tenant_branch("acme").to_string()));
         assert!(!has_graph_prometheus_samples(&rendered));
     }
 
@@ -6264,7 +6220,7 @@ mod tests {
             &domain,
             &relay,
             &physical_node,
-            r#"{"tenant":"acme"}"#,
+            tenant_branch("acme"),
         )
         .observe(9, 128, None);
         metrics
@@ -6298,7 +6254,7 @@ mod tests {
             &domain,
             &relay,
             &physical_node,
-            r#"{"tenant":"acme"}"#,
+            tenant_branch("acme"),
         )
         .observe(9, 128, None);
         metrics
@@ -6306,7 +6262,7 @@ mod tests {
             .observe_batch(2, 64, None);
 
         let snapshot = metrics.snapshot_branch_target(
-            r#"{"tenant":"acme"}"#,
+            tenant_branch("acme"),
             &domain,
             ModelKind::Relay,
             &ModelName::from(&relay),
@@ -6322,7 +6278,7 @@ mod tests {
 
         let restored = RuntimeMetrics::default();
         restored.apply_branch_target_snapshot(
-            r#"{"tenant":"acme"}"#,
+            tenant_branch("acme"),
             &domain,
             ModelKind::Relay,
             &ModelName::from(&relay),
@@ -6331,7 +6287,7 @@ mod tests {
         );
         assert!(!has_graph_prometheus_samples(&restored.prometheus_text()));
         let restored_branch = restored.snapshot_branch_target(
-            r#"{"tenant":"acme"}"#,
+            tenant_branch("acme"),
             &domain,
             ModelKind::Relay,
             &ModelName::from(&relay),
@@ -6354,7 +6310,7 @@ mod tests {
 
     fn deduplicator_input(
         metrics: &RuntimeMetrics,
-        branch_key: Option<&str>,
+        branch: Option<BranchKeyFingerprint>,
     ) -> NodeInputMetricsHandle {
         metrics.resolve_node_input_metrics(
             &DomainName::parse("main").expect("valid domain"),
@@ -6362,7 +6318,7 @@ mod tests {
             &ModelName::parse("dedupe").expect("valid identifier"),
             &RelayName::parse("events").expect("valid identifier"),
             Some(&ClusterNodeName::parse("node-1").expect("valid name")),
-            branch_key,
+            branch,
         )
     }
 
@@ -6416,7 +6372,7 @@ mod tests {
     #[test]
     fn a_delivered_batch_records_each_series_once_with_its_latest_watermark() {
         let metrics = RuntimeMetrics::default();
-        let input = deduplicator_input(&metrics, Some(r#"{"tenant":"acme"}"#));
+        let input = deduplicator_input(&metrics, Some(tenant_branch("acme")));
 
         input.observe_delivery(&DeliveryObservation {
             messages: 4,
@@ -6460,7 +6416,7 @@ mod tests {
         let domain = DomainName::parse("main").expect("valid domain");
         let node = ModelName::parse("dedupe").expect("valid identifier");
         let branch = metrics.snapshot_branch_target(
-            r#"{"tenant":"acme"}"#,
+            tenant_branch("acme"),
             &domain,
             ModelKind::Deduplicator,
             &node,

@@ -15,14 +15,10 @@ use super::*;
 pub(super) enum CorrelatorError {
     #[error("cannot batch zero correlator matches")]
     NoMatches,
-    #[error(
-        "correlator match cannot combine branch '{}' with branch '{}'",
-        branch_key_display(.left),
-        branch_key_display(.right)
-    )]
+    #[error("correlator match cannot combine {left} with {right}")]
     MixedBranchKeys {
-        left: Option<BranchKey>,
-        right: Option<BranchKey>,
+        left: BranchScope,
+        right: BranchScope,
     },
     #[error("failed to batch correlator {side:?} rows")]
     SideRows { side: CorrelatorSide },
@@ -300,8 +296,8 @@ impl CorrelatorMatchedBatch {
             .find(|(left, right)| left.message.key != right.message.key)
         {
             return Err(Report::new(CorrelatorError::MixedBranchKeys {
-                left: left.message.key.clone(),
-                right: right.message.key.clone(),
+                left: BranchScope::from(&left.message.key),
+                right: BranchScope::from(&right.message.key),
             }));
         }
         let left_rows = correlations
@@ -1698,12 +1694,21 @@ mod tests {
             },
             materialized_state: Arc::new(HashMap::default()),
         };
+        let fingerprint = |tenant: &str| {
+            string_branch_key("tenant", tenant)
+                .assured("a tenant names a concrete branch")
+                .fingerprint()
+        };
         assert_eq!(
             failure(CorrelatorMatchedBatch::from_correlations(
                 &[(pending("acme"), pending("globex"))],
                 &[],
             )),
-            r#"correlator match cannot combine branch '{"tenant":"acme"}' with branch '{"tenant":"globex"}'"#
+            format!(
+                "correlator match cannot combine branch {} with branch {}",
+                fingerprint("acme"),
+                fingerprint("globex")
+            )
         );
 
         let row = test_runtime_row([("id".to_string(), RuntimeValue::U32(1))]);

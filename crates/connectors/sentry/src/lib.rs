@@ -353,6 +353,25 @@ mod tests {
     }
 
     #[test]
+    fn envelope_keeps_every_digit_of_an_event_number() {
+        let envelope = SentrySink::encode_envelope(
+            br#"{"message":"failed","extra":{"reading":1.4000000000000001}}"#,
+            Timestamp::from_unix_nanos(946_684_800_000_000_000),
+        )
+        .expect("event should encode");
+        let event_bytes = envelope
+            .split(|byte| *byte == b'\n')
+            .nth(2)
+            .expect("envelope must contain an event payload");
+        let event = std::str::from_utf8(event_bytes).expect("event payload must be UTF-8");
+
+        assert!(
+            event.contains(r#""reading":1.4000000000000001"#),
+            "the event keeps its number: {event}"
+        );
+    }
+
+    #[test]
     fn envelope_rejects_an_event_above_sentrys_decompressed_limit() {
         let payload = format!(r#"{{"message":"{}"}}"#, "x".repeat(1_000_000));
         let result = SentrySink::encode_envelope(

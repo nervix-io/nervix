@@ -1337,7 +1337,7 @@ impl RelayBoundaryServices {
             warn!(
                 domain = domain.as_str(),
                 relay = relay.as_str(),
-                branch = ?batch.key.as_ref().map(BranchKey::fingerprint),
+                scope = %BranchScope::from(&batch.key),
                 target_node = %owner_node,
                 error = %format_args!("{error:#}"),
                 "failed to admit relay batch on its owner"
@@ -1781,7 +1781,7 @@ impl Runtime {
                             relay,
                             physical_node_id,
                             RELAY_BUFFER_DIRECTION_CONCRETE,
-                            Some(branch_key.as_str()),
+                            Some(branch_key.fingerprint()),
                         ),
                     )
                 },
@@ -2209,7 +2209,7 @@ impl Runtime {
                         warn!(
                             domain = domain.as_str(),
                             relay = relay.as_str(),
-                            branch = branch_key_display(&branch_key),
+                            scope = %BranchScope::from(&branch_key),
                             error = %format_args!("{error:#}"),
                             "failed to decode scheduled materialized relay batch"
                         );

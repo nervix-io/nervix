@@ -2253,16 +2253,20 @@ async fn the_console_lists_the_concrete_branches_the_relay_owner_holds() {
         .map(|statistics| statistics.branch)
         .collect::<Vec<_>>();
 
-    let expected = [&acme, &beta]
+    let mut expected = [&acme, &beta]
         .into_iter()
         .map(|key| {
             key.as_ref()
                 .expect("the test keys are concrete")
-                .as_str()
+                .fingerprint()
                 .to_string()
         })
         .collect::<Vec<_>>();
-    assert_eq!(listed, expected, "branches are listed in key order");
+    expected.sort();
+    assert_eq!(
+        listed, expected,
+        "branches are listed by the fingerprints of their keys, in fingerprint order"
+    );
     assert!(
         runtime
             .dataflow_relay_branch_statistics(&domain, &named("absent"))

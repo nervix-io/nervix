@@ -23,12 +23,12 @@ use nervix_wasm::CompiledWasmProcessor;
 use ordered_float::OrderedFloat;
 
 use super::{
-    BranchBufferDeadline, BranchBufferTimer, BranchBufferTimingResult, BranchKey, BranchRuntime,
+    BranchBufferDeadline, BranchBufferTimer, BranchBufferTimingResult, BranchRuntime, BranchScope,
     CompiledDeduplicatorKeyProgram, CompiledProgramWithMaterializedInterest, DeduplicatorKeyspace,
     DomainClock, DomainExecutionSnapshot, PendingMaterializedBatch, RelayBoundaryServices,
     RelayMessage, RelayRecordBatch, ReplicatedWasmProcessorState, ReplicatedWindowProcessorState,
     RuntimeFlushPolicy, RuntimeInputCollectPolicy, RuntimeInputCollector, WasmGuestStateResetFence,
-    WasmLiveInstance, WindowAccumulatorPlan, WindowProcessorState, branch_key_display,
+    WasmLiveInstance, WindowAccumulatorPlan, WindowProcessorState,
     inferencer::OnnxInferencerSession,
 };
 use crate::{
@@ -355,32 +355,27 @@ pub(super) enum ProcessorCompileError {
 /// Every way resolving a stateful processor's materialized dependencies for one branch fails.
 #[derive(Debug, thiserror::Error)]
 pub(super) enum ProcessorMaterializedError {
-    #[error("failed to read the domain routing for branch '{}'", branch_key_display(.branch))]
-    DomainRouting { branch: Option<BranchKey> },
+    #[error("failed to read the domain routing ({branch})")]
+    DomainRouting { branch: BranchScope },
+    #[error("failed to resolve materialized dependencies ({branch})")]
+    Resolve { branch: BranchScope },
     #[error(
-        "failed to resolve materialized dependencies in branch '{}'",
-        branch_key_display(.branch)
+        "materialized state a REQUIRED SKIP dependency needs was evicted after the batch was \
+         admitted ({branch})"
     )]
-    Resolve { branch: Option<BranchKey> },
+    EvictedRequiredSkip { branch: BranchScope },
     #[error(
-        "materialized state a REQUIRED SKIP dependency needs was evicted from branch '{}' after \
-         the batch was admitted",
-        branch_key_display(.branch)
+        "materialized state a REQUIRED WAIT dependency awaits was evicted after the batch was \
+         admitted ({branch})"
     )]
-    EvictedRequiredSkip { branch: Option<BranchKey> },
-    #[error(
-        "materialized state a REQUIRED WAIT dependency awaits was evicted from branch '{}' after \
-         the batch was admitted",
-        branch_key_display(.branch)
-    )]
-    EvictedRequiredWait { branch: Option<BranchKey> },
+    EvictedRequiredWait { branch: BranchScope },
 }
 
 /// A stateful processor failed to publish the live state its branch task owns.
 #[derive(Debug, thiserror::Error)]
-#[error("failed to publish processor live state for branch '{}'", branch_key_display(.branch))]
+#[error("failed to publish processor live state ({branch})")]
 pub(super) struct ProcessorLiveStateError {
-    pub(super) branch: Option<BranchKey>,
+    pub(super) branch: BranchScope,
 }
 
 #[derive(Debug, Clone)]

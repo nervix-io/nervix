@@ -121,7 +121,7 @@ impl Runtime {
                 domain,
                 branch,
                 dispatcher.as_deref().map(RemoteDispatcher::local_node_id),
-                branch_key_display(key),
+                key.as_ref().map(BranchKey::fingerprint),
             );
         }
     }
@@ -145,12 +145,13 @@ impl Runtime {
         };
         let dispatcher = self.inner.remote_dispatcher.load();
         let physical_node_id = dispatcher.as_deref().map(RemoteDispatcher::local_node_id);
+        let concrete_branch = key.as_ref().map(BranchKey::fingerprint);
         if let Some(reason) = reason {
             self.inner.metrics.observe_branch_instance_removed(
                 domain,
                 branch,
                 physical_node_id,
-                branch_key_display(key),
+                concrete_branch,
                 reason,
             );
         } else {
@@ -158,7 +159,7 @@ impl Runtime {
                 domain,
                 branch,
                 physical_node_id,
-                branch_key_display(key),
+                concrete_branch,
             );
         }
     }
@@ -395,16 +396,17 @@ impl Runtime {
         let Some(services) = execution.relay_services.get(relay) else {
             return Vec::new();
         };
+        // A branch is named by the fingerprint of its key: these statistics reach sessions, and a
+        // branch's key fields may be `SENSITIVE`.
         let membership = services.branch_presence.load();
-        let mut branches = membership
+        let branches = membership
             .branches()
-            .map(|branch| branch.as_str().to_string())
-            .collect::<Vec<_>>();
-        branches.sort();
+            .map(BranchKey::fingerprint)
+            .collect::<BTreeSet<_>>();
         branches
             .into_iter()
             .map(|branch| nervix_dataflow_graph::DataflowBranchStatistics {
-                branch,
+                branch: branch.to_string(),
                 statistics: Default::default(),
             })
             .collect()
@@ -841,7 +843,7 @@ mod tests {
                     relay: &named("notifications"),
                     physical_node_id: Some(&ClusterNodeName::parse("node-3").expect("valid name")),
                     direction: "sent",
-                    branch_key: None,
+                    branch: None,
                 })
                 .observe(19, 1900, None);
             let snapshot = BranchAggregatedRuntimeStateSnapshot {
@@ -910,7 +912,7 @@ mod tests {
                 relay: &named("notifications"),
                 physical_node_id: Some(&ClusterNodeName::parse("node-3").expect("valid name")),
                 direction: "sent",
-                branch_key: None,
+                branch: None,
             })
             .observe(19, 1900, None);
         let snapshot = BranchAggregatedRuntimeStateSnapshot {
@@ -993,7 +995,7 @@ mod tests {
                 relay: &named("notifications"),
                 physical_node_id: Some(&ClusterNodeName::parse("node-3").expect("valid name")),
                 direction: "sent",
-                branch_key: None,
+                branch: None,
             })
             .observe(19, 1900, None);
         let snapshot = BranchAggregatedRuntimeStateSnapshot {
@@ -1038,7 +1040,7 @@ mod tests {
                 relay: &named("notifications"),
                 physical_node_id: Some(&ClusterNodeName::parse("node-3").expect("valid name")),
                 direction: "sent",
-                branch_key: None,
+                branch: None,
             })
             .observe(1, 100, None);
 

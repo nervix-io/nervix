@@ -244,7 +244,10 @@ Materialized state is also the readable snapshot surface for `GENERATOR` nodes. 
 `SHOW RELAY <relay> MATERIALIZED STATE` reports `kind: RELAY`, the relay owner, and its
 scheduler-selected state replicas before the materialized entries or empty-state message. Each
 entry keeps its typed branch key through collection and renders it at this reporting boundary;
-unbranched entries render as `key=(root)`.
+unbranched entries render as `key=(root)`. An entry's payload is written as JSON, which has no
+number for a NaN or an infinity, so a float field holding one is written as the string `NaN`,
+`Infinity` or `-Infinity`. A record holds one when a payload's number rounds past its `F32` field's
+range, or when an Avro payload or a producer's Arrow batch carries one.
 
 `DESCRIBE RELAY <relay>` reports the owner and state replicas immediately after `kind: RELAY`, then
 the logical definition and owner buffer-utilization metrics. An ordinary relay reports

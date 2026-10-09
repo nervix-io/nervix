@@ -238,9 +238,7 @@ impl Runtime {
                 }
             }
         }
-        reports.sort_by(|left, right| {
-            branch_key_display(&left.branch).cmp(branch_key_display(&right.branch))
-        });
+        reports.sort_by(|left, right| BranchKey::canonical_order(&left.branch, &right.branch));
         Ok(reports)
     }
 
@@ -603,9 +601,7 @@ impl Runtime {
                 })
             })
             .collect::<error_stack::Result<Vec<_>, MaterializedReadError>>()?;
-        reports.sort_by(|left, right| {
-            branch_key_display(&left.branch).cmp(branch_key_display(&right.branch))
-        });
+        reports.sort_by(|left, right| BranchKey::canonical_order(&left.branch, &right.branch));
         Ok(reports)
     }
 

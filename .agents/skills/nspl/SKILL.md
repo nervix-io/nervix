@@ -108,8 +108,9 @@ bounded overall backup wait (CLI `--backup-wait-timeout`, default `10m`). If tha
 retain its execution reference and recover with CLI `backup --execution-reference` and the same
 selected domain, scope, resources and capture options; the output file or stdout may change.
 Waiting again does not extend server retry validity or archive retention. A `WRITE_FAILED` from
-`--output -` follows a complete download that released the server's copy: deliver the verified
-archive the report names (`error.archive`) instead of recovering by reference.
+`--output -` that names `error.archive` follows a complete download that released the server's
+copy: deliver that verified archive instead of recovering by reference. One without a reference
+took no backup, as when stdout is `/dev/null` or closed: fix stdout and run the backup again.
 
 Use `BEGIN; ... COMMIT;` when sending multiple queueable configuration statements. A transaction
 belongs to one already-existing domain: `BEGIN` binds it to the selected domain and every queued
@@ -280,7 +281,11 @@ activation; a newly effective hard colocation requirement can relocate runtime n
   `MAX STATE SIZE` after duration `WIDTH` and `STEP`, a branched window a branch with
   `MAX INSTANCES <n> EVICT LRU`, and the precision or capacity sets both accuracy and memory.
 - Use a separate wire schema and codec when transport shape differs from the internal runtime
-  schema. Declare datetime encoding explicitly when required.
+  schema. Declare datetime encoding explicitly when required: a JSON or CBOR `string` wire field
+  binds a `DATETIME` field only with `ENCODE <field> AS RFC3339`, while an exact `DATETIME` wire
+  type, like the exact `U8` through `I64`, `F32` and `F64` types, binds only the internal type of
+  its own name. JSON and CBOR carry no NaN or infinity; read `Schemas And Codecs` → `Value
+  Fidelity` before relying on non-finite floats or unsigned Avro list elements.
 - For every JAQ-backed codec, use `WITH JAQ TRANSFORMATIONS` and declare `ON INGESTION`,
   `ON EMITTING`, or both in that order. At least one direction is required.
 - An `ON INGESTION` program runs once per value a payload holds, and every object it yields becomes

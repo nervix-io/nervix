@@ -79,7 +79,7 @@ async fn processor_input_accepted_after_its_clock_stopped_fails_as_an_internal_e
         report_of_dispatched_input(&runtime, &domain, &domain_clock, &mut instances).await;
 
     let expected = "junction 'route_orders' internal error in domain 'default': could not read \
-                    the domain time of accepted input for branch 'none': domain 'default' clock \
+                    the domain time of accepted input (unbranched): domain 'default' clock \
                     generation 0 is stopped";
     assert_eq!(message, expected);
     assert_eq!(outcome, AckOutcome::NoAck(expected.to_string()));
@@ -112,8 +112,8 @@ async fn processor_input_for_a_branch_task_that_stopped_fails_as_an_internal_err
     let (message, outcome) =
         report_of_dispatched_input(&runtime, &domain, &domain_clock, &mut instances).await;
 
-    let expected = "junction 'route_orders' internal error in domain 'default': the task of \
-                    branch 'none' is unavailable";
+    let expected = "junction 'route_orders' internal error in domain 'default': the processor \
+                    task is unavailable (unbranched)";
     assert_eq!(message, expected);
     assert_eq!(outcome, AckOutcome::NoAck(expected.to_string()));
 }

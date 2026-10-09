@@ -1,20 +1,100 @@
-//! Complete current native restore conversions and their checkpoint round trips.
+//! Complete current native lifecycle and Kafka conversions: restore's streamed native encodings,
+//! and a backup cut's streamed archive records of stored native checkpoints.
 //!
 //! Layer: test harness.
 //! - **Owns.** Bounded current lifecycle and Kafka values and complete value oracles.
-//! - **Depends on.** Native production encoders, decoders, and admitted execution.
+//! - **Depends on.** Native production encoders, decoders, validated checkpoint views, the
+//!   archive's streamed records, and admitted execution.
 //! - **Must not know.** Live graph tasks, publication fencing, or historical encodings.
+
+use std::mem::MaybeUninit;
 
 use meticulous::ResultExt as _;
 use nervix_arbitrary::{Arbitrary, Domain};
-use nervix_backup::{StateField, StateValue};
-use nervix_execution::{CpuClass, ExecutionConfig, Executor, MemoryClass};
-use nervix_models::{ModelName, Timestamp};
+use nervix_backup::{
+    ArchiveRecord as _, BranchLifecycleEntry, BranchLifecycleRecord, KafkaOffsetsRecord,
+    KafkaPartitionOffset, StateField, StateValue, StreamedBranchLifecycle, StreamedKafkaOffsets,
+};
+use nervix_execution::{Cancellation, CpuClass, ExecutionConfig, Executor, MemoryClass};
+use nervix_models::{DomainName, ModelKind, ModelName, SchemaFingerprint, Timestamp};
 
 use super::{
-    BackupBranchLifecycleEntry, decode_backup_branch_lifecycle, decode_backup_kafka_offsets,
+    BackupBranchLifecycleEntry,
+    backup_state::{
+        NativeKafkaCheckpoint, NativeLifecycleCheckpoint, decode_backup_branch_lifecycle,
+        decode_backup_kafka_offsets,
+    },
+    state_store::checkpoint_reader::AlignedCheckpoint,
     write_restored_branch_lifecycle, write_restored_kafka_offsets,
 };
+
+/// Runs `work` as one admitted bulk CPU job under a bounded preparation grant.
+fn in_admitted_job<T: Send + 'static>(work: impl FnOnce(&Cancellation) -> T + Send + 'static) -> T {
+    let runtime = nervix_primitives::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .assured("the case runtime opens");
+    let executor = Executor::new(ExecutionConfig::default()).assured("default limits validate");
+    runtime.block_on(async {
+        let charge = executor
+            .reserve(MemoryClass::RestoreMetadata, 1024 * 1024)
+            .await
+            .assured("the bounded property fits its preparation grant");
+        executor
+            .run_cpu(CpuClass::Bulk, charge, move |_charge, cancellation| {
+                work(cancellation)
+            })
+            .await
+            .assured("the bounded job finishes")
+    })
+}
+
+fn aligned(revision: u64, payload: &[u8]) -> AlignedCheckpoint {
+    let mut aligned = rkyv::util::AlignedVec::<16>::with_capacity(payload.len());
+    aligned.extend_from_slice(payload);
+    AlignedCheckpoint {
+        lsm: revision,
+        payload: aligned,
+    }
+}
+
+fn generated_lifecycle(arbitrary: &mut Arbitrary<'_>) -> Vec<BackupBranchLifecycleEntry> {
+    let mut entries = Vec::new();
+    for _ in 0..arbitrary.entropy().count(16) {
+        let key = if arbitrary.entropy().flag() {
+            Some(
+                vec![
+                    StateField {
+                        name: "identity".into(),
+                        value: scalar(arbitrary),
+                    },
+                    StateField {
+                        name: "nested".into(),
+                        value: StateValue::Array(vec![
+                            StateValue::Vec(vec![scalar(arbitrary), scalar(arbitrary)]),
+                            StateValue::Array(vec![]),
+                        ]),
+                    },
+                    StateField {
+                        name: "signed_zero".into(),
+                        value: StateValue::F64Bits((-0.0_f64).to_bits()),
+                    },
+                ]
+                .into_iter()
+                .map(StateField::into_remote)
+                .collect(),
+            )
+        } else {
+            None
+        };
+        entries.push(BackupBranchLifecycleEntry {
+            key,
+            last_ingestion: Timestamp::from_unix_nanos(arbitrary.entropy().any_i64()),
+            incarnation: arbitrary.positive_u64().get(),
+        });
+    }
+    entries
+}
 
 #[test]
 fn bolero_streamed_lifecycle_preserves_complete_current_values() {
@@ -23,43 +103,7 @@ fn bolero_streamed_lifecycle_preserves_complete_current_values() {
         .with_max_len(2048)
         .for_each(|bytes| {
             let mut arbitrary = Arbitrary::new(bytes, Domain::Vocabulary);
-            let mut entries = Vec::new();
-            for _ in 0..arbitrary.entropy().count(16) {
-                let key = if arbitrary.entropy().flag() {
-                    Some(
-                        vec![
-                            StateField {
-                                name: "identity".into(),
-                                value: scalar(&mut arbitrary),
-                            },
-                            StateField {
-                                name: "nested".into(),
-                                value: StateValue::Array(vec![
-                                    StateValue::Vec(vec![
-                                        scalar(&mut arbitrary),
-                                        scalar(&mut arbitrary),
-                                    ]),
-                                    StateValue::Array(vec![]),
-                                ]),
-                            },
-                            StateField {
-                                name: "signed_zero".into(),
-                                value: StateValue::F64Bits((-0.0_f64).to_bits()),
-                            },
-                        ]
-                        .into_iter()
-                        .map(StateField::into_remote)
-                        .collect(),
-                    )
-                } else {
-                    None
-                };
-                entries.push(BackupBranchLifecycleEntry {
-                    key,
-                    last_ingestion: Timestamp::from_unix_nanos(arbitrary.entropy().any_i64()),
-                    incarnation: arbitrary.positive_u64().get(),
-                });
-            }
+            let entries = generated_lifecycle(&mut arbitrary);
             let expected = lifecycle_values(&entries);
             let entity = ModelName::parse("metrics").assured("literal name is valid");
             let runtime = nervix_primitives::runtime::Builder::new_current_thread()
@@ -202,4 +246,178 @@ fn bolero_streamed_kafka_preserves_every_partition_and_offset() {
                 offsets
             );
         });
+}
+
+#[test]
+fn bolero_captured_lifecycle_streams_its_complete_archive_record() {
+    bolero::check!()
+        .with_iterations(256)
+        .with_max_len(2048)
+        .for_each(|bytes| {
+            let mut arbitrary = Arbitrary::new(bytes, Domain::Vocabulary);
+            let entries = generated_lifecycle(&mut arbitrary);
+            let revision = arbitrary.entropy().any_u64();
+            let expected = entries
+                .iter()
+                .cloned()
+                .map(BranchLifecycleEntry::from)
+                .collect::<Vec<_>>();
+            let domain = DomainName::parse("orders").assured("literal name is valid");
+            let entity = ModelName::parse("metrics").assured("literal name is valid");
+            let schema = SchemaFingerprint::from_digest([9; 32]);
+            let record_domain = domain.clone();
+            let record_entity = entity.clone();
+            let section = in_admitted_job(move |cancellation| {
+                let mut native = Vec::new();
+                write_restored_branch_lifecycle(
+                    entries.into_iter(),
+                    &entity,
+                    &mut native,
+                    cancellation,
+                )
+                .assured("the complete current lifecycle streams natively");
+                let lifecycle = NativeLifecycleCheckpoint::validate(
+                    aligned(revision, &native),
+                    &entity,
+                    cancellation,
+                )
+                .assured("the stored native lifecycle validates");
+                lifecycle.with_branches(|branches| {
+                    let record = StreamedBranchLifecycle {
+                        domain: record_domain,
+                        owner_kind: ModelKind::Ingestor,
+                        entity: record_entity,
+                        schema,
+                        revision: lifecycle.revision,
+                        branches: branches.map(BranchLifecycleEntry::from),
+                    };
+                    let mut scratch = vec![
+                        MaybeUninit::uninit();
+                        record
+                            .scratch_bytes()
+                            .assured("bounded branches have scratch")
+                    ];
+                    let mut section = Vec::new();
+                    record
+                        .write(&mut scratch, &mut section, &|| false)
+                        .assured("the captured lifecycle streams its archive record");
+                    section
+                })
+            });
+            let record = BranchLifecycleRecord::decode("captured.rkyv", &section)
+                .assured("the archive validator accepts the captured lifecycle");
+            assert_eq!(
+                record,
+                BranchLifecycleRecord {
+                    domain,
+                    owner_kind: ModelKind::Ingestor,
+                    entity: ModelName::parse("metrics").assured("literal name is valid"),
+                    schema,
+                    revision,
+                    branches: expected,
+                }
+            );
+        });
+}
+
+#[test]
+fn bolero_captured_kafka_offsets_stream_in_archive_order() {
+    bolero::check!()
+        .with_iterations(256)
+        .with_max_len(2048)
+        .for_each(|bytes| {
+            let mut arbitrary = Arbitrary::new(bytes, Domain::Vocabulary);
+            // Stored in any order, and a partition may be recorded more than once.
+            let mut stored = Vec::new();
+            for _ in 0..arbitrary.entropy().count(64) {
+                let next_offset = arbitrary.entropy().between(
+                    0..=u64::try_from(i64::MAX).assured("the positive signed maximum fits u64"),
+                );
+                stored.push((
+                    format!("topic_{}", arbitrary.entropy().byte() % 8),
+                    i32::from(arbitrary.entropy().byte() % 8),
+                    i64::try_from(next_offset).assured("bounded by i64::MAX"),
+                ));
+            }
+            // A later record of a partition replaces an earlier one, as decoding the table keeps it.
+            let mut ordered = std::collections::BTreeMap::new();
+            for (topic, partition, next_offset) in &stored {
+                ordered.insert((topic.clone(), *partition), *next_offset);
+            }
+            let mut expected = Vec::new();
+            for ((topic, partition), next_offset) in ordered {
+                expected.push(KafkaPartitionOffset {
+                    topic,
+                    partition,
+                    next_offset,
+                });
+            }
+            let revision = arbitrary.entropy().any_u64();
+            let domain = DomainName::parse("orders").assured("literal name is valid");
+            let entity = ModelName::parse("source").assured("literal name is valid");
+            let schema = SchemaFingerprint::from_digest([7; 32]);
+            let record_domain = domain.clone();
+            let record_entity = entity.clone();
+            let captured = in_admitted_job(move |cancellation| {
+                let mut native = Vec::new();
+                write_restored_kafka_offsets(stored.into_iter(), &mut native, cancellation)
+                    .assured("the stored offsets stream natively");
+                let decoded = decode_backup_kafka_offsets(&native)
+                    .assured("the runtime decodes its own native offsets");
+                let offsets = NativeKafkaCheckpoint::validate(
+                    aligned(revision, &native),
+                    &entity,
+                    cancellation,
+                )
+                .assured("the stored native offsets validate");
+                let section = offsets.with_positions(|positions| {
+                    let record = StreamedKafkaOffsets {
+                        domain: record_domain,
+                        entity: record_entity,
+                        schema,
+                        revision: offsets.revision,
+                        offsets: positions.map(KafkaPartitionOffset::from),
+                    };
+                    let mut scratch = vec![
+                        MaybeUninit::uninit();
+                        record
+                            .scratch_bytes()
+                            .assured("bounded offsets have scratch")
+                    ];
+                    let mut section = Vec::new();
+                    record
+                        .write(&mut scratch, &mut section, &|| false)
+                        .assured("the captured offsets stream their archive record");
+                    section
+                });
+                CapturedOffsets { decoded, section }
+            });
+            let record = KafkaOffsetsRecord::decode("captured.rkyv", &captured.section)
+                .assured("the archive validator accepts the captured offsets");
+            let mut decoded = Vec::new();
+            for (topic, partition, next_offset) in captured.decoded {
+                decoded.push(KafkaPartitionOffset {
+                    topic,
+                    partition,
+                    next_offset,
+                });
+            }
+            assert_eq!(decoded, expected, "the runtime's own decoding agrees");
+            assert_eq!(
+                record,
+                KafkaOffsetsRecord {
+                    domain,
+                    entity: ModelName::parse("source").assured("literal name is valid"),
+                    schema,
+                    revision,
+                    offsets: expected,
+                }
+            );
+        });
+}
+
+/// The runtime's whole decoding of a native offset checkpoint beside its streamed archive record.
+struct CapturedOffsets {
+    decoded: Vec<(String, i32, i64)>,
+    section: Vec<u8>,
 }
