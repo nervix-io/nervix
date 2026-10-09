@@ -161,6 +161,13 @@ state encoding and reports `StorageFailure::InvalidState` with a recreation inst
 These boundaries reject unrecognized data before its counts can be reinterpreted; none clamps,
 truncates, or supplies a replacement value. See [Archived Counts](./typed-states.md#archived-counts).
 
+An rkyv archive can pass shape validation and still contain a value that its vocabulary decoder
+refuses, including a typed name, size limit, reference, or range inside a list. The owning boundary
+reports its existing decode failure with the value's cause. The decoder drops values it has already
+read and releases any partially read list or fixed array, boxed value, or shared pointer allocation
+before returning that failure; it neither publishes a partial value nor retains memory for a
+refused archive.
+
 Schemaful JSON parsing has one codec decode failure carrying the simd-json source. Malformed
 syntax, invalid UTF-8, and invalid escapes enter through that failure; object shape, missing or
 unexpected fields, nullability, exact wire types, integer ranges, datetime parsing, base64, and

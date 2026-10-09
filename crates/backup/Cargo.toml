@@ -20,6 +20,7 @@ tar = { workspace = true }
 thiserror = { workspace = true }
 
 [dev-dependencies]
+alloc_count = { workspace = true }
 arrow-array = { workspace = true }
 arrow-ipc = { workspace = true }
 arrow-schema = { workspace = true }
