@@ -15,6 +15,7 @@ use std::{
     time::Duration,
 };
 
+use error_stack::Report;
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_dns::{DnsConfiguration, DnsLookupError, DnsLookupFailure, DnsResolver, NameServers};
 use nervix_models::{
@@ -136,6 +137,15 @@ async fn within_deadline<F: Future>(future: F) -> F::Output {
     nervix_primitives::time::timeout(DEADLINE, future)
         .await
         .assured("the awaited step completes within the generous test deadline")
+}
+
+/// The client failure one level beneath the report's current context: the failure an uncertain
+/// outcome stands above.
+fn cause_beneath(report: &Report<ClientError>) -> Option<&ClientError> {
+    report
+        .frames()
+        .filter_map(|frame| frame.downcast_ref::<ClientError>())
+        .nth(1)
 }
 
 /// The server's side of one exchange the client opened.
@@ -540,7 +550,13 @@ async fn native_session_connection_deadline_cancels_a_silent_dns_lookup() {
     .assured(
         "the client's connection deadline cancels DNS before the authority's 20-second silence",
     );
-    assert!(matches!(result, Err(ClientError::ConnectServer(_))));
+    let Err(error) = result else {
+        panic!("a name the authority never answers cannot open a native session");
+    };
+    assert!(matches!(
+        error.current_context(),
+        ClientError::ConnectServer(_)
+    ));
     assert!(authority.questions_for(name) > 0);
 }
 
@@ -585,10 +601,10 @@ async fn native_session_connection_error_preserves_the_typed_dns_failure() {
     else {
         panic!("the missing name cannot open a native session");
     };
-    let ClientError::ConnectServer(connect_error) = error else {
+    let ClientError::ConnectServer(connect_error) = error.current_context() else {
         panic!("DNS resolution should be classified as a connection failure");
     };
-    let lookup = DnsLookupError::find_in(&connect_error)
+    let lookup = DnsLookupError::find_in(connect_error)
         .assured("the Tonic connection error retains the resolver's typed cause");
     assert_eq!(lookup.name(), name);
     assert_eq!(lookup.failure(), DnsLookupFailure::NameNotFound);
@@ -982,10 +998,10 @@ async fn an_unanswered_command_ends_with_a_reusable_uncertain_identity() {
         .await
         .assured("the command task ends")
         .expect_err("no reply can prove success");
-    let ClientError::UncertainCommand { reference, .. } = error else {
+    let ClientError::UncertainCommand { reference } = error.current_context() else {
         panic!("the deadline must report uncertainty");
     };
-    assert_eq!(reference, expected);
+    assert_eq!(reference, &expected);
 }
 
 #[nervix_primitives::test]
@@ -1133,11 +1149,17 @@ async fn backup_wait_expiry_preserves_the_reference_for_explicit_recovery() {
         .await
         .assured("the backup wait ends before either ordinary deadline")
         .assured("the waiter finishes");
-    let Err(ClientError::UncertainCommand { reference, source }) = result else {
+    let Err(error) = result else {
         panic!("an unanswered backup reports its uncertain reference");
     };
-    assert_eq!(reference, expected);
-    assert!(matches!(*source, ClientError::RetryDeadline));
+    let ClientError::UncertainCommand { reference } = error.current_context() else {
+        panic!("an unanswered backup reports its uncertain reference");
+    };
+    assert_eq!(reference, &expected);
+    assert!(matches!(
+        cause_beneath(&error),
+        Some(ClientError::RetryDeadline)
+    ));
     let backup = nervix_models::Backup {
         scope: nervix_models::BackupScope::Cluster,
         destination: "recovered.nvxb".to_string(),
@@ -1149,7 +1171,7 @@ async fn backup_wait_expiry_preserves_the_reference_for_explicit_recovery() {
     recovery_client.set_domain(Some(domain("tenant"))).await;
     let mut exchange = recovery_server.next_exchange().await;
     let recovered = recovery_client
-        .prepare_backup_with_reference(&backup, &reference)
+        .prepare_backup_with_reference(&backup, reference)
         .await;
     assert_eq!(recovered.reference(), &expected);
     assert_eq!(recovered.domain(), Some(&domain("tenant")));
@@ -2168,7 +2190,7 @@ async fn malformed_upload_replies_are_rejected_by_their_correlations() {
         .await
         .expect_err("a reply for another upload or request cannot report success");
         assert!(matches!(
-            error,
+            error.current_context(),
             ClientError::UploadIdentityMismatch { .. } | ClientError::UnexpectedReply { .. }
         ));
     }
@@ -2194,7 +2216,7 @@ async fn upload_permission_denial_is_reported_without_retry() {
     ))
     .await
     .expect_err("the server denied the upload");
-    let ClientError::UploadResource(status) = error else {
+    let ClientError::UploadResource(status) = error.current_context() else {
         panic!("permission denial has a typed upload status");
     };
     assert_eq!(status.code(), tonic::Code::PermissionDenied);
@@ -2342,9 +2364,12 @@ async fn domain_clock_statements_need_an_active_domain_and_no_transaction() {
 
     client.set_domain(None).await;
     for statement in ["ATTACH DOMAIN CLOCK;", "DETACH DOMAIN CLOCK;"] {
+        let Err(error) = within_deadline(client.execute(statement)).await else {
+            panic!("a clock statement without a selected domain is refused");
+        };
         assert!(matches!(
-            within_deadline(client.execute(statement)).await,
-            Err(ClientError::NoActiveDomain)
+            error.current_context(),
+            ClientError::NoActiveDomain
         ));
     }
 

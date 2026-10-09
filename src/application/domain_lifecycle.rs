@@ -74,14 +74,22 @@ pub(in crate::application) enum DomainAlterError {
         operation: &'static str,
         reason: String,
     },
-    #[error("failed to pause domain '{domain}' for model alteration: {reason}")]
-    PauseDomain { domain: DomainName, reason: String },
-    #[error("failed to stop ingestion in domain '{domain}' for model alteration: {reason}")]
-    StopIngestion { domain: DomainName, reason: String },
-    #[error("failed to resume domain '{domain}' after model alteration: {reason}")]
-    ResumeDomain { domain: DomainName, reason: String },
-    #[error("failed to restore ingestion in domain '{domain}' after model alteration: {reason}")]
-    RestoreIngestion { domain: DomainName, reason: String },
+    /// The consensus report of the pause is beneath.
+    #[error("failed to pause domain '{domain}' for model alteration")]
+    PauseDomain { domain: DomainName },
+    /// The runtime's report of the cluster state it could not apply is beneath.
+    #[error("failed to stop ingestion in domain '{domain}' for model alteration")]
+    StopIngestion { domain: DomainName },
+    /// The consensus report of the resume is beneath.
+    #[error("failed to resume domain '{domain}' after model alteration")]
+    ResumeDomain { domain: DomainName },
+    /// The runtime's report of the cluster state it could not apply is beneath.
+    #[error("failed to restore ingestion in domain '{domain}' after model alteration")]
+    RestoreIngestion { domain: DomainName },
+    /// The alteration failed after its domain paused, and resuming the domain failed too. Both
+    /// reports are beneath: the alteration's failure, then the resume's.
+    #[error("failed to resume domain '{domain}' after its model alteration was abandoned")]
+    ResumeAfterAbandonedAlter { domain: DomainName },
     #[error("failed to roll back model alteration in domain '{domain}': {reason}")]
     Rollback { domain: DomainName, reason: String },
 }
@@ -202,25 +210,24 @@ impl SessionServiceImpl {
             .pause_domain(domain.clone(), mutation)
             .await
         {
-            let reason = ConsensusError::report_message(&error);
             if let (Some(impact), Some(attempt)) = (impact, attempt) {
+                let reason = ConsensusError::report_message(&error);
                 if matches!(error.current_context(), ConsensusError::Conflict(_)) {
                     impact.fail(
                         attempt,
                         nervix_models::ImpactDiagnosticKind::Quiescence,
-                        reason.clone(),
+                        reason,
                     );
                 } else {
                     impact.uncertain(
                         attempt,
                         nervix_models::ImpactDiagnosticKind::Quiescence,
-                        reason.clone(),
+                        reason,
                     );
                 }
             }
             return Err(error.change_context(DomainAlterError::PauseDomain {
                 domain: domain.clone(),
-                reason,
             }));
         }
         if let (Some(impact), Some(attempt)) = (impact, attempt) {
@@ -228,24 +235,18 @@ impl SessionServiceImpl {
         }
 
         if let Err(error) = self.apply_current_cluster_state().await {
-            let reason = format!("{error:#}");
             if let (Some(impact), Some(attempt)) = (impact, attempt) {
                 impact.fail(
                     attempt,
                     nervix_models::ImpactDiagnosticKind::Quiescence,
-                    reason.clone(),
+                    format!("{error:#}"),
                 );
             }
+            let stopped = error.change_context(DomainAlterError::StopIngestion {
+                domain: domain.clone(),
+            });
             return Err(self
-                .abort_domain_alter_pause(
-                    domain,
-                    mutation,
-                    impact.zip(attempt),
-                    Report::new(DomainAlterError::StopIngestion {
-                        domain: domain.clone(),
-                        reason,
-                    }),
-                )
+                .abort_domain_alter_pause(domain, mutation, impact.zip(attempt), stopped)
                 .await);
         }
 
@@ -263,7 +264,7 @@ impl SessionServiceImpl {
                     impact.fail(
                         attempt,
                         nervix_models::ImpactDiagnosticKind::Quiescence,
-                        reason.to_string(),
+                        format!("{reason:#}"),
                     );
                 }
                 Err(self
@@ -532,13 +533,13 @@ impl SessionServiceImpl {
                     impact.fail(
                         attempt,
                         nervix_models::ImpactDiagnosticKind::Recovery,
-                        resume_error.to_string(),
+                        format!("{resume_error:#}"),
                     );
                 }
-                let reason = format!("{reason}; automatic resume failed: {resume_error}");
-                resume_error.change_context(DomainAlterError::Rollback {
+                let mut abandoned = reason;
+                abandoned.extend_one(resume_error);
+                abandoned.change_context(DomainAlterError::ResumeAfterAbandonedAlter {
                     domain: domain.clone(),
-                    reason,
                 })
             }
         }
@@ -553,19 +554,14 @@ impl SessionServiceImpl {
             .consensus
             .resume_domain(domain.clone(), mutation)
             .await
-            .map_err(|error| {
-                let reason = error.to_string();
-                error.change_context(DomainAlterError::ResumeDomain {
-                    domain: domain.clone(),
-                    reason,
-                })
-            })?;
-        self.apply_current_cluster_state().await.map_err(|error| {
-            Report::new(DomainAlterError::RestoreIngestion {
+            .change_context_lazy(|| DomainAlterError::ResumeDomain {
                 domain: domain.clone(),
-                reason: format!("{error:#}"),
+            })?;
+        self.apply_current_cluster_state()
+            .await
+            .change_context_lazy(|| DomainAlterError::RestoreIngestion {
+                domain: domain.clone(),
             })
-        })
     }
 
     pub(in crate::application) async fn resume_domain_after_alter_with_impact(
@@ -579,7 +575,7 @@ impl SessionServiceImpl {
                 impact.fail(
                     attempt,
                     nervix_models::ImpactDiagnosticKind::Recovery,
-                    error.to_string(),
+                    format!("{error:#}"),
                 );
             }
             return Err(error);

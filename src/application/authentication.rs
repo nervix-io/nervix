@@ -186,13 +186,14 @@ impl PasswordHashError {
     }
 }
 
-impl From<GrpcAuthenticationError> for Status {
-    fn from(error: GrpcAuthenticationError) -> Self {
-        match error {
-            GrpcAuthenticationError::Required | GrpcAuthenticationError::Failed => {
-                Self::unauthenticated(error.to_string())
-            }
-            GrpcAuthenticationError::Busy => Self::unavailable(error.to_string()),
+impl GrpcAuthenticationError {
+    /// The status a call whose credentials did not authenticate it ends with. It names the
+    /// refusal and nothing beneath it.
+    pub(in crate::application) fn status(report: Report<Self>) -> Status {
+        let refusal = report.current_context();
+        match refusal {
+            Self::Required | Self::Failed => Status::unauthenticated(refusal.to_string()),
+            Self::Busy => Status::unavailable(refusal.to_string()),
         }
     }
 }
@@ -337,14 +338,14 @@ impl SessionServiceImpl {
     pub(in crate::application) async fn authenticate_grpc_metadata(
         &self,
         metadata: &MetadataMap,
-    ) -> Result<UserName, GrpcAuthenticationError> {
+    ) -> error_stack::Result<UserName, GrpcAuthenticationError> {
         let Some(credentials) = credentials_from_metadata(metadata) else {
-            return Err(GrpcAuthenticationError::Required);
+            return Err(Report::new(GrpcAuthenticationError::Required));
         };
         match self.authenticate_basic_credentials(&credentials).await {
             Ok(user) => Ok(user),
-            Err(CredentialRejection::Failed) => Err(GrpcAuthenticationError::Failed),
-            Err(CredentialRejection::Busy) => Err(GrpcAuthenticationError::Busy),
+            Err(CredentialRejection::Failed) => Err(Report::new(GrpcAuthenticationError::Failed)),
+            Err(CredentialRejection::Busy) => Err(Report::new(GrpcAuthenticationError::Busy)),
         }
     }
 
@@ -691,11 +692,11 @@ mod tests {
     #[test]
     fn credentials_the_node_could_not_verify_are_answered_as_unavailable() {
         assert_eq!(
-            Status::from(GrpcAuthenticationError::Busy).code(),
+            GrpcAuthenticationError::status(Report::new(GrpcAuthenticationError::Busy)).code(),
             tonic::Code::Unavailable
         );
         assert_eq!(
-            Status::from(GrpcAuthenticationError::Failed).code(),
+            GrpcAuthenticationError::status(Report::new(GrpcAuthenticationError::Failed)).code(),
             tonic::Code::Unauthenticated
         );
         assert_eq!(

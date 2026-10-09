@@ -309,10 +309,10 @@ pub(super) async fn run_backup(request: BackupRequest) -> Result<(), StackReport
                 report,
                 format,
                 "CONNECTION_FAILED",
-                &error.to_string(),
+                &format!("{error:#}"),
                 None,
             );
-            return Err(StackReport::new(ClientError::from(error)));
+            return Err(error.change_context(ClientError::Connect));
         }
     };
     let execution = match request.execution_reference {
@@ -326,9 +326,9 @@ pub(super) async fn run_backup(request: BackupRequest) -> Result<(), StackReport
     let outcome = match client.execute_prepared(&execution).await {
         Ok(outcome) => outcome,
         Err(error) => {
-            let recovery = match &error {
-                nervix_client_core::ClientError::UncertainCommand { reference, .. }
-                | nervix_client_core::ClientError::BackupDownload { reference, .. } => {
+            let recovery = match error.current_context() {
+                nervix_client_core::ClientError::UncertainCommand { reference }
+                | nervix_client_core::ClientError::BackupDownload { reference } => {
                     Some(Recovery::Rerun { reference })
                 }
                 _ => None,
@@ -337,10 +337,10 @@ pub(super) async fn run_backup(request: BackupRequest) -> Result<(), StackReport
                 report,
                 format,
                 "BACKUP_FAILED",
-                &error_chain(&error),
+                &format!("{error:#}"),
                 recovery,
             );
-            return Err(StackReport::new(ClientError::from(error)));
+            return Err(error.change_context(ClientError::Request));
         }
     };
     let summary = match (outcome.succeeded(), outcome.backup.as_deref()) {
@@ -368,18 +368,6 @@ pub(super) async fn run_backup(request: BackupRequest) -> Result<(), StackReport
         }
     }
     Ok(())
-}
-
-/// The error and every cause behind it, as one line.
-fn error_chain(error: &nervix_client_core::ClientError) -> String {
-    let mut message = error.to_string();
-    let mut cause = std::error::Error::source(error);
-    while let Some(current) = cause {
-        message.push_str(": ");
-        message.push_str(&current.to_string());
-        cause = current.source();
-    }
-    message
 }
 
 /// What a failure report tells the operator to do about a backup the server admitted, under its

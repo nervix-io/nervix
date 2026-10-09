@@ -36,6 +36,7 @@ delivery can fail during schedule application.
 | Restore planning | Archives a restore cannot apply to the cluster: the wrong scope, a domain the archive lacks or the cluster has, an archived user the cluster has under `ON EXISTING USER FAIL`, resource versions the archive does not hold consistently, and models that bind no restored version | Refuse the restore before it changes anything, naming the domain, user, resource, version, or model. |
 | Interconnect | Authentication, framing, limits, transport, and the class and subject of a remote operation failure | Distinguish a transport failure from a peer's rejection, absence, unreadiness, or executed failure. |
 | Deadlock detector and diagnostic run | A detector that cannot be installed or is installed twice (`InstallError`), a diagnostic run that cannot install it or record its starting evidence (`DiagnosticError`), and evidence that does not encode, decode, fit its bounds, write or read (`EvidenceError`) | Refuse to start a diagnostic process, or refuse a whole evidence file naming the check that failed. A deadlock finding is not one of these errors: it is a diagnostic result that ends the process with its own status. |
+| Native client and its edges | A call that could not connect, was refused or cancelled, was answered outside the protocol, or lost its session (`ClientError`), above the transport status, the codec's report, a local archive's I/O error, or the failure that left a command or upload uncertain | Retry, recover the session, recover an uncertain command or upload by its reference or identity, or display the whole chain; the CLI and the C binding classify from the current context. |
 | Control plane and public edges | Transaction and lifecycle results, command dispositions, session diagnostics, and HTTP response selection | Return a recoverable command outcome or an appropriate response to a client or operator. |
 
 The owner extends its existing error type when an operation gains another failure case. A second
@@ -266,7 +267,7 @@ Database response text that could quote a bound value is discarded after extract
 classification; diagnostics do not quote the row payload.
 
 The native Rust session client loads its Hickory resolver before opening a server channel. An
-unreadable or invalid resolver configuration is `ClientError::LoadDnsConfiguration`, carrying the
+unreadable or invalid resolver configuration is `ClientError::LoadDnsConfiguration` above the
 resolver's configuration report; the shared binding classifies it as a connection failure. A
 failed lookup within an initial, seed, redirect, or reconnect attempt is
 `ClientError::ConnectServer`. Tonic retains `DnsLookupError` in that transport error's cause chain,
@@ -465,10 +466,12 @@ from the restored schedule or its schema fingerprint differs, installation skips
 the successful command carries an unlocated warning diagnostic. The same applies to a verified
 state record whose kind tag or version is unsupported. The CLI includes those warnings
 in text and JSON reports. The client reports an archive it cannot read
-as `ClientError::ReadRestoreArchive` with the path and the I/O error kind, an empty file as
-`ClientError::EmptyRestoreArchive`, a failed call as `ClientError::Restore` with its status, and a
-reply that does not decode as `ClientError::InvalidRestoreReply`; an error that may hide an
-admitted restore is `ClientError::UncertainCommand` with its execution reference. The C binding
+as `ClientError::ReadRestoreArchive` with the path and the I/O error kind, above the I/O error when
+the client read the file itself, an empty file as `ClientError::EmptyRestoreArchive`, a failed call
+as `ClientError::Restore` with its status, and a reply that does not decode as
+`ClientError::InvalidRestoreReply` above the codec's report; an error that may hide an admitted
+restore is `ClientError::UncertainCommand` with its execution reference, above the failure that
+left the outcome unknown. The C binding
 classifies an unreadable or empty archive as `NX_ERROR_INVALID_ARGUMENT`, a failed call as
 `NX_ERROR_TRANSPORT`, and an undecodable reply as `NX_ERROR_PROTOCOL`.
 
@@ -1057,6 +1060,25 @@ behavior, while [Inspecting A Transaction](./control-plane.md#inspecting-a-trans
 retained command outcomes and [ALTER Lock And Quiesce Classification](./control-plane.md#alter-lock-and-quiesce-classification)
 describes impact inspection.
 
+The session service's own edges report the same way. A gRPC call whose credentials do not
+authenticate it fails as a `GrpcAuthenticationError` report, `Required`, `Failed` or `Busy`, and the
+call ends with `UNAUTHENTICATED`, or with `UNAVAILABLE` when the node could not verify the
+credentials now; the status names only the refusal. A command on a transaction its session is no
+longer bound to fails as a `SessionTransactionBindingError` report, whose current context selects
+the `TransactionTakenOver` or `TransactionDetached` disposition and whose chain is the command's
+message. A domain snapshot that cannot be encoded for a session is `SnapshotEncodingError::Graph`
+or `Frame` above the graph serializer's or the frame encoder's report, and the node logs that chain
+instead of sending the snapshot.
+
+A model alteration that pauses its domain reports each step of the pause and the resume above the
+report of the owner that failed: `DomainAlterError::PauseDomain` and `ResumeDomain` above the
+consensus report of the domain's lifecycle change, and `StopIngestion` and `RestoreIngestion` above
+the runtime's report of the cluster state it could not apply. When the alteration fails after the
+pause and resuming the domain fails too, `ResumeAfterAbandonedAlter` keeps both reports beneath it,
+the alteration's failure first, so a consensus leadership loss in either still answers the command
+with a leader redirect. The failed command, the session's error broadcast, a backup's capture
+failure and the step's impact diagnostic render the whole chain.
+
 A domain clock attachment answers with its own typed disposition rather than a command disposition,
 and every refusal names the domain it concerns. An attach is `Attached` with the observed clock,
 `AlreadyAttached` when the session already follows that domain's clock, `DomainNotFound` when the
@@ -1077,10 +1099,27 @@ uninstalled clock, or a projection outside the timestamp range, as a typed `Doma
 See [Domain Clock Attachment](./sessions.md#domain-clock-attachment).
 
 A Rust client subscribe or unsubscribe runs on a task of its own, so that an attempt its caller
-stops waiting for still completes. Its caller rebuilds the typed session failure from that task's
-report, and recovers the session and sends the request again exactly as for any other call; only a
-failure a new session cannot remedy is returned, as `ClientError::SubscriptionOperation` carrying
-the report.
+stops waiting for still completes. Its caller classifies that task's report by its current
+context, and recovers the session and sends the request again exactly as for any other call; a
+failure a new session cannot remedy is returned as that report, with its own classification.
+
+Every call of the Rust client returns an `error_stack::Report<ClientError>`. Its current context is
+the failure a caller acts on, and the frames beneath keep the cause: a call's transport status, the
+wire codec's report beneath `EncodeRequest`, `InvalidUploadReply` or `InvalidRestoreReply`, the
+name's report beneath `InvalidResourceName`, a local archive's I/O error beneath
+`BuildUploadArchive` or `ReadRestoreArchive`, a suggestion request's value report beneath
+`InvalidCursor` or `InvalidCompletionPageSize`, the event queue's overflow beneath `EventOverflow`,
+and the `BackupDownloadError` beneath `BackupDownload`. A failure that may hide an admitted command
+or an installed upload is `UncertainCommand` or `UncertainUpload` above the failure that left the
+outcome unknown. The client decides retries, session recovery and uncertainty from those typed
+contexts and never from text, and a context names its own operation without repeating its
+transport status, which the next frame shows. The CLI adds the operation it ran above the client's
+report, `failed to connect to the server` or `the request to the server failed`; its text and JSON
+failure reports, its JSON inspection errors and its event-stream notices render the whole chain. A
+restoration failure the client reports as a subscription or domain clock event carries the whole
+chain as its message. The shared C binding classifies a failure from the current context, a failed
+backup download from the `BackupDownloadError` beneath it, and returns the whole chain as the
+error's message.
 
 The shared C binding converts a clock-event wait's `error_stack::Report<ClientError>` at its
 reporting boundary. It classifies the typed current context as an `NX_ERROR_*` kind and retains

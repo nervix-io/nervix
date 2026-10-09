@@ -4173,11 +4173,11 @@ pub(crate) async fn run_command_via_client(
         client_connect_options(server)?,
     )
     .await
-    .map_err(io::Error::other)?;
+    .map_err(|report| io::Error::other(format!("{report:#}")))?;
     let outcome = client
         .execute(query.to_string())
         .await
-        .map_err(io::Error::other)?;
+        .map_err(|report| io::Error::other(format!("{report:#}")))?;
     if outcome.succeeded() {
         Ok(flatten_outcome_messages(&outcome))
     } else {
