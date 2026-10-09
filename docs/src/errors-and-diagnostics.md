@@ -356,12 +356,16 @@ server's conflict, expiry and retention authority.
 
 The CLI's delivery of a downloaded archive to standard output has failures of its own, which
 follow the complete download that released the server's copy. A staged archive that could not be
-read, or a write or flush of standard output that failed, is `WRITE_FAILED`: the report keeps the
-typed error and its I/O cause, and names the durable reference with the verified archive the CLI
-kept, `error.archive` in JSON, as the recovery, because running the backup again cannot download a
+read, or a write to standard output that failed, is `WRITE_FAILED`: the report keeps the typed
+error and its I/O cause, and names the durable reference with the verified archive the CLI kept,
+`error.archive` in JSON, as the recovery, because running the backup again cannot download a
 collected archive. A staging directory that could not be removed after every byte was delivered is
 `CLEANUP_FAILED`, which names the reference and the directory, `error.staging` in JSON. A staging
-directory that could not be created is `WRITE_FAILED` before admission, without a reference.
+directory that could not be created is `WRITE_FAILED` before admission, without a reference. So is
+a standard output that would discard the archive, checked before anything is staged: the null
+device, and a standard output that was closed when the CLI started, which the CLI finds holding the
+null device and cannot tell apart from it. A standard output the CLI could not inspect is
+`WRITE_FAILED` before admission as well, with its I/O cause.
 
 The web console owns its own typed download and restore failures. A download failure names the
 server's refusal, a transport failure, a stalled or interrupted stream, a missing leader or a
@@ -545,10 +549,13 @@ ready. A transport failure or an executed remote failure does not become absence
 
 Schema mismatch, a repeated dependency, an invalid default expression, a missing required default
 field, and a snapshot that cannot be decoded are failures. The materialized read or snapshot owner
-reports them with relay and placement context; a branch-local read includes the concrete branch key.
-The same key accompanies branch-local processor and relay failures, so another branch cannot be
-mistaken for the failed one. Unbranched work has no branch key. [Data Plane](./data-plane.md) owns
-branch execution and [Cluster Interconnect](./interconnect.md) owns snapshot exchange.
+reports them with relay and placement context, and the branch-local processor that resolved the
+dependency names its concrete branch. Branch-local processor and relay failures name their branch
+the same way, so another branch cannot be mistaken for the failed one. A failure names a concrete
+branch by the fingerprint of its key, as described under
+[Sensitive Data And Observability](#sensitive-data-and-observability), and unbranched work as
+`unbranched`. [Data Plane](./data-plane.md) owns branch execution and
+[Cluster Interconnect](./interconnect.md) owns snapshot exchange.
 
 The materialized installation owner refuses a lower snapshot revision with
 `RuntimeStateOperationError::MaterializedSnapshotRevision { received, current }`, a snapshot from an
@@ -922,9 +929,9 @@ deadlines, reports a runtime event that names the task and its domain and render
 of the failure, so a stale clock generation or an unrepresentable deadline beneath the clock
 failure stays visible.
 
-An owner-delivery admission failure logs the domain, relay, branch fingerprint and target together
-with the transport report, including retained cancellation and rejection causes, before returning
-the undelivered batch. This keeps admission and connection failures visible even when the batch
+An owner-delivery admission failure logs the domain, relay, branch scope and target together with
+the transport report, including retained cancellation and rejection causes, before returning the
+undelivered batch. This keeps admission and connection failures visible even when the batch
 carries no acknowledgement, without logging branch field values.
 
 A batch container that cannot be produced keeps its `BatchContainerError` report in the packing
@@ -1173,6 +1180,16 @@ carry sensitive payload values. Error-route metadata and hot-path logs must not 
 input, credentials, key paths, or certificate contents. A route that deliberately copies an input
 field into its ordinary output still obeys the normal explicit sensitivity rule. Operators can
 correlate a stable error reference with a code and affected fields without seeing the secret.
+
+A branch schema may declare key fields `SENSITIVE`, so nothing that names a concrete branch in
+text renders its key's field values. Errors, runtime events, negative acknowledgement reasons and
+logs name the execution a failure belongs to as `branch <fingerprint>` or `unbranched`; a log
+record carries the same text in its `scope` field. The fingerprint is the lowercase hexadecimal
+digest of the branch's canonical key text, the identity `DESCRIBE WASM PROCESSOR` checkpoint lines
+and `DESCRIBE BACKUP` print and transaction-impact reports carry for the same branch, so an
+operator matches a failure to those reports by that text. The per-branch statistics the execution
+graph carries to sessions name each branch by the same fingerprint. A session subscription, which
+masks sensitive key fields, is where a key's other field values are read.
 Per-message and per-batch detail belongs at `debug` or `trace`; `info` is for lifecycle,
 administration, topology, and unusual transitions. [Metrics And Observability](./metrics-and-observability.md)
 defines the available metrics and their aggregation.

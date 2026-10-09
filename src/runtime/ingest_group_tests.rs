@@ -1096,7 +1096,7 @@ async fn branched_root_without_children_acks_success() {
             relay: &root_relay,
             physical_node_id: None,
             direction: "sent",
-            branch_key: Some(branch_key_display(&root_key)),
+            branch: root_key.as_ref().map(BranchKey::fingerprint),
         });
     let mut root = BranchRuntime {
         key: root_key.clone(),

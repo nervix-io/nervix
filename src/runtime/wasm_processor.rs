@@ -267,13 +267,10 @@ impl WasmBranchModule {
 
 impl std::fmt::Display for WasmBranchModule {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match &self.branch {
-            Some(branch) => write!(formatter, "branch {branch}")?,
-            None => formatter.write_str("unbranched")?,
-        }
         write!(
             formatter,
-            ", resource '{}' version {} file '{}'",
+            "{}, resource '{}' version {} file '{}'",
+            BranchScope::from(&self.branch),
             self.resource.identifier.as_str(),
             self.resource.version,
             self.file
@@ -1063,9 +1060,10 @@ mod tests {
         assert_eq!(
             format!("{failure:#}"),
             "wasm processor 'sessionizer' application state restoration failed (branch \
-             {\"tenant\":\"alpha\"}, resource 'sessionizer' version 3 file 'sessionizer.wasm', \
-             export 'nervix_load_state', saved state revision 12): wasm guest rejected the \
-             application state in its saved snapshot: counters header is truncated"
+             40238306d5ebf339fe640ae723e4705c5bb1743e39d0ec207ed8de19fead54b1, resource \
+             'sessionizer' version 3 file 'sessionizer.wasm', export 'nervix_load_state', saved \
+             state revision 12): wasm guest rejected the application state in its saved snapshot: \
+             counters header is truncated"
         );
     }
 

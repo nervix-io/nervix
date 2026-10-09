@@ -111,9 +111,9 @@ destination to prove it can restore a checkpoint. A passive revision for a stopp
 the complete validated checkpoint inventory and preserves its guest saves without executing guest
 callbacks or reading domain time. The guest validates the save when `START` installs the running
 revision. A stopped clock is not a missing-checkpoint outcome and cannot justify a state reset.
-The control plane and the
-inspection name a concrete branch by its fingerprint, a fixed-size digest of the canonical
-branch-key text, never by its field values.
+The control plane, the inspection, and the diagnostics and logs of a branch's guest name a concrete
+branch by its fingerprint, a fixed-size digest of the canonical branch-key text, never by its field
+values.
 
 A concrete branch that is evicted for its `TTL` or its instance limit stops without a quiesce flush,
 and its live instance and the work it buffered are dropped with it, as for every evicted processor
