@@ -7,11 +7,10 @@
 //! - **Depends on.** The Models and the runtime reports it renders.
 //! - **Must not know.** Where the values it renders were gathered.
 
-use std::{fmt::Write as _, time::Duration};
+use std::time::Duration;
 
 use ahash::{HashMap, HashSet};
 use arch_into::ArchInto;
-use meticulous::ResultExt as _;
 use nervix_dataflow_graph::{DataflowNodeHealth, DataflowNodeStatus};
 use nervix_interconnect::{
     DataflowNodeStatusEnvelope, IngestorDescribeEnvelope, LookupDescribeEnvelope,
@@ -1199,14 +1198,10 @@ fn format_wasm_checkpoint_lines(inspection: Option<&WasmStateInspection>) -> Vec
     };
     let mut lines = Vec::new();
     for checkpoint in &inspection.checkpoints {
-        let mut branch = "unbranched".to_string();
-        if let Some(fingerprint) = checkpoint.branch {
-            branch.clear();
-            for byte in fingerprint.fingerprint() {
-                write!(branch, "{byte:02x}")
-                    .assured("writing fixed-size fingerprint bytes to String cannot fail");
-            }
-        }
+        let branch = match checkpoint.branch {
+            Some(fingerprint) => fingerprint.to_string(),
+            None => "unbranched".to_string(),
+        };
         let committed = match checkpoint.committed_revision {
             Some(revision) => revision.to_string(),
             None => "none".to_string(),
@@ -1643,7 +1638,7 @@ pub(in crate::application) fn placement_groups_claimed_by_rule<'a>(
 
 #[cfg(test)]
 mod tests {
-    use meticulous::OptionExt as _;
+    use meticulous::{OptionExt as _, ResultExt as _};
 
     use super::{super::test_fixtures::placement_member, *};
 

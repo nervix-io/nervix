@@ -80,41 +80,8 @@ fn report_join_failure(error: &JoinError, task: &str) {
 
 #[cfg(test)]
 mod tests {
-    use std::io;
-
-    use nervix_primitives::sync::{StdArc, blocking::Mutex};
-    use tracing_subscriber::fmt::MakeWriter;
-
     use super::*;
-
-    /// Collects everything a scoped subscriber writes so a test can assert on what was reported.
-    #[derive(Clone, Default)]
-    struct CapturedLogs(StdArc<Mutex<Vec<u8>>>);
-
-    impl CapturedLogs {
-        fn contents(&self) -> String {
-            String::from_utf8_lossy(&self.0.lock().clone()).into_owned()
-        }
-    }
-
-    impl io::Write for CapturedLogs {
-        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-            self.0.lock().extend_from_slice(buf);
-            Ok(buf.len())
-        }
-
-        fn flush(&mut self) -> io::Result<()> {
-            Ok(())
-        }
-    }
-
-    impl<'a> MakeWriter<'a> for CapturedLogs {
-        type Writer = Self;
-
-        fn make_writer(&'a self) -> Self::Writer {
-            self.clone()
-        }
-    }
+    use crate::captured_logs::CapturedLogs;
 
     /// What a join produced, and everything it reported while it ran.
     struct Captured<T> {
@@ -129,13 +96,9 @@ mod tests {
     /// from a test capturing it concurrently.
     async fn capture<T>(join: impl Future<Output = T>) -> Captured<T> {
         let logs = CapturedLogs::default();
-        let subscriber = tracing_subscriber::fmt()
-            .with_writer(logs.clone())
-            .with_ansi(false)
-            .finish();
         // `#[nervix_primitives::test]` runs the whole future on the calling thread, so the thread-local
         // default the guard installs stays in force across the await.
-        let guard = tracing::subscriber::set_default(subscriber);
+        let guard = tracing::subscriber::set_default(logs.subscriber());
         let output = join.await;
         drop(guard);
         Captured {
