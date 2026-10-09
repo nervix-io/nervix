@@ -751,8 +751,10 @@ because its interconnect entry reads `unavailable` or has left the list, another
 clock over within ten physical seconds. A node becomes unavailable only after its health probes have
 failed continuously for the deployed unavailability timeout; a gossip warning alone does not end its
 availability, so a short fault may end before any replacement. The replacement bound measures the
-portion of each continuous tick stall following that observation. Ticks that continued before a
-later stall remain healthy time in this accounting. No public command, metric or
+portion of each continuous tick stall following that observation while the fault remains held.
+Ticks that continued before a later stall remain healthy time in this accounting. Returning voters
+can change the eligible authority set and wait for runtime readiness; gaps after healing retain the
+sixty-second authority bound. No public command, metric or
 info-level log names the clock authority, so a rotation covers every voter: the round whose fault
 stalls the ticks on every surviving observer is the one that removed the authority, and a rotation
 without such a round fails as missing evidence. Every paced window must close no earlier than eight

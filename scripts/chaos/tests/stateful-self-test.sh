@@ -366,19 +366,24 @@ expect_pass 'clock through a voter rotation that removed the authority' "${clock
 jq -e '.authority_rounds == [2] and (.authority_losses | length) == 2' "${tmp_dir}/clock.json" >/dev/null \
     || fail "the clock verdict did not attribute the authority stall to round 2: $(jq -c '.authority_rounds' "${tmp_dir}/clock.json")"
 # The survivors reported nervix-2 unavailable 5 seconds into its 12-second stall: replaced in time.
-jq -c --argjson marked $((stall_from + 5000)) 'if .ordinal == 2 then .unavailable_ms = $marked else . end' \
+jq -c --argjson marked $((stall_from + 5000)) --argjson ended $((stall_from + 18000)) \
+    'if .ordinal == 2 then .unavailable_ms = $marked | .fault_ended_ns = ($ended * 1000000) else . end' \
     "${tmp_dir}/rounds.ndjson" >"${tmp_dir}/rounds-marked.ndjson"
 expect_pass 'clock authority replaced soon after its node was reported unavailable' "${clock}" clock \
     "${clock_args[@]}" --rounds "${tmp_dir}/rounds-marked.ndjson" --fault voter-crash --result "${tmp_dir}/clock.json"
 # Reported unavailable one second into the stall, the authority stayed stalled 11 more seconds.
-jq -c --argjson marked $((stall_from + 1000)) 'if .ordinal == 2 then .unavailable_ms = $marked else . end' \
+jq -c --argjson marked $((stall_from + 1000)) --argjson ended $((stall_from + 18000)) \
+    'if .ordinal == 2 then .unavailable_ms = $marked | .fault_ended_ns = ($ended * 1000000) else . end' \
     "${tmp_dir}/rounds.ndjson" >"${tmp_dir}/rounds-marked.ndjson"
 expect_failure 'clock authority not replaced after its node was reported unavailable' 'no other voter took the clock over' \
     "${tmp_dir}/clock.json" "${clock}" clock "${clock_args[@]}" --rounds "${tmp_dir}/rounds-marked.ndjson" \
     --fault voter-crash --result "${tmp_dir}/clock.json"
 # Ticks continued after the availability observation, then a four-second stall began later in the
 # same recovery round. The replacement bound measures the stalled interval after that observation.
-jq -c --argjson marked $((start_ms + 62000)) 'if .ordinal == 2 then .unavailable_ms = $marked else . end' \
+jq -c --argjson marked $((start_ms + 62000)) --argjson ended $((start_ms + 88000)) \
+    --argjson recovered $((start_ms + 89000)) \
+    'if .ordinal == 2 then .unavailable_ms = $marked | .fault_ended_ns = ($ended * 1000000)
+     | .recovered_ns = ($recovered * 1000000) else . end' \
     "${tmp_dir}/rounds.ndjson" >"${tmp_dir}/rounds-marked.ndjson"
 for host in nervix-1 nervix-2 nervix-3; do
     write_observer "${tmp_dir}/clock-${host}.log" $((start_ms + 70000)) $((start_ms + 74000))
@@ -391,6 +396,13 @@ done
 expect_failure 'a later clock stall exceeded the replacement bound' 'no other voter took the clock over' \
     "${tmp_dir}/clock.json" "${clock}" clock "${clock_args[@]}" --rounds "${tmp_dir}/rounds-marked.ndjson" \
     --fault voter-crash --result "${tmp_dir}/clock.json"
+# Ticks already demonstrated recovery while the voter was absent. Its return can install another
+# authority and wait for runtime readiness; this later gap still has the 60-second authority bound.
+jq -c --argjson ended $((start_ms + 70250)) \
+    'if .ordinal == 2 then .fault_ended_ns = ($ended * 1000000) else . end' \
+    "${tmp_dir}/rounds-marked.ndjson" >"${tmp_dir}/rounds-returned.ndjson"
+expect_pass 'clock authority installation after a voter returned' "${clock}" clock "${clock_args[@]}" \
+    --rounds "${tmp_dir}/rounds-returned.ndjson" --fault voter-crash --result "${tmp_dir}/clock.json"
 for host in nervix-1 nervix-2 nervix-3; do
     write_observer "${tmp_dir}/clock-${host}.log" 0 0
 done

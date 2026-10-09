@@ -80,8 +80,9 @@ stall_ms=2000
 authority_bound_ms=60000
 # Once a surviving node no longer counts the faulted node available, its interconnect entry turning
 # unavailable or leaving, the leader reconciles the authority and the replacement ticks as soon as
-# every live node is ready; a stall that outlasts this physical bound after that report means no
-# other voter took the clock over.
+# every live node is ready; a stall that outlasts this physical bound while that fault remains
+# held means no other voter took the clock over. Healing can restore an eligible incarnation and
+# install a different authority; its runtime-readiness wait belongs to the authority bound.
 replace_bound_ms=10000
 # A paced window may close at most this much logical time after its width, away from moves and
 # restarts of its own node.
@@ -188,13 +189,15 @@ clock() {
              | select(any($stall.rounds[]; .target == $stall.host or .target == "all") | not)] as $authority_stalls
           | [$authority_stalls[] | select(.gap_ms > $authority_bound_ms)] as $unrepaired
           | [$authority_stalls[] | . as $stall
-             | ([$faults[] | . as $round | select(any($stall.rounds[]; .ordinal == $round.ordinal))
-                 | .unavailable_ms | select(. != null)] | min) as $unavailable_ms
+             | $faults[] | . as $round
+             | select(any($stall.rounds[]; .ordinal == $round.ordinal))
+             | .unavailable_ms as $unavailable_ms
              | select($unavailable_ms != null)
              | ([$stall.start_ms, $unavailable_ms] | max) as $replacement_start_ms
-             | select($stall.end_ms > $replacement_start_ms + $replace_bound_ms)
-             | . + {unavailable_ms: $unavailable_ms,
-                    stalled_after_unavailable_ms: ($stall.end_ms - $replacement_start_ms)}] as $not_replaced
+             | ([$stall.end_ms, $round.ended_ms] | min) as $replacement_end_ms
+             | select($replacement_end_ms > $replacement_start_ms + $replace_bound_ms)
+             | $stall + {unavailable_ms: $unavailable_ms, fault_ended_ms: $round.ended_ms,
+                         stalled_after_unavailable_ms: ($replacement_end_ms - $replacement_start_ms)}] as $not_replaced
           | ([$authority_stalls[].rounds[].ordinal] | unique) as $authority_rounds
           | [$faults[] | . as $round
              | ($all | map(.host) | unique)[] as $host
