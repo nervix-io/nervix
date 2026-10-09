@@ -103,6 +103,7 @@ tags = [
   "@inferencer_branch_batches",
   "@shutdown_cordon_release",
   "@shutdown_kafka_handoff",
+  "@shutdown_leader_change",
 ]
 target = "test:scenarios"
 
