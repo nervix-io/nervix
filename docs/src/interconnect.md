@@ -362,6 +362,11 @@ and nesting depth, before exposing it to an operation handler. Encoded and decod
 to the traffic class before decoding begins. Unknown operations, a pool mismatch, malformed
 archives, and values above the operation limit fail at the transport boundary.
 
+Validation checks an archive's shape. A typed name inside it is checked when the record is read
+back, so a record can be refused after part of it was read. A relay grant request refused that way
+frees everything it had read: its acknowledgement registrations, each of which names its registrar,
+are read back one by one, and the request is refused at the first registrar that is no node's name.
+
 Control-operation responses preserve a typed failure class and subject across the wire. A receiver
 can distinguish a node that rejects ownership, an unavailable subject, a subject that is not ready,
 and an operation that ran and failed without parsing display text. Only the final class carries an
@@ -374,9 +379,7 @@ the owning resource, snapshot, or state protocol interpret the stream.
 Before the receiver gives a relay Arrow stream to Arrow's reader, the shared IPC framing owner
 checks every message's continuation marker, metadata, declared body and column buffers against the
 received bytes. A malformed stream reports `ArrowBodyError::Framing` before the reader can allocate
-or slice from an unchecked length. This includes negative body lengths and positive declarations
-larger than the bytes the peer actually sent, even if the declaration is much larger than the
-encoded relay-batch limit. A reader panic on malformed metadata that passes framing is
+or slice from an unchecked length. A reader panic on malformed metadata that passes framing is
 reported as `ArrowBodyError::Decode`.
 
 The primary payload limits are:
@@ -397,8 +400,10 @@ canonical IPC stream: every message opens with the continuation marker, and the 
 marker ends the body. Every length the stream declares must lie within the bytes the body carries:
 each message's metadata, its body, and each column buffer inside that body. A body that is framed
 otherwise is refused as misframed, so a declared length never sizes an allocation the body does not
-back, and a column buffer is never sliced outside its message. The same check opens every Arrow
-section of a sealed snapshot, a checkpoint or a backup archive.
+back, and a column buffer is never sliced outside its message. The same scan refuses, as
+undecodable, a body whose schema declares a field type Nervix does not carry, a dictionary encoding
+among them, or whose record batch is at odds with that schema. It opens every Arrow section of a
+sealed snapshot, a checkpoint or a backup archive.
 
 HTTP/2 flow control adds another bound. Each stream begins with a 64 KiB receive window, each
 connection begins with a 256 KiB receive window, and request headers are limited to 16 KiB. A
@@ -616,8 +621,11 @@ A delivery proceeds as follows:
 5. The receiver reads exactly the granted length under the reservation, records body receipt, and
    places the work in its bounded application queue. The HTTP/2 body response confirms receipt by
    the receiving process only.
-6. The application lane validates the exact schema, metadata, branch, and record-acknowledgement
-   count, then resolves the configured concrete runtime branch. Work for one channel remains ordered,
+6. The application lane validates the body's Arrow IPC stream, which must hold a schema message
+   of the field types Nervix carries, one uncompressed record batch that declares the field nodes
+   and buffers that schema's fields take with every buffer inside its body, and the end-of-stream
+   marker, and then the exact schema, metadata, branch, and record-acknowledgement count, then
+   resolves the configured concrete runtime branch. Work for one channel remains ordered,
    while other channels continue independently. A payload that fails this validation never reaches
    the branch. The receiver keeps the failure as a report of `RuntimeError::DecodeRemoteRelay`
    with the typed `RemoteRelayDecodeError` beneath it, which names what the payload got wrong and
@@ -956,7 +964,9 @@ Backup state capture uses typed drain, capture, inventory, and fetch operations.
 each node's admitted work through a management-class drain request and requests a separate
 confirming force-flush round after all nodes appear quiet. The leader sends a management-class capture
 request with its coordination identity and applied cut revision to each live node, then reads each
-node's management-class inventory of staged sections. A receiver waits up to five seconds for its
+node's management-class inventory of staged sections. A capture request's deadline is the remaining
+budget of the domain's cut rather than a fixed request deadline, because an owner stages its share of
+the domain's state before it answers; a `WITHOUT PAUSE` capture takes the default cut budget. A receiver waits up to five seconds for its
 state machine to apply that revision, installs its current runtime plan, and rechecks the sending
 leader before it captures. A closed applied-state authority or a catch-up deadline refuses the
 capture; a follower that is still applying the cut does not produce an archive from earlier state.
@@ -966,7 +976,10 @@ and the leader stages and verifies the stream before adding it to the archive. T
 staged section only for the coordinator process that requested it and releases expired stages.
 The fetch stream authenticates that process identity before its handler can consume the stage; a
 partitioned or cancelled fetch leaves any unconsumed stage available until expiry.
-Materialized inventories distinguish archive descriptors, scalar identity groups and Arrow
+An owner streams each branch lifecycle and Kafka offset section from the cut's database snapshot
+into its staged file under a `restore_metadata` conversion charge and a 64 KiB bulk buffer, so the
+inventory declares a section's exact length and digest without the owner holding the section
+whole. Materialized inventories distinguish archive descriptors, scalar identity groups and Arrow
 column groups. Their bounded sections are staged from a fresh assignment-qualified capture and
 fetched through the same authenticated stream; the capture never transfers an entire container
 as one bulk response allocation. The leader verifies each length and digest before assembly.

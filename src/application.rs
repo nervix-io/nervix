@@ -746,8 +746,11 @@ impl Application {
             .map(MemoryPressureController::new)
             .transpose()
             .map_err(|error| {
-                error!(?error, "failed to initialize memory pressure monitor");
-                Report::new(AppError::InitMemoryPressureMonitor).attach_printable(error)
+                error!(
+                    error = format!("{error:#}"),
+                    "failed to initialize memory pressure monitor"
+                );
+                error.change_context(AppError::InitMemoryPressureMonitor)
             })?;
         let db_path = self.db_path.clone();
         let temp_dir = self.temp_dir.clone();
@@ -926,37 +929,13 @@ impl Application {
             runtime_state_snapshot_interval = ?startup.runtime.state_snapshot_interval(),
             "initialized runtime persistence"
         );
-        let startup_runtime_changes = match startup.registry.startup_runtime_changes() {
-            Ok(changes) => changes,
-            Err(error) => {
-                let error = Report::new(AppError::ApplyStartupRuntime(error.to_string()));
-                startup.terminate().await;
-                return Err(error);
-            }
-        };
-        for changes in startup_runtime_changes {
-            let revision = match changes.execution_revision() {
-                Ok(revision) => revision,
-                Err(error) => {
-                    let error = Report::new(AppError::ApplyStartupRuntime(format!("{error:#}")));
-                    startup.terminate().await;
-                    return Err(error);
-                }
-            };
-            if let Err(error) = startup
-                .runtime
-                .apply_changes(&changes.domain, revision)
-                .await
-            {
-                let reason = format!("{error:#}");
-                error!(
-                    error = reason.as_str(),
-                    "failed to apply startup runtime changes"
-                );
-                let error = Report::new(AppError::ApplyStartupRuntime(reason));
-                startup.terminate().await;
-                return Err(error);
-            }
+        if let Err(error) = startup.apply_stored_runtime_changes().await {
+            error!(
+                error = format!("{error:#}"),
+                "failed to apply startup runtime changes"
+            );
+            startup.terminate().await;
+            return Err(error);
         }
         let interconnect_result = Transport::bind(
             interconnect_listen_addr,

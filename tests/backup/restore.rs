@@ -14,6 +14,8 @@
 #[path = "../runtime/native_restore_inspection.rs"]
 mod native_restore_inspection;
 
+use std::os::unix::fs::OpenOptionsExt as _;
+
 use nervix_backup::{
     ArchiveLayout, ArchiveRecord, BackupManifest, BranchLifecycleRecord, SectionDigester,
     SectionPath, WasmStateDescriptor,
@@ -457,9 +459,9 @@ pub(crate) struct ArmedRestorePause {
 /// Every section of an archive: its manifest, each section's bytes by path, and where each section
 /// begins in the archive.
 #[derive(Default)]
-struct ArchiveCopy {
+pub(super) struct ArchiveCopy {
     manifest: Option<BackupManifest>,
-    sections: BTreeMap<String, Vec<u8>>,
+    pub(super) sections: BTreeMap<String, Vec<u8>>,
     offsets: BTreeMap<String, u64>,
 }
 
@@ -486,7 +488,7 @@ impl SectionVisitor for ArchiveCopy {
 }
 
 /// Reads and verifies every section of the archive at `path`.
-fn copy_of_archive(path: &Path) -> ArchiveCopy {
+pub(super) fn copy_of_archive(path: &Path) -> ArchiveCopy {
     let file = std::fs::File::open(path).expect("the archive exists");
     let mut copy = ArchiveCopy::default();
     read_archive(std::io::BufReader::new(file), &mut copy)
@@ -750,112 +752,24 @@ async fn when_cli_restores_with_memory_measurements(
     file: String,
     node: String,
 ) {
-    let nodes = world.cluster().node_ids();
-    let mut urls = Vec::new();
-    for node in &nodes {
-        urls.push((
-            node.clone(),
-            world
-                .cluster()
-                .observability_metrics_url(node)
-                .assured("a restore target exposes metrics"),
-        ));
-    }
-    let (ready, started) = nervix_primitives::sync::oneshot::channel();
-    let stop = CancellationToken::new();
-    let sampled_stop = stop.clone();
-    let initial_usage = nervix_server::memory_pressure::jemalloc_memory_usage()
-        .assured("the harness allocator exposes statistics");
-    let initial_heap = initial_usage.allocated;
-    let initial_resident = initial_usage.resident;
-    let sampler = AbortOnDropHandle::new(nervix_primitives::task::spawn(async move {
-        let client = reqwest::Client::new();
-        let mut peak_heap = initial_heap;
-        let mut peak_resident = initial_resident;
-        let mut peaks = BTreeMap::<String, f64>::new();
-        let mut metadata_peaks = BTreeMap::<String, f64>::new();
-        let mut baseline_rejections = BTreeMap::<String, f64>::new();
-        let mut final_rejections = BTreeMap::<String, f64>::new();
-        let mut samples = 0_u64;
-        let mut ready = Some(ready);
-        loop {
-            nervix_primitives::task::consume_budget().await;
-            for (node, url) in &urls {
-                nervix_primitives::task::consume_budget().await;
-                let response = client
-                    .get(url)
-                    .send()
-                    .await
-                    .assured("the restore target's metrics remain reachable");
-                let body = response.text().await.assured("metrics decode as text");
-                for line in body.lines() {
-                    let is_metadata = line.contains("class=\"restore_metadata\"");
-                    if !line.contains("class=\"bulk\"") && !is_metadata {
-                        continue;
-                    }
-                    let value = line
-                        .split_whitespace()
-                        .last()
-                        .assured("a metric sample contains its value")
-                        .parse::<f64>()
-                        .assured("the metric value is numeric");
-                    if line.starts_with("nervix_execution_memory_reserved_bytes{") {
-                        let peak = if is_metadata {
-                            metadata_peaks.entry(node.clone()).or_default()
-                        } else {
-                            peaks.entry(node.clone()).or_default()
-                        };
-                        *peak = peak.max(value);
-                    } else if !is_metadata
-                        && line.starts_with("nervix_execution_memory_rejections_total{")
-                    {
-                        baseline_rejections.entry(node.clone()).or_insert(value);
-                        final_rejections.insert(node.clone(), value);
-                    }
-                }
-            }
-            let usage = nervix_server::memory_pressure::jemalloc_memory_usage()
-                .assured("allocator statistics remain available");
-            peak_heap = peak_heap.max(usage.allocated);
-            peak_resident = peak_resident.max(usage.resident);
-            samples = samples
-                .checked_add(1)
-                .assured("one restore has a bounded sample count");
-            if let Some(sender) = ready.take() {
-                sender
-                    .send(())
-                    .assured("the measurement caller waits for its baseline");
-            }
-            nervix_primitives::select! {
-                () = sampled_stop.cancelled() => break,
-                () = nervix_primitives::time::sleep(Duration::from_millis(20)) => {}
-            }
-        }
-        assert_eq!(
-            baseline_rejections, final_rejections,
-            "valid restored state incurs no bulk budget refusal"
-        );
-        (peak_heap, peak_resident, peaks, metadata_peaks, samples)
-    }));
-    started
-        .await
-        .assured("every restore target was sampled before the CLI starts");
+    let nodes = world.cluster().node_ids().len();
+    let sampler = super::memory::MemorySampler::start(world).await;
     let began = Instant::now();
     when_cli_restores(world, scope, file.clone(), node).await;
     let elapsed = began.elapsed();
-    stop.cancel();
-    let (peak_heap, peak_resident, peaks, metadata_peaks, samples) =
-        sampler.await.assured("the restore memory sampler finishes");
-    assert_eq!(peaks.len(), nodes.len(), "each restore target was sampled");
+    let sampled = sampler.finish().await;
+    sampled.assert_no_bulk_refusal("valid restored state incurs no bulk budget refusal");
+    assert_eq!(
+        sampled.bulk_peaks.len(),
+        nodes,
+        "each restore target was sampled"
+    );
+    let archive_bytes = std::fs::metadata(archive_path(world, &file))
+        .assured("the archive remains available")
+        .len();
     eprintln!(
         "restore generation measurement: {}",
-        serde_json::json!({
-            "test_id": world.test_id, "nodes": nodes.len(), "archive_bytes": std::fs::metadata(archive_path(world, &file)).assured("the archive remains available").len(),
-            "restore_milliseconds": elapsed.as_millis(), "sample_interval_milliseconds": 20, "samples": samples,
-            "sampled_bulk_peaks_bytes": peaks, "sampled_restore_metadata_peaks_bytes": metadata_peaks, "harness_heap_before_bytes": initial_heap, "harness_heap_peak_bytes": peak_heap,
-            "harness_allocator_resident_before_bytes": initial_resident, "harness_allocator_resident_peak_bytes": peak_resident,
-            "heap_scope": "every in-process cluster and harness allocation; allocator resident excludes mappings outside jemalloc", "storage_working_reservation_bytes": 2 * 1024 * 1024
-        })
+        sampled.evidence(world, archive_bytes, elapsed)
     );
 }
 
@@ -1542,7 +1456,14 @@ fn write_archive(copy: &ArchiveCopy, replaced: &BTreeMap<String, Vec<u8>>, targe
         }
     }
     let layout = ArchiveLayout::new(manifest).expect("the altered manifest lays out");
-    let mut file = std::fs::File::create(target).expect("the altered archive is created");
+    // An altered archive is as sensitive as the one it was copied from: only its owner reads it.
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .mode(0o600)
+        .open(target)
+        .expect("the altered archive is created");
     layout
         .write_to(&mut file, |entry, sink| {
             let path = entry.path.as_str();

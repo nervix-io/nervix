@@ -1,439 +1,487 @@
 //! The Arrow IPC bodies a batch travels and is sealed as, read back whole and read back damaged.
 //!
 //! Layer: test harness.
-//! - **Owns.** Generated batches whose columns take every buffer layout, their relay bodies and
-//!   sealed snapshot sections, and the same bodies damaged once.
-//! - **Depends on.** The production body encoder and decoder, and the vocabulary generators.
-//! - **Must not know.** Relays, snapshots, or what a decoded batch is used for.
+//!
+//! - **Owns.** The round-trip and damaged-body properties of every Arrow IPC body the runtime
+//!   encodes and decodes, relay bodies and sealed snapshot sections alike, and the boundary of
+//!   each limit those decoders enforce.
+//! - **Depends on.** The generated batches and their logical oracle, the body codecs and the
+//!   executor that charges them.
+//! - **Must not know.** Relays, peers or the interconnect that carries a body.
 
-use arrow_array::{
-    ArrayRef, BinaryArray, BooleanArray, Int64Array, RecordBatch, StringArray,
-    builder::{Int64Builder, ListBuilder},
-};
-use arrow_ipc::{Message, MessageHeader, root_as_message};
-use arrow_schema::{DataType, Field, Schema as ArrowSchema};
-use error_stack::Report;
+use arrow_array::RecordBatch;
+use arrow_ipc::writer::StreamWriter;
+use arrow_schema::Schema as ArrowSchema;
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_arbitrary::{Arbitrary, Domain};
-use nervix_execution::{ChargedBytes, Executor, MemoryClass};
+use nervix_execution::{ChargedBytes, ExecutionConfig, Executor, MemoryClass, OperationLimits};
 use nervix_primitives::sync::StdArc;
+use rstest::rstest;
+use ubyte::ByteUnit;
 
-use super::{ArrowBodyError, RuntimeRecordBatch, ipc_stream::IpcFramingDefect};
+use super::ArrowBodyError;
+use crate::runtime_schema::{
+    RuntimeRecordBatch,
+    crafted_streams::{StreamDefect, receiver_schema},
+    generated_batches::{
+        Damage, GeneratedDomain, GeneratedSchema, assert_rewritten_batch, assert_same_batch,
+    },
+    ipc_stream::IpcStreamError,
+};
 
-/// The most rows, list elements and text or byte lengths one generated batch draws.
-const GENERATED_BOUND: usize = 4;
+/// The bytes one round-trip case reads its schema, rows and section count from.
+const ROUND_TRIP_BYTES: usize = 2048;
 
-/// Which path a generated body travels, which decides its budget and whether its reader already
-/// knows its schema.
-#[derive(Debug, Clone, Copy)]
-enum Carriage {
-    /// A relay batch, read by a receiver that learns the schema from the body.
-    Relay,
-    /// One Arrow section of a sealed snapshot, read against the schema installed for it.
-    SnapshotSection,
+/// The bytes one damaged-body case reads its batch and damage from.
+const DAMAGED_BYTES: usize = 2048;
+
+/// The most sections a generated multi-section body carries.
+const SECTIONS: usize = 3;
+
+/// One generated batch and the runtime that drives the asynchronous codecs over it.
+struct BodyCase {
+    schema: GeneratedSchema,
+    rows: RecordBatch,
 }
 
-impl Carriage {
-    fn generated(arbitrary: &mut Arbitrary<'_>) -> Self {
-        if arbitrary.entropy().flag() {
-            Self::Relay
-        } else {
-            Self::SnapshotSection
-        }
+impl BodyCase {
+    fn new(arbitrary: &mut Arbitrary<'_>) -> Self {
+        let schema = GeneratedDomain::Arrow.schema(arbitrary);
+        let rows = GeneratedDomain::Arrow.batch(arbitrary, &schema);
+        Self { schema, rows }
     }
 
-    const fn memory_class(self) -> MemoryClass {
-        match self {
-            Self::Relay => MemoryClass::Relay,
-            Self::SnapshotSection => MemoryClass::Bulk,
-        }
+    fn runtime_batch(&self) -> RuntimeRecordBatch {
+        self.schema.runtime_batch(self.rows.clone())
     }
 
-    async fn encode(
-        self,
-        batch: &RuntimeRecordBatch,
-        executor: &Executor,
-    ) -> Result<ChargedBytes, Report<ArrowBodyError>> {
-        match self {
-            Self::Relay => batch.encode_arrow_ipc(executor).await,
-            Self::SnapshotSection => batch.encode_arrow_snapshot_section(executor).await,
-        }
+    fn arrow_schema(&self) -> StdArc<ArrowSchema> {
+        self.schema.compiled.arrow_schema()
     }
 
-    /// Reads `bytes` as a body of `schema` on this path.
-    async fn decode(
-        self,
-        schema: &StdArc<ArrowSchema>,
-        executor: &Executor,
-        bytes: Vec<u8>,
-    ) -> Result<RuntimeRecordBatch, Report<ArrowBodyError>> {
-        let body = executor
-            .charge_owned(self.memory_class(), bytes)
-            .await
-            .assured("the default budget holds one small generated body");
-        match self {
-            Self::Relay => RuntimeRecordBatch::decode_arrow_ipc(executor, body).await,
-            Self::SnapshotSection => {
-                RuntimeRecordBatch::decode_arrow_snapshot_section(
-                    executor,
-                    StdArc::clone(schema),
-                    body,
+    /// The rows written as `sections` record batch messages of one stream, as a peer whose body
+    /// carried more than one section would have written them.
+    fn sections(&self, sections: usize) -> Vec<u8> {
+        let mut body = Vec::new();
+        let mut writer =
+            StreamWriter::try_new(&mut body, &self.arrow_schema()).assured("the schema writes");
+        for _ in 0..sections {
+            writer.write(&self.rows).assured("a generated batch writes");
+        }
+        writer.finish().assured("the stream ends");
+        drop(writer);
+        body
+    }
+}
+
+fn property_runtime() -> nervix_primitives::runtime::Runtime {
+    nervix_primitives::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .assured("the property runtime opens")
+}
+
+fn charged(executor: &Executor, bytes: Vec<u8>) -> ChargedBytes {
+    executor
+        .try_charge_owned(MemoryClass::Relay, bytes)
+        .assured("a bounded test body fits the relay budget")
+}
+
+/// The batch `sections` copies of `rows` decode into when a decoder concatenates them.
+fn repeated(rows: &RecordBatch, sections: usize) -> RecordBatch {
+    let copies = vec![rows.clone(); sections];
+    arrow_select::concat::concat_batches(&rows.schema(), &copies)
+        .assured("copies of one batch share its schema")
+}
+
+/// Every relay body and snapshot section decodes to the batch it was encoded from: the exact
+/// schema, every row, and every value and null, floats by their bits, through a view whose columns
+/// start inside a larger batch. A body of several sections is refused by the decoders that accept
+/// exactly one and concatenated by the one that accepts any number. Nothing stays charged.
+#[test]
+fn bolero_arrow_bodies_restore_every_column_value_and_null() {
+    let runtime = property_runtime();
+    bolero::check!()
+        .with_iterations(128)
+        .with_max_len(ROUND_TRIP_BYTES)
+        .for_each(|input| {
+            let executor = Executor::default();
+            let mut arbitrary = Arbitrary::new(input, Domain::Vocabulary);
+            // What shapes the case is read before the case: an ordinary run's few bytes run out
+            // while a batch is generated, and a choice read after that takes its first option.
+            let sections = arbitrary
+                .entropy()
+                .count(SECTIONS.checked_sub(2).assured("more than one section"))
+                .checked_add(2)
+                .verified("a small count");
+            let case = BodyCase::new(&mut arbitrary);
+            runtime.block_on(async {
+                let batch = case.runtime_batch();
+                let body = batch
+                    .encode_arrow_ipc(&executor)
+                    .await
+                    .assured("a bounded batch encodes");
+                let exact = case
+                    .schema
+                    .compiled
+                    .decode_arrow_body(&executor, body.clone())
+                    .await
+                    .assured("the encoded body decodes against its schema");
+                assert_same_batch(exact.batch(), &case.rows);
+                let any = RuntimeRecordBatch::decode_arrow_ipc(&executor, body)
+                    .await
+                    .assured("the encoded body decodes without a known schema");
+                assert_same_batch(any.batch(), &case.rows);
+
+                let section = batch
+                    .encode_arrow_snapshot_section(&executor)
+                    .await
+                    .assured("a bounded batch encodes as a section");
+                let restored = RuntimeRecordBatch::decode_arrow_snapshot_section(
+                    &executor,
+                    case.arrow_schema(),
+                    section,
                 )
                 .await
-            }
-        }
-    }
+                .assured("the section decodes against its schema");
+                assert_same_batch(restored.batch(), &case.rows);
+
+                let several = charged(&executor, case.sections(sections));
+                let refused = case
+                    .schema
+                    .compiled
+                    .decode_arrow_body(&executor, several.clone())
+                    .await
+                    .expect_err("a relay body carries exactly one section");
+                assert!(
+                    matches!(
+                        refused.current_context(),
+                        ArrowBodyError::TooManySections { sections: counted, limit: 1 }
+                            if *counted == sections
+                    ),
+                    "every section past the first is refused: {refused:?}"
+                );
+                let section_refused = RuntimeRecordBatch::decode_arrow_snapshot_section(
+                    &executor,
+                    case.arrow_schema(),
+                    several.clone(),
+                )
+                .await
+                .expect_err("a snapshot section carries exactly one section");
+                assert!(matches!(
+                    section_refused.current_context(),
+                    ArrowBodyError::TooManySections { sections: counted, limit: 1 }
+                        if *counted == sections
+                ));
+                let concatenated = RuntimeRecordBatch::decode_arrow_ipc(&executor, several)
+                    .await
+                    .assured("a body of several sections concatenates them");
+                assert_same_batch(concatenated.batch(), &repeated(&case.rows, sections));
+            });
+            let snapshot = executor.snapshot();
+            assert_eq!(
+                snapshot.relay_memory.reserved_bytes, 0,
+                "no relay charge outlives its body"
+            );
+            assert_eq!(
+                snapshot.bulk_memory.reserved_bytes, 0,
+                "no section charge outlives it"
+            );
+        });
 }
 
-/// A short lowercase text.
-fn generated_text(arbitrary: &mut Arbitrary<'_>) -> String {
-    let length = arbitrary.entropy().count(GENERATED_BOUND);
-    let mut text = String::with_capacity(length);
-    for _ in 0..length {
-        let letter = b'a'
-            .checked_add(arbitrary.entropy().byte() % 26)
-            .verified("a letter index below 26 stays within the lowercase letters");
-        text.push(char::from(letter));
-    }
-    text
+/// A damaged relay body, snapshot section or arbitrary bytes either fail with a typed body
+/// failure the decoder reports for the bytes themselves, never one of admission or execution, or
+/// decode to a valid batch: of the expected schema where the decoder knows it, and one that
+/// encodes and decodes back to itself.
+#[test]
+fn bolero_damaged_arrow_bodies_are_refused_typed_or_decode_canonically() {
+    let runtime = property_runtime();
+    bolero::check!()
+        .with_iterations(256)
+        .with_max_len(DAMAGED_BYTES)
+        .for_each(|input| {
+            let executor = Executor::default();
+            let mut arbitrary = Arbitrary::new(input, Domain::Vocabulary);
+            let damage = Damage::draw(arbitrary.entropy());
+            let case = BodyCase::new(&mut arbitrary);
+            let damaged = damage.apply(case.sections(1));
+            runtime.block_on(async {
+                let exact = case
+                    .schema
+                    .compiled
+                    .decode_arrow_body(&executor, charged(&executor, damaged.clone()))
+                    .await;
+                check_damaged_outcome(&executor, exact, Some(&case.arrow_schema())).await;
+                let section = RuntimeRecordBatch::decode_arrow_snapshot_section(
+                    &executor,
+                    case.arrow_schema(),
+                    charged(&executor, damaged.clone()),
+                )
+                .await;
+                check_damaged_outcome(&executor, section, Some(&case.arrow_schema())).await;
+                let any =
+                    RuntimeRecordBatch::decode_arrow_ipc(&executor, charged(&executor, damaged))
+                        .await;
+                check_damaged_outcome(&executor, any, None).await;
+            });
+            let snapshot = executor.snapshot();
+            assert_eq!(
+                snapshot.relay_memory.reserved_bytes, 0,
+                "no relay charge outlives its body"
+            );
+            assert_eq!(
+                snapshot.bulk_memory.reserved_bytes, 0,
+                "no section charge outlives it"
+            );
+        });
 }
 
-/// A batch of up to four rows whose columns take every buffer layout a body carries: fixed-width
-/// values, a validity bitmap, variable-length offsets, bit-packed values and a nested list.
-fn generated_batch(arbitrary: &mut Arbitrary<'_>) -> RuntimeRecordBatch {
-    let rows = arbitrary.entropy().count(GENERATED_BOUND);
-    let mut wide = Vec::with_capacity(rows);
-    let mut text = Vec::with_capacity(rows);
-    let mut flags = Vec::with_capacity(rows);
-    let mut bytes = Vec::with_capacity(rows);
-    let mut lists = ListBuilder::new(Int64Builder::new());
-    for _ in 0..rows {
-        wide.push(arbitrary.entropy().any_i64());
-        if arbitrary.entropy().flag() {
-            text.push(None);
-        } else {
-            text.push(Some(generated_text(arbitrary)));
-        }
-        if arbitrary.entropy().flag() {
-            flags.push(None);
-        } else {
-            flags.push(Some(arbitrary.entropy().flag()));
-        }
-        let length = arbitrary.entropy().count(GENERATED_BOUND);
-        let mut value = Vec::with_capacity(length);
-        for _ in 0..length {
-            value.push(arbitrary.entropy().byte());
-        }
-        bytes.push(value);
-        if arbitrary.entropy().flag() {
-            lists.append_null();
-        } else {
-            let elements = arbitrary.entropy().count(GENERATED_BOUND);
-            for _ in 0..elements {
-                if arbitrary.entropy().flag() {
-                    lists.values().append_null();
-                } else {
-                    lists.values().append_value(arbitrary.entropy().any_i64());
-                }
-            }
-            lists.append(true);
-        }
-    }
-    let schema = StdArc::new(ArrowSchema::new(vec![
-        Field::new("wide", DataType::Int64, false),
-        Field::new("text", DataType::Utf8, true),
-        Field::new("flag", DataType::Boolean, true),
-        Field::new("bytes", DataType::Binary, false),
-        Field::new(
-            "list",
-            DataType::List(StdArc::new(Field::new_list_field(DataType::Int64, true))),
-            true,
-        ),
-    ]));
-    let byte_values = bytes.iter().map(Vec::as_slice).collect::<Vec<_>>();
-    let columns: Vec<ArrayRef> = vec![
-        StdArc::new(Int64Array::from(wide)),
-        StdArc::new(StringArray::from(text)),
-        StdArc::new(BooleanArray::from(flags)),
-        StdArc::new(BinaryArray::from(byte_values)),
-        StdArc::new(lists.finish()),
-    ];
-    let batch = RecordBatch::try_new(StdArc::clone(&schema), columns)
-        .assured("every generated column has its field's type and the batch's row count");
-    RuntimeRecordBatch::from_record_batch(schema, batch)
-        .assured("the batch has the schema it was built with")
-}
-
-/// Writes `value` over the bytes of `body` from `position`, as far as the body reaches.
-fn overwrite(body: &mut [u8], position: usize, value: &[u8]) {
-    for (offset, byte) in value.iter().enumerate() {
-        let index = position
-            .checked_add(offset)
-            .verified("a position at most a test body's length is far below usize::MAX");
-        if let Some(slot) = body.get_mut(index) {
-            *slot = *byte;
-        }
-    }
-}
-
-/// `body` damaged once at a generated position: a flipped bit, a cut, appended bytes, or a four-
-/// or eight-byte little-endian length overwritten with a boundary value.
-fn damaged(arbitrary: &mut Arbitrary<'_>, mut body: Vec<u8>) -> Vec<u8> {
-    let length = u64::try_from(body.len()).assured("a body length fits in u64");
-    let position = arbitrary.entropy().up_to(length);
-    let position = usize::try_from(position).verified("a position at most the body length");
-    match arbitrary.entropy().byte() % 5 {
-        0 => {
-            let bit = arbitrary.entropy().byte() % 8;
-            if let Some(byte) = body.get_mut(position) {
-                *byte ^= 1_u8 << bit;
-            }
-        }
-        1 => body.truncate(position),
-        2 => {
-            let added = arbitrary.entropy().count(16);
-            for _ in 0..added {
-                body.push(arbitrary.entropy().byte());
-            }
-        }
-        3 => {
-            let whole = u32::try_from(body.len()).assured("a generated body is far below 4 GiB");
-            let value = arbitrary.entropy().pick([0, 1, whole, u32::MAX]);
-            overwrite(&mut body, position, &value.to_le_bytes());
-        }
-        _ => {
-            let whole = i64::try_from(body.len()).assured("a generated body is far below 8 EiB");
-            let value = arbitrary
-                .entropy()
-                .pick([0, 1, whole, 1 << 48, i64::MAX, -1]);
-            overwrite(&mut body, position, &value.to_le_bytes());
-        }
-    }
-    body
-}
-
-/// Change only the record message's declared body length in a current writer's stream.
-fn with_declared_record_body(mut body: Vec<u8>, declared: i64) -> Vec<u8> {
-    let schema_metadata = usize::try_from(i32::from_le_bytes(
-        body[4..8].try_into().assured("a writer's schema frame is complete"),
-    ))
-    .assured("a written schema has a nonnegative metadata length");
-    let record_start = 8_usize
-        .checked_add(schema_metadata)
-        .assured("the bounded schema metadata fits memory");
-    assert_eq!(&body[record_start..record_start + 4], &[0xff; 4]);
-    let metadata_start = record_start
-        .checked_add(8)
-        .assured("the bounded frame fits memory");
-    let metadata_length = usize::try_from(i32::from_le_bytes(
-        body[record_start + 4..metadata_start]
-            .try_into()
-            .assured("a writer's record frame is complete"),
-    ))
-    .assured("a written batch has a nonnegative metadata length");
-    let metadata_end = metadata_start
-        .checked_add(metadata_length)
-        .assured("the bounded batch metadata fits memory");
-    let message = root_as_message(&body[metadata_start..metadata_end])
-        .assured("the writer produced valid record metadata");
-    assert_eq!(message.header_type(), MessageHeader::RecordBatch);
-    let field = message._tab.vtable().get(Message::VT_BODYLENGTH);
-    assert_ne!(field, 0, "the writer records its body length");
-    let table = metadata_start
-        .checked_add(message._tab.loc())
-        .assured("the bounded table fits memory");
-    let start = table
-        .checked_add(usize::from(field))
-        .assured("the body length slot fits memory");
-    let end = start.checked_add(8).assured("the length field fits memory");
-    body[start..end].copy_from_slice(&declared.to_le_bytes());
-    body
-}
-
-/// Asserts that `bytes` either are refused for what they hold or decode to a batch like any
-/// other, which encodes and decodes back to itself.
-async fn assert_refused_typed_or_decodes_canonically(
-    carriage: Carriage,
-    schema: &StdArc<ArrowSchema>,
+async fn check_damaged_outcome(
     executor: &Executor,
-    bytes: Vec<u8>,
+    outcome: Result<RuntimeRecordBatch, error_stack::Report<ArrowBodyError>>,
+    expected: Option<&StdArc<ArrowSchema>>,
 ) {
-    let decoded = match carriage.decode(schema, executor, bytes).await {
+    let decoded = match outcome {
         Ok(decoded) => decoded,
-        Err(report) => {
-            assert_refused_for_its_content(&report);
+        Err(failure) => {
+            assert!(
+                matches!(
+                    failure.current_context(),
+                    ArrowBodyError::Decode { .. }
+                        | ArrowBodyError::Framing { .. }
+                        | ArrowBodyError::TooManySections { .. }
+                        | ArrowBodyError::NoSection
+                        | ArrowBodyError::DecodedTooLarge { .. }
+                ),
+                "a damaged body fails with the defect of its own bytes: {failure:?}"
+            );
             return;
         }
     };
-    let body = carriage
-        .encode(&decoded, executor)
+    let body = decoded
+        .encode_arrow_ipc(executor)
         .await
-        .assured("a decoded batch encodes");
-    let decoded_schema = decoded.batch().schema();
-    let reopened = carriage
-        .decode(&decoded_schema, executor, body.as_ref().to_vec())
+        .assured("a decoded batch encodes again");
+    let again = RuntimeRecordBatch::decode_arrow_ipc(executor, body)
         .await
-        .assured("an encoded body decodes");
-    assert_eq!(reopened.batch(), decoded.batch());
+        .assured("a re-encoded valid batch decodes");
+    let Some(expected) = expected else {
+        // Without a known schema the damaged stream may declare a zone no schema of the node's
+        // declares, which the writer rewrites.
+        assert_rewritten_batch(again.batch(), decoded.batch());
+        return;
+    };
+    assert_eq!(
+        &decoded.schema(),
+        expected,
+        "an accepted body has the expected schema"
+    );
+    assert_same_batch(again.batch(), decoded.batch());
 }
 
-/// Asserts that `report` refuses a body for what it holds: what its framing or its limits get
-/// wrong, or what the reader rejects or panics on. It is never refused as work the node could
-/// not admit or execute.
-fn assert_refused_for_its_content(report: &Report<ArrowBodyError>) {
+/// A relay with the given decoded limit and the default everything else.
+fn executor_with(limits: OperationLimits) -> Executor {
+    Executor::new(ExecutionConfig {
+        limits,
+        ..ExecutionConfig::default()
+    })
+    .assured("a narrower relay limit keeps the default budgets valid")
+}
+
+/// The first generated case holding a row, drawn from bytes spread from `seed`, for the boundary
+/// tests below.
+fn fixed_case(seed: u8) -> BodyCase {
+    for attempt in 0..=u8::MAX {
+        let mut bytes = Vec::with_capacity(512);
+        for index in 0..512_usize {
+            let scaled = index
+                .checked_mul(31)
+                .assured("a small index times a small factor fits in usize");
+            let spread = scaled
+                .checked_add(usize::from(seed))
+                .assured("a small sum fits in usize");
+            let spread = spread
+                .checked_add(usize::from(attempt))
+                .assured("a small sum fits in usize");
+            bytes.push(u8::try_from(spread % 256).assured("a remainder of 256 is one byte"));
+        }
+        let mut arbitrary = Arbitrary::new(&bytes, Domain::Vocabulary);
+        let case = BodyCase::new(&mut arbitrary);
+        if case.rows.num_rows() > 0 {
+            return case;
+        }
+    }
+    panic!("no spread of seed {seed} generates a row");
+}
+
+#[nervix_primitives::test]
+async fn a_body_longer_than_the_encoded_limit_is_refused_before_it_is_read() {
+    let case = fixed_case(7);
+    let body = case.sections(1);
+    let length = u64::try_from(body.len()).assured("a bounded body length");
+    let limit = length.checked_sub(1).assured("an encoded body has bytes");
+    let executor = executor_with(OperationLimits {
+        relay_encoded_bytes: ByteUnit::Byte(limit),
+        ..OperationLimits::default()
+    });
+    let refused = case
+        .schema
+        .compiled
+        .decode_arrow_body(&executor, charged(&executor, body))
+        .await
+        .expect_err("the body is one byte over the limit");
     assert!(
         matches!(
-            report.current_context(),
-            ArrowBodyError::Decode { .. }
-                | ArrowBodyError::Framing { .. }
-                | ArrowBodyError::NoSection
-                | ArrowBodyError::TooManySections { .. }
-                | ArrowBodyError::BodyTooLarge { .. }
-                | ArrowBodyError::DecodedTooLarge { .. }
+            refused.current_context(),
+            ArrowBodyError::BodyTooLarge { size, limit: refused_limit }
+                if *size == length && *refused_limit == limit
         ),
-        "a damaged body is refused for what it holds: {report:?}"
+        "the refusal names the size and the limit: {refused:?}"
     );
 }
 
-/// A batch read back from its relay body and from its sealed snapshot section has the schema it
-/// was written with, every value of every column, and every null.
-#[test]
-fn bolero_arrow_bodies_restore_every_column_value_and_null() {
-    bolero::check!()
-        .with_iterations(128)
-        .with_max_len(1024)
-        .for_each(|input: &[u8]| {
-            let runtime = nervix_primitives::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-                .assured("a property runtime opens");
-            let executor = Executor::default();
-            let mut arbitrary = Arbitrary::new(input, Domain::Vocabulary);
-            let batch = generated_batch(&mut arbitrary);
-            let schema = batch.batch().schema();
-            runtime.block_on(async {
-                for carriage in [Carriage::Relay, Carriage::SnapshotSection] {
-                    let body = carriage
-                        .encode(&batch, &executor)
-                        .await
-                        .assured("a bounded generated batch encodes");
-                    let decoded = carriage
-                        .decode(&schema, &executor, body.as_ref().to_vec())
-                        .await
-                        .assured("an encoded body decodes");
-                    assert_eq!(decoded.batch(), batch.batch());
-                }
-            });
-        });
-}
-
-/// A relay body or a sealed snapshot section damaged once, and arbitrary bytes, are refused for
-/// what they hold or decode to a batch that encodes and decodes back to itself. No damage makes
-/// the decoder allocate from a length the body does not carry, which would abort the process.
-#[test]
-fn bolero_damaged_arrow_bodies_are_refused_typed_or_decode_canonically() {
-    bolero::check!()
-        .with_iterations(256)
-        .with_max_len(2048)
-        .for_each(|input: &[u8]| {
-            let runtime = nervix_primitives::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-                .assured("a property runtime opens");
-            let executor = Executor::default();
-            let mut arbitrary = Arbitrary::new(input, Domain::Vocabulary);
-            let batch = generated_batch(&mut arbitrary);
-            let schema = batch.batch().schema();
-            let carriage = Carriage::generated(&mut arbitrary);
-            runtime.block_on(async {
-                let body = carriage
-                    .encode(&batch, &executor)
-                    .await
-                    .assured("a bounded generated batch encodes");
-                let damaged_body = damaged(&mut arbitrary, body.as_ref().to_vec());
-                assert_refused_typed_or_decodes_canonically(
-                    carriage,
-                    &schema,
-                    &executor,
-                    damaged_body,
-                )
-                .await;
-                assert_refused_typed_or_decodes_canonically(
-                    carriage,
-                    &schema,
-                    &executor,
-                    input.to_vec(),
-                )
-                .await;
-            });
-        });
-}
-
-/// Exercises the same bounded decoder with one fixed carriage so fuzzing always reaches this
-/// path. Archive column sections use the snapshot-section decoder after archive verification.
-fn assert_malformed_carriage(carriage: Carriage, input: &[u8]) {
-    let runtime = nervix_primitives::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .assured("a property runtime opens");
-    let executor = Executor::default();
-    let mut arbitrary = Arbitrary::new(input, Domain::Vocabulary);
-    let batch = generated_batch(&mut arbitrary);
-    let schema = batch.batch().schema();
-    runtime.block_on(async {
-        let body = carriage
-            .encode(&batch, &executor)
+#[nervix_primitives::test]
+async fn sections_that_decode_past_the_decoded_limit_stop_at_the_section_that_crossed_it() {
+    let case = fixed_case(9);
+    // The limit is written in the bytes a decoded batch holds, which a view cut from a larger
+    // batch need not equal, so it is measured on the decoded section itself.
+    let generous = Executor::default();
+    let measured = case
+        .schema
+        .compiled
+        .decode_arrow_body(&generous, charged(&generous, case.sections(1)))
+        .await
+        .assured("one section decodes under the default limits");
+    let one = super::batch_payload_bytes(measured.batch());
+    assert!(one > 0, "a section of rows holds bytes");
+    let executor = executor_with(OperationLimits {
+        relay_decoded_bytes: ByteUnit::Byte(one),
+        ..OperationLimits::default()
+    });
+    let accepted = case
+        .schema
+        .compiled
+        .decode_arrow_body(&executor, charged(&executor, case.sections(1)))
+        .await
+        .assured("one section of exactly the decoded limit decodes");
+    assert_same_batch(accepted.batch(), &case.rows);
+    let refused =
+        RuntimeRecordBatch::decode_arrow_ipc(&executor, charged(&executor, case.sections(2)))
             .await
-            .assured("a bounded generated batch encodes");
-        for declared in [1_i64 << 60, -1_i64] {
-            let with_declaration = with_declared_record_body(body.as_ref().to_vec(), declared);
-            let report = carriage
-                .decode(&schema, &executor, with_declaration)
-                .await
-                .expect_err("an unbacked or negative body length fails before Arrow reads it");
-            assert!(
-                matches!(
-                    report.current_context(),
-                    ArrowBodyError::Framing {
-                        defect: IpcFramingDefect::Truncated | IpcFramingDefect::BodyLength
-                    }
-                ),
-                "a declared body outside its bytes fails at framing: {report:?}"
+            .expect_err("two sections decode past the limit");
+    assert!(
+        matches!(
+            refused.current_context(),
+            ArrowBodyError::DecodedTooLarge { limit, .. } if *limit == one
+        ),
+        "the refusal names the decoded limit: {refused:?}"
+    );
+}
+
+#[nervix_primitives::test]
+async fn a_stream_without_a_section_is_refused_where_one_is_required() {
+    let case = fixed_case(11);
+    let executor = Executor::default();
+    let empty = case.sections(0);
+    let refused = case
+        .schema
+        .compiled
+        .decode_arrow_body(&executor, charged(&executor, empty.clone()))
+        .await
+        .expect_err("a relay body carries one section");
+    assert!(matches!(
+        refused.current_context(),
+        ArrowBodyError::NoSection
+    ));
+    let section_refused = RuntimeRecordBatch::decode_arrow_snapshot_section(
+        &executor,
+        case.arrow_schema(),
+        charged(&executor, empty.clone()),
+    )
+    .await
+    .expect_err("a snapshot section carries one section");
+    assert!(matches!(
+        section_refused.current_context(),
+        ArrowBodyError::NoSection
+    ));
+    let any = RuntimeRecordBatch::decode_arrow_ipc(&executor, charged(&executor, empty))
+        .await
+        .assured("a stream of no sections is an empty batch of its schema");
+    assert_eq!(any.schema(), case.arrow_schema());
+    assert_eq!(any.batch().num_rows(), 0);
+}
+
+#[nervix_primitives::test]
+async fn a_body_of_another_schema_is_refused_where_the_schema_is_known() {
+    let case = fixed_case(13);
+    let other = fixed_case(17);
+    assert_ne!(
+        case.arrow_schema(),
+        other.arrow_schema(),
+        "the fixed cases differ"
+    );
+    let executor = Executor::default();
+    let refused = case
+        .schema
+        .compiled
+        .decode_arrow_body(&executor, charged(&executor, other.sections(1)))
+        .await
+        .expect_err("the body declares another schema");
+    assert!(matches!(
+        refused.current_context(),
+        ArrowBodyError::Decode { .. }
+    ));
+}
+
+/// A body declaring what Arrow's reader would panic on, or allocate for until the process aborts,
+/// is refused by the scan before the reader reads it, by every relay body decoder: as misframed
+/// when its framing is what is wrong, and as undecodable for anything else it declares.
+#[rstest]
+fn a_body_arrows_reader_would_panic_on_is_refused_before_it_is_read(
+    #[values(
+        StreamDefect::BufferPastBody,
+        StreamDefect::IntegerOfSevenBits,
+        StreamDefect::ListWithoutChild,
+        StreamDefect::DictionaryEncoded,
+        StreamDefect::SchemaWithoutFields,
+        StreamDefect::ValidityShorterThanRows,
+        StreamDefect::OffsetsCutInsideAnOffset,
+        StreamDefect::VariadicBufferCounts,
+        StreamDefect::FixedSizeListTooLongToCount,
+        StreamDefect::BodyLongerThanStream
+    )]
+    defect: StreamDefect,
+) {
+    let schema = receiver_schema();
+    let stream = defect.stream();
+    let executor = Executor::default();
+    property_runtime().block_on(async {
+        let exact = schema
+            .compiled
+            .decode_arrow_body(&executor, charged(&executor, stream.clone()))
+            .await
+            .expect_err("the stream declares what no valid stream does");
+        let any = RuntimeRecordBatch::decode_arrow_ipc(&executor, charged(&executor, stream))
+            .await
+            .expect_err("the stream declares what no valid stream does");
+        for refused in [exact, any] {
+            match (defect.refusal(), refused.current_context()) {
+                (
+                    IpcStreamError::Framing { defect: expected },
+                    ArrowBodyError::Framing { defect: reported },
+                ) => assert_eq!(*reported, expected, "the body is refused as misframed"),
+                (IpcStreamError::Framing { .. }, other) => {
+                    panic!("a misframed body is refused as misframed: {other:?}")
+                }
+                (_, ArrowBodyError::Decode { .. }) => {}
+                (_, other) => panic!("the body is refused as undecodable: {other:?}"),
+            }
+            assert_eq!(
+                refused.downcast_ref::<IpcStreamError>(),
+                Some(&defect.refusal()),
+                "the scan refuses the body for what it declares"
             );
         }
-        let damaged_body = damaged(&mut arbitrary, body.as_ref().to_vec());
-        assert_refused_typed_or_decodes_canonically(carriage, &schema, &executor, damaged_body)
-            .await;
-        assert_refused_typed_or_decodes_canonically(
-            carriage,
-            &schema,
-            &executor,
-            input.to_vec(),
-        )
-        .await;
     });
-}
-
-#[test]
-fn bolero_malformed_relay_arrow_bodies_fail_typed() {
-    bolero::check!()
-        .with_iterations(256)
-        .with_max_len(2048)
-        .for_each(|input: &[u8]| assert_malformed_carriage(Carriage::Relay, input));
-}
-
-#[test]
-fn bolero_malformed_snapshot_arrow_sections_fail_typed() {
-    bolero::check!()
-        .with_iterations(256)
-        .with_max_len(2048)
-        .for_each(|input: &[u8]| assert_malformed_carriage(Carriage::SnapshotSection, input));
-}
-
-#[test]
-fn bolero_malformed_archived_arrow_columns_fail_typed() {
-    bolero::check!()
-        .with_iterations(256)
-        .with_max_len(2048)
-        .for_each(|input: &[u8]| assert_malformed_carriage(Carriage::SnapshotSection, input));
 }

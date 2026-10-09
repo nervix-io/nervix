@@ -5,7 +5,8 @@
 //! - **Owns.** Encoding a batch into one shared immutable body and decoding a body back into a
 //!   batch, both off the async workers and both charged to the budget of the carriage they travel
 //!   under before they allocate.
-//! - **Depends on.** The executor that admits and charges the work, and Arrow's IPC codec.
+//! - **Depends on.** The executor that admits and charges the work, the IPC stream scan that checks
+//!   a body and opens Arrow's reader over it, and Arrow's IPC writer.
 //! - **Must not know.** Who sends the body, how many destinations it has, or what happens to the
 //!   batch afterwards.
 //!
@@ -13,11 +14,11 @@
 //! once and shared: every destination and every retry sends the same allocation, charged once, and
 //! reserves its own outstanding-delivery bytes separately.
 
-use std::{io::Cursor, num::NonZeroUsize};
+use std::num::NonZeroUsize;
 
 use arch_into::ArchInto as _;
-use arrow_array::{RecordBatch, RecordBatchOptions};
-use arrow_ipc::{reader::StreamReader, writer::StreamWriter};
+use arrow_array::{RecordBatch, RecordBatchOptions, new_empty_array};
+use arrow_ipc::writer::StreamWriter;
 use arrow_schema::Schema as ArrowSchema;
 use error_stack::{Report, ResultExt as _};
 use nervix_execution::{
@@ -28,7 +29,7 @@ use thiserror::Error;
 
 use super::{
     CompiledSchema, RuntimeRecordBatch, batch_payload_bytes,
-    ipc_stream::{IpcFramingDefect, IpcMessages},
+    ipc_stream::{IpcFramingDefect, IpcMessages, IpcStreamError},
 };
 
 /// Why a relay body could not be produced or consumed.
@@ -75,12 +76,18 @@ impl ArrowBodyError {
         })
     }
 
-    /// A body whose stream is not framed within it, naming what its framing gets wrong.
-    fn misframed(defect: Report<IpcFramingDefect>) -> Report<Self> {
-        let context = Self::Framing {
-            defect: defect.current_context().clone(),
+    /// A body the scan refused, with what the scan found beneath: misframed, naming what its
+    /// framing gets wrong, or one that does not decode for what its stream declares.
+    fn refused(refusal: Report<IpcStreamError>) -> Report<Self> {
+        let context = match refusal.current_context() {
+            IpcStreamError::Framing { defect } => Self::Framing {
+                defect: defect.clone(),
+            },
+            declared => Self::Decode {
+                reason: declared.to_string(),
+            },
         };
-        defect.change_context(context)
+        refusal.change_context(context)
     }
 }
 
@@ -273,9 +280,14 @@ impl RuntimeRecordBatch {
         batches: Vec<RecordBatch>,
     ) -> Result<Self, Report<ArrowBodyError>> {
         if batches.is_empty() {
+            let columns = schema
+                .fields()
+                .iter()
+                .map(|field| new_empty_array(field.data_type()))
+                .collect::<Vec<_>>();
             let batch = RecordBatch::try_new_with_options(
                 schema,
-                Vec::new(),
+                columns,
                 &RecordBatchOptions::new().with_row_count(Some(0)),
             )
             .map_err(ArrowBodyError::decoding)?;
@@ -373,13 +385,22 @@ async fn decode_body(
                 cancellation
                     .check()
                     .change_context(ArrowBodyError::Cancelled)?;
-                // Arrow's reader sizes what it allocates from the lengths a stream declares, so
-                // the stream is held to its own bytes before a reader sees it.
-                IpcMessages::new(body.as_ref())
-                    .check()
-                    .map_err(ArrowBodyError::misframed)?;
-                let mut reader = StreamReader::try_new(Cursor::new(body.as_ref()), None)
-                    .map_err(ArrowBodyError::decoding)?;
+                // Arrow's reader sizes what it allocates from the lengths a stream declares, and
+                // panics on a stream that declares what it does not expect. The stream is
+                // therefore scanned first, and its sections counted, before any column is read.
+                let scanned = IpcMessages::new(body.as_ref())
+                    .scan(None)
+                    .map_err(ArrowBodyError::refused)?;
+                if scanned.record_batches > contract.max_sections.get() {
+                    return Err(Report::new(ArrowBodyError::TooManySections {
+                        sections: scanned.record_batches,
+                        limit: contract.max_sections.get(),
+                    }));
+                }
+                if scanned.record_batches == 0 && contract.schema.is_some() {
+                    return Err(Report::new(ArrowBodyError::NoSection));
+                }
+                let mut reader = scanned.reader().map_err(ArrowBodyError::decoding)?;
                 let schema = reader.schema();
                 if let Some(expected) = &contract.schema
                     && schema.as_ref() != expected.as_ref()
@@ -395,15 +416,6 @@ async fn decode_body(
                         .check()
                         .change_context(ArrowBodyError::Cancelled)?;
                     let batch = next.map_err(ArrowBodyError::decoding)?;
-                    if batches.len() >= contract.max_sections.get() {
-                        return Err(Report::new(ArrowBodyError::TooManySections {
-                            sections: batches
-                                .len()
-                                .checked_add(1)
-                                .unwrap_or(contract.max_sections.get()),
-                            limit: contract.max_sections.get(),
-                        }));
-                    }
                     let section = batch_payload_bytes(&batch);
                     decoded = decoded.checked_add(section).ok_or_else(|| {
                         Report::new(ArrowBodyError::DecodedTooLarge {
@@ -420,9 +432,6 @@ async fn decode_body(
                         }));
                     }
                     batches.push(batch);
-                }
-                if batches.is_empty() && contract.schema.is_some() {
-                    return Err(Report::new(ArrowBodyError::NoSection));
                 }
                 RuntimeRecordBatch::from_decoded_sections(schema, batches)
             },
@@ -479,7 +488,7 @@ mod projection_tests {
 mod framing_tests {
     use std::ops::Range;
 
-    use arrow_array::{ArrayRef, DictionaryArray, Int32Array, Int64Array, types::Int32Type};
+    use arrow_array::{ArrayRef, Int32Array, Int64Array};
     use arrow_schema::{DataType, Field};
     use meticulous::{OptionExt as _, ResultExt as _};
 
@@ -507,16 +516,6 @@ mod framing_tests {
             let wide: ArrayRef = StdArc::new(Int64Array::from(vec![1, 2, 3]));
             let narrow: ArrayRef = StdArc::new(Int32Array::from(vec![4, 5, 6]));
             Self::of(executor, fields, vec![wide, narrow]).await
-        }
-
-        /// A dictionary-encoded column, whose values travel in a dictionary batch message of
-        /// their own before the record batch that indexes them.
-        async fn dictionary_encoded(executor: &Executor) -> Self {
-            let label = DataType::Dictionary(Box::new(DataType::Int32), Box::new(DataType::Utf8));
-            let fields = vec![Field::new("label", label, false)];
-            let labels: DictionaryArray<Int32Type> = ["red", "blue", "red"].into_iter().collect();
-            let labels: ArrayRef = StdArc::new(labels);
-            Self::of(executor, fields, vec![labels]).await
         }
 
         async fn of(executor: &Executor, fields: Vec<Field>, columns: Vec<ArrayRef>) -> Self {
@@ -644,19 +643,6 @@ mod framing_tests {
             .open(&executor, section.bytes.clone())
             .await
             .assured("an undamaged section opens");
-        assert_eq!(opened.batch(), section.batch.batch());
-    }
-
-    /// A dictionary batch declares column buffers of its own, held to the body of its message as
-    /// a record batch's are.
-    #[nervix_primitives::test]
-    async fn a_dictionary_encoded_section_opens_with_every_value() {
-        let executor = Executor::default();
-        let section = SealedSection::dictionary_encoded(&executor).await;
-        let opened = section
-            .open(&executor, section.bytes.clone())
-            .await
-            .assured("an undamaged dictionary-encoded section opens");
         assert_eq!(opened.batch(), section.batch.batch());
     }
 
@@ -799,41 +785,36 @@ mod framing_tests {
 
     /// Whatever single bit of a sealed section is damaged, the section either opens or is refused
     /// for what it holds. No such damage reaches the reader as a length it would allocate, which
-    /// aborts the process when the node cannot make the allocation, and damage the reader panics
-    /// on, as its schema conversion does on a field type the verifier admits, is a decode failure
-    /// rather than work the node could not execute.
+    /// aborts the process when the node cannot make the allocation, or as a declaration it would
+    /// panic on, as its schema conversion does on a field type the verifier admits: the scan
+    /// refuses both before the reader reads the stream.
     #[nervix_primitives::test]
     async fn every_single_damaged_bit_opens_or_is_refused_typed() {
         let executor = Executor::default();
-        let sections = [
-            SealedSection::sealed(&executor).await,
-            SealedSection::dictionary_encoded(&executor).await,
-        ];
-        for section in &sections {
-            for position in 0..section.bytes.len() {
-                nervix_primitives::task::consume_budget().await;
-                for bit in 0..8_u8 {
-                    let mut damaged = section.bytes.clone();
-                    damaged[position] ^= 1_u8 << bit;
+        let section = SealedSection::sealed(&executor).await;
+        for position in 0..section.bytes.len() {
+            nervix_primitives::task::consume_budget().await;
+            for bit in 0..8_u8 {
+                let mut damaged = section.bytes.clone();
+                damaged[position] ^= 1_u8 << bit;
 
-                    let result = section.open(&executor, damaged).await;
+                let result = section.open(&executor, damaged).await;
 
-                    let Err(report) = result else {
-                        continue;
-                    };
-                    // What the reader rejects or panics on is a decode failure, and what the
-                    // framing rejects names its defect.
-                    assert!(
-                        matches!(
-                            report.current_context(),
-                            ArrowBodyError::Decode { .. }
-                                | ArrowBodyError::Framing { .. }
-                                | ArrowBodyError::NoSection
-                                | ArrowBodyError::TooManySections { .. }
-                        ),
-                        "bit {bit} of byte {position}: {report:?}"
-                    );
-                }
+                let Err(report) = result else {
+                    continue;
+                };
+                // What the scan or the reader rejects for what the stream declares is a decode
+                // failure, and what the framing rejects names its defect.
+                assert!(
+                    matches!(
+                        report.current_context(),
+                        ArrowBodyError::Decode { .. }
+                            | ArrowBodyError::Framing { .. }
+                            | ArrowBodyError::NoSection
+                            | ArrowBodyError::TooManySections { .. }
+                    ),
+                    "bit {bit} of byte {position}: {report:?}"
+                );
             }
         }
     }

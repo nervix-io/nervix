@@ -63,6 +63,17 @@ declare_runtime_state_kinds! {
     BranchLru = 7,
 }
 
+impl RuntimeStateKind {
+    /// Whether state of this kind belongs to one branch of its entity, which a placement names by
+    /// the branch key's fingerprint. Every other kind is state of the whole entity.
+    pub fn is_branch_local(self) -> bool {
+        matches!(
+            self,
+            Self::Correlator | Self::Deduplicator | Self::WasmProcessor | Self::WindowProcessor
+        )
+    }
+}
+
 /// One runtime state a placement names, together with the lifetime that state belongs to.
 ///
 /// Branch-aggregated metrics and Kafka offsets depend on no schema: they name nothing beyond their

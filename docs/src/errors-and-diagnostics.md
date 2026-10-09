@@ -309,8 +309,9 @@ failure, which the emitter retries on its backoff.
 
 A backup's failures are owned where they are decided. The archive format reports an
 `ArchiveWriteError` for a record that does not encode, a record above the 64 MiB record limit, a
-section path a tar header cannot name, or bytes that differ from the manifest entry they were
-written for, and an `ArchiveReadError` for an archive whose first entry is not the manifest, a
+streamed record whose caller stopped it or whose destination failed, a section path a tar header
+cannot name, or bytes that differ from the manifest entry they were written for, and an
+`ArchiveReadError` for an archive whose first entry is not the manifest, a
 record with a foreign magic, kind, or format version, an invalid record value, a missing,
 misplaced, unexpected, or out-of-order section, and a section whose length or digest differs from
 the manifest. Each names the section path and the check as typed fields, and none carries section
@@ -321,7 +322,10 @@ leader or differs from its catalog entry, a record that does not encode, and an 
 staging area cannot hold. A quiesced capture also names its domain when the mutation lease, pause,
 drain, owner capture, or resume fails or times out, or when its coordinator loses the leader tenure
 under which it acquired the cut. Owner capture failures are classified at the
-interconnect boundary without guest bytes in the failure. Stored materialized capture refuses
+interconnect boundary without guest bytes in the failure. A branch lifecycle or Kafka offset
+section names its entity when its checkpoint does not decode, its serializer scratch or conversion
+cannot be admitted to `restore_metadata`, or its record cannot be written; the failure renders every
+context of its report. Stored materialized capture refuses
 malformed headers, inconsistent group or row counts, oversized identity or column frames,
 truncated checkpoints and failed stored chunk digests. These
 typed codec/storage failures follow the same domain capture failure path without column bytes.
@@ -582,7 +586,13 @@ references. A branch mismatch in an error route, for example, identifies the sou
 relay, and both branch declarations. A flush-based route without `FLUSH EACH` or `FLUSH IMMEDIATE`
 fails validation; the registry does not supply a cadence. The current registry reports this as an
 invalid-model failure naming the node and output in its diagnostic. Planning failures likewise
-retain the selected entity or placement so an operator can correct the request. See [Control
+retain the selected entity or placement so an operator can correct the request. A relocation the
+graph cannot plan is a `RelocationPlanError` report beneath `RelocationError::Graph`: a member
+that does not exist names the domain and the member, a server-listener ingestor names the ingestor,
+a corridor whose `FROM`/`TO` pairs are all disconnected, a hard group whose overrides request
+different strategies lists every member of that group, and an override outside the unit names its
+member. The failed command renders the chain, such as `relocation plan failed: junction
+'chain_distant' is not part of the relocation`. See [Control
 Plane](./control-plane.md) for activation and [Typed States And Validation
 Boundaries](./typed-states.md) for required state.
 
@@ -715,6 +725,23 @@ a typed execution-configuration failure. A budget below the selected requirement
 class, operation, configured budget, and required bytes, so the node fails startup with an
 actionable diagnostic instead of discovering insufficient storage capacity while applying a
 transaction.
+
+Memory-pressure watermarks are validated where the node reads its options. A low watermark that is
+not below the high one, or a zero check interval, is a `MemoryPressureConfigError` carrying the
+configured values beneath `AppError::InvalidMemoryPressureConfig`, so the node does not start. The
+supervisor's constructor validates the same configuration beneath
+`MemoryPressureError::InvalidConfig`, and an allocator sample that jemalloc refuses is
+`MemoryPressureError::ReadJemalloc`, naming the control it read, the epoch, `stats.allocated` or
+`stats.resident`, with jemalloc's own error beneath. A refused sample at startup fails it beneath
+`AppError::InitMemoryPressureMonitor`; a refused sample while the node runs is logged with its whole
+chain and the supervisor keeps its current pause state until the next sample.
+
+Startup applies each domain's stored schedule before the node serves. A registry that cannot list
+those changes fails as `AppError::ReadStartupRuntimeChanges`, a stored graph that does not plan into
+an execution revision as `AppError::PlanStartupRuntime`, and a revision the runtime does not install
+as `AppError::ApplyStartupRuntime`; the last two name the domain. Each keeps the registry's or the
+runtime's report beneath it, so the node's exit renders the whole chain rather than the top context
+of the failure.
 
 ## Runtime Message Errors
 
@@ -872,10 +899,6 @@ Each failure reports its owner's typed context above the cause it kept:
   for a WASM processor's instance and the output its guest emitted. The VM, Arrow, ONNX or relay
   batch failure stays beneath. A WASM output route's FILTER-MAP reports the `PlannedGeneralError`
   step a planned batch reports, and the callback whose output did not forward is named by its kind.
-  A generated Arrow pool whose IPC framing declares a negative body length or more body bytes than
-  the guest supplied is `WasmOutputError::InvalidGeneratedArrowIpc` with the shared
-  `IpcFramingDefect` beneath it. The guest's malformed output is a content failure of that
-  callback, even when Arrow's schema conversion itself cannot decode the metadata.
 - `ProcessorBranchTaskError`, `BranchEntrypointError` and `ReingestorError` for the concrete branch
   work of a processor, a branched entrypoint and a reingestor: the domain time of accepted input
   that cannot be read, a branch that cannot be instantiated, a branch task that is gone or whose
@@ -957,10 +980,13 @@ marker, a stream cut inside a message, a negative length, metadata that is not a
 column buffer outside its message's body, or bytes behind the end-of-stream marker. The decoder
 refuses it before it allocates or reads anything from a declared length, for a relay body and for
 an Arrow section of a sealed snapshot or a backup archive alike. A client batch names the same
-defects as the reason of its `Malformed` defect. A stream the framing admits and Arrow's reader
-then panics on ends its decode job, and the decoder reports that as `ArrowBodyError::Decode`, a
-defect of the body, rather than as work the node could not execute: decoding the same body again
-would panic again. A decoded batch the local relay boundary refuses is the separate
+defects as the reason of its `Malformed` defect. A stream that is framed within its bytes and
+declares what Arrow's reader would panic on, a field type Nervix does not carry or a record batch
+at odds with its own schema, is refused by the same scan as `ArrowBodyError::Decode`, a defect of
+the body, before the reader reads it. Should the reader still panic on a body the scan admitted,
+that ends its decode job, and the decoder reports it as `ArrowBodyError::Decode` too rather than
+as work the node could not execute: decoding the same body again would panic again. A decoded
+batch the local relay boundary refuses is the separate
 `RuntimeError::DispatchRemoteRelay`. Remote payload handling returns these as `error-stack`
 reports: the receiver logs the whole chain, and a payload it refused before admitting it is
 answered with the chain rendered as the reason.
@@ -1184,7 +1210,25 @@ only way the rest of Nervix reaches the dependency. The vocabulary's duration pa
 with `DurationTextError::TooLong`, and every reader of duration text uses it: NSPL literals, Model
 settings, window aggregate arguments, node command-line options and their environment variables,
 benchmark settings and test harnesses. Clippy rejects a direct call to `humantime::parse_duration`
-and any use of `humantime::Duration`, whose text conversion reads through the same parser.
+and any use of `humantime::Duration`, whose text conversion reads through the same parser. Arrow's
+IPC stream reader trusts what a stream declares: it panics on a field type or a type parameter it
+does not implement, on a list without its child, on a buffer that reaches past its message body,
+on a validity bitmap shorter than the nulls it is declared to hold, on an offsets buffer that ends
+inside an offset, on variadic buffer counts no field takes and on a fixed-size list too long to
+count, and it allocates a message's metadata and body from their declared lengths before reading
+them. Every reader of an Arrow IPC stream from outside the node, a relay body, a snapshot section,
+a producer's batch or a WASM guest's generated pool, therefore first scans the stream: the
+continuation markers and lengths inside the stream, the schema message first with only the field
+types Nervix carries, uncompressed record batches that declare exactly the field nodes and buffers
+that schema's fields take with every buffer inside its message body, and the end-of-stream marker
+ending the stream, where a generated pool may instead end after its last message, as the Arrow
+format allows. The scan alone opens Arrow's reader over such a stream. A stream it refuses fails
+before the reader sees it: as misframed or undecodable for a relay body or a snapshot section; as
+malformed, of another schema or of invalid data for a producer's batch; and as unreadable, or as
+declaring a field Nervix does not carry, for a generated pool. Two readers of Arrow IPC stay
+outside the scan because neither reads a stream from outside the node: the Iceberg sink reads back
+the staged files the node itself wrote, inside a storage job whose panic the executor reports as a
+failed commit, and the Rust client reads the deliveries a node wrote.
 `DurationTextError` describes only the reason, `humantime`'s own for malformed text or
 `it is longer than a duration can be`, so each owner keeps its diagnostic around it: the setting,
 the text it could not read, then that reason. An owner with a typed error of its own, such as the

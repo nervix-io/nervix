@@ -13,9 +13,9 @@ use nervix_models::{
 use crate::{
     error::{ArchiveReadError, ArchiveWriteError},
     section::{ArchiveRecord, RecordKind, decode_record, encode_record},
+    stream::{StreamedBranchLifecycle, StreamedKafkaOffsets},
     wire::{
-        BranchLifecycleEntryWire, BranchLifecycleWire, KafkaOffsetsWire, KafkaPartitionWire,
-        StateField, StateValue, WasmStateDescriptorWire,
+        BranchLifecycleWire, KafkaOffsetsWire, StateField, StateValue, WasmStateDescriptorWire,
     },
 };
 
@@ -119,25 +119,14 @@ impl ArchiveRecord for KafkaOffsetsRecord {
     const VERSION: u16 = STATE_RECORD_VERSION;
 
     fn encode(&self) -> Result<Vec<u8>, Report<ArchiveWriteError>> {
-        encode_record(
-            Self::KIND,
-            Self::VERSION,
-            &KafkaOffsetsWire {
-                domain: self.domain.as_str().to_string(),
-                entity: self.entity.as_str().to_string(),
-                schema: *self.schema.as_digest(),
-                revision: self.revision,
-                offsets: self
-                    .offsets
-                    .iter()
-                    .map(|offset| KafkaPartitionWire {
-                        topic: offset.topic.clone(),
-                        partition: offset.partition,
-                        next_offset: offset.next_offset,
-                    })
-                    .collect(),
-            },
-        )
+        StreamedKafkaOffsets {
+            domain: self.domain.clone(),
+            entity: self.entity.clone(),
+            schema: self.schema,
+            revision: self.revision,
+            offsets: self.offsets.iter().cloned(),
+        }
+        .encode()
     }
 
     fn decode(path: &str, bytes: &[u8]) -> Result<Self, Report<ArchiveReadError>> {
@@ -176,26 +165,15 @@ impl ArchiveRecord for BranchLifecycleRecord {
     const VERSION: u16 = STATE_RECORD_VERSION;
 
     fn encode(&self) -> Result<Vec<u8>, Report<ArchiveWriteError>> {
-        encode_record(
-            Self::KIND,
-            Self::VERSION,
-            &BranchLifecycleWire {
-                domain: self.domain.as_str().to_string(),
-                owner_kind: self.owner_kind.as_str().to_string(),
-                entity: self.entity.as_str().to_string(),
-                schema: *self.schema.as_digest(),
-                revision: self.revision,
-                branches: self
-                    .branches
-                    .iter()
-                    .map(|branch| BranchLifecycleEntryWire {
-                        key: branch.key.clone(),
-                        last_ingestion_unix_nanos: branch.last_ingestion.unix_nanos(),
-                        incarnation: branch.incarnation,
-                    })
-                    .collect(),
-            },
-        )
+        StreamedBranchLifecycle {
+            domain: self.domain.clone(),
+            owner_kind: self.owner_kind,
+            entity: self.entity.clone(),
+            schema: self.schema,
+            revision: self.revision,
+            branches: self.branches.iter().cloned(),
+        }
+        .encode()
     }
 
     fn decode(path: &str, bytes: &[u8]) -> Result<Self, Report<ArchiveReadError>> {

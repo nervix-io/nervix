@@ -23,4 +23,6 @@ strum = { workspace = true }
 thiserror = { workspace = true }
 
 [dev-dependencies]
+bolero = { workspace = true }
 ciborium = { workspace = true }
+meticulous = { workspace = true }

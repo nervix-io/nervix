@@ -12,6 +12,8 @@ use crate::section::RecordKind;
 pub enum ArchiveWriteError {
     #[error("the {kind} record could not be encoded")]
     Encode { kind: RecordKind },
+    #[error("writing the {kind} record was interrupted by its writer's caller")]
+    Interrupted { kind: RecordKind },
     #[error("the {kind} record encodes to {length} bytes, above the {limit}-byte record limit")]
     RecordTooLarge {
         kind: RecordKind,

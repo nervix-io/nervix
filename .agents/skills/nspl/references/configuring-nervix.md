@@ -298,9 +298,7 @@ relay. Do not use them to scan across branches.
   `nervix_process_batch(ptr, size)`, validates that exact range against its reusable buffer, and
   declares positive `MAX FUEL` then `MAX MEMORY` limits immediately after `FILE`. Its
   Rust `nervix-wasm-sdk` `Processor` callbacks return `error_stack::Result<_, GuestError>`;
-  follow the `Rust WASM Guest SDK` chapter for the callback contract. A custom guest's generated
-  Arrow pool must finish its IPC stream and keep every declared message body within its emitted
-  bytes; malformed output fails its callback with a typed error. Its
+  follow the `Rust WASM Guest SDK` chapter for the callback contract. Its
   `nervix_dump_state` saves only durable computation state, never buffered input, ACK tokens,
   pending output, timeout handles, or latched error state, and reports a failed save with a
   negative code, after which Nervix keeps the state saved last. Its `nervix_load_state` rejects
@@ -381,7 +379,9 @@ Choose checks relevant to the configured graph:
   materialized relay generations, deduplicator keys and the rows windows retain. `WITHOUT
   PAUSE` reads published checkpoints while execution continues; `WITHOUT STATE` captures only
   configuration. `DESCRIBE BACKUP '<file>';` verifies one offline in `nervix-cli` and inventories
-  its state, domains, users, and resource versions. Treat an archive as a secret.
+  its state, domains, users, and resource versions. Treat an archive as a secret. Kafka offset and
+  branch lifecycle sections stream within the 32 MiB bulk budget up to the 64 MiB record limit;
+  their conversion is charged to the node's `restore_metadata` grant, sized below.
 - `RESTORE CLUSTER FROM '<file>' [RESUME] [ON EXISTING USER FAIL | SKIP | REPLACE] [DRY RUN]
   [WITHOUT STATE | WITHOUT SOURCE OFFSETS];` or
   `RESTORE DOMAIN <name> [AS <new_name>] FROM '<file>' [RESUME] [DRY RUN]

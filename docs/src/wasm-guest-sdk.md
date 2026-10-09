@@ -169,11 +169,6 @@ instead of accepting them silently.
   every queued envelope after the callback returns. Routes that need different
   generated row counts or ordering belong in separate emitted envelopes.
 
-The SDK writes a complete Arrow IPC stream for the generated pool. A guest that builds its own
-pool must keep every declared message body and column buffer within the bytes it emits and finish
-the stream with its end marker. The host validates those lengths before decoding and reports a
-typed callback error when the stream is malformed.
-
 Row lineage follows the ABI contract: preserve the complete row sidecar for
 rows you keep, put dropped rows' tokens in `acked`, failed rows in `nacked`
 with a reason, and rows for the processor's `ON MESSAGE ERROR` policy in

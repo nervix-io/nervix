@@ -275,13 +275,13 @@ impl SessionServiceImpl {
             .run_storage(
                 nervix_execution::StorageClass::Filesystem,
                 reservation,
-                move |_charge, _cancellation| {
-                    runtime.capture_backup_state(&domain_owned, quiesced, status)
+                move |_charge, cancellation| {
+                    runtime.capture_backup_state(&domain_owned, quiesced, status, cancellation)
                 },
             )
             .await
             .map_err(|_| failed(domain, "state capture execution failed"))?;
-        read.map_err(|error| failed(domain, &error.to_string()))
+        read.map_err(|error| failed(domain, &format!("{error:#}")))
     }
 
     pub(crate) async fn handle_backup_capture_request(
@@ -323,7 +323,7 @@ impl SessionServiceImpl {
             .capture_local_state(&request.domain, request.quiesced, status)
             .await?;
         let sections = plan_state_sections(
-            state.checkpoints,
+            state.guest_saves,
             capture.schedule.domain(&request.domain),
             self.inner.consensus.local_node_id(),
         )
@@ -344,6 +344,14 @@ impl SessionServiceImpl {
                 artifact,
             ));
         }
+        staged.extend(
+            self.stage_native_metadata_sections(
+                state.native_metadata,
+                capture.schedule.domain(&request.domain),
+                &request,
+            )
+            .await?,
+        );
         match state.materialized {
             CapturedMaterializedState::Current(captured) => {
                 staged.extend(

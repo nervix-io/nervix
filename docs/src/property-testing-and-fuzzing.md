@@ -98,9 +98,22 @@ own Cucumber, Shuttle, Loom, Turmoil and external Chaos evidence.
 | `runtime-window-snapshots` | `nervix-server` complete sealed window equality, and nothing for another branch lifetime | up to three rows of one branch with boundary sequences, nullable arguments and typed aggregate state, v1 | 128 | 2048 bytes |
 | `runtime-window-snapshots-malformed` | `nervix-server` typed window snapshot failure or a window that seals back to the same bytes | sealed windows damaged once and arbitrary bytes behind the magic, v1 | 256 | 4096 bytes |
 | `runtime-window-sealed-checkpoints` | `nervix-server` a window sealed in quota-owned pieces byte-identical to its resident encoding | up to three rows of one branch with boundary sequences, nullable arguments and typed aggregate state, v1 | 64 | 2048 bytes |
-| `runtime-arrow-bodies` | `nervix-server` complete batch equality through a relay body and a sealed snapshot section: schema, every value and every null | up to four rows of fixed-width, nullable text and boolean, byte and nullable nested list columns, v1 | 128 | 1024 bytes |
-| `runtime-arrow-bodies-malformed` | `nervix-server` typed refusal of a misframed or invalid Arrow body, or a batch that encodes and decodes back to itself, without allocating from a declared length | relay bodies and sealed sections damaged once by a flipped bit, a cut, appended bytes or an overwritten four- or eight-byte length, and arbitrary bytes, v1 | 256 | 2048 bytes |
+| `runtime-arrow-bodies` | `nervix-server` relay body and sealed snapshot section Arrow IPC equality: exact schema, values, nulls and float bits; several sections refused by the one-section decoders and concatenated by the schema-free one | every field type with nulls, nested lists, masked list elements, empty and sliced views and boundary values, v2 | 128 | 2048 bytes |
+| `runtime-arrow-bodies-malformed` | `nervix-server` typed refusal of a misframed or undecodable Arrow body, or a batch of the expected schema that encodes and decodes back to itself, without allocating from a declared length | relay bodies and sealed sections truncated, flipped, overwritten, shifted or trailed, and arbitrary bytes, v2 | 256 | 2048 bytes |
 | `resource-store-layout` | `nervix-server` complete manifest and archive read-back for every installed version | names across the whole name rule and those spelled like the store's own directories, staging cleanup and removal of another version, v1 | 64 | 512 bytes |
+| `client-producer-batches` | `nervix-server` producer batch equality from the client library's stream to the node's batch, with exact row and byte limits | every field type with nulls, nested lists and sliced views, v1 | 128 | 2048 bytes |
+| `client-producer-batches-malformed` | `nervix-server` refusal with a batch defect or a batch within the ingestor's schema and row limit | damaged producer streams and arbitrary bytes, v1 | 256 | 2048 bytes |
+| `codec-schemaful-rows` | `nervix-server` `WIRE JSON`, `WIRE CBOR` and `WIRE AVRO` row round-trip equality through one group builder | registry-accepted codecs over each format's value domain, generic and exact wire types and shuffled wire field order, v1 | 256 | 4096 bytes |
+| `codec-schemaful-payload-groups` | `nervix-server` each payload decodes in a group exactly as alone; refusals are typed | codec payloads interleaved with damaged bytes, swapped values and changed keys, v1 | 256 | 4096 bytes |
+| `codec-json-non-finite-floats` | `nervix-server` the JSON projection of non-finite floats: optional top-level fields read back as nulls, required fields and list elements refuse the payload | `WIRE JSON` and `WIRE CBOR` codecs over every float bit pattern and field type, v1 | 256 | 4096 bytes |
+| `codec-transforming-numbers` | `nervix-server` number equality through the JAQ-native `JSON`, `YAML`, `TOML` and `CBOR` codecs and a protobuf codec with unchanged programs: `F64` and `F32` bits, alone and in lists, and `I64` values; a protobuf singular zero reads back positive | generated batches of one schema of numbers over every finite float bit pattern, v1 | 256 | 1024 bytes |
+| `jaq-native-numbers` | `nervix-jaq` number equality through the identity program and each numeric native format's writer and reader: float bits, integer value and signedness | finite floats of any bit pattern, boundary floats and 64-bit integers, `TOML` within its signed range, v1 | 256 | 256 bytes |
+| `remote-relay-rows` | `nervix-server` routed relay batch equality from the sender's payload to the receiver's rows, branch key bits and watermarks | every field type, concrete and absent branches and per-row registrations, v1 | 128 | 2048 bytes |
+| `remote-relay-rows-malformed` | `nervix-server` the first payload defect in the receiver's check order | foreign bodies, miscounted watermarks and registrations and invalid branch keys, v1 | 128 | 2048 bytes |
+| `relay-wire-messages` | `nervix-interconnect` relay grant, reply, admission, acknowledgement and connection binding equality through the bounded codec | every message variant, branch key values with any float bits and per-row metadata, v1 | 256 | 2048 bytes |
+| `relay-wire-messages-malformed` | `nervix-interconnect` typed decode failure or a message that encodes and decodes back to itself, with every allocation of the decoder freed | damaged encodings of every message and arbitrary bytes, v1 | 256 | 2048 bytes |
+| `wasm-generated-pools` | `nervix-server` generated column pool equality from a WASM guest's Arrow IPC stream to the node's batch: unnamed fields, types, nullability, values, nulls and float bits | every field type with nulls, nested lists and sliced views, streams ended by the marker or closed, v1 | 128 | 2048 bytes |
+| `wasm-generated-pools-malformed` | `nervix-server` a typed generated-IPC or batch-count defect, or one batch of unnamed columns that writes and decodes back to itself | truncated, flipped, overwritten, shifted, trailing and arbitrary pools, v1 | 256 | 2048 bytes |
 | `simd-checked-lanes` | `nervix-simd-kernels` checked integer arithmetic equals scalar overflowing arithmetic at every SIMD level | all integer widths, runs and shared operands, v1 | 256 | 128 bytes |
 | `simd-constant-division` | `nervix-simd-kernels` constant quotients and remainders equal checked operations at every SIMD level | all integer widths, divisors, scalar fallback and tails, with full-range signed overflow, v1 | 256 | 128 bytes |
 | `deadlock-evidence` | `nervix-deadlock` complete evidence encode/decode equality | every finding variant, cycles up to the thread bound with omitted threads, texts cut inside multi-byte characters, absent context and extreme identities and times, v1 | 256 | 4096 bytes |
@@ -155,6 +168,14 @@ The [client representation coverage map](https://github.com/nervix-io/nervix/blo
 ties the client targets to current schema families, complete oracles, ownership and malformed-input
 boundaries. Request, reply and event coverage checks compare generated families with the schema's
 union declarations, so adding a family requires extending its generator.
+
+The [Arrow, codec and interconnect representation coverage map](https://github.com/nervix-io/nervix/blob/main/tests/arrow-representation-coverage.md)
+ties the relay body, producer batch, WASM generated pool, schemaful codec, JAQ-native and protobuf
+codec number, routed relay payload and relay wire message targets to their oracles, each codec's
+value domain and the contract boundaries they record. Its server targets share one generator of
+schemas and batches over every current field type and one logical oracle that compares batches cell
+by cell with floats by their bits. `just test-bolero codec-` runs the four codec targets, and
+`just test-bolero jaq-native` the numbers a JAQ program and its native formats carry.
 
 ## Generated Domains
 
@@ -244,8 +265,10 @@ recorded boundary, not a claim:
   spelling, and a Postgres `ON CONFLICT DO UPDATE` whose target names every mapped column is
   rejected, because it leaves no column to update. Only the vocabulary domain generates those
   states, for the archive properties.
-- A time rate's JSON form is not asserted: `serde_json` reads a float without correct rounding, so
-  it may land one unit in the last place away. Its text and archived forms keep every bit.
+- A time rate's text, JSON and archived forms keep every bit. The workspace builds `serde_json`
+  with `float_roundtrip`, which reads a decimal as the float nearest to it; its default reader is
+  best-effort and lands one unit in the last place away for a tenth to a quarter of the decimals
+  that computed floats print as.
 
 ## Commands And Enforcement
 
