@@ -333,7 +333,7 @@ impl Runtime {
 
     /// Stops every ingestor on this node admitting new work and tells generators to stop
     /// producing. An ingestor prepared after this call starts with its intake already stopped.
-    fn close_local_intake(&self) {
+    pub(crate) fn close_local_intake(&self) {
         let previous = self.inner.local_intake.send_replace(LocalIntake::Closed);
         if previous == LocalIntake::Closed {
             return;

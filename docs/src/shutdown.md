@@ -307,11 +307,30 @@ drained.
 Drain support has two parts that share the drain timeout. Both are also bounded by the shutdown
 deadline.
 
+The stopping node closes its local source intake at the start of drain support, before it asks the
+leader to move any scheduled work. Kafka and other source ingestors stop taking new input, and
+generators stop producing. A payload already admitted and its acknowledgement chain continue
+through the installed relays and emitters. This prevents a source from admitting a new ACK root
+while a downstream emitter is moving. A destination node can start its replacement source after
+the handoff; intake on that node remains open. The local intake closure is permanent for the
+stopping process and is reused by the later in-place drain.
+
 **Moving scheduled work.** When another live, schedulable Raft voter exists, the node first moves
 its scheduled work there through the planned ownership handoff described below. This is the same
 operation `DRAIN NODE` performs, requested against the terminating node itself: it visits domains
 and schedule units in canonical order and moves one hard colocation group or independent runtime
-node at a time.
+node at a time. The request gives the leader the time left in the stopping node's drain budget.
+For each unit, the leader bounds its gate, state preparation, and activation waits by the time still
+left on that request minus one sixth of the request's initial budget. Preparation, including the
+entity gate's quiescence wait and state capture, has at most four fifths of that unit bound;
+activation uses the same unit deadline. The
+ordinary entity-gate limit can shorten either phase. If a unit cannot prepare within its bound,
+the gate is released, the leader records that unit and its reason as failed, and it attempts other
+units while time remains. If no unit budget remains, the leader reports the unfinished drain. A
+stopping node that receives a failed or unanswered drain reports its drain-support phase
+`Abandoned`, then still runs the in-place drain with whatever time remains. The node's own timeout
+and shutdown deadline bound its wait for a leader even when that leader continues cleanup after
+the node stops waiting.
 
 **Completing admitted work in place.** The node then finishes what it has already admitted. This
 part always runs, whatever happened in the first part. It is the whole drain when no replacement

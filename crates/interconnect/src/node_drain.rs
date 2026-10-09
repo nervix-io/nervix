@@ -17,8 +17,8 @@ use crate::InterconnectRequest;
 #[derive(Debug, Clone, Copy, Archive, Serialize, Deserialize, PartialEq, Eq)]
 pub enum StoppingNodeDrainAction {
     /// Cordon the node and move its scheduled work to other nodes through planned ownership
-    /// handoffs.
-    Drain,
+    /// handoffs, within the time the stopping node has left for its drain.
+    Drain { budget: Duration },
     /// Clear the cordon the node's own drain set.
     ReleaseCordon,
 }
@@ -66,6 +66,7 @@ mod wire_properties {
     #[derive(Debug, bolero::TypeGenerator)]
     struct DrainWireCase {
         release_cordon: bool,
+        drain_budget_ms: u32,
         answer: DrainAnswerCase,
     }
 
@@ -81,7 +82,9 @@ mod wire_properties {
             let action = if self.release_cordon {
                 StoppingNodeDrainAction::ReleaseCordon
             } else {
-                StoppingNodeDrainAction::Drain
+                StoppingNodeDrainAction::Drain {
+                    budget: Duration::from_millis(u64::from(self.drain_budget_ms)),
+                }
             };
             StoppingNodeDrainRequest { action }
         }

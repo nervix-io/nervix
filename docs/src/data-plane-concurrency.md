@@ -1676,8 +1676,9 @@ a quiesce expiry across two domains, backup capture and restore of WASM branches
 deduplicator keys and windows, a delayed restore coordinator, interleaved branches with remote
 acknowledgement owners, session restarts that resume a producer and consumer, a domain restart that
 replaces its consumer, a memory-pressure pause of scheduled ingestors, and graceful shutdown with a
-slow cordon release and diagnostic server processes that stop gracefully. Each stressed scenario is
-registered under its own `stress.` identity; the full tagged suite and the paced-driver scenarios
+slow cordon release or a Kafka ingestor and attached emitter handoff, plus diagnostic server
+processes that stop gracefully. Each stressed scenario is registered under its own `stress.`
+identity; the full tagged suite and the paced-driver scenarios
 stay in the active-only and order selections.
 `tests/deloxide-inventory.toml` is the lane's bounded inventory. It registers every workload a
 selection runs, each with a stable identity, the invariant it owns, the selections that must run it
@@ -1685,8 +1686,14 @@ and the coverage it declares: the disposable-process probes of `nervix-deadlock`
 locks' conformance checks of `nervix-primitives`, the diagnostic owner tests of the server library,
 and the tagged scenarios with the number of example runs each must make. The three
 `@remote_ack_owners` scenarios add four example runs across interleaved branches, a lost
-acknowledgement and producer restart; every selection exercises the tracked correlation and peer
-admission owner locks. The inventory also bounds the lane: one real-time budget for a selection's
+acknowledgement and producer restart; both selections exercise the tracked correlation and peer
+admission owner locks. The `@shutdown_kafka_handoff` scenario runs in the active-only, order and
+stress selections. It reaches the ingestor quiesce control's tracked locks while a stopping node
+closes intake, waits for its attached emitter's handoff, and finishes admitted Kafka
+acknowledgements. The async gate wait,
+remote delivery and scheduling order remain outside the detector's observation and have the
+Cucumber and chaos checks in [Shutdown And Recovery](./shutdown.md). The inventory also bounds the
+lane: one real-time budget for a selection's
 diagnostic compilation and execution after its prerequisites, a bound for every invocation, a stop
 grace period, the reserve the scenario binary keeps for its own teardown inside its invocation's
 bound, and how many scenarios run at once, which is the same on every machine.

@@ -99,7 +99,12 @@ async fn the_leader_drains_and_then_uncordons_the_stopping_node_that_asks() {
     let local_node = service.inner.consensus.local_node_id().clone();
 
     let drained = service
-        .act_for_stopping_node(local_node.clone(), StoppingNodeDrainAction::Drain)
+        .act_for_stopping_node(
+            local_node.clone(),
+            StoppingNodeDrainAction::Drain {
+                budget: Duration::from_secs(30),
+            },
+        )
         .await;
     let StoppingNodeDrainResponse::Completed { report } = drained else {
         panic!("the leader did not drain the node that asked: {drained:?}");
@@ -151,7 +156,12 @@ async fn the_leader_reports_the_drain_of_a_node_outside_its_membership_as_failed
     let stranger = node_named("node-stranger");
 
     let drained = service
-        .act_for_stopping_node(stranger.clone(), StoppingNodeDrainAction::Drain)
+        .act_for_stopping_node(
+            stranger.clone(),
+            StoppingNodeDrainAction::Drain {
+                budget: Duration::from_secs(30),
+            },
+        )
         .await;
     let StoppingNodeDrainResponse::Failed { report } = drained else {
         panic!("the leader drained a node outside its membership: {drained:?}");
@@ -219,7 +229,13 @@ async fn a_drain_request_the_transport_cannot_carry_is_unanswered() {
     service.inner.interconnect.shutdown().await;
 
     let answer = service
-        .ask_shutdown_drain_leader(&local_node, leader.clone(), StoppingNodeDrainAction::Drain)
+        .ask_shutdown_drain_leader(
+            &local_node,
+            leader.clone(),
+            StoppingNodeDrainAction::Drain {
+                budget: Duration::from_secs(30),
+            },
+        )
         .await;
     let ShutdownDrainAnswer::Unanswered {
         leader: asked,

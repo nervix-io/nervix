@@ -382,6 +382,13 @@ than to be refused, ahead of work that asks afterwards. A shutdown or a new quie
 and returns the payload to the front of its buffer, so a drain delays neither. A payload its codec
 rejects leaves the buffer and is reported.
 
+At the start of a graceful stop, the host closes intake on the stopping node before the control
+plane moves scheduled sources or sinks. The shutdown quiesce suspends broker polling and listener
+admission regardless of the ingestor's declared `ON QUIESCE` mode; already admitted payloads and
+ACK roots continue through the graph. The connector does not choose the move or finish its own
+acknowledgements early. A source started on the destination node after handoff uses that node's
+open intake.
+
 A live payload a source hands over without an acknowledgement, a paced poll or a batch read in a
 `NO_ACK` mode, cannot be presented again either. An acknowledged batch the extension workers refuse
 is rejected for its source to deliver again, and an endpoint refuses a body its sender sends again;
