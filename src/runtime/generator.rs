@@ -782,10 +782,10 @@ impl Runtime {
                                     Err(error) => {
                                         task_events.report_error(format!(
                                             "failed to prepare generator '{}' context in domain \
-                                             '{}' branch '{}': {error:#}",
+                                             '{}' ({}): {error:#}",
                                             task_generator.as_str(),
                                             task_domain.as_str(),
-                                            branch_key_display(&branch_key),
+                                            BranchScope::from(&branch_key),
                                         ));
                                         continue;
                                     }
@@ -801,11 +801,11 @@ impl Runtime {
                                         Err(error) => {
                                             task_events.report_error(format!(
                                                 "failed to prepare generator '{}' route '{}' \
-                                                 input in domain '{}' branch '{}': {error:#}",
+                                                 input in domain '{}' ({}): {error:#}",
                                                 task_generator.as_str(),
                                                 route.relay.as_str(),
                                                 task_domain.as_str(),
-                                                branch_key_display(&branch_key),
+                                                BranchScope::from(&branch_key),
                                             ));
                                             continue;
                                         }
@@ -899,10 +899,10 @@ impl Runtime {
                                                             task_events.report_error(format!(
                                                                 "failed to capture generator '{}' \
                                                                  materialized state in domain \
-                                                                 '{}' branch '{}': {error:#}",
+                                                                 '{}' ({}): {error:#}",
                                                                 task_generator.as_str(),
                                                                 task_domain.as_str(),
-                                                                branch_key_display(&branch_key),
+                                                                BranchScope::from(&branch_key),
                                                             ));
                                                             continue;
                                                         }
@@ -951,11 +951,11 @@ impl Runtime {
                                         Err(error) => {
                                             task_events.report_error(format!(
                                                 "failed to execute generator '{}' route '{}' in \
-                                                 domain '{}' branch '{}': {error:#}",
+                                                 domain '{}' ({}): {error:#}",
                                                 task_generator.as_str(),
                                                 route.relay.as_str(),
                                                 task_domain.as_str(),
-                                                branch_key_display(&branch_key),
+                                                BranchScope::from(&branch_key),
                                             ));
                                         }
                                     }

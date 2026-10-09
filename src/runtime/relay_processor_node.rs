@@ -43,7 +43,7 @@ impl RelayProcessorNode {
     ) -> error_stack::Result<MaterializedDependencyResolution, ProcessorMaterializedError> {
         let routing = branch.domain_routing().change_context_lazy(|| {
             ProcessorMaterializedError::DomainRouting {
-                branch: branch_key.clone(),
+                branch: BranchScope::from(branch_key),
             }
         })?;
         branch
@@ -57,7 +57,7 @@ impl RelayProcessorNode {
             )
             .await
             .change_context_lazy(|| ProcessorMaterializedError::Resolve {
-                branch: branch_key.clone(),
+                branch: BranchScope::from(branch_key),
             })
     }
 
@@ -1968,7 +1968,7 @@ impl RelayProcessorNode {
                     state.clear(plan);
                     replicated_state.generations.mark_live_dirty();
                     return Err(error.change_context(ProcessorLiveStateError {
-                        branch: branch.key.clone(),
+                        branch: BranchScope::from(&branch.key),
                     }));
                 }
                 Ok(())

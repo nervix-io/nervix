@@ -102,8 +102,11 @@ pub(crate) enum ProducerOpenError {
 enum RunError {
     #[error("{0}")]
     Options(OptionsError),
-    #[error("cannot connect to '{server}': {source}")]
-    Connect { server: String, source: ClientError },
+    #[error("cannot connect to '{server}': {report:#}")]
+    Connect {
+        server: String,
+        report: Report<ClientError>,
+    },
     #[error("{}", .0.current_context())]
     Clock(Report<ClockError>),
     #[error("{}", .0.current_context())]
@@ -175,9 +178,9 @@ async fn connect(settings: &Settings) -> Result<Client, RunError> {
             .await;
     match connected {
         Ok(client) => Ok(client),
-        Err(source) => Err(RunError::Connect {
+        Err(report) => Err(RunError::Connect {
             server: settings.server.clone(),
-            source,
+            report,
         }),
     }
 }

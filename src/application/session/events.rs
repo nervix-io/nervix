@@ -18,6 +18,7 @@
 use std::{num::NonZeroU64, time::Duration};
 
 use arch_into::ArchInto as _;
+use error_stack::ResultExt as _;
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_client_wire::{
     ClusterObserved, DomainEntity, DomainInfo, DomainSnapshotObserved, DomainsObserved,
@@ -330,7 +331,11 @@ impl SessionServiceImpl {
         match encoded {
             Ok(Ok(frame)) => Some(frame),
             Ok(Err(error)) => {
-                warn!(domain = domain.as_str(), error = %error, "a domain snapshot was not sent");
+                warn!(
+                    domain = domain.as_str(),
+                    error = %format_args!("{error:#}"),
+                    "a domain snapshot was not sent"
+                );
                 None
             }
             Err(error) => {
@@ -420,18 +425,21 @@ fn encode_snapshot(
     graph: &DataflowGraph,
     entities: &[DomainEntity],
     limits: &SessionLimits,
-) -> Result<EncodedFrame<ServerFrame>, SnapshotEncodingError> {
-    let graph_bytes = graph.serialize().map_err(SnapshotEncodingError::Graph)?;
+) -> error_stack::Result<EncodedFrame<ServerFrame>, SnapshotEncodingError> {
+    let graph_bytes = graph
+        .serialize()
+        .change_context(SnapshotEncodingError::Graph)?;
     let graph_json = String::from_utf8(graph_bytes).assured("a JSON serializer writes UTF-8 text");
     DomainSnapshotObserved::encode(domain, &graph_json, entities, limits)
-        .map_err(SnapshotEncodingError::Frame)
+        .change_context(SnapshotEncodingError::Frame)
 }
 
-/// Why a domain snapshot could not be encoded.
+/// Why a domain snapshot could not be encoded. The serializer's or the frame encoder's report is
+/// beneath.
 #[derive(Debug, thiserror::Error)]
 enum SnapshotEncodingError {
-    #[error("the domain graph could not be serialized: {0}")]
-    Graph(error_stack::Report<nervix_dataflow_graph::DataflowGraphError>),
-    #[error("the snapshot does not fit a session frame: {0}")]
-    Frame(error_stack::Report<nervix_client_wire::WireEncodeError>),
+    #[error("the domain graph could not be serialized")]
+    Graph,
+    #[error("the snapshot does not fit a session frame")]
+    Frame,
 }

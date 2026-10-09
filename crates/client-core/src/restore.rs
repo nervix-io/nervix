@@ -21,6 +21,7 @@ use std::{
 };
 
 use arch_into::ArchInto as _;
+use error_stack::{Report, ResultExt as _};
 use meticulous::ResultExt as _;
 use nervix_client_wire::{
     EncodedFrame, RequestId, RestoreChunk, RestoreDisposition, RestoreFrame, RestoreReply,
@@ -98,7 +99,7 @@ impl Client {
         &self,
         restore: &Restore,
         on_progress: impl Fn(u64) + Send + Sync + Clone + 'static,
-    ) -> Result<CommandOutcome, ClientError> {
+    ) -> error_stack::Result<CommandOutcome, ClientError> {
         let reference = CommandExecutionReference::parse(uuid::Uuid::now_v7().to_string()).assured(
             "a hyphenated UUID is 36 ASCII hex digits and hyphens, within the execution reference \
              grammar",
@@ -115,14 +116,14 @@ impl Client {
         restore: &Restore,
         reference: &CommandExecutionReference,
         on_progress: impl Fn(u64) + Send + Sync + Clone + 'static,
-    ) -> Result<CommandOutcome, ClientError> {
+    ) -> error_stack::Result<CommandOutcome, ClientError> {
         match self.run_restore(restore, reference, on_progress).await {
             Ok(outcome) => Ok(outcome),
-            Err(error) if error.can_hide_admitted_work() => Err(ClientError::UncertainCommand {
-                reference: reference.clone(),
-                source: Box::new(error),
-            }),
-            Err(error) => Err(error),
+            Err(report) if report.current_context().can_hide_admitted_work() => Err(report
+                .change_context(ClientError::UncertainCommand {
+                    reference: reference.clone(),
+                })),
+            Err(report) => Err(report),
         }
     }
 
@@ -131,19 +132,18 @@ impl Client {
         restore: &Restore,
         reference: &CommandExecutionReference,
         on_progress: impl Fn(u64) + Send + Sync + Clone + 'static,
-    ) -> Result<CommandOutcome, ClientError> {
+    ) -> error_stack::Result<CommandOutcome, ClientError> {
         let path = expand_user_path(Path::new(&restore.source));
         let measured = match measure_archive(path.clone()).await {
             Ok(measured) => measured,
             Err(error) => {
-                return Err(ClientError::ReadRestoreArchive {
-                    path,
-                    kind: error.kind(),
-                });
+                let kind = error.kind();
+                return Err(Report::new(error)
+                    .change_context(ClientError::ReadRestoreArchive { path, kind }));
             }
         };
         let Some(total_bytes) = NonZeroU64::new(measured.length) else {
-            return Err(ClientError::EmptyRestoreArchive { path });
+            return Err(Report::new(ClientError::EmptyRestoreArchive { path }));
         };
         let archive = RestoreArchive {
             total_bytes,
@@ -160,17 +160,19 @@ impl Client {
                 archive,
             }
             .encode(&SESSION_LIMITS)
-            .map_err(|report| ClientError::EncodeRequest {
+            .change_context(ClientError::EncodeRequest {
                 request: RequestKind::Restore,
-                source: report.current_context().clone(),
             })?;
             let archive_file = match File::open(&path).await {
                 Ok(archive_file) => archive_file,
                 Err(error) => {
-                    return Err(ClientError::ReadRestoreArchive {
-                        path: path.clone(),
-                        kind: error.kind(),
-                    });
+                    let kind = error.kind();
+                    return Err(Report::new(error).change_context(
+                        ClientError::ReadRestoreArchive {
+                            path: path.clone(),
+                            kind,
+                        },
+                    ));
                 }
             };
             let sent = RestoreStreamAttempt {
@@ -184,38 +186,41 @@ impl Client {
             let response = match sent {
                 Ok(response) => response,
                 Err(AttemptFailure::Read(kind)) => {
-                    return Err(ClientError::ReadRestoreArchive {
+                    return Err(Report::new(ClientError::ReadRestoreArchive {
                         path: path.clone(),
                         kind,
-                    });
+                    }));
                 }
                 Err(AttemptFailure::Transport(status))
                     if upload_status_is_retryable(&status) && Self::await_retry(attempt).await =>
                 {
                     match self.recover_session(RecoveryMode::Replace).await? {
                         SessionRecovery::Ready => continue,
-                        SessionRecovery::Unavailable => return Err(ClientError::Restore(status)),
+                        SessionRecovery::Unavailable => {
+                            return Err(Report::new(ClientError::Restore(status)));
+                        }
                     }
                 }
-                Err(AttemptFailure::Transport(status)) => return Err(ClientError::Restore(status)),
+                Err(AttemptFailure::Transport(status)) => {
+                    return Err(Report::new(ClientError::Restore(status)));
+                }
             };
-            let reply = RestoreReply::decode(response.get_ref()).map_err(|report| {
-                ClientError::InvalidRestoreReply(report.current_context().clone())
-            })?;
+            let reply = RestoreReply::decode(response.get_ref())
+                .change_context(ClientError::InvalidRestoreReply)?;
             if let Some(request_id) = reply.request_id
                 && request_id != RESTORE_REQUEST_ID
             {
-                return Err(ClientError::UnexpectedReply {
+                return Err(Report::new(ClientError::UnexpectedReply {
                     request: RequestKind::Restore,
-                });
+                }));
             }
             let outcome = match reply.disposition {
                 RestoreDisposition::Outcome(outcome) => {
                     if outcome.execution_reference != *reference {
-                        return Err(ClientError::ExecutionReferenceMismatch {
+                        return Err(Report::new(ClientError::ExecutionReferenceMismatch {
                             expected: reference.clone(),
                             received: outcome.execution_reference,
-                        });
+                        }));
                     }
                     CommandOutcome::from(*outcome)
                 }

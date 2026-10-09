@@ -3,19 +3,16 @@
 //! Layer: edges.
 //!
 //! - **Owns.** The failures a caller of the client can act on, and which request each concerns.
-//! - **Depends on.** The wire contract's rejection, cancellation and codec errors, and tonic's
-//!   transport errors.
+//!   Each is the context of a report whose frames beneath it keep the cause.
+//! - **Depends on.** The wire contract's requests, rejections and cancellations, the vocabulary's
+//!   identities and refusals, and tonic's transport errors.
 //! - **Must not know.** How a caller recovers; the client's own retries happen before an error is
 //!   returned.
 
 use nervix_client_wire::{
     CancellationStage, ClientRequest, EmitterOpenRefusal, ReplyBody, RequestRejection,
-    WireDecodeError, WireEncodeError,
 };
-use nervix_dns::DnsConfigurationError;
-use nervix_models::{
-    ClientProducerRefusal, CommandExecutionReference, NameError, ResourceUploadIdentity,
-};
+use nervix_models::{ClientProducerRefusal, CommandExecutionReference, ResourceUploadIdentity};
 use thiserror::Error;
 use tonic::metadata::errors::InvalidMetadataValue;
 use uuid::Uuid;
@@ -103,10 +100,15 @@ impl From<&ClientRequest> for RequestKind {
     }
 }
 
+/// Why a client call failed. Every call returns it as the current context of an
+/// [`error_stack::Report`], whose frames beneath it hold the causes: the transport status, the
+/// wire codec's report, the resolver's configuration report, or, for an uncertain command, the
+/// failure that left its outcome unknown.
 #[derive(Debug, Error)]
 pub enum ClientError {
-    #[error("failed to load native DNS configuration: {0}")]
-    LoadDnsConfiguration(error_stack::Report<DnsConfigurationError>),
+    /// The resolver's configuration report is beneath.
+    #[error("failed to load native DNS configuration")]
+    LoadDnsConfiguration,
     #[error("invalid server URI")]
     InvalidServerUri(#[source] tonic::codegen::http::uri::InvalidUri),
     #[error("invalid server URL")]
@@ -123,7 +125,7 @@ pub enum ClientError {
     ConfigureTls(#[source] tonic::transport::Error),
     #[error("failed to connect to server")]
     ConnectServer(#[source] tonic::transport::Error),
-    #[error("failed to start session exchange: {0}")]
+    #[error("failed to start session exchange")]
     StartSession(#[source] Box<tonic::Status>),
     #[error("session exchange opening exceeded its deadline")]
     SessionOpenDeadline,
@@ -133,9 +135,7 @@ pub enum ClientError {
     SessionClosed,
     #[error("a subscription operation task stopped before completing")]
     SubscriptionTask(#[source] nervix_primitives::task::JoinError),
-    #[error("subscription operation failed")]
-    SubscriptionOperation(#[source] Box<dyn std::error::Error + Send + Sync>),
-    #[error("session exchange failed: {0}")]
+    #[error("session exchange failed")]
     Transport(#[source] Box<tonic::Status>),
     #[error("the {request} request exceeded its deadline")]
     RequestDeadline { request: RequestKind },
@@ -143,11 +143,12 @@ pub enum ClientError {
     RequestInterrupted { request: RequestKind },
     #[error("session retry deadline expired")]
     RetryDeadline,
+    /// The command may have been admitted under `reference`, and its outcome did not arrive. The
+    /// failure that left it unknown is beneath; running the same execution handle again recovers
+    /// the outcome.
     #[error("command outcome for execution '{reference}' is uncertain")]
     UncertainCommand {
         reference: CommandExecutionReference,
-        #[source]
-        source: Box<ClientError>,
     },
     #[error("the {stream} event consumer exceeded its bounded queue")]
     EventOverflow { stream: EventStreamKind },
@@ -160,19 +161,12 @@ pub enum ClientError {
     InvalidCursor { cursor: usize, length: usize },
     #[error("completion page size {size} must be between 1 and 100")]
     InvalidCompletionPageSize { size: u16 },
+    /// The name's report is beneath.
     #[error("'{name}' is not a valid resource name")]
-    InvalidResourceName {
-        name: String,
-        #[source]
-        source: NameError,
-    },
-    /// The request does not fit the session limits.
+    InvalidResourceName { name: String },
+    /// The request does not fit the session limits. The wire codec's report is beneath.
     #[error("failed to encode the {request} request")]
-    EncodeRequest {
-        request: RequestKind,
-        #[source]
-        source: WireEncodeError,
-    },
+    EncodeRequest { request: RequestKind },
     /// The server refused to serve the request.
     #[error("the server rejected the {request} request ({rejection:?}): {message}")]
     RequestRejected {
@@ -191,18 +185,18 @@ pub enum ClientError {
     /// The server answered the request with a reply of a kind that does not answer it.
     #[error("the server answered the {request} request with a reply of another kind")]
     UnexpectedReply { request: RequestKind },
+    /// The directory could not be archived. The I/O error is beneath when one occurred.
     #[error("failed to build upload archive")]
     BuildUploadArchive,
-    #[error("upload request failed: {0}")]
+    #[error("upload request failed")]
     UploadResource(#[source] Box<tonic::Status>),
+    /// The upload may have been installed under `identity`, and its outcome did not arrive. The
+    /// failure that left it unknown is beneath.
     #[error("upload outcome for identity '{identity}' is uncertain")]
-    UncertainUpload {
-        identity: ResourceUploadIdentity,
-        #[source]
-        source: Box<ClientError>,
-    },
+    UncertainUpload { identity: ResourceUploadIdentity },
+    /// The wire codec's report is beneath.
     #[error("the upload reply does not decode")]
-    InvalidUploadReply(#[source] WireDecodeError),
+    InvalidUploadReply,
     #[error("command reply execution '{received}' does not match request execution '{expected}'")]
     ExecutionReferenceMismatch {
         expected: CommandExecutionReference,
@@ -213,8 +207,6 @@ pub enum ClientError {
         expected: ResourceUploadIdentity,
         received: ResourceUploadIdentity,
     },
-    #[error("failed to load TLS CA certificate")]
-    LoadTlsCaCertificate(#[source] std::io::Error),
     /// The server refused to open a producer. Nothing was attached.
     #[error("the server refused to open the producer ({refusal:?}): {message}")]
     ProducerRefused {
@@ -245,18 +237,18 @@ pub enum ClientError {
     /// The archive a restore names is empty, so it holds no backup.
     #[error("the restore archive '{}' is empty", .path.display())]
     EmptyRestoreArchive { path: std::path::PathBuf },
-    #[error("restore request failed: {0}")]
+    #[error("restore request failed")]
     Restore(#[source] Box<tonic::Status>),
+    /// The wire codec's report is beneath.
     #[error("the restore reply does not decode")]
-    InvalidRestoreReply(#[source] WireDecodeError),
-    /// The backup completed, and its archive could not be downloaded. Running the same execution
-    /// handle again recovers the backup's outcome and downloads the archive again while the server
-    /// retains it.
+    InvalidRestoreReply,
+    /// The backup completed, and its archive could not be downloaded. The
+    /// [`BackupDownloadError`](crate::BackupDownloadError) that says why is beneath. Running the
+    /// same execution handle again recovers the backup's outcome and downloads the archive again
+    /// while the server retains it.
     #[error("failed to download the archive of backup '{reference}'")]
     BackupDownload {
         reference: CommandExecutionReference,
-        #[source]
-        source: crate::backup::BackupDownloadError,
     },
 }
 
@@ -293,40 +285,21 @@ impl ClientError {
         }
     }
 
+    /// Whether the failure is the loss of a session, which a caller recovers from by opening a
+    /// new one and sending its request again.
     pub(crate) fn retryable_session_failure(&self) -> bool {
-        self.session_failure().is_some()
-    }
-
-    /// The same failure again, when it is the loss of a session that a caller recovers from by
-    /// opening a new one.
-    ///
-    /// A subscription request fails on a task of its own, whose report its caller keeps; the
-    /// caller rebuilds the failure from that report so it can recover the session the way every
-    /// other request does.
-    pub(crate) fn session_failure(&self) -> Option<Self> {
         match self {
-            Self::SessionClosed => Some(Self::SessionClosed),
-            Self::RequestDeadline { request } => Some(Self::RequestDeadline { request: *request }),
-            Self::RequestInterrupted { request } => {
-                Some(Self::RequestInterrupted { request: *request })
-            }
-            Self::Transport(status) => match status.code() {
+            Self::SessionClosed
+            | Self::RequestDeadline { .. }
+            | Self::RequestInterrupted { .. } => true,
+            Self::Transport(status) => matches!(
+                status.code(),
                 tonic::Code::Cancelled
-                | tonic::Code::Unknown
-                | tonic::Code::DeadlineExceeded
-                | tonic::Code::Unavailable => Some(Self::Transport(status.clone())),
-                _ => None,
-            },
-            _ => None,
-        }
-    }
-
-    /// The error the report of a subscription request stands for: the session failure it
-    /// reports, which its caller recovers from, or the operation's failure with its report.
-    pub(crate) fn subscription_operation(report: error_stack::Report<Self>) -> Self {
-        match report.current_context().session_failure() {
-            Some(failure) => failure,
-            None => Self::SubscriptionOperation(Box::new(report.into_error())),
+                    | tonic::Code::Unknown
+                    | tonic::Code::DeadlineExceeded
+                    | tonic::Code::Unavailable
+            ),
+            _ => false,
         }
     }
 

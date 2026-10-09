@@ -1630,7 +1630,7 @@ async fn window_processor_snapshot_task_persists_published_state_on_interval() {
             snapshot_state
                 .replace_state(&live_state)
                 .change_context(ProcessorLiveStateError {
-                    branch: snapshot_branch,
+                    branch: BranchScope::from(&snapshot_branch),
                 });
         response
             .send(published)
@@ -1960,7 +1960,7 @@ fn branch_aggregated_state_snapshot_roundtrips_metrics() {
             relay: &relay,
             physical_node_id: Some(&ClusterNodeName::parse("node-1").expect("valid name")),
             direction: "sent",
-            branch_key: None,
+            branch: None,
         })
         .observe(2, 64, None);
     let lsm = state.mark_metrics_updated();
@@ -2022,7 +2022,7 @@ fn a_metrics_update_after_a_flush_took_its_snapshot_is_persisted_by_the_next_flu
         relay: &relay,
         physical_node_id: Some(&node),
         direction: "sent",
-        branch_key: None,
+        branch: None,
     });
     batch_metrics.observe(2, 64, None);
     state.mark_metrics_updated();

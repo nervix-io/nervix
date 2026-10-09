@@ -73,7 +73,7 @@ use super::{
         SubscriptionSampler,
     },
     tls::HttpsListenerCertificates,
-    transaction::TransactionRecovery,
+    transaction::{SessionTransactionBindingError, TransactionRecovery},
 };
 use crate::{
     cluster,
@@ -1711,7 +1711,10 @@ impl SessionServiceImpl {
                     self.validate_session_transaction_binding(subscriptions.binding())
             {
                 let result = self
-                    .command_with_transaction_status(error.into_command_result(), subscriptions)
+                    .command_with_transaction_status(
+                        SessionTransactionBindingError::command_result(&error),
+                        subscriptions,
+                    )
                     .await;
                 return Ok(CommandResponse::executed(result));
             }

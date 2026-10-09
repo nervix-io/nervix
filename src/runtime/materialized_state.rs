@@ -399,7 +399,7 @@ impl MaterializedRelayStateRead {
             }
         }
         records.sort_unstable_by(|left, right| {
-            super::branch_key_display(&left.branch).cmp(super::branch_key_display(&right.branch))
+            BranchKey::canonical_order(&left.branch, &right.branch)
         });
         MaterializedGeneration::new(
             revision,
