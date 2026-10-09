@@ -16,7 +16,7 @@
 
 use error_stack::{Report, ResultExt as _};
 use futures_util::stream;
-use meticulous::ResultExt as _;
+use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_execution::{CpuClass, MemoryClass};
 use nervix_interconnect::{
     FetchStateCheckpoint, StateCheckpointRead, StateSnapshotEnvelope, StreamHandlerError,
