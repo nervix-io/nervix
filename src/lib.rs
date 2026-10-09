@@ -30,6 +30,8 @@ compile_error!(
 );
 
 pub mod application;
+#[cfg(test)]
+mod archive_allocation_tests;
 pub mod cluster;
 mod domain_clock_authority;
 mod emitter_execution_plan;

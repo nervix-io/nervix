@@ -26,6 +26,28 @@ use crate::{
     },
 };
 
+pub(super) fn assert_decode_frees_allocations<F, T>(decode: F)
+where
+    F: Fn() -> T,
+{
+    drop(decode());
+    let before = alloc_count::stats();
+    drop(decode());
+    let after = alloc_count::stats();
+    let allocated = after
+        .alloc_calls
+        .checked_sub(before.alloc_calls)
+        .assured("a thread's allocation count only grows");
+    let freed = after
+        .dealloc_calls
+        .checked_sub(before.dealloc_calls)
+        .assured("a thread's deallocation count only grows");
+    assert_eq!(
+        freed, allocated,
+        "a refused backup record retains no allocation"
+    );
+}
+
 fn validate<R: ArchiveRecord + PartialEq + Debug>(
     bytes: &[u8],
 ) -> Result<(), Report<ArchiveReadError>> {
@@ -287,6 +309,7 @@ fn bolero_malformed_current_records_return_safe_typed_errors() {
                 framed.extend_from_slice(&current_version(kind).to_le_bytes());
                 framed.extend_from_slice(bytes);
                 for input in [bytes, framed.as_slice()] {
+                    assert_decode_frees_allocations(|| validate_kind(kind, input));
                     if let Err(error) = validate_kind(kind, input) {
                         safe_record_failure(&error);
                     }

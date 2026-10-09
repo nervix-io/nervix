@@ -89,19 +89,46 @@ where
     fn decode_record(bytes: &[u8]) -> io::Result<Self> {
         use meticulous::OptionExt as _;
 
-        let max_depth = NonZeroUsize::new(STORAGE_ARCHIVE_MAX_DEPTH)
-            .assured("the storage archive depth limit is nonzero");
-        let mut aligned = AlignedVec::<STORAGE_ARCHIVE_ALIGNMENT>::with_capacity(bytes.len());
-        aligned.extend_from_slice(bytes);
-        let mut validator = Validator::new(
-            ArchiveValidator::with_max_depth(&aligned, Some(max_depth)),
-            SharedValidator::new(),
-        );
-        let archived = access_with_context::<T::Archived, _, RkyvError>(&aligned, &mut validator)
-            .map_err(|_| io::Error::other(StorageFailure::InvalidState))?;
-        let mut deserializer = Pool::default();
-        deserialize_using::<T, _, RkyvError>(archived, &mut deserializer)
-            .map_err(|_| io::Error::other(StorageFailure::InvalidState))
+        let decode = || {
+            let max_depth = NonZeroUsize::new(STORAGE_ARCHIVE_MAX_DEPTH)
+                .assured("the storage archive depth limit is nonzero");
+            let mut aligned = AlignedVec::<STORAGE_ARCHIVE_ALIGNMENT>::with_capacity(bytes.len());
+            aligned.extend_from_slice(bytes);
+            let mut validator = Validator::new(
+                ArchiveValidator::with_max_depth(&aligned, Some(max_depth)),
+                SharedValidator::new(),
+            );
+            let archived =
+                access_with_context::<T::Archived, _, RkyvError>(&aligned, &mut validator)
+                    .map_err(|_| io::Error::other(StorageFailure::InvalidState))?;
+            let mut deserializer = Pool::default();
+            deserialize_using::<T, _, RkyvError>(archived, &mut deserializer)
+                .map_err(|_| io::Error::other(StorageFailure::InvalidState))
+        };
+
+        #[cfg(test)]
+        {
+            // Count the owning archive decoder, not the database recovery loop: Fjall may
+            // retain caches and background work after a recovered state is dropped.
+            drop(decode());
+            let before = alloc_count::stats();
+            drop(decode());
+            let after = alloc_count::stats();
+            let allocated = after
+                .alloc_calls
+                .checked_sub(before.alloc_calls)
+                .assured("a thread's allocation count only grows");
+            let freed = after
+                .dealloc_calls
+                .checked_sub(before.dealloc_calls)
+                .assured("a thread's deallocation count only grows");
+            assert_eq!(
+                freed, allocated,
+                "a consensus archive decoder retains no allocation"
+            );
+        }
+
+        decode()
     }
 }
 

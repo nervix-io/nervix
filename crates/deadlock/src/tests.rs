@@ -19,6 +19,25 @@ use crate::{
     },
 };
 
+fn assert_decode_frees_allocations<F, T>(decode: F)
+where
+    F: Fn() -> T,
+{
+    drop(decode());
+    let before = alloc_count::stats();
+    drop(decode());
+    let after = alloc_count::stats();
+    let allocated = after
+        .alloc_calls
+        .checked_sub(before.alloc_calls)
+        .assured("a thread's allocation count only grows");
+    let freed = after
+        .dealloc_calls
+        .checked_sub(before.dealloc_calls)
+        .assured("a thread's deallocation count only grows");
+    assert_eq!(freed, allocated, "evidence decoding retains no allocation");
+}
+
 fn id(number: u64) -> NonZeroU64 {
     NonZeroU64::new(number).assured("tests number threads and locks from one")
 }
@@ -557,6 +576,7 @@ fn bolero_malformed_deadlock_evidence_is_refused_or_round_trips() {
             let mut headed = b"NVXDLEVD\x01\x00\x02\x00".to_vec();
             headed.extend_from_slice(bytes);
             for candidate in [bytes, headed.as_slice()] {
+                assert_decode_frees_allocations(|| DeadlockEvidence::decode(candidate));
                 // Whatever decodes is evidence within every bound, and encodes back to itself.
                 if let Ok(evidence) = DeadlockEvidence::decode(candidate) {
                     let encoded = evidence.encode().assured("decoded evidence encodes");
