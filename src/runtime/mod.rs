@@ -696,6 +696,7 @@ mod window_state;
 
 #[doc(hidden)]
 pub use branch_key::BranchKey;
+pub(crate) use branch_key::BranchKeyShapeError;
 pub(crate) use domain_clock::{
     DomainClock, DomainClockAccessError, DomainClockLifecycle, DomainClockObserver,
     DomainExecutionSnapshot,

@@ -71,9 +71,11 @@ fn bolero_malformed_runtime_state_snapshots_fail_typed() {
         .with_max_len(4096)
         .for_each(|bytes: &[u8]| {
             let payload = bytes.to_vec();
-            kafka_offset_state::assert_offset_payload_decodes_typed(&payload);
-            branch_lru_state::assert_lifecycle_payload_decodes_typed(&payload);
-            deduplicator::assert_key_payload_decodes_typed(&payload);
-            branch_aggregated_state::assert_metrics_payload_decodes_typed(&payload);
+            crate::archive_allocation_tests::assert_decode_frees_allocations(|| {
+                kafka_offset_state::assert_offset_payload_decodes_typed(&payload);
+                branch_lru_state::assert_lifecycle_payload_decodes_typed(&payload);
+                deduplicator::assert_key_payload_decodes_typed(&payload);
+                branch_aggregated_state::assert_metrics_payload_decodes_typed(&payload);
+            });
         });
 }

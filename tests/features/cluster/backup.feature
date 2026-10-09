@@ -619,7 +619,7 @@ Feature: Configuration backup into a public archive
       | 1            |
       | 3            |
 
-  @restore_installation
+  @restore_installation @deloxide_stress
   Scenario Outline: A quiesced backup restores two WASM branches and Kafka domain offsets
     Given Kafka is running
     And runtime replication is configured with replica count 0 and snapshot interval "10m"

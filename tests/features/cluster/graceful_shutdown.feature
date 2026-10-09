@@ -21,7 +21,7 @@ Feature: Graceful shutdown
       raft.cordoned_nodes: node-2
       """
 
-  @shutdown_kafka_handoff
+  @shutdown_kafka_handoff @deloxide_stress
   Scenario: A stopping Kafka ingestor closes intake while its attached emitter hands over
     Given Kafka is running
     And graceful shutdown drain is enabled
@@ -105,7 +105,7 @@ Feature: Graceful shutdown
       kind=emitter name=handoff_output owner={{handoff_emitter_destination}} replicas=- transition_from=node-1 state_recovery=complete
       """
 
-  @shutdown_cordon_release
+  @shutdown_cordon_release @deloxide_stress
   Scenario Outline: A stopping <role> whose cordon release outlasts one second completes its drain and leaves no cordon
     Given graceful shutdown drain is enabled
     And drain timeout is configured as "30s"

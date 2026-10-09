@@ -94,7 +94,9 @@ On restart, the node also uses the peer endpoints in its recovered Raft membersh
 excluding its own endpoint. These are contact hints, not current discovery advertisements: the
 bootstrap exchange authenticates the answering node, and gossip then replaces the hint with that
 node's current incarnation and advertised endpoint. This lets a former bootstrap node contact
-survivors even when its deployment has no configured bootstrap host.
+survivors even when its deployment has no configured bootstrap host. A node with recovered peer
+endpoints can also start when its configured bootstrap host does not resolve: it logs that lookup
+failure and contacts the peers whose recovered endpoints do resolve.
 
 A peer advertises three endpoints independently: its interconnect endpoint as a host and port, and
 its client and web-console endpoints as URLs. Discovery converges field by field, so each one is
@@ -152,11 +154,14 @@ lookup means for a peer.
 
 At startup a node resolves its own advertised interconnect endpoint, whose first address becomes
 its gossip identity address, and its configured bootstrap endpoint, every address of which becomes a
-gossip seed. Each lookup has the connection setup timeout, five seconds; failure of either required
-lookup fails startup with `failed to start cluster membership`. It also resolves the recovered Raft
-members' advertised endpoints in parallel. Their successful answers become additional gossip seeds;
-an unavailable recovered endpoint is logged at `warn` and skipped so it does not prevent the node
-from starting or using another reachable member. These startup answers are not looked up again:
+gossip seed. Each lookup has the connection setup timeout, five seconds. Failure to resolve the
+node's own endpoint fails startup with `failed to start cluster membership`. A configured bootstrap
+endpoint must resolve when the node has no recovered Raft peer endpoints; otherwise its lookup
+failure is logged at `warn` and skipped. An invalid configured bootstrap endpoint still fails
+startup. The node also resolves the recovered Raft members' advertised endpoints in parallel. Their
+successful answers become additional gossip seeds; an unavailable recovered endpoint is logged at
+`warn` and skipped so it does not prevent the node from starting or using another reachable member.
+These startup answers are not looked up again:
 gossip keeps dialling the seed addresses they produced, and the gossip identity address stays the
 one resolved at startup. Once gossip discovers a live peer, the interconnect replaces the recovery
 hint with that peer's current advertised endpoint.
@@ -365,10 +370,13 @@ and nesting depth, before exposing it to an operation handler. Encoded and decod
 to the traffic class before decoding begins. Unknown operations, a pool mismatch, malformed
 archives, and values above the operation limit fail at the transport boundary.
 
-Validation checks an archive's shape. A typed name inside it is checked when the record is read
-back, so a record can be refused after part of it was read. A relay grant request refused that way
-frees everything it had read: its acknowledgement registrations, each of which names its registrar,
-are read back one by one, and the request is refused at the first registrar that is no node's name.
+Validation checks an archive's shape. Semantic values such as typed names are checked when the
+record is read back, so a record can be refused after part of it was read. The shared archive
+reader owns each completed list or fixed-array element while reading the next, and releases the
+initialized prefix and the list, boxed, or shared allocation if a later element is refused. A
+relay grant request whose acknowledgement registrations include a registrar that is no node's name
+is refused with everything already read freed. The operation handler receives no part of that
+request.
 
 Control-operation responses preserve a typed failure class and subject across the wire. A receiver
 can distinguish a node that rejects ownership, an unavailable subject, a subject that is not ready,

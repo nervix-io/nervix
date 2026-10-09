@@ -97,7 +97,9 @@ Keep each node's named data volume across restarts. Once the three nodes have jo
 membership retains the advertised interconnect names. If `nervix-1` stops while the other nodes
 continue, it uses those names to find a survivor when it restarts; it does not need a second
 configured bootstrap host. The joining nodes still use `NERVIX_CLUSTER_BOOTSTRAP_HOST` for their
-first contact with a fresh cluster.
+first contact with a fresh cluster. Once they have recovered Raft peer endpoints from their volumes,
+they can restart while that bootstrap host does not resolve and rejoin through another peer whose
+name resolves. Keep the other members' advertised names resolvable to the restarting node.
 
 ```bash
 docker run --detach \

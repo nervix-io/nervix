@@ -37,6 +37,12 @@ use crate::{
 const HISTORY_EDGE_CAPACITY: usize = 16_384;
 const HELD_GUARD_CAPACITY: usize = MAX_ORDER_EDGES;
 
+/// Whether the caller's live guards are kept. Deloxide records a thread's held locks itself when
+/// order instrumentation is compiled, and when stress disables its fast paths, and then filters a
+/// thread's wait for a lock it holds as a cycle through a common lock. In those builds the boundary
+/// keeps the live guards so it can report that wait itself.
+const TRACKS_HELD_GUARDS: bool = cfg!(any(feature = "deloxide-order", feature = "deloxide-stress"));
+
 std::thread_local! { static HELD: RefCell<HeldGuards> = RefCell::new(HeldGuards::default()); }
 
 #[derive(Default)]
@@ -103,7 +109,7 @@ impl OrderHistory {
     /// Only the caller's actual live guards can establish a self wait. Runtime order checking may
     /// be disabled in an instrumented build, whose upstream active graph still tracks held locks.
     pub(crate) fn holds_exclusively(&self, lock: usize) -> bool {
-        if !cfg!(feature = "deloxide-order") {
+        if !TRACKS_HELD_GUARDS {
             return false;
         }
         let lock = u64::try_from(lock).assured("supported targets address at most 64 bits");
@@ -245,7 +251,7 @@ impl OrderHistory {
         access: Access,
         at: &'static Location<'static>,
     ) -> Option<HeldLease> {
-        if !cfg!(feature = "deloxide-order") {
+        if !TRACKS_HELD_GUARDS {
             return None;
         }
         let acquired = HeldAcquisition {

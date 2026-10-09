@@ -1,7 +1,7 @@
 # The workloads of the Deloxide diagnostic lane, and the owners of tracked locks they reach.
 #
-# `just test-deloxide` and `just test-deloxide-order` build every invocation below for their
-# selection and run it supervised: each process in a session of its own, within its bound and the
+# `just test-deloxide`, `just test-deloxide-order` and `just test-deloxide-stress` build every
+# invocation below that their selection runs, and run it supervised: each process in a session of its own, within its bound and the
 # lane's budget, with its output, evidence and exit kept in a fresh attempt directory. A selection
 # runs every workload that lists it. The lane fails when a registered workload is missing, ignored
 # or did not complete; when a discovered test or tagged scenario is not registered; when an
@@ -35,6 +35,13 @@ recorded = "ActiveOnly"
 [[selection]]
 name = "deloxide-order"
 recorded = "OrderAnalysis"
+
+# The active-only build with Deloxide's bounded scheduling disturbance, `StressConfiguration::LANE`.
+# It runs every probe, conformance check and owner test, and the lifecycle scenarios of the
+# `stress-scenarios` invocation.
+[[selection]]
+name = "deloxide-stress"
+recorded = "StressedActiveOnly"
 
 [[invocation]]
 artifacts = true
@@ -79,6 +86,7 @@ id = "scenarios"
 inputs = ["tests/features/**/*.feature"]
 kind = "cucumber"
 package = "nervix-server"
+selections = ["deloxide", "deloxide-order"]
 tags = [
   "@deadlock_diagnostics",
   "@restore_installation",
@@ -108,7 +116,25 @@ id = "paced-simulation"
 inputs = ["tests/features/runtime/paced_simulation.feature"]
 kind = "cucumber"
 package = "nervix-server"
+selections = ["deloxide", "deloxide-order"]
 tags = ["@paced_simulation_reopen"]
+target = "test:scenarios"
+
+# The lifecycle scenarios the stress selection runs under Deloxide's scheduling disturbance, tagged
+# `@deloxide_stress`, in one process and one scenario at a time. A stress build enters Deloxide's
+# process-wide detector twice on every mutex and write acquisition, so the nodes of several
+# scenarios in one process contend on it and miss product deadlines; one at a time they meet them.
+[[invocation]]
+bound_seconds = 3000
+concurrency = 1
+evidence = true
+features = ["testing"]
+id = "stress-scenarios"
+inputs = ["tests/features/**/*.feature"]
+kind = "cucumber"
+package = "nervix-server"
+selections = ["deloxide-stress"]
+tags = ["@deloxide_stress"]
 target = "test:scenarios"
 
 [[workload]]
@@ -116,7 +142,7 @@ coverage = "Tracked mutex acquisitions waiting in a two-thread wait-for cycle."
 id = "probe.opposite-order-mutexes"
 invariant = "Two named threads that each hold one mutex and want the other's report one active cycle naming both threads, both locks and where each waits, record it, and end the child with status 3."
 invocation = "probes"
-selections = ["deloxide", "deloxide-order"]
+selections = ["deloxide", "deloxide-order", "deloxide-stress"]
 test = "two_threads_locking_two_mutexes_in_opposite_orders_report_one_cycle"
 
 [[workload]]
@@ -124,7 +150,7 @@ coverage = "A mutex acquisition by the thread that already holds its guard."
 id = "probe.self-relock"
 invariant = "A thread that locks a mutex it holds reports a cycle of one naming the construction and waiting lines, and ends the child with status 3."
 invocation = "probes"
-selections = ["deloxide", "deloxide-order"]
+selections = ["deloxide", "deloxide-order", "deloxide-stress"]
 test = "a_thread_relocking_its_own_mutex_reports_a_cycle_of_one"
 
 [[workload]]
@@ -132,7 +158,7 @@ coverage = "A write acquisition by the thread holding a read guard of the same l
 id = "probe.read-upgrade"
 invariant = "A thread that asks for write access to a read-write lock it reads reports a cycle of one with exclusive access and ends the child with status 3."
 invocation = "probes"
-selections = ["deloxide", "deloxide-order"]
+selections = ["deloxide", "deloxide-order", "deloxide-stress"]
 test = "a_thread_upgrading_its_own_read_lock_reports_a_cycle_of_one"
 
 [[workload]]
@@ -140,7 +166,7 @@ coverage = "Shared and exclusive acquisitions of a read-write lock and a mutex i
 id = "probe.writer-reader"
 invariant = "A writer and a reader that each hold one lock the other wants report one cycle with the reader's shared and the writer's exclusive access and end the child with status 3."
 invocation = "probes"
-selections = ["deloxide", "deloxide-order"]
+selections = ["deloxide", "deloxide-order", "deloxide-stress"]
 test = "a_writer_and_a_reader_across_two_locks_report_one_cycle"
 
 [[workload]]
@@ -148,7 +174,7 @@ coverage = "A condition variable waiter reacquiring its mutex while its notifier
 id = "probe.notified-waiter"
 invariant = "A notified waiter and a notifier that holds the waiter's mutex while it wants the waiter's lock report one cycle and end the child with status 3."
 invocation = "probes"
-selections = ["deloxide", "deloxide-order"]
+selections = ["deloxide", "deloxide-order", "deloxide-stress"]
 test = "a_notified_waiter_and_a_notifier_holding_its_mutex_report_one_cycle"
 
 [[workload]]
@@ -156,7 +182,7 @@ coverage = "Repeated nested mutex acquisitions in one consistent order."
 id = "probe.consistent-order"
 invariant = "Two threads that take two mutexes in one order for many rounds end cleanly with evidence that records no finding."
 invocation = "probes"
-selections = ["deloxide", "deloxide-order"]
+selections = ["deloxide", "deloxide-order", "deloxide-stress"]
 test = "threads_taking_two_mutexes_in_one_order_complete_without_findings"
 
 [[workload]]
@@ -164,7 +190,7 @@ coverage = "A condition variable handing values between two threads through wait
 id = "probe.condition-handoff"
 invariant = "A value handed between two threads through a condition variable for many rounds ends cleanly with evidence that records no finding."
 invocation = "probes"
-selections = ["deloxide", "deloxide-order"]
+selections = ["deloxide", "deloxide-order", "deloxide-stress"]
 test = "a_condition_handed_between_threads_completes_without_findings"
 
 [[workload]]
@@ -172,15 +198,23 @@ coverage = "Concurrent shared acquisitions of one read-write lock."
 id = "probe.shared-readers"
 invariant = "Three readers that share a read-write lock across a barrier end cleanly with evidence that records no finding."
 invocation = "probes"
-selections = ["deloxide", "deloxide-order"]
+selections = ["deloxide", "deloxide-order", "deloxide-stress"]
 test = "readers_sharing_a_read_write_lock_complete_without_findings"
+
+[[workload]]
+coverage = "Deloxide's scheduling disturbance before nested mutex acquisitions, and its configuration in evidence."
+id = "probe.stress-disturbance"
+invariant = "A thread that takes an inner mutex while it holds an outer one for twenty thousand rounds waits at least the shortest delay for half the preemptions the lane's configuration expects, and its evidence records that configuration and no finding."
+invocation = "probes"
+selections = ["deloxide-stress"]
+test = "stress_delays_nested_acquisitions_and_records_its_configuration"
 
 [[workload]]
 coverage = "Detector installation and the process's standard streams."
 id = "probe.quiet-start"
 invariant = "Installing the detector writes nothing of its own to standard output or standard error, and the process's later output still arrives."
 invocation = "probes"
-selections = ["deloxide", "deloxide-order"]
+selections = ["deloxide", "deloxide-order", "deloxide-stress"]
 test = "the_detector_keeps_its_start_up_output_off_standard_output"
 
 [[workload]]
@@ -188,7 +222,7 @@ coverage = "The once-per-process diagnostic run."
 id = "probe.one-run"
 invariant = "A second diagnostic run in one process is refused as an installation failure and the first run stays current."
 invocation = "probes"
-selections = ["deloxide", "deloxide-order"]
+selections = ["deloxide", "deloxide-order", "deloxide-stress"]
 test = "a_process_starts_one_run"
 
 [[workload]]
@@ -196,7 +230,7 @@ coverage = "A tracked lock constructed before installation."
 id = "probe.lock-before-run"
 invariant = "A process that constructs a tracked lock before its diagnostic run fails with the configuration error instead of running untracked."
 invocation = "probes"
-selections = ["deloxide", "deloxide-order"]
+selections = ["deloxide", "deloxide-order", "deloxide-stress"]
 test = "a_tracked_lock_before_the_run_fails_the_process"
 
 [[workload]]
@@ -204,7 +238,7 @@ coverage = "Starting a run whose evidence directory does not exist."
 id = "probe.missing-directory"
 invariant = "A run refuses an evidence directory that does not exist with a typed start failure and creates nothing."
 invocation = "probes"
-selections = ["deloxide", "deloxide-order"]
+selections = ["deloxide", "deloxide-order", "deloxide-stress"]
 test = "a_run_refuses_an_evidence_directory_that_does_not_exist"
 
 [[workload]]
@@ -212,7 +246,7 @@ coverage = "Recording an active finding into a directory that can no longer hold
 id = "probe.unrecordable-evidence"
 invariant = "An active cycle whose evidence cannot be written is still described on standard error and ends the child with the diagnostic failure status 4."
 invocation = "probes"
-selections = ["deloxide", "deloxide-order"]
+selections = ["deloxide", "deloxide-order", "deloxide-stress"]
 test = "a_deadlock_whose_evidence_cannot_be_recorded_fails_the_diagnostic_run"
 
 [[workload]]
@@ -220,7 +254,7 @@ coverage = "A run without an evidence directory."
 id = "probe.standard-error-only"
 invariant = "A run without an evidence directory describes an active cycle on standard error alone and ends the child with status 3."
 invocation = "probes"
-selections = ["deloxide", "deloxide-order"]
+selections = ["deloxide", "deloxide-order", "deloxide-stress"]
 test = "a_run_without_an_evidence_directory_reports_on_standard_error"
 
 [[workload]]
@@ -292,7 +326,7 @@ coverage = "The thread-blocking primitives a diagnostic build selects."
 id = "primitive.selected-locks"
 invariant = "A diagnostic build selects the tracked mutex, read-write lock, guards and condition variable, and keeps the standard library's barrier, one-time initialization and channel."
 invocation = "primitive-conformance"
-selections = ["deloxide", "deloxide-order"]
+selections = ["deloxide", "deloxide-order", "deloxide-stress"]
 test = "tests::tracked_locks::deloxide_selects_the_tracked_locks_and_keeps_the_rest"
 
 [[workload]]
@@ -300,7 +334,7 @@ coverage = "The tracked adapters' own acquisitions: `Debug` formatting of a free
 id = "primitive.debug-formatting"
 invariant = "Formatting a tracked mutex or read-write lock tries the lock and never waits: a free lock prints its value, a lock its own thread holds prints `<locked>`, a read-write lock prints its value beside another reader, and no finding reaches the detector's sink."
 invocation = "primitive-conformance"
-selections = ["deloxide", "deloxide-order"]
+selections = ["deloxide", "deloxide-order", "deloxide-stress"]
 test = "tests::tracked_locks::debug_formatting_never_waits_for_a_held_lock"
 
 [[workload]]
@@ -308,7 +342,7 @@ coverage = "Construction from a value or its default, exclusive borrows, non-blo
 id = "primitive.value-handoff"
 invariant = "A tracked mutex and read-write lock hand their value in and out as the locks they replace do, and a non-blocking writer is refused while a reader holds the lock."
 invocation = "primitive-conformance"
-selections = ["deloxide", "deloxide-order"]
+selections = ["deloxide", "deloxide-order", "deloxide-stress"]
 test = "tests::tracked_locks::a_lock_hands_its_value_in_and_out"
 
 [[workload]]
@@ -316,7 +350,7 @@ coverage = "A tracked condition variable waking two waiters through wait and not
 id = "primitive.notification-count"
 invariant = "A notification returns exactly the two waiters it wakes, and the next one returns none."
 invocation = "primitive-conformance"
-selections = ["deloxide", "deloxide-order"]
+selections = ["deloxide", "deloxide-order", "deloxide-stress"]
 test = "tests::tracked_locks::notify_all_counts_the_waiters_it_wakes"
 
 [[workload]]
@@ -324,7 +358,7 @@ coverage = "A second detector installation in one process."
 id = "primitive.second-installation"
 invariant = "A second installation is refused as already claimed and the first detector stays installed."
 invocation = "primitive-conformance"
-selections = ["deloxide", "deloxide-order"]
+selections = ["deloxide", "deloxide-order", "deloxide-stress"]
 test = "tests::tracked_locks::a_second_installation_is_refused"
 
 [[workload]]
@@ -332,7 +366,7 @@ coverage = "The detector registry's record of a thread across its exit."
 id = "primitive.exited-thread"
 invariant = "A thread the registry learned is forgotten when it exits, so the registry holds no more threads than are alive."
 invocation = "primitive-conformance"
-selections = ["deloxide", "deloxide-order"]
+selections = ["deloxide", "deloxide-order", "deloxide-stress"]
 test = "tests::tracked_locks::an_exited_thread_leaves_the_registry"
 
 [[workload]]
@@ -340,7 +374,7 @@ coverage = "A tracked read acquisition that waits for a writer."
 id = "primitive.released-wait"
 invariant = "A reader that waits for a write guard proceeds with the written value once the guard is released, and no finding reaches the detector's sink."
 invocation = "primitive-conformance"
-selections = ["deloxide", "deloxide-order"]
+selections = ["deloxide", "deloxide-order", "deloxide-stress"]
 test = "tests::tracked_locks::a_waiting_acquisition_proceeds_once_the_lock_is_released"
 
 [[workload]]
@@ -348,7 +382,7 @@ coverage = "State-store staging, publication, snapshot readers, queued checkpoin
 id = "owner.restore-storage"
 invariant = "One fresh diagnostic process runs the state store's restore staging, publication, cancellation, reader, writer, cleanup and reclamation regressions with its detector installed first, and records no finding."
 invocation = "owner-tests"
-selections = ["deloxide", "deloxide-order"]
+selections = ["deloxide", "deloxide-order", "deloxide-stress"]
 test = "runtime::state_store::backup::tests::deloxide_restore_storage"
 
 [[workload]]
@@ -356,7 +390,7 @@ coverage = "Materialized relay publications, eviction, rebinding and routing-epo
 id = "owner.materialized-publications"
 invariant = "One fresh diagnostic process runs the materialized publication lifetime regressions with its detector installed first, and records no finding."
 invocation = "owner-tests"
-selections = ["deloxide", "deloxide-order"]
+selections = ["deloxide", "deloxide-order", "deloxide-stress"]
 test = "runtime::materialized_state::publication_tests::deloxide_materialized_publications"
 
 [[workload]]
@@ -802,6 +836,146 @@ invocation = "scenarios"
 scenario = "Native lifecycle and Kafka metadata above the bulk budget on <cluster_size> nodes restore exactly"
 selections = ["deloxide", "deloxide-order"]
 
+[[workload]]
+coverage = "Under scheduling stress: every tracked lock of in-process nodes, their clients and the scenario process while a workload runs and is altered."
+examples = 2
+feature = "tests/features/cluster/deadlock_diagnostics.feature"
+id = "stress.diagnostic-nodes"
+invariant = "In-process diagnostic nodes on one and three nodes ingest, route, alter a filter and deliver a message error while the scenario process records no finding."
+invocation = "stress-scenarios"
+scenario = "In-process diagnostic nodes run a workload with every blocking lock tracked on a <nodes> node cluster"
+selections = ["deloxide-stress"]
+
+[[workload]]
+coverage = "Under scheduling stress: start-up, configuration and graceful SIGTERM shutdown of real diagnostic server processes."
+examples = 2
+feature = "tests/features/cluster/deadlock_diagnostics.feature"
+id = "stress.diagnostic-server-processes"
+invariant = "Real diagnostic server processes on one and three nodes stop gracefully with status 0, keep the detector's start-up output out of their logs, and record a running detector with no findings."
+invocation = "stress-scenarios"
+scenario = "Diagnostic server processes record a running detector and stop gracefully on a <nodes> node cluster"
+selections = ["deloxide-stress"]
+
+[[workload]]
+coverage = "Under scheduling stress: a graceful stop of a leader and of a follower that hands its work over through the leader, releases its drain cordon through a consensus write beside the in-place drain of its admitted work, and restarts. The release wait and the test delay map are untracked."
+examples = 2
+feature = "tests/features/cluster/graceful_shutdown.feature"
+id = "stress.shutdown-cordon-release"
+invariant = "A stopping leader and a stopping follower whose cordon release outlasts one second complete the drain-support phase and leave no cordon after the stop or after the restart."
+invocation = "stress-scenarios"
+scenario = "A stopping <role> whose cordon release outlasts one second completes its drain and leaves no cordon"
+selections = ["deloxide-stress"]
+
+[[workload]]
+coverage = "Under scheduling stress: a Kafka source closes intake before the leader moves an attached emitter, with tracked source controls and acknowledgement completion active during the stop."
+examples = 1
+feature = "tests/features/cluster/graceful_shutdown.feature"
+id = "stress.shutdown-kafka-handoff"
+invariant = "A stopping Kafka owner admits no new source work during its emitter handoff and completes the drain with every admitted record delivered."
+invocation = "stress-scenarios"
+scenario = "A stopping Kafka ingestor closes intake while its attached emitter hands over"
+selections = ["deloxide-stress"]
+
+[[workload]]
+coverage = "Under scheduling stress: bounded remote delivery and peer admission owners under interleaved branches, attached sink acknowledgement and Kafka source offset commit."
+examples = 2
+feature = "tests/features/runtime/remote_ack_owners.feature"
+id = "stress.remote-ack-branches"
+invariant = "On one and three nodes, two interleaved branches complete all attached deliveries and commit their source offsets while remote correlation and admission owners retire their rows."
+invocation = "stress-scenarios"
+scenario = "Interleaved branches complete attached deliveries and commit their source offsets"
+selections = ["deloxide-stress"]
+
+[[workload]]
+coverage = "Under scheduling stress: capture, archive and restore of deduplicator keys and half-filled window rows, and their per-branch continuation."
+examples = 2
+feature = "tests/features/cluster/backup_branch_state.feature"
+id = "stress.branch-state-resume"
+invariant = "Deduplicator keys and half-filled windows captured at a quiesced cut continue per branch after RESUME on one node and on three nodes with a replica."
+invocation = "stress-scenarios"
+scenario = "Deduplicator keys and half-filled windows captured at a quiesced cut continue per branch after RESUME"
+selections = ["deloxide-stress"]
+
+[[workload]]
+coverage = "Under scheduling stress: the applied-state authority guard for resumed deduplicator and window state across a leadership transfer."
+examples = 1
+feature = "tests/features/cluster/backup_branch_state.feature"
+id = "stress.branch-state-stale-coordinator"
+invariant = "A delayed restore coordinator cannot replace deduplicator keys and windows a new leader resumed."
+invocation = "stress-scenarios"
+scenario = "A delayed coordinator cannot replace resumed deduplicator keys and windows"
+selections = ["deloxide-stress"]
+
+[[workload]]
+coverage = "Under scheduling stress: buffered client admission, entity holds and drains during an alteration."
+examples = 4
+feature = "tests/features/runtime/client_ingestors.feature"
+id = "stress.client-alter-drain"
+invariant = "An alteration drains buffered branches on a shared relay before replacing a client ingestor's contract."
+invocation = "stress-scenarios"
+scenario = "An alteration drains buffered branches on a shared relay before replacing its client contract"
+selections = ["deloxide-stress"]
+
+[[workload]]
+coverage = "Under scheduling stress: failed drains, rejected engagements and released client admission during an alteration."
+examples = 8
+feature = "tests/features/runtime/client_ingestors.feature"
+id = "stress.client-alter-rejection"
+invariant = "A rejected alteration releases buffered client admission and retains the committed contract."
+invocation = "stress-scenarios"
+scenario = "A rejected <failure> releases buffered client admission and retains its committed contract"
+selections = ["deloxide-stress"]
+
+[[workload]]
+coverage = "Under scheduling stress: memory backpressure pausing a scheduled ingestor that starts and runs above the high watermark."
+examples = 2
+feature = "tests/features/runtime/memory_pressure.feature"
+id = "stress.memory-pressure-pause"
+invariant = "An HTTP ingestor started above the memory high watermark on one and three nodes is quiesced by memory pressure with backpressure active, rejects posted intake and counts the rejection."
+invocation = "stress-scenarios"
+scenario = "Memory high watermark pauses scheduled ingestors"
+selections = ["deloxide-stress"]
+
+[[workload]]
+coverage = "Under scheduling stress: rust client consumers, producers and the attached domain clock resuming across a cluster restart."
+examples = 2
+feature = "tests/features/runtime/client_emitters.feature"
+id = "stress.client-consumer-restore"
+invariant = "After a cluster restart on one and three nodes, a Rust client's producer and consumer resume their unchanged endpoint: the consumer reports its attachment interruption and delivers the batch submitted after the restart, and the attached domain clock reports its interruption and ticks again."
+invocation = "stress-scenarios"
+scenario = "A producer and consumer resume their unchanged endpoint after a session restart"
+selections = ["deloxide-stress"]
+
+[[workload]]
+coverage = "Under scheduling stress: rust client and WebSocket consumers closed by a domain stop and reopened after its restart."
+examples = 2
+feature = "tests/features/runtime/client_emitters.feature"
+id = "stress.client-consumer-generation"
+invariant = "Stopping a domain ends its consumers, refuses new ones while it is stopped, and requires an explicit new open after START, on one and three nodes."
+invocation = "stress-scenarios"
+scenario = "Stopping and restarting a domain closes the consumer and creates a new endpoint"
+selections = ["deloxide-stress"]
+
+[[workload]]
+coverage = "Under scheduling stress: diagnostic domain capture, refusal and resumption around an ordinary CLI subprocess's second-domain cut expiry."
+examples = 2
+feature = "tests/features/cluster/backup_wait.feature"
+id = "stress.backup-cut-expiry"
+invariant = "A second-domain cut expiry returns its bounded failure and resumes both domains on one and three nodes."
+invocation = "stress-scenarios"
+scenario = "A second-domain quiesce expiry returns its failure and resumes both domains"
+selections = ["deloxide-stress"]
+
+[[workload]]
+coverage = "Under scheduling stress: quiesced capture and restore of WASM guest state and Kafka source offsets."
+examples = 2
+feature = "tests/features/cluster/backup.feature"
+id = "stress.wasm-kafka-restore"
+invariant = "A quiesced backup restores two WASM branches and the domain's Kafka offsets on one and three nodes."
+invocation = "stress-scenarios"
+scenario = "A quiesced backup restores two WASM branches and Kafka domain offsets"
+selections = ["deloxide-stress"]
+
 [[owner]]
 path = "crates/checkpoint-replication/src/replication.rs"
 workloads = [
@@ -826,6 +1000,8 @@ workloads = [
   "paced.reopen-generation",
   "paced.follow-start-generation",
   "paced.reopen-failure",
+  "stress.client-consumer-restore",
+  "stress.client-consumer-generation",
 ]
 
 [[owner]]
@@ -843,6 +1019,7 @@ workloads = [
   "paced.reopen-generation",
   "scenario.backup-native-recovery",
   "scenario.backup-multi-domain-wait",
+  "stress.client-alter-drain",
 ]
 
 [[owner]]
@@ -851,11 +1028,17 @@ workloads = [
   "scenario.client-alter-drain",
   "scenario.client-alter-rejection",
   "paced.reopen-generation",
+  "stress.client-alter-drain",
+  "stress.client-alter-rejection",
 ]
 
 [[owner]]
 path = "crates/client-core/src/producer/slots.rs"
-workloads = ["scenario.client-alter-drain", "paced.refused-tick-replay"]
+workloads = [
+  "scenario.client-alter-drain",
+  "paced.refused-tick-replay",
+  "stress.client-alter-drain",
+]
 
 [[owner]]
 path = "crates/client-core/src/restoration.rs"
@@ -863,13 +1046,15 @@ workloads = ["paced.reopen-generation", "paced.follow-start-generation"]
 
 [[owner]]
 path = "crates/client-core/src/subscriptions.rs"
-workloads = ["scenario.diagnostic-nodes"]
+workloads = ["scenario.diagnostic-nodes", "stress.diagnostic-nodes"]
 
 [[owner]]
 path = "crates/consensus/src/lib.rs"
 workloads = [
   "scenario.diagnostic-nodes",
   "scenario.diagnostic-server-processes",
+  "stress.diagnostic-nodes",
+  "stress.diagnostic-server-processes",
 ]
 
 [[owner]]
@@ -882,13 +1067,19 @@ workloads = [
 
 [[owner]]
 path = "crates/consensus/src/snapshot.rs"
-workloads = ["scenario.restore-generation", "scenario.wasm-kafka-restore"]
+workloads = [
+  "scenario.restore-generation",
+  "scenario.wasm-kafka-restore",
+  "stress.wasm-kafka-restore",
+]
 
 [[owner]]
 path = "crates/consensus/src/storage.rs"
 workloads = [
   "scenario.diagnostic-nodes",
   "scenario.diagnostic-server-processes",
+  "stress.diagnostic-nodes",
+  "stress.diagnostic-server-processes",
 ]
 
 [[owner]]
@@ -896,6 +1087,8 @@ path = "crates/interconnect/src/connection.rs"
 workloads = [
   "scenario.diagnostic-nodes",
   "scenario.diagnostic-server-processes",
+  "stress.diagnostic-nodes",
+  "stress.diagnostic-server-processes",
 ]
 
 [[owner]]
@@ -904,6 +1097,7 @@ workloads = [
   "scenario.remote-ack-branches",
   "scenario.remote-ack-loss",
   "scenario.remote-ack-restart",
+  "stress.remote-ack-branches",
 ]
 
 [[owner]]
@@ -936,11 +1130,20 @@ workloads = [
 
 [[owner]]
 path = "src/application/backup/retained.rs"
-workloads = ["scenario.wasm-kafka-restore", "scenario.restore-generation"]
+workloads = [
+  "scenario.wasm-kafka-restore",
+  "scenario.restore-generation",
+  "stress.wasm-kafka-restore",
+]
 
 [[owner]]
 path = "src/application/model_mutation.rs"
-workloads = ["scenario.diagnostic-nodes", "scenario.client-alter-drain"]
+workloads = [
+  "scenario.diagnostic-nodes",
+  "scenario.client-alter-drain",
+  "stress.diagnostic-nodes",
+  "stress.client-alter-drain",
+]
 
 [[owner]]
 path = "src/application/restore/archives.rs"
@@ -948,6 +1151,7 @@ workloads = [
   "scenario.wasm-kafka-restore",
   "scenario.restore-generation",
   "scenario.restore-staging-quota",
+  "stress.wasm-kafka-restore",
 ]
 
 [[owner]]
@@ -960,11 +1164,17 @@ workloads = [
   "scenario.diagnostic-nodes",
   "scenario.client-alter-drain",
   "paced.reopen-generation",
+  "stress.diagnostic-nodes",
+  "stress.client-alter-drain",
 ]
 
 [[owner]]
 path = "src/application/session/outbound.rs"
-workloads = ["scenario.diagnostic-nodes", "paced.reopen-generation"]
+workloads = [
+  "scenario.diagnostic-nodes",
+  "paced.reopen-generation",
+  "stress.diagnostic-nodes",
+]
 
 [[owner]]
 path = "src/application/session/producers.rs"
@@ -972,6 +1182,8 @@ workloads = [
   "scenario.client-alter-drain",
   "scenario.client-alter-rejection",
   "paced.reopen-generation",
+  "stress.client-alter-drain",
+  "stress.client-alter-rejection",
 ]
 
 [[owner]]
@@ -980,15 +1192,25 @@ workloads = ["scenario.vhost-tls-rebinding"]
 
 [[owner]]
 path = "src/application/tracing_setup.rs"
-workloads = ["scenario.diagnostic-nodes"]
+workloads = ["scenario.diagnostic-nodes", "stress.diagnostic-nodes"]
 
 [[owner]]
 path = "src/application/transaction.rs"
-workloads = ["scenario.diagnostic-nodes", "scenario.client-alter-rejection"]
+workloads = [
+  "scenario.diagnostic-nodes",
+  "scenario.client-alter-rejection",
+  "stress.diagnostic-nodes",
+  "stress.client-alter-rejection",
+]
 
 [[owner]]
 path = "src/application/transaction/impact.rs"
-workloads = ["scenario.client-alter-drain", "scenario.client-alter-rejection"]
+workloads = [
+  "scenario.client-alter-drain",
+  "scenario.client-alter-rejection",
+  "stress.client-alter-drain",
+  "stress.client-alter-rejection",
+]
 
 [[owner]]
 path = "src/cluster.rs"
@@ -996,6 +1218,8 @@ workloads = [
   "scenario.restarted-voter-observation",
   "scenario.diagnostic-nodes",
   "scenario.diagnostic-server-processes",
+  "stress.diagnostic-nodes",
+  "stress.diagnostic-server-processes",
 ]
 
 [[owner]]
@@ -1003,6 +1227,8 @@ path = "src/metrics.rs"
 workloads = [
   "scenario.diagnostic-nodes",
   "scenario.diagnostic-server-processes",
+  "stress.diagnostic-nodes",
+  "stress.diagnostic-server-processes",
 ]
 
 [[owner]]
@@ -1010,6 +1236,8 @@ path = "src/metrics/interconnection.rs"
 workloads = [
   "scenario.diagnostic-nodes",
   "scenario.diagnostic-server-processes",
+  "stress.diagnostic-nodes",
+  "stress.diagnostic-server-processes",
 ]
 
 [[owner]]
@@ -1017,11 +1245,13 @@ path = "src/registry/storage.rs"
 workloads = [
   "scenario.diagnostic-nodes",
   "scenario.diagnostic-server-processes",
+  "stress.diagnostic-nodes",
+  "stress.diagnostic-server-processes",
 ]
 
 [[owner]]
 path = "src/runtime/branch_aggregated_state.rs"
-workloads = ["scenario.client-alter-drain"]
+workloads = ["scenario.client-alter-drain", "stress.client-alter-drain"]
 
 [[owner]]
 path = "src/runtime/branch_lifecycle_state.rs"
@@ -1030,19 +1260,31 @@ workloads = [
   "scenario.branch-state-resume",
   "scenario.branch-state-stale-coordinator",
   "scenario.restore-generation",
+  "stress.branch-state-resume",
+  "stress.branch-state-stale-coordinator",
 ]
 
 [[owner]]
 path = "src/runtime/branch_runtime.rs"
-workloads = ["scenario.client-alter-drain", "scenario.wasm-kafka-restore"]
+workloads = [
+  "scenario.client-alter-drain",
+  "scenario.wasm-kafka-restore",
+  "stress.client-alter-drain",
+  "stress.wasm-kafka-restore",
+]
 
 [[owner]]
 path = "src/runtime/entity_gate.rs"
-workloads = ["scenario.client-alter-drain", "scenario.client-alter-rejection"]
+workloads = [
+  "scenario.client-alter-drain",
+  "scenario.client-alter-rejection",
+  "stress.client-alter-drain",
+  "stress.client-alter-rejection",
+]
 
 [[owner]]
 path = "src/runtime/force_flush.rs"
-workloads = ["scenario.client-alter-drain"]
+workloads = ["scenario.client-alter-drain", "stress.client-alter-drain"]
 
 [[owner]]
 path = "src/runtime/inferencer.rs"
@@ -1055,6 +1297,10 @@ workloads = [
   "scenario.diagnostic-nodes",
   "scenario.memory-pressure-pause",
   "scenario.shutdown-kafka-handoff",
+  "stress.client-alter-drain",
+  "stress.diagnostic-nodes",
+  "stress.memory-pressure-pause",
+  "stress.shutdown-kafka-handoff",
 ]
 
 [[owner]]
@@ -1067,19 +1313,24 @@ workloads = [
 
 [[owner]]
 path = "src/runtime/message_error_delivery.rs"
-workloads = ["scenario.diagnostic-nodes"]
+workloads = ["scenario.diagnostic-nodes", "stress.diagnostic-nodes"]
 
 [[owner]]
 path = "src/runtime/processor_branch_task.rs"
-workloads = ["scenario.wasm-kafka-restore", "scenario.client-alter-drain"]
+workloads = [
+  "scenario.wasm-kafka-restore",
+  "scenario.client-alter-drain",
+  "stress.wasm-kafka-restore",
+  "stress.client-alter-drain",
+]
 
 [[owner]]
 path = "src/runtime/relay_boundary.rs"
-workloads = ["scenario.diagnostic-nodes"]
+workloads = ["scenario.diagnostic-nodes", "stress.diagnostic-nodes"]
 
 [[owner]]
 path = "src/runtime/relay_channel.rs"
-workloads = ["scenario.diagnostic-nodes"]
+workloads = ["scenario.diagnostic-nodes", "stress.diagnostic-nodes"]
 
 [[owner]]
 path = "src/runtime/remote_ack_owner.rs"
@@ -1087,6 +1338,7 @@ workloads = [
   "scenario.remote-ack-branches",
   "scenario.remote-ack-loss",
   "scenario.remote-ack-restart",
+  "stress.remote-ack-branches",
 ]
 
 [[owner]]
@@ -1101,4 +1353,9 @@ workloads = [
 
 [[owner]]
 path = "src/runtime_ack.rs"
-workloads = ["scenario.client-alter-drain", "scenario.wasm-kafka-restore"]
+workloads = [
+  "scenario.client-alter-drain",
+  "scenario.wasm-kafka-restore",
+  "stress.client-alter-drain",
+  "stress.wasm-kafka-restore",
+]

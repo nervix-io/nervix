@@ -110,7 +110,7 @@ Feature: Client emitters
       | 1            | client "app"                |
       | 3            | WebSocket session "browser" |
 
-  @client_emitter @client_io_03_emitter @client_io_03_consumer_restore
+  @client_emitter @client_io_03_emitter @client_io_03_consumer_restore @deloxide_stress
   Scenario Outline: A producer and consumer resume their unchanged endpoint after a session restart
     Given runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
@@ -164,7 +164,7 @@ Feature: Client emitters
       | 1            |
       | 3            |
 
-  @client_emitter @client_io_03_emitter @client_io_03_generation
+  @client_emitter @client_io_03_emitter @client_io_03_generation @deloxide_stress
   Scenario Outline: Stopping and restarting a domain closes the consumer and creates a new endpoint
     Given runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started

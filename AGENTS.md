@@ -945,8 +945,13 @@ build and the existing tests, and nothing in it changes behavior.
 - A change that adds or alters thread-blocking synchronization, a `sync::blocking` lock or
   condition variable, the order in which tracked locks are acquired, or a shutdown, drain, restore,
   cancellation, handoff or other lifecycle or ownership path that uses tracked locks runs
-  `just test-deloxide` and `just test-deloxide-order` and carries the `deloxide` label, so that CI's
-  `deloxide` job, which runs only for a pull request with that label, runs both. Where the lane's
+  `just test-deloxide`, `just test-deloxide-order` and `just test-deloxide-stress` and carries the
+  `deloxide` label, so that CI's `deloxide` job, which runs only for a pull request with that label,
+  runs all three. The stress selection runs the active-only probes, conformance checks and owner
+  tests and the lifecycle scenarios tagged `@deloxide_stress` under Deloxide's bounded scheduling
+  disturbance; a change to a lifecycle path those scenarios do not reach tags one that does; a stressed workload that fails is a finding, reproduced first as a
+  focused failing test against its owner and fixed there, never hidden by a passing rerun, a wider
+  product deadline or a weaker assertion. Where the lane's
   workloads do not yet reach the changed path, the change
   extends its probes, owner tests or tagged scenarios and registers each in
   `tests/deloxide-inventory.toml` with a stable identity, the invariant it owns, its selections and
@@ -1119,9 +1124,17 @@ build and the existing tests, and nothing in it changes behavior.
   namespace. `just test-typed-ratchet` and `just qualify-typed-ratchet-cache` qualify diagnostics,
   current paired API doctests and completion/cache behavior. Tooling Bolero targets use the shared
   inventory and current ordinary/fuzz CI policy; native coverage uses matching LLVM tools.
-- Every Rust build, check, lint, and test invocation must use the repository-configured kache
-  compiler wrapper. Never unset, clear, or override `RUSTC_WRAPPER`, including for diagnostics,
-  benchmarks, cache troubleshooting, or retries.
+- Every Rust build, check, lint, and test invocation must run through kache, the compiler wrapper
+  the host configures with `RUSTC_WRAPPER` or Cargo's `build.rustc-wrapper`. The requirement has
+  no exceptions: diagnostics, benchmarks, cache troubleshooting, and retries run through it too.
+  Kache serves compiled artifacts from the host's shared cache. A build that bypasses it compiles
+  from source what the cache already holds, which puts extra CPU load on the host, and writes a
+  private full copy of every artifact, so its target directory consumes a lot of disk space.
+  Never unset, clear, or override `RUSTC_WRAPPER`, `CARGO_BUILD_RUSTC_WRAPPER`, or
+  `build.rustc-wrapper`, and never run Cargo with a `HOME` or `CARGO_HOME` that hides the host's
+  Cargo configuration: the host may set the wrapper there, and an empty `RUSTC_WRAPPER` switches
+  it off. When kache is unavailable or a build fails under it, stop and report that instead of
+  building without it.
 - Use `just validate-skill` to validate the public NSPL skill against the Agent Skills publication
   checks. CI runs this validation but does not create GitHub releases; the public default branch is
   the install source.
@@ -1151,8 +1164,9 @@ build and the existing tests, and nothing in it changes behavior.
 - A change to a primitive adapter or a synchronization protocol runs the checks of every mode it
   affects: `just test-shuttle [filter]` for interleavings, `just test-loom [filter]` for
   memory-ordering claims, `just test-turmoil` for the simulated network, and `just test-deloxide`
-  for active deadlocks and `just test-deloxide-order` for potential acquisition-order cycles among
-  tracked locks, beside the ordinary suite. The two Deloxide commands run the diagnostic lane over
+  for active deadlocks, `just test-deloxide-order` for potential acquisition-order cycles among
+  tracked locks and `just test-deloxide-stress` for active deadlocks under bounded scheduling
+  disturbance, beside the ordinary suite. The three Deloxide commands run the diagnostic lane over
   the bounded inventory in `tests/deloxide-inventory.toml`: a registered workload that is missing,
   ignored or incomplete fails it, so does a discovered probe, owner test or tagged scenario that is
   not registered, and every run keeps an attempt that `just test-deloxide-replay` replays.
@@ -1183,8 +1197,8 @@ build and the existing tests, and nothing in it changes behavior.
 - `just coverage-native-extras [producer ...]` runs eligible native extra checks under LLVM source
   instrumentation: `test-typed-ratchet`, `bench-smoke`, `nspl-completion-walk`, the canonical
   `test-shuttle` and `test-loom` runners, each `test-primitives-<mode>` conformance recipe,
-  `test-deadlock-evidence-order`, `test-deadlock-report`, and the `test-deloxide` and
-  `test-deloxide-order` lanes, which export only from a complete `lane.json` and instrument only
+  `test-deadlock-evidence-order`, `test-deadlock-report`, and the `test-deloxide`,
+  `test-deloxide-order` and `test-deloxide-stress` lanes, which export only from a complete `lane.json` and instrument only
   workspace crates, through a workspace compiler wrapper beneath kache, so their nodes meet the
   product's deadlines.
   `test-primitives` selects every native conformance mode. CI runs these checks through collection;
@@ -1219,7 +1233,7 @@ build and the existing tests, and nothing in it changes behavior.
 - Final implementation reports must name the cucumber scenario added or updated. If none was added,
   state the explicit user-approved reason.
 - Final implementation reports of concurrency-related work state whether the Deloxide rule applies.
-  When it applies, they name the lane runs of both selections, whether the registered workloads
+  When it applies, they name the lane runs of every selection, whether the registered workloads
   reach the changed path, and the inventory and owner records the change added. When the work is
   async-only or otherwise untracked, they record that the detector does not see it and name the
   Shuttle, Loom, Turmoil, Chaos or Bolero evidence that covers it instead.

@@ -153,3 +153,96 @@ fn identities_sites_kinds_and_access_describe_themselves() {
     assert_eq!(Access::Exclusive.to_string(), "exclusive");
     assert_eq!(Access::Shared.to_string(), "shared");
 }
+
+#[test]
+fn the_lane_stress_configuration_preempts_one_in_twenty_between_its_delays() {
+    use std::time::Duration;
+
+    use crate::deadlock::{DiagnosticSelection, PREEMPTION_SCALE, StressConfiguration};
+
+    let lane = StressConfiguration::LANE;
+    assert_eq!(lane.preemptions_per_million().get(), PREEMPTION_SCALE / 20);
+    assert_eq!(lane.shortest_delay(), Duration::from_micros(20));
+    assert_eq!(lane.longest_delay(), Duration::from_micros(200));
+    assert!(!lane.yield_after_release());
+    let stressed = DiagnosticSelection::StressedActiveOnly(lane);
+    assert_eq!(stressed.stress(), Some(lane));
+    assert!(!stressed.checks_order());
+    assert_eq!(DiagnosticSelection::ActiveOnly.stress(), None);
+    assert_eq!(
+        stressed.is_available(),
+        cfg!(feature = "deloxide-stress"),
+        "only a stress build installs a stressed selection"
+    );
+    assert_eq!(
+        DiagnosticSelection::ActiveOnly.is_available(),
+        !cfg!(any(feature = "deloxide-order", feature = "deloxide-stress"))
+    );
+    if cfg!(feature = "deloxide-stress") {
+        assert_eq!(DiagnosticSelection::for_build(false), stressed);
+        assert_eq!(DiagnosticSelection::for_build(true), stressed);
+    }
+}
+
+#[test]
+fn a_stress_configuration_outside_its_bounds_is_refused() {
+    use std::{num::NonZeroU32, time::Duration};
+
+    use crate::deadlock::{
+        MAX_STRESS_DELAY, PREEMPTION_SCALE, StressConfiguration, StressOutOfBounds,
+    };
+
+    let per_million = |value: u32| NonZeroU32::new(value).assured("the checks use nonzero values");
+    let micro = Duration::from_micros(1);
+    let whole = StressConfiguration::new(
+        per_million(PREEMPTION_SCALE),
+        micro,
+        MAX_STRESS_DELAY,
+        false,
+    )
+    .assured("a probability of one and the delay bounds themselves are within the bounds");
+    assert_eq!(whole.preemptions_per_million().get(), PREEMPTION_SCALE);
+
+    let above_one = PREEMPTION_SCALE
+        .checked_add(1)
+        .assured("the scale is a million");
+    assert_eq!(
+        StressConfiguration::new(per_million(above_one), micro, micro, false),
+        Err(StressOutOfBounds::Probability {
+            per_million: above_one
+        })
+    );
+    let too_long = MAX_STRESS_DELAY
+        .checked_add(micro)
+        .assured("two milliseconds and one");
+    assert_eq!(
+        StressConfiguration::new(per_million(1), micro, too_long, false),
+        Err(StressOutOfBounds::Delay { delay: too_long })
+    );
+    assert_eq!(
+        StressConfiguration::new(per_million(1), Duration::ZERO, micro, false),
+        Err(StressOutOfBounds::Delay {
+            delay: Duration::ZERO
+        })
+    );
+    let fractional = Duration::from_nanos(1_500);
+    assert_eq!(
+        StressConfiguration::new(per_million(1), fractional, MAX_STRESS_DELAY, false),
+        Err(StressOutOfBounds::Delay { delay: fractional })
+    );
+    assert_eq!(
+        StressConfiguration::new(per_million(1), MAX_STRESS_DELAY, micro, true),
+        Err(StressOutOfBounds::Inverted {
+            shortest: MAX_STRESS_DELAY,
+            longest: micro
+        })
+    );
+    assert!(
+        StressOutOfBounds::Inverted {
+            shortest: MAX_STRESS_DELAY,
+            longest: micro
+        }
+        .to_string()
+        .contains("longer than the longest")
+    );
+}

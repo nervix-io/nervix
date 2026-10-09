@@ -38,12 +38,14 @@ use meticulous::ResultExt as _;
 #[cfg(feature = "native")]
 mod handoff;
 mod order;
+mod stress;
 #[cfg(feature = "native")]
 pub use handoff::ReportHandoff;
 pub use order::{
     LockLifetime, MAX_ORDER_EDGES, MAX_ORDER_WITNESSES, OrderEdge, OrderLock, OrderOutOfBounds,
     OrderWitness, PotentialCycle,
 };
+pub use stress::{MAX_STRESS_DELAY, PREEMPTION_SCALE, StressConfiguration, StressOutOfBounds};
 
 /// Compile-time instrumentation and runtime checking selected for one diagnostic process.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -55,11 +57,18 @@ pub enum DiagnosticSelection {
     /// The graph is compiled, but runtime order checking is disabled. This still pays the
     /// instrumented acquisition cost and is never an ordinary or active-only fast path.
     OrderInstrumentedActiveOnly,
+    /// No order graph was compiled, and Deloxide disturbs the schedule of nested acquisitions as
+    /// the configuration says. Only a `deloxide-stress` build selects it.
+    StressedActiveOnly(StressConfiguration),
 }
 
 impl DiagnosticSelection {
+    /// The selection this build runs: a `deloxide-stress` build disturbs its schedule with
+    /// [`StressConfiguration::LANE`] and has no order graph to enable, whatever `active_only` says.
     pub const fn for_build(active_only: bool) -> Self {
-        if cfg!(feature = "deloxide-order") {
+        if cfg!(feature = "deloxide-stress") {
+            Self::StressedActiveOnly(StressConfiguration::LANE)
+        } else if cfg!(feature = "deloxide-order") {
             if active_only {
                 Self::OrderInstrumentedActiveOnly
             } else {
@@ -72,6 +81,28 @@ impl DiagnosticSelection {
 
     pub const fn checks_order(self) -> bool {
         matches!(self, Self::OrderAnalysis)
+    }
+
+    /// Whether this build can install the detector with this selection: the selection it was
+    /// compiled for, or, in a `deloxide-stress` build, stress with any valid configuration.
+    pub const fn is_available(self) -> bool {
+        match self {
+            Self::StressedActiveOnly(_) => cfg!(feature = "deloxide-stress"),
+            Self::ActiveOnly => {
+                !cfg!(feature = "deloxide-order") && !cfg!(feature = "deloxide-stress")
+            }
+            Self::OrderAnalysis | Self::OrderInstrumentedActiveOnly => {
+                cfg!(feature = "deloxide-order")
+            }
+        }
+    }
+
+    /// The disturbance this selection applies, when it applies one.
+    pub const fn stress(self) -> Option<StressConfiguration> {
+        match self {
+            Self::StressedActiveOnly(configuration) => Some(configuration),
+            Self::ActiveOnly | Self::OrderAnalysis | Self::OrderInstrumentedActiveOnly => None,
+        }
     }
 }
 

@@ -65,7 +65,13 @@ rounding past an `F32` field's range, an Avro float or a producer's Arrow batch 
 an infinity in, and every JSON rendering of a record, such as a materialized report, a hash map
 answer or a hash map key, writes one as the string `NaN`, `Infinity` or `-Infinity`. A key read from a stored checkpoint or a peer that holds one
 fails with `BranchKeyError::NonFiniteFloat`, and one holding a datetime that is not RFC 3339 text
-fails with `BranchKeyError::RemoteFieldValue`; both name the field. Materialized-state reads use the
+fails with `BranchKeyError::RemoteFieldValue`; both name the field. A concrete key is a key of a
+branch schema when it holds exactly the schema's fields, each with a value of exactly its declared
+type; a missing or undeclared field and a value of another type are distinct
+`BranchKeyShapeError` states naming the field, never a value converted to fit. The subscription
+Row encoder holds each key to its relay's branch with that one check, and a restore holds every
+archived key it installs to the branching its restored entity declares before staging it; see
+[Backup And Restore](./backup-and-restore.md#archived-branch-keys). Materialized-state reads use the
 incoming concrete branch, or the actual unbranched state, and reporting keeps the optional branch
 identity until the display boundary. The structural ASCII graph projection is domain-free; a
 serialized graph retains its real typed domain.
@@ -386,6 +392,32 @@ could add up to the most seconds a duration holds with a typed error; the gramma
 would panic on such text instead of failing, and Clippy rejects every other way of reaching that
 library's parser.
 
+Archive validation establishes the archived structure, then each vocabulary value is checked when
+it is read back. A refusal in a list can therefore follow values that were already constructed.
+The archive reader owns each completed value and frees it on refusal, together with the incomplete
+list or fixed array and any box or shared pointer allocation. No decoded fragment crosses the
+storage or transport boundary, and a stored record of an invalid current shape still requires
+recreation.
+
+The current archive readback inventory for containers with a semantic value that may refuse its
+archived representation is:
+
+| Boundary | Fallible contents inside archived containers |
+| --- | --- |
+| Interconnect | `ApplicationCompletionPeersResponse.peers`; `RelayMetadata.acks`; `PrepareOwnershipHandoffStateRequest.checkpoints`; the `relays` and `affected_entities` of `EntityGateRequest` and `EntityDrainStatusRequest`; the `emitter_publishing` lists of `DomainDrainStatusEnvelope` and `EntityDrainStatusEnvelope`; `DescribeRelayRequest.bindings`; ownership handoff checkpoint responses. These contain typed node, relay, emitter, model, or domain names. |
+| Consensus replication and persistence | `AppendEntriesRecord.entries`, including membership configurations and nodes; durable batches of Raft entries and consensus state; the `Vec` and `Box` descendants of `ConsensusCommand`, domain schedules, command execution, transaction plans and reports, and stored models. They contain typed names, references, limits, and operation ranges. |
+| Registry | Stored `Model` variants, including schema fields, nested `ParseAsType` boxes, processor routes and inputs, connector configuration, and recursive expression vectors and boxes. Their typed names and other checked vocabulary values may refuse after earlier members decode. |
+| Runtime state identity | `StoredHandoffPreparation.checkpoints` and `StoredForcedRecoveryPreparation.checkpoints` contain placement envelopes with checked domain and model names. |
+| Runtime window snapshot | `WindowDelayedRemovalSection.removals` contains `CountAsU64` buckets. A stored count above `usize::MAX` is refused on a narrower host. |
+
+There is no archived shared pointer field at these Nervix boundaries today; names share an `Arc`
+only in memory, and archive as text. The shared pointer reader is covered by the same dependency
+fix and by a refusal test. The deduplicator, Kafka offset, materialized identity, branch LRU and
+other runtime state snapshot containers, together with backup sections and deadlock evidence, first
+deserialize primitive or raw string wire values, then validate their meaning after the complete
+wire value owns its allocations. Their malformed input tests still check that every archive decode
+frees its allocations.
+
 Constant integer division prepares a `SignedDivisor` or `UnsignedDivisor` at the kernel boundary.
 Its unsigned magnitude is `NonZeroU64`, and its private reciprocal state distinguishes a power-of-two
 shift from a multiply-high reciprocal. A zero input produces no prepared divisor; the numeric
@@ -456,7 +488,8 @@ generation fields are validated at their wire boundary, including the valid gene
 Materialized archive descriptors and row identities are archive-owned types. Their raw schema
 fingerprint binds once to the archived start generation for native storage, independently of the
 installation authority; payload values stay exact-schema Arrow columns. Typed branch identities,
-watermark ordering, counts and framing are validated before those values reach the runtime.
+watermark ordering, counts and framing are validated before those values reach the runtime, and
+each record identity's branch must be a key of the restored relay's branching.
 
 A materialized capture carries either current rows or stored checkpoints as distinct variants.
 A captured materialized checkpoint is a selected immutable source. Opening it produces a reader
