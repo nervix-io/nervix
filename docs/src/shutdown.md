@@ -849,7 +849,9 @@ former bootstrap node therefore has a path back to surviving peers even if it wa
 configured without a bootstrap host. The endpoints only initiate authenticated contact; gossip
 establishes each peer's current incarnation and endpoint before normal peer routing and runtime
 admission proceed. A recovered endpoint that does not resolve is skipped while other seeds and
-incoming gossip remain available.
+incoming gossip remain available. A configured bootstrap host that does not resolve is skipped on
+that restart when recovered peer endpoints are available; a node without them still needs the
+bootstrap host for first contact.
 
 This is the fence that prevents crash recovery from reviving an obsolete owner. It is a
 process-start admission proof only: connectivity lost after admission does not revoke execution.
