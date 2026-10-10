@@ -39,43 +39,43 @@ type SignalingProtobufResult<T> = Result<T, Report<SignalingProtobufError>>;
 
 #[derive(Debug, Error)]
 enum SignalingProtobufError {
-    #[error("failed to decode protobuf message '{message}': {source}")]
+    #[error("failed to decode protobuf message '{message}'")]
     Decode {
         message: String,
         #[source]
         source: prost::DecodeError,
     },
-    #[error("failed to encode protobuf message '{message}': {source}")]
+    #[error("failed to encode protobuf message '{message}'")]
     Encode {
         message: String,
         #[source]
         source: prost::EncodeError,
     },
-    #[error("failed to serialize the input JSON for protobuf message '{message}': {source}")]
+    #[error("failed to serialize the input JSON for protobuf message '{message}'")]
     SerializeInput {
         message: String,
         #[source]
         source: serde_json::Error,
     },
-    #[error("failed to deserialize the protobuf message '{message}' from JSON: {source}")]
+    #[error("failed to deserialize the protobuf message '{message}' from JSON")]
     DeserializeMessage {
         message: String,
         #[source]
         source: serde_json::Error,
     },
-    #[error("failed to finish deserializing the protobuf message '{message}': {source}")]
+    #[error("failed to finish deserializing the protobuf message '{message}'")]
     FinishMessage {
         message: String,
         #[source]
         source: serde_json::Error,
     },
-    #[error("failed to serialize the protobuf message '{message}' to JSON: {source}")]
+    #[error("failed to serialize the protobuf message '{message}' to JSON")]
     SerializeMessage {
         message: String,
         #[source]
         source: serde_json::Error,
     },
-    #[error("failed to deserialize the protobuf JSON output for message '{message}': {source}")]
+    #[error("failed to deserialize the protobuf JSON output for message '{message}'")]
     DeserializeOutput {
         message: String,
         #[source]
@@ -192,9 +192,9 @@ pub enum SignalingProtocolCompileError {
 
 #[derive(Debug, Error)]
 pub enum WebsocketSignalingError {
-    #[error("failed to send signaling frame: {0}")]
+    #[error("failed to send signaling frame")]
     Send(#[source] Box<WebSocketError>),
-    #[error("failed to receive signaling frame: {0}")]
+    #[error("failed to receive signaling frame")]
     Receive(#[source] Box<WebSocketError>),
     #[error("SEND JAQ program #{index} failed: {reason}")]
     SendProgram { index: usize, reason: String },
@@ -404,13 +404,15 @@ impl CompiledSignalingProtocol {
                         .attach_printable(source.to_string())
                     })
             }
+            // The protobuf failure keeps its codec error as the frame beneath it, so the detail is
+            // the whole chain.
             CompiledSignalingWire::Protobuf { send, .. } => encode_protobuf_payload(send, &value)
                 .map(Message::Binary)
                 .map_err(|source| {
                     Report::new(SignalingFrameEncodeError::Protobuf {
                         message: send.full_name().to_string(),
                     })
-                    .attach_printable(source.to_string())
+                    .attach_printable(format!("{source:#}"))
                 }),
         }
     }
@@ -886,6 +888,87 @@ mod tests {
             .expect("the descriptor set declares one valid message")
             .get_message_by_name("nervix.test.Level")
             .expect("the pool holds the message it was built from")
+    }
+
+    #[test]
+    fn protobuf_and_frame_transport_failures_name_their_cause_once() {
+        let descriptor = level_descriptor();
+        let undecodable = decode_protobuf_payload(&descriptor, &[0x09])
+            .expect_err("a double field needs its eight bytes");
+        let decode_cause = DynamicMessage::decode(descriptor.clone(), &[0x09][..])
+            .expect_err("a double field needs its eight bytes");
+        let unknown_field = encode_protobuf_payload(&descriptor, &json!({"unknown": 1}))
+            .expect_err("the message has no field named unknown");
+        let mut deserializer = serde_json::Deserializer::from_slice(br#"{"unknown":1}"#);
+        let deserialize_cause = DynamicMessage::deserialize_with_options(
+            descriptor.clone(),
+            &mut deserializer,
+            &ProtobufDeserializeOptions::new().deny_unknown_fields(true),
+        )
+        .expect_err("the message has no field named unknown");
+        let level = compile_fixture!(
+            &protocol(
+                SignalingWireFormat::Protobuf(SignalingProtobufConfig {
+                    resource: ResourceName::parse("proto_bundle").expect("valid identifier"),
+                    resource_version: 1,
+                    config: Vec::new(),
+                    send_message: "nervix.test.Level".to_string(),
+                    wait_message: "nervix.test.Level".to_string(),
+                }),
+                on_connect(&["{level: 1}"], &[".level == 1"], &[]),
+            ),
+            Some(SignalingProtobufDescriptors {
+                send: descriptor.clone(),
+                wait: descriptor.clone(),
+            }),
+        )
+        .expect("the protocol compiles with its descriptors");
+        let unencodable = level
+            .encode_frame(json!({"unknown": 1}))
+            .expect_err("the SEND output has no field named unknown");
+
+        assert_eq!(
+            format!("{undecodable:#}"),
+            format!("failed to decode protobuf message 'nervix.test.Level': {decode_cause}")
+        );
+        assert_eq!(
+            format!("{unknown_field:#}"),
+            format!(
+                "failed to deserialize the protobuf message 'nervix.test.Level' from JSON: \
+                 {deserialize_cause}"
+            )
+        );
+        assert_eq!(
+            signaling_frame_encode_error_message(&unencodable),
+            format!(
+                "failed to deserialize the protobuf message 'nervix.test.Level' from JSON: \
+                 {deserialize_cause}"
+            )
+        );
+        assert_eq!(
+            format!(
+                "{:#}",
+                Report::new(WebsocketSignalingError::Send(Box::new(
+                    WebSocketError::ConnectionClosed
+                )))
+            ),
+            format!(
+                "failed to send signaling frame: {}",
+                WebSocketError::ConnectionClosed
+            )
+        );
+        assert_eq!(
+            format!(
+                "{:#}",
+                Report::new(WebsocketSignalingError::Receive(Box::new(
+                    WebSocketError::AlreadyClosed
+                )))
+            ),
+            format!(
+                "failed to receive signaling frame: {}",
+                WebSocketError::AlreadyClosed
+            )
+        );
     }
 
     #[test]

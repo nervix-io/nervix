@@ -111,7 +111,7 @@ pub struct PostgresSink {
 
 #[derive(Debug, thiserror::Error)]
 enum PostgresWriteError {
-    #[error("failed to load Postgres table metadata: {0}")]
+    #[error("failed to load Postgres table metadata")]
     Metadata(#[source] sqlx::Error),
     #[error("Postgres table '{table}' has no column '{column}'")]
     MissingColumn { table: String, column: String },
@@ -125,7 +125,7 @@ enum PostgresWriteError {
     EmptyConflictColumn,
     #[error("Postgres insert failed with SQLSTATE {code:?}")]
     Server { code: Option<String> },
-    #[error("Postgres insert failed: {0}")]
+    #[error("Postgres insert failed")]
     Execute(#[source] sqlx::Error),
     #[error("{reason}")]
     Pool { reason: String },
@@ -176,6 +176,9 @@ impl PostgresWriteError {
                 Some(format!("Postgres request failed with SQLSTATE {code}"))
             }
             Self::Execute(_) => Some("Postgres request failed with SQLSTATE unknown".to_string()),
+            Self::Metadata(error) => {
+                Some(format!("failed to load Postgres table metadata: {error}"))
+            }
             Self::Pool { reason } => Some(reason.clone()),
             error => Some(error.to_string()),
         };
@@ -974,6 +977,36 @@ mod tests {
             .expect_err("a target column must be named");
         let report = PostgresWriteError::into_report(failure);
         assert!(report.contains::<PostgresWriteError>());
+    }
+
+    #[test]
+    fn a_driver_failure_names_its_cause_once_and_keeps_it_at_the_host_boundary() {
+        let cause = sqlx::Error::PoolTimedOut.to_string();
+        let execute = PostgresWriteError::report_execute(sqlx::Error::PoolTimedOut);
+        let metadata = Report::new(PostgresWriteError::Metadata(sqlx::Error::PoolTimedOut));
+
+        assert_eq!(
+            format!("{execute:#}"),
+            format!("Postgres insert failed: {cause}")
+        );
+        assert_eq!(
+            format!("{metadata:#}"),
+            format!("failed to load Postgres table metadata: {cause}")
+        );
+        let published = PostgresWriteError::into_report(metadata);
+        let mut descriptions = Vec::new();
+        for frame in published.frames() {
+            if let error_stack::FrameKind::Attachment(error_stack::AttachmentKind::Printable(
+                attachment,
+            )) = frame.kind()
+            {
+                descriptions.push(attachment.to_string());
+            }
+        }
+        assert_eq!(
+            descriptions,
+            [format!("failed to load Postgres table metadata: {cause}")]
+        );
     }
 
     #[test]

@@ -20,7 +20,7 @@ pub enum GuestError {
     OutOfBounds,
     #[error("processor was invoked before initialization")]
     NotInitialized,
-    #[error("Arrow IPC processing failed: {0}")]
+    #[error("Arrow IPC processing failed")]
     ArrowIpc(#[from] ArrowError),
     #[error("envelope protocol violation")]
     Protocol,
@@ -97,6 +97,18 @@ mod tests {
         );
         assert_eq!(GuestError::Protocol.abi_code(), -5);
         assert_eq!(GuestError::failed("fatal").current_context().abi_code(), -6);
+    }
+
+    #[test]
+    fn an_arrow_ipc_failure_names_its_cause_once() {
+        let report = Report::new(GuestError::ArrowIpc(ArrowError::ParseError(
+            "truncated message".to_string(),
+        )));
+
+        assert_eq!(
+            format!("{report:#}"),
+            "Arrow IPC processing failed: Parser error: truncated message"
+        );
     }
 
     #[test]

@@ -76,7 +76,7 @@ pub struct ClickHouseSink {
 enum ClickHouseWriteError {
     #[error("ClickHouse rejected an insert")]
     Response { name: Option<&'static str> },
-    #[error("ClickHouse insert failed: {0}")]
+    #[error("ClickHouse insert failed")]
     Driver(#[source] ClickHouseError),
 }
 
@@ -746,6 +746,10 @@ mod tests {
                 ClickHouseWriteError::Driver(ClickHouseError::TimedOut)
             ),
             "unexpected ClickHouse insert error: {result:?}"
+        );
+        assert_eq!(
+            format!("{result:#}"),
+            format!("ClickHouse insert failed: {}", ClickHouseError::TimedOut)
         );
     }
 

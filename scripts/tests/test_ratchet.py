@@ -290,6 +290,135 @@ fn stream_reported<S>() where S: Stream<Item = Result<(), Report<StreamHandlerEr
 
             self.assertEqual(count(root, "bare_error_signatures"), 3)
 
+    def test_bare_error_signatures_read_an_imported_error_stack_result(self) -> None:
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            write_repository(
+                root,
+                {
+                    "src/error.rs": "pub enum StoreError { Missing }\n",
+                    "src/direct.rs": """
+use error_stack::Result;
+
+fn decode() -> Result<(), StoreError> {
+    Ok(())
+}
+""",
+                    "src/grouped.rs": """
+use error_stack::{Report, Result, ResultExt as _};
+
+fn decode() -> Result<(), StoreError> {
+    Ok(())
+}
+""",
+                    "src/renamed.rs": """
+use error_stack::{Report, Result as StackResult};
+
+fn reported() -> StackResult<(), StoreError> {
+    Ok(())
+}
+
+fn bare() -> Result<(), StoreError> {
+    Ok(())
+}
+""",
+                    "src/nested.rs": """
+use error_stack::{fmt::Result, Report};
+
+fn bare() -> Result<(), StoreError> {
+    Ok(())
+}
+""",
+                    "src/documented.rs": """
+//! use error_stack::Result;
+
+fn bare() -> Result<(), StoreError> {
+    Ok(())
+}
+""",
+                },
+            )
+
+            sites = measure_sources(root)["bare_error_signatures"]
+            self.assertEqual(
+                sorted(site.path for site in sites),
+                ["src/documented.rs", "src/nested.rs", "src/renamed.rs"],
+            )
+
+    def test_bare_error_signatures_skip_the_library_error_mirrors_only(self) -> None:
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            write_repository(
+                root,
+                {
+                    "crates/primitives/src/sync/watch.rs": """
+pub mod error {
+    pub struct RecvError(pub(super) ());
+}
+
+pub fn has_changed() -> Result<bool, error::RecvError> {
+    Ok(false)
+}
+""",
+                    "src/channel.rs": """
+pub struct RecvError;
+
+pub fn received() -> Result<(), RecvError> {
+    Ok(())
+}
+""",
+                },
+            )
+
+            sites = measure_sources(root)["bare_error_signatures"]
+            self.assertEqual([site.path for site in sites], ["src/channel.rs"])
+
+    def test_bare_error_signatures_see_through_free_result_aliases(self) -> None:
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            write_repository(
+                root,
+                {
+                    "src/error.rs": "pub enum StoreError { Missing }\n",
+                    "src/lib.rs": """
+type StoreResult<T> = Result<T, StoreError>;
+type ReportedResult<T> = Result<T, Report<StoreError>>;
+type StackResult<T> = error_stack::Result<T, StoreError>;
+
+fn load() -> StoreResult<()> {
+    Ok(())
+}
+
+fn loading<F>() where F: Future<Output = StoreResult<()>> {}
+
+fn reported() -> ReportedResult<()> {
+    Ok(())
+}
+
+fn stacked() -> StackResult<()> {
+    Ok(())
+}
+
+impl Request for Load {
+    type Response = Result<(), StoreError>;
+}
+
+fn respond() -> Response {
+    Response::new()
+}
+""",
+                },
+            )
+
+            sites = measure_sources(root)["bare_error_signatures"]
+            self.assertEqual(
+                [site.detail for site in sites],
+                [
+                    "fn load() -> StoreResult<()> {",
+                    "fn loading<F>() where F: Future<Output = StoreResult<()>> {}",
+                ],
+            )
+
     def test_string_node_ids_cover_fields_parameters_and_aliases(self) -> None:
         with TemporaryDirectory() as directory:
             root = Path(directory)
