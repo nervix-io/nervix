@@ -1,6 +1,7 @@
 @remote_ack_owners
 Feature: Remote acknowledgements across a producer restart
 
+  @deloxide_stress
   Scenario: An acknowledgement addressed to a restarted producer's earlier process leaves its new records pending
     Given Kafka is running
     And the production sticky scheduler is configured

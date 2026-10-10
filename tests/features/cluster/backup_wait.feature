@@ -1,7 +1,6 @@
-@backup_wait
+@backup_wait @deloxide_stress_restore
 Feature: Bounded multi-domain backup waits and exact recovery
 
-  @deloxide_stress
   Scenario Outline: A second-domain quiesce expiry returns its failure and resumes both domains
     Given a <cluster_size> node nervix cluster is started
     And the active domain is saved as placeholder "backup_base"
