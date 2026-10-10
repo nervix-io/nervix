@@ -9,7 +9,13 @@ on:
     - cron: "0 2 * * *"
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
+  # A label that builds no image runs in a group of its own: adding it beside `chaos` in one request
+  # would otherwise cancel the build that label started and then skip itself, leaving no image.
+  group: >-
+    ${{ github.workflow }}-${{ github.ref }}${{
+      github.event.action == 'labeled' &&
+      !contains(fromJSON('["benchmark", "chaos", "chaos-soak"]'), github.event.label.name) &&
+      format('-{0}', github.run_id) || '' }}
   cancel-in-progress: true
 
 permissions:
@@ -121,6 +127,55 @@ jobs:
               "${{ matrix.platform }}" \
               "${push_image}"
           fi
+
+  # The Deloxide diagnostic image of the same revision, for the chaos runs that qualify its tracked
+  # locks under process, pause and network faults. It is pushed under its own tag, carries its
+  # selection in a label, and never enters a published manifest.
+  build-diagnostic:
+    name: build-diagnostic-deloxide-order-amd64
+    needs: meta
+    if: >-
+      github.event_name == 'schedule' ||
+      (github.event_name == 'pull_request' &&
+        github.event.pull_request.head.repo.full_name == github.repository &&
+        (contains(github.event.pull_request.labels.*.name, 'chaos') ||
+          contains(github.event.pull_request.labels.*.name, 'chaos-soak')))
+    # The diagnostic server's workspace crates compile with the detector's features, which the
+    # release image's cache does not hold, so this build takes the larger worker.
+    runs-on: blacksmith-8vcpu-ubuntu-2404
+    timeout-minutes: 80
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+
+      - name: Setup Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Install cargo tools
+        uses: taiki-e/install-action@v2
+        with:
+          tool: just@latest,toml-cli
+
+      - name: Login to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push the diagnostic image
+        env:
+          KACHE_S3_BUCKET: ${{ vars.KACHE_BUCKET }}
+          KACHE_S3_REGION: ${{ vars.KACHE_BUCKET_REGION }}
+          KACHE_S3_ENDPOINT: ${{ vars.KACHE_BUCKET_ENDPOINT }}
+          KACHE_S3_ACCESS_KEY: ${{ secrets.KACHE_BUCKET_ACCESS_KEY_ID }}
+          KACHE_S3_SECRET_KEY: ${{ secrets.KACHE_BUCKET_SECRET_ACCESS_KEY }}
+        run: |
+          just docker-build-diagnostic deloxide-order 23 \
+            "ghcr.io/nervix-io/nervix:${{ needs.meta.outputs.build_id }}-debian-amd64-deloxide-order" \
+            linux/amd64 true
 
   benchmark:
     name: benchmarks
@@ -384,9 +439,11 @@ jobs:
               core.setFailed('successful benchmark job did not publish a comparison');
             }
 
-  # The external chaos runner against the image built above, through the same `just chaos suite`
-  # command a developer runs. A pull request runs the smoke suite with the `chaos` label and the
-  # soak suite with `chaos-soak`; the nightly build of main runs the soak.
+  # The external chaos runner against the images built above, through the same `just chaos suite`
+  # command a developer runs: the release image and the Deloxide diagnostic image of the same
+  # revision, each refused by the suite unless its labels name that kind and revision. A pull
+  # request runs the smoke suite with the `chaos` label and the soak suite with `chaos-soak`; the
+  # nightly build of main runs the soak.
   chaos-smoke:
     name: chaos-smoke
     needs: [meta, build-arch]
@@ -400,6 +457,25 @@ jobs:
     uses: ./.github/workflows/chaos.yaml
     with:
       image: ghcr.io/nervix-io/nervix:${{ needs.meta.outputs.build_id }}-debian-amd64
+      image-kind: ordinary
+      revision: ${{ github.sha }}
+      suite: smoke
+
+  chaos-smoke-diagnostic:
+    name: chaos-smoke-diagnostic
+    needs: [meta, build-diagnostic]
+    if: >-
+      github.event_name == 'pull_request' &&
+      contains(github.event.pull_request.labels.*.name, 'chaos') &&
+      github.event.pull_request.head.repo.full_name == github.repository
+    permissions:
+      contents: read
+      packages: read
+    uses: ./.github/workflows/chaos.yaml
+    with:
+      image: ghcr.io/nervix-io/nervix:${{ needs.meta.outputs.build_id }}-debian-amd64-deloxide-order
+      image-kind: deloxide-order
+      revision: ${{ github.sha }}
       suite: smoke
 
   chaos-soak:
@@ -416,6 +492,26 @@ jobs:
     uses: ./.github/workflows/chaos.yaml
     with:
       image: ghcr.io/nervix-io/nervix:${{ needs.meta.outputs.build_id }}-debian-amd64
+      image-kind: ordinary
+      revision: ${{ github.sha }}
+      suite: soak
+
+  chaos-soak-diagnostic:
+    name: chaos-soak-diagnostic
+    needs: [meta, build-diagnostic]
+    if: >-
+      github.event_name == 'schedule' ||
+      (github.event_name == 'pull_request' &&
+        contains(github.event.pull_request.labels.*.name, 'chaos-soak') &&
+        github.event.pull_request.head.repo.full_name == github.repository)
+    permissions:
+      contents: read
+      packages: read
+    uses: ./.github/workflows/chaos.yaml
+    with:
+      image: ghcr.io/nervix-io/nervix:${{ needs.meta.outputs.build_id }}-debian-amd64-deloxide-order
+      image-kind: deloxide-order
+      revision: ${{ github.sha }}
       suite: soak
 
   publish-manifest:

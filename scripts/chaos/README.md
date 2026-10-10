@@ -1364,6 +1364,68 @@ probe; they make no claim about product recovery or model-checker coverage.
 `just verify-chaos-clock` accepts the clock verifier's arguments for judging retained observer
 transcripts, and `just coverage-chaos-stateful-verifiers` retains shell coverage for these controls.
 
+## Diagnostic images
+
+Every scenario and suite also runs against a Deloxide diagnostic image: a test artifact whose server
+tracks its thread-blocking locks with the deadlock detector of [Data-Plane
+Concurrency](../../docs/src/data-plane-concurrency.md#diagnostic-deadlock-detection), built from the
+same revision as a release image and never published as one. Build one, or overlay a locally built
+diagnostic server on an available image, and run it like any other image:
+
+```bash
+just docker-build-diagnostic deloxide-order 23 nervix:diagnostic
+just build-chaos-diagnostic-image nervix:diagnostic-local ghcr.io/nervix-io/nervix:debian-latest deloxide-order
+just chaos run leader-crash --image nervix:diagnostic-local
+just chaos suite smoke --image nervix:diagnostic-local --image-kind deloxide-order
+```
+
+A diagnostic image declares its selection, `deloxide`, `deloxide-order` or `deloxide-stress`, in its
+`io.nervix.diagnostic.selection` label, and both kinds of image declare the revision they were
+built from in `org.opencontainers.image.revision`. The run reads the label after it resolves the
+image, records the selection and revision in `manifest.json`, and requires the image to package
+`nervix-deadlock-report` beside the server. It then adds `compose.diagnostic.yaml` to the
+deployment: every node records its evidence in `deadlock/node-N/` of the run directory, mounted at
+`/var/lib/nervix-deadlock` and named by `NERVIX_DEADLOCK_EVIDENCE`, so the evidence outlives the
+node's container and volume. Nothing else of the deployment, the workload, the faults or the
+verdicts changes: the fault injection stays external, and no scenario adds a deadlock hook.
+
+Each process a diagnostic node starts writes one evidence file, `deadlock-PID-TIME.rkyv`, when its
+diagnostic run starts, and replaces it after each finding. Once the run's live Docker event
+recording is closed, the controller freezes every node that still runs, so no process records a
+finding after its evidence is read, and qualifies each file with the image's own
+`nervix-deadlock-report` in a container without a network whose only mount is the node's evidence
+directory, read-only. The tool's inspection and qualification sit beside each file as
+`.inspect.txt` and `.qualify.txt`, and `deadlock/qualification.ndjson` lists every file with its
+size, the tool's exit status and the selection it records. The nodes run again before cleanup.
+`verify-diagnostic-evidence.sh` then writes `results/diagnostic-evidence.json`, which passes only
+when:
+
+- each node holds exactly one complete evidence file for each start of its container in the
+  recording, and no partially written one;
+- every file is valid evidence of the selection the image declares and qualifies: it holds no
+  active cycle, no unreviewed potential cycle and no loss;
+- no node container ended with status 3, the end of a process whose detector reported an active
+  deadlock, or 4, the end of a failed diagnostic execution;
+- a node keeps at most 64 files and the run at most 64 MiB of evidence, and the report tool judges
+  every file within the run's 300-second qualification budget, inside the teardown reserve.
+
+The result counts the process starts, files, bytes and findings: active, potential, unreviewed and
+lost. A run that otherwise passed fails in phase `diagnostic evidence` with the category of its
+problems: `diagnostic` for a finding, missing, partial, invalid or unbounded evidence, or another
+selection, and `controller` when the recording is incomplete or the tool could not run. An active
+deadlock or a failed diagnostic execution also classifies a run that failed otherwise as
+`diagnostic`, because the node it ended explains what the run observed after. Every such failure
+keeps `results/finding.json` with the evidence files among its evidence. A potential cycle is never
+approved here: a correction removes the order from the workload, as in the diagnostic lane.
+
+The evidence is an observation of each process up to its end or the freeze. SIGKILL, a pause and a
+graceful stop end a process without a flush barrier, so a finding the detector had not yet delivered
+when the process ended is not in its evidence, and the detector observes only Nervix's tracked
+thread-blocking locks: Tokio's locks and channels, atomic protocols and network waits keep their
+own Shuttle, Loom, Turmoil and Chaos evidence, and a qualifying run proves no untracked path free of
+deadlocks. Timings of a diagnostic image are not product performance evidence, and its runs keep the
+product's deadlines and the suite's budgets unchanged.
+
 ## Suites and CI
 
 A suite is a named selection of runs from `suites.json`, which CI and a developer start with the
@@ -1374,6 +1436,7 @@ just chaos suite list
 just chaos suite smoke --image ghcr.io/nervix-io/nervix@sha256:<digest>
 just chaos suite soak --image ghcr.io/nervix-io/nervix@sha256:<digest> --shard 6
 just chaos suite soak --image nervix:debian --entry partition-leader --entry stale-follower
+just chaos suite smoke --image nervix:diagnostic --image-kind deloxide-order --image-revision "$(git rev-parse HEAD)"
 ```
 
 Each entry of a suite is one `just chaos run` command, listed with its arguments, and a budget in
@@ -1399,19 +1462,26 @@ one of GNU coreutils does, and refuses to start without them; its cleanup reads 
 `/proc` and `ps`. Before its first run the suite checks its own verdict logic with
 `tests/suite-self-test.sh`, which `just chaos self-test` runs too. It resolves the image once: a
 digest reference stays as given, and any other reference runs as the local image ID it resolves to,
-so every run of the suite uses one immutable image. A suite writes `ARTIFACTS/SUITE_ID/` (by default
+so every run of the suite uses one immutable image. It records the revision and the diagnostic
+selection the image's labels declare. `--image-kind ordinary`, or the selection `deloxide`,
+`deloxide-order` or `deloxide-stress`, and `--image-revision REVISION` refuse, as a setup error
+before any run, an image whose labels declare another kind or revision, so the suites of a release
+image and a diagnostic image show that both came from one revision. On a [diagnostic
+image](#diagnostic-images) an entry passes only when its run recorded its nodes as diagnostic nodes
+of the image's selection and a passing evidence verdict. A suite writes `ARTIFACTS/SUITE_ID/` (by default
 `target/chaos/<suite>-<time>-<pid>/`):
 
 - one run directory per entry, named `<suite-id>-<entry>`, exactly as `just chaos run` writes it;
 - `logs/<entry>.log`, the console output of each run;
 - `suite.json`, the machine-readable record: the suite and shard, the requested image with its
-  resolved image ID and repository digests, the worker's kernel, Docker and Compose versions, CPUs
+  resolved image ID, repository digests, revision and diagnostic selection, the worker's kernel, Docker and Compose versions, CPUs
   and memory, and for every entry its command, run ID, verdict, exit status, failure category, final
   phase, duration, timeout and teardown, seed and policy, reproducer, the delivery ledger
   (expected, observed, duplicate, missing, unexpected and incorrect records), the headline recovery
   timings its result records (election, placement, returning listeners, settlement, resumed delivery,
   and the slowest settle, output and drain after a heal of a mixed run), a mixed run's peak node
-  memory, backlog and output stall, and the result files it wrote;
+  memory, backlog and output stall, a diagnostic run's evidence verdict with its process starts,
+  files, bytes and findings, and the result files it wrote;
 - `summary.md`, the same verdicts rendered for a reader, which the suite also prints at the end;
 - `suite.log`, the suite's whole console, which it goes on writing when its caller stops reading.
 
@@ -1454,17 +1524,25 @@ within which a run that reached its own timeout finishes its teardown. Its job b
 `just chaos suite report [--expect-shards N] SUITE_JSON...` renders one summary of several shards
 and fails unless each passed and N of them are present.
 
-The `Chaos` workflow, `.github/workflows/chaos.yaml`, runs a suite on CI. The `Docker Build`
-workflow calls it with the image its build job published,
-`ghcr.io/nervix-io/nervix:<build-id>-debian-amd64`:
+The `Chaos` workflow, `.github/workflows/chaos.yaml`, runs a suite on CI against one image of a
+named kind and revision. The `Docker Build` workflow calls it twice for each suite it runs: with the
+release image its build job published, `ghcr.io/nervix-io/nervix:<build-id>-debian-amd64`, as kind
+`ordinary`, and with the diagnostic image its `build-diagnostic` job published from the same
+checkout, `ghcr.io/nervix-io/nervix:<build-id>-debian-amd64-deloxide-order`, as kind
+`deloxide-order`, both with the revision the build checked out. The diagnostic image is pushed under
+that tag only and never enters a published manifest. The diagnostic build runs only when a chaos run
+needs it:
 
-- a pull request labeled `chaos` runs the smoke suite against the image built from it;
-- a pull request labeled `chaos-soak` runs the soak suite against that image;
-- the nightly build of `main` at 02:00 UTC runs the soak suite, and publishes neither a manifest nor
-  the book.
+- a pull request labeled `chaos` runs the smoke suite against both images built from it;
+- a pull request labeled `chaos-soak` runs the soak suite against both images;
+- the nightly build of `main` at 02:00 UTC runs the soak suite against both images, and publishes
+  neither a manifest nor the book.
 
-A manual run of the `Chaos` workflow names the suite and an immutable image,
-`REPOSITORY@sha256:DIGEST`, and builds nothing. The workflow's plan job resolves the image to its
+A label that builds no image runs its Docker Build in a concurrency group of its own, so a pull
+request that adds `chaos` beside other labels in one request keeps the build `chaos` started.
+
+A manual run of the `Chaos` workflow names the suite, an immutable image,
+`REPOSITORY@sha256:DIGEST`, its kind and optionally its revision, and builds nothing. The workflow's plan job resolves the image to its
 digest, so every shard runs the same image, and reads the shards and their budgets from
 `just chaos suite shards`. Each shard then runs on its own GitHub-hosted `ubuntu-24.04` Docker
 worker. The repository's Blacksmith workers cannot qualify: their kernel offers none of the queueing
@@ -1475,7 +1553,8 @@ modules and fails when the kernel cannot provide one, installs `just` and `toml`
 jq 1.7. It removes every Rust toolchain directory from the `PATH` the suite runs with and fails if
 `cargo`, `rustc` or `rustup` is still reachable, pulls the image and logs out of the registry, and
 runs
-`just chaos suite <suite> --shard <n> --image <digest> --artifacts <dir> --suite-id ci-<run>-<attempt>-<suite>-<n>`.
+`just chaos suite <suite> --shard <n> --image <digest> --image-kind <kind> --image-revision <revision> --artifacts <dir> --suite-id ci-<run>-<attempt>-<suite>-<n>`,
+whose suite ID adds `-diagnostic` before the shard for a diagnostic image.
 The suite step ends at the shard's step budget and the job at its job budget. When the step is
 cancelled or reaches its budget, the runner sends SIGINT to the step's process, `just`, which does
 not pass it on, then SIGTERM 7.5 seconds later, which `just` passes to the suite that its recipe
@@ -1484,11 +1563,12 @@ step's output. The suite and its run outlive the step, so the job always runs
 `just chaos suite cleanup` next: it waits up to five minutes for the controller to finish its run's
 exit work and record it, kills whatever still executes, and captures and removes what any run left
 behind as a second witness. It then publishes the shard summary and uploads two artifacts for 14
-days: `chaos-verdict-<suite>-<n>-<run>-<attempt>` with `suite.json` and `summary.md`, and
-`chaos-<suite>-<n>-<run>-<attempt>` with the whole suite directory. The run attempt is part of each
-name, so a rerun never replaces the artifacts of the attempt it repeats. The verdict job publishes
-`just chaos suite report` over every shard's verdict and fails when a shard did not pass or recorded
-no verdict.
+days: `chaos-verdict-<suite>-<n>-<kind>-<run>-<attempt>` with `suite.json` and `summary.md`, and
+`chaos-<suite>-<n>-<kind>-<run>-<attempt>` with the whole suite directory, which holds a diagnostic
+run's evidence files. The run attempt is part of each name, so a rerun never replaces the artifacts
+of the attempt it repeats, and the kind sits between the shard and the run, so the verdicts of one
+kind are never read as another's. The verdict job of each kind publishes `just chaos suite report`
+over every shard's verdict of that kind and fails when a shard did not pass or recorded no verdict.
 
 To investigate a CI failure, download the shard's evidence artifact and read its `summary.md`: each
 failed entry names its category, phase, reproducer, finding and run directory. A reproducer pins the
