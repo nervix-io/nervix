@@ -183,6 +183,7 @@ checked_approx_from_float_pointer_width! {
 }
 
 #[cfg(test)]
+#[path = "properties_tests.rs"]
 mod properties;
 
 #[cfg(test)]

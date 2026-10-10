@@ -2132,7 +2132,7 @@ manifest = "Cargo.toml"
 max_input_bytes = 64
 package = "nervix-approx-into"
 random_iterations = 256
-source = "crates/approx-into/src/properties.rs"
+source = "crates/approx-into/src/properties_tests.rs"
 test = "properties::bolero_conversions_round_to_the_nearest_value_or_name_no_integer"
 test_target = "lib"
 
@@ -2147,7 +2147,7 @@ manifest = "Cargo.toml"
 max_input_bytes = 32
 package = "nervix-approx-into"
 random_iterations = 256
-source = "crates/approx-into/src/properties.rs"
+source = "crates/approx-into/src/properties_tests.rs"
 test = "properties::bolero_exactly_representable_values_convert_without_loss"
 test_target = "lib"
 
@@ -2237,7 +2237,7 @@ manifest = "Cargo.toml"
 max_input_bytes = 8192
 package = "nervix-columnar-json"
 random_iterations = 256
-source = "crates/columnar-json/src/properties.rs"
+source = "crates/columnar-json/src/properties_tests.rs"
 test = "properties::bolero_rows_match_an_independent_json_rendering_of_their_values"
 test_target = "lib"
 
@@ -2252,7 +2252,7 @@ manifest = "Cargo.toml"
 max_input_bytes = 1024
 package = "nervix-bounded-write"
 random_iterations = 256
-source = "crates/bounded-write/src/properties.rs"
+source = "crates/bounded-write/src/properties_tests.rs"
 test = "properties::bolero_writes_land_whole_within_the_limit_and_classify_the_encoding"
 test_target = "lib"
 

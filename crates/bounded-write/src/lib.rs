@@ -128,6 +128,7 @@ impl io::Write for BoundedWriter {
 }
 
 #[cfg(test)]
+#[path = "properties_tests.rs"]
 mod properties;
 
 #[cfg(test)]

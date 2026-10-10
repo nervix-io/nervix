@@ -553,6 +553,7 @@ impl<'a> JsonColumn<'a> {
 }
 
 #[cfg(test)]
+#[path = "properties_tests.rs"]
 mod properties;
 
 #[cfg(test)]
