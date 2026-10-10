@@ -40,7 +40,8 @@ installers a single winner, replacement, teardown, and observers.
 
 `just bench-remote-owners` measures registration, admission, Alive, ordered parking/resume and
 terminal resolution with actual ACK roots at one and 64 rows per delivery, reports delivery tail
-latency and relay-memory reclamation, and measures the full fixed-position empty sweep. Its
+latency and relay-memory reclamation, and measures an empty sweep of the positions its deliveries
+claimed beside the fixed position count. Its
 authenticated frame probe sends three current Arrow rows, admits them, returns the exact terminal
 reply and checks retired attempt counts. A separate 5,000-frame peer-owner probe completes while
 another peer's protocol guard is continuously held and checks returned permits and memory. These
@@ -52,10 +53,29 @@ Each delivery generation owns its mutable rows under one short synchronous guard
 is independent of the other rows. Each side claims unused positions on demand and returns retired
 positions to its own bounded free queue, preserving admission room when delivery positions fill.
 Shutdown seals first claims before closing the queues and visits only positions that were claimed.
+The silence sweep, which runs once a second on every node, has the same bound: it reads each side's
+first-claim count and takes a guard only for the positions below it, so a node that forwards
+nothing takes none and a sweep's cost follows the positions its deliveries have used, not the
+16,384 positions a node is built with. The counts bound the scan and order nothing: a position's
+guard publishes its correlation, and nothing relies on a sweep having observed a claim. A share
+whose first claim races a sweep is counted from that sweep or from the first one after its
+registration, so it still fails between the silence timeout and one sweep interval later. Runtime
+shutdown cancels the sweep task and waits for it, and the task observes the cancellation between
+sweeps, so a sweep's guard count also bounds how long a stopping node waits for it. A diagnostic
+build pays for every one of those guards: the acquisition-order selection enters Deloxide's
+process-wide detector on each tracked acquisition and release, and the nodes of every scenario in
+one process share that detector, which is why a recurring pass takes guards in proportion to its
+live work and never to a fixed capacity.
 Record allocation and receiver batch watcher tasks reserve relay memory before creating their
 retained rows. A batch task multiplexes row progress and keepalive polls every 100 milliseconds;
 each row and the single task have fixed charges. The cadence remains shorter than a one-second
-source ACK timeout while task cardinality stays bounded by admitted batches.
+source ACK timeout while task cardinality stays bounded by admitted batches. A receiver whose relay
+budget has no room for a batch's watches holds the unadmitted batch on its own channel lane and
+reads the budget again every 10 milliseconds; it registers for no release notification and never
+queues in the budget's semaphore, whose released permits would otherwise go to the held charge
+ahead of the relay work that frees it. The batch task returns each watch's share as that watch
+ends, through its exclusively owned reservation, so the hold involves no shared state beyond the
+budget's own atomic permit count.
 The registered wire number selects the position, exact generation and row without a concurrent
 map lookup. The process identity is checked before routing. Generation exhaustion seals the
 position, and cancellation, timeout, terminal resolution and shutdown compete to take each row
@@ -77,7 +97,8 @@ owns the capacities, grace periods and reconciliation deadlines.
 
 Production-owner Shuttle checks cover delayed events against a reused position, registration
 against shutdown, admission waiter drop against a reply, final silence sweeps against terminal and
-Alive reports, body claim against cancellation, admission against peer ending, and another peer's
+Alive reports, a first claim against a sweep, a sweep that completes while an unclaimed position's
+guard is held, body claim against cancellation, admission against peer ending, and another peer's
 progress while one peer holds its guard. The production admission choice has a Loom model for one
 irreversible verdict; replacing its compare-and-exchange with an overwriting swap must fail and
 replay. ArcSwap, queues and external semaphore internals remain outside that atomic claim.
@@ -372,10 +393,13 @@ not repeatedly acquire the registry guard.
 
 ### Ownership handoff drain before freeze
 
-The runtime closes intake and the affected boundary gates, then requests a force flush. The
-engagement owner polls local affected drain status before publishing ownership freezes. An ingestor
-route or processor must be able to complete its requested flush while that drain is pending. A
-held handoff therefore has both a drained local scope and immutable state ready for capture.
+The runtime closes intake and the affected boundary gates, then requests a force flush and
+confirms the admission hold. The coordinator can observe pending work and its timeout diagnostics
+while the installed ingestor routes and processors finish that flush. Each participant's exact
+operation drain-status query publishes its ownership freeze only when the local affected scope is
+drained. Capture requires both the held operation and its own coordination identity's freeze.
+The status query retains the operation's registry guard through publication, so release cannot
+withdraw its hold between observing drain and publishing capture readiness.
 
 This is lifecycle work: the polls read existing quiesce and acknowledgement registries, and hot
 paths continue to retain their counters and freeze publications. The existing force-flush and
@@ -1155,6 +1179,12 @@ or effect proof.
 `nervix::unknown_effect` diagnoses an acquisition without a context or an unresolved application
 call reached from recurring execution. `nervix::invalid_contract` rejects contract and exception
 errors. The lints use ordinary Rust warn/deny/expect levels; the required gate also rejects unresolved Nervix warnings.
+
+The driver also emits the resolved failure-contract, outcome-discard and panic diagnostics
+described in [Errors And Diagnostics](errors-and-diagnostics.md). Their exact error/return
+classifications use `nervix::error_boundary`; execution-context inheritance does not classify
+an error or exempt a failure. All diagnostics share the same one-operation expectation checks
+and complete configuration evidence.
 
 Retained repair debt names its owning task at the exact operation:
 

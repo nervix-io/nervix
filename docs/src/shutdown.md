@@ -494,13 +494,16 @@ roots, emitter buffers and active publishing, and an Iceberg emitter's staged co
 schedule is written only after that drain succeeds, and the fence opens only after the destination
 activates the published revision.
 
-Before publishing the ownership freeze, each participant requests a force flush and drains its
-local affected work with the intake and boundary gates already closed. Routes and processors can
-therefore finish the obligations that make their state ready to capture. A held handoff denotes
-that completed drain and the installed freeze; frozen owners retain their state until capture and
-activation finish. Preparation retains its original deadline, distinct from the gate lease that
-protects activation. Repeated engagement requests use the same coordination identity and scope;
-a bounded reply timeout does not create another flush or restart the lease.
+Each participant closes intake and boundary gates, requests a force flush and confirms its
+admission hold. The coordinator polls the exact operation's drain status while installed routes
+and processors finish the admitted work. Returning a drained ownership status publishes that
+participant's capture freeze under its retained hold. Capture verifies both the held operation and
+its exact freeze identity, so a pending flush cannot make mutable state ready for capture.
+Frozen owners retain state until capture and activation finish. Preparation retains its original
+deadline, distinct from the activation lease. A pending-drain timeout reports its node and counts,
+releases every attempted hold, and leaves independent schedule units available for later moves.
+Repeated engagement requests use the same identity and scope; a bounded reply timeout creates
+no additional flush and restarts no lease.
 
 Every step of the handoff carries one coordination identity, composed of the coordinating node, its
 process incarnation, and a sequence. The receiver verifies that identity against the authenticated
@@ -743,10 +746,15 @@ retention, and snapshot contracts behind this barrier.
 The interconnect rejects new admission, cancels pool and operation waiters, and retires the pool
 and peer protocol owners. An ending peer owner cancels unadmitted records and releases item and
 terminal-outcome permits even if the runtime retains an intake already admitted; that intake's
-verdict remains admitted. Decoded metadata stays charged while a borrower keeps it. Runtime
+verdict remains admitted. A batch the runtime holds back for room for its acknowledgement watches
+is unadmitted, so that cancellation ends its hold, and so does the end of the relay intake lane
+when the node stops; it is never admitted afterwards. Decoded metadata stays charged while a borrower keeps it. Runtime
 teardown cancels and joins its charged ACK watcher tasks, closes delivery and admission routing
-queues, and negatively resolves remaining volatile correlations exactly once. No ACK owner state
-is stored for restart. The interconnect also retires the pool
+queues, and negatively resolves remaining volatile correlations exactly once. The once-a-second
+silence sweep is one of the joined tasks and observes the cancellation between sweeps, so the join
+waits for at most the sweep in progress; that sweep, like the resolution that follows, visits only
+the correlation positions the node's deliveries and admissions have claimed, never its fixed
+capacity. No ACK owner state is stored for restart. The interconnect also retires the pool
 connections the node opened, giving their leased streams up to ten seconds before closing whatever
 remains. Connections that peers opened to the node close at once, together with the handlers still
 serving their streams, so a peer's request the node has not answered fails instead of completing.

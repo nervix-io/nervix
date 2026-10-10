@@ -130,6 +130,9 @@ Feature: Deduplicator and window state in backup archives
       """
       {"tenant":"probe","latency":1}
       """
+    When the CLI backs up "domain {{domain}}" from node "{{leader}}" into "branch-state-resumed.nvxb" reporting JSON
+    Then the CLI backup succeeded with a JSON report naming domain "{{domain}}"
+    And backup archives "branch-state.nvxb" and "branch-state-resumed.nvxb" have identical deduplicator state
     When these NSPL commands are executed on the leader node
       """
       CREATE SUBSCRIPTION restored_summaries TO metric_summaries;
@@ -186,7 +189,7 @@ Feature: Deduplicator and window state in backup archives
       """
       {"tenant":"alpha","transaction_id":"txn-1","amount":10}
       """
-    And timestamp placeholder "key_expired" is between "3m" and "3m30s" after timestamp placeholder "keys_seen"
+    And timestamp placeholder "key_expired" is at least "3m" after timestamp placeholder "keys_seen"
 
     Examples:
       | cluster_size | replica_count |

@@ -449,6 +449,19 @@ fn then_restored_branch_states_match(world: &mut ScenarioWorld, before: String, 
     );
 }
 
+#[then(expr = "backup archives {string} and {string} have identical deduplicator state")]
+fn then_restored_deduplicator_states_match(
+    world: &mut ScenarioWorld,
+    before: String,
+    after: String,
+) {
+    assert_eq!(
+        state_sections(&archive_path(world, &before), &["deduplicator"]),
+        state_sections(&archive_path(world, &after), &["deduplicator"]),
+        "the running restore preserves each key and its original seen_at time"
+    );
+}
+
 /// A restore step pause a scenario armed, which it releases by the node it named.
 #[derive(Debug, Clone)]
 pub(crate) struct ArmedRestorePause {
@@ -543,6 +556,16 @@ async fn given_cluster_is_replaced(world: &mut ScenarioWorld, node_count: usize,
     assert!(
         panics.is_empty(),
         "the replaced cluster stopped cleanly: {panics:?}"
+    );
+    // A node that is still stopping keeps running beside the cluster that replaces it, so the
+    // replacement has not happened yet.
+    let still_stopping = teardown
+        .still_stopping()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>();
+    assert!(
+        still_stopping.is_empty(),
+        "the replaced cluster stopped within its cleanup budget: {still_stopping:?}"
     );
     // Dropping the cluster gives back the storage and fixtures its nodes wrote to.
     drop(cluster);

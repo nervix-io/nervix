@@ -346,7 +346,14 @@ message it unfolded into has completed its own route or error delivery.
 Remote delivery retains that host-owned ACK share in a bounded delivery owner, with independent
 row outcomes and an exact generation identity. Admission refusal or cancellation before admission
 returns the share negatively; admitted records remain pending through keepalives and required
-waits until their terminal outcome or the silence bound. Relay construction retains the domain's
+waits until their terminal outcome or the silence bound. A relay owner whose relay memory has no
+room for the acknowledgement watches of a delivery holds the delivery back unadmitted instead of
+refusing it, and the host's dispatch waits for that admission within its five-minute bound. A
+source in a `NO_ACK` mode therefore stops reading while its delivery is held, as under any relay
+backpressure, and its output is delivered once the relay owner has room rather than lost. In an
+acknowledged mode the held rows' shares stay pending without keepalives, so a hold longer than the
+source's `ACK TIMEOUT` rejects their positions and the source delivers them again, possibly after the
+held delivery was admitted. Relay construction retains the domain's
 ACK-root tracker, so intake does not resolve a mutable domain registry for each row. Receiver
 watchers retain the sender's full process identity and charge their memory to the relay budget;
 sender replacement or shutdown ends them. These correlations remain volatile and are never a
@@ -544,9 +551,10 @@ deadline-bounded final flush and transport finish, and a stopped interaction per
 drain before the loop exits.
 
 An ownership handoff closes source admission and boundary dispatch while installed routes and
-sinks finish their admitted work and requested flush. The participant publishes its ownership
-freeze only after that local drain completes, so capture cannot prevent a route from completing
-its flush. Preparation retains its original deadline; the distinct gate lease protects capture
+sinks finish their admitted work and requested flush. Engagement confirms the closed admission
+hold; the participant's exact-operation drain-status query publishes its ownership freeze only
+when that local drain completes. Capture requires the held operation and its exact freeze identity,
+so it cannot prevent a route from completing its flush. Preparation retains its original deadline; the distinct gate lease protects capture
 and activation. [Shutdown And Recovery](./shutdown.md) owns the complete
 handoff lifecycle and failure outcomes.
 
@@ -917,6 +925,12 @@ sequenceDiagram
   decoding, routing, flush cadence, and error reporting.
 
 ## Failure and observation
+
+The compiler failure-contract gate reads exact source-owned semantic outcome classifications for
+SQL mapped-column refusals and MongoDB value/document refusals. Their callers produce definitive
+record rejections with the record position and safe field path. Infrastructure and batch failures
+return contextual reports. [Errors And Diagnostics](errors-and-diagnostics.md) owns the compiler
+classification contract; these annotations do not change acknowledgement or retry policy.
 
 An ingestor opens all source instances before registration, so a failed source start leaves no
 running ingestor. An invalid emitter declaration or expression fails planning before its new

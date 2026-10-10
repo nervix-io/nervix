@@ -289,6 +289,14 @@ impl PotentialCycle {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(
+    nervix_lint,
+    nervix::error_boundary(
+        outcome,
+        reason = "lock-order configuration and evidence construction return pure validation \
+                  refusals"
+    )
+)]
 pub enum OrderOutOfBounds {
     Empty,
     TooManyEdges,

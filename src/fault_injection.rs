@@ -26,7 +26,7 @@ use std::{
 use ahash::RandomState;
 use error_stack::Report;
 use meticulous::{OptionExt as _, ResultExt as _};
-use nervix_execution::{CpuClass, Executor, MemoryClass};
+use nervix_execution::{CpuClass, Executor, MemoryClass, Reservation};
 use nervix_models::{
     ClusterNodeIdentity, ClusterNodeIncarnation, ClusterNodeName, CommandExecutionReference,
     DomainName, DomainNodeRef, EmitterName, IngestorName, ModelKind, ModelName, RelayName,
@@ -162,6 +162,9 @@ struct FaultInjectionState {
     /// assuming it.
     lost_remote_acknowledgements:
         DashMap<RemoteAcknowledgementLink, watch::Sender<RemoteAcknowledgementLoss>, RandomState>,
+    /// Nodes whose relay memory a scenario fills just before they charge the acknowledgement
+    /// watches of the next delivery another node sends them, and the memory each fill holds.
+    relay_memory_fills: DashMap<ClusterNodeName, RelayMemoryFill, RandomState>,
     /// The owner pauses one buffered batch before it acquires a dispatch permit and loads routes.
     owner_relay_fanout_pauses: DashMap<String, Arc<TestPause>, RandomState>,
     /// A local schedule swap pauses after removing one attached emitter from its relay.
@@ -243,6 +246,19 @@ impl std::fmt::Debug for ConsensusProbe {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ConsensusProbe").finish_non_exhaustive()
     }
+}
+
+/// The relay memory a scenario fills on one node as the node charges acknowledgement watches.
+#[derive(Debug)]
+enum RelayMemoryFill {
+    /// The node's next charge of acknowledgement watches first takes all of its free relay memory.
+    Armed,
+    /// The relay memory the fill took, held until the scenario releases it.
+    Holding {
+        // Held for as long as the fill lasts and never read: the charge is the reservation's
+        // existence, not its value.
+        _memory: Reservation,
+    },
 }
 
 #[derive(Debug)]
@@ -412,6 +428,7 @@ impl Default for FaultInjection {
                 remote_relay_admission_pauses: DashMap::default(),
                 remote_relay_dispatch_pauses: DashMap::default(),
                 lost_remote_acknowledgements: DashMap::default(),
+                relay_memory_fills: DashMap::default(),
                 owner_relay_fanout_pauses: DashMap::default(),
                 emitter_swap_after_detach_pauses: DashMap::default(),
                 ingestor_dispatch_pauses: DashMap::default(),
@@ -2486,6 +2503,71 @@ impl FaultInjection {
         }
         pause.reach();
         pause.wait_until_released().await;
+    }
+
+    /// Arms `node_id` to take all of its free relay memory just before it charges the
+    /// acknowledgement watches of the next delivery another node sends it, and to hold that memory
+    /// until the scenario releases it.
+    pub fn fill_relay_memory_before_next_acknowledgement_watches_on(
+        &self,
+        node_id: ClusterNodeName,
+    ) {
+        self.inner
+            .relay_memory_fills
+            .insert(node_id, RelayMemoryFill::Armed);
+    }
+
+    /// Returns the relay memory an armed fill took on `node_id`, and disarms a fill that has not
+    /// taken any yet.
+    pub fn release_relay_memory_fill_on(&self, node_id: &ClusterNodeName) {
+        self.inner.relay_memory_fills.remove(node_id);
+    }
+
+    /// Whether the fill armed on `node_id` holds its relay memory.
+    pub fn relay_memory_fill_holds_on(&self, node_id: &ClusterNodeName) -> bool {
+        let Some(fill) = self.inner.relay_memory_fills.get(node_id) else {
+            return false;
+        };
+        matches!(fill.value(), RelayMemoryFill::Holding { .. })
+    }
+
+    /// Takes all of `node_id`'s free relay memory, once, when a scenario armed the fill.
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            bounded,
+            reason = "the scenario fills a node's relay memory only before the first watches the \
+                      node charges after the fill was armed",
+            key = "one test node's armed relay memory fill",
+            bound = "one keyed entry and one charge of the free room; no guard across await"
+        )
+    )]
+    pub(crate) fn fill_relay_memory_before_acknowledgement_watches_if_armed(
+        &self,
+        node_id: &ClusterNodeName,
+        executor: &Executor,
+    ) {
+        let Some(mut fill) = self.inner.relay_memory_fills.get_mut(node_id) else {
+            return;
+        };
+        if let RelayMemoryFill::Holding { .. } = fill.value() {
+            return;
+        }
+        // The relay work running beside the fill can take memory between the read and the
+        // charge, so the fill charges again what is free then.
+        let reservation = loop {
+            let memory = executor.memory(MemoryClass::Relay);
+            let room = memory
+                .capacity_bytes
+                .checked_sub(memory.reserved_bytes)
+                .assured("a budget never reserves more than its capacity");
+            if let Ok(reservation) = executor.try_reserve(MemoryClass::Relay, room) {
+                break reservation;
+            }
+        };
+        *fill.value_mut() = RelayMemoryFill::Holding {
+            _memory: reservation,
+        };
     }
 
     /// Whether the terminal record acknowledgement `resolver` is about to return to `registrar` is

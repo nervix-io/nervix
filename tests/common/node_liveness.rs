@@ -146,6 +146,8 @@ impl fmt::Display for NodeTaskTerminalOutcome {
 pub(crate) enum NodeTaskState {
     NotStarted,
     Running,
+    /// The task outlived its owner's wait and was handed to a keeper, which waits for its end.
+    LeftStopping,
     Terminal(Arc<NodeTaskTerminalOutcome>),
 }
 
@@ -154,25 +156,37 @@ impl fmt::Display for NodeTaskState {
         match self {
             Self::NotStarted => formatter.write_str("not started"),
             Self::Running => formatter.write_str("running"),
+            Self::LeftStopping => formatter.write_str("left stopping"),
             Self::Terminal(outcome) => write!(formatter, "terminal ({outcome})"),
         }
     }
 }
 
-/// The result of consuming a node task during orderly or forced teardown.
+/// The result of waiting for a node task within a deadline.
 #[derive(Debug)]
 pub(crate) enum NodeTaskWaitOutcome {
     NotStarted,
     AlreadyObserved(Arc<NodeTaskTerminalOutcome>),
     Joined(Arc<NodeTaskTerminalOutcome>),
-    AbortedAtDeadline(Arc<NodeTaskTerminalOutcome>),
+    /// The deadline passed while the task was still running. Its owner still holds it.
+    StillRunning,
+    /// The task had already been handed to a keeper, which waits for its end.
+    LeftStopping,
 }
 
 /// The sole owner of a node's join handle and the outcome obtained from that handle.
+///
+/// A node's task is the future the node was started as, not the node: the node spawns the tasks
+/// that hold its databases, its listeners and its peers, and they outlive that future when it is
+/// dropped. Aborting the task would therefore leave a node running that nothing owns and nothing
+/// can join. This owner never aborts. A node ends by its own shutdown, and a node that has not
+/// ended when a wait's deadline passes stays owned, here or by the keeper it is handed to.
 #[derive(Debug)]
 pub(crate) enum OwnedNodeTask {
     NotStarted,
     Running(JoinHandle<Result<(), Report<AppError>>>),
+    /// The running task was handed to a keeper, which waits for its end.
+    LeftStopping,
     Terminal(Arc<NodeTaskTerminalOutcome>),
 }
 
@@ -200,7 +214,7 @@ impl OwnedNodeTask {
                 | NodeTaskTerminalOutcome::Panic(_)
                 | NodeTaskTerminalOutcome::Cancellation(_) => None,
             },
-            Self::NotStarted | Self::Running(_) => None,
+            Self::NotStarted | Self::Running(_) | Self::LeftStopping => None,
         }
     }
 
@@ -208,71 +222,74 @@ impl OwnedNodeTask {
         match self {
             Self::NotStarted => NodeTaskState::NotStarted,
             Self::Running(_) => NodeTaskState::Running,
+            Self::LeftStopping => NodeTaskState::LeftStopping,
             Self::Terminal(outcome) => NodeTaskState::Terminal(outcome.clone()),
         }
     }
 
     /// Join a task that has finished and retain its typed result for later teardown.
     pub(crate) async fn inspect(&mut self) -> NodeTaskState {
-        let finished = match self {
-            Self::Running(task) => task.is_finished(),
-            Self::NotStarted | Self::Terminal(_) => false,
-        };
-        if !finished {
+        let Self::Running(task) = self else {
             return self.state();
-        }
-
-        let previous = std::mem::replace(self, Self::NotStarted);
-        let task = match previous {
-            Self::Running(task) => task,
-            state => {
-                *self = state;
-                return self.state();
-            }
         };
+        if !task.is_finished() {
+            return NodeTaskState::Running;
+        }
+        // The handle stays with this owner across the join, so a caller that stops polling here
+        // leaves a task that is still owned.
         let outcome = Arc::new(NodeTaskTerminalOutcome::from_join(task.await));
         *self = Self::Terminal(outcome.clone());
         NodeTaskState::Terminal(outcome)
     }
 
-    /// Wait for the owned task once, aborting and then joining it if `deadline` passes.
+    /// Wait for the owned task until `deadline`, and leave it running with this owner when the
+    /// deadline passes first.
     ///
-    /// The deadline is a value this call receives rather than a timeout wrapped around it: the
-    /// wait takes the join handle out of the owner, so a wait cancelled from outside would drop
-    /// that handle and leave the task running with nothing left that could abort or join it.
+    /// The join handle never leaves the owner while it waits, so a wait that is cancelled from
+    /// outside, like one whose deadline passes, leaves a task that is still owned.
     pub(crate) async fn wait(&mut self, deadline: PhaseDeadline) -> NodeTaskWaitOutcome {
-        let previous = std::mem::replace(self, Self::NotStarted);
-        let mut task = match previous {
+        let task = match self {
             Self::NotStarted => return NodeTaskWaitOutcome::NotStarted,
+            Self::LeftStopping => return NodeTaskWaitOutcome::LeftStopping,
             Self::Terminal(outcome) => {
-                *self = Self::Terminal(outcome.clone());
-                return NodeTaskWaitOutcome::AlreadyObserved(outcome);
+                return NodeTaskWaitOutcome::AlreadyObserved(outcome.clone());
             }
             Self::Running(task) => task,
         };
-
-        let (outcome, expired) = match timeout(deadline.remaining(), &mut task).await {
-            Ok(result) => (Arc::new(NodeTaskTerminalOutcome::from_join(result)), false),
-            Err(_) => {
-                task.abort();
-                let result = task.await;
-                (Arc::new(NodeTaskTerminalOutcome::from_join(result)), true)
-            }
+        let joined = match timeout(deadline.remaining(), task).await {
+            Ok(joined) => joined,
+            Err(_) => return NodeTaskWaitOutcome::StillRunning,
         };
+        let outcome = Arc::new(NodeTaskTerminalOutcome::from_join(joined));
         *self = Self::Terminal(outcome.clone());
-        if expired {
-            NodeTaskWaitOutcome::AbortedAtDeadline(outcome)
-        } else {
-            NodeTaskWaitOutcome::Joined(outcome)
-        }
+        NodeTaskWaitOutcome::Joined(outcome)
     }
 
-    /// Abort the still-running task when an async join is impossible, such as from `Drop`.
-    pub(crate) fn abort(&mut self) {
-        let previous = std::mem::replace(self, Self::NotStarted);
-        if let Self::Running(task) = previous {
-            task.abort();
-        }
+    /// Hand a task that is still running to a keeper, which waits for the node to end and then
+    /// runs `ended` with how it ended. `ended` gives back what the node held until then: its
+    /// storage, its ports and its registrations.
+    ///
+    /// Returns whether a running task was handed over. A task in any other state has nothing left
+    /// to wait for, and `ended` is dropped unrun.
+    pub(crate) fn keep_until_ended<Ended>(&mut self, ended: Ended) -> bool
+    where
+        Ended: FnOnce(&NodeTaskTerminalOutcome) + Send + 'static,
+    {
+        let previous = std::mem::replace(self, Self::LeftStopping);
+        let task = match previous {
+            Self::Running(task) => task,
+            state @ (Self::NotStarted | Self::LeftStopping | Self::Terminal(_)) => {
+                *self = state;
+                return false;
+            }
+        };
+        // The keeper is the task's owner from here on. Nothing joins the keeper: it ends when the
+        // node does, or with the runtime that runs them both.
+        nervix_primitives::task::spawn(async move {
+            let outcome = NodeTaskTerminalOutcome::from_join(task.await);
+            ended(&outcome);
+        });
+        true
     }
 }
 
@@ -391,7 +408,9 @@ impl OwnedNodeTask {
             match task_state {
                 NodeTaskState::Running if ready => return Ok(()),
                 NodeTaskState::Running => deadline.pause(poll_interval).await,
-                NodeTaskState::NotStarted | NodeTaskState::Terminal(_) => {
+                NodeTaskState::NotStarted
+                | NodeTaskState::LeftStopping
+                | NodeTaskState::Terminal(_) => {
                     return Err(NodeStartupError::report(
                         node,
                         attempt,

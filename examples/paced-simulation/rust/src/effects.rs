@@ -14,6 +14,7 @@
 use std::{io, path::Path};
 
 use ahash::HashSet;
+use error_stack::{Report, ResultExt as _};
 use nervix_models::Timestamp;
 use nervix_primitives::sync::watch;
 use serde::{Deserialize, Serialize};
@@ -31,20 +32,12 @@ use crate::{
 /// Why the effect store cannot be read or written.
 #[derive(Debug, Error)]
 pub(crate) enum EffectError {
-    #[error("cannot open the effect store '{path}': {source}")]
-    Open {
-        path: String,
-        #[source]
-        source: io::Error,
-    },
-    #[error("line {line} of the effect store '{path}' is not an effect: {reason}")]
-    Malformed {
-        path: String,
-        line: usize,
-        reason: String,
-    },
-    #[error("cannot record an effect: {0}")]
-    Record(#[source] io::Error),
+    #[error("cannot open the effect store '{path}'")]
+    Open { path: String },
+    #[error("line {line} of the effect store '{path}' is not an effect")]
+    Malformed { path: String, line: usize },
+    #[error("cannot record an effect")]
+    Record,
 }
 
 /// One line of the effect store.
@@ -96,10 +89,11 @@ pub(crate) struct EffectStore {
 
 impl EffectStore {
     /// Opens the store, reading back every effect an earlier run applied.
-    pub(crate) async fn open(path: &Path) -> Result<Self, EffectError> {
-        let open_error = |source| EffectError::Open {
-            path: path.display().to_string(),
-            source,
+    pub(crate) async fn open(path: &Path) -> Result<Self, Report<EffectError>> {
+        let open_error = |source| {
+            Report::new(source).change_context(EffectError::Open {
+                path: path.display().to_string(),
+            })
         };
         let text = match tokio::fs::read_to_string(path).await {
             Ok(text) => text,
@@ -109,12 +103,12 @@ impl EffectStore {
         let mut readings = HashSet::default();
         let mut rejections = HashSet::default();
         for (index, line) in text.lines().enumerate() {
-            let record: EffectRecord =
-                serde_json::from_str(line).map_err(|error| EffectError::Malformed {
+            let record: EffectRecord = serde_json::from_str(line).map_err(|error| {
+                Report::new(error).change_context(EffectError::Malformed {
                     path: path.display().to_string(),
                     line: index + 1,
-                    reason: error.to_string(),
-                })?;
+                })
+            })?;
             match record {
                 EffectRecord::Reading { reading_id, .. } => {
                     readings.insert(reading_id);
@@ -154,7 +148,7 @@ impl EffectStore {
         &mut self,
         reading: &ObservedReading,
         generation: u64,
-    ) -> Result<Applied, EffectError> {
+    ) -> Result<Applied, Report<EffectError>> {
         if self.readings.contains(&reading.reading_id) {
             return Ok(Applied::Duplicate);
         }
@@ -178,7 +172,7 @@ impl EffectStore {
         &mut self,
         notice: &RejectionNotice,
         generation: u64,
-    ) -> Result<Applied, EffectError> {
+    ) -> Result<Applied, Report<EffectError>> {
         if self.rejections.contains(&notice.reading_id) {
             return Ok(Applied::Duplicate);
         }
@@ -195,21 +189,20 @@ impl EffectStore {
         Ok(Applied::New)
     }
 
-    async fn append(&mut self, record: &EffectRecord) -> Result<(), EffectError> {
-        let mut line = serde_json::to_string(record)
-            .map_err(|error| EffectError::Record(io::Error::other(error)))?;
+    async fn append(&mut self, record: &EffectRecord) -> Result<(), Report<EffectError>> {
+        let mut line = serde_json::to_string(record).change_context(EffectError::Record)?;
         line.push('\n');
         self.file
             .write_all(line.as_bytes())
             .await
-            .map_err(EffectError::Record)?;
-        self.file.flush().await.map_err(EffectError::Record)
+            .change_context(EffectError::Record)?;
+        self.file.flush().await.change_context(EffectError::Record)
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use meticulous::ResultExt as _;
+    use meticulous::{OptionExt as _, ResultExt as _};
 
     use super::*;
 
@@ -291,13 +284,48 @@ mod tests {
     }
 
     #[nervix_primitives::test]
+    async fn a_malformed_effect_retains_its_decoder_cause_in_one_chain() {
+        let directory = tempfile::tempdir().assured("a test can create a directory");
+        let path = directory.path().join("effects.jsonl");
+        tokio::fs::write(&path, "not json\n")
+            .await
+            .assured("a test can write a file");
+        let report = EffectStore::open(&path)
+            .await
+            .err()
+            .assured("the malformed effect is refused");
+        assert!(matches!(
+            report.current_context(),
+            EffectError::Malformed { line: 1, .. }
+        ));
+        let cause = report
+            .downcast_ref::<serde_json::Error>()
+            .assured("the report retains the decoder cause");
+        assert_eq!(
+            format!("{report:#}"),
+            format!(
+                "line 1 of the effect store '{}' is not an effect: {cause}",
+                path.display()
+            )
+        );
+    }
+
+    #[nervix_primitives::test]
     async fn a_store_path_that_is_not_a_file_is_named_when_it_cannot_be_opened() {
         let directory = tempfile::tempdir().assured("a test can create a directory");
         let expected = directory.path().display().to_string();
         let opened = EffectStore::open(directory.path()).await.err();
         assert!(matches!(
-            opened,
-            Some(EffectError::Open { path, .. }) if path == expected
+            opened.as_ref().map(Report::current_context),
+            Some(EffectError::Open { path, .. }) if path == &expected
         ));
+        let report = opened.assured("a directory is refused as an effect file");
+        let cause = report
+            .downcast_ref::<io::Error>()
+            .assured("the report retains the I/O cause");
+        assert_eq!(
+            format!("{report:#}"),
+            format!("cannot open the effect store '{expected}': {cause}")
+        );
     }
 }

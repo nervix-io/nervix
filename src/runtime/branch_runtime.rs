@@ -2686,6 +2686,23 @@ mod tests {
             .expect("engagement task should not panic")
             .expect("handoff gate should engage");
         assert!(runtime.entity_gate_operation_is_held(&coordination));
+        timeout(Duration::from_secs(1), async {
+            while !runtime
+                .entity_gate_operation_drain_status(
+                    &coordination,
+                    &domain,
+                    &[],
+                    std::slice::from_ref(&entity),
+                    EntityGatePurpose::OwnershipHandoff,
+                )
+                .expect("the exact handoff scope reports its drain")
+                .is_drained()
+            {
+                nervix_primitives::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("drain status publishes the freeze after the requested flush completes");
         let freeze = OwnershipHandoffFreezeWatch::new(&runtime, entity.in_domain(&domain));
         assert!(freeze.observe().is_frozen());
         assert!(

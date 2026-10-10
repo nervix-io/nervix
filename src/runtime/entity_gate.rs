@@ -1017,23 +1017,6 @@ impl Runtime {
                 .pause_ownership_handoff_flush_if_armed(domain)
                 .await;
         }
-        if purpose == EntityGatePurpose::OwnershipHandoff {
-            // Intake and boundary admission are already closed. Leave the owners running until
-            // their admitted work and requested flush complete, then freeze the state for capture.
-            // Freezing first would prevent those owners from completing the very flush we await.
-            while Instant::now() < deadline {
-                if self.freeze_drained_ownership_handoff(
-                    &coordination,
-                    domain,
-                    &scope.relays,
-                    &scope.affected_entities,
-                ) {
-                    break;
-                }
-                let next_poll = (Instant::now() + Duration::from_millis(25)).min(deadline);
-                nervix_primitives::time::sleep_until(next_poll).await;
-            }
-        }
         if Instant::now() >= deadline {
             Self::release_entity_alter_hold(
                 &self.inner.ingestors,
@@ -1087,27 +1070,23 @@ impl Runtime {
         domain: &DomainName,
         relays: &[RelayName],
         affected_entities: &[NodeRef],
-    ) -> bool {
-        if !self
-            .entity_drain_status(
-                domain,
-                relays,
-                affected_entities,
-                EntityGatePurpose::OwnershipHandoff,
-            )
-            .is_drained()
-        {
-            return false;
+    ) -> EntityDrainStatus {
+        let status = self.entity_drain_status(
+            domain,
+            relays,
+            affected_entities,
+            EntityGatePurpose::OwnershipHandoff,
+        );
+        if status.is_drained() {
+            for entity in affected_entities {
+                self.inner
+                    .frozen_ownership_handoff_entities
+                    .entry(entity.in_domain(domain))
+                    .or_default()
+                    .insert(coordination.clone());
+            }
         }
-        for entity in affected_entities {
-            let key = entity.in_domain(domain);
-            self.inner
-                .frozen_ownership_handoff_entities
-                .entry(key)
-                .or_default()
-                .insert(coordination.clone());
-        }
-        true
+        status
     }
 
     pub(crate) fn entity_gate_operation_drain_status(
@@ -1137,12 +1116,24 @@ impl Runtime {
             ));
         }
         let scope = operation.scope();
-        Ok(self.entity_drain_status(
-            &scope.domain,
-            &scope.relays,
-            &scope.affected_entities,
-            scope.purpose,
-        ))
+        // Keep the exact operation registered while publishing its freeze. Its release cannot
+        // remove the hold between this drained observation and capture readiness.
+        let status = if scope.purpose == EntityGatePurpose::OwnershipHandoff {
+            self.freeze_drained_ownership_handoff(
+                coordination,
+                &scope.domain,
+                &scope.relays,
+                &scope.affected_entities,
+            )
+        } else {
+            self.entity_drain_status(
+                &scope.domain,
+                &scope.relays,
+                &scope.affected_entities,
+                scope.purpose,
+            )
+        };
+        Ok(status)
     }
 
     pub(crate) fn entity_gate_operation_owns_entity(
@@ -1160,6 +1151,9 @@ impl Runtime {
             && &scope.domain == domain
             && scope.purpose == purpose
             && scope.affected_entities.binary_search(entity).is_ok()
+            && (purpose != EntityGatePurpose::OwnershipHandoff
+                || self
+                    .ownership_handoff_entity_is_frozen_by(&entity.in_domain(domain), coordination))
     }
 
     pub(crate) async fn release_entity_gate_operation(
@@ -2189,6 +2183,21 @@ mod tests {
             .await
             .expect("the replacement coordinator ownership hold should engage");
 
+        for coordination in [&first, &second] {
+            assert!(
+                runtime
+                    .entity_gate_operation_drain_status(
+                        coordination,
+                        &domain,
+                        &[],
+                        std::slice::from_ref(&affected),
+                        EntityGatePurpose::OwnershipHandoff,
+                    )
+                    .expect("each exact hold reports its drain and installs its freeze")
+                    .is_drained()
+            );
+        }
+
         runtime
             .release_entity_gate_operation(&first, &domain)
             .await
@@ -2434,7 +2443,7 @@ mod tests {
         assert_eq!(relay.outstanding_work(), 1);
         assert_eq!(emitter.outstanding_work(), 0);
     }
-    #[nervix_primitives::test]
+    #[nervix_primitives::test(start_paused = true)]
     async fn ownership_handoff_expiry_reopens_gates_after_an_unfinished_local_flush() {
         let runtime = Runtime::default();
         let domain = domain("default");
@@ -2449,7 +2458,7 @@ mod tests {
             DomainNodeRef::node_in(domain.clone(), ModelKind::Relay, relay.clone()),
             fanout,
         );
-        let error = runtime
+        runtime
             .engage_entity_gate_operation(
                 &coordination,
                 &domain,
@@ -2457,24 +2466,41 @@ mod tests {
                 std::slice::from_ref(&entity),
                 EntityGatePurpose::OwnershipHandoff,
                 EntityGateLease {
-                    // The fixture must reach the unfinished flush before its lease expires;
-                    // expiring during cold gate setup would exercise a different failure.
                     deadline: Instant::now() + Duration::from_secs(5),
                     reason: "unfinished local flush",
                 },
             )
             .await
-            .expect_err("an uncompleted participant cannot make state ready to capture");
-        assert!(
-            matches!(
-                error.current_context(),
-                EntityGateOperationError::EngagementExpired { .. }
-            ),
-            "the unfinished flush must expire after engagement: {error:#}"
-        );
-        assert!(!dispatch_gate.is_closed());
-        assert!(!runtime.entity_gate_operation_is_held(&coordination));
+            .expect("closed admission engages while its admitted work remains observable");
+        assert!(dispatch_gate.is_closed());
+        assert!(runtime.entity_gate_operation_is_held(&coordination));
+        let status = runtime
+            .entity_gate_operation_drain_status(
+                &coordination,
+                &domain,
+                std::slice::from_ref(&relay),
+                std::slice::from_ref(&entity),
+                EntityGatePurpose::OwnershipHandoff,
+            )
+            .expect("the engaged operation reports its pending flush");
+        assert_eq!(status.node_work_items, 1);
+        assert!(!runtime.entity_gate_operation_owns_entity(
+            &coordination,
+            &domain,
+            &entity,
+            EntityGatePurpose::OwnershipHandoff,
+        ));
         let freeze = OwnershipHandoffFreezeWatch::new(&runtime, entity.in_domain(&domain));
+        assert!(!freeze.observe().is_frozen());
+        nervix_primitives::time::advance(Duration::from_secs(6)).await;
+        nervix_primitives::time::timeout(Duration::from_secs(1), async {
+            while runtime.entity_gate_operation_is_held(&coordination) {
+                nervix_primitives::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("the original lease releases its unfinished operation");
+        assert!(!dispatch_gate.is_closed());
         assert!(!freeze.observe().is_frozen());
         assert_eq!(counters.force_flush_obligations(), 1);
         drop(participant);

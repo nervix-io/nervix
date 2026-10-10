@@ -880,7 +880,7 @@ fn shuttle_an_ownership_handoff_freeze_observation_registers_before_its_read() {
 }
 
 /// The capture freeze follows the participant's real force-flush completion, even when the
-/// engagement owner observes drain status between the route's output and obligation updates.
+/// drain-status owner observes work between the route's output and obligation updates.
 fn handoff_freeze_follows_admitted_route_flush() {
     shuttle::future::block_on(async {
         let runtime = Runtime::default();
@@ -898,12 +898,16 @@ fn handoff_freeze_follows_admitted_route_flush() {
             &runtime,
             entity.in_domain(&domain),
         ));
-        assert!(!runtime.freeze_drained_ownership_handoff(
-            &coordination(),
-            &domain,
-            &[],
-            std::slice::from_ref(&entity)
-        ));
+        assert!(
+            !runtime
+                .freeze_drained_ownership_handoff(
+                    &coordination(),
+                    &domain,
+                    &[],
+                    std::slice::from_ref(&entity)
+                )
+                .is_drained()
+        );
         assert!(!freeze.observe().is_frozen());
 
         let flushing_freeze = freeze.clone();
@@ -928,12 +932,15 @@ fn handoff_freeze_follows_admitted_route_flush() {
         let freezing_domain = domain.clone();
         let freezing_entity = entity.clone();
         let freeze_task = nervix_primitives::task::spawn(async move {
-            while !freezing_runtime.freeze_drained_ownership_handoff(
-                &coordination(),
-                &freezing_domain,
-                &[],
-                std::slice::from_ref(&freezing_entity),
-            ) {
+            while !freezing_runtime
+                .freeze_drained_ownership_handoff(
+                    &coordination(),
+                    &freezing_domain,
+                    &[],
+                    std::slice::from_ref(&freezing_entity),
+                )
+                .is_drained()
+            {
                 nervix_primitives::task::yield_now().await;
             }
             assert!(

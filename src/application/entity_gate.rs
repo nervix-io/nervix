@@ -460,8 +460,8 @@ impl SessionServiceImpl {
                         )
                         && nervix_primitives::time::Instant::now() < deadline =>
                 {
-                    // A handoff engagement owns its local drain before capture freezes state.
-                    // Await the same receiver-owned operation; neither its flush nor lease repeats.
+                    // Await the same receiver-owned admission fence. Its flush request and
+                    // activation lease remain unchanged when a response is lost.
                     nervix_primitives::task::consume_budget().await;
                 }
                 Err(error) => return EntityGateEngagementOutcome::Uncertain(error.to_string()),

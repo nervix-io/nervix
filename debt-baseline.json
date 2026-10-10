@@ -1,11 +1,8 @@
 {
   "as_casts": 3,
-  "bare_error_signatures": 0,
-  "bare_unwrap_and_expect": 0,
   "clamped_arithmetic": 8,
   "combinator_control_flow": 0,
   "data_plane_cluster_awaits": 0,
-  "discarded_results": 0,
   "files_over_3000_lines": 10,
   "model_matches_in_data_plane": 0,
   "parser_imports_outside_edges": 0,

@@ -145,6 +145,33 @@ fn ending_a_peer_releases_capacity_even_when_an_intake_keeps_the_record() {
     assert_eq!(fixture.executor.snapshot().relay_memory.reserved_bytes, 0);
 }
 
+/// An intake that holds its received batch back before deciding admission learns when the attempt
+/// can no longer be admitted: its sender cancels it, or its peer ends.
+#[test]
+fn a_held_intake_observes_the_cancellation_of_its_attempt() {
+    use futures_util::FutureExt as _;
+
+    let fixture = PeerFixture::new(2);
+    let withdrawn = fixture.register(1, 1);
+    let held = RelayAdmission {
+        record: fixture.register(2, 2),
+    };
+    let withdrawn_intake = RelayAdmission {
+        record: withdrawn.clone(),
+    };
+    assert!(withdrawn_intake.cancelled().now_or_never().is_none());
+    assert!(held.cancelled().now_or_never().is_none());
+
+    assert_eq!(withdrawn.cancel(), RelayAdmissionStatus::Cancelled);
+    assert!(withdrawn_intake.cancelled().now_or_never().is_some());
+    assert!(held.cancelled().now_or_never().is_none());
+
+    fixture.owner.end();
+    assert!(held.cancelled().now_or_never().is_some());
+    assert_eq!(withdrawn_intake.admit(), RelayAdmissionDecision::Cancelled);
+    assert_eq!(held.admit(), RelayAdmissionDecision::Cancelled);
+}
+
 #[test]
 #[ignore = "native independent-peer cost probe run by bench-remote-owners"]
 fn remote_relay_frame_cost_with_another_peers_guard_held() {

@@ -249,10 +249,13 @@ contributes only `DYNAMIC` to the actual aggregate. A confirmed or uncertain eng
 its possible scope even if the step subsequently fails or the gate is released. The report never
 rewrites the planned requirement to make a later outcome appear expected.
 
-Ownership-handoff readiness follows the participant's local drain and capture freeze. Retrying a
-two-second reply timeout waits on the same receiver-owned coordination identity; it creates no
-additional pause attempt and extends no lease. Preparation retains its original deadline, and
-cleanup still releases every participant whose engagement was attempted.
+Ownership-handoff engagement confirms the closed admission hold and requested flush. The
+coordinator observes each exact operation's pending drain before capture; a drained response
+publishes the participant's capture freeze. A drain timeout keeps the pending node and work counts
+and releases attempted holds before independent schedule units continue. Retrying a two-second
+engagement reply timeout waits on the same receiver-owned identity, adds no pause attempt and
+extends no lease. Preparation retains its original deadline, and cleanup releases every attempted
+participant.
 
 The step changes from `UNATTEMPTED` to `APPLYING` when its authoritative effect transition is
 recorded. It becomes `APPLIED` only after required activation, source readiness, handoff, and

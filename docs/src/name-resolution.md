@@ -119,6 +119,11 @@ retry or acknowledgement paths. If startup ends before installing DNS, dropping 
 closes the resolver publication so a pending connection fails without waiting for a resolver that
 will never arrive. The guard flushes the provider while the node's Tokio runtime still exists.
 
+The Tonic connector's standard-error hook owns a `TraceConnectFailure` carrying the complete
+`Report<TraceConnectError>`. Resolver-installation closure, timeout and connection failures retain
+their typed contexts and the connection's cause chain. DNS hook carriers are checked by paired
+compiling and `compile_fail` examples in `just test-typed-ratchet-product-docs`.
+
 ## Configuration
 
 Three server options select what the node's resolver reads. The native CLI accepts the same three
