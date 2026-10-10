@@ -544,6 +544,16 @@ async fn given_cluster_is_replaced(world: &mut ScenarioWorld, node_count: usize,
         panics.is_empty(),
         "the replaced cluster stopped cleanly: {panics:?}"
     );
+    // A node that is still stopping keeps running beside the cluster that replaces it, so the
+    // replacement has not happened yet.
+    let still_stopping = teardown
+        .still_stopping()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>();
+    assert!(
+        still_stopping.is_empty(),
+        "the replaced cluster stopped within its cleanup budget: {still_stopping:?}"
+    );
     // Dropping the cluster gives back the storage and fixtures its nodes wrote to.
     drop(cluster);
     world.cluster_config.node_name_prefix = prefix;

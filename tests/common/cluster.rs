@@ -47,6 +47,7 @@ use nervix_interconnect::{
 };
 use nervix_models::{ClusterNodeName, NodeEndpoint};
 use nervix_primitives::{
+    runtime::Handle,
     sync::{
         StdArc,
         blocking::{LazyLock, OnceLock},
@@ -111,8 +112,8 @@ use super::{
     },
     kafka_group_member::ExternalKafkaGroupMember,
     node_liveness::{
-        NodeStartupError, NodeTaskTerminalOutcome, NodeTaskWaitOutcome, OwnedNodeTask,
-        ReadinessProbeOutcome,
+        NodeStartupError, NodeTaskState, NodeTaskTerminalOutcome, NodeTaskWaitOutcome,
+        OwnedNodeTask, ReadinessProbeOutcome,
     },
     node_startup::{
         ATTEMPT_READINESS_BUDGET, AttemptCleanup, NODE_STARTUP_BUDGET, NodeStartup, StartableNode,
@@ -131,7 +132,7 @@ use super::{
         STATUS_DIAGNOSTIC_BUDGET, STATUS_REQUEST_TIMEOUT, STATUS_WAIT_BUDGET, StatusEndpoint,
         StatusRequestError, StatusTransport,
     },
-    suite_watchdog::{LiveClusterHandle, LiveClusterRegistration, NodeStop},
+    suite_watchdog::{LiveClusterRegistration, NodeStop},
 };
 
 const HOST: IpAddr = IpAddr::V4(Ipv4Addr::LOCALHOST);
@@ -738,9 +739,22 @@ pub(crate) enum InterconnectCredentialFault {
     ExpiredCertificate,
 }
 
+/// What every node of one cluster uses for as long as it runs. The cluster and each of its nodes
+/// share it, so a node that is still stopping when its cluster is dropped keeps its storage and
+/// stays published until its own task has ended.
+#[derive(Debug)]
+struct ClusterRoots {
+    /// The temporary storage every node's databases and certificates live in.
+    storage: TempDir,
+    /// Publishes this cluster to the suite watchdog for as long as the scenario holds it or one of
+    /// its nodes still runs, so a suite timeout can name its nodes and ask every one of them to
+    /// stop.
+    live: LiveClusterRegistration,
+}
+
 #[derive(Debug)]
 pub(crate) struct Cluster {
-    _root_dir: TempDir,
+    roots: Arc<ClusterRoots>,
     interconnect_ca: InterconnectTestCa,
     peer_addressing: PeerAddressing,
     /// The DNS a named cluster resolves peers through; a literally addressed cluster has none.
@@ -748,9 +762,6 @@ pub(crate) struct Cluster {
     nodes: BTreeMap<String, NodeHandle>,
     fault_injection: FaultInjection,
     dependencies: DependencyEndpoints,
-    /// Publishes this cluster to the suite watchdog for as long as the scenario holds it, so a
-    /// suite timeout can name its nodes and ask every one of them to stop.
-    live: LiveClusterRegistration,
     /// What every node's name begins with: the n-th node is `<prefix>-<n>`, and the first one
     /// bootstraps the cluster.
     node_name_prefix: String,
@@ -840,9 +851,12 @@ impl Cluster {
         };
         truncate_test_log_once()?;
         init_tracing_to_file(std::path::Path::new(TEST_LOG_FILE))?;
-        let root_dir = tempdir()?;
-        let interconnect_ca = InterconnectTestCa::new(&root_dir)?;
-        let live = LiveClusterRegistration::start(scenario);
+        let storage = tempdir()?;
+        let interconnect_ca = InterconnectTestCa::new(&storage)?;
+        let roots = Arc::new(ClusterRoots {
+            storage,
+            live: LiveClusterRegistration::start(scenario),
+        });
         /// One node of the cluster being built, before its spec exists.
         struct PlannedNode {
             node_id: String,
@@ -869,7 +883,7 @@ impl Cluster {
                 listen_ip: node.address.listen_ip,
             });
         }
-        let dns = ClusterDns::start(peer_addressing, root_dir.path(), &published).await?;
+        let dns = ClusterDns::start(peer_addressing, roots.storage.path(), &published).await?;
         let mut nodes = BTreeMap::new();
 
         for PlannedNode {
@@ -878,36 +892,39 @@ impl Cluster {
             address,
         } in planned
         {
-            let mut spec = NodeSpec::new(&root_dir, &interconnect_ca, &node_id, index == 1)?;
+            let mut spec = NodeSpec::new(&roots.storage, &interconnect_ca, &node_id, index == 1)?;
             spec.set_interconnect_address(address);
             spec.dns = dns.as_ref().map(ClusterDns::configuration);
             fault_injection
                 .set_syslog_ingestor_bind_ip(node_name(&node_id), spec.syslog_ingestor_host);
             nodes.insert(
                 node_id.clone(),
-                NodeHandle::new(spec, fault_injection.clone(), config.clone(), live.handle()),
+                NodeHandle::new(spec, fault_injection.clone(), config.clone(), roots.clone()),
             );
         }
 
         let mut cluster = Self {
-            _root_dir: root_dir,
+            roots,
             interconnect_ca,
             peer_addressing,
             dns,
             fault_injection,
             nodes,
             dependencies: config.dependencies,
-            live,
             node_name_prefix: config.node_name_prefix,
         };
 
         if let Err(error) = cluster.start_nodes_and_wait(node_count).await {
-            let cleanup_error = cluster.shutdown().await.err();
-            return Err(if let Some(cleanup_error) = cleanup_error {
-                io::Error::other(format!("{error}; cleanup failed: {cleanup_error}"))
-            } else {
-                error
-            });
+            // A construction that failed has no assertion left to serve, so the nodes it started
+            // stop together under the one cleanup budget rather than one after another under the
+            // product shutdown deadlines a scenario-driven stop observes.
+            let teardown = cluster.shutdown_for_teardown().await;
+            let Some(unclean) = teardown.unclean() else {
+                return Err(error);
+            };
+            return Err(io::Error::other(format!(
+                "{error}; cleanup {teardown}: {unclean}"
+            )));
         }
 
         Ok(cluster)
@@ -1093,7 +1110,7 @@ impl Cluster {
             .expect("an existing cluster has at least one node")
             .config
             .clone();
-        let mut spec = NodeSpec::new(&self._root_dir, &self.interconnect_ca, node_id, false)?;
+        let mut spec = NodeSpec::new(&self.roots.storage, &self.interconnect_ca, node_id, false)?;
         let index = NodeSpec::index(node_id)?;
         let address = self.peer_addressing.address(node_id, index);
         if let Some(dns) = &self.dns {
@@ -1110,7 +1127,7 @@ impl Cluster {
                 spec,
                 self.fault_injection.clone(),
                 config,
-                self.live.handle(),
+                self.roots.clone(),
             ),
         );
         self.start_node(node_id).await?;
@@ -1288,7 +1305,7 @@ impl Cluster {
     }
 
     pub(crate) async fn rotate_interconnect_certificates(&mut self) -> io::Result<()> {
-        let interconnect_ca = InterconnectTestCa::new(&self._root_dir)?;
+        let interconnect_ca = InterconnectTestCa::new(&self.roots.storage)?;
         for (node_id, node) in &mut self.nodes {
             nervix_primitives::task::consume_budget().await;
             let (certificate, key) = interconnect_ca.issue_node(node_id, &node.spec.base_dir)?;
@@ -1323,7 +1340,7 @@ impl Cluster {
             )
         })?;
         let target_addr = target.spec.interconnect_listen_addr();
-        let probe_directory = tempfile::tempdir_in(self._root_dir.path())?;
+        let probe_directory = tempfile::tempdir_in(self.roots.storage.path())?;
         let untrusted_authority = if let InterconnectCredentialFault::UntrustedClient = fault {
             Some(InterconnectTestCa::new(&probe_directory)?)
         } else {
@@ -1451,7 +1468,7 @@ impl Cluster {
             }
         }
         for node in self.nodes.values_mut() {
-            node.spec.release_ports();
+            node.release_ports_once_down();
         }
         if let Some(error) = first_error {
             Err(error)
@@ -3057,7 +3074,9 @@ struct NodeHandle {
     /// How the last stop a scenario requested and waited for ended, kept after its coordinator
     /// is released so the scenario can read the outcome of each shutdown phase.
     last_shutdown: Option<ShutdownOutcome>,
-    live: LiveClusterHandle,
+    /// The cluster's storage and watchdog registration, which a node left stopping keeps until its
+    /// task has ended.
+    roots: Arc<ClusterRoots>,
 }
 
 impl NodeHandle {
@@ -3065,7 +3084,7 @@ impl NodeHandle {
         spec: NodeSpec,
         fault_injection: FaultInjection,
         config: TestClusterConfig,
-        live: LiveClusterHandle,
+        roots: Arc<ClusterRoots>,
     ) -> Self {
         Self {
             spec,
@@ -3074,13 +3093,22 @@ impl NodeHandle {
             task: OwnedNodeTask::not_started(),
             shutdown: None,
             last_shutdown: None,
-            live,
+            roots,
         }
     }
 
     fn start(&mut self) -> io::Result<()> {
-        if self.task.is_running() {
-            return Ok(());
+        match self.task.state() {
+            NodeTaskState::Running => return Ok(()),
+            // The node this handle launched before is still stopping under its keeper, with the
+            // database and the listeners a fresh launch would need.
+            NodeTaskState::LeftStopping => {
+                return Err(io::Error::other(format!(
+                    "node '{}' was left stopping and cannot be started until it has ended",
+                    self.spec.node_id
+                )));
+            }
+            NodeTaskState::NotStarted | NodeTaskState::Terminal(_) => {}
         }
         if self.config.grpc_mode == InternalTransportMode::Https {
             ensure_dev_tls_assets()?;
@@ -3158,9 +3186,11 @@ impl NodeHandle {
             .build();
         // Published before the task is spawned and handed to that task, so the watchdog sees the
         // node for exactly as long as it runs: the registration leaves the registry when the task
-        // ends, whether it returned, failed, panicked or was aborted.
+        // ends, whether it returned, failed or panicked.
         let live = self
+            .roots
             .live
+            .handle()
             .node_started(&self.spec.node_id, StdArc::new(shutdown.clone()));
         self.shutdown = Some(shutdown);
         self.task = OwnedNodeTask::spawn(async move {
@@ -3200,6 +3230,10 @@ impl NodeHandle {
 
     /// Waits for a node a scenario stopped itself, within the product shutdown deadlines that
     /// scenario configured. Scenario cleanup uses the harness cleanup budget instead.
+    ///
+    /// A node still stopping when the watchdog passes fails the step and keeps its task: it holds
+    /// its databases and its consensus registration until it has ended, so nothing of it is given
+    /// back here.
     async fn wait_stopped(&mut self) -> io::Result<()> {
         let shutdown_timeout = self.shutdown_watchdog_timeout()?;
         let task_result = match self.task.wait(PhaseDeadline::after(shutdown_timeout)).await {
@@ -3215,12 +3249,11 @@ impl NodeHandle {
                     Ok(())
                 }
             }
-            NodeTaskWaitOutcome::AbortedAtDeadline(outcome) => {
-                Err(io::Error::other(NodeShutdownError::Deadline {
+            NodeTaskWaitOutcome::StillRunning | NodeTaskWaitOutcome::LeftStopping => {
+                return Err(io::Error::other(NodeShutdownError::Deadline {
                     node: node_name(&self.spec.node_id),
                     timeout: shutdown_timeout,
-                    outcome,
-                }))
+                }));
             }
         };
         if let Some(shutdown) = self.shutdown.take() {
@@ -3232,6 +3265,15 @@ impl NodeHandle {
             self.ensure_database_unlocked().await?;
         }
         task_result
+    }
+
+    /// Returns this node's ports to the pool unless its task still runs, here or under a keeper,
+    /// which gives them back itself once the node has ended.
+    fn release_ports_once_down(&mut self) {
+        match self.task.state() {
+            NodeTaskState::NotStarted | NodeTaskState::Terminal(_) => self.spec.release_ports(),
+            NodeTaskState::Running | NodeTaskState::LeftStopping => {}
+        }
     }
 
     async fn ensure_database_unlocked(&self) -> io::Result<()> {
@@ -3279,11 +3321,6 @@ impl NodeHandle {
         let status = self.status_endpoint().cluster_status(phase).await?;
         Ok(ClusterStatus::parse(status))
     }
-
-    fn abort(&mut self) {
-        self.shutdown = None;
-        self.task.abort();
-    }
 }
 
 impl StartableNode for NodeHandle {
@@ -3307,16 +3344,21 @@ impl StartableNode for NodeHandle {
 
     /// A node that never became ready has no drain to finish, so its cleanup is the short slice
     /// its startup budget can spare rather than the product's shutdown watchdog. The stop is
-    /// requested first, and the task is aborted and joined when the slice ends. A database lock
-    /// that outlives the abort surfaces as the next attempt's application error, which ends the
-    /// startup with both attempts in its history.
+    /// requested first. A node still stopping when the slice ends keeps its task, its coordinator
+    /// and its consensus registration, and the startup ends rather than launching over the
+    /// database and the listeners it still holds.
     async fn clean_up(&mut self, cleanup: PhaseDeadline) -> AttemptCleanup {
         self.request_stop();
-        let outcome = self.task.wait(cleanup).await;
-        self.shutdown = None;
-        self.fault_injection
-            .unregister_consensus(&node_name(&self.spec.node_id));
-        AttemptCleanup::from(outcome)
+        let outcome = AttemptCleanup::from(self.task.wait(cleanup).await);
+        match outcome {
+            AttemptCleanup::StillStopping => {}
+            AttemptCleanup::NothingLaunched | AttemptCleanup::Stopped(_) => {
+                self.shutdown = None;
+                self.fault_injection
+                    .unregister_consensus(&node_name(&self.spec.node_id));
+            }
+        }
+        outcome
     }
 
     fn move_to_fresh_ports(&mut self) -> io::Result<()> {
@@ -3345,11 +3387,44 @@ impl TeardownNode for NodeHandle {
             .unregister_consensus(&node_name(&self.spec.node_id));
         self.spec.release_ports();
     }
+
+    fn leave_stopping(&mut self) {
+        let node = self.spec.node_id.clone();
+        let ports = self.spec.ports();
+        let fault_injection = self.fault_injection.clone();
+        let roots = self.roots.clone();
+        let left = Instant::now();
+        let kept = self.task.keep_until_ended(move |outcome| {
+            fault_injection.unregister_consensus(&node_name(&node));
+            release_test_ports(&ports);
+            eprintln!(
+                "node '{node}' ended {:?} after it was left stopping: {outcome}",
+                left.elapsed()
+            );
+            // The storage and the watchdog registration go last: the node used both until now.
+            drop(roots);
+        });
+        if kept {
+            self.shutdown = None;
+        }
+    }
 }
 
 impl Drop for NodeHandle {
+    /// A node dropped while it runs is asked to stop and left to end itself with what it holds.
+    /// Aborting its task would end only the future the node was started as and orphan the tasks
+    /// the node spawned, with its databases and its listeners.
     fn drop(&mut self) {
-        self.abort();
+        if !self.task.is_running() {
+            return;
+        }
+        // Without a runtime nothing can run the node's task or a keeper for it, so there is
+        // nothing left to hand over.
+        if Handle::try_current().is_err() {
+            return;
+        }
+        TeardownNode::request_stop(self);
+        self.leave_stopping();
     }
 }
 
@@ -3370,14 +3445,10 @@ enum NodeShutdownError {
         node: ClusterNodeName,
         outcome: Arc<NodeTaskTerminalOutcome>,
     },
-    #[error(
-        "timed out after {timeout:?} waiting for node '{node}' shutdown; terminal task outcome: \
-         {outcome}"
-    )]
+    #[error("timed out after {timeout:?} waiting for node '{node}' shutdown; it is still stopping")]
     Deadline {
         node: ClusterNodeName,
         timeout: Duration,
-        outcome: Arc<NodeTaskTerminalOutcome>,
     },
 }
 
@@ -3539,7 +3610,12 @@ impl NodeSpec {
     /// the release safe, not the stop itself, so a caller that releases while a peer may still dial
     /// the address belongs elsewhere.
     fn release_ports(&mut self) {
-        release_test_ports(&[
+        release_test_ports(&self.ports());
+    }
+
+    /// The seven ports this node listens on.
+    fn ports(&self) -> [u16; 7] {
+        [
             self.grpc_port,
             self.grpc_https_port,
             self.http_port,
@@ -3547,7 +3623,7 @@ impl NodeSpec {
             self.observability_port,
             self.web_console_port,
             self.interconnect_port,
-        ]);
+        ]
     }
 
     fn grpc_addr(&self) -> String {
