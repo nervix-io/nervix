@@ -57,7 +57,7 @@ Feature: Deduplicator and window state in backup archives
       START;
       """
 
-  @restore_installation @deloxide_stress
+  @restore_installation @deloxide_stress_restore
   Scenario Outline: Deduplicator keys and half-filled windows captured at a quiesced cut continue per branch after RESUME
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "10m"
     And the production sticky scheduler is configured
@@ -196,7 +196,7 @@ Feature: Deduplicator and window state in backup archives
       | 1            | 0             |
       | 3            | 1             |
 
-  @restore_installation
+  @restore_installation @deloxide_stress_restore
   Scenario Outline: A stopped restore re-exports identical deduplicator and window sections, an interrupted installation keeps START gated, and WITHOUT STATE installs neither
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "10m"
     And the production sticky scheduler is configured
@@ -300,7 +300,7 @@ Feature: Deduplicator and window state in backup archives
       | 1            | 0             |
       | 3            | 1             |
 
-  @restore_installation @deloxide_stress
+  @restore_installation @deloxide_stress_restore
   Scenario: A delayed coordinator cannot replace resumed deduplicator keys and windows
     Given runtime replication is configured with replica count 1 and snapshot interval "10m"
     And the production sticky scheduler is configured
@@ -387,7 +387,7 @@ Feature: Deduplicator and window state in backup archives
     Then the CLI backup succeeded with a JSON report naming domain "{{domain}}"
     And backup archives "branch-state-before-stale.nvxb" and "branch-state-after-stale.nvxb" have identical deduplicator and window state
 
-  @restore_installation
+  @restore_installation @deloxide_stress_restore
   Scenario Outline: A changed window model or branch incarnation starts an empty window with a restore warning
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "10m"
     And the production sticky scheduler is configured
