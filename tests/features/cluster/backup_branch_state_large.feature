@@ -82,7 +82,7 @@ Feature: Deduplicator keyspaces and windows larger than the bulk budget in backu
       key={"tenant":"large"} | "samples":41 | "total":1339 | "first_latency":12 | "last_latency":70 | "smallest":12 | "largest":70 | "latency_p0":5.0 | "note_bytes":42991616
       """
 
-    @restore_installation
+    @restore_installation @deloxide_stress_restore
     Examples:
       | cluster_size | replica_count |
       | 1            | 0             |
