@@ -19,7 +19,9 @@
 //! failed attempt and every pause between attempts receives only the time left before it. A retry
 //! therefore cannot restart the budget, and the product's shutdown watchdog, which is minutes
 //! long, is never reached once per retry: a node that never became ready has no drain to finish,
-//! so its cleanup is a short slice of what remains and ends in an abort.
+//! so its cleanup is a short slice of what remains. A node still stopping when that slice ends
+//! keeps its database and its listeners until it has stopped, so the startup ends there rather
+//! than launching over it.
 //!
 //! The budget pays for [`FULL_LENGTH_ATTEMPTS`] attempts at their full length. The further launch
 //! [`NODE_START_ATTEMPTS`] allows is reached when an earlier attempt failed fast, which is what a
@@ -62,14 +64,14 @@ pub(crate) const ATTEMPT_READINESS_BUDGET: Duration = Duration::from_secs(36);
 /// policy input: measure it again when the suite, its concurrency or node startup changes.
 const SLOWEST_HEALTHY_NODE_STARTUP: Duration = Duration::from_millis(24_211);
 /// The slice of what remains that cleaning up after a failed attempt may take before the harness
-/// stops waiting for the node and aborts its task. A policy input.
+/// stops waiting for the node. A node still stopping then ends the startup. A policy input.
 const RETRY_CLEANUP_SLICE: Duration = Duration::from_secs(5);
 /// How long the harness waits after cleaning up before it launches again, so an address or a peer
 /// that was busy has a moment to free up. A policy input.
 const RETRY_BACKOFF: Duration = Duration::from_secs(1);
 /// How many launches the budget pays for at their full length, so readiness that never arrives is
 /// waited for again before the harness gives up. A policy input.
-pub(crate) const FULL_LENGTH_ATTEMPTS: u32 = 2;
+const FULL_LENGTH_ATTEMPTS: u32 = 2;
 /// How many times the harness launches one node before it gives up. A policy input: the launches
 /// beyond [`FULL_LENGTH_ATTEMPTS`] are what a launch that fails at once leaves room for.
 pub(crate) const NODE_START_ATTEMPTS: u32 = 3;
@@ -148,8 +150,8 @@ pub(crate) trait StartableNode {
         readiness: PhaseDeadline,
     ) -> error_stack::Result<(), NodeStartupError>;
 
-    /// Stop the node this attempt launched within `cleanup`, aborting and joining its task when
-    /// that slice ends first.
+    /// Ask the node this attempt launched to stop and wait for its task within `cleanup`. A node
+    /// still stopping when that slice ends keeps its task, and the startup does not launch again.
     async fn clean_up(&mut self, cleanup: PhaseDeadline) -> AttemptCleanup;
 
     /// Move the node to freshly allocated ports, so a launch that lost a port race does not
@@ -198,9 +200,11 @@ impl AttemptFailure {
             NodeStartupFailure::DeadlineExpired => StartupRetry::Transient,
             NodeStartupFailure::TaskTerminated => match &error.task_state {
                 NodeTaskState::Terminal(outcome) => Self::terminal_retry(outcome),
-                // A task reported as unstarted or still running did not terminate, so the harness
-                // has no ending to classify and must not launch over it.
-                NodeTaskState::NotStarted | NodeTaskState::Running => StartupRetry::Terminal,
+                // A task reported as unstarted, still running or left stopping did not terminate,
+                // so the harness has no ending to classify and must not launch over it.
+                NodeTaskState::NotStarted
+                | NodeTaskState::Running
+                | NodeTaskState::LeftStopping => StartupRetry::Terminal,
             },
         }
     }
@@ -254,8 +258,9 @@ pub(crate) enum AttemptCleanup {
     NothingLaunched,
     /// The node task ended inside the cleanup slice.
     Stopped(Arc<NodeTaskTerminalOutcome>),
-    /// The cleanup slice ended first, so the harness aborted the task and joined it.
-    AbortedAtDeadline(Arc<NodeTaskTerminalOutcome>),
+    /// The cleanup slice ended first. The node is still stopping, and it holds its database and
+    /// its listeners until it has.
+    StillStopping,
 }
 
 impl From<NodeTaskWaitOutcome> for AttemptCleanup {
@@ -264,7 +269,9 @@ impl From<NodeTaskWaitOutcome> for AttemptCleanup {
             NodeTaskWaitOutcome::NotStarted => Self::NothingLaunched,
             NodeTaskWaitOutcome::AlreadyObserved(outcome)
             | NodeTaskWaitOutcome::Joined(outcome) => Self::Stopped(outcome),
-            NodeTaskWaitOutcome::AbortedAtDeadline(outcome) => Self::AbortedAtDeadline(outcome),
+            NodeTaskWaitOutcome::StillRunning | NodeTaskWaitOutcome::LeftStopping => {
+                Self::StillStopping
+            }
         }
     }
 }
@@ -274,9 +281,7 @@ impl fmt::Display for AttemptCleanup {
         match self {
             Self::NothingLaunched => formatter.write_str("nothing was launched"),
             Self::Stopped(outcome) => write!(formatter, "stopped ({outcome})"),
-            Self::AbortedAtDeadline(outcome) => {
-                write!(formatter, "aborted at the cleanup deadline ({outcome})")
-            }
+            Self::StillStopping => formatter.write_str("still stopping at the cleanup deadline"),
         }
     }
 }
@@ -341,6 +346,11 @@ pub(crate) enum StartupEnd {
     AttemptsSpent,
     #[error("the startup budget ran out before another launch could start")]
     BudgetSpent,
+    #[error(
+        "the node the last attempt launched had not stopped, and a fresh launch cannot take the \
+         database and listeners it still holds"
+    )]
+    StillStopping,
     #[error("fresh ports for the next launch could not be allocated: {0}")]
     PortsUnavailable(io::Error),
 }
@@ -406,6 +416,7 @@ impl<'node> NodeStartup<'node> {
             let cleanup = target
                 .clean_up(self.budget.nested(RETRY_CLEANUP_SLICE))
                 .await;
+            let still_stopping = matches!(cleanup, AttemptCleanup::StillStopping);
             self.record(attempt, failure, retry, cleanup);
 
             if let StartupRetry::Terminal = retry {
@@ -413,6 +424,15 @@ impl<'node> NodeStartup<'node> {
             }
             if attempt == NODE_START_ATTEMPTS {
                 break;
+            }
+            if still_stopping {
+                // A cleanup the spent budget left no time for says nothing about the node, so the
+                // budget is what ended the startup. A node that had its slice and is still
+                // stopping is what ended it otherwise.
+                if self.budget.has_passed() {
+                    return Err(self.exhausted(StartupEnd::BudgetSpent));
+                }
+                return Err(self.exhausted(StartupEnd::StillStopping));
             }
             if let Err(error) = target.move_to_fresh_ports() {
                 return Err(self.exhausted(StartupEnd::PortsUnavailable(error)));

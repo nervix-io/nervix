@@ -738,7 +738,10 @@ identity. An exhausted generation is sealed permanently. A delayed report, termi
 cleanup cannot change a replacement occupying the same position.
 Unused positions are claimed on demand; only retired positions enter the bounded free queues.
 Shutdown seals fresh claims before scanning positions that were ever claimed, so a concurrent
-registrar either occupies a position shutdown visits or finds it closed.
+registrar either occupies a position shutdown visits or finds it closed. The once-a-second silence
+sweep scans the same claimed positions and no others: a share whose first claim races a sweep is
+counted from that sweep or from the first one after its registration, and a node that has forwarded
+nothing sweeps nothing.
 
 Record storage and receiver ACK watches are charged to the relay memory budget. One task per
 admitted batch multiplexes its row watches, with a fixed charge of 1 KiB per row plus 4 KiB for the

@@ -40,7 +40,8 @@ installers a single winner, replacement, teardown, and observers.
 
 `just bench-remote-owners` measures registration, admission, Alive, ordered parking/resume and
 terminal resolution with actual ACK roots at one and 64 rows per delivery, reports delivery tail
-latency and relay-memory reclamation, and measures the full fixed-position empty sweep. Its
+latency and relay-memory reclamation, and measures an empty sweep of the positions its deliveries
+claimed beside the fixed position count. Its
 authenticated frame probe sends three current Arrow rows, admits them, returns the exact terminal
 reply and checks retired attempt counts. A separate 5,000-frame peer-owner probe completes while
 another peer's protocol guard is continuously held and checks returned permits and memory. These
@@ -52,6 +53,19 @@ Each delivery generation owns its mutable rows under one short synchronous guard
 is independent of the other rows. Each side claims unused positions on demand and returns retired
 positions to its own bounded free queue, preserving admission room when delivery positions fill.
 Shutdown seals first claims before closing the queues and visits only positions that were claimed.
+The silence sweep, which runs once a second on every node, has the same bound: it reads each side's
+first-claim count and takes a guard only for the positions below it, so a node that forwards
+nothing takes none and a sweep's cost follows the positions its deliveries have used, not the
+16,384 positions a node is built with. The counts bound the scan and order nothing: a position's
+guard publishes its correlation, and nothing relies on a sweep having observed a claim. A share
+whose first claim races a sweep is counted from that sweep or from the first one after its
+registration, so it still fails between the silence timeout and one sweep interval later. Runtime
+shutdown cancels the sweep task and waits for it, and the task observes the cancellation between
+sweeps, so a sweep's guard count also bounds how long a stopping node waits for it. A diagnostic
+build pays for every one of those guards: the acquisition-order selection enters Deloxide's
+process-wide detector on each tracked acquisition and release, and the nodes of every scenario in
+one process share that detector, which is why a recurring pass takes guards in proportion to its
+live work and never to a fixed capacity.
 Record allocation and receiver batch watcher tasks reserve relay memory before creating their
 retained rows. A batch task multiplexes row progress and keepalive polls every 100 milliseconds;
 each row and the single task have fixed charges. The cadence remains shorter than a one-second
@@ -83,7 +97,8 @@ owns the capacities, grace periods and reconciliation deadlines.
 
 Production-owner Shuttle checks cover delayed events against a reused position, registration
 against shutdown, admission waiter drop against a reply, final silence sweeps against terminal and
-Alive reports, body claim against cancellation, admission against peer ending, and another peer's
+Alive reports, a first claim against a sweep, a sweep that completes while an unclaimed position's
+guard is held, body claim against cancellation, admission against peer ending, and another peer's
 progress while one peer holds its guard. The production admission choice has a Loom model for one
 irreversible verdict; replacing its compare-and-exchange with an overwriting swap must fail and
 replay. ArcSwap, queues and external semaphore internals remain outside that atomic claim.

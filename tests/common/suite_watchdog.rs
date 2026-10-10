@@ -23,8 +23,9 @@
 //! diagnostic is the state the run was actually in: every scenario still active, which attempt of
 //! it is running, the phase it is in, how long it has been in that phase, and the nodes it holds.
 //! It then asks every live node to stop and waits one [`WATCHDOG_CLEANUP_WINDOW`] for all of them
-//! together, and finally drops the run, which aborts the node tasks the scenario worlds own and
-//! kills the child processes they started.
+//! together, and finally drops the run, which kills the child processes the scenario worlds
+//! started and leaves the nodes they still hold to their keepers. Those nodes end with the
+//! runtime when the process drops it.
 //!
 //! # Why the budget is the length it is
 //!
@@ -300,8 +301,9 @@ impl LiveClusterHandle {
     /// Publishes a node whose task has just been spawned.
     ///
     /// The returned registration belongs to that task: the node leaves the registry when the task
-    /// ends, whether it returned, failed, panicked or was aborted. That is what lets the watchdog
-    /// tell a cluster that stopped from one that is still running without owning either.
+    /// ends, whether it returned, failed or panicked, or ended with the runtime. That is what lets
+    /// the watchdog tell a cluster that stopped from one that is still running without owning
+    /// either.
     pub(crate) fn node_started(
         &self,
         name: &str,
@@ -500,7 +502,7 @@ pub(crate) struct WatchdogCleanup {
     pub(crate) elapsed: Duration,
     /// How many nodes were asked to stop.
     pub(crate) asked: usize,
-    /// The clusters still running when the window passed. Dropping the run aborts them.
+    /// The clusters still running when the window passed. They end with the runtime.
     pub(crate) still_live: Vec<LiveCluster>,
 }
 
@@ -640,8 +642,9 @@ impl SuiteWatchdog {
         flush_process_output();
 
         let cleanup = WatchdogCleanup::stop_every_live_node(self.cleanup_window).await;
-        // Dropping the run ends every scenario future the suite still held, which aborts the node
-        // tasks those scenarios own and kills the child processes they started.
+        // Dropping the run ends every scenario future the suite still held, which kills the child
+        // processes those scenarios started and hands the nodes they still hold to keepers. A
+        // node the window could not stop ends when the process drops the runtime.
         drop(run);
         SuiteRun::TimedOut(SuiteTimeout { stall, cleanup })
     }

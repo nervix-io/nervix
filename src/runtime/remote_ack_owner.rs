@@ -65,6 +65,16 @@ enum CorrelationSlot {
     Closed,
 }
 
+/// How many positions each side has handed out for the first time. A side claims its positions in
+/// order, so the positions below its count are the only ones a correlation has ever occupied.
+struct FirstClaims {
+    deliveries: usize,
+    admissions: usize,
+}
+
+/// The positions a correlation has ever occupied, deliveries before admissions.
+type ClaimedPositions = std::iter::Chain<std::ops::Range<usize>, std::ops::Range<usize>>;
+
 struct RemoteCorrelation {
     route: u64,
     state: RemoteCorrelationState,
@@ -551,10 +561,50 @@ impl RemoteDispatchRegistry {
         }
     }
 
+    /// The positions a correlation has ever occupied: each side's first claims, deliveries before
+    /// admissions. Every other position is still as it was built, open and empty.
+    fn claimed_positions(&self, claims: &FirstClaims) -> ClaimedPositions {
+        let admission_end = self
+            .delivery_capacity
+            .checked_add(claims.admissions)
+            .assured(
+                "a side's first claims never exceed the capacity its positions were built for",
+            );
+        (0..claims.deliveries).chain(self.delivery_capacity..admission_end)
+    }
+
+    /// The positions one silence sweep visits: those a side has claimed so far.
+    ///
+    /// A position no registrar has claimed has never held a correlation, so a sweep takes no guard
+    /// for it: a node that forwards nothing sweeps nothing, however many positions it was built
+    /// with. The counts bound the scan and order nothing: the slot guard publishes a correlation,
+    /// and no reader relies on a sweep having observed a claim. A first claim these loads do not
+    /// observe registers beside this sweep, and its silence is counted from the first sweep that
+    /// finds it under its guard.
+    fn swept_positions(&self) -> ClaimedPositions {
+        let claims = FirstClaims {
+            deliveries: self.next_delivery.load(Ordering::Relaxed) & !CLAIMS_CLOSED,
+            admissions: self.next_admission.load(Ordering::Relaxed) & !CLAIMS_CLOSED,
+        };
+        self.claimed_positions(&claims)
+    }
+
+    /// Runs `during` while the guard of `position` is held, for a check of which guards a sweep
+    /// may wait for.
+    #[cfg(all(test, feature = "shuttle"))]
+    pub(super) fn while_position_is_held<T>(
+        &self,
+        position: usize,
+        during: impl FnOnce() -> T,
+    ) -> T {
+        let _held = self.slots[position].lock();
+        during()
+    }
+
     pub(super) fn fail_silent_acks(&self) -> BTreeMap<ClusterNodeName, usize> {
         let mut failed = BTreeMap::new();
-        for (position, slot) in self.slots.iter().enumerate() {
-            let mut slot = slot.lock();
+        for position in self.swept_positions() {
+            let mut slot = self.slots[position].lock();
             let CorrelationSlot::Open {
                 correlation: entry, ..
             } = &mut *slot
@@ -618,17 +668,19 @@ impl RemoteDispatchRegistry {
         // Seal first claims before choosing the scan bounds. A claim won before either seal is
         // included even when its registrar has not reached the slot yet: the slot guard then
         // decides whether registration or shutdown owns its final state.
-        let delivery_claimed =
+        let deliveries =
             self.next_delivery.fetch_or(CLAIMS_CLOSED, Ordering::AcqRel) & !CLAIMS_CLOSED;
-        let admission_claimed = self
+        let admissions = self
             .next_admission
             .fetch_or(CLAIMS_CLOSED, Ordering::AcqRel)
             & !CLAIMS_CLOSED;
+        let claims = FirstClaims {
+            deliveries,
+            admissions,
+        };
         self.deliveries.close();
         self.admissions.close();
-        for position in (0..delivery_claimed)
-            .chain(self.delivery_capacity..self.delivery_capacity + admission_claimed)
-        {
+        for position in self.claimed_positions(&claims) {
             let slot = &self.slots[position];
             let state = std::mem::replace(&mut *slot.lock(), CorrelationSlot::Closed);
             if let CorrelationSlot::Open {

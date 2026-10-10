@@ -28905,19 +28905,22 @@ async fn run_scenarios(parallelism: TestParallelism) -> SuiteOutcome {
                                 "scenario teardown failed: {panicked}"
                             ));
                         }
-                        for forced in teardown.forced() {
-                            append_cucumber_log_line(&format!("scenario cleanup forced: {forced}"));
+                        for unfinished in teardown.still_stopping() {
+                            append_cucumber_log_line(&format!(
+                                "scenario cleanup unfinished: {unfinished}"
+                            ));
                         }
-                        if teardown.was_forced() {
-                            // Cleanup that has to take a node apart is usually cleanup that ran
-                            // beside work heavy enough to starve it, so name what else was live.
+                        if teardown.left_nodes_stopping() {
+                            // A node that outlasts its cleanup is usually one that stopped beside
+                            // work heavy enough to starve it, so name what else was live.
                             for active in ActiveScenario::active() {
                                 append_cucumber_log_line(&format!(
-                                    "scenario live during forced cleanup: {active}"
+                                    "scenario live during unfinished cleanup: {active}"
                                 ));
                             }
                         }
-                        // Dropping the cluster gives back the temporary storage its nodes wrote to.
+                        // Dropping the cluster gives back the temporary storage its nodes wrote
+                        // to, once the last node that was left stopping has ended.
                         drop(cluster);
                         format!("teardown={teardown}")
                     }
@@ -28965,8 +28968,8 @@ async fn run_scenarios(parallelism: TestParallelism) -> SuiteOutcome {
                 append_cucumber_log_line(line);
             }
             if timeout.cleanup.was_forced() {
-                // A node the watchdog could not stop is aborted with the run, so the record of
-                // what it was is this line and nothing else.
+                // A node the watchdog could not stop ends with the run's runtime, so the record
+                // of what it was is this line and nothing else.
                 append_cucumber_log_line(
                     "suite timeout cleanup forced: the run was dropped with nodes still running",
                 );
