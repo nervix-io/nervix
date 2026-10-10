@@ -263,6 +263,12 @@ keeps its hold alive through that observation and publication. Request cancellat
 receiver-owned engagement and its original lease intact; retries await the same operation and
 renew no lease. The preparation deadline separately bounds engagement, drain and capture.
 
+A domain schedule's planning snapshot keeps its captured consensus cordons with two distinct
+identity sets: all live voters and eligible placement destinations. Termination of an already
+cordoned voter leaves both sets unchanged; losing or restarting that voter changes its live
+identity and invalidates the plan. Schedule and transaction publication validate the composed
+destination set and retain the independent consensus topology fence.
+
 ## External Encodings And Conversion Failure
 
 The stopping-node drain action carries a required remaining `Duration` budget. Its sender deducts

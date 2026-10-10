@@ -1076,6 +1076,12 @@ drain report with its kind, name, former owner and typed entity-gate cause, incl
 and work counts when quiescence timed out. Exhausting the remaining unit budget is reported as a
 failed drain instead of waiting for the sender's outer timeout.
 
+Schedule eligibility compares live voter identities and the placement candidates after the
+captured cordons and terminating flags are applied. A cordoned former owner's later terminating
+advertisement is an unchanged planning input. A changed live incarnation or eligible destination
+still reports `SchedulePlanningStale::Eligibility`; changed membership or cordons is rejected
+by the separate topology fence.
+
 A handoff confirms closed admission while its local admitted work and flush can still be pending.
 The coordinator's exact-operation drain query retains the pending node and counts; exhaustion
 reports `DomainAlterError::EntityQuiesceTimeout` and releases the held scope. Independent schedule

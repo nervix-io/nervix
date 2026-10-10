@@ -171,6 +171,12 @@ that is neither cordoned nor a terminating incarnation. `RELOCATE` and `DESCRIBE
 the same checks in a fixed order and name the first one that fails — not a Raft member, then not a
 live Raft voter, then `node '<node_id>' is terminating`, then `node '<node_id>' is cordoned`.
 
+The planning fence uses those composed destination candidates. After the drain's cordon commits,
+observing the former owner's terminating advertisement does not invalidate its pending move:
+that owner was already excluded as a destination. Its live incarnation remains a required input,
+so a restart or loss of that owner still invalidates the captured plan. Changes to other eligible
+destinations and to the committed topology retain their own fences.
+
 ### Cordon Preservation
 
 A graceful shutdown that moves work away cordons the node so its own work does not come back to it

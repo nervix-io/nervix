@@ -15,6 +15,12 @@ The most important property is that control-plane state is authoritative. A runt
 
 Execution graph configuration is part of this control-plane state. NSPL models, domain schedules, and lifecycle transitions are persisted with strong consistency guarantees before runtime nodes execute them. The committed schedule becomes an in-memory typed execution revision at the application boundary; [Execution Plans](./execution-plans.md) describes its installation and recovery.
 
+Schedule planning captures live voter incarnations separately from destination candidates, which
+exclude both terminating incarnations and the captured consensus cordons. Revalidation uses the
+same composed candidate set. A cordoned former owner beginning to terminate leaves that set
+unchanged, while its loss or replacement incarnation still invalidates the plan. The consensus
+publication fence independently checks the captured membership and cordons.
+
 In practice, the control plane covers:
 
 - domain creation and selection

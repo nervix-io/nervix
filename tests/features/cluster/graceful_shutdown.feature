@@ -313,7 +313,8 @@ Feature: Graceful shutdown
       {"amount":10,"tenant":"acme","transaction_id":"txn-1"}
       """
     When node "node-2" is gracefully stopped
-    And these NSPL commands are executed on the active session
+    Then the last shutdown of node "node-2" reports its drain-support phase "Completed"
+    When these NSPL commands are executed on the active session
       """
       SHOW CLUSTER STATUS;
       """

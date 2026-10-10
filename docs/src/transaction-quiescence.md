@@ -198,6 +198,11 @@ transaction id, accepted position, and planning basis. It names the **whole tran
 when inspection focuses on one operation. A coherent preview is current for the inputs it read;
 it does not promise that no other command will change those inputs after inspection.
 
+The captured schedule eligibility records every live voter incarnation and the destination
+candidates after applying termination and consensus cordons. A cordoned voter's terminating
+advertisement changes neither set; its loss or restart changes the live identity set and makes
+the plan stale. The committed topology fence separately rejects changed membership or cordons.
+
 `COMMIT` can name the expected preview. Before engaging a gate or applying an effect, admission
 checks its position and captured inputs. A stale expected preview is refused with both expected
 and current identities; the transaction remains `OPEN` with the same binding and no effect. The
