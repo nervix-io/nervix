@@ -1600,8 +1600,8 @@ class ApplicabilityTests(unittest.TestCase):
         return {
             "configurations": [
                 {"name": "ordinary", "features": ["nervix-deadlock/report-tool"]},
-                {"name": "deloxide", "features": ["native", "deloxide"]},
-                {"name": "deloxide-order-binaries", "features": ["native", "deloxide-order"]},
+                {"name": "deloxide", "features": ["native", "deloxide", "testing"]},
+                {"name": "deloxide-order-binaries", "features": ["native", "deloxide-order", "testing"]},
             ],
             "findings": findings,
         }
@@ -1636,6 +1636,33 @@ class ApplicabilityTests(unittest.TestCase):
         broken = self.catalog(("deloxide", "nervix_primitives::sync::blocking::tracked::Mutex", ""))
         with self.assertRaisesRegex(LaneError, "names no source file"):
             deloxide_lane.catalog_owners(broken)
+
+    def test_testing_only_acquisitions_require_an_owner_in_each_diagnostic_selection(self) -> None:
+        inventory = deloxide_lane.parse_inventory(INVENTORY)
+        tracked = "nervix_primitives::sync::blocking::tracked::Mutex"
+        path = "src/testing_owner.rs"
+        owner = deloxide_lane.Owner(path, ("owner.store",), None)
+        registered = replace(inventory, owners={**inventory.owners, path: owner})
+        for selection in ("deloxide", "deloxide-order", "deloxide-stress"):
+            with self.subTest(selection=selection):
+                catalog = self.catalog(
+                    ("deloxide", tracked, "src/store.rs"),
+                    ("deloxide-order-binaries", tracked, "crates/client/src/lib.rs"),
+                    ("testing-diagnostic", tracked, path),
+                    ("testing", "lock_api::mutex::Mutex", "src/ordinary_testing.rs"),
+                )
+                catalog["configurations"].extend([
+                    {"name": "testing", "features": ["testing"]},
+                    {"name": "testing-diagnostic", "features": ["native", "testing", selection]},
+                ])
+                self.assertEqual(
+                    deloxide_lane.catalog_owners(catalog),
+                    {"src/store.rs", "crates/client/src/lib.rs", path},
+                )
+                problems = deloxide_lane.applicability(inventory, catalog)
+                self.assertEqual(len(problems), 1)
+                self.assertIn(f"{path} acquires tracked blocking locks", problems[0])
+                self.assertEqual(deloxide_lane.applicability(registered, catalog), [])
 
     def test_the_command_reports_owners_and_fails_on_a_gap_in_the_records(self) -> None:
         fixture = Fixture(self)
