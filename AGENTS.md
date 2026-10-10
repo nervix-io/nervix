@@ -142,11 +142,14 @@ behavior, and a compatibility requirement the user states explicitly for the cur
   attachment, resource uploads, node stop and restart as clients observe them, the shared binding
   and measured protocol costs, guarantees and non-guarantees, and observability.
 - [Errors And Diagnostics](docs/src/errors-and-diagnostics.md) is the authoritative architecture
-  reference for typed error ownership, propagation, ordinary outcomes versus failures, validation
-  and planning diagnostics, runtime message errors, cross-node failure classification, public
-  diagnostics, sensitivity, recovery and panic classes, and enforcement. Any change to error types,
-  error or diagnostic propagation, failure classification, or reporting at a layer or public
-  boundary must keep that chapter current in the same change.
+  reference for typed error ownership by layer, how a report is created, given context, inspected
+  and rendered, ordinary outcomes versus failures, row and record outcome channels, the fixed wire,
+  ABI, stored and public outcomes a report is projected into, foreign-trait boundaries, validation
+  and planning diagnostics, runtime message errors, cross-node failure classification, backup and
+  restore failures, public diagnostics, sensitivity and how a branch is named, recovery and panic
+  classes, enforcement and its evidence, and the checklist for adding a fallible operation. Any
+  change to error types, error or diagnostic propagation, failure classification, or reporting at
+  a layer or public boundary must keep that chapter current in the same change.
 - [Consensus Storage And Replication](docs/src/consensus-storage-and-replication.md) is the
   authoritative architecture reference for Raft persistence and catch-up. Any change to consensus
   durability, replication pacing, log reading or retention, snapshot storage or transfer, or the
@@ -681,6 +684,22 @@ build and the existing tests, and nothing in it changes behavior.
   route-local, the operation, and the relevant fields. They never carry sensitive payload values.
 - Hot-path errors do not allocate a formatted message per row or per batch when the variant already
   names the failure. Formatting belongs at the reporting boundary.
+- A report is created at the failure, and each layer that changes its meaning adds its own context
+  with `change_context` above the report it received. Never format a cause into a `String` field,
+  and never clone `current_context()` to satisfy a signature. A fixed wire, ABI, stored or public
+  outcome is projected from the report only where that outcome is constructed.
+- A context names its own operation and does not print its `#[source]`: `error-stack` records the
+  source as the frame beneath, so printing it repeats the cause in the rendered chain. A context
+  does not repeat a node or a domain that a context above it names.
+- A reporting boundary renders a report with `{error:#}`. Plain `Display`, `to_string` and a
+  `%error` tracing field show only the outermost context, and an attachment is not part of the
+  rendered chain.
+- A decision reads typed data: the report's current context, a typed context beneath it, or a typed
+  field. It never reads rendered text.
+- A foreign trait that accepts only a standard error receives one that holds the whole report,
+  never a clone of the report's current context.
+- Text that names a concrete branch names it through the runtime's `BranchScope`, by the
+  fingerprint of its key, never by the key's field values.
 - `Result<_, String>` is rejected outright in product code. `just validate-typed-errors`, part of
   `just validate`, fails on any occurrence and names the rule; there is no baseline to raise. The
   `bare_error_signatures` count in `just ratchet` rejects replacing a `String` error with an
