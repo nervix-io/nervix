@@ -2327,6 +2327,15 @@ ordering it claims, rather than passing because something else synchronized its 
 weakening whose original text no longer appears exactly once fails as well, so changing an owner's
 ordering means revisiting its qualification.
 
+Successful qualifications retain `target/loom-qualification/<qualification-id>/` as well: the
+counterexample checkpoint, the checkpoint advanced during replay, both outputs and metadata with
+the revision, toolchain, exploration bounds and complete registered weakening. CI uploads these
+records whether the qualification job passes or fails. To replay a retained counterexample, restore
+its recorded revision, apply its recorded weakening in an isolated worktree and run
+`just test-loom-replay <directory>`; replay against the unweakened owner is a different check.
+The isolated build copy is still removed after qualification, and an unsuccessful control retains
+its output and any checkpoint it produced.
+
 Loom models a `SeqCst` access as an acquire or a release, and models only `fence(SeqCst)` exactly. A
 protocol in which each side writes one location and then reads the other, such as a dispatch that
 raises the in-flight count before it reads the closed flag while a fence closes the gate before it

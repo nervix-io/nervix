@@ -955,10 +955,12 @@ build and the existing tests, and nothing in it changes behavior.
   join or an extra lock, or a real atomic does not qualify. Name the invariant with an
   `InvariantId`, explore it through `nervix_model_harness::loom::explore`, register it in
   `crates/model-harness/loom-inventory.toml`, and register a `[[qualification]]` weakening that
-  must make the model fail. A standalone relaxed counter carries no cross-location claim, and an
-  operation inside an opaque dependency is excluded from a claim rather than given a fictional
-  model. A store-load claim, in which each side writes one location and then reads the other's,
-  holds only under sequential consistency, which acquire and release do not give and Loom cannot
+  must make the model fail. Successful qualifications retain their counterexample checkpoint,
+  replay checkpoint, both outputs and source, bounds and weakening metadata; CI uploads those
+  records on success as well as failure. A standalone relaxed counter carries no cross-location
+  claim, and an operation inside an opaque dependency is excluded from a claim rather than given
+  a fictional model. A store-load claim, in which each side writes one location and then reads
+  the other's, holds only under sequential consistency, which acquire and release do not give and Loom cannot
   check, because it models `SeqCst` accesses as acquire and release. The side off the hot path
   therefore reads the other side's location by read-modify-write, so acquire and release decide the
   claim and Loom can check it.

@@ -1644,13 +1644,13 @@ jobs:
           path: ${{ runner.temp }}/kache-report
           if-no-files-found: warn
 
-      # A failed qualification is only reproducible from its weakened run; this job is the only
-      # witness of it.
+      # Each successful negative control retains its counterexample and checkpoint replay too.
+      # The isolated weakened source copy is gone by the time these records are uploaded.
       - name: Upload Loom qualification evidence
-        if: failure()
+        if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: loom-qualification-failures-${{ matrix.shard }}
+          name: loom-qualification-evidence-${{ matrix.shard }}
           path: |
             target/loom-qualification/*/*.log
             target/loom-qualification/*/*.json
