@@ -983,6 +983,13 @@ stopped, interrupts its first re-export partway through a section, which publish
 re-exports it again with every value identical while each node stays within its bulk budget. It
 then restores that archive with `RESUME` and backs up the running domain, whose every lifecycle
 branch and partition offset is the same.
+The native metadata restore scenario also restarts the restored owner and replicas, preserves
+their placements and exact stored values, and checks subsequent Kafka input and isolated output
+for both tenants. `just test-native-metadata-restore-repeat` qualifies its three-node example ten
+consecutive times with concurrency four and no retries. Each attempt retains its source revision,
+source patch, scenario output and node logs under `target/native-metadata-restore`; only ten passing
+examples produce a completion record. The same scenario remains registered in both complete
+Deloxide selections, which additionally exercise the tracked blocking locks on the restore path.
 The deduplicator and window one-node and three-node scenarios re-export a stopped restore with
 identical descriptors and Arrow groups, stop an installation before its first deduplicator or
 window checkpoint, which leaves `START` gated, and release a delayed coordinator's publication

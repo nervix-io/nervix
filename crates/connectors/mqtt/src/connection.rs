@@ -21,15 +21,17 @@
 //! does. The driver then completes TLS against the configured host, so an `mqtts` broker's
 //! certificate must name that host whichever of its addresses was dialled.
 //!
-//! A failed lookup reaches the driver as the resolver's [`DnsLookupError`], which the driver keeps
-//! as the cause of the connection error it reports; [`MqttConnectionError::report`] finds it
-//! there again. A connection is never closed because its host's answer changed or expired; the
+//! A failed lookup reaches the driver as the resolver's [`DnsLookupReport`], which the driver keeps
+//! as the cause of the connection error it reports; [`MqttConnectionError::report`] finds the
+//! [`DnsLookupError`] in it there again. A connection is never closed because its host's answer changed or expired; the
 //! next connection uses the new answer.
 
 use std::{io, time::Duration};
 
 use error_stack::Report;
-use nervix_dns::{ConnectionBudget, DnsLookupError, DnsLookupFailure, DnsResolver};
+use nervix_dns::{
+    ConnectionBudget, DnsLookupError, DnsLookupFailure, DnsLookupReport, DnsResolver,
+};
 use nervix_primitives::{net::TcpStream, time::timeout};
 use rumqttc::{ConnectionError, MqttOptions, NetworkOptions};
 use thiserror::Error;
@@ -111,7 +113,7 @@ impl MqttDialer {
         let resolved = self.dns.resolve(host, port, budget.remaining()).await;
         let addresses = match resolved {
             Ok(addresses) => addresses,
-            Err(report) => return Err(io::Error::other(report.current_context().clone())),
+            Err(report) => return Err(io::Error::other(DnsLookupReport::from(report))),
         };
         let mut failure = io::Error::new(
             io::ErrorKind::NotFound,

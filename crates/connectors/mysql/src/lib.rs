@@ -114,7 +114,7 @@ enum MySqlWriteError {
     Pool { reason: String },
     #[error("MySQL insert failed with SQLSTATE {state} and code {code}")]
     Server { state: String, code: u16 },
-    #[error("MySQL insert failed: {0}")]
+    #[error("MySQL insert failed")]
     Execute(#[source] mysql_async::Error),
 }
 
@@ -930,6 +930,20 @@ mod tests {
             .expect_err("an update needs mapped values");
         let report = MySqlWriteError::into_report(failure);
         assert!(report.contains::<MySqlWriteError>());
+    }
+
+    #[test]
+    fn a_driver_failure_names_its_cause_once() {
+        let failure = mysql_async::Error::Driver(mysql_async::DriverError::PoolDisconnected);
+        let cause = failure.to_string();
+        let report = MySqlWriteError::report_execute(failure);
+        let rendered = format!("{report:#}");
+
+        assert!(
+            rendered.starts_with(&format!("MySQL insert failed: {cause}")),
+            "{rendered}"
+        );
+        assert_eq!(rendered.matches(&cause).count(), 1, "{rendered}");
     }
 
     #[test]

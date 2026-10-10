@@ -2341,7 +2341,7 @@ pub enum ProtobufJsonOperation {
 /// A schema, Arrow record, or scalar projection that cannot satisfy its exact runtime contract.
 #[derive(Debug, Error)]
 pub enum RuntimeSchemaError {
-    #[error("invalid protobuf descriptor set: {source}")]
+    #[error("invalid protobuf descriptor set")]
     InvalidProtobufDescriptorSet {
         #[source]
         source: prost_reflect::DescriptorError,
@@ -2492,7 +2492,7 @@ pub enum RuntimeSchemaError {
     NotSequence { field: String, found: ParseAsType },
     #[error("field '{field}' list contains null at index {index}")]
     NullListElement { field: String, index: usize },
-    #[error("runtime DATETIME is not valid RFC 3339: {source}")]
+    #[error("runtime DATETIME is not valid RFC 3339")]
     InvalidRuntimeDatetime {
         #[source]
         source: chrono::ParseError,
@@ -2901,7 +2901,9 @@ impl<'de> Deserialize<'de> for RuntimeValue {
         D: Deserializer<'de>,
     {
         let value = SerializableRuntimeValue::deserialize(deserializer)?;
-        Self::try_from(value).map_err(serde::de::Error::custom)
+        // A value that does not convert keeps its parser's error beneath the context, so the
+        // message is the whole chain.
+        Self::try_from(value).map_err(|report| serde::de::Error::custom(format!("{report:#}")))
     }
 }
 
@@ -5214,6 +5216,62 @@ mod tests {
         for<'a> <N as TryFrom<&'a str>>::Error: std::fmt::Debug,
     {
         N::try_from(raw).expect("valid name")
+    }
+
+    #[test]
+    fn a_runtime_datetime_that_is_not_rfc3339_names_the_parser_error_once() {
+        let parse_cause = DateTime::parse_from_rfc3339("yesterday")
+            .expect_err("the text is not RFC 3339")
+            .to_string();
+        let converted =
+            RuntimeValue::try_from(SerializableRuntimeValue::Datetime("yesterday".to_string()))
+                .expect_err("the text is not RFC 3339");
+        let deserialized = serde_json::from_value::<RuntimeValue>(serde_json::json!({
+            "type": "Datetime",
+            "value": "yesterday",
+        }))
+        .expect_err("the text is not RFC 3339");
+
+        assert_eq!(
+            format!("{converted:#}"),
+            format!("runtime DATETIME is not valid RFC 3339: {parse_cause}")
+        );
+        assert_eq!(
+            deserialized.to_string(),
+            format!("runtime DATETIME is not valid RFC 3339: {parse_cause}")
+        );
+    }
+
+    #[test]
+    fn an_inconsistent_descriptor_set_names_the_descriptor_error_once() {
+        let file = prost_types::FileDescriptorProto {
+            name: Some("broken.proto".to_string()),
+            package: Some("nervix.test".to_string()),
+            message_type: vec![prost_types::DescriptorProto {
+                name: Some("Event".to_string()),
+                field: vec![prost_types::FieldDescriptorProto {
+                    name: Some("missing".to_string()),
+                    number: Some(1),
+                    r#type: Some(prost_types::field_descriptor_proto::Type::Message.into()),
+                    type_name: Some(".nervix.test.Missing".to_string()),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }],
+            syntax: Some("proto3".to_string()),
+            ..Default::default()
+        };
+        let set = prost_types::FileDescriptorSet { file: vec![file] };
+        let descriptor_cause = prost_reflect::DescriptorPool::from_file_descriptor_set(set.clone())
+            .expect_err("the field names a message the set does not define")
+            .to_string();
+        let error = ProtobufDescriptorPool::from_file_descriptor_set(set)
+            .expect_err("the field names a message the set does not define");
+
+        assert_eq!(
+            format!("{error:#}"),
+            format!("invalid protobuf descriptor set: {descriptor_cause}")
+        );
     }
 
     fn schema() -> CreateSchema {

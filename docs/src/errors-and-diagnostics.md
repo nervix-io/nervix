@@ -46,7 +46,12 @@ operation, node, route, branch, placement, or target as context while retaining 
 report. It does not format a cause into a string and then classify that text as a new failure.
 Values a caller acts on belong in typed fields; display formatting happens when the result is
 reported. `anyhow` remains at integration and tooling boundaries whose caller has no domain choice
-to make, such as a foreign callback that only accepts a general error.
+to make. A foreign trait that accepts only a standard error receives one that holds the whole
+report, never a clone of the report's current context: the DNS hooks hand Hyper, Reqwest, Smithy,
+MQTT and Redis a `DnsLookupReport`, and the owner's own lookup, `DnsLookupError::find_in`, recovers
+the typed failure from the causes the library wraps around it. The node's command-line value
+parsers return a refusal that displays the whole chain, because clap prints only the plain
+`Display` of the error a parser returns.
 
 Runtime reporting renders every context in the report it receives, using alternate `Display`
 (`{error:#}`), including report-bearing tracing fields. Clock arithmetic and attachment, source
@@ -354,7 +359,9 @@ leader, and a call without valid credentials ends with `UNAUTHENTICATED`. The cl
 `BackupDownloadError` beneath `ClientError::BackupDownload`, which carries the backup's execution
 reference: the server's refusal, a transport failure, a stalled or interrupted stream, a missing
 leader or a redirect loop, frames out of order or undecodable, an archive that differs from the
-backup's summary, or a local write failure. Only a transport failure, a stall, and an interrupted
+backup's summary, or a local write failure. An undecodable frame and a request that does not
+encode keep the codec's report beneath `InvalidFrame` and `EncodeRequest`, rather than a copy of
+its error in the context. Only a transport failure, a stall, and an interrupted
 stream are retried, from the archive's first byte. The C binding classifies a refusal as
 `NX_ERROR_REJECTED`, a transport failure as `NX_ERROR_TRANSPORT`, a mismatched or malformed
 archive as `NX_ERROR_PROTOCOL`, and a write failure as `NX_ERROR_INVALID_ARGUMENT`, and names the
@@ -1328,12 +1335,32 @@ measure. A node given such a value on its command line or in an environment vari
 option and the reason and exits with status 2 before it starts. A dropped result with no stated
 recovery class does not establish that it was handled.
 
+The rest of the benchmark tooling returns reports too. Catalog discovery and loading name the
+benchmark, the implementation and the file, and a template that does not compile or render keeps
+the template engine's diagnostic beneath it once. A metrics report names the line, metric, series
+or quantile it could not use, with the reason as a typed cause, such as a sample value that is not
+a number or a histogram whose buckets decrease. A comparison names the run directory and the
+artifact it could not load, an A/B summary the arm whose artifact failed, and topic provisioning
+the topic and the partition count it waited for. The benchmark command adds the benchmark and
+implementation it was running above those reports and above the client's own report of a
+connection or statement, and prints the whole report when it exits with status 1; `run-all`
+records each failed implementation with its chain.
+
 The former `result_string_errors` debt measure is now a zero-tolerance rule:
 `just validate-typed-errors`, run by `just validate`, rejects `Result<_, String>` in product code
-without a baseline. `just ratchet` still counts `bare_error_signatures`: a Nervix error returned
-without an `error-stack` report cannot increase that debt, including a locally owned error nested
-in a `Future` output or `Stream` item callback contract. The ratchet also guards raw dropped
-outcomes and panic sites. For a new fallible site, a reviewer asks in order: which layer decides its
+without a baseline. `just ratchet` holds `bare_error_signatures` at zero, so a signature that
+returns a Nervix error without an `error-stack` report fails it. It reads a `Result` returned
+directly, as the output of a `Future` or the item of a `Stream` a callback contract names, and
+through a free type alias of such a `Result`; a file that imports `error_stack::Result` writes it as
+a bare `Result`, which is already a report. Three shapes return no Nervix error without a report,
+and it does not count them: an associated type whose trait defines the shape, such as a wire
+request's response; the error types a modeled primitive adapter declares to keep its library's
+interface, such as the Shuttle watch channel's mirror of Tokio's `RecvError`, which the ratchet
+lists by file; and a foreign trait that accepts only a standard error, which receives the report
+inside one, as above. A typed per-row or per-record outcome stays in its outcome channel, and a
+fixed wire, ABI or stored outcome is projected from a report only where it is constructed: the
+items of the consensus append stream are the wire records it answers with. The ratchet also guards
+raw dropped outcomes and panic sites. For a new fallible site, a reviewer asks in order: which layer decides its
 meaning; whether it is an ordinary outcome, a recoverable failure, or a broken invariant; which
 typed fields let the caller act; which context must cross each boundary; and which public
 diagnostic or recovery class closes the path. That classification must preserve branch and
