@@ -1810,6 +1810,13 @@ diagnostic compilation and execution after its prerequisites, a bound for every 
 grace period, the reserve the scenario binary keeps for its own teardown inside its invocation's
 bound, and how many scenarios run at once, which is the same on every machine.
 
+The fault harness shares its observation and release barriers through
+`src/fault_injection/pause.rs`. The barrier owns watch-backed reached, released and delivered
+state and the one-shot atomic claim; fault selection remains in the harness's owning modules.
+These async observations introduce no tracked blocking-lock owner. Deloxide continues to measure
+the registered product locks, while the public scenarios and model checks exercise pause ordering
+at their applicable boundaries.
+
 The registered `@restarted_voter_observation` workload reaches whole-cluster restart and automatic scheduling when the leader first hears a voter through a relayed heartbeat. Its test-only watch channels and concurrent fault map are untracked. The registered native metadata restore workload exercises distributed Kafka checkpoint replication, acknowledgement, restart and exact restoration above the resident replication message budget; its stream waits and assignment atomics retain their complementary checks.
 
 For each invocation the lane builds the selection's executable, lists what the build holds or reads
