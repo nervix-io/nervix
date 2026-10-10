@@ -1170,8 +1170,12 @@ entity, through two replication-class request kinds and, when a checkpoint advan
 A state synchronization request names one placement and the revision the replica holds of it. The
 owner answers through the actual state handle published when that placement was installed: with
 the newer checkpoint's revision, length and BLAKE3 digest, or with nothing when it is current.
-The owner reads storage only when it holds no live state for the placement. The replica opens a
-Snapshot-subquota bulk stream for the described revision; the owner refuses a revision it no longer
+The owner reads storage only when it holds no live state for the placement.
+
+Branch-aggregate metrics retain the exact encoded bytes first selected for each dirty revision;
+elapsed times are captured once. Describing, streaming and persisting that revision therefore
+agree byte for byte, and restoration retains the incoming bytes until the next metric update.
+The replica opens a Snapshot-subquota bulk stream for the described revision; the owner refuses a revision it no longer
 holds. Chunks are at most the configured bulk chunk size (64 KiB by default). Each side admits the
 whole captured or received allocation against `restore_metadata`, up to a 256 MiB checkpoint
 transfer bound. The replica checks the stream's declared length, received length and digest before

@@ -118,6 +118,7 @@ tags = [
   "@shutdown_kafka_handoff",
   "@shutdown_leader_change",
   "@shutdown_flush_before_freeze",
+  "@metrics_checkpoint_handoff",
 ]
 target = "test:scenarios"
 
@@ -1495,6 +1496,46 @@ invocation = "stress-restore-scenarios"
 scenario = "Guest saves above the bulk budget stream, retry and resume on <cluster_size> nodes"
 selections = ["deloxide-stress-restore"]
 
+[[workload]]
+coverage = "Exact metric checkpoint bytes, window state and branch lifecycle through a graceful owner drain."
+examples = 1
+feature = "tests/features/runtime/window_processor.feature"
+id = "scenario.window-metrics-drain"
+invariant = "A graceful drain transfers exact checkpoint revisions and incomplete windows for both tenant branches without early output."
+invocation = "scenarios"
+scenario = "Graceful owner drain retains incomplete branch windows without emitting them early"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
+coverage = "Exact metric checkpoint bytes, window state and branch lifecycle through explicit relocation."
+examples = 1
+feature = "tests/features/runtime/window_processor.feature"
+id = "scenario.window-metrics-relocation"
+invariant = "A window relocation transfers exact checkpoint revisions and preserves incomplete aggregates in two interleaved tenant branches."
+invocation = "scenarios"
+scenario = "Relocating a window owner preserves incomplete branch-local exact aggregates"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
+coverage = "Under scheduling stress: exact metric and incomplete window checkpoints across graceful owner drain."
+examples = 1
+feature = "tests/features/runtime/window_processor.feature"
+id = "stress.window-metrics-drain"
+invariant = "A graceful drain transfers exact checkpoint revisions and incomplete windows for both tenant branches without early output."
+invocation = "stress-restore-scenarios"
+scenario = "Graceful owner drain retains incomplete branch windows without emitting them early"
+selections = ["deloxide-stress-restore"]
+
+[[workload]]
+coverage = "Under scheduling stress: exact metric and branch-local incomplete window checkpoints across relocation."
+examples = 1
+feature = "tests/features/runtime/window_processor.feature"
+id = "stress.window-metrics-relocation"
+invariant = "A window relocation transfers exact checkpoint revisions and preserves incomplete aggregates in two interleaved tenant branches."
+invocation = "stress-restore-scenarios"
+scenario = "Relocating a window owner preserves incomplete branch-local exact aggregates"
+selections = ["deloxide-stress-restore"]
+
 [[owner]]
 path = "crates/checkpoint-replication/src/replication.rs"
 workloads = [
@@ -1859,7 +1900,14 @@ workloads = [
 
 [[owner]]
 path = "src/runtime/branch_aggregated_state.rs"
-workloads = ["scenario.client-alter-drain", "stress.client-alter-drain"]
+workloads = [
+  "scenario.client-alter-drain",
+  "stress.client-alter-drain",
+  "scenario.window-metrics-drain",
+  "scenario.window-metrics-relocation",
+  "stress.window-metrics-drain",
+  "stress.window-metrics-relocation",
+]
 
 [[owner]]
 path = "src/runtime/branch_lifecycle_state.rs"

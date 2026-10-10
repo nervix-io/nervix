@@ -927,6 +927,11 @@ WASM branch resumes the state it checkpointed. The restore reads only the node's
 processor's execution plan, which carries the schema a window's retained rows are read under, so it
 does not wait for the domain's routing, which installation publishes after it starts the tasks.
 
+The entity's branch-aggregate metric checkpoint also retains exact bytes for its revision, including
+elapsed metric fields. Capture, persistence and bulk transfer agree on those bytes while the handoff
+gate is held, and the recovering owner retains them until its next dirty metric revision.
+See [checkpoint synchronization](./interconnect.md).
+
 A restore installs every branch or none. It builds each branch and opens its retained state first,
 starts the branch tasks only once all of them are built, and releases a transferred checkpoint only
 after that. When a branch cannot be built, because storage cannot be read, a checkpoint does not

@@ -564,6 +564,12 @@ its selected namespace and validates that it remains current before writing. The
 marker is required for nonempty checkpoint storage; corruption or absence fails explicitly and
 requires recreation rather than inventing a namespace for the stored keys.
 
+A branch-aggregate metric checkpoint revision identifies one exact encoded payload. Capture
+retains its elapsed fields once, so another descriptor, stream or persistence request cannot choose
+different bytes for that revision. Initial, replica and persisted recovery preserve the received
+bytes with their revision. A dirty metric update selects the next revision; a snapshot mutex
+serializes capture and installation at that placement's cold boundary.
+
 Active chunk maintenance validates the placement and fixed revision/offset coordinates before
 forming a chunk-set cursor. A set remains referenced only when the same view's selected header is
 segmented and names that exact revision. A missing or inline header is an ordinary unreferenced

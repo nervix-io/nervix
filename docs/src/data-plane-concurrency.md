@@ -540,8 +540,16 @@ that route from one immutable publication, never from the state, execution or id
 An announcer retains its selected route for its whole lifetime and reads the current primary and
 replica set from the assignment slot.
 
-Branch-aggregate byte capture keeps the existing narrow `lifecycle_call` expectation for
-scanning the metrics inventory at an explicit snapshot boundary. State-route selection uses the
+Branch-aggregate byte capture keeps the narrow `lifecycle_call` expectation for scanning the
+metrics inventory at an explicit snapshot boundary. Each placement retains one encoded snapshot
+under its own blocking mutex. Capture reads the dirty revision first and chooses that revision's
+bytes once; subsequent descriptors, streams and persistence reuse them, including elapsed metric
+fields. Initial, replica and persisted recovery install the received bytes with their revision.
+The guard serializes capture and installation, covers only that placement's snapshot work and
+never crosses an await. Metric recording advances the dirty revision without taking this guard;
+the next capture includes those measurements. The guard belongs to cold checkpoint work, not to
+record or batch execution. The two interleaved-tenant window drain and relocation scenarios run
+in both diagnostic selections and the stressed restore selection. State-route selection uses the
 installed state handle and retained assignment slot.
 Checkpoint synchronization sends a bounded revision, length and digest description through that
 selected route. The replica fetches the exact revision through the bulk pool, admits the whole

@@ -1082,6 +1082,11 @@ advertisement is an unchanged planning input. A changed live incarnation or elig
 still reports `SchedulePlanningStale::Eligibility`; changed membership or cordons is rejected
 by the separate topology fence.
 
+Relocation validates membership and liveness, then reports a committed cordon as
+`RelocationError::DestinationCordoned`. A remaining placement exclusion reports
+`DestinationTerminating`. The cordon-filtered destination set does not classify a live cordoned
+voter as terminating.
+
 A handoff confirms closed admission while its local admitted work and flush can still be pending.
 The coordinator's exact-operation drain query retains the pending node and counts; exhaustion
 reports `DomainAlterError::EntityQuiesceTimeout` and releases the held scope. Independent schedule
