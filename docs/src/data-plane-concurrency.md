@@ -360,6 +360,26 @@ Per-row mutation is kept close to the lane that orders it. A global concurrent m
 those lanes, not the owner of their inner state. Once a task has found its lane, later mutation does
 not repeatedly acquire the registry guard.
 
+### Ownership handoff drain before freeze
+
+The runtime closes intake and the affected boundary gates, then requests a force flush. The
+engagement owner polls local affected drain status before publishing ownership freezes. An ingestor
+route or processor must be able to complete its requested flush while that drain is pending. A
+held handoff therefore has both a drained local scope and immutable state ready for capture.
+
+This is lifecycle work: the polls read existing quiesce and acknowledgement registries, and hot
+paths continue to retain their counters and freeze publications. The existing force-flush and
+quiesce checks cover completion visibility; freeze checks cover publication and wakeup order.
+The ownership drain reads force-flush obligations before admitted-work counts. Acquiring a
+completed flush therefore makes a parked message that the flush resumed visible to that drain.
+`loom_an_ownership_handoff_drain_sees_work_resumed_before_flush_completion` exercises the production
+counter method; its qualification weakens that method's existing acquire. The handoff publication
+check races the production freeze decision against the actual participant's flush completion.
+The public shutdown regression holds an admitted Kafka route until handoff publishes its flush
+request, then verifies completed drain and exactly one acknowledged output. The diagnostic lane
+registers that path in all three selections; async wakeups, transport and deadlines remain outside
+tracked blocking-lock detection.
+
 ### Emitter payload assembly
 
 One emitter task owns the released carriers and their flush order. Its batch packer borrows each

@@ -10972,6 +10972,63 @@ async fn given_entity_gate_pause(world: &mut ScenarioWorld, domain: String) {
     world.fault_injection.pause_entity_gate(domain);
 }
 
+#[given(expr = "ingestor {string} pauses before polling its route")]
+async fn given_ingestor_route_poll_pause(world: &mut ScenarioWorld, ingestor: String) {
+    world
+        .fault_injection
+        .pause_ingestor_route_poll(world.ingestor_dispatch_ref(&ingestor));
+}
+
+#[then(expr = "ingestor {string} reaches the route poll pause")]
+async fn then_ingestor_route_poll_pause(world: &mut ScenarioWorld, ingestor: String) {
+    let ingestor = world.ingestor_dispatch_ref(&ingestor);
+    nervix_primitives::time::timeout(
+        Duration::from_secs(10),
+        world
+            .fault_injection
+            .wait_for_ingestor_route_poll_pause(&ingestor),
+    )
+    .await
+    .expect("the route must reach its armed poll pause");
+}
+
+#[when(expr = "ingestor {string} leaves the route poll pause")]
+async fn when_ingestor_route_poll_pause_released(world: &mut ScenarioWorld, ingestor: String) {
+    world
+        .fault_injection
+        .release_ingestor_route_poll_pause(&world.ingestor_dispatch_ref(&ingestor));
+}
+
+#[given(expr = "ownership handoff for domain {string} pauses after requesting flush")]
+async fn given_ownership_handoff_flush_pause(world: &mut ScenarioWorld, domain: String) {
+    let domain = nervix_models::DomainName::try_from(expand_placeholders(world, &domain).as_str())
+        .assured("the scenario domain is valid");
+    world.fault_injection.pause_ownership_handoff_flush(domain);
+}
+
+#[then(expr = "the ownership handoff flush pause for domain {string} is reached")]
+async fn then_ownership_handoff_flush_pause(world: &mut ScenarioWorld, domain: String) {
+    let domain = nervix_models::DomainName::try_from(expand_placeholders(world, &domain).as_str())
+        .assured("the scenario domain is valid");
+    nervix_primitives::time::timeout(
+        Duration::from_secs(10),
+        world
+            .fault_injection
+            .wait_for_ownership_handoff_flush_pause(&domain),
+    )
+    .await
+    .expect("handoff must publish its flush request and reach its pause");
+}
+
+#[when(expr = "the ownership handoff flush pause for domain {string} is released")]
+async fn when_ownership_handoff_flush_pause_released(world: &mut ScenarioWorld, domain: String) {
+    let domain = nervix_models::DomainName::try_from(expand_placeholders(world, &domain).as_str())
+        .assured("the scenario domain is valid");
+    world
+        .fault_injection
+        .release_ownership_handoff_flush_pause(&domain);
+}
+
 #[given(expr = "ingestor {string} pauses inside dispatch")]
 async fn given_ingestor_dispatch_pause(world: &mut ScenarioWorld, ingestor: String) {
     let ingestor = world.ingestor_dispatch_ref(&ingestor);

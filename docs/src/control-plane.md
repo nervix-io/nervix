@@ -606,6 +606,14 @@ buffers and active publishing, and an Iceberg emitter's staged commit. Internal 
 producer moves with the same hard group remain open so admitted work can reach the group's output
 boundary.
 
+Before publishing the ownership freeze, each participant requests a force flush and drains its
+local affected work with the intake and boundary gates already closed. Routes and processors can
+therefore finish the obligations that make their state ready to capture. A held handoff denotes
+that completed drain and the installed freeze; frozen owners retain their state until capture and
+activation finish. Preparation retains its original deadline, distinct from the gate lease that
+protects activation. Repeated engagement requests use the same coordination identity and scope;
+a bounded reply timeout does not create another flush or restart the lease.
+
 Nervix writes the new schedule only after that drain succeeds. A drain writes and activates one hard
 group or independent node at a time. Placement consolidation gates all of its moved groups together
 and publishes its model and assignments in one schedule update. Only moved runtime nodes restart;

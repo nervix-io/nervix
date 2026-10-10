@@ -494,6 +494,14 @@ roots, emitter buffers and active publishing, and an Iceberg emitter's staged co
 schedule is written only after that drain succeeds, and the fence opens only after the destination
 activates the published revision.
 
+Before publishing the ownership freeze, each participant requests a force flush and drains its
+local affected work with the intake and boundary gates already closed. Routes and processors can
+therefore finish the obligations that make their state ready to capture. A held handoff denotes
+that completed drain and the installed freeze; frozen owners retain their state until capture and
+activation finish. Preparation retains its original deadline, distinct from the gate lease that
+protects activation. Repeated engagement requests use the same coordination identity and scope;
+a bounded reply timeout does not create another flush or restart the lease.
+
 Every step of the handoff carries one coordination identity, composed of the coordinating node, its
 process incarnation, and a sequence. The receiver verifies that identity against the authenticated
 connection before the request is handled, so a different node cannot use it and a restarted

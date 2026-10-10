@@ -134,3 +134,33 @@ fn shuttle_a_message_a_flush_resumed_is_seen_by_a_drain_that_sees_the_flush_comp
         });
     });
 }
+
+/// A handoff that sees flush completion must also see work that flush resumed.
+#[test]
+fn shuttle_an_ownership_handoff_drain_sees_work_resumed_before_flush_completion() {
+    check_random_and_pct(|| {
+        shuttle::future::block_on(async {
+            let sources = Arc::new(OneRelayAndNode::new());
+            sources.counters.begin_force_flush_obligation();
+            let mut message = NodeQuiesceWorkGuard::begin(sources.counters.clone());
+            message.park_for_required_materialized_state();
+            let flushing_sources = sources.clone();
+            let flushing = nervix_primitives::task::spawn(async move {
+                message.resume_from_required_materialized_state();
+                flushing_sources.counters.complete_force_flush_obligation();
+                message
+            });
+            let work = sources
+                .counters
+                .outstanding_work_for(nervix_interconnect::EntityGatePurpose::OwnershipHandoff);
+            let resumed = flushing
+                .await
+                .assured("the real flush resumes one parked message");
+            assert!(
+                work != 0,
+                "an ownership drain must see either the outstanding flush or the work it resumed"
+            );
+            drop(resumed);
+        });
+    });
+}

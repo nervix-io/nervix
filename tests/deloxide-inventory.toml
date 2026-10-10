@@ -104,6 +104,7 @@ tags = [
   "@shutdown_cordon_release",
   "@shutdown_kafka_handoff",
   "@shutdown_leader_change",
+  "@shutdown_flush_before_freeze",
 ]
 target = "test:scenarios"
 
@@ -1007,6 +1008,26 @@ invocation = "stress-scenarios"
 scenario = "A stopping follower resumes its remaining ownership moves after the leader changes"
 selections = ["deloxide-stress"]
 
+[[workload]]
+coverage = "Tracked entity-gate and force-flush ownership during shutdown with a route held before its next poll. Async route wakeups, network delivery and deadlines are untracked."
+examples = 1
+feature = "tests/features/cluster/graceful_shutdown.feature"
+id = "scenario.shutdown-flush-before-freeze"
+invariant = "The handoff releases admitted Kafka route output before freezing state, completes shutdown and delivers exactly one acknowledged payload."
+invocation = "scenarios"
+scenario = "A stopping ingestor flushes its admitted route before freezing ownership state"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
+coverage = "Tracked entity-gate and force-flush ownership during shutdown with a route held before its next poll. Async route wakeups, network delivery and deadlines are untracked."
+examples = 1
+feature = "tests/features/cluster/graceful_shutdown.feature"
+id = "stress.shutdown-flush-before-freeze"
+invariant = "The handoff releases admitted Kafka route output before freezing state, completes shutdown and delivers exactly one acknowledged payload."
+invocation = "stress-scenarios"
+scenario = "A stopping ingestor flushes its admitted route before freezing ownership state"
+selections = ["deloxide-stress"]
+
 [[owner]]
 path = "crates/checkpoint-replication/src/replication.rs"
 workloads = [
@@ -1298,6 +1319,8 @@ workloads = [
 [[owner]]
 path = "src/runtime/branch_runtime.rs"
 workloads = [
+  "scenario.shutdown-flush-before-freeze",
+  "stress.shutdown-flush-before-freeze",
   "scenario.client-alter-drain",
   "scenario.wasm-kafka-restore",
   "stress.client-alter-drain",
@@ -1307,6 +1330,8 @@ workloads = [
 [[owner]]
 path = "src/runtime/entity_gate.rs"
 workloads = [
+  "scenario.shutdown-flush-before-freeze",
+  "stress.shutdown-flush-before-freeze",
   "scenario.client-alter-drain",
   "scenario.client-alter-rejection",
   "scenario.shutdown-leader-change",
@@ -1317,7 +1342,12 @@ workloads = [
 
 [[owner]]
 path = "src/runtime/force_flush.rs"
-workloads = ["scenario.client-alter-drain", "stress.client-alter-drain"]
+workloads = [
+  "scenario.shutdown-flush-before-freeze",
+  "stress.shutdown-flush-before-freeze",
+  "scenario.client-alter-drain",
+  "stress.client-alter-drain",
+]
 
 [[owner]]
 path = "src/runtime/inferencer.rs"
@@ -1326,6 +1356,8 @@ workloads = ["scenario.inferencer-branch-batches"]
 [[owner]]
 path = "src/runtime/ingestor_quiesce.rs"
 workloads = [
+  "scenario.shutdown-flush-before-freeze",
+  "stress.shutdown-flush-before-freeze",
   "scenario.client-alter-drain",
   "scenario.diagnostic-nodes",
   "scenario.memory-pressure-pause",

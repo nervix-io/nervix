@@ -11,13 +11,29 @@
 use std::time::Duration;
 
 #[cfg(not(feature = "testing"))]
-use nervix_models::{ClusterNodeName, DomainName, EmitterName, IngestorName, ModelName};
+use nervix_models::{
+    ClusterNodeName, DomainName, EmitterName, IngestorName, ModelKind, ModelName, RelayName,
+};
 
 #[cfg(not(feature = "testing"))]
 use crate::ConfiguredFaultInjection;
 
 #[cfg(not(feature = "testing"))]
 impl ConfiguredFaultInjection {
+    pub(in crate::runtime) async fn pause_ingestor_route_poll_if_armed(
+        &self,
+        _domain: &DomainName,
+        _kind: ModelKind,
+        _source: &RelayName,
+    ) {
+    }
+
+    pub(in crate::runtime) async fn pause_ownership_handoff_flush_if_armed(
+        &self,
+        _domain: &DomainName,
+    ) {
+    }
+
     pub(in crate::runtime) fn emitter_should_fail(&self, _emitter: &EmitterName) -> bool {
         false
     }

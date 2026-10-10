@@ -113,12 +113,12 @@ Feature: Graceful shutdown
       """
       transient error: fault injector stalled emitter publish
       """
-    Given the entity gate for domain "{{domain}}" pauses after engagement
+    Given ownership handoff for domain "{{domain}}" pauses after requesting flush
     When node "node-1" begins stopping
-    Then the entity gate pause for domain "{{domain}}" is reached
+    Then the ownership handoff flush pause for domain "{{domain}}" is reached
     And within "5s" node "node-2" eventually reports describe ingestor "handoff_source" as "quiesce state: shutdown"
     When emitter "handoff_output" leaves stall mode
-    And the entity gate pause for domain "{{domain}}" is released
+    And the ownership handoff flush pause for domain "{{domain}}" is released
     And node "node-1" is stopped
     Then the last shutdown of node "node-1" reports its drain-support phase "Completed"
     And within "30s" the observed broker receives payloads
@@ -143,6 +143,67 @@ Feature: Graceful shutdown
       """
       kind=emitter name=handoff_output owner={{handoff_emitter_destination}} replicas=- transition_from=node-1 state_recovery=complete
       """
+
+  @shutdown_flush_before_freeze @deloxide_stress
+  Scenario: A stopping ingestor flushes its admitted route before freezing ownership state
+    Given Kafka is running
+    And graceful shutdown drain is enabled
+    And drain timeout is configured as "30s"
+    And the production sticky scheduler is configured
+    And a 3 node nervix cluster is started
+    And Kafka topic "shutdown_flush_in_{{test_id}}" exists with 1 partitions
+    And Kafka topic "shutdown_flush_out_{{test_id}}" is observed
+    When these NSPL commands are executed on the leader node
+      """
+      CORDON NODE node-2;
+      CORDON NODE node-3;
+      CREATE UNPACED DOMAIN {{domain}};
+      CREATE SCHEMA flush_event ( event_id I64 );
+      CREATE WIRE JSON SCHEMA flush_wire MODE STRICT ( event_id integer );
+      CREATE CODEC flush_codec
+        FROM WIRE JSON SCHEMA flush_wire TO SCHEMA flush_event;
+      CREATE RELAY flush_records SCHEMA flush_event UNBRANCHED CAPACITY 1;
+      CREATE CLIENT flush_kafka TYPE KAFKA CONFIG {
+        'bootstrap.servers' = '{{kafka_addr}}',
+        'auto.offset.reset' = 'earliest'
+      };
+      CREATE INGESTOR flush_source
+        FROM KAFKA flush_kafka TOPIC shutdown_flush_in_{{test_id}}
+          OFFSET BY CONSUMER GROUP shutdown_flush_group_{{test_id}}
+          MODE ACK SEQUENTIAL ACK TIMEOUT 30s
+          RETRY POLICY BACKOFF 100ms MAX 1s
+        ON QUIESCE SUSPEND DECODE USING flush_codec
+        TO flush_records INHERIT ALL UNBRANCHED
+          FLUSH EACH 1h MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
+      CREATE ATTACHED EMITTER flush_output FROM flush_records
+        TO KAFKA flush_kafka TOPIC shutdown_flush_out_{{test_id}}
+          MODE ACK PARALLEL MAX 2 ACK TIMEOUT 30s
+          RETRY POLICY BACKOFF 100ms MAX 1s ENCODE USING flush_codec
+        INHERIT ALL FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+      START;
+      UNCORDON NODE node-2;
+      UNCORDON NODE node-3;
+      """
+    Given ingestor "flush_source" pauses before polling its route
+    When these Kafka messages are rapidly published to topic "shutdown_flush_in_{{test_id}}"
+      """
+      {"event_id":1}
+      """
+    Then ingestor "flush_source" reaches the route poll pause
+    Given ownership handoff for domain "{{domain}}" pauses after requesting flush
+    When node "node-1" begins stopping
+    Then the ownership handoff flush pause for domain "{{domain}}" is reached
+    When ingestor "flush_source" leaves the route poll pause
+    And the ownership handoff flush pause for domain "{{domain}}" is released
+    And node "node-1" is stopped
+    Then the last shutdown of node "node-1" reports its drain-support phase "Completed"
+    And within "30s" the observed broker receives payloads
+      """
+      {"event_id":1}
+      """
+    And within "30s" Kafka consumer group "shutdown_flush_group_{{test_id}}" next offset for topic "shutdown_flush_in_{{test_id}}" partition 0 is "at least 1"
+    And the observed broker does not receive a payload within "2s"
 
   @shutdown_cordon_release @deloxide_stress
   Scenario Outline: A stopping <role> whose cordon release outlasts one second completes its drain and leaves no cordon

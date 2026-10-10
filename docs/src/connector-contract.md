@@ -543,6 +543,13 @@ error policy. Stop requests retain their separate
 deadline-bounded final flush and transport finish, and a stopped interaction performs its final
 drain before the loop exits.
 
+An ownership handoff closes source admission and boundary dispatch while installed routes and
+sinks finish their admitted work and requested flush. The participant publishes its ownership
+freeze only after that local drain completes, so capture cannot prevent a route from completing
+its flush. Preparation retains its original deadline; the distinct gate lease protects capture
+and activation. [Shutdown And Recovery](./shutdown.md) owns the complete
+handoff lifecycle and failure outcomes.
+
 A quiesced backup keeps these source and sink tasks installed. The host stops domain source
 admission according to each source's declared quiesce policy, reports admitted ACK roots and
 publishing sinks to the domain drain, and runs a confirming force flush after admitted work clears.

@@ -323,6 +323,12 @@ only while the original coordinator process and both bound participant incarnati
 the exact ownership-handoff gate is still held; every other preparation is discarded durably. A
 second pass after the gate deadline reclaims work that was active during the first pass.
 
+Ownership-handoff engagement answers after local admitted work and requested force-flush
+obligations drain and the ownership freeze is installed. Each request keeps the two-second reply
+bound; a typed timeout retries the same identity and complete scope within the coordinator's
+original preparation deadline. A retry observes the existing receiver-owned operation and lease.
+Other request failures are not reclassified or retried by that policy.
+
 After a receiver admits a new gate engagement or release, a receiver-owned task finishes that state
 transition even if the requesting connection disappears. Coordinator loss therefore cannot strand
 an operation in a partially engaged state or cancel cleanup after the receiver accepted it.

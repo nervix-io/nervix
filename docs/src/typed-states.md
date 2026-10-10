@@ -249,6 +249,12 @@ duration clamped at its physical anchor. Neither encodes an absent clock. The
 [Domain Clock](./domain-clock.md) chapter defines clock absence, installation states, authority
 fencing, and overflow handling.
 
+An entity-gate operation owns pending, held, released and failed outcomes. For ownership handoff,
+held means that local affected admitted work and flush obligations drained before the ownership
+freeze was published. Request cancellation leaves the receiver-owned engagement and its original
+lease intact; retries await the same operation and cannot recapture mutable state or renew its
+lease. The preparation deadline separately bounds the coordinator's wait for that held outcome.
+
 ## External Encodings And Conversion Failure
 
 The stopping-node drain action carries a required remaining `Duration` budget. Its sender deducts

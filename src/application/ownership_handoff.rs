@@ -971,16 +971,25 @@ impl SessionServiceImpl {
                     .to_string(),
             })
         })?;
-        let gate = self
-            .engage_cluster_entity_gates(
+        let gate = nervix_primitives::time::timeout_at(
+            preparation_deadline,
+            self.engage_cluster_entity_gates(
                 domain,
                 relays,
                 affected_entities,
                 EntityGatePurpose::OwnershipHandoff,
                 activation_deadline,
                 impact.clone(),
-            )
-            .await?;
+            ),
+        )
+        .await
+        .map_err(|_| {
+            Report::new(DomainAlterError::EntityGate {
+                domain: domain.clone(),
+                operation: EntityGatePurpose::OwnershipHandoff.operation_name(),
+                reason: "timed out preparing the ownership-handoff gate".to_string(),
+            })
+        })??;
         let coordination = gate.coordination.clone();
         #[cfg(feature = "testing")]
         self.inner.runtime.pause_entity_gate_if_armed(domain).await;

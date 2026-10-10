@@ -258,6 +258,20 @@ path = "src/runtime/entity_gate.rs"
 weakened = "self.force_flushes.load(Ordering::Relaxed)"
 
 [[invariant]]
+claim = "The production ownership handoff counter reader sees either an unfinished flush or the admitted message it resumed, because it acquires flush completion before reading admitted work. Parked work is retained for transfer and does not hold this drain."
+id = "runtime.ownership-handoff.flush-completion"
+package = "nervix-server"
+test = "runtime::local_drain::loom_models::loom_an_ownership_handoff_drain_sees_work_resumed_before_flush_completion"
+
+[[qualification]]
+failure = "an ownership drain must see either the outstanding flush or the work it resumed"
+id = "runtime.ownership-handoff.relaxed-obligations"
+invariant = "runtime.ownership-handoff.flush-completion"
+original = "self.force_flushes.load(Ordering::Acquire)"
+path = "src/runtime/entity_gate.rs"
+weakened = "self.force_flushes.load(Ordering::Relaxed)"
+
+[[invariant]]
 claim = "A captured Kafka offset checkpoint stamped with a commit's revision encodes that commit's offset after releasing the assignment barrier: the commit stores the partition's offset before it advances the revision, capture reads the revision before retaining the table and encoding its offsets, and advancing releases what reading the revision acquires."
 id = "runtime.kafka-offset-state.snapshot-revision"
 package = "nervix-server"

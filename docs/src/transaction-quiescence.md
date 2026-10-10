@@ -249,6 +249,11 @@ contributes only `DYNAMIC` to the actual aggregate. A confirmed or uncertain eng
 its possible scope even if the step subsequently fails or the gate is released. The report never
 rewrites the planned requirement to make a later outcome appear expected.
 
+Ownership-handoff readiness follows the participant's local drain and capture freeze. Retrying a
+two-second reply timeout waits on the same receiver-owned coordination identity; it creates no
+additional pause attempt and extends no lease. Preparation retains its original deadline, and
+cleanup still releases every participant whose engagement was attempted.
+
 The step changes from `UNATTEMPTED` to `APPLYING` when its authoritative effect transition is
 recorded. It becomes `APPLIED` only after required activation, source readiness, handoff, and
 gate release complete. A failure records a diagnostic and the transaction's completed prefix;

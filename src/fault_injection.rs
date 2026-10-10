@@ -29,8 +29,8 @@ use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_execution::{CpuClass, Executor, MemoryClass};
 use nervix_models::{
     ClusterNodeIdentity, ClusterNodeIncarnation, ClusterNodeName, CommandExecutionReference,
-    DomainName, DomainNodeRef, EmitterName, IngestorName, ModelKind, ModelName, RemoteRuntimeField,
-    RestoreStep,
+    DomainName, DomainNodeRef, EmitterName, IngestorName, ModelKind, ModelName, RelayName,
+    RemoteRuntimeField, RestoreStep,
 };
 use nervix_primitives::{
     collections::DashMap,
@@ -325,6 +325,8 @@ enum CommandPausePoint {
         coordinator: ClusterNodeName,
     },
     RestoreBranchStateConversion(DomainName),
+    IngestorRoutePoll(DomainNodeRef),
+    OwnershipHandoffFlush(DomainName),
     TransactionCommit {
         node_id: ClusterNodeName,
         domain: String,
@@ -1673,6 +1675,50 @@ impl FaultInjection {
     ) {
         let pause = self.emitter_swap_after_detach_pause(domain, emitter);
         pause.release();
+    }
+
+    /// Holds one route after accepting its input and before observing handoff or flush state.
+    pub fn pause_ingestor_route_poll(&self, ingestor: DomainNodeRef) {
+        self.arm_command_pause(CommandPausePoint::IngestorRoutePoll(ingestor));
+    }
+
+    pub async fn wait_for_ingestor_route_poll_pause(&self, ingestor: &DomainNodeRef) {
+        self.wait_for_command_pause(&CommandPausePoint::IngestorRoutePoll(ingestor.clone()))
+            .await;
+    }
+
+    pub fn release_ingestor_route_poll_pause(&self, ingestor: &DomainNodeRef) {
+        self.release_command_pause(&CommandPausePoint::IngestorRoutePoll(ingestor.clone()));
+    }
+
+    pub(crate) async fn pause_ingestor_route_poll_if_armed(
+        &self,
+        domain: &DomainName,
+        kind: ModelKind,
+        source: &RelayName,
+    ) {
+        let ingestor = DomainNodeRef::node_in(domain.clone(), kind, ModelName::from(source));
+        self.pause_command_if_armed(CommandPausePoint::IngestorRoutePoll(ingestor))
+            .await;
+    }
+
+    /// Holds handoff after publishing its force-flush generation, before declaring the hold ready.
+    pub fn pause_ownership_handoff_flush(&self, domain: DomainName) {
+        self.arm_command_pause(CommandPausePoint::OwnershipHandoffFlush(domain));
+    }
+
+    pub async fn wait_for_ownership_handoff_flush_pause(&self, domain: &DomainName) {
+        self.wait_for_command_pause(&CommandPausePoint::OwnershipHandoffFlush(domain.clone()))
+            .await;
+    }
+
+    pub fn release_ownership_handoff_flush_pause(&self, domain: &DomainName) {
+        self.release_command_pause(&CommandPausePoint::OwnershipHandoffFlush(domain.clone()));
+    }
+
+    pub(crate) async fn pause_ownership_handoff_flush_if_armed(&self, domain: &DomainName) {
+        self.pause_command_if_armed(CommandPausePoint::OwnershipHandoffFlush(domain.clone()))
+            .await;
     }
 
     pub fn pause_ingestor_dispatch(&self, ingestor: DomainNodeRef) {

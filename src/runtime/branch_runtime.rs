@@ -1052,6 +1052,15 @@ impl IngestorRouteTask {
             OwnershipHandoffFreezeWatch::new(&self.runtime_handle, ownership_entity);
         loop {
             nervix_primitives::task::consume_budget().await;
+            self.runtime_handle
+                .inner
+                .fault_injection
+                .pause_ingestor_route_poll_if_armed(
+                    &self.domain,
+                    self.template.branch.source_kind,
+                    &self.template.branch.source,
+                )
+                .await;
             let freeze = ownership_freeze.observe();
             let ownership_frozen = freeze.is_frozen();
             let flush_deadlines = self.flush_deadlines();
@@ -2569,6 +2578,130 @@ mod tests {
         );
         assert_eq!(handoff.outstanding_acks, 0);
         assert!(handoff.is_drained());
+    }
+
+    /// Ownership capture waits for the route's already admitted batch to be published.
+    #[nervix_primitives::test]
+    async fn ownership_handoff_flushes_the_route_before_freezing_its_state() {
+        let runtime = Runtime::default();
+        let domain = domain("default");
+        install_unpaced_test_domain(&runtime, &domain);
+        let ingestor = named::<IngestorName>("orders_source");
+        let relay = named::<RelayName>("orders");
+        let schema = test_schema(&[("user_id", ParseAsType::U32)]);
+        let counters = runtime
+            .node_quiesce_counters(&domain, NodeRef::new(ModelKind::Ingestor, ingestor.clone()));
+        let force_flush = runtime.force_flush_participant(&domain, counters.clone());
+        let (branch_sender, mut branch_output) = mpsc::channel(TWO_ITEM_TEST_CHANNEL_CAPACITY);
+        let (_route_sender, route_input) = mpsc::channel(TWO_ITEM_TEST_CHANNEL_CAPACITY);
+        let (shutdown, shutdown_rx) = watch::channel(false);
+        let mut route_task = IngestorRouteTask {
+            runtime_handle: runtime.clone(),
+            domain: domain.clone(),
+            ingestor: ingestor.clone(),
+            template: IngestorRouteTemplate {
+                branch: BranchInstanceTemplate {
+                    revision: ProcessorPlanRevision::new(),
+                    source_kind: ModelKind::Ingestor,
+                    source: named("orders_source"),
+                    root_relay: relay.clone(),
+                    branch: None,
+                    branch_ttl: None,
+                    branch_max_instances: None,
+                    error_policies: ErrorPolicies::handled_by_log(),
+                    relays: HashMap::default(),
+                    processors: HashMap::default(),
+                    wasm_state_reset: None,
+                },
+                ack_boundary: BranchInstanceAckBoundary::Preserve,
+                flush_policy: RuntimeFlushPolicy::Each {
+                    interval: Duration::from_secs(3600),
+                    max_batch_size: u64::from(u32::MAX),
+                },
+            },
+            branch_sender,
+            pending: HashMap::default(),
+            quiesce: OutputBufferQuiesceGauge::new(counters.clone()),
+        };
+        let domain_clock = runtime
+            .bind_domain_clock(&domain)
+            .expect("the route fixture has an installed domain clock");
+        route_task
+            .accept(
+                RelayRecordBatch::single(
+                    schema.clone(),
+                    None,
+                    test_runtime_row([("user_id".to_string(), RuntimeValue::U32(11))]),
+                    AckSet::empty(),
+                )
+                .expect("route input batch should build"),
+                &domain_clock,
+            )
+            .await;
+        assert_eq!(counters.admitted_work(), 1);
+        let coordination = nervix_models::CoordinationIdentity::new(named("coordinator"), 1, 1);
+        let entity = NodeRef::new(ModelKind::Ingestor, ingestor.clone());
+        let engagement = {
+            let runtime = runtime.clone();
+            let domain = domain.clone();
+            let entity = entity.clone();
+            let coordination = coordination.clone();
+            nervix_primitives::task::spawn(async move {
+                runtime
+                    .engage_entity_gate_operation(
+                        &coordination,
+                        &domain,
+                        &[],
+                        &[entity],
+                        EntityGatePurpose::OwnershipHandoff,
+                        EntityGateLease {
+                            deadline: nervix_primitives::time::Instant::now()
+                                + Duration::from_secs(5),
+                            reason: "route flush before capture",
+                        },
+                    )
+                    .await
+            })
+        };
+        timeout(Duration::from_secs(1), async {
+            while counters.force_flush_obligations() == 0 {
+                nervix_primitives::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("handoff should publish the flush before waiting for the route");
+        let task =
+            nervix_primitives::task::spawn(route_task.run(route_input, shutdown_rx, force_flush));
+        let forced = timeout(Duration::from_secs(1), branch_output.recv())
+            .await
+            .expect("the handoff flush must publish admitted route output before freezing")
+            .expect("the branch entrypoint remains open");
+        assert_eq!(
+            row_value(&forced.runtime_row(0).expect("one row"), "user_id"),
+            Some(RuntimeValue::U32(11))
+        );
+        timeout(Duration::from_secs(1), engagement)
+            .await
+            .expect("handoff should finish after the route flush")
+            .expect("engagement task should not panic")
+            .expect("handoff gate should engage");
+        assert!(runtime.entity_gate_operation_is_held(&coordination));
+        let freeze = OwnershipHandoffFreezeWatch::new(&runtime, entity.in_domain(&domain));
+        assert!(freeze.observe().is_frozen());
+        assert!(
+            runtime
+                .entity_drain_status(&domain, &[], &[entity], EntityGatePurpose::OwnershipHandoff)
+                .is_drained()
+        );
+        runtime
+            .release_entity_gate_operation(&coordination, &domain)
+            .await
+            .expect("handoff releases its exact hold");
+        shutdown.send_replace(true);
+        timeout(Duration::from_secs(1), task)
+            .await
+            .expect("route stops")
+            .expect("route does not panic");
     }
 
     /// A domain force flush releases route buffers that a long logical cadence still holds, and
