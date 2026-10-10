@@ -77,7 +77,7 @@ enum ResourceReplicaPublishError {
     Request {
         leader: nervix_models::ClusterNodeName,
     },
-    #[error("leader rejected resource replica: {source}")]
+    #[error("leader rejected resource replica")]
     Remote { source: ResourceInterconnectError },
 }
 
@@ -1212,6 +1212,21 @@ mod tests {
         super::test_fixtures::{TestService, build_test_service, create_test_domain, named},
         *,
     };
+
+    #[test]
+    fn a_replica_the_leader_rejects_names_the_rejection_once() {
+        let rejection = crate::resource_interconnect::ResourceInterconnectError::ReplicaOrigin {
+            authenticated: ClusterNodeName::parse("node-b").assured("the test node name is valid"),
+            declared: ClusterNodeName::parse("node-a").assured("the test node name is valid"),
+        };
+        let report = Report::new(ResourceReplicaPublishError::Remote { source: rejection });
+
+        assert_eq!(
+            format!("{report:#}"),
+            "leader rejected resource replica: authenticated node 'node-b' cannot publish \
+             resource state for 'node-a'"
+        );
+    }
 
     #[cfg(feature = "testing")]
     #[nervix_primitives::test]

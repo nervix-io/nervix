@@ -752,28 +752,133 @@ _NESTED_RESULT_RETURN = re.compile(
     r"((?:[A-Za-z_][A-Za-z0-9_]*\s*::\s*)*)Result\s*<"
 )
 _PLAIN_TYPE = re.compile(r"^(?:[A-Za-z_][A-Za-z0-9_]*\s*::\s*)*([A-Za-z_][A-Za-z0-9_]*)$")
+_STACK_IMPORT = re.compile(r"\buse\s+error_stack\s*::\s*")
+_IMPORTED_RESULT = re.compile(r"\s*Result\b(?!\s+as\b)")
+_GROUPED_RESULT = re.compile(r"(?<![\w:])Result\b(?!\s+as\b)")
+_RESULT_ALIAS = re.compile(
+    r"\btype\s+([A-Za-z_][A-Za-z0-9_]*)\s*(?:<[^=;]*>)?\s*=\s*"
+    r"((?:[A-Za-z_][A-Za-z0-9_]*\s*::\s*)*)Result\s*<"
+)
+_IMPL_OR_TRAIT_BLOCK = re.compile(r"\b(?:impl|trait)\b[^{;]*\{")
+_ALIAS_RETURN = re.compile(
+    r"(?:->|\b(?:Output|Item)\s*=)\s*(?:[A-Za-z_][A-Za-z0-9_]*\s*::\s*)*([A-Za-z_][A-Za-z0-9_]*)\b"
+)
+
+# Error types that keep the interface of a library a primitive adapter stands in for. The primitive
+# boundary requires a modeled adapter to keep its library's semantics, so the signatures returning
+# them return the library's own error shape, never a report. They are mirrors, not Nervix errors.
+LIBRARY_ERROR_MIRRORS: dict[str, frozenset[str]] = {
+    # Tokio's `sync::watch::error`, for the watch channel of a Shuttle build.
+    "crates/primitives/src/sync/watch.rs": frozenset({"RecvError", "SendError"}),
+}
+
+
+def declared_errors(files: Sequence[RustFile]) -> set[str]:
+    """The names of the error types the workspace declares, without the library mirrors."""
+
+    declared: set[str] = set()
+    for file in files:
+        mirrors = LIBRARY_ERROR_MIRRORS.get(file.path, frozenset())
+        for match in _ERROR_DECLARATION.finditer(file.code):
+            if match.group(1) not in mirrors:
+                declared.add(match.group(1))
+    return declared
+
+
+def imports_stack_result(file: RustFile) -> bool:
+    """Whether `file` imports `error_stack::Result`, so that its bare `Result` is a report."""
+
+    for match in _STACK_IMPORT.finditer(file.code):
+        end = file.code.find(";", match.end())
+        if end < 0:
+            continue
+        imported = file.code[match.end() : end]
+        if imported.startswith("{"):
+            # A group names `Result` as one of its own items, never as the tail of a nested path.
+            if _GROUPED_RESULT.search(imported):
+                return True
+        elif _IMPORTED_RESULT.fullmatch(imported):
+            return True
+    return False
+
+
+def _is_stack_result(file: RustFile, prefix: str, imports_stack: bool) -> bool:
+    """Whether a `Result` written with `prefix` before it is `error_stack::Result`."""
+
+    written = prefix.replace(" ", "")
+    if written == "error_stack::":
+        return True
+    return not written and imports_stack
+
+
+def _bare_error(file: RustFile, open_index: int, declared: set[str]) -> bool:
+    """Whether the `Result<…>` whose `<` is at `open_index` carries a declared error without a report.
+
+    In a file that declares library mirrors, those names are the mirrors, whatever else is declared
+    with the same name elsewhere.
+    """
+
+    arguments = generic_arguments(file.product, open_index)
+    if not arguments or len(arguments) < 2:
+        return False
+    error = _PLAIN_TYPE.match(arguments[-1].strip())
+    if error is None or error.group(1) not in declared:
+        return False
+    return error.group(1) not in LIBRARY_ERROR_MIRRORS.get(file.path, frozenset())
+
+
+def _item_block_spans(code: str) -> list[tuple[int, int]]:
+    """The spans of every `impl` and `trait` block, whose `type` items are associated types."""
+
+    spans: list[tuple[int, int]] = []
+    for match in _IMPL_OR_TRAIT_BLOCK.finditer(code):
+        spans.append((match.start(), _end_of_block(code, match.end() - 1)))
+    return spans
+
+
+def bare_result_aliases(files: Sequence[RustFile], declared: set[str]) -> set[str]:
+    """The names of the type aliases that stand for a `Result` with a declared bare error.
+
+    Only free aliases are names a signature can return through. A `type` inside an `impl` or a
+    `trait` is an associated type whose shape that trait defines, such as a wire request's response.
+    """
+
+    aliases: set[str] = set()
+    for file in product_files(files):
+        imports_stack = imports_stack_result(file)
+        blocks = _item_block_spans(file.product)
+        for match in _RESULT_ALIAS.finditer(file.product):
+            if any(start <= match.start() < end for start, end in blocks):
+                continue
+            if _is_stack_result(file, match.group(2), imports_stack):
+                continue
+            if _bare_error(file, match.end() - 1, declared):
+                aliases.add(match.group(1))
+    return aliases
 
 
 def count_bare_error_signatures(files: Sequence[RustFile]) -> list[Site]:
-    """Count signatures returning a Nervix error that carries no `error_stack` context."""
+    """Count signatures returning a Nervix error that carries no `error_stack` context.
 
-    declared = {
-        match.group(1)
-        for file in files
-        for match in _ERROR_DECLARATION.finditer(file.code)
-    }
+    A signature returns a `Result` directly, as the output of a `Future` or the item of a `Stream`
+    it names, or through a free type alias of such a `Result`. A file that imports
+    `error_stack::Result` writes it as a bare `Result`, which is already a report.
+    """
+
+    declared = declared_errors(files)
+    aliases = bare_result_aliases(files, declared)
     sites: list[Site] = []
     for file in product_files(files):
+        imports_stack = imports_stack_result(file)
         for pattern in (_RESULT_RETURN, _NESTED_RESULT_RETURN):
             for match in pattern.finditer(file.product):
-                if match.group(1).replace(" ", "") == "error_stack::":
+                if _is_stack_result(file, match.group(1), imports_stack):
                     continue
-                arguments = generic_arguments(file.product, match.end() - 1)
-                if not arguments or len(arguments) < 2:
-                    continue
-                error = _PLAIN_TYPE.match(arguments[-1].strip())
-                if error and error.group(1) in declared:
+                if _bare_error(file, match.end() - 1, declared):
                     sites.append(file.site(match.start(), file.source_line(match.start())))
+        for match in _ALIAS_RETURN.finditer(file.product):
+            if match.group(1) in aliases:
+                sites.append(file.site(match.start(), file.source_line(match.start())))
     return sites
 
 
