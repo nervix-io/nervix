@@ -3,8 +3,9 @@
 //! Layer: test harness.
 //!
 //! - **Owns.** Generated `WIRE JSON`, `WIRE CBOR` and `WIRE AVRO` codecs of the shapes the registry
-//!   accepts, the round trip of every row of a batch through one of them, and the property that a
-//!   group of payloads decodes to exactly what each payload decodes to alone.
+//!   accepts, the framing each format's batch container wraps around its members, the round trip
+//!   of every row of a batch through one of them, and the property that a group of payloads
+//!   decodes to exactly what each payload decodes to alone.
 //! - **Depends on.** The generated batches and their logical oracle, the codec Models and the
 //!   compiled codecs' row encoder and payload decoder.
 //! - **Must not know.** Ingestors, emitters, connectors or the ingest group that owns a builder.
@@ -50,14 +51,74 @@ pub(crate) enum SchemafulFormat {
 }
 
 impl SchemafulFormat {
-    const ALL: [Self; 3] = [Self::Json, Self::Cbor, Self::Avro];
+    pub(crate) const ALL: [Self; 3] = [Self::Json, Self::Cbor, Self::Avro];
 
     /// The values this format's codecs promise to preserve.
-    fn domain(self) -> GeneratedDomain {
+    pub(crate) fn domain(self) -> GeneratedDomain {
         match self {
             Self::Json | Self::Cbor => GeneratedDomain::Json,
             Self::Avro => GeneratedDomain::Avro,
         }
+    }
+
+    /// The batch container this format writes around `members`, framed from the formats'
+    /// specifications rather than the codec: a JSON array, a definite-length CBOR array, and one
+    /// Avro array block of zig-zag counted items ended by a zero count.
+    pub(crate) fn framed(self, members: &[Vec<u8>]) -> Vec<u8> {
+        let mut container = Vec::new();
+        match self {
+            Self::Json => {
+                container.push(b'[');
+                for (index, member) in members.iter().enumerate() {
+                    if index > 0 {
+                        container.push(b',');
+                    }
+                    container.extend_from_slice(member);
+                }
+                container.push(b']');
+            }
+            Self::Cbor => {
+                // Major type 4 with the count as its argument: inline below 24, then the shortest
+                // big-endian width that holds it.
+                let count = members.len();
+                if count < 24 {
+                    let count = u8::try_from(count).verified("the branch holds counts below 24");
+                    container.push(0x80 | count);
+                } else if let Ok(count) = u8::try_from(count) {
+                    container.extend_from_slice(&[0x98, count]);
+                } else {
+                    let count = u16::try_from(count)
+                        .assured("a generated batch holds far fewer than 65,536 members");
+                    container.push(0x99);
+                    container.extend_from_slice(&count.to_be_bytes());
+                }
+                for member in members {
+                    container.extend_from_slice(member);
+                }
+            }
+            Self::Avro => {
+                // One block: its count, a positive long `n` zig-zagged to `2n` and written seven
+                // bits at a time, low first; its items; and the zero count that ends the array.
+                let mut zigzag = u64::try_from(members.len())
+                    .assured("a member count fits u64")
+                    .checked_mul(2)
+                    .assured("a generated batch holds far fewer than 2^63 members");
+                loop {
+                    let low = u8::try_from(zigzag & 0x7f).assured("seven bits fit u8");
+                    zigzag >>= 7;
+                    if zigzag == 0 {
+                        container.push(low);
+                        break;
+                    }
+                    container.push(low | 0x80);
+                }
+                for member in members {
+                    container.extend_from_slice(member);
+                }
+                container.push(0);
+            }
+        }
+        container
     }
 }
 
@@ -99,7 +160,7 @@ impl CodecCase {
     }
 
     /// A codec of `format` for `schema`, its wire schema drawn from `arbitrary`.
-    fn with_schema(
+    pub(crate) fn with_schema(
         arbitrary: &mut Arbitrary<'_>,
         format: SchemafulFormat,
         schema: GeneratedSchema,

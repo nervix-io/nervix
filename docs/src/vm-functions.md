@@ -1335,6 +1335,9 @@ Treat this as the checklist for a new builtin, or for a new family.
    - a public Cucumber scenario outline on one and three nodes that proves values and failures
      through a graph and a session subscription, run with `just test-scenarios --input <feature>`
    - a row in the [qualification ledger](https://github.com/nervix-io/nervix/blob/main/tests/vm-function-qualification.md)
+   - for a kernel with an independent reference, a registered Bolero property over its column
+     kernel, as `round(value, digits)` has in `vm-decimal-rounding-floats` and
+     `vm-decimal-rounding-integers`; see [Property Testing And Fuzzing](./property-testing-and-fuzzing.md)
    - window structures also need interleaved branches, eviction, and snapshot restore
 10. **Measure it.** Add a Criterion case to `crates/nervix-vm/benches/vm.rs` or its workload
     shapes, and run it with `just bench-vm`. Use `just bench-vm-alloc` for allocation evidence, and

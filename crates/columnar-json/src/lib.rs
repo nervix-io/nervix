@@ -563,6 +563,10 @@ impl<'a> JsonColumn<'a> {
 }
 
 #[cfg(test)]
+#[path = "properties_tests.rs"]
+mod properties;
+
+#[cfg(test)]
 mod tests {
     use arrow_array::{ArrayRef, FixedSizeListArray};
     use arrow_schema::{Field, Schema};
