@@ -472,8 +472,8 @@ test-deloxide-stress: tests-deps test-deloxide-stress-workloads
 # The stressed build's capture, restore and checkpoint-transfer scenarios, tagged
 # `@deloxide_stress_restore`, in the `deloxide-stress-restore` selection: the same build and
 # disturbance as `test-deloxide-stress`, its probes, and these scenarios one at a time, in a lane
-# with a budget of its own, because the stressed scenarios of both selections together outlast one
-# lane's budget.
+# with a budget of its own, because the stressed scenarios of both selections together would take
+# most of one lane's budget.
 test-deloxide-stress-restore: tests-deps test-deloxide-stress-restore-workloads
 
 # The part of each selection's lane that executes Nervix code. It has no dependencies, so the native

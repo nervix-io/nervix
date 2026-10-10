@@ -164,8 +164,8 @@ def replaced(text: str, *replacements: tuple[str, str]) -> str:
 
 
 # Two more selections, each compiling another selection's build under its own name, as a selection
-# does whose workloads would not fit one lane's budget beside those of the selection named after its
-# build. The probes and the scenarios run in all four; the owner tests stay with the first two.
+# does whose workloads of that build run in a lane, budget and CI runner of their own. The probes
+# and the scenarios run in all four; the owner tests stay with the first two.
 SHARDS = replaced(
     INVENTORY,
     (

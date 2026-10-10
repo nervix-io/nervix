@@ -1549,7 +1549,7 @@ no lifecycle path. `deloxide-stress` runs the lifecycle scenarios tagged `@delox
 paced-driver scenarios with the stressed Rust driver; `deloxide-stress-restore` compiles the same
 build under its own name and runs its probes and the capture, restore and checkpoint-transfer
 scenarios tagged `@deloxide_stress_restore`, in a lane of its own because the stressed scenarios of
-both, one at a time, outlast one lane's budget. The `probe.stress-disturbance` probe proves the
+both, one at a time, would take most of one lane's budget. The `probe.stress-disturbance` probe proves the
 disturbance is applied in each: twenty thousand nested acquisitions must wait at least the shortest
 delay for half the preemptions the configuration expects, and record the lane's configuration. Its first run found that the adapters'
 immediate try bypassed the disturbance entirely, and that a self wait went unreported once
@@ -1686,7 +1686,7 @@ because an unreviewed historical cycle exists.
 and CI's `deloxide` job runs all four side by side for every pull request labeled `deloxide`, the
 label each change the Deloxide rule applies to carries. A selection is named after the diagnostic
 build feature it compiles, or extends that name and declares the feature when it runs workloads of
-the same build that would not fit one lane's budget beside the selection named after the build; a
+the same build in a lane, budget and CI runner of their own; a
 build records one diagnostic selection in its evidence whichever selection runs it. An invocation
 runs in every selection unless the inventory names the selections that run it. The stress selection
 runs every probe, conformance check and owner test of the active-only selection, its

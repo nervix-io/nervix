@@ -1302,7 +1302,13 @@ feature keeps the sum and adds a process start-up per chunk. Running more stress
 in one process, or fewer nodes in each of several concurrent scenarios, is the configuration whose
 nodes missed product deadlines, and Deloxide 04A investigates the failures seen at two per process.
 The restore scenarios are the longest family, so they became their own selection: a budget and a
-runner of their own, and the same build, disturbance and probes. The disturbance delays one in
+runner of their own, and the same build, disturbance and probes. In the CI run of 2026-10-10 that
+introduced the split, `deloxide-stress` took 28m41s in the lane's step and 27 minutes inside its
+budget: about 9.5 minutes of diagnostic builds, 6m19s for the 35 stressed lifecycle runs and
+10m51s for the 36 paced-driver runs, with 30 qualifying evidence files and no finding.
+`deloxide-stress-restore` took 39m40s in its step and 37 minutes inside its budget: 5.5 minutes of
+builds and 31m30s for the 43 restore runs, with no finding. One lane holding both would have needed
+58.5 of its 80 minutes, before any variation between runs. The disturbance delays one in
 twenty nested mutex and write acquisitions by at most 200µs, and the product's physical and logical
 deadlines are not widened for it. A stressed workload that misses a product deadline is a finding to
 reproduce and fix in its owner, not a bound to raise.

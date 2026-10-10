@@ -45,8 +45,9 @@ name = "deloxide-stress"
 recorded = "StressedActiveOnly"
 
 # The same stressed build's capture, restore and checkpoint-transfer scenarios, in a lane of their
-# own. Stressed scenarios run one at a time, and those of both selections together outlast one
-# lane's budget, so each selection keeps its own budget and CI runs each on a runner of its own.
+# own. Stressed scenarios run one at a time, and those of both selections together would take most
+# of one lane's budget, so each selection keeps its own budget and CI runs each on a runner of its
+# own.
 [[selection]]
 feature = "deloxide-stress"
 name = "deloxide-stress-restore"

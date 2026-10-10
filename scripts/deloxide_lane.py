@@ -182,8 +182,8 @@ class Bounds:
 @dataclass(frozen=True)
 class Selection:
     """One lane run's diagnostic build and the workloads it runs. A selection is named after the
-    build feature it compiles, or extends that name when it runs workloads of the same build that
-    would not fit one lane's budget beside those of the selection named after the build."""
+    build feature it compiles, or extends that name when it runs workloads of the same build in a
+    lane, budget and CI runner of their own."""
 
     name: str
     # The diagnostic build feature its executables are compiled with.
