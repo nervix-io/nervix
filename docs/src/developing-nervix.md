@@ -351,6 +351,23 @@ workspace-wrapper chains directly while caching ordinary dependencies; complete 
 validated independently of that detail. Compiler semantic fixtures qualify resolved lints and
 cross-crate metadata.
 
+### Typed errors and reports
+
+`just validate` rejects a `Result<_, String>` in product code and a signature that returns a Nervix
+failure without an `error-stack` report. Run the distinct source check, the complete compiler gate,
+its semantic fixtures and the structural scanner tests with:
+
+```bash
+just validate-typed-errors
+just ratchet
+just test-typed-ratchet-contracts
+just test-ratchet-units
+```
+
+[Errors And Diagnostics](./errors-and-diagnostics.md#adding-a-fallible-operation) holds the
+checklist for a new fallible operation: which layer owns the failure, what its context carries,
+where the report ends, how it is rendered and which evidence holds it.
+
 ### Capability doctests
 
 `just test-capability-docs` checks runtime state handles, logical and physical deadlines,

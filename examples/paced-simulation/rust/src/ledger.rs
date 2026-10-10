@@ -12,7 +12,7 @@
 
 use std::{collections::BTreeMap, io, path::Path};
 
-use error_stack::Report;
+use error_stack::{Report, ResultExt as _};
 use nervix_models::Timestamp;
 use nervix_primitives::sync::Mutex;
 use serde::{Deserialize, Serialize};
@@ -30,20 +30,12 @@ use crate::{
 /// Why the ledger cannot be read or written.
 #[derive(Debug, Error)]
 pub(crate) enum LedgerError {
-    #[error("cannot open the ledger '{path}': {source}")]
-    Open {
-        path: String,
-        #[source]
-        source: io::Error,
-    },
-    #[error("cannot append to the ledger: {0}")]
-    Append(#[source] io::Error),
-    #[error("line {line} of the ledger '{path}' is not a ledger record: {reason}")]
-    Malformed {
-        path: String,
-        line: usize,
-        reason: String,
-    },
+    #[error("cannot open the ledger '{path}'")]
+    Open { path: String },
+    #[error("cannot append to the ledger")]
+    Append,
+    #[error("line {line} of the ledger '{path}' is not a ledger record")]
+    Malformed { path: String, line: usize },
 }
 
 /// The terminal outcome of a batch, as the ledger records it.
@@ -136,9 +128,8 @@ impl Ledger {
             .open(path)
             .await
             .map_err(|source| {
-                Report::new(LedgerError::Open {
+                Report::new(source).change_context(LedgerError::Open {
                     path: path.display().to_string(),
-                    source,
                 })
             })?;
         Ok(Self {
@@ -154,9 +145,8 @@ impl Ledger {
             Ok(text) => text,
             Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
             Err(source) => {
-                return Err(Report::new(LedgerError::Open {
+                return Err(Report::new(source).change_context(LedgerError::Open {
                     path: path.display().to_string(),
-                    source,
                 }));
             }
         };
@@ -165,11 +155,9 @@ impl Ledger {
         let mut outcomes: BTreeMap<String, OutcomeKind> = BTreeMap::new();
         for (index, line) in text.lines().enumerate() {
             let record: LedgerRecord = serde_json::from_str(line).map_err(|error| {
-                let reason = error.to_string();
                 Report::new(error).change_context(LedgerError::Malformed {
                     path: path.display().to_string(),
                     line: index + 1,
-                    reason,
                 })
             })?;
             match record {
@@ -259,24 +247,21 @@ impl Ledger {
     async fn append(&self, records: &[LedgerRecord]) -> Result<(), Report<LedgerError>> {
         let mut text = String::new();
         for record in records {
-            let line = serde_json::to_string(record)
-                .map_err(|error| Report::new(LedgerError::Append(io::Error::other(error))))?;
+            let line = serde_json::to_string(record).change_context(LedgerError::Append)?;
             text.push_str(&line);
             text.push('\n');
         }
         let mut file = self.file.lock().await;
         file.write_all(text.as_bytes())
             .await
-            .map_err(|error| Report::new(LedgerError::Append(error)))?;
-        file.flush()
-            .await
-            .map_err(|error| Report::new(LedgerError::Append(error)))
+            .change_context(LedgerError::Append)?;
+        file.flush().await.change_context(LedgerError::Append)
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use meticulous::ResultExt as _;
+    use meticulous::{OptionExt as _, ResultExt as _};
 
     use super::*;
     use crate::readings::ReadingSlot;
@@ -366,6 +351,17 @@ mod tests {
             error.as_ref().map(Report::current_context),
             Some(LedgerError::Malformed { line: 2, .. })
         ));
+        let report = error.as_ref().assured("the malformed line is refused");
+        let cause = report
+            .downcast_ref::<serde_json::Error>()
+            .assured("the report retains the decoder cause");
+        assert_eq!(
+            format!("{report:#}"),
+            format!(
+                "line 2 of the ledger '{}' is not a ledger record: {cause}",
+                path.display()
+            )
+        );
     }
 
     #[nervix_primitives::test]
@@ -382,5 +378,15 @@ mod tests {
             replayed.as_ref().map(Report::current_context),
             Some(LedgerError::Open { path, .. }) if path == &expected
         ));
+        for report in [appended, replayed] {
+            let report = report.assured("a directory is refused as a ledger file");
+            let cause = report
+                .downcast_ref::<io::Error>()
+                .assured("the report retains the I/O cause");
+            assert_eq!(
+                format!("{report:#}"),
+                format!("cannot open the ledger '{expected}': {cause}")
+            );
+        }
     }
 }
