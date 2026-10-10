@@ -755,11 +755,16 @@ def scenario_chunks(
     return chunks
 
 
-def scenario_arguments(chunk: ScenarioChunk, concurrency: int | None) -> list[str]:
+def scenario_arguments(root: Path, chunk: ScenarioChunk, concurrency: int | None) -> list[str]:
     """Select a chunk with one Cucumber filter; its CLI excludes combining tags and names."""
     arguments: list[str] = []
     for pattern in chunk.inputs:
-        arguments.extend(["--input", pattern])
+        path = root / pattern
+        # Relative globs make Cucumber walk the entire working directory, including build
+        # artifacts. Its absolute-path walker needs a glob component even for one exact file.
+        if not any(character in pattern for character in "*{}"):
+            path = path.with_name(f"{{{path.name},{path.name}}}")
+        arguments.extend(["--input", str(path)])
     if chunk.name_filter is not None:
         arguments.extend(["--name", f"^{re.escape(chunk.name_filter)}$"])
     else:
@@ -1830,7 +1835,7 @@ class Lane:
                 directory = Path(chunk_environment[EVIDENCE_VARIABLE]) / chunk.name
                 directory.mkdir(parents=True, exist_ok=True)
                 chunk_environment[EVIDENCE_VARIABLE] = str(directory)
-            arguments = scenario_arguments(chunk, invocation.concurrency)
+            arguments = scenario_arguments(self.root, chunk, invocation.concurrency)
             launch = Launch(
                 name=chunk.name,
                 argv=self.command(executable, arguments),

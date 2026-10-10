@@ -339,7 +339,9 @@ under which it acquired the cut. Owner capture failures are classified at the
 interconnect boundary without guest bytes in the failure. A branch lifecycle or Kafka offset
 section names its entity when its checkpoint does not decode, its serializer scratch or conversion
 cannot be admitted to `restore_metadata`, or its record cannot be written; the failure renders every
-context of its report. Stored materialized capture refuses
+context of its report. A selected WASM guest section likewise names its processor when its
+checkpoint read, `restore_metadata` admission, or staged write fails or is interrupted; no failure
+includes guest bytes. Stored materialized capture refuses
 malformed headers, inconsistent group or row counts, oversized identity or column frames,
 truncated checkpoints and failed stored chunk digests. These
 typed codec/storage failures follow the same domain capture failure path without column bytes.

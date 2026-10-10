@@ -79,9 +79,9 @@ enum NodeDatabaseFlush {
     Flushed,
 }
 
-/// The entity of one domain whose native metadata a backup captures.
+/// The entity of one domain whose state a backup captures.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-struct NativeMetadataOwner {
+struct CapturedStateOwner {
     domain: DomainName,
     entity: ModelName,
 }
@@ -124,7 +124,9 @@ struct FaultInjectionState {
     failed_restore_state_installations: DashMap<DomainName, RestoreStateFailure, RandomState>,
     /// One-shot interruptions of a backup's next native metadata section of an entity, after
     /// this many of its entries.
-    native_metadata_interruptions: DashMap<NativeMetadataOwner, u64, RandomState>,
+    native_metadata_interruptions: DashMap<CapturedStateOwner, u64, RandomState>,
+    /// One-shot interruptions of a backup's next guest save after this many transfer chunks.
+    guest_save_interruptions: DashMap<CapturedStateOwner, u64, RandomState>,
     /// One-shot failures, consumed by the next HTTPS listener configuration a node installs.
     failed_https_listener_installations: DashMap<ClusterNodeName, (), RandomState>,
     consensus_probes: DashMap<ClusterNodeName, ConsensusProbeState, RandomState>,
@@ -391,6 +393,7 @@ impl Default for FaultInjection {
                 failed_resource_installations: DashMap::default(),
                 failed_restore_state_installations: DashMap::default(),
                 native_metadata_interruptions: DashMap::default(),
+                guest_save_interruptions: DashMap::default(),
                 failed_https_listener_installations: DashMap::default(),
                 consensus_probes: DashMap::default(),
                 startup_consensus_faults: DashMap::default(),
@@ -469,7 +472,15 @@ impl FaultInjection {
     ) {
         self.inner
             .native_metadata_interruptions
-            .insert(NativeMetadataOwner { domain, entity }, entries);
+            .insert(CapturedStateOwner { domain, entity }, entries);
+    }
+
+    /// Interrupt the next guest save of `entity` that a backup of `domain` streams, once, after
+    /// writing `chunks` of its bytes.
+    pub fn interrupt_guest_save_capture(&self, domain: DomainName, entity: ModelName, chunks: u64) {
+        self.inner
+            .guest_save_interruptions
+            .insert(CapturedStateOwner { domain, entity }, chunks);
     }
 
     pub fn fail_after_durable_restore_publication(&self, domain: DomainName) {
@@ -604,12 +615,25 @@ impl FaultInjection {
         domain: &DomainName,
         entity: &ModelName,
     ) -> Option<u64> {
-        let owner = NativeMetadataOwner {
+        let owner = CapturedStateOwner {
             domain: domain.clone(),
             entity: entity.clone(),
         };
         let (_, entries) = self.inner.native_metadata_interruptions.remove(&owner)?;
         Some(entries)
+    }
+
+    pub(crate) fn guest_save_capture_interruption(
+        &self,
+        domain: &DomainName,
+        entity: &ModelName,
+    ) -> Option<u64> {
+        let owner = CapturedStateOwner {
+            domain: domain.clone(),
+            entity: entity.clone(),
+        };
+        let (_, chunks) = self.inner.guest_save_interruptions.remove(&owner)?;
+        Some(chunks)
     }
 
     pub(crate) fn restored_wasm_checkpoint_fails(&self, domain: &DomainName) -> bool {

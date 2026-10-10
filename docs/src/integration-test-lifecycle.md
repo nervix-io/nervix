@@ -1227,6 +1227,12 @@ the inventory's fixed number of scenarios at once, four, rather than one per CPU
 build pays for its tracked acquisitions on every lock, and a fixed count puts the same load on its
 nodes locally and on CI's 16-vCPU runner.
 
+The lane resolves every feature pattern against its repository root before passing it to
+Cucumber. A relative pattern would make Cucumber traverse the whole working directory, including
+generated build artifacts. An exact feature uses an absolute pattern with two identical literal
+alternatives, so the walker starts at that feature's parent directory and still selects only
+that file. This bounds discovery without changing the registered examples or their deadlines.
+
 Under the native coverage collector the lane instruments only workspace crates, the scope the
 ordinary coverage build has. When every crate was instrumented, wasmtime's compiler included, CI's
 WASM restore scenarios ran five times as long as an uninstrumented local run, 338 seconds against

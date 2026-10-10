@@ -426,7 +426,7 @@ class InventoryTests(unittest.TestCase):
                     self.assertTrue(workload.id.startswith("stress."))
                     self.assertIn((workload.feature, workload.scenario, workload.examples), active_scenarios)
         self.assertEqual(len(inventory.workloads_of("probes", "deloxide-stress")), 15)
-        self.assertEqual(len(inventory.workloads_of("stress-scenarios", "deloxide-stress")), 13)
+        self.assertEqual(len(inventory.workloads_of("stress-scenarios", "deloxide-stress")), 14)
         for path, owner in inventory.owners.items():
             with self.subTest(owner=path):
                 self.assertTrue((REPOSITORY / path).is_file(), path)
@@ -472,12 +472,12 @@ class InventoryTests(unittest.TestCase):
         self.assertEqual(len(generation), 4)
         self.assertTrue(all(chunk.expected == 1 and chunk.example_tag for chunk in generation))
         named = next(chunk for chunk in order if chunk.name_filter is not None)
-        named_arguments = deloxide_lane.scenario_arguments(named, invocation.concurrency)
+        named_arguments = deloxide_lane.scenario_arguments(REPOSITORY, named, invocation.concurrency)
         self.assertEqual(named_arguments.count("--name"), 1)
         self.assertNotIn("--tags", named_arguments)
         self.assertIn("--retry", named_arguments)
         tagged = next(chunk for chunk in order if chunk.example_tag is not None)
-        tagged_arguments = deloxide_lane.scenario_arguments(tagged, invocation.concurrency)
+        tagged_arguments = deloxide_lane.scenario_arguments(REPOSITORY, tagged, invocation.concurrency)
         self.assertEqual(tagged_arguments.count("--tags"), 1)
         self.assertNotIn("--name", tagged_arguments)
         remote = [chunk for chunk in order if chunk.inputs == ("tests/features/runtime/remote_ack_owners.feature",)]
@@ -1017,7 +1017,7 @@ class LaneTests(unittest.TestCase):
         self.assertEqual(owner.argv[1:], ("store::tests::deloxide_store", "--exact", "--test-threads=1"))
         self.assertEqual(owner.environment[deloxide_lane.EVIDENCE_VARIABLE], str(lane.attempt / "evidence/owner-tests/owner.store"))
         scenarios = launches["scenarios-0"]
-        self.assertEqual(scenarios.argv[1:], ("--input", "features/lane.feature", "--tags", "@lane", "--retry", "0", "--concurrency", "4"))
+        self.assertEqual(scenarios.argv[1:], ("--input", str(self.fixture.root / "features/{lane.feature,lane.feature}"), "--tags", "@lane", "--retry", "0", "--concurrency", "4"))
         self.assertEqual(scenarios.environment[deloxide_lane.SUITE_BUDGET_VARIABLE], "110s")
         self.assertEqual(scenarios.environment[deloxide_lane.EVIDENCE_VARIABLE], str(lane.attempt / "evidence/scenarios/scenarios-0"))
         self.assertEqual(scenarios.environment[deloxide_lane.REPORT_TOOL_VARIABLE], str(self.fixture.target / "debug/nervix-deadlock-report"))
@@ -1506,7 +1506,7 @@ class CommandLineTests(unittest.TestCase):
         self.assertEqual(self.main("run", "deloxide-order", selection="deloxide-order"), 0)
         launches = self.processes[-1].launches
         scenario = next(launch for launch in launches if launch.name == "scenarios-0")
-        self.assertIn("features/lane.feature", scenario.argv)
+        self.assertIn(str(self.fixture.root / "features/{lane.feature,lane.feature}"), scenario.argv)
         self.assertIn("@lane", scenario.argv)
         self.assertTrue(scenario.environment[deloxide_lane.EVIDENCE_VARIABLE].endswith("/scenarios-0"))
 
