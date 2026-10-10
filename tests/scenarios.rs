@@ -8709,6 +8709,32 @@ async fn given_node_has_state_counting_wasm_processor_fixture_resource_directory
 }
 
 #[given(
+    expr = "node {string} has state-counting WASM reset fixture with {int} MiB saves in resource \
+            directory {string}"
+)]
+async fn given_node_has_large_state_counting_wasm_reset_fixture(
+    world: &mut ScenarioWorld,
+    node_id: String,
+    mebibytes: usize,
+    placeholder: String,
+) {
+    assert!(
+        (1..=48).contains(&mebibytes),
+        "the fixture fits the guest memory limit"
+    );
+    let bytes = mebibytes
+        .checked_mul(1024 * 1024)
+        .assured("the fixture size is bounded");
+    place_generated_wasm_processor_fixture(
+        world,
+        &node_id,
+        &placeholder,
+        state_counting_wasm_fixture_with_size("counted_events", bytes),
+    )
+    .await;
+}
+
+#[given(
     expr = "node {string} has guest-requested-reset WASM processor fixture resource directory \
             {string}"
 )]
@@ -20784,6 +20810,59 @@ async fn then_within_duration_describe_wasm_processor_on_leader_contains(
             "timed out waiting for DESCRIBE WASM PROCESSOR {processor} to contain {}. last \
              output: {output}",
             expected.trim()
+        );
+        nervix_primitives::time::sleep(Duration::from_millis(100)).await;
+    }
+}
+
+#[then(
+    expr = "within {string} the {int} branches of WASM PROCESSOR {string} have committed revision \
+            {int} with {int} confirmed replicas"
+)]
+async fn then_all_wasm_branches_have_confirmed_checkpoint(
+    world: &mut ScenarioWorld,
+    duration: String,
+    branch_count: usize,
+    processor: String,
+    revision: u64,
+    replicas: usize,
+) {
+    let duration = parse_duration_text(&duration).expect("step duration must be valid");
+    let deadline = Instant::now() + duration;
+    // The scenario reconnects its subscription to a live node after owner loss. Inspect through
+    // that same node: the cluster-wide leader helper waits on stopped nodes as well as live ones.
+    let node = match world.active_session_node.clone() {
+        Some(node) => node,
+        None => current_leader_node(world).await,
+    };
+    let expected = format!(
+        "committed_revision={revision} latest_revision={revision} stage=REPLICA_CONFIRMED \
+         required_replicas={replicas} confirmed_replicas={replicas}"
+    );
+    loop {
+        nervix_primitives::task::consume_budget().await;
+        let output = run_nspl_commands_on_node(
+            world,
+            &node,
+            &format!("DESCRIBE WASM PROCESSOR {processor};"),
+        )
+        .await
+        .expect("describe wasm processor command must succeed");
+        let checkpoints = output
+            .lines()
+            .filter(|line| line.trim_start().starts_with("checkpoint branch="))
+            .collect::<Vec<_>>();
+        if output.contains(&format!("state structures: {branch_count}"))
+            && output.contains("failed checkpoints: 0")
+            && checkpoints.len() == branch_count
+            && checkpoints.iter().all(|line| line.contains(&expected))
+        {
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "timed out waiting for {branch_count} branch checkpoints at revision {revision} with \
+             {replicas} replicas. last output: {output}"
         );
         nervix_primitives::time::sleep(Duration::from_millis(100)).await;
     }

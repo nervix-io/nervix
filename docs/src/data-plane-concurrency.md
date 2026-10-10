@@ -207,6 +207,10 @@ one-MiB saves fit the replication operation's limit. Deloxide tracks the install
 boundary blocking locks; Fjall's internal locks, async authority ordering and memory ordering keep
 their separate ordinary, Shuttle, Loom and Turmoil checks. Measurements and diagnostic artifacts
 are delivered to the owning task.
+The registered large-WASM-handoff diagnostic scenario reaches replica installation and planned
+handoff with two branch saves above that message limit. It exercises the state store's tracked
+installation locks in both Deloxide selections; the bulk stream's async waits and transport faults
+remain outside the detector and have their own Turmoil and Cucumber evidence.
 
 Materialized capture shares row carriers under the existing assignment barrier, together with the
 revision, ownership fence and branch generation. Membership insertion and eviction use that same
@@ -485,6 +489,13 @@ replica set from the assignment slot.
 Branch-aggregate byte capture keeps the existing narrow `lifecycle_call` expectation for
 scanning the metrics inventory at an explicit snapshot boundary. State-route selection uses the
 installed state handle and retained assignment slot.
+Checkpoint synchronization sends a bounded revision, length and digest description through that
+selected route. The replica fetches the exact revision through the bulk pool, admits the whole
+allocation and verifies every byte before installation. A handoff destination follows the same
+sequence from the source's captured checkpoint while its entity gate remains held. Neither
+path adds a shared hot-path lock or a new
+wait-and-notify protocol; Deloxide sees the existing state-store installation lock but cannot see
+stream scheduling or async memory admission.
 
 A replica's progress only rises. Acknowledgements travel independently, and a replica acknowledges
 what it holds again whenever it is offered a checkpoint, so an acknowledgement of an older revision
