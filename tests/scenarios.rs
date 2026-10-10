@@ -11169,6 +11169,56 @@ async fn then_remote_acknowledgement_was_lost(
     });
 }
 
+/// Arms a node to take all of its free relay memory just before it charges the acknowledgement
+/// watches of the next delivery another node sends it, so that delivery finds the relay budget
+/// full exactly when it needs room for its watches.
+#[when(
+    expr = "node {string} fills its relay memory before it charges its next acknowledgement \
+            watches"
+)]
+async fn when_node_fills_relay_memory_before_acknowledgement_watches(
+    world: &mut ScenarioWorld,
+    node_id: String,
+) {
+    let node_id = expand_placeholders(world, &node_id);
+    world
+        .fault_injection
+        .fill_relay_memory_before_next_acknowledgement_watches_on(
+            crate::common::cluster::node_name(&node_id),
+        );
+}
+
+#[then(expr = "within {string} node {string} has filled its relay memory")]
+async fn then_node_has_filled_relay_memory(
+    world: &mut ScenarioWorld,
+    duration: String,
+    node_id: String,
+) {
+    let node_id = expand_placeholders(world, &node_id);
+    let node = crate::common::cluster::node_name(&node_id);
+    let deadline = Instant::now()
+        + parse_duration_text(&duration).expect("step duration must be a valid duration");
+    loop {
+        nervix_primitives::task::consume_budget().await;
+        if world.fault_injection.relay_memory_fill_holds_on(&node) {
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "node '{node_id}' did not fill its relay memory within {duration}"
+        );
+        nervix_primitives::time::sleep(Duration::from_millis(100)).await;
+    }
+}
+
+#[when(expr = "node {string} releases its filled relay memory")]
+async fn when_node_releases_filled_relay_memory(world: &mut ScenarioWorld, node_id: String) {
+    let node_id = expand_placeholders(world, &node_id);
+    world
+        .fault_injection
+        .release_relay_memory_fill_on(&crate::common::cluster::node_name(&node_id));
+}
+
 #[given(expr = "relay owner fan-out for domain {string} is paused before dispatch")]
 async fn given_owner_relay_fanout_pause(world: &mut ScenarioWorld, domain: String) {
     let domain = expand_placeholders(world, &domain);

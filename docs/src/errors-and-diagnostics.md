@@ -978,9 +978,12 @@ failure beneath the reason can quote the payload it evaluated, and is not render
 The interconnect validates and bounds the wire request before its operation handler runs. A
 delivery correlation that has no free position reports `CorrelationCapacity`; an exhausted
 generation reports `CorrelationIdentityExhausted`; failure to reserve record storage reports
-`CorrelationMemory`. A receiver unable to reserve a watcher reports `RemoteAckAdmission` with its
-execution admission cause, before runtime admission. These refusals judge no payload and preserve
-source retry ownership. Ending a registered delivery before admission or shutting its owner down
+`CorrelationMemory`. A receiver whose relay budget has no room for a batch's acknowledgement watches
+holds the batch back unadmitted rather than failing it, because that lack of room is temporary. It
+reports `RemoteAckAdmission`, with the typed `AdmissionError` beneath it rather than rendered into
+its own text, only for watches larger than the whole budget or a hold still without room when the
+five-minute admission bound has passed, before runtime admission. These refusals judge no payload
+and preserve source retry ownership. Ending a registered delivery before admission or shutting its owner down
 resolves its held shares negatively once. Stale generations and registrar runs are ordinary
 unmatched reports logged at `debug`, and never resolve current work.
 

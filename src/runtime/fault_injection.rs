@@ -110,6 +110,13 @@ impl ConfiguredFaultInjection {
         false
     }
 
+    pub(in crate::runtime) fn fill_relay_memory_before_acknowledgement_watches_if_armed(
+        &self,
+        _node_id: &ClusterNodeName,
+        _executor: &nervix_execution::Executor,
+    ) {
+    }
+
     pub(in crate::runtime) async fn pause_owner_relay_fanout_if_armed(&self, _domain: &DomainName) {
     }
 

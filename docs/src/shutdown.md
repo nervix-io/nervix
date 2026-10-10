@@ -711,7 +711,9 @@ retention, and snapshot contracts behind this barrier.
 The interconnect rejects new admission, cancels pool and operation waiters, and retires the pool
 and peer protocol owners. An ending peer owner cancels unadmitted records and releases item and
 terminal-outcome permits even if the runtime retains an intake already admitted; that intake's
-verdict remains admitted. Decoded metadata stays charged while a borrower keeps it. Runtime
+verdict remains admitted. A batch the runtime holds back for room for its acknowledgement watches
+is unadmitted, so that cancellation ends its hold, and so does the end of the relay intake lane
+when the node stops; it is never admitted afterwards. Decoded metadata stays charged while a borrower keeps it. Runtime
 teardown cancels and joins its charged ACK watcher tasks, closes delivery and admission routing
 queues, and negatively resolves remaining volatile correlations exactly once. No ACK owner state
 is stored for restart. The interconnect also retires the pool

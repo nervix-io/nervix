@@ -284,6 +284,7 @@ mod relay_processor_node;
 mod relay_subscription;
 mod relay_transit;
 mod remote_ack_owner;
+mod remote_ack_watch_charge;
 mod remote_dispatch;
 mod reorderer;
 mod resources;

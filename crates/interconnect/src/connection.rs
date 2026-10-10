@@ -661,6 +661,14 @@ impl std::fmt::Debug for RelayAdmission {
 }
 
 impl RelayAdmission {
+    /// Resolves once this attempt can no longer be admitted: its sender cancelled it, its peer
+    /// ended or changed process, or the transport rejected it. An application that holds the
+    /// received batch back before it decides admission stops holding it then; [`Self::admit`]
+    /// reports the same verdict.
+    pub async fn cancelled(&self) {
+        self.record.cancellation.cancelled().await;
+    }
+
     pub fn admit(&self) -> RelayAdmissionDecision {
         self.record.mark_admitted();
         match self.record.choice.current() {
