@@ -304,6 +304,15 @@ clock or lifecycle handle bound at startup. Each WASM state retains its entity a
 which publishes state identity and checkpoint execution/replica owners together. A generation
 replacement or removal therefore fences a callback without a runtime registry lookup.
 
+Clock authority reconciliation binds a producer to its locally installed mapping, generation and
+authority fence before starting it. Progress production does not wait for another node's graph
+activation. Each remote delivery loop starts after its own receiver advertises preparation of that
+revision, so a held preparation elsewhere cannot stall an installed authority or prepared observer.
+An obsolete producer still retires before its successor starts. The takeover Cucumber scenarios in
+`domain_clock_contract.feature` exercise this ownership path in the active, order and lifecycle
+stress Deloxide selections;
+their async installation, watch and transport waits remain outside tracked-lock detection.
+
 Force-flush participants retain a private idle, available or closed scalar. Idle and already-claimed
 polls acquire no coordinator mutex. An available indication enters the mutex, which remains the
 sole authority for generations and claims. The coordinator visits participants in participant-ID

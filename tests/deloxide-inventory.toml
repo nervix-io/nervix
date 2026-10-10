@@ -110,6 +110,7 @@ tags = [
   "@remote_ack_owners",
   "@backup_wait",
   "@restarted_voter_observation",
+  "@domain_clock_takeover",
   "@udf_column_builder",
   "@vhost_tls_rebinding",
   "@inferencer_branch_batches",
@@ -722,6 +723,26 @@ scenario = "A paced RESUME retains its mapping and admits TIMESTAMP AT in the pr
 selections = ["deloxide", "deloxide-order"]
 
 [[workload]]
+coverage = "Clock authority reassignment after health, consensus and gossip loss while a surviving node holds runtime preparation. Consensus, cluster observation and session output use tracked locks; async installation, notifications and network waits remain outside Deloxide."
+examples = 1
+feature = "tests/features/runtime/domain_clock_contract.feature"
+id = "scenario.clock-takeover-local"
+invariant = "An installed replacement authority emits increasing ticks within ten seconds while another survivor's preparation is paused, preserving the committed generation and mapping."
+invocation = "scenarios"
+scenario = "An installed survivor takes over the clock while another survivor installs the authority revision"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
+coverage = "Clock progress delivery to a prepared observer after a directed application-health failure and leadership transfer, while another node holds preparation. Tracked consensus, cluster observation and session locks are exercised; async delivery and transport waits remain outside Deloxide."
+examples = 1
+feature = "tests/features/runtime/domain_clock_contract.feature"
+id = "scenario.clock-takeover-observer"
+invariant = "A prepared observer receives increasing replacement ticks within ten seconds without waiting for another node's preparation or graph activation."
+invocation = "scenarios"
+scenario = "A prepared clock observer receives replacement ticks before another node activates the revision"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
 coverage = "Restore staging quota, reclamation and retry across restart."
 examples = 2
 feature = "tests/features/cluster/backup_staging.feature"
@@ -1049,6 +1070,26 @@ id = "stress.client-consumer-restore"
 invariant = "After a cluster restart on one and three nodes, a Rust client's producer and consumer resume their unchanged endpoint: the consumer reports its attachment interruption and delivers the batch submitted after the restart, and the attached domain clock reports its interruption and ticks again."
 invocation = "stress-scenarios"
 scenario = "A producer and consumer resume their unchanged endpoint after a session restart"
+selections = ["deloxide-stress"]
+
+[[workload]]
+coverage = "Under scheduling stress: clock authority reassignment while a surviving node holds runtime preparation, including tracked consensus, cluster observation and session output locks. Async installation and transport waits remain outside Deloxide."
+examples = 1
+feature = "tests/features/runtime/domain_clock_contract.feature"
+id = "stress.clock-takeover-local"
+invariant = "An installed replacement authority emits increasing ticks within ten seconds while another survivor's preparation is paused, preserving the committed generation and mapping."
+invocation = "stress-scenarios"
+scenario = "An installed survivor takes over the clock while another survivor installs the authority revision"
+selections = ["deloxide-stress"]
+
+[[workload]]
+coverage = "Under scheduling stress: clock delivery to a prepared observer after directed application-health failure and leadership transfer, with another preparation held. Tracked consensus, cluster observation and session locks are exercised; async delivery and network waits remain outside Deloxide."
+examples = 1
+feature = "tests/features/runtime/domain_clock_contract.feature"
+id = "stress.clock-takeover-observer"
+invariant = "A prepared observer receives increasing replacement ticks within ten seconds without waiting for another node's preparation or graph activation."
+invocation = "stress-scenarios"
+scenario = "A prepared clock observer receives replacement ticks before another node activates the revision"
 selections = ["deloxide-stress"]
 
 [[workload]]
@@ -1468,6 +1509,10 @@ workloads = ["scenario.diagnostic-nodes", "stress.diagnostic-nodes"]
 [[owner]]
 path = "crates/consensus/src/lib.rs"
 workloads = [
+  "scenario.clock-takeover-local",
+  "scenario.clock-takeover-observer",
+  "stress.clock-takeover-local",
+  "stress.clock-takeover-observer",
   "scenario.diagnostic-nodes",
   "scenario.diagnostic-server-processes",
   "stress.diagnostic-nodes",
@@ -1607,6 +1652,10 @@ workloads = [
 [[owner]]
 path = "src/application/session/mod.rs"
 workloads = [
+  "scenario.clock-takeover-local",
+  "scenario.clock-takeover-observer",
+  "stress.clock-takeover-local",
+  "stress.clock-takeover-observer",
   "scenario.diagnostic-nodes",
   "scenario.client-alter-drain",
   "paced.reopen-generation",
@@ -1618,6 +1667,10 @@ workloads = [
 [[owner]]
 path = "src/application/session/outbound.rs"
 workloads = [
+  "scenario.clock-takeover-local",
+  "scenario.clock-takeover-observer",
+  "stress.clock-takeover-local",
+  "stress.clock-takeover-observer",
   "scenario.diagnostic-nodes",
   "paced.reopen-generation",
   "stress.diagnostic-nodes",
@@ -1664,6 +1717,10 @@ workloads = [
 [[owner]]
 path = "src/cluster.rs"
 workloads = [
+  "scenario.clock-takeover-local",
+  "scenario.clock-takeover-observer",
+  "stress.clock-takeover-local",
+  "stress.clock-takeover-observer",
   "scenario.restarted-voter-observation",
   "scenario.diagnostic-nodes",
   "scenario.diagnostic-server-processes",

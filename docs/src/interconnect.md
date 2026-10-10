@@ -1359,16 +1359,18 @@ management request in the reserved progress subquota, rather than an unclassifie
 The response confirms that the authenticated receiver evaluated the report against its current
 fence; it does not establish or replace the receiver's committed clock mapping.
 
-For each domain and ready remote node, the authority owns one delivery loop with at most one request
+For each domain and prepared remote node, the authority owns one delivery loop with at most one request
 in flight and one latest pending report. A newer logical frontier replaces the pending report while
 the loop waits for capacity or a response, so a fast clock or slow peer cannot create an unbounded
 tick queue. The node-wide progress quota bounds attempts across every domain and peer. Liveness,
 relay admission, cancellation, and terminal outcomes retain their independent capacity.
 
-Only live peers that have installed the required runtime revision receive progress. A node that
-joins or reconnects receives the newest retained frontier once it becomes ready. Each attempt has a
-two-second physical deadline. A failed attempt waits 200 milliseconds, then retries the newest
-frontier; authority shutdown cancels both an active request and its retry delay.
+Only live peers that have prepared the required runtime revision receive progress. Preparation
+installs the mapping and authority fence before graph activation, so a receiver does not wait for
+other nodes to prepare or activate. A node that joins or reconnects receives the newest retained
+frontier once its own preparation is advertised. Each attempt has a two-second physical deadline.
+A failed attempt waits 200 milliseconds, then retries the newest frontier; authority shutdown
+cancels both an active request and its retry delay.
 
 The wire report contains typed logical and UTC timestamps and no process-local monotonic instant.
 The receiver authenticates the reporting node and applies the committed generation, revision,
