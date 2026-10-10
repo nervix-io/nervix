@@ -32,6 +32,8 @@ use super::{
 const MOVING_BATCH: InvariantId = InvariantId::new("runtime.local-drain.moving-batch");
 const TAKEN_BATCH: InvariantId = InvariantId::new("runtime.local-drain.taken-batch");
 const HANDED_ON_BATCH: InvariantId = InvariantId::new("runtime.local-drain.handed-on-batch");
+const HANDOFF_FLUSH_COMPLETION: InvariantId =
+    InvariantId::new("runtime.ownership-handoff.flush-completion");
 const FLUSH_COMPLETION: InvariantId = InvariantId::new("runtime.local-drain.flush-completion");
 
 #[test]
@@ -123,6 +125,33 @@ fn loom_a_message_a_flush_resumed_is_seen_by_a_drain_that_sees_the_flush_complet
         assert!(
             status.force_flush_obligations != 0 || status.holds_admitted_work(),
             "a drain observation saw the flush complete without the message the flush resumed"
+        );
+        drop(resumed);
+    });
+}
+
+#[test]
+fn loom_an_ownership_handoff_drain_sees_work_resumed_before_flush_completion() {
+    explore(HANDOFF_FLUSH_COMPLETION, || {
+        let sources = Arc::new(OneRelayAndNode::new());
+        sources.counters.begin_force_flush_obligation();
+        let mut message = NodeQuiesceWorkGuard::begin(sources.counters.clone());
+        message.park_for_required_materialized_state();
+        let flushing_sources = Arc::clone(&sources);
+        let flushing = spawn(move || {
+            message.resume_from_required_materialized_state();
+            flushing_sources.counters.complete_force_flush_obligation();
+            message
+        });
+        let work = sources
+            .counters
+            .outstanding_work_for(nervix_interconnect::EntityGatePurpose::OwnershipHandoff);
+        let resumed = flushing
+            .join()
+            .assured("the flushing side only resumes one message and completes its flush");
+        assert!(
+            work != 0,
+            "an ownership drain must see either the outstanding flush or the work it resumed"
         );
         drop(resumed);
     });

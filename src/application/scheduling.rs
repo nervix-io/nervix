@@ -144,6 +144,31 @@ struct ShutdownDrainBudget {
     deadline: ShutdownDeadline,
 }
 
+/// The leader's view of the time a stopping node gave it for moving scheduled work. Each unit
+/// keeps a share of that time for the units after it and for the stopping node's local drain.
+struct ShutdownLeaderDrainBudget {
+    started: Instant,
+    timeout: Duration,
+}
+
+impl ShutdownLeaderDrainBudget {
+    fn new(timeout: Duration) -> Self {
+        Self {
+            started: Instant::now(),
+            timeout,
+        }
+    }
+
+    fn unit_handoff_budget(&self) -> Duration {
+        let remaining = self
+            .timeout
+            .checked_sub(self.started.elapsed())
+            .unwrap_or(Duration::ZERO);
+        let reserve = self.timeout / 6;
+        remaining.checked_sub(reserve).unwrap_or(Duration::ZERO)
+    }
+}
+
 impl ShutdownDrainBudget {
     fn start(timeout: Duration, deadline: ShutdownDeadline) -> Self {
         Self {
@@ -670,6 +695,16 @@ impl SessionServiceImpl {
         node_id: ClusterNodeName,
         execution: Option<&CommandExecution>,
     ) -> CommandResult {
+        self.drain_node_with_budget(node_id, execution, None).await
+    }
+
+    async fn drain_node_with_budget(
+        &self,
+        node_id: ClusterNodeName,
+        execution: Option<&CommandExecution>,
+        shutdown_budget: Option<Duration>,
+    ) -> CommandResult {
+        let shutdown_budget = shutdown_budget.map(ShutdownLeaderDrainBudget::new);
         let membership = self.inner.consensus.membership_nodes().await;
         if !membership.contains_key(&node_id) {
             return command_error(format!("node '{node_id}' is not a raft member"));
@@ -701,7 +736,7 @@ impl SessionServiceImpl {
         let mut failed = false;
         let mut failed_units = BTreeSet::<(DomainName, String)>::new();
         let mut failed_domains = BTreeSet::<DomainName>::new();
-        loop {
+        'drain: loop {
             let mut handled_this_iteration = false;
 
             for (domain, graph) in self.inner.registry.active_graphs() {
@@ -899,10 +934,40 @@ impl SessionServiceImpl {
                     handled_this_iteration = true;
                     break;
                 }
-                let mut handoff = match self
-                    .begin_planned_ownership_handoff(&domain, Some(current_domain), Some(&next))
-                    .await
-                {
+                let unit_budget = shutdown_budget
+                    .as_ref()
+                    .map(ShutdownLeaderDrainBudget::unit_handoff_budget);
+                if unit_budget == Some(Duration::ZERO) {
+                    failed = true;
+                    outcomes.push(format!(
+                        "- {} owner={node_id} failed: the stopping node's drain budget left no \
+                         time for another ownership handoff",
+                        drain_move.label
+                    ));
+                    break 'drain;
+                }
+                let preparation = async {
+                    match unit_budget {
+                        Some(budget) => {
+                            self.begin_shutdown_ownership_handoff(
+                                &domain,
+                                Some(current_domain),
+                                Some(&next),
+                                budget,
+                            )
+                            .await
+                        }
+                        None => {
+                            self.begin_planned_ownership_handoff(
+                                &domain,
+                                Some(current_domain),
+                                Some(&next),
+                            )
+                            .await
+                        }
+                    }
+                };
+                let mut handoff = match preparation.await {
                     Ok(handoff) => handoff,
                     Err(error) => {
                         failed = true;
@@ -1031,6 +1096,10 @@ impl SessionServiceImpl {
         deadline: ShutdownDeadline,
     ) -> ShutdownPhaseOutcome {
         let budget = ShutdownDrainBudget::start(drain_timeout, deadline);
+        // Stop source admission before the leader begins moving downstream nodes. A Kafka poll
+        // admitted while an emitter moves can otherwise leave its source ACK root waiting on that
+        // move until the entire drain budget expires.
+        self.inner.runtime.close_local_intake();
         let local_node_id = self.inner.consensus.local_node_id().clone();
         let operator_cordon_exists = self
             .inner
@@ -1131,8 +1200,13 @@ impl SessionServiceImpl {
         };
         // A requested drain may cordon the node before it moves anything, so a drain that times out
         // still counts as requested.
-        let drain =
-            self.ask_shutdown_drain_leader(local_node_id, leader, StoppingNodeDrainAction::Drain);
+        let drain = self.ask_shutdown_drain_leader(
+            local_node_id,
+            leader,
+            StoppingNodeDrainAction::Drain {
+                budget: budget.remaining(),
+            },
+        );
         let answer = match nervix_primitives::time::timeout(budget.remaining(), drain).await {
             Ok(answer) => answer,
             Err(_) => {
@@ -1181,9 +1255,11 @@ impl SessionServiceImpl {
     }
 
     /// Asks `leader` to act on this stopping node's own scheduled work, and asks the leader this
-    /// node observes next whenever the node asked does not lead, which changed nothing, or lost
-    /// its leadership while it released the cordon. While this node leads, it acts for itself.
+    /// node observes next whenever the node asked does not lead, or lost its leadership while
+    /// draining or releasing the cordon. While this node leads, it acts for itself.
     ///
+    /// A leader that loses leadership during a drain preserves committed moves and lets the next
+    /// leader plan the remaining ones within the same budget.
     /// Another leader hears the request over the interconnect, which authenticates this node by its
     /// certificate, so asking needs no user credential.
     async fn ask_shutdown_drain_leader(
@@ -1193,13 +1269,24 @@ impl SessionServiceImpl {
         action: StoppingNodeDrainAction,
     ) -> ShutdownDrainAnswer {
         let mut leader = first_leader;
+        let requested_at = Instant::now();
         loop {
             nervix_primitives::task::consume_budget().await;
+            let current_action = match action {
+                StoppingNodeDrainAction::Drain { budget } => StoppingNodeDrainAction::Drain {
+                    budget: budget
+                        .checked_sub(requested_at.elapsed())
+                        .unwrap_or(Duration::ZERO),
+                },
+                StoppingNodeDrainAction::ReleaseCordon => StoppingNodeDrainAction::ReleaseCordon,
+            };
             let response = if &leader == local_node_id {
-                self.act_for_stopping_node(local_node_id.clone(), action)
+                self.act_for_stopping_node(local_node_id.clone(), current_action)
                     .await
             } else {
-                let request = StoppingNodeDrainRequest { action };
+                let request = StoppingNodeDrainRequest {
+                    action: current_action,
+                };
                 match self.inner.interconnect.request(&leader, request).await {
                     Ok(response) => response,
                     Err(error) => return ShutdownDrainAnswer::Unanswered { leader, error },
@@ -1297,12 +1384,24 @@ impl SessionServiceImpl {
             return StoppingNodeDrainResponse::NotLeader;
         }
         match action {
-            StoppingNodeDrainAction::Drain => {
-                let drained = self.drain_node(node_id, None).await;
+            StoppingNodeDrainAction::Drain { budget } => {
+                let drained = self
+                    .drain_node_with_budget(node_id.clone(), None, Some(budget))
+                    .await;
                 if drained.succeeded() {
                     StoppingNodeDrainResponse::Completed {
                         report: drained.message,
                     }
+                } else if drained.is_not_leader()
+                    || self.inner.consensus.current_leader().await.as_ref()
+                        != Some(self.inner.consensus.local_node_id())
+                {
+                    info!(
+                        node_id = %node_id,
+                        report = %drained.message,
+                        "stopping-node drain lost leadership; remaining work needs the next leader"
+                    );
+                    StoppingNodeDrainResponse::NotLeader
                 } else {
                     StoppingNodeDrainResponse::Failed {
                         report: drained.message,

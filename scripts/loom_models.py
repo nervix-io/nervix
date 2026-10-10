@@ -43,7 +43,7 @@ import shutil
 import subprocess
 import sys
 import tomllib
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Callable, Mapping, Sequence
 
@@ -702,6 +702,7 @@ def qualify_one(
     problem = qualification_failure(weakened, qualification)
     if problem is None and not checkpoint.is_file():
         problem = "the failed model left no checkpoint to replay"
+    replayed: Outcome | None = None
     if problem is None:
         replayed_checkpoint = directory / "replay-checkpoint.json"
         shutil.copyfile(checkpoint, replayed_checkpoint)
@@ -714,9 +715,30 @@ def qualify_one(
         replay_problem = qualification_failure(replayed, qualification)
         if replay_problem is not None:
             problem = f"its checkpoint does not replay the failure: {replay_problem}"
+    if checkpoint.is_file():
+        command = model_command(model, manifest)
+        metadata = failure_metadata(commands, model, command, weakened, directory)
+        metadata["qualification"] = asdict(qualification)
+        metadata["qualification_status"] = "passed" if problem is None else "failed"
+        metadata["checkpoint_replay"] = (
+            {
+                "command": command,
+                "checkpoint": "replay-checkpoint.json",
+                "exit_status": replayed.status,
+                "output": "replay.log",
+            }
+            if replayed is not None
+            else None
+        )
+        metadata["replay"] = (
+            "Restore the recorded revision and apply the recorded qualification's weakening "
+            f"in an isolated worktree, then run just test-loom-replay {directory}"
+        )
+        (directory / "metadata.json").write_text(
+            json.dumps(metadata, indent=2) + "\n", encoding="utf-8"
+        )
     if problem is not None:
         return f"qualification {qualification.id}: {problem}; see {directory}"
-    shutil.rmtree(directory)
     print(
         f"loom: {qualification.id} makes {invariant.id} fail with "
         f"`{qualification.failure}`, and its checkpoint replays the failure",

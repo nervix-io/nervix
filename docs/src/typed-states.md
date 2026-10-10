@@ -255,7 +255,33 @@ duration clamped at its physical anchor. Neither encodes an absent clock. The
 [Domain Clock](./domain-clock.md) chapter defines clock absence, installation states, authority
 fencing, and overflow handling.
 
+An entity-gate operation owns pending, held, released and failed outcomes. A held operation has
+closed its admission scope and requested its force flush. Ownership capture also requires a freeze
+owned by that exact coordination identity. The exact operation's drain-status query publishes it
+only after observing no affected admitted work or flush obligations. The operation's registry guard
+keeps its hold alive through that observation and publication. Request cancellation leaves the
+receiver-owned engagement and its original lease intact; retries await the same operation and
+renew no lease. The preparation deadline separately bounds engagement, drain and capture.
+
+A domain schedule's planning snapshot keeps its captured consensus cordons with two distinct
+identity sets: all live voters and eligible placement destinations. Termination of an already
+cordoned voter leaves both sets unchanged; losing or restarting that voter changes its live
+identity and invalidates the plan. Schedule and transaction publication validate the composed
+destination set and retain the independent consensus topology fence.
+
 ## External Encodings And Conversion Failure
+
+The stopping-node drain action carries a required remaining `Duration` budget. Its sender deducts
+elapsed request time before each leader redirect; the receiving leader owns the typed budget for
+the handoffs it performs. Preparation and activation deadlines are derived from that one value,
+and exhaustion produces a failed drain outcome. The stopping-node answer distinguishes a failure
+while its coordinator still leads from an interrupted drain whose coordinator no longer leads.
+The latter routes the remaining moves through the next leader without resetting the budget or
+repeating committed moves. Classification consumes the typed command disposition and consensus
+leadership observation rather than matching diagnostic text. The interconnect verifies the archived
+action
+and fences its current representation with the wire fingerprint. [Shutdown And Recovery](./shutdown.md)
+owns the lifecycle and deadline policy.
 
 At an external boundary, a protocol may require a raw tag, signature, null lane, or optional
 scalar. The adapter owns that encoding and turns it into a typed internal state. In the other
@@ -537,6 +563,12 @@ uses one database view for namespace selection and payload data. A queued checkp
 its selected namespace and validates that it remains current before writing. The storage format
 marker is required for nonempty checkpoint storage; corruption or absence fails explicitly and
 requires recreation rather than inventing a namespace for the stored keys.
+
+A branch-aggregate metric checkpoint revision identifies one exact encoded payload. Capture
+retains its elapsed fields once, so another descriptor, stream or persistence request cannot choose
+different bytes for that revision. Initial, replica and persisted recovery preserve the received
+bytes with their revision. A dirty metric update selects the next revision; a snapshot mutex
+serializes capture and installation at that placement's cold boundary.
 
 Active chunk maintenance validates the placement and fixed revision/offset coordinates before
 forming a chunk-set cursor. A set remains referenced only when the same view's selected header is

@@ -1,6 +1,45 @@
 @shutdown_qualification
 Feature: Graceful shutdown
 
+  @shutdown_leader_change @deloxide_stress
+  Scenario: A stopping follower resumes its remaining ownership moves after the leader changes
+    Given graceful shutdown drain is enabled
+    And drain timeout is configured as "30s"
+    And runtime replication is configured with replica count 0 and snapshot interval "10m"
+    And the production sticky scheduler is configured
+    And a 3 node nervix cluster is started
+    And the leader node is configured with these NSPL commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      CREATE SCHEMA drain_event ( id I64 );
+      CREATE RELAY drain_input SCHEMA drain_event UNBRANCHED;
+      CREATE RELAY drain_output SCHEMA drain_event UNBRANCHED;
+      CREATE JUNCTION drain_route FROM drain_input UNBRANCHED
+        TO drain_output INHERIT ALL FLUSH IMMEDIATE ON MESSAGE ERROR LOG;
+      START;
+      RELOCATE JUNCTION drain_route ONTO NODE node-2 IGNORE PREFERENCES;
+      """
+    Then node "node-1" eventually reports status containing "kind=junction name=drain_route owner=node-2"
+    When leadership is transferred to node "node-3"
+    Given ownership handoff for domain "{{domain}}" pauses after preparation
+    When node "node-2" begins stopping
+    Then the ownership handoff preparation pause for domain "{{domain}}" is reached
+    When leadership is transferred to node "node-1"
+    Then node "node-3" eventually reports leader "node-1"
+    When the ownership handoff preparation pause for domain "{{domain}}" is released
+    And node "node-2" is stopped
+    Then the last shutdown of node "node-2" reports its drain-support phase "Completed"
+    And node "node-1" eventually reports status containing "raft.cordoned_nodes: (none)"
+    When these NSPL commands are executed through the client on node "node-1"
+      """
+      SHOW CLUSTER STATUS;
+      """
+    Then the last cluster status owner for scheduled "junction" "drain_route" is saved as placeholder "drain_route_destination"
+    And the last command output contains
+      """
+      kind=junction name=drain_route owner={{drain_route_destination}} replicas=- transition_from=node-2 state_recovery=complete
+      """
+
   Scenario: Graceful shutdown preserves an operator cordon across restart
     Given graceful shutdown drain is enabled
     And the production sticky scheduler is configured
@@ -20,6 +59,151 @@ Feature: Graceful shutdown
       """
       raft.cordoned_nodes: node-2
       """
+
+  @shutdown_kafka_handoff @deloxide_stress
+  Scenario: A stopping Kafka ingestor closes intake while its attached emitter hands over
+    Given Kafka is running
+    And graceful shutdown drain is enabled
+    And drain timeout is configured as "30s"
+    And the production sticky scheduler is configured
+    And a 3 node nervix cluster is started
+    And Kafka topic "shutdown_handoff_in_{{test_id}}" exists with 1 partitions
+    And Kafka topic "shutdown_handoff_out_{{test_id}}" is observed
+    When these NSPL commands are executed on the leader node
+      """
+      CORDON NODE node-2;
+      CORDON NODE node-3;
+      CREATE UNPACED DOMAIN {{domain}};
+      CREATE SCHEMA handoff_event ( event_id I64 );
+      CREATE WIRE JSON SCHEMA handoff_wire MODE STRICT ( event_id integer );
+      CREATE CODEC handoff_codec
+        FROM WIRE JSON SCHEMA handoff_wire TO SCHEMA handoff_event;
+      CREATE RELAY handoff_records SCHEMA handoff_event UNBRANCHED CAPACITY 1;
+      CREATE CLIENT handoff_kafka TYPE KAFKA CONFIG {
+        'bootstrap.servers' = '{{kafka_addr}}',
+        'auto.offset.reset' = 'earliest'
+      };
+      CREATE INGESTOR handoff_source
+        FROM KAFKA handoff_kafka TOPIC shutdown_handoff_in_{{test_id}}
+          OFFSET BY CONSUMER GROUP shutdown_handoff_group_{{test_id}}
+          MODE ACK SEQUENTIAL ACK TIMEOUT 30s
+          RETRY POLICY BACKOFF 100ms MAX 1s
+        ON QUIESCE SUSPEND DECODE USING handoff_codec
+        TO handoff_records INHERIT ALL UNBRANCHED
+          FLUSH IMMEDIATE ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
+      CREATE ATTACHED EMITTER handoff_output FROM handoff_records
+        TO KAFKA handoff_kafka TOPIC shutdown_handoff_out_{{test_id}}
+          MODE ACK PARALLEL MAX 2 ACK TIMEOUT 30s
+          RETRY POLICY BACKOFF 100ms MAX 1s ENCODE USING handoff_codec
+        INHERIT ALL FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+      START;
+      UNCORDON NODE node-2;
+      UNCORDON NODE node-3;
+      """
+    And leadership is transferred to node "node-2"
+    When emitter "handoff_output" enters stall mode
+    And these Kafka messages are rapidly published to topic "shutdown_handoff_in_{{test_id}}"
+      """
+      {"event_id":1}
+      {"event_id":2}
+      {"event_id":3}
+      """
+    Then within "30s" DESCRIBE EMITTER "handoff_output" on the leader node contains
+      """
+      transient error: fault injector stalled emitter publish
+      """
+    Given ownership handoff for domain "{{domain}}" pauses after requesting flush
+    When node "node-1" begins stopping
+    Then the ownership handoff flush pause for domain "{{domain}}" is reached
+    And within "5s" node "node-2" eventually reports describe ingestor "handoff_source" as "quiesce state: shutdown"
+    When emitter "handoff_output" leaves stall mode
+    And the ownership handoff flush pause for domain "{{domain}}" is released
+    And node "node-1" is stopped
+    Then the last shutdown of node "node-1" reports its drain-support phase "Completed"
+    And within "30s" the observed broker receives payloads
+      """
+      {"event_id":1}
+      {"event_id":2}
+      {"event_id":3}
+      """
+    And within "30s" Kafka consumer group "shutdown_handoff_group_{{test_id}}" next offset for topic "shutdown_handoff_in_{{test_id}}" partition 0 is "at least 3"
+    And the observed broker does not receive a payload within "2s"
+    When these NSPL commands are executed on node "node-2"
+      """
+      SHOW CLUSTER STATUS;
+      """
+    Then the last cluster status owner for scheduled "ingestor" "handoff_source" is saved as placeholder "handoff_source_destination"
+    And the last cluster status owner for scheduled "emitter" "handoff_output" is saved as placeholder "handoff_emitter_destination"
+    And the last command output contains
+      """
+      kind=ingestor name=handoff_source owner={{handoff_source_destination}} replicas=- transition_from=node-1 state_recovery=complete
+      """
+    And the last command output contains
+      """
+      kind=emitter name=handoff_output owner={{handoff_emitter_destination}} replicas=- transition_from=node-1 state_recovery=complete
+      """
+
+  @shutdown_flush_before_freeze @deloxide_stress
+  Scenario: A stopping ingestor flushes its admitted route before freezing ownership state
+    Given Kafka is running
+    And graceful shutdown drain is enabled
+    And drain timeout is configured as "30s"
+    And the production sticky scheduler is configured
+    And a 3 node nervix cluster is started
+    And Kafka topic "shutdown_flush_in_{{test_id}}" exists with 1 partitions
+    And Kafka topic "shutdown_flush_out_{{test_id}}" is observed
+    When these NSPL commands are executed on the leader node
+      """
+      CORDON NODE node-2;
+      CORDON NODE node-3;
+      CREATE UNPACED DOMAIN {{domain}};
+      CREATE SCHEMA flush_event ( event_id I64 );
+      CREATE WIRE JSON SCHEMA flush_wire MODE STRICT ( event_id integer );
+      CREATE CODEC flush_codec
+        FROM WIRE JSON SCHEMA flush_wire TO SCHEMA flush_event;
+      CREATE RELAY flush_records SCHEMA flush_event UNBRANCHED CAPACITY 1;
+      CREATE CLIENT flush_kafka TYPE KAFKA CONFIG {
+        'bootstrap.servers' = '{{kafka_addr}}',
+        'auto.offset.reset' = 'earliest'
+      };
+      CREATE INGESTOR flush_source
+        FROM KAFKA flush_kafka TOPIC shutdown_flush_in_{{test_id}}
+          OFFSET BY CONSUMER GROUP shutdown_flush_group_{{test_id}}
+          MODE ACK SEQUENTIAL ACK TIMEOUT 30s
+          RETRY POLICY BACKOFF 100ms MAX 1s
+        ON QUIESCE SUSPEND DECODE USING flush_codec
+        TO flush_records INHERIT ALL UNBRANCHED
+          FLUSH EACH 1h MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
+      CREATE ATTACHED EMITTER flush_output FROM flush_records
+        TO KAFKA flush_kafka TOPIC shutdown_flush_out_{{test_id}}
+          MODE ACK PARALLEL MAX 2 ACK TIMEOUT 30s
+          RETRY POLICY BACKOFF 100ms MAX 1s ENCODE USING flush_codec
+        INHERIT ALL FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+      START;
+      UNCORDON NODE node-2;
+      UNCORDON NODE node-3;
+      """
+    Given ingestor "flush_source" pauses before polling its route
+    When these Kafka messages are rapidly published to topic "shutdown_flush_in_{{test_id}}"
+      """
+      {"event_id":1}
+      """
+    Then ingestor "flush_source" reaches the route poll pause
+    Given ownership handoff for domain "{{domain}}" pauses after requesting flush
+    When node "node-1" begins stopping
+    Then the ownership handoff flush pause for domain "{{domain}}" is reached
+    When ingestor "flush_source" leaves the route poll pause
+    And the ownership handoff flush pause for domain "{{domain}}" is released
+    And node "node-1" is stopped
+    Then the last shutdown of node "node-1" reports its drain-support phase "Completed"
+    And within "30s" the observed broker receives payloads
+      """
+      {"event_id":1}
+      """
+    And within "30s" Kafka consumer group "shutdown_flush_group_{{test_id}}" next offset for topic "shutdown_flush_in_{{test_id}}" partition 0 is "at least 1"
+    And the observed broker does not receive a payload within "2s"
 
   @shutdown_cordon_release @deloxide_stress
   Scenario Outline: A stopping <role> whose cordon release outlasts one second completes its drain and leaves no cordon
@@ -129,7 +313,8 @@ Feature: Graceful shutdown
       {"amount":10,"tenant":"acme","transaction_id":"txn-1"}
       """
     When node "node-2" is gracefully stopped
-    And these NSPL commands are executed on the active session
+    Then the last shutdown of node "node-2" reports its drain-support phase "Completed"
+    When these NSPL commands are executed on the active session
       """
       SHOW CLUSTER STATUS;
       """

@@ -429,28 +429,43 @@ impl SessionServiceImpl {
                 Err(error) => EntityGateEngagementOutcome::Rejected(error.to_string()),
             };
         }
-        let remaining = deadline.saturating_duration_since(nervix_primitives::time::Instant::now());
-        let deadline_millis = u64::try_from(remaining.as_millis().max(1)).unwrap_or(u64::MAX);
-        let response = self
-            .inner
-            .interconnect
-            .request_with_timeout(
-                node_id,
-                RemoteEntityGateRequest {
-                    coordination: coordination.clone(),
-                    domain: domain.clone(),
-                    relays: relays.to_vec(),
-                    affected_entities: affected_entities.to_vec(),
-                    purpose,
-                    deadline_millis,
-                    reason: reason.to_string(),
-                },
-                remaining.min(Duration::from_secs(2)),
-            )
-            .await;
-        let response = match response {
-            Ok(response) => response,
-            Err(error) => return EntityGateEngagementOutcome::Uncertain(error.to_string()),
+        let response = loop {
+            let remaining =
+                deadline.saturating_duration_since(nervix_primitives::time::Instant::now());
+            let deadline_millis = u64::try_from(remaining.as_millis().max(1)).unwrap_or(u64::MAX);
+            let response = self
+                .inner
+                .interconnect
+                .request_with_timeout(
+                    node_id,
+                    RemoteEntityGateRequest {
+                        coordination: coordination.clone(),
+                        domain: domain.clone(),
+                        relays: relays.to_vec(),
+                        affected_entities: affected_entities.to_vec(),
+                        purpose,
+                        deadline_millis,
+                        reason: reason.to_string(),
+                    },
+                    remaining.min(Duration::from_secs(2)),
+                )
+                .await;
+            match response {
+                Ok(response) => break response,
+                Err(error)
+                    if purpose == EntityGatePurpose::OwnershipHandoff
+                        && matches!(
+                            error.current_context(),
+                            nervix_interconnect::RequestError::Timeout { .. }
+                        )
+                        && nervix_primitives::time::Instant::now() < deadline =>
+                {
+                    // Await the same receiver-owned admission fence. Its flush request and
+                    // activation lease remain unchanged when a response is lost.
+                    nervix_primitives::task::consume_budget().await;
+                }
+                Err(error) => return EntityGateEngagementOutcome::Uncertain(error.to_string()),
+            }
         };
         match response.result {
             Ok(()) => EntityGateEngagementOutcome::Confirmed,

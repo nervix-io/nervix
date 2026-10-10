@@ -1487,6 +1487,7 @@ impl Application {
                                 &scheduling_availability,
                                 &current_availability,
                                 automatic_schedule_input.topology().voters(),
+                                automatic_schedule_input.topology().cordoned(),
                             ) {
                                 break;
                             }
@@ -1600,6 +1601,7 @@ impl Application {
                                     &scheduling_availability,
                                     &current_availability,
                                     automatic_schedule_input.topology().voters(),
+                                    automatic_schedule_input.topology().cordoned(),
                                 ) {
                                     break;
                                 }

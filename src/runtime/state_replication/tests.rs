@@ -143,6 +143,18 @@ impl EmptyRelayHandoffFixture {
             )
             .await
             .expect("ownership handoff gate should engage");
+        assert!(
+            runtime
+                .entity_gate_operation_drain_status(
+                    &coordination,
+                    &self.domain,
+                    &[],
+                    std::slice::from_ref(&self.entity),
+                    EntityGatePurpose::OwnershipHandoff,
+                )
+                .expect("the empty relay should publish its capture freeze after draining")
+                .is_drained()
+        );
         runtime
             .prepare_ownership_handoff_state(PrepareOwnershipHandoffStateRequest {
                 coordination,

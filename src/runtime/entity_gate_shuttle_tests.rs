@@ -878,3 +878,93 @@ fn observing_an_ownership_handoff_freeze_never_misses_its_release() {
 fn shuttle_an_ownership_handoff_freeze_observation_registers_before_its_read() {
     explore(observing_an_ownership_handoff_freeze_never_misses_its_release);
 }
+
+/// The capture freeze follows the participant's real force-flush completion, even when the
+/// drain-status owner observes work between the route's output and obligation updates.
+fn handoff_freeze_follows_admitted_route_flush() {
+    shuttle::future::block_on(async {
+        let runtime = Runtime::default();
+        let domain = DomainName::parse("default").assured("valid domain");
+        let entity = NodeRef::new(
+            ModelKind::Ingestor,
+            ModelName::parse("source").assured("valid source"),
+        );
+        let counters = runtime.node_quiesce_counters(&domain, entity.clone());
+        let mut participant = runtime.force_flush_participant(&domain, counters.clone());
+        counters.admit(1);
+        runtime.force_flush_domain(&domain);
+        let observation = StdArc::new(AtomicBool::new(false));
+        let freeze = Arc::new(OwnershipHandoffFreezeWatch::new(
+            &runtime,
+            entity.in_domain(&domain),
+        ));
+        assert!(
+            !runtime
+                .freeze_drained_ownership_handoff(
+                    &coordination(),
+                    &domain,
+                    &[],
+                    std::slice::from_ref(&entity)
+                )
+                .is_drained()
+        );
+        assert!(!freeze.observe().is_frozen());
+
+        let flushing_freeze = freeze.clone();
+        let published_output = observation.clone();
+        let flush = nervix_primitives::task::spawn(async move {
+            let completion = participant
+                .pending_completion()
+                .assured("participant remains available")
+                .assured("this participant owes the requested generation");
+            assert!(!flushing_freeze.observe().is_frozen());
+            // This records publication without contributing a modeled ordering or wakeup.
+            published_output.store(true, Ordering::SeqCst);
+            counters.withdraw_admitted(1);
+            nervix_primitives::task::yield_now().await;
+            assert!(
+                !flushing_freeze.observe().is_frozen(),
+                "the live flush obligation prevents capture"
+            );
+            assert!(completion.complete());
+        });
+        let freezing_runtime = runtime.clone();
+        let freezing_domain = domain.clone();
+        let freezing_entity = entity.clone();
+        let freeze_task = nervix_primitives::task::spawn(async move {
+            while !freezing_runtime
+                .freeze_drained_ownership_handoff(
+                    &coordination(),
+                    &freezing_domain,
+                    &[],
+                    std::slice::from_ref(&freezing_entity),
+                )
+                .is_drained()
+            {
+                nervix_primitives::task::yield_now().await;
+            }
+            assert!(
+                observation.load(Ordering::SeqCst),
+                "capture follows publication of admitted output"
+            );
+            assert!(
+                freezing_runtime
+                    .entity_drain_status(
+                        &freezing_domain,
+                        &[],
+                        &[freezing_entity],
+                        EntityGatePurpose::OwnershipHandoff
+                    )
+                    .is_drained()
+            );
+        });
+        flush.await.assured(CHECK_TASK_JOINS);
+        freeze_task.await.assured(CHECK_TASK_JOINS);
+        assert!(freeze.observe().is_frozen());
+    });
+}
+
+#[test]
+fn shuttle_an_ownership_handoff_freezes_only_after_admitted_route_flush_completes() {
+    explore(handoff_freeze_follows_admitted_route_flush);
+}

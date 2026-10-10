@@ -198,6 +198,11 @@ transaction id, accepted position, and planning basis. It names the **whole tran
 when inspection focuses on one operation. A coherent preview is current for the inputs it read;
 it does not promise that no other command will change those inputs after inspection.
 
+The captured schedule eligibility records every live voter incarnation and the destination
+candidates after applying termination and consensus cordons. A cordoned voter's terminating
+advertisement changes neither set; its loss or restart changes the live identity set and makes
+the plan stale. The committed topology fence separately rejects changed membership or cordons.
+
 `COMMIT` can name the expected preview. Before engaging a gate or applying an effect, admission
 checks its position and captured inputs. A stale expected preview is refused with both expected
 and current identities; the transaction remains `OPEN` with the same binding and no effect. The
@@ -248,6 +253,14 @@ cleanup records `RELEASED`. A request followed by a definitive failure *before* 
 contributes only `DYNAMIC` to the actual aggregate. A confirmed or uncertain engagement contributes
 its possible scope even if the step subsequently fails or the gate is released. The report never
 rewrites the planned requirement to make a later outcome appear expected.
+
+Ownership-handoff engagement confirms the closed admission hold and requested flush. The
+coordinator observes each exact operation's pending drain before capture; a drained response
+publishes the participant's capture freeze. A drain timeout keeps the pending node and work counts
+and releases attempted holds before independent schedule units continue. Retrying a two-second
+engagement reply timeout waits on the same receiver-owned identity, adds no pause attempt and
+extends no lease. Preparation retains its original deadline, and cleanup releases every attempted
+participant.
 
 The step changes from `UNATTEMPTED` to `APPLYING` when its authoritative effect transition is
 recorded. It becomes `APPLIED` only after required activation, source readiness, handoff, and

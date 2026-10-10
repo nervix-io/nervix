@@ -1062,11 +1062,42 @@ promoted owner. A commit that lacks its required replica acknowledgement still r
 existing quorum deadline; catch-up retries do not turn that deadline into a successful commit.
 A stopping node's `stopping_node_drain` request answers with outcomes of its own instead, because
 its only subject is the authenticated sender: completed or failed, each with the leader's report for
-the sender's log, or not the leader, which changed nothing and sends the sender to the leader it
-observes next. When that request fails in transport, the drain counts as requested but unanswered:
+the sender's log, or not the leader, which sends the sender to the leader it observes next. A node
+that receives the request without leading changes nothing. If leadership is lost during a drain,
+the interrupted report remains in the former leader's log and the new leader continues from the
+committed schedule within the original remaining budget. This classification uses the typed
+command disposition and the retained consensus leadership observation; it never interprets report
+text. A failed drain while the answering node still leads remains failed. When that request fails
+in transport, the drain counts as requested but unanswered:
 the sender reports its drain-support phase abandoned and still clears the cordon the request may
-have set; see [Topology Cases](./shutdown.md#topology-cases). A
-listing that arrives but names a branch key that does not decode is a failure of its own, distinct
+have set; see [Topology Cases](./shutdown.md#topology-cases). A unit whose ownership handoff
+cannot prepare within its share of the stopping node's drain budget appears in the leader's failed
+drain report with its kind, name, former owner and typed entity-gate cause, including pending node
+and work counts when quiescence timed out. Exhausting the remaining unit budget is reported as a
+failed drain instead of waiting for the sender's outer timeout.
+
+Schedule eligibility compares live voter identities and the placement candidates after the
+captured cordons and terminating flags are applied. A cordoned former owner's later terminating
+advertisement is an unchanged planning input. A changed live incarnation or eligible destination
+still reports `SchedulePlanningStale::Eligibility`; changed membership or cordons is rejected
+by the separate topology fence.
+
+Relocation validates membership and liveness, then reports a committed cordon as
+`RelocationError::DestinationCordoned`. A remaining placement exclusion reports
+`DestinationTerminating`. The cordon-filtered destination set does not classify a live cordoned
+voter as terminating.
+
+A handoff confirms closed admission while its local admitted work and flush can still be pending.
+The coordinator's exact-operation drain query retains the pending node and counts; exhaustion
+reports `DomainAlterError::EntityQuiesceTimeout` and releases the held scope. Independent schedule
+units remain available to continue, and a subsequent attempt can retry the stalled unit. A gate
+that expires during engagement reports `EntityGateOperationError::EngagementExpired` and releases
+its partial intake and relay holds. The preparation deadline bounds engagement, drain and capture
+independently of the activation lease. A typed reply timeout can retry the same engagement identity
+and scope within that budget; rejection and other request failures keep their classification.
+
+A listing that arrives but names a
+branch key that does not decode is a failure of its own, distinct
 from a failed request. A relay payload that does not decode is `RuntimeError::DecodeRemoteRelay`,
 naming the domain and relay, with the `RemoteRelayDecodeError` that says what the payload got wrong
 beneath it: no admission registration, a body that is not one Arrow section of the relay's schema,
@@ -1801,6 +1832,13 @@ transfer to alter a later measurement. A failed required attempt remains evidenc
 subsequent successful qualification. The controller's measurement budget does not extend the
 product's recovery budget. [The external Chaos runner](https://github.com/nervix-io/nervix/blob/main/scripts/chaos/README.md) owns the
 commands, measurement interpretation and retained artifact paths.
+
+The end-to-end benchmark driver distinguishes fresh Kafka partition leader readiness from a
+failed measurement. Before any warm-up input, its empty-topic preparation retries only the
+driver's typed `NotLeaderForPartition` and `LeaderNotAvailable` metadata failures within one
+thirty-second query budget per topic. A nonempty topic, another query failure, or an exhausted
+budget fails preparation with the Kafka cause retained. Measured delivery and output auditing
+keep their own failure boundaries and are never repeated by this preparation check.
 
 A diagnostic node's findings retain a typed source. `WaitForGraph`/`ActiveCycle` establishes an
 active tracked-lock cycle and ends the diagnostic process with status `3` after recording.

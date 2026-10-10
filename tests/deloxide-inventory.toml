@@ -115,6 +115,10 @@ tags = [
   "@vhost_tls_rebinding",
   "@inferencer_branch_batches",
   "@shutdown_cordon_release",
+  "@shutdown_kafka_handoff",
+  "@shutdown_leader_change",
+  "@shutdown_flush_before_freeze",
+  "@metrics_checkpoint_handoff",
 ]
 target = "test:scenarios"
 
@@ -537,6 +541,26 @@ id = "scenario.shutdown-cordon-release"
 invariant = "A stopping leader and a stopping follower whose cordon release outlasts one second complete the drain-support phase and leave no cordon after the stop or after the restart."
 invocation = "scenarios"
 scenario = "A stopping <role> whose cordon release outlasts one second completes its drain and leaves no cordon"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
+coverage = "A Kafka source's shutdown quiesce closes intake before the leader moves an attached emitter, while tracked source controls and ACK completion run during the stop."
+examples = 1
+feature = "tests/features/cluster/graceful_shutdown.feature"
+id = "scenario.shutdown-kafka-handoff"
+invariant = "A stopping Kafka owner admits no new source work during its emitter handoff and completes the drain with every admitted record delivered."
+invocation = "scenarios"
+scenario = "A stopping Kafka ingestor closes intake while its attached emitter hands over"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
+coverage = "Tracked entity-gate state during a stopping follower's ownership handoff across a leader change. Async leadership observation, transport waits and the shared shutdown deadline are untracked."
+examples = 1
+feature = "tests/features/cluster/graceful_shutdown.feature"
+id = "scenario.shutdown-leader-change"
+invariant = "A stopping follower resumes the remaining committed-schedule ownership moves through the new leader within its original drain budget and completes its drain-support phase."
+invocation = "scenarios"
+scenario = "A stopping follower resumes its remaining ownership moves after the leader changes"
 selections = ["deloxide", "deloxide-order"]
 
 [[workload]]
@@ -1413,6 +1437,46 @@ scenario = "Native lifecycle and Kafka metadata above the bulk budget on <cluste
 selections = ["deloxide-stress-restore"]
 
 [[workload]]
+coverage = "Under scheduling stress: tracked ingestor quiesce-control locks during intake closure and attached Kafka emitter handoff. Async gate and remote delivery waits remain untracked."
+examples = 1
+feature = "tests/features/cluster/graceful_shutdown.feature"
+id = "stress.shutdown-kafka-handoff"
+invariant = "A stopping Kafka owner admits no new source work during its emitter handoff and completes the drain with every admitted record delivered."
+invocation = "stress-scenarios"
+scenario = "A stopping Kafka ingestor closes intake while its attached emitter hands over"
+selections = ["deloxide-stress"]
+
+[[workload]]
+coverage = "Under scheduling stress: tracked entity-gate state during a stopping follower's ownership handoff across a leader change. Async leadership observation, transport waits and the shared shutdown deadline remain untracked."
+examples = 1
+feature = "tests/features/cluster/graceful_shutdown.feature"
+id = "stress.shutdown-leader-change"
+invariant = "A stopping follower resumes the remaining committed-schedule ownership moves through the new leader within its original drain budget and completes its drain-support phase."
+invocation = "stress-scenarios"
+scenario = "A stopping follower resumes its remaining ownership moves after the leader changes"
+selections = ["deloxide-stress"]
+
+[[workload]]
+coverage = "Tracked entity-gate and force-flush ownership during shutdown with a route held before its next poll. Async route wakeups, network delivery and deadlines are untracked."
+examples = 1
+feature = "tests/features/cluster/graceful_shutdown.feature"
+id = "scenario.shutdown-flush-before-freeze"
+invariant = "The handoff releases admitted Kafka route output before freezing state, completes shutdown and delivers exactly one acknowledged payload."
+invocation = "scenarios"
+scenario = "A stopping ingestor flushes its admitted route before freezing ownership state"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
+coverage = "Under scheduling stress: tracked entity-gate and force-flush ownership during shutdown with a route held before its next poll. Async route wakeups, network delivery and deadlines are untracked."
+examples = 1
+feature = "tests/features/cluster/graceful_shutdown.feature"
+id = "stress.shutdown-flush-before-freeze"
+invariant = "The handoff releases admitted Kafka route output before freezing state, completes shutdown and delivers exactly one acknowledged payload."
+invocation = "stress-scenarios"
+scenario = "A stopping ingestor flushes its admitted route before freezing ownership state"
+selections = ["deloxide-stress"]
+
+[[workload]]
 coverage = "One- and three-node capture, interruption, retry and resumed restore of two 40 MiB WASM guest saves. The selected checkpoint and staged file use the existing storage owners; async reservations, the test fault map and stream waits are untracked."
 examples = 2
 feature = "tests/features/cluster/backup_guest_saves.feature"
@@ -1430,6 +1494,46 @@ id = "stress.guest-save-backup"
 invariant = "A selected guest save above the bulk budget is staged in bounded chunks, an interrupted capture publishes no archive, and a retry and resumed restore preserve both guest branches byte for byte."
 invocation = "stress-restore-scenarios"
 scenario = "Guest saves above the bulk budget stream, retry and resume on <cluster_size> nodes"
+selections = ["deloxide-stress-restore"]
+
+[[workload]]
+coverage = "Exact metric checkpoint bytes, window state and branch lifecycle through a graceful owner drain."
+examples = 1
+feature = "tests/features/runtime/window_processor.feature"
+id = "scenario.window-metrics-drain"
+invariant = "A graceful drain transfers exact checkpoint revisions and incomplete windows for both tenant branches without early output."
+invocation = "scenarios"
+scenario = "Graceful owner drain retains incomplete branch windows without emitting them early"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
+coverage = "Exact metric checkpoint bytes, window state and branch lifecycle through explicit relocation."
+examples = 1
+feature = "tests/features/runtime/window_processor.feature"
+id = "scenario.window-metrics-relocation"
+invariant = "A window relocation transfers exact checkpoint revisions and preserves incomplete aggregates in two interleaved tenant branches."
+invocation = "scenarios"
+scenario = "Relocating a window owner preserves incomplete branch-local exact aggregates"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
+coverage = "Under scheduling stress: exact metric and incomplete window checkpoints across graceful owner drain."
+examples = 1
+feature = "tests/features/runtime/window_processor.feature"
+id = "stress.window-metrics-drain"
+invariant = "A graceful drain transfers exact checkpoint revisions and incomplete windows for both tenant branches without early output."
+invocation = "stress-restore-scenarios"
+scenario = "Graceful owner drain retains incomplete branch windows without emitting them early"
+selections = ["deloxide-stress-restore"]
+
+[[workload]]
+coverage = "Under scheduling stress: exact metric and branch-local incomplete window checkpoints across relocation."
+examples = 1
+feature = "tests/features/runtime/window_processor.feature"
+id = "stress.window-metrics-relocation"
+invariant = "A window relocation transfers exact checkpoint revisions and preserves incomplete aggregates in two interleaved tenant branches."
+invocation = "stress-restore-scenarios"
+scenario = "Relocating a window owner preserves incomplete branch-local exact aggregates"
 selections = ["deloxide-stress-restore"]
 
 [[owner]]
@@ -1753,6 +1857,12 @@ workloads = [
 gap = "The listed workloads reach scheduling, drain and entity-gate timing RwLocks. The holders mutex in occupy_execution and release_execution is reached by ordinary bounded-execution and branch-state-room scenarios, which the lane's registered scenario selections do not include."
 path = "src/fault_injection.rs"
 workloads = [
+  "scenario.shutdown-flush-before-freeze",
+  "scenario.shutdown-kafka-handoff",
+  "scenario.shutdown-leader-change",
+  "stress.shutdown-flush-before-freeze",
+  "stress.shutdown-kafka-handoff",
+  "stress.shutdown-leader-change",
   "scenario.diagnostic-nodes",
   "scenario.client-alter-drain",
   "scenario.client-alter-rejection",
@@ -1790,7 +1900,14 @@ workloads = [
 
 [[owner]]
 path = "src/runtime/branch_aggregated_state.rs"
-workloads = ["scenario.client-alter-drain", "stress.client-alter-drain"]
+workloads = [
+  "scenario.client-alter-drain",
+  "stress.client-alter-drain",
+  "scenario.window-metrics-drain",
+  "scenario.window-metrics-relocation",
+  "stress.window-metrics-drain",
+  "stress.window-metrics-relocation",
+]
 
 [[owner]]
 path = "src/runtime/branch_lifecycle_state.rs"
@@ -1810,6 +1927,8 @@ workloads = [
 [[owner]]
 path = "src/runtime/branch_runtime.rs"
 workloads = [
+  "scenario.shutdown-flush-before-freeze",
+  "stress.shutdown-flush-before-freeze",
   "scenario.client-alter-drain",
   "scenario.wasm-kafka-restore",
   "stress.client-alter-drain",
@@ -1819,15 +1938,24 @@ workloads = [
 [[owner]]
 path = "src/runtime/entity_gate.rs"
 workloads = [
+  "scenario.shutdown-flush-before-freeze",
+  "stress.shutdown-flush-before-freeze",
   "scenario.client-alter-drain",
   "scenario.client-alter-rejection",
+  "scenario.shutdown-leader-change",
   "stress.client-alter-drain",
   "stress.client-alter-rejection",
+  "stress.shutdown-leader-change",
 ]
 
 [[owner]]
 path = "src/runtime/force_flush.rs"
-workloads = ["scenario.client-alter-drain", "stress.client-alter-drain"]
+workloads = [
+  "scenario.shutdown-flush-before-freeze",
+  "stress.shutdown-flush-before-freeze",
+  "scenario.client-alter-drain",
+  "stress.client-alter-drain",
+]
 
 [[owner]]
 path = "src/runtime/inferencer.rs"
@@ -1839,12 +1967,16 @@ workloads = [
 [[owner]]
 path = "src/runtime/ingestor_quiesce.rs"
 workloads = [
+  "scenario.shutdown-flush-before-freeze",
+  "stress.shutdown-flush-before-freeze",
   "scenario.client-alter-drain",
   "scenario.diagnostic-nodes",
   "scenario.memory-pressure-pause",
+  "scenario.shutdown-kafka-handoff",
   "stress.client-alter-drain",
   "stress.diagnostic-nodes",
   "stress.memory-pressure-pause",
+  "stress.shutdown-kafka-handoff",
 ]
 
 [[owner]]

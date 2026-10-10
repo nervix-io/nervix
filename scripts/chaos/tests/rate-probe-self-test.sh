@@ -75,11 +75,14 @@ run_bounded() {
         printf 'deliberate receiver launch failure\n' >&2
         return 125
     fi
-    if [[ "${test_case}" == not-listening || "${test_case}" == receiver-failure ]]; then
+    if [[ "${test_case}" == not-listening || "${test_case}" == receiver-failure \
+        || "${test_case}" == delayed-receiver ]]; then
         for i in "${!arguments[@]}"; do
             if [[ "${arguments[i]}" == 'nc -l -p 18081 | wc -c' ]]; then
                 if [[ "${test_case}" == not-listening ]]; then
                     arguments[i]='sleep 60'
+                elif [[ "${test_case}" == delayed-receiver ]]; then
+                    arguments[i]='nc -l -p 18081 | { dd bs=1 count=1 2>/dev/null; sleep 12; cat; } | wc -c'
                 else
                     arguments[i]+='; exit 7'
                 fi
@@ -117,6 +120,15 @@ jq -e '.sender_status == 0 and .receiver_wait_status == 0 and .receiver_exit_cod
     and .sender == "sender" and .receiver == "receiver" and .port == 18081' \
     "${tmp_dir}/delayed-connect.probe.json" >/dev/null || fail 'successful helper evidence is incomplete'
 netem qdisc del dev eth0 root
+
+# The sender's success does not complete the receiver helper. Its complete byte count and final
+# outcome must still be collected when completion takes longer than ten seconds inside the budget.
+test_case=delayed-receiver
+link_rate_probe "${tmp_dir}/delayed-receiver.json" sender receiver
+jq -e '.received_bytes == 262144 and .duration_ms >= 12000' \
+    "${tmp_dir}/delayed-receiver.json" >/dev/null || fail 'receiver completion was abandoned'
+jq -e '.sender_status == 0 and .receiver_wait_status == 0 and .receiver_exit_code == 0' \
+    "${tmp_dir}/delayed-receiver.probe.json" >/dev/null || fail 'receiver completion lost its outcome'
 
 test_case=partial
 if (set -e; link_rate_probe "${tmp_dir}/partial.json" sender receiver) \

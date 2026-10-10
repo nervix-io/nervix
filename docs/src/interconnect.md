@@ -323,6 +323,14 @@ only while the original coordinator process and both bound participant incarnati
 the exact ownership-handoff gate is still held; every other preparation is discarded durably. A
 second pass after the gate deadline reclaims work that was active during the first pass.
 
+Ownership-handoff engagement answers after admission is fenced and its force flush is requested.
+The coordinator then queries the exact operation's drain status. A participant publishes its capture
+freeze before returning a drained status, and capture requires that coordination identity's freeze
+in addition to its held gate. Pending status retains the work counts used by timeout diagnostics.
+Each engagement request keeps the two-second reply bound; a typed timeout retries the same identity
+and complete scope within the original preparation deadline. A retry observes the existing
+receiver-owned operation and lease. Other request failures keep their existing classification.
+
 After a receiver admits a new gate engagement or release, a receiver-owned task finishes that state
 transition even if the requesting connection disappears. Coordinator loss therefore cannot strand
 an operation in a partially engaged state or cancel cleanup after the receiver accepted it.
@@ -333,17 +341,24 @@ therefore neither release nor erase a replacement lease occupying the same logic
 
 A stopping node moves its own scheduled work with one typed commands-pool request to the current
 leader, `stopping_node_drain`. It names no node and carries one of two actions: drain, which cordons
-the sender and moves its scheduled work through planned ownership handoffs, and release, which
-clears the cordon that drain set. The leader acts for the node the authenticated connection belongs
+the sender, carries its remaining drain budget, and moves its scheduled work through planned
+ownership handoffs, and release, which clears the cordon that drain set. The leader acts for
+the node the authenticated connection belongs
 to, so the certificate that admitted the connection is the whole authorization: a node can drain
 and uncordon only itself, and no user credential takes part. The answer is completed or failed, each
-with the leader's account of the action for the stopping node's log, or not the leader, from a node
-that changed nothing and leaves the sender to ask the leader it observes next. A leader that loses
-its leadership while it writes a release also answers not the leader, because clearing a cordon
-again through the next leader is harmless. The leader runs the action in a service task of its own,
+with the leader's account of the action for the stopping node's log, or not the leader, which leaves
+the sender to ask the leader it observes next. A node that does not lead when the request arrives
+changes nothing. A leader that loses leadership before completing a drain also answers not the
+leader, logs its interrupted report, and preserves any moves already committed. The next leader
+plans the remaining moves from the current schedule, within the sender's remaining budget. A
+leader that loses its leadership while it writes a release also answers not the leader, because
+clearing a cordon again through the next leader is harmless. The leader runs the action in a service
+task of its own,
 so a drain that has begun finishes, and releases what it holds, even when the sender's deadline
 abandons the request first. For a drain that deadline is what remains of the sender's drain
-timeout; for a release it is the bound
+timeout; the leader also uses the budget carried by the drain action to bound each unit's gate,
+state preparation, and activation waits, leaving a window for later units and the sender's in-place
+drain. For a release it is the bound
 [Releasing The Drain Cordon](./shutdown.md#releasing-the-drain-cordon) states.
 [Topology Cases](./shutdown.md#topology-cases) owns when a node sends it.
 
@@ -1076,6 +1091,10 @@ the receiving process after the first 64 KiB install chunk: its replacement refu
 finish and publishes only after a complete new 36 MiB transfer. The handlers retain counts and
 digests; these checks qualify the authenticated transport, while the public restore scenarios
 and storage checks qualify native containers, atomic publication and activation.
+Their 300-second simulated completion deadline follows two intentional request deadlines and
+allows the 64 KiB fetch and install chunks to traverse a seeded link at its 100 ms maximum
+latency. The enclosing 320-second simulated horizon, 400,000-step cap and 90-second wall cap
+still fail a transfer that does not complete.
 Capture fetch and state installation share the peer connection's one reserved snapshot stream
 slot. The archive staging phase finishes and releases its fetch stream before installation starts;
 an installer cannot retain a fetch stream while awaiting another snapshot request to that peer.
@@ -1151,8 +1170,12 @@ entity, through two replication-class request kinds and, when a checkpoint advan
 A state synchronization request names one placement and the revision the replica holds of it. The
 owner answers through the actual state handle published when that placement was installed: with
 the newer checkpoint's revision, length and BLAKE3 digest, or with nothing when it is current.
-The owner reads storage only when it holds no live state for the placement. The replica opens a
-Snapshot-subquota bulk stream for the described revision; the owner refuses a revision it no longer
+The owner reads storage only when it holds no live state for the placement.
+
+Branch-aggregate metrics retain the exact encoded bytes first selected for each dirty revision;
+elapsed times are captured once. Describing, streaming and persisting that revision therefore
+agree byte for byte, and restoration retains the incoming bytes until the next metric update.
+The replica opens a Snapshot-subquota bulk stream for the described revision; the owner refuses a revision it no longer
 holds. Chunks are at most the configured bulk chunk size (64 KiB by default). Each side admits the
 whole captured or received allocation against `restore_metadata`, up to a 256 MiB checkpoint
 transfer bound. The replica checks the stream's declared length, received length and digest before

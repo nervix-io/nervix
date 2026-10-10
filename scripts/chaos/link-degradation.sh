@@ -80,6 +80,7 @@ link_rate_probe() {
     local sender_helper_id=""
     if [[ "${ready}" == true ]]; then
         started="$(epoch_ms)"
+        local transfer_deadline=$((SECONDS + transfer_deadline_seconds))
         status=0
         # The positional parameter belongs to the helper container's shell.
         # shellcheck disable=SC2016
@@ -99,9 +100,14 @@ link_rate_probe() {
                     >"${evidence}.sender-cleanup.log" 2>&1 || sender_cleanup_status=$?
             fi
         fi
-        server_status=0
-        run_bounded 10 docker wait "${server_id}" >"${evidence}.server-exit.txt" \
-            2>&1 || server_status=$?
+        local receiver_seconds=$((transfer_deadline - SECONDS))
+        server_status=124
+        : >"${evidence}.server-exit.txt"
+        if ((receiver_seconds > 0)); then
+            server_status=0
+            run_bounded "${receiver_seconds}" docker wait "${server_id}" \
+                >"${evidence}.server-exit.txt" 2>&1 || server_status=$?
+        fi
         finished="$(epoch_ms)"
         if [[ "${server_status}" -eq 0 ]]; then
             receiver_exit_code="$(tr -d '[:space:]' <"${evidence}.server-exit.txt")"

@@ -29,8 +29,8 @@ use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_execution::{CpuClass, Executor, MemoryClass, Reservation};
 use nervix_models::{
     ClusterNodeIdentity, ClusterNodeIncarnation, ClusterNodeName, CommandExecutionReference,
-    DomainName, DomainNodeRef, EmitterName, IngestorName, ModelKind, ModelName, RemoteRuntimeField,
-    RestoreStep,
+    DomainName, DomainNodeRef, EmitterName, IngestorName, ModelKind, ModelName, RelayName,
+    RemoteRuntimeField, RestoreStep,
 };
 use nervix_primitives::{
     collections::DashMap,
@@ -45,8 +45,10 @@ use nervix_recovery::{Discarded as _, NoReceiver as _};
 
 use crate::registry::SchedulerMode;
 
+mod pause;
 mod restarted_voter;
 
+use pause::TestPause;
 use restarted_voter::StartupVoterGossip;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -268,21 +270,6 @@ struct NodeExecution {
     holders: Arc<Mutex<Vec<nervix_primitives::sync::blocking::mpsc::Sender<()>>>>,
 }
 
-#[derive(Debug, Clone, Copy, Default)]
-struct TestPauseState {
-    reached: bool,
-    released: bool,
-    delivered: bool,
-}
-
-#[derive(Debug)]
-struct TestPause {
-    state: watch::Sender<TestPauseState>,
-    /// Command pauses are one-shot: later matching requests must be able to drive the failure
-    /// while the selected request remains at its barrier.
-    claimed: AtomicBool,
-}
-
 #[derive(Debug, Clone, Hash, PartialEq, Eq)]
 struct RemoteRelayAdmissionPauseKey {
     domain: String,
@@ -343,6 +330,8 @@ enum CommandPausePoint {
         coordinator: ClusterNodeName,
     },
     RestoreBranchStateConversion(DomainName),
+    IngestorRoutePoll(DomainNodeRef),
+    OwnershipHandoffFlush(DomainName),
     TransactionCommit {
         node_id: ClusterNodeName,
         domain: String,
@@ -1716,6 +1705,50 @@ impl FaultInjection {
         pause.release();
     }
 
+    /// Holds one route after accepting its input and before observing handoff or flush state.
+    pub fn pause_ingestor_route_poll(&self, ingestor: DomainNodeRef) {
+        self.arm_command_pause(CommandPausePoint::IngestorRoutePoll(ingestor));
+    }
+
+    pub async fn wait_for_ingestor_route_poll_pause(&self, ingestor: &DomainNodeRef) {
+        self.wait_for_command_pause(&CommandPausePoint::IngestorRoutePoll(ingestor.clone()))
+            .await;
+    }
+
+    pub fn release_ingestor_route_poll_pause(&self, ingestor: &DomainNodeRef) {
+        self.release_command_pause(&CommandPausePoint::IngestorRoutePoll(ingestor.clone()));
+    }
+
+    pub(crate) async fn pause_ingestor_route_poll_if_armed(
+        &self,
+        domain: &DomainName,
+        kind: ModelKind,
+        source: &RelayName,
+    ) {
+        let ingestor = DomainNodeRef::node_in(domain.clone(), kind, ModelName::from(source));
+        self.pause_command_if_armed(CommandPausePoint::IngestorRoutePoll(ingestor))
+            .await;
+    }
+
+    /// Holds handoff after publishing its force-flush generation, before declaring the hold ready.
+    pub fn pause_ownership_handoff_flush(&self, domain: DomainName) {
+        self.arm_command_pause(CommandPausePoint::OwnershipHandoffFlush(domain));
+    }
+
+    pub async fn wait_for_ownership_handoff_flush_pause(&self, domain: &DomainName) {
+        self.wait_for_command_pause(&CommandPausePoint::OwnershipHandoffFlush(domain.clone()))
+            .await;
+    }
+
+    pub fn release_ownership_handoff_flush_pause(&self, domain: &DomainName) {
+        self.release_command_pause(&CommandPausePoint::OwnershipHandoffFlush(domain.clone()));
+    }
+
+    pub(crate) async fn pause_ownership_handoff_flush_if_armed(&self, domain: &DomainName) {
+        self.pause_command_if_armed(CommandPausePoint::OwnershipHandoffFlush(domain.clone()))
+            .await;
+    }
+
     pub fn pause_ingestor_dispatch(&self, ingestor: DomainNodeRef) {
         self.inner
             .ingestor_dispatch_pauses
@@ -2946,52 +2979,5 @@ impl FaultInjection {
             panic!("domain clock progress pause for '{point:?}' is not armed");
         };
         pause.value().clone()
-    }
-}
-
-impl Default for TestPause {
-    fn default() -> Self {
-        Self {
-            state: watch::channel(TestPauseState::default()).0,
-            claimed: AtomicBool::new(false),
-        }
-    }
-}
-
-impl TestPause {
-    fn reach(&self) {
-        self.state.send_modify(|state| state.reached = true);
-    }
-
-    async fn wait_until_reached(&self) {
-        self.state
-            .subscribe()
-            .wait_for(|state| state.reached)
-            .await
-            .assured("the pause owns its state sender for the full wait");
-    }
-
-    async fn wait_until_released(&self) {
-        self.state
-            .subscribe()
-            .wait_for(|state| state.released)
-            .await
-            .assured("the pause owns its state sender for the full wait");
-    }
-
-    async fn wait_until_delivered(&self) {
-        self.state
-            .subscribe()
-            .wait_for(|state| state.delivered)
-            .await
-            .assured("the pause owns its state sender for the full wait");
-    }
-
-    fn release(&self) {
-        self.state.send_modify(|state| state.released = true);
-    }
-
-    fn mark_delivered(&self) {
-        self.state.send_modify(|state| state.delivered = true);
     }
 }

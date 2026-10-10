@@ -491,6 +491,40 @@ It runs `just test-primitives-ordinary`, the checks in ordinary native execution
 [Data-Plane Concurrency](./data-plane-concurrency.md) defines the primitive boundary, what each
 mode observes, and every model's claim.
 
+#### Integrated primitive qualification
+
+At a release candidate revision, run the ordinary suite and the complete primitive, Shuttle,
+Loom and Turmoil inventories. Keep the replay and weakening checks separate from successful model
+exploration: they show that recorded failures reproduce and that the asserted ordering matters.
+Run the applicable public Cucumber scenarios at the same revision. An empty selection, incomplete
+inventory or timed-out exploration is a failed qualification, even if another mode passed.
+
+The external smoke and soak suites use a fresh ordinary image built from that revision. The suite
+resolves the image once and gives every scenario the same image identity; its `suite.json` and each
+run's manifest prove which image, fault action, accepted events and recovery outcome were observed.
+For pull-request CI, select both `chaos` and `chaos-soak` when qualifying the complete matrix; the
+labels run the suites against that pull request's own image. A nightly run of a different commit
+does not qualify the candidate. A recorded replay reproduces the external action plan, not the
+operating system's thread schedule.
+
+Measure the ordinary, uninstrumented build on the same host and profile as its baseline:
+
+```bash
+just bench-primitives
+just bench-relay-interaction
+just bench-admitted-work
+just bench-task-handles
+```
+
+`bench-primitives` times atomic access, publication loads and stores, an uncontended blocking
+lock, and shared-reference cloning. The relay and admitted-work suites include their production
+owners; `bench-task-handles` retains raw timing and allocation samples. Record the revisions,
+host/load, toolchain, exact commands, raw results and comparison on the ClickUp task. Keep model
+evidence, real-process Chaos evidence and performance measurements distinct; none establishes the
+claim of another method. Generated qualification reports and logs belong on the task rather than
+in the repository. A pull request labeled `benchmark` runs the product comparison and the ordinary
+primitive probe on its benchmark worker and retains the probe output with the benchmark artifacts.
+
 ### Deadlock diagnostics
 
 Diagnostic builds select `deloxide` for active cycles, `deloxide-order` for active and historical

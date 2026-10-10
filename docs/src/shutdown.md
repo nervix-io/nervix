@@ -171,6 +171,12 @@ that is neither cordoned nor a terminating incarnation. `RELOCATE` and `DESCRIBE
 the same checks in a fixed order and name the first one that fails — not a Raft member, then not a
 live Raft voter, then `node '<node_id>' is terminating`, then `node '<node_id>' is cordoned`.
 
+The planning fence uses those composed destination candidates. After the drain's cordon commits,
+observing the former owner's terminating advertisement does not invalidate its pending move:
+that owner was already excluded as a destination. Its live incarnation remains a required input,
+so a restart or loss of that owner still invalidates the captured plan. Changes to other eligible
+destinations and to the committed topology retain their own fences.
+
 ### Cordon Preservation
 
 A graceful shutdown that moves work away cordons the node so its own work does not come back to it
@@ -307,11 +313,30 @@ drained.
 Drain support has two parts that share the drain timeout. Both are also bounded by the shutdown
 deadline.
 
+The stopping node closes its local source intake at the start of drain support, before it asks the
+leader to move any scheduled work. Kafka and other source ingestors stop taking new input, and
+generators stop producing. A payload already admitted and its acknowledgement chain continue
+through the installed relays and emitters. This prevents a source from admitting a new ACK root
+while a downstream emitter is moving. A destination node can start its replacement source after
+the handoff; intake on that node remains open. The local intake closure is permanent for the
+stopping process and is reused by the later in-place drain.
+
 **Moving scheduled work.** When another live, schedulable Raft voter exists, the node first moves
 its scheduled work there through the planned ownership handoff described below. This is the same
 operation `DRAIN NODE` performs, requested against the terminating node itself: it visits domains
 and schedule units in canonical order and moves one hard colocation group or independent runtime
-node at a time.
+node at a time. The request gives the leader the time left in the stopping node's drain budget.
+For each unit, the leader bounds its gate, state preparation, and activation waits by the time still
+left on that request minus one sixth of the request's initial budget. Preparation, including the
+entity gate's quiescence wait and state capture, has at most four fifths of that unit bound;
+activation uses the same unit deadline. The
+ordinary entity-gate limit can shorten either phase. If a unit cannot prepare within its bound,
+the gate is released, the leader records that unit and its reason as failed, and it attempts other
+units while time remains. If no unit budget remains, the leader reports the unfinished drain. A
+stopping node that receives a failed or unanswered drain reports its drain-support phase
+`Abandoned`, then still runs the in-place drain with whatever time remains. The node's own timeout
+and shutdown deadline bound its wait for a leader even when that leader continues cleanup after
+the node stops waiting.
 
 **Completing admitted work in place.** The node then finishes what it has already admitted. This
 part always runs, whatever happened in the first part. It is the whole drain when no replacement
@@ -475,6 +500,17 @@ roots, emitter buffers and active publishing, and an Iceberg emitter's staged co
 schedule is written only after that drain succeeds, and the fence opens only after the destination
 activates the published revision.
 
+Each participant closes intake and boundary gates, requests a force flush and confirms its
+admission hold. The coordinator polls the exact operation's drain status while installed routes
+and processors finish the admitted work. Returning a drained ownership status publishes that
+participant's capture freeze under its retained hold. Capture verifies both the held operation and
+its exact freeze identity, so a pending flush cannot make mutable state ready for capture.
+Frozen owners retain state until capture and activation finish. Preparation retains its original
+deadline, distinct from the activation lease. A pending-drain timeout reports its node and counts,
+releases every attempted hold, and leaves independent schedule units available for later moves.
+Repeated engagement requests use the same identity and scope; a bounded reply timeout creates
+no additional flush and restarts no lease.
+
 Every step of the handoff carries one coordination identity, composed of the coordinating node, its
 process incarnation, and a sequence. The receiver verifies that identity against the authenticated
 connection before the request is handled, so a different node cannot use it and a restarted
@@ -573,8 +609,13 @@ node: the leader acts for the node whose certificate authenticated the connectio
 drain only itself, and no user credential takes part. A follower started without
 `--init-default-user-password`, as every node but the bootstrap node is in the documented
 [Docker deployments](./installation-docker.md), therefore drains through the leader like any other.
-A node that receives the request without leading changes nothing and says so, and the follower asks
-the leader it observes next, within the same drain timeout. The leader runs the drain in a task of
+A node that receives the request without leading changes nothing and says so. A leader that loses
+leadership before it completes the drain also answers as not leading, including when a participant
+fences its coordination identity during a handoff. It logs the interrupted drain report before
+answering. The stopping node asks the leader it observes next within the same shrinking drain
+budget. Already committed moves remain committed; the next leader reads the current schedule and
+moves only the work still owned by the stopping node. A failed drain from a node that still leads
+remains a failed outcome. The leader runs the drain in a task of
 its own, so a drain that has begun finishes, and releases the gates it engaged, even when the
 follower's drain timeout ends its wait first. The interconnect resolves the leader's advertised
 endpoint through the follower's loaded resolver, described in [Name Resolution](./name-resolution.md),
@@ -886,6 +927,11 @@ WASM branch resumes the state it checkpointed. The restore reads only the node's
 processor's execution plan, which carries the schema a window's retained rows are read under, so it
 does not wait for the domain's routing, which installation publishes after it starts the tasks.
 
+The entity's branch-aggregate metric checkpoint also retains exact bytes for its revision, including
+elapsed metric fields. Capture, persistence and bulk transfer agree on those bytes while the handoff
+gate is held, and the recovering owner retains them until its next dirty metric revision.
+See [checkpoint synchronization](./interconnect.md).
+
 A restore installs every branch or none. It builds each branch and opens its retained state first,
 starts the branch tasks only once all of them are built, and releases a transferred checkpoint only
 after that. When a branch cannot be built, because storage cannot be read, a checkpoint does not
@@ -1008,7 +1054,8 @@ The phase records are the primary signal:
 | `warn` | `repeated termination signal received; abandoning graceful shutdown` |
 | `warn` | `shutdown deadline expired; abandoning graceful shutdown` |
 
-Drain decisions and failures are logged beside them: `preserving operator cordon across graceful
+Drain decisions and failures are logged beside them: `stopping-node drain lost leadership; remaining
+work needs the next leader`, `preserving operator cordon across graceful
 shutdown`, `no live schedulable replacement node remains; admitted work completes in place`, `timed
 out reaching the leader before requesting a graceful shutdown drain`, `drained local node before
 graceful shutdown`, `failed to drain local node before graceful shutdown`, `the leader did not
