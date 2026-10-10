@@ -2435,18 +2435,6 @@ impl FaultInjection {
         pause.wait_until_released().await;
     }
 
-    /// Whether the terminal record acknowledgement `resolver` is about to return to `registrar` is
-    /// lost on the way. Only the first acknowledgement on an armed link is lost.
-    #[cfg_attr(
-        nervix_lint,
-        nervix::context(
-            bounded,
-            reason = "the scenario drops only the first acknowledgement on an armed link",
-            key = "one test resolver and registrar link",
-            bound = "one keyed read and a terminal retained watch transition; no guard across \
-                     await"
-        )
-    )]
     /// Arms `node_id` to take all of its free relay memory just before it charges the
     /// acknowledgement watches of the next delivery another node sends it, and to hold that memory
     /// until the scenario releases it.
@@ -2474,6 +2462,16 @@ impl FaultInjection {
     }
 
     /// Takes all of `node_id`'s free relay memory, once, when a scenario armed the fill.
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            bounded,
+            reason = "the scenario fills a node's relay memory only before the first watches the \
+                      node charges after the fill was armed",
+            key = "one test node's armed relay memory fill",
+            bound = "one keyed entry and one charge of the free room; no guard across await"
+        )
+    )]
     pub(crate) fn fill_relay_memory_before_acknowledgement_watches_if_armed(
         &self,
         node_id: &ClusterNodeName,
@@ -2502,6 +2500,18 @@ impl FaultInjection {
         };
     }
 
+    /// Whether the terminal record acknowledgement `resolver` is about to return to `registrar` is
+    /// lost on the way. Only the first acknowledgement on an armed link is lost.
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            bounded,
+            reason = "the scenario drops only the first acknowledgement on an armed link",
+            key = "one test resolver and registrar link",
+            bound = "one keyed read and a terminal retained watch transition; no guard across \
+                     await"
+        )
+    )]
     pub(crate) fn loses_remote_acknowledgement(
         &self,
         resolver: &ClusterNodeName,
