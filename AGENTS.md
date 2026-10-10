@@ -142,11 +142,14 @@ behavior, and a compatibility requirement the user states explicitly for the cur
   attachment, resource uploads, node stop and restart as clients observe them, the shared binding
   and measured protocol costs, guarantees and non-guarantees, and observability.
 - [Errors And Diagnostics](docs/src/errors-and-diagnostics.md) is the authoritative architecture
-  reference for typed error ownership, propagation, ordinary outcomes versus failures, validation
-  and planning diagnostics, runtime message errors, cross-node failure classification, public
-  diagnostics, sensitivity, recovery and panic classes, and enforcement. Any change to error types,
-  error or diagnostic propagation, failure classification, or reporting at a layer or public
-  boundary must keep that chapter current in the same change.
+  reference for typed error ownership by layer, how a report is created, given context, inspected
+  and rendered, ordinary outcomes versus failures, row and record outcome channels, the fixed wire,
+  ABI, stored and public outcomes a report is projected into, foreign-trait boundaries, validation
+  and planning diagnostics, runtime message errors, cross-node failure classification, backup and
+  restore failures, public diagnostics, sensitivity and how a branch is named, recovery and panic
+  classes, enforcement and its evidence, and the checklist for adding a fallible operation. Any
+  change to error types, error or diagnostic propagation, failure classification, or reporting at
+  a layer or public boundary must keep that chapter current in the same change.
 - [Consensus Storage And Replication](docs/src/consensus-storage-and-replication.md) is the
   authoritative architecture reference for Raft persistence and catch-up. Any change to consensus
   durability, replication pacing, log reading or retention, snapshot storage or transfer, or the
@@ -681,6 +684,22 @@ build and the existing tests, and nothing in it changes behavior.
   route-local, the operation, and the relevant fields. They never carry sensitive payload values.
 - Hot-path errors do not allocate a formatted message per row or per batch when the variant already
   names the failure. Formatting belongs at the reporting boundary.
+- A report is created at the failure, and each layer that changes its meaning adds its own context
+  with `change_context` above the report it received. Never format a cause into a `String` field,
+  and never clone `current_context()` to satisfy a signature. A fixed wire, ABI, stored or public
+  outcome is projected from the report only where that outcome is constructed.
+- A context names its own operation and does not print its `#[source]`: `error-stack` records the
+  source as the frame beneath, so printing it repeats the cause in the rendered chain. A context
+  does not repeat a node or a domain that a context above it names.
+- A reporting boundary renders a report with `{error:#}`. Plain `Display`, `to_string` and a
+  `%error` tracing field show only the outermost context, and an attachment is not part of the
+  rendered chain.
+- A decision reads typed data: the report's current context, a typed context beneath it, or a typed
+  field. It never reads rendered text.
+- A foreign trait that accepts only a standard error receives one that holds the whole report,
+  never a clone of the report's current context.
+- Text that names a concrete branch names it through the runtime's `BranchScope`, by the
+  fingerprint of its key, never by the key's field values.
 - `Result<_, String>` is rejected outright in product code. `just validate-typed-errors`, part of
   `just validate`, fails on any occurrence and names the rule; there is no baseline to raise. The
   `bare_error_signatures` count in `just ratchet` rejects replacing a `String` error with an
@@ -945,13 +964,19 @@ build and the existing tests, and nothing in it changes behavior.
 - A change that adds or alters thread-blocking synchronization, a `sync::blocking` lock or
   condition variable, the order in which tracked locks are acquired, or a shutdown, drain, restore,
   cancellation, handoff or other lifecycle or ownership path that uses tracked locks runs
-  `just test-deloxide`, `just test-deloxide-order` and `just test-deloxide-stress` and carries the
-  `deloxide` label, so that CI's `deloxide` job, which runs only for a pull request with that label,
-  runs all three. The stress selection runs the active-only probes, conformance checks and owner
-  tests and the lifecycle scenarios tagged `@deloxide_stress` under Deloxide's bounded scheduling
-  disturbance; a change to a lifecycle path those scenarios do not reach tags one that does; a stressed workload that fails is a finding, reproduced first as a
-  focused failing test against its owner and fixed there, never hidden by a passing rerun, a wider
-  product deadline or a weaker assertion. Where the lane's
+  `just test-deloxide`, `just test-deloxide-order`, `just test-deloxide-stress` and
+  `just test-deloxide-stress-restore` and carries the `deloxide` label, so that CI's `deloxide` job,
+  which runs only for a pull request with that label, runs all four. The two stress selections
+  compile one build with Deloxide's bounded scheduling disturbance and each keeps its own lane
+  budget: `deloxide-stress` runs the active-only probes, conformance checks and owner tests, the
+  lifecycle scenarios tagged `@deloxide_stress` and the paced-driver scenarios, and
+  `deloxide-stress-restore` the capture, restore and checkpoint-transfer scenarios tagged
+  `@deloxide_stress_restore`. Between them they run every scenario of the active-only selection but
+  the report tool's triage, so a scenario that joins the active-only selection joins the stress
+  selection of its family under a `stress.` identity, and a change to a lifecycle path those
+  scenarios do not reach tags one that does. A stressed workload that fails is a finding,
+  reproduced first as a focused failing test against its owner and fixed there, never hidden by a
+  passing rerun, a wider product deadline or a weaker assertion. Where the lane's
   workloads do not yet reach the changed path, the change
   extends its probes, owner tests or tagged scenarios and registers each in
   `tests/deloxide-inventory.toml` with a stable identity, the invariant it owns, its selections and
@@ -1165,8 +1190,9 @@ build and the existing tests, and nothing in it changes behavior.
   affects: `just test-shuttle [filter]` for interleavings, `just test-loom [filter]` for
   memory-ordering claims, `just test-turmoil` for the simulated network, and `just test-deloxide`
   for active deadlocks, `just test-deloxide-order` for potential acquisition-order cycles among
-  tracked locks and `just test-deloxide-stress` for active deadlocks under bounded scheduling
-  disturbance, beside the ordinary suite. The three Deloxide commands run the diagnostic lane over
+  tracked locks, and `just test-deloxide-stress` and `just test-deloxide-stress-restore` for active
+  deadlocks under bounded scheduling disturbance, beside the ordinary suite. The four Deloxide
+  commands run the diagnostic lane over
   the bounded inventory in `tests/deloxide-inventory.toml`: a registered workload that is missing,
   ignored or incomplete fails it, so does a discovered probe, owner test or tagged scenario that is
   not registered, and every run keeps an attempt that `just test-deloxide-replay` replays.
@@ -1198,7 +1224,8 @@ build and the existing tests, and nothing in it changes behavior.
   instrumentation: `test-typed-ratchet`, `bench-smoke`, `nspl-completion-walk`, the canonical
   `test-shuttle` and `test-loom` runners, each `test-primitives-<mode>` conformance recipe,
   `test-deadlock-evidence-order`, `test-deadlock-report`, and the `test-deloxide`,
-  `test-deloxide-order` and `test-deloxide-stress` lanes, which export only from a complete `lane.json` and instrument only
+  `test-deloxide-order`, `test-deloxide-stress` and `test-deloxide-stress-restore` lanes, which
+  export only from a complete `lane.json` and instrument only
   workspace crates, through a workspace compiler wrapper beneath kache, so their nodes meet the
   product's deadlines.
   `test-primitives` selects every native conformance mode. CI runs these checks through collection;

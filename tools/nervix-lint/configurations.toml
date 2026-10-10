@@ -32,7 +32,7 @@ name = "turmoil"
 packages = ["nervix-primitives", "nervix-interconnect"]
 
 [[configuration]]
-features = ["native", "deloxide"]
+features = ["native", "deloxide", "testing"]
 kinds = ["lib"]
 manifest = "Cargo.toml"
 name = "deloxide"
@@ -44,7 +44,7 @@ packages = [
 ]
 
 [[configuration]]
-features = ["native", "deloxide-order"]
+features = ["native", "deloxide-order", "testing"]
 kinds = ["lib"]
 manifest = "Cargo.toml"
 name = "deloxide-order"
@@ -56,7 +56,7 @@ packages = [
 ]
 
 [[configuration]]
-features = ["native", "deloxide-stress"]
+features = ["native", "deloxide-stress", "testing"]
 kinds = ["lib"]
 manifest = "Cargo.toml"
 name = "deloxide-stress"
@@ -70,21 +70,21 @@ packages = [
 # The local report tool is an ordinary product binary. Diagnostic binaries are checked separately
 # from the reporting library, so these configurations never enable its report-tool capability.
 [[configuration]]
-features = ["native", "deloxide"]
+features = ["native", "deloxide", "testing"]
 kinds = ["bin"]
 manifest = "Cargo.toml"
 name = "deloxide-binaries"
 packages = ["nervix-primitives", "nervix-paced-simulation", "nervix-server"]
 
 [[configuration]]
-features = ["native", "deloxide-order"]
+features = ["native", "deloxide-order", "testing"]
 kinds = ["bin"]
 manifest = "Cargo.toml"
 name = "deloxide-order-binaries"
 packages = ["nervix-primitives", "nervix-paced-simulation", "nervix-server"]
 
 [[configuration]]
-features = ["native", "deloxide-stress"]
+features = ["native", "deloxide-stress", "testing"]
 kinds = ["bin"]
 manifest = "Cargo.toml"
 name = "deloxide-stress-binaries"

@@ -76,7 +76,7 @@ Feature: Roto user-defined functions
       | 1            | 0             |
       | 3            | 0             |
 
-  @udf_column_builder
+  @udf_column_builder @deloxide_stress
   Scenario Outline: A Roto UDF uses the per-element escape hatch for Luhn validation
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started

@@ -340,6 +340,22 @@ workspace-wrapper chains directly while caching ordinary dependencies; complete 
 validated independently of that detail. Compiler semantic fixtures qualify resolved lints and
 cross-crate metadata.
 
+### Typed errors and reports
+
+`just validate` rejects a `Result<_, String>` in product code and a signature that returns a Nervix
+error without an `error-stack` report. Run the first check alone, list the sites the second one
+counts, and test the scanner itself with:
+
+```bash
+just validate-typed-errors
+just ratchet --show bare_error_signatures
+just test-ratchet-units
+```
+
+[Errors And Diagnostics](./errors-and-diagnostics.md#adding-a-fallible-operation) holds the
+checklist for a new fallible operation: which layer owns the failure, what its context carries,
+where the report ends, how it is rendered and which evidence holds it.
+
 ### Capability doctests
 
 `just test-capability-docs` checks runtime state handles, logical and physical deadlines,
@@ -523,12 +539,18 @@ handoff or other lifecycle path that uses tracked locks:
 just test-deloxide
 just test-deloxide-order
 just test-deloxide-stress
+just test-deloxide-stress-restore
 just deadlock-report inspect target/deloxide/test-deloxide/deloxide-order/run.XXXX/evidence/scenarios/deadlock-PID-TIME.rkyv --source potential
 ```
 
 The lane runs every workload `tests/deloxide-inventory.toml` registers for its selection: the
 disposable-process probes, the tracked locks' conformance checks, the diagnostic owner tests and the
-tagged one- and three-node scenarios, without retries. It fails when a registered workload is
+tagged one- and three-node scenarios, without retries. The two stress selections compile one
+build: `deloxide-stress` runs the probes, conformance checks, owner tests, lifecycle scenarios and
+paced-driver scenarios under the disturbance, and `deloxide-stress-restore` its capture, restore
+and checkpoint-transfer scenarios, one at a time in a lane of their own. A scenario that joins the
+active-only selection also joins the stress selection of its family, tagged `@deloxide_stress` or
+`@deloxide_stress_restore`, under a `stress.` identity. It fails when a registered workload is
 missing or ignored, when a probe, conformance check, owner test or tagged scenario is not
 registered, when a process deadlocks, fails its diagnostics, is killed by a signal, outlives its
 bound or leaves a process behind, and when evidence is missing, partly written or does not qualify.
@@ -554,7 +576,7 @@ why: `just validate-deloxide-applicability`, part of `just validate`, holds the 
 compiler's acquisition catalog. For a pull request labeled `deloxide`, which every change the
 Deloxide rule applies to carries, CI's `deloxide` job runs every selection through the native
 coverage collector, as `just coverage-native-extras test-deloxide test-deloxide-order
-test-deloxide-stress` does locally,
+test-deloxide-stress test-deloxide-stress-restore` does locally,
 and keeps their attempts, completion records and diagnostic coverage reports as artifacts. The
 ordinary report tool also exports selected artifacts, records explicit proofs in reviewed copies and
 qualifies whole-process evidence. `just coverage-deadlock` measures the diagnostic implementation
@@ -645,10 +667,11 @@ just coverage-native-extras
 
 Name producers to run only those: `test-typed-ratchet`, `bench-smoke`, `nspl-completion-walk`,
 `test-shuttle`, `test-loom`, `test-deadlock-evidence-order`, `test-deadlock-report`,
-`test-deloxide`, `test-deloxide-order`, `test-deloxide-stress`, or an individual
-`test-primitives-<mode>` recipe. The focused diagnostic owner and probes use the `deloxide-order`
-build; the local report command uses the ordinary build; the three diagnostic lanes build in their
-own selections and export only after their
+`test-deloxide`, `test-deloxide-order`, `test-deloxide-stress`, `test-deloxide-stress-restore`, or
+an individual `test-primitives-<mode>` recipe. The focused diagnostic owner and probes use the
+`deloxide-order` build; the local report command uses the ordinary build; each diagnostic lane
+builds in the instrumented build of the feature its selection compiles, the two stress lanes in one,
+and exports only after its
 `lane.json` records a complete run. `test-primitives`
 selects native conformance in ordinary, Shuttle, Loom, Turmoil and Deloxide execution:
 
@@ -668,7 +691,8 @@ that executes Nervix code then runs in the environment `cargo llvm-cov show-env 
 --no-rustc-wrapper` describes: every crate is compiled with source coverage instrumentation into
 `target/native-coverage-build` for ordinary mode and `target/native-coverage-build-<mode>` for
 each other mode, and the configured kache wrapper stays in place. The `test-deloxide`,
-`test-deloxide-order` and `test-deloxide-stress` lanes instrument only workspace crates: the collector moves the
+`test-deloxide-order`, `test-deloxide-stress` and `test-deloxide-stress-restore` lanes instrument
+only workspace crates: the collector moves the
 instrumentation flags into `scripts/coverage_workspace_wrapper.py`, which Cargo runs beneath kache
 as the workspace compiler wrapper, the scope `cargo llvm-cov` gives the ordinary coverage build.
 Their nodes must meet product deadlines while they compile WASM processors and process Arrow state,
