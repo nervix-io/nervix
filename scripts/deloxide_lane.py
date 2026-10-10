@@ -3,12 +3,16 @@
 """Run the Deloxide diagnostic lane, qualify its supervision, replay its invocations, and hold
 the owners of tracked locks to their applicability records.
 
-`just test-deloxide`, `just test-deloxide-order` and `just test-deloxide-stress` run `run deloxide`,
-`run deloxide-order` and `run deloxide-stress` after their prerequisites. The stress selection is the
-active-only build with Deloxide's bounded scheduling disturbance compiled in, so the same lifecycle
-workloads meet orders of nested acquisitions an idle schedule rarely takes. The inventory in `tests/deloxide-inventory.toml` registers every workload a
-selection runs: the disposable-process probes of `nervix-deadlock`, the diagnostic owner tests of the
-server library, and the tagged scenarios the scenario binary runs on diagnostic nodes. For each
+`just test-deloxide`, `just test-deloxide-order`, `just test-deloxide-stress` and
+`just test-deloxide-stress-restore` run `run <selection>` for their selection after their
+prerequisites. The stress selection is the active-only build with Deloxide's bounded scheduling
+disturbance compiled in, so the same lifecycle workloads meet orders of nested acquisitions an idle
+schedule rarely takes. A selection compiles the diagnostic build feature it is named after, or the
+one it declares: `deloxide-stress-restore` compiles the stress build under its own name, so its
+stressed restore scenarios get a lane, a budget and a CI runner of their own. The inventory in
+`tests/deloxide-inventory.toml` registers every workload a selection runs: the disposable-process
+probes of `nervix-deadlock`, the diagnostic owner tests of the server library, and the tagged
+scenarios the scenario binary runs on diagnostic nodes. For each
 invocation the lane builds its executable for the selection, discovers what the build and the
 feature files hold, and refuses a registered workload that is missing or ignored, a discovered test
 or tagged scenario that is not registered, and a selection with nothing in it. It then runs the
@@ -177,7 +181,13 @@ class Bounds:
 
 @dataclass(frozen=True)
 class Selection:
+    """One lane run's diagnostic build and the workloads it runs. A selection is named after the
+    build feature it compiles, or extends that name when it runs workloads of the same build that
+    would not fit one lane's budget beside those of the selection named after the build."""
+
     name: str
+    # The diagnostic build feature its executables are compiled with.
+    feature: str
     # The diagnostic selection a process of this build records in its evidence.
     recorded: str
 
@@ -298,6 +308,25 @@ def _known_keys(table: Mapping[str, object], allowed: set[str], where: str) -> N
         raise LaneError(f"{where} has unknown keys: {', '.join(unknown)}")
 
 
+def _selection_feature(table: Mapping[str, object], name: str, where: str) -> str:
+    """The build feature a selection compiles: the one it is named after, or the one it names."""
+
+    if "feature" not in table:
+        if name not in DIAGNOSTIC_FEATURES:
+            raise LaneError(
+                f"{where}: `{name}` is not a diagnostic build feature; name the `feature` it builds"
+            )
+        return name
+    feature = _string(table, "feature", where)
+    if feature not in DIAGNOSTIC_FEATURES:
+        raise LaneError(f"{where} builds `{feature}`, which is not a diagnostic build feature")
+    if name in DIAGNOSTIC_FEATURES and name != feature:
+        raise LaneError(f"{where} is named after the build `{name}` and cannot build `{feature}`")
+    if name != feature and not name.startswith(f"{feature}-"):
+        raise LaneError(f"{where} builds `{feature}`, so its name extends `{feature}-`")
+    return feature
+
+
 def parse_inventory(text: str) -> Inventory:
     """Parse and validate the inventory. Every problem names the entry it was found in."""
 
@@ -317,15 +346,27 @@ def parse_inventory(text: str) -> Inventory:
     selections: dict[str, Selection] = {}
     for index, table in enumerate(document.get("selection", [])):
         where = f"selection #{index + 1}"
-        _known_keys(table, {"name", "recorded"}, where)
+        _known_keys(table, {"name", "feature", "recorded"}, where)
         name = _string(table, "name", where)
-        if name not in DIAGNOSTIC_FEATURES:
-            raise LaneError(f"{where}: `{name}` is not a diagnostic build feature")
+        where = f"selection {name}"
         if name in selections:
             raise LaneError(f"selection {name} is registered twice")
-        selections[name] = Selection(name=name, recorded=_string(table, "recorded", where))
+        selections[name] = Selection(
+            name=name,
+            feature=_selection_feature(table, name, where),
+            recorded=_string(table, "recorded", where),
+        )
     if not selections:
         raise LaneError("the inventory registers no selection")
+    # One build records one diagnostic selection in its evidence, whichever selection runs it.
+    recorded_by_feature: dict[str, Selection] = {}
+    for selection in selections.values():
+        first = recorded_by_feature.setdefault(selection.feature, selection)
+        if first.recorded != selection.recorded:
+            raise LaneError(
+                f"selection {selection.name} records `{selection.recorded}` for the build "
+                f"`{selection.feature}`, which selection {first.name} records as `{first.recorded}`"
+            )
 
     invocations: dict[str, Invocation] = {}
     for index, table in enumerate(document.get("invocation", [])):
@@ -707,15 +748,16 @@ class ScenarioChunk:
 
 
 def scenario_chunks(
-    root: Path, invocation: Invocation, registered: Sequence[Workload], selection: str
+    root: Path, invocation: Invocation, registered: Sequence[Workload], feature: str
 ) -> list[ScenarioChunk]:
     """Keep historical order edges inside one feature, or one large restore example.
 
     Active detection still runs the complete tagged suite once. Order analysis cannot retain a
     whole suite's unrelated lock histories in one process; each chunk starts a fresh detector.
+    `feature` is the build the chunks run in, whichever selection runs them.
     """
 
-    if selection != "deloxide-order":
+    if feature != "deloxide-order":
         return [ScenarioChunk(
             invocation.id, invocation.inputs, invocation.tags, None, tuple(registered),
             sum(workload.examples or 0 for workload in registered),
@@ -1488,6 +1530,7 @@ class Lane:
         self.record.content = {
             "lane": "deloxide",
             "selection": self.selection.name,
+            "feature": self.selection.feature,
             "recorded_selection": self.selection.recorded,
             "verdict": "running",
             "started_at": utc_now(),
@@ -1635,7 +1678,7 @@ class Lane:
         """The test executable of `invocation` in this selection, and the package directory Cargo
         runs it in."""
 
-        features = " ".join([*invocation.features, self.selection.name])
+        features = " ".join([*invocation.features, self.selection.feature])
         messages = self.cargo_build(
             f"{invocation.id}-build",
             ["test", "--no-run", "--package", invocation.package, "--features", features,
@@ -1657,7 +1700,7 @@ class Lane:
 
     def build_driver(self, package: str) -> Path:
         messages = self.cargo_build(
-            f"{package}-build", ["build", "--package", package, "--features", self.selection.name]
+            f"{package}-build", ["build", "--package", package, "--features", self.selection.feature]
         )
         for message in messages:
             if message.get("reason") != "compiler-artifact":
@@ -1805,7 +1848,7 @@ class Lane:
         expected = sum(workload.examples or 0 for workload in registered)
         self.counts.selected += expected
         try:
-            chunks = scenario_chunks(self.root, invocation, registered, self.selection.name)
+            chunks = scenario_chunks(self.root, invocation, registered, self.selection.feature)
         except LaneError as error:
             raise LaneFailed(Failure.INVENTORY, str(error)) from error
         scenario_environment = dict(environment)
@@ -2093,26 +2136,27 @@ class Expected:
 
 @dataclass(frozen=True)
 class Case:
-    """A probe workload, deliberately failing or clean, and how the lane must classify it."""
+    """A probe workload, deliberately failing or clean, the diagnostic builds it qualifies, and how
+    the lane must classify it."""
 
     workload: str
-    selections: frozenset[str]
+    features: frozenset[str]
     failure: Failure | None
     bound_seconds: int
     evidence: Expected
     signal: int | None = None
 
 
-EVERY_SELECTION = frozenset(DIAGNOSTIC_FEATURES)
+EVERY_BUILD = frozenset(DIAGNOSTIC_FEATURES)
 CASES = (
-    Case("two_mutexes_in_one_order", EVERY_SELECTION, None, 120, Expected(readable=True)),
-    Case("two_mutexes_in_opposite_orders", EVERY_SELECTION, Failure.ACTIVE_DEADLOCK, 120,
+    Case("two_mutexes_in_one_order", EVERY_BUILD, None, 120, Expected(readable=True)),
+    Case("two_mutexes_in_opposite_orders", EVERY_BUILD, Failure.ACTIVE_DEADLOCK, 120,
          Expected(readable=True, active=1)),
-    Case("evidence_that_cannot_be_recorded", EVERY_SELECTION, Failure.DIAGNOSTIC_FAILURE, 120,
+    Case("evidence_that_cannot_be_recorded", EVERY_BUILD, Failure.DIAGNOSTIC_FAILURE, 120,
          Expected(readable=False)),
-    Case("an_untracked_wait_that_never_ends", EVERY_SELECTION, Failure.TIMED_OUT, 15,
+    Case("an_untracked_wait_that_never_ends", EVERY_BUILD, Failure.TIMED_OUT, 15,
          Expected(readable=True)),
-    Case("an_aborted_process", EVERY_SELECTION, Failure.SIGNALED, 120, Expected(readable=True),
+    Case("an_aborted_process", EVERY_BUILD, Failure.SIGNALED, 120, Expected(readable=True),
          signal=signal.SIGABRT),
     Case("serial_inversion", frozenset({"deloxide-order"}), Failure.EVIDENCE_UNQUALIFIED, 120,
          Expected(readable=True, unreviewed=True)),
@@ -2140,8 +2184,8 @@ def classify(ended: Ended, qualified: Sequence[Qualified], partial: Sequence[Pat
 
 
 def qualify(inventory: Inventory, processes: Processes, workspace: Workspace, selection: Selection) -> int:
-    """Run every qualification case of `selection` through the lane's own supervision, then replay
-    the recorded active deadlock."""
+    """Run every qualification case of the build `selection` compiles through the lane's own
+    supervision, then replay the recorded active deadlock."""
 
     probes = inventory.invocations[PROBES]
     lane = Lane(inventory, selection, workspace, processes, prefix="qualification.")
@@ -2156,7 +2200,7 @@ def qualify(inventory: Inventory, processes: Processes, workspace: Workspace, se
     problems: list[str] = []
     replayable: Launch | None = None
     for case in CASES:
-        if selection.name not in case.selections:
+        if selection.feature not in case.features:
             continue
         directory = lane.attempt / "cases" / case.workload
         evidence = directory / "evidence"

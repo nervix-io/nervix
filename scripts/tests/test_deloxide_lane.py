@@ -152,6 +152,46 @@ CONFORMANCE = textwrap.dedent(
     """
 )
 
+
+def replaced(text: str, *replacements: tuple[str, str]) -> str:
+    """`text` with each `(old, new)` pair replaced once; an `old` the text does not hold fails."""
+
+    for old, new in replacements:
+        if old not in text:
+            raise AssertionError(f"the fixture holds no {old!r}")
+        text = text.replace(old, new, 1)
+    return text
+
+
+# Two more selections, each compiling another selection's build under its own name, as a selection
+# does whose workloads would not fit one lane's budget beside those of the selection named after its
+# build. The probes and the scenarios run in all four; the owner tests stay with the first two.
+SHARDS = replaced(
+    INVENTORY,
+    (
+        '[[selection]]\nname = "deloxide-order"\nrecorded = "OrderAnalysis"\n',
+        '[[selection]]\nname = "deloxide-order"\nrecorded = "OrderAnalysis"\n\n'
+        '[[selection]]\nfeature = "deloxide"\nname = "deloxide-restore"\nrecorded = "ActiveOnly"\n\n'
+        '[[selection]]\nfeature = "deloxide-order"\nname = "deloxide-order-restore"\n'
+        'recorded = "OrderAnalysis"\n',
+    ),
+    ('id = "owner-tests"\n', 'id = "owner-tests"\nselections = ["deloxide", "deloxide-order"]\n'),
+    (
+        'invocation = "probes"\nselections = ["deloxide", "deloxide-order"]',
+        'invocation = "probes"\nselections = ["deloxide", "deloxide-order", "deloxide-restore", '
+        '"deloxide-order-restore"]',
+    ),
+    (
+        'invocation = "probes"\nselections = ["deloxide-order"]',
+        'invocation = "probes"\nselections = ["deloxide-order", "deloxide-order-restore"]',
+    ),
+    (
+        'scenario = "Nodes on <nodes> nodes"\nselections = ["deloxide", "deloxide-order"]',
+        'scenario = "Nodes on <nodes> nodes"\nselections = ["deloxide", "deloxide-order", '
+        '"deloxide-restore", "deloxide-order-restore"]',
+    ),
+)
+
 FEATURE = textwrap.dedent(
     """
     @lane
@@ -377,10 +417,16 @@ def quietly(function: Callable[[], int]) -> int:
 class InventoryTests(unittest.TestCase):
     def test_the_repository_inventory_registers_every_selection_and_workload(self) -> None:
         inventory = deloxide_lane.load_inventory(REPOSITORY)
-        self.assertEqual(list(inventory.selections), ["deloxide", "deloxide-order", "deloxide-stress"])
-        self.assertEqual(inventory.selections["deloxide"].recorded, "ActiveOnly")
-        self.assertEqual(inventory.selections["deloxide-order"].recorded, "OrderAnalysis")
-        self.assertEqual(inventory.selections["deloxide-stress"].recorded, "StressedActiveOnly")
+        builds = {
+            name: (selection.feature, selection.recorded)
+            for name, selection in inventory.selections.items()
+        }
+        self.assertEqual(builds, {
+            "deloxide": ("deloxide", "ActiveOnly"),
+            "deloxide-order": ("deloxide-order", "OrderAnalysis"),
+            "deloxide-stress": ("deloxide-stress", "StressedActiveOnly"),
+            "deloxide-stress-restore": ("deloxide-stress", "StressedActiveOnly"),
+        })
         for workload in inventory.workloads.values():
             with self.subTest(workload=workload.id):
                 self.assertTrue(workload.invariant.endswith("."), workload.invariant)
@@ -393,44 +439,102 @@ class InventoryTests(unittest.TestCase):
         self.assertEqual(len(inventory.workloads_of("probes", "deloxide")), 14)
         self.assertEqual(len(inventory.workloads_of("probes", "deloxide-order")), 22)
         self.assertEqual(len(order_only), 8)
+        self.assertEqual(
+            list(inventory.invocations),
+            ["probes", "primitive-conformance", "owner-tests", "scenarios", "paced-simulation",
+             "stress-scenarios", "stress-paced-simulation", "stress-restore-scenarios"],
+        )
+        for name in ("scenarios", "paced-simulation"):
+            self.assertEqual(inventory.invocations[name].selections, {"deloxide", "deloxide-order"})
+        for name in ("primitive-conformance", "owner-tests"):
+            self.assertEqual(inventory.invocations[name].selections, {"deloxide", "deloxide-order", "deloxide-stress"})
+        for name in ("stress-scenarios", "stress-paced-simulation"):
+            self.assertEqual(inventory.invocations[name].selections, {"deloxide-stress"})
+        self.assertEqual(inventory.invocations["stress-restore-scenarios"].selections, {"deloxide-stress-restore"})
+        # Stressed scenarios run one at a time: the nodes of several in one process contend on the
+        # detector a stress build enters twice per acquisition.
+        for name in ("stress-scenarios", "stress-paced-simulation", "stress-restore-scenarios"):
+            self.assertEqual(inventory.invocations[name].concurrency, 1)
+        self.assertEqual(inventory.invocations["stress-paced-simulation"].driver, "nervix-paced-simulation")
+        # Every active-only probe, conformance check and owner test runs again under disturbance,
+        # and the restore selection runs the probes of the build it shares.
+        for workload in inventory.workloads.values():
+            with self.subTest(stressed=workload.id):
+                if workload.invocation in {"probes", "primitive-conformance", "owner-tests"} and "deloxide" in workload.selections:
+                    self.assertIn("deloxide-stress", workload.selections)
+                if workload.invocation == "probes" and "deloxide-stress" in workload.selections:
+                    self.assertIn("deloxide-stress-restore", workload.selections)
+        self.assertEqual(len(inventory.workloads_of("probes", "deloxide-stress")), 15)
+        self.assertEqual(len(inventory.workloads_of("probes", "deloxide-stress-restore")), 15)
         stress_only = {
             workload.id
             for workload in inventory.workloads.values()
-            if workload.selections == {"deloxide-stress"}
+            if workload.selections <= {"deloxide-stress", "deloxide-stress-restore"}
         }
         self.assertEqual(
             {workload for workload in stress_only if not workload.startswith("stress.")},
             {"probe.stress-disturbance"},
         )
-        # Every active-only probe, conformance check and owner test runs again under disturbance,
-        # and each stressed scenario is one the active-only selection runs too.
-        self.assertEqual(
-            list(inventory.invocations),
-            ["probes", "primitive-conformance", "owner-tests", "scenarios", "paced-simulation",
-             "stress-scenarios"],
-        )
-        self.assertEqual(inventory.invocations["stress-scenarios"].selections, {"deloxide-stress"})
-        self.assertEqual(inventory.invocations["stress-scenarios"].concurrency, 1)
-        for name in ("scenarios", "paced-simulation"):
-            self.assertEqual(inventory.invocations[name].selections, {"deloxide", "deloxide-order"})
-        active_scenarios = {
-            (workload.feature, workload.scenario, workload.examples)
-            for workload in inventory.workloads.values()
-            if workload.invocation == "scenarios"
+        # The stress selections together run every scenario of the active-only selection but the
+        # report tool's triage, which drives no lifecycle path: the capture, restore and
+        # checkpoint-transfer features in the restore selection, and each under its own `stress.`
+        # identity with the scenario, examples and invariant of its active-only counterpart.
+        restore_features = {
+            "tests/features/cluster/backup.feature",
+            "tests/features/cluster/backup_generation.feature",
+            "tests/features/cluster/backup_branch_state.feature",
+            "tests/features/cluster/backup_branch_state_large.feature",
+            "tests/features/cluster/backup_materialized.feature",
+            "tests/features/cluster/backup_staging.feature",
+            "tests/features/cluster/backup_wait.feature",
+            "tests/features/cluster/backup_metadata.feature",
+            "tests/features/runtime/large_wasm_state_replication.feature",
         }
+        stressed = {
+            (workload.feature, workload.scenario): workload
+            for workload in inventory.workloads.values()
+            if workload.invocation.startswith("stress-")
+        }
+        expected: set[tuple[str | None, str | None]] = set()
         for workload in inventory.workloads.values():
-            with self.subTest(stressed=workload.id):
-                if workload.invocation in {"probes", "primitive-conformance", "owner-tests"} and "deloxide" in workload.selections:
-                    self.assertIn("deloxide-stress", workload.selections)
-                if workload.invocation == "stress-scenarios":
-                    self.assertTrue(workload.id.startswith("stress."))
-                    self.assertIn((workload.feature, workload.scenario, workload.examples), active_scenarios)
-        self.assertEqual(len(inventory.workloads_of("probes", "deloxide-stress")), 15)
-        self.assertEqual(len(inventory.workloads_of("stress-scenarios", "deloxide-stress")), 13)
+            if workload.invocation not in {"scenarios", "paced-simulation"}:
+                continue
+            if workload.id == "scenario.local-report-triage":
+                continue
+            with self.subTest(active=workload.id):
+                identity = (workload.feature, workload.scenario)
+                expected.add(identity)
+                counterpart = stressed.get(identity)
+                assert counterpart is not None, f"{workload.id} has no stressed counterpart"
+                if workload.invocation == "paced-simulation":
+                    self.assertEqual(counterpart.id, f"stress.{workload.id}")
+                    self.assertEqual(counterpart.invocation, "stress-paced-simulation")
+                else:
+                    self.assertEqual(counterpart.id, workload.id.replace("scenario.", "stress.", 1))
+                    if workload.feature in restore_features:
+                        self.assertEqual(counterpart.invocation, "stress-restore-scenarios")
+                    else:
+                        self.assertEqual(counterpart.invocation, "stress-scenarios")
+                self.assertEqual(counterpart.examples, workload.examples)
+                self.assertEqual(counterpart.invariant, workload.invariant)
+                self.assertTrue(counterpart.coverage.startswith("Under scheduling stress: "))
+        self.assertEqual(set(stressed), expected)
+        self.assertEqual(sum(workload.examples or 0 for workload in inventory.workloads_of("stress-scenarios", "deloxide-stress")), 35)
+        self.assertEqual(sum(workload.examples or 0 for workload in inventory.workloads_of("stress-paced-simulation", "deloxide-stress")), 36)
+        self.assertEqual(sum(workload.examples or 0 for workload in inventory.workloads_of("stress-restore-scenarios", "deloxide-stress-restore")), 43)
+        stress_ids = {workload.id for workload in inventory.workloads.values() if workload.id.startswith("stress.")}
         for path, owner in inventory.owners.items():
             with self.subTest(owner=path):
                 self.assertTrue((REPOSITORY / path).is_file(), path)
                 self.assertTrue(owner.workloads or owner.gap)
+                # A stressed scenario reaches the owners its active-only counterpart reaches.
+                for name in owner.workloads:
+                    if name.startswith("scenario.") and name != "scenario.local-report-triage":
+                        self.assertIn(name.replace("scenario.", "stress.", 1), owner.workloads)
+                    if name.startswith("paced."):
+                        self.assertIn(f"stress.{name}", owner.workloads)
+                    if name.startswith("stress."):
+                        self.assertIn(name, stress_ids)
 
     def test_the_inventory_registers_exactly_the_lane_tagged_scenarios(self) -> None:
         inventory = deloxide_lane.load_inventory(REPOSITORY)
@@ -538,6 +642,51 @@ class InventoryTests(unittest.TestCase):
         probes = INVENTORY.replace('id = "probes"', 'id = "probes"\n    selections = ["deloxide"]', 1)
         with self.assertRaisesRegex(LaneError, "invocation probes runs in every selection"):
             deloxide_lane.parse_inventory(probes)
+
+    def test_a_selection_can_compile_another_selections_build_under_its_own_name(self) -> None:
+        inventory = deloxide_lane.parse_inventory(SHARDS)
+        builds = {
+            name: (selection.feature, selection.recorded)
+            for name, selection in inventory.selections.items()
+        }
+        self.assertEqual(builds, {
+            "deloxide": ("deloxide", "ActiveOnly"),
+            "deloxide-order": ("deloxide-order", "OrderAnalysis"),
+            "deloxide-restore": ("deloxide", "ActiveOnly"),
+            "deloxide-order-restore": ("deloxide-order", "OrderAnalysis"),
+        })
+        self.assertEqual(
+            [workload.id for workload in inventory.workloads_of("probes", "deloxide-order-restore")],
+            ["probe.cycle", "probe.order"],
+        )
+        self.assertEqual(inventory.workloads_of("owner-tests", "deloxide-restore"), [])
+        cases = {
+            "a name that is no build": (
+                ('feature = "deloxide"\nname = "deloxide-restore"', 'name = "deloxide-restore"'),
+                "selection deloxide-restore: `deloxide-restore` is not a diagnostic build feature; "
+                "name the `feature` it builds",
+            ),
+            "a build that is no diagnostic feature": (
+                ('feature = "deloxide"\nname = "deloxide-restore"', 'feature = "loom"\nname = "deloxide-restore"'),
+                "selection deloxide-restore builds `loom`, which is not a diagnostic build feature",
+            ),
+            "a build's own selection building another": (
+                ('[[selection]]\nname = "deloxide"\n', '[[selection]]\nfeature = "deloxide-order"\nname = "deloxide"\n'),
+                "selection deloxide is named after the build `deloxide` and cannot build `deloxide-order`",
+            ),
+            "a name that does not extend its build": (
+                ('feature = "deloxide"\nname = "deloxide-restore"', 'feature = "deloxide-order"\nname = "deloxide-restore"'),
+                "selection deloxide-restore builds `deloxide-order`, so its name extends `deloxide-order-`",
+            ),
+            "one build recorded two ways": (
+                ('name = "deloxide-restore"\nrecorded = "ActiveOnly"', 'name = "deloxide-restore"\nrecorded = "OrderAnalysis"'),
+                "selection deloxide-restore records `OrderAnalysis` for the build `deloxide`, which "
+                "selection deloxide records as `ActiveOnly`",
+            ),
+        }
+        for case, (replacement, message) in cases.items():
+            with self.subTest(case=case), self.assertRaisesRegex(LaneError, re.escape(message)):
+                deloxide_lane.parse_inventory(replaced(SHARDS, replacement))
 
     def test_every_malformed_entry_is_refused_naming_it(self) -> None:
         def edited(old: str, new: str) -> str:
@@ -1026,6 +1175,35 @@ class LaneTests(unittest.TestCase):
         self.assertEqual(recorded[0]["accounting"]["outcomes"]["workload"], "ignored")
         self.assertEqual(recorded[2]["accounting"]["scenarios"], {"total": 2, "passed": 2})
 
+    def test_a_selection_builds_records_and_chunks_by_the_build_it_names(self) -> None:
+        fixture = Fixture(self, SHARDS)
+        processes = ScriptedProcesses(fixture.root, "deloxide")
+        lane = fixture.lane(processes, "deloxide-restore")
+        self.assertEqual(quietly(lane.execute), 0)
+        self.assertTrue(lane.attempt.is_relative_to(fixture.target / "deloxide/test-deloxide/deloxide-restore"))
+        content = record(lane)
+        self.assertEqual(
+            (content["selection"], content["feature"], content["recorded_selection"]),
+            ("deloxide-restore", "deloxide", "ActiveOnly"),
+        )
+        self.assertEqual([workload["id"] for workload in content["workloads"]], ["probe.cycle", "scenario.nodes"])
+        self.assertEqual(deloxide_lane.read_complete(lane.record.path, "deloxide-restore"), content)
+        launches = {launch.name: launch for launch in processes.launches}
+        self.assertEqual(list(launches), ["probes-build", "probes", "scenarios-build", "scenarios"])
+        self.assertEqual(launches["probes-build"].argv[5:8], ("--features", "deloxide", "--test"))
+        self.assertEqual(launches["scenarios-build"].argv[5:8], ("--features", "testing deloxide", "--test"))
+
+        # An order build starts a fresh scenario process per feature whatever its selection's name.
+        processes = ScriptedProcesses(fixture.root, "deloxide-order")
+        lane = fixture.lane(processes, "deloxide-order-restore")
+        self.assertEqual(quietly(lane.execute), 0)
+        self.assertEqual(
+            [launch.name for launch in processes.launches],
+            ["probes-build", "probes", "scenarios-build", "scenarios-0"],
+        )
+        self.assertEqual(processes.launches[0].argv[5:7], ("--features", "deloxide-order"))
+        self.assertEqual(record(lane)["feature"], "deloxide-order")
+
     def test_an_instrumented_run_builds_where_the_collector_chose_and_starts_through_its_runner(self) -> None:
         environment = {
             deloxide_lane.COVERAGE_ATTEMPT_VARIABLE: "/collector/attempt",
@@ -1322,7 +1500,12 @@ class QualificationTests(unittest.TestCase):
     runs the real probe binary."""
 
     def test_every_case_is_classified_and_the_deadlock_replays(self) -> None:
-        fixture = Fixture(self)
+        self.assert_order_cases_qualify(Fixture(self), "deloxide-order")
+
+    def test_a_selection_qualifies_with_the_cases_of_the_build_it_names(self) -> None:
+        self.assert_order_cases_qualify(Fixture(self, SHARDS), "deloxide-order-restore")
+
+    def assert_order_cases_qualify(self, fixture: Fixture, selection: str) -> None:
         processes = ScriptedProcesses(fixture.root, "deloxide-order")
         endings = {
             "case-two_mutexes_in_opposite_orders": Ended(9, Ending.EXITED, 3, None, 1.0),
@@ -1364,8 +1547,8 @@ class QualificationTests(unittest.TestCase):
             return original_capture(argv, cwd, environment)
 
         processes.capture = capture  # type: ignore[method-assign]
-        status = quietly(lambda: deloxide_lane.qualify(fixture.inventory, processes, fixture.workspace(), fixture.inventory.selection("deloxide-order")))
-        cases_dir = next((fixture.target / "deloxide/test-deloxide/deloxide-order").glob("qualification.*"))
+        status = quietly(lambda: deloxide_lane.qualify(fixture.inventory, processes, fixture.workspace(), fixture.inventory.selection(selection)))
+        cases_dir = next((fixture.target / "deloxide/test-deloxide" / selection).glob("qualification.*"))
         content = json.loads((cases_dir / deloxide_lane.RECORD).read_text())
         self.assertEqual(content["problems"], [])
         self.assertEqual(status, 0)
@@ -1377,7 +1560,7 @@ class QualificationTests(unittest.TestCase):
         self.assertEqual(observed["case-an_aborted_process"], ("signaled", 1))
         self.assertEqual(observed["case-serial_inversion"], ("evidence-unqualified", 1))
         self.assertEqual(observed["case-retention_overload"], ("diagnostic-failure", 4))
-        replays = list((fixture.target / "deloxide/test-deloxide/deloxide-order").glob("replay.*"))
+        replays = list((fixture.target / "deloxide/test-deloxide" / selection).glob("replay.*"))
         self.assertEqual(len(replays), 1)
 
     def test_a_case_classified_otherwise_fails_the_qualification(self) -> None:
@@ -1560,7 +1743,11 @@ class ContractTests(unittest.TestCase):
         return [str(dependency["recipe"]) for dependency in self.recipes[recipe]["dependencies"]]
 
     def test_each_selection_is_its_prerequisites_then_the_lane_alone(self) -> None:
-        for selection in ("deloxide", "deloxide-order", "deloxide-stress"):
+        selections = list(deloxide_lane.load_inventory(REPOSITORY).selections)
+        self.assertEqual(
+            selections, ["deloxide", "deloxide-order", "deloxide-stress", "deloxide-stress-restore"]
+        )
+        for selection in selections:
             with self.subTest(selection=selection):
                 self.assertEqual(self.dependencies(f"test-{selection}"), ["tests-deps", f"test-{selection}-workloads"])
                 self.assertEqual(self.dependencies(f"test-{selection}-workloads"), [])
@@ -1576,18 +1763,20 @@ class ContractTests(unittest.TestCase):
         match = re.search(r"^  deloxide:\n(?P<body>(?:    .*\n|\n)+)", self.workflow, re.MULTILINE)
         assert match is not None
         job = match.group("body")
-        self.assertIn("selection: [deloxide, deloxide-order, deloxide-stress]", job)
+        inventory = deloxide_lane.load_inventory(REPOSITORY)
+        # Every selection of the inventory runs on a runner of its own, and nothing else does.
+        self.assertIn(f"selection: [{', '.join(inventory.selections)}]", job)
         self.assertIn("fail-fast: false", job)
         job_limit = int(re.search(r"timeout-minutes: (\d+)", job).group(1))  # type: ignore[union-attr]
         lane_limit = int(re.search(r'--kill-after=60 (\d+)m just coverage-native-extras "test-\$\{SELECTION\}"', job).group(1))  # type: ignore[union-attr]
         qualification_limit = int(re.search(r'--kill-after=60 (\d+)m just test-deloxide-qualification "\$\{SELECTION\}"', job).group(1))  # type: ignore[union-attr]
-        inventory = deloxide_lane.load_inventory(REPOSITORY)
         # The inventory's budget is the diagnostic part of the lane's bound; preparation and
         # export share the rest, and setup and the uploads the job's remaining minutes.
         self.assertLess(inventory.bounds.budget_seconds / 60, lane_limit)
         self.assertLessEqual(lane_limit + 1 + qualification_limit + 1, job_limit - 10)
         self.assertIn("if: always()", job[job.index("Upload diagnostic lane evidence"):])
-        self.assertIn("target/native-coverage-build-${{ matrix.selection }}/test-deloxide/", job)
+        # A selection's lane keeps its attempts in the instrumented build of the feature it compiles.
+        self.assertIn("target/native-coverage-build-deloxide*/test-deloxide/${{ matrix.selection }}/", job)
         self.assertIn("target/deloxide/test-deloxide/", job)
         needs = re.search(r"^  coverage:\n(?:    .*\n|\n)+", self.workflow, re.MULTILINE)
         assert needs is not None

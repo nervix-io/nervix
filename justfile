@@ -463,11 +463,18 @@ test-deloxide-order: tests-deps test-deloxide-order-workloads
 # of its further acquisitions, between 20µs and 200µs, as `StressConfiguration::LANE` records in
 # every process's evidence. Every probe, conformance check and owner test of the active-only
 # selection runs again under that disturbance, together with the probe that proves it is applied,
-# and the lifecycle scenarios tagged `@deloxide_stress` run one at a time, so the transactions,
-# drains, restores, reconnections and shutdowns they drive meet orders of nested acquisitions an
-# idle schedule rarely takes. Deloxide draws its delays from entropy it seeds itself, so a replay repeats the
-# workload and the configuration, not the schedule.
+# and the lifecycle scenarios tagged `@deloxide_stress` and the paced-driver scenarios run one at a
+# time, so the transactions, drains, reconnections, reopens and shutdowns they drive meet orders of
+# nested acquisitions an idle schedule rarely takes. Deloxide draws its delays from entropy it
+# seeds itself, so a replay repeats the workload and the configuration, not the schedule.
 test-deloxide-stress: tests-deps test-deloxide-stress-workloads
+
+# The stressed build's capture, restore and checkpoint-transfer scenarios, tagged
+# `@deloxide_stress_restore`, in the `deloxide-stress-restore` selection: the same build and
+# disturbance as `test-deloxide-stress`, its probes, and these scenarios one at a time, in a lane
+# with a budget of its own, because the stressed scenarios of both selections together outlast one
+# lane's budget.
+test-deloxide-stress-restore: tests-deps test-deloxide-stress-restore-workloads
 
 # The part of each selection's lane that executes Nervix code. It has no dependencies, so the native
 # coverage collector runs exactly the lane inside its instrumentation.
@@ -479,6 +486,9 @@ test-deloxide-order-workloads:
 
 test-deloxide-stress-workloads:
     python3 -m scripts.deloxide_lane --target-dir {{ quote(cargo_target_dir) }} run deloxide-stress
+
+test-deloxide-stress-restore-workloads:
+    python3 -m scripts.deloxide_lane --target-dir {{ quote(cargo_target_dir) }} run deloxide-stress-restore
 
 # Prove the lane's supervision on real failing processes: probe workloads that deadlock, fail their
 # diagnostics, hang on an untracked wait, abort, retain an unreviewed potential cycle or overflow

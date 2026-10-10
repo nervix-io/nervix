@@ -92,7 +92,7 @@ Feature: Large WASM guest saves across the replication message limit
       """
     And the relay subscription does not receive a payload within "1s"
 
-  @deadlock_diagnostics
+  @deadlock_diagnostics @deloxide_stress_restore
   Scenario: Draining a large-state owner prepares its successor through bulk checkpoint streams
     Given runtime replication is configured with replica count 1 and snapshot interval "100ms"
     And the production sticky scheduler is configured
