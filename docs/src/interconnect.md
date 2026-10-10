@@ -642,7 +642,10 @@ A delivery proceeds as follows:
    registration is refused the same way, with no registration to answer.
 7. When the concrete runtime branch accepts the batch, the receiver sends a terminal admission
    outcome over the reserved management capacity. The sender can then release the channel for the
-   next batch.
+   next batch. A batch that carries record acknowledgements is admitted only once the receiver has
+   charged its acknowledgement watches; while the relay budget has no room for them, the receiver
+   holds the batch back unadmitted, as
+   [Bounded Correlation And Peer Owners](#bounded-correlation-and-peer-owners) describes.
 8. If the send includes record acknowledgements, later acknowledgement events report downstream
    processing completion. Detached sends and subscription fan-out end at admission.
 
@@ -738,16 +741,33 @@ Shutdown seals fresh claims before scanning positions that were ever claimed, so
 registrar either occupies a position shutdown visits or finds it closed.
 
 Record storage and receiver ACK watches are charged to the relay memory budget. One task per
-admitted batch multiplexes its row watches, with a fixed charge per row plus one task charge; a
-wide frame therefore does not allocate one task per acknowledgement. Pending rows report progress
-every 100 milliseconds, below the registrar's fifteen-second silence bound even when two reports
-each exhaust their dispatch deadline. The same cadence keeps local emitter and message-error
-acknowledgements alive while a connector request is pending, giving a one-second source
-`ACK TIMEOUT` multiple chances to observe progress. Admission
-refusal is typed and occurs before runtime admission. Cancellation before admission resolves every
-held share negatively and returns its position. Completion of the last record returns the delivery
-storage and its charge. Watcher memory remains charged through its dispatch attempts and ends on
-completion, runtime shutdown, or the registrar run leaving or changing. The membership writer
+admitted batch multiplexes its row watches, with a fixed charge of 1 KiB per row plus 4 KiB for the
+task; a wide frame therefore does not allocate one task per acknowledgement. Pending rows report
+progress every 100 milliseconds, below the registrar's fifteen-second silence bound even when two
+reports each exhaust their dispatch deadline. The same cadence keeps local emitter and
+message-error acknowledgements alive while a connector request is pending, giving a one-second
+source `ACK TIMEOUT` multiple chances to observe progress. Refusing record storage is typed and
+occurs before the delivery is sent. Cancellation before admission resolves every held share
+negatively and returns its position. Completion of the last record returns the delivery storage and
+its charge.
+
+The receiver charges a batch's watches before it decodes the batch and before runtime admission.
+While the relay budget has no room for them, typically because the watches of earlier batches are
+still reporting their rows, the receiver holds the batch back instead of refusing it. The batch
+stays unadmitted, so the transport keeps reporting it alive and its sender keeps waiting within the
+five-second progress and five-minute total admission bounds; the sender's channel carries nothing
+else meanwhile, which pushes back on the source that fills it. The held batch keeps the reservation
+of its grant. Every 10 milliseconds the receiver reads the budget and takes the charge once it
+fits. It never waits in the budget's queue, because a place there takes every byte the class
+releases until it is satisfied, which would keep the node's other relay work, including forwarding
+the rows whose acknowledgements end the watches it waits for, behind it. A held batch counts no
+refusal. The hold ends as soon as the sender cancels the delivery, its peer ends, or the runtime
+stops. Only watches larger than the whole budget, or a hold still without room when the
+five-minute bound has passed, are refused, with the typed admission cause beneath the runtime's
+`RemoteAckAdmission`. Each watch returns its row's share as soon as it reports the row's terminal
+outcome, gives that outcome up, or ends because the registrar run left or changed, so room
+returns at the rate rows are reported rather than a whole batch at a time; the task's share
+returns when the batch's last watch ends or the runtime shuts down. The membership writer
 publishes immutable process identities; a watcher gives initial discovery five seconds and stops
 once a previously observed registrar is absent. Terminal delivery retains the five-second event
 deadline described above; this does not promise suppression of replay duplicates after lost outcomes.

@@ -973,6 +973,205 @@ async fn owner_ingress_publishes_branch_presence_to_the_relay_state_placement() 
         .expect("relay owner should drain");
 }
 
+/// One relay owned by a runtime that joined a loopback cluster, and the registration an earlier
+/// run of that node handed out, so a watcher of it ends as soon as it starts.
+struct JoinedRelayOwner {
+    runtime: Runtime,
+    domain: DomainName,
+    relay: RelayName,
+    schema: Arc<CompiledSchema>,
+    services: Arc<RelayBoundaryServices>,
+    stale_registration: RemoteAckRegistration,
+}
+
+impl JoinedRelayOwner {
+    async fn start() -> Self {
+        let runtime = Runtime::default();
+        let node = ClusterNodeName::parse("node-1").expect("valid node name");
+        let incarnation = attach_loopback_cluster(&runtime, &node).await;
+        let domain = DomainName::parse("default").expect("valid domain");
+        let relay = RelayName::parse("notifications").expect("valid identifier");
+        let schema = test_schema(&[("user_id", ParseAsType::U32)]);
+        let services = test_relay_boundary_services();
+        install_test_domain_execution(
+            &runtime,
+            &domain,
+            Vec::new(),
+            DomainRoutingSnapshot {
+                relay_schemas: HashMap::from_iter([(relay.clone(), schema.clone())]),
+                relay_services: HashMap::from_iter([(relay.clone(), services.clone())]),
+                ..DomainRoutingSnapshot::default()
+            },
+        );
+        let earlier_run = incarnation
+            .get()
+            .checked_sub(1)
+            .expect("a loopback cluster's incarnation is its start time in nanoseconds");
+        Self {
+            runtime,
+            domain,
+            relay,
+            schema,
+            services,
+            stale_registration: RemoteAckRegistration {
+                ack_id: 1,
+                registrar: ClusterNodeIdentity::new(node, ClusterNodeIncarnation::new(earlier_run)),
+            },
+        }
+    }
+
+    /// A delivery of one row on `key` whose acknowledgement a remote watch reports.
+    async fn delivery(&self, key: &Option<BranchKey>, watched_rows: usize) -> RelayPayload {
+        let batch_ipc = self
+            .schema
+            .batch_from_test_rows([[("user_id".to_string(), RuntimeValue::U32(42))]])
+            .expect("batch should build")
+            .encode_arrow_ipc(self.runtime.executor())
+            .await
+            .expect("batch ipc should serialize");
+        RelayPayload {
+            delivery: RelayDelivery {
+                channel_incarnation: [5; 16],
+                sequence: 0,
+            },
+            kind: RelayPayloadKind::Ingress,
+            domain: self.domain.clone(),
+            relay: self.relay.clone(),
+            key: BranchKey::to_remote_key(key),
+            batch_ipc,
+            metadata: vec![
+                test_runtime_row([("user_id".to_string(), RuntimeValue::U32(42))])
+                    .metadata()
+                    .to_remote(),
+            ],
+            acks: vec![Some(self.stale_registration.clone()); watched_rows],
+            admission: None,
+        }
+    }
+
+    fn relay_memory(&self) -> nervix_execution::MemoryBudgetSnapshot {
+        self.runtime
+            .executor()
+            .memory(nervix_execution::MemoryClass::Relay)
+    }
+}
+
+/// A delivery whose acknowledgement watches the relay budget cannot hold yet is held back before
+/// admission rather than refused, and reaches its relay once the memory that filled the budget
+/// returns.
+#[nervix_primitives::test]
+async fn a_delivery_held_for_its_acknowledgement_watches_reaches_its_relay_once_room_returns() {
+    let owner = JoinedRelayOwner::start().await;
+    let key = u32_branch_key("user_id", 42);
+    let delivery = owner.delivery(&key, 1).await;
+    let owner_task = owner.runtime.spawn_relay_owner_task(
+        &owner.domain,
+        &owner.relay,
+        owner.services.clone(),
+        RelayRetention::default(),
+    );
+    let memory = owner.relay_memory();
+    let room = memory
+        .capacity_bytes
+        .checked_sub(memory.reserved_bytes)
+        .expect("a budget never reserves more than its capacity");
+    let occupied = owner
+        .runtime
+        .executor()
+        .try_reserve(nervix_execution::MemoryClass::Relay, room)
+        .expect("the fixture takes the rest of the relay budget");
+
+    let handling = owner
+        .runtime
+        .handle_remote_stream_payload_with_owner_ingress(delivery, true);
+    let mut handling = std::pin::pin!(handling);
+    let held = timeout(Duration::from_millis(200), handling.as_mut()).await;
+    assert!(
+        held.is_err(),
+        "a delivery whose watches the full budget cannot hold is held back, not refused"
+    );
+    assert!(
+        !owner
+            .runtime
+            .describe_local_stream_exists(&owner.domain, &owner.relay, &key)
+            .expect("stream existence should be queryable"),
+        "a held delivery has not reached its relay"
+    );
+    assert_eq!(owner.relay_memory().refused, 0);
+
+    drop(occupied);
+    timeout(Duration::from_secs(30), handling)
+        .await
+        .expect("the held delivery is admitted once room returns")
+        .expect("the held delivery reaches its relay");
+    timeout(Duration::from_secs(30), async {
+        loop {
+            nervix_primitives::task::consume_budget().await;
+            if owner
+                .runtime
+                .describe_local_stream_exists(&owner.domain, &owner.relay, &key)
+                .expect("stream existence should be queryable")
+            {
+                break;
+            }
+            nervix_primitives::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("the relay owner observes the delivered branch");
+    owner_task
+        .stop(Duration::from_secs(1))
+        .await
+        .expect("relay owner should drain");
+    owner.runtime.shutdown().await;
+}
+
+/// Watches the whole relay budget could never hold are refused before the rows are decoded, and
+/// the refusal keeps the execution admission cause beneath the runtime context, rendered once.
+#[nervix_primitives::test]
+async fn acknowledgement_watches_larger_than_the_relay_budget_keep_their_typed_cause() {
+    let owner = JoinedRelayOwner::start().await;
+    let capacity = owner.relay_memory().capacity_bytes;
+    let too_many = usize::try_from(capacity / 1024 + 1)
+        .expect("the default relay budget's watch count fits in usize");
+    let delivery = owner.delivery(&None, too_many).await;
+
+    let Err(error) = owner
+        .runtime
+        .handle_remote_stream_payload_with_owner_ingress(delivery, true)
+        .await
+    else {
+        panic!("watches larger than the whole relay budget are refused");
+    };
+
+    assert!(matches!(
+        error.current_context(),
+        RuntimeError::RemoteAckAdmission { .. }
+    ));
+    let cause = error
+        .downcast_ref::<nervix_execution::AdmissionError>()
+        .expect("the admission refusal stays beneath the runtime context");
+    assert!(matches!(
+        cause,
+        nervix_execution::AdmissionError::ExceedsBudget { .. }
+    ));
+    let watches = u64::try_from(too_many).expect("the fixture's watch count fits in u64");
+    let watch_bytes = watches
+        .checked_mul(1024)
+        .expect("the fixture's watch charge fits in u64");
+    let requested = watch_bytes
+        .checked_add(4096)
+        .expect("the fixture's watch charge leaves room for the task's share");
+    assert_eq!(
+        format!("{error:#}"),
+        format!(
+            "could not own remote acknowledgements in domain 'default': an operation of \
+             {requested} bytes exceeds the whole relay memory budget of {capacity} bytes"
+        )
+    );
+    owner.runtime.shutdown().await;
+}
+
 /// A batch for `schema` with one row, acknowledged through `acks`.
 fn routed_test_batch(schema: Arc<CompiledSchema>, acks: AckSet) -> RelayRecordBatch {
     RelayRecordBatch::single(

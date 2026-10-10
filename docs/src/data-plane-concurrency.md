@@ -55,7 +55,13 @@ Shutdown seals first claims before closing the queues and visits only positions 
 Record allocation and receiver batch watcher tasks reserve relay memory before creating their
 retained rows. A batch task multiplexes row progress and keepalive polls every 100 milliseconds;
 each row and the single task have fixed charges. The cadence remains shorter than a one-second
-source ACK timeout while task cardinality stays bounded by admitted batches.
+source ACK timeout while task cardinality stays bounded by admitted batches. A receiver whose relay
+budget has no room for a batch's watches holds the unadmitted batch on its own channel lane and
+reads the budget again every 10 milliseconds; it registers for no release notification and never
+queues in the budget's semaphore, whose released permits would otherwise go to the held charge
+ahead of the relay work that frees it. The batch task returns each watch's share as that watch
+ends, through its exclusively owned reservation, so the hold involves no shared state beyond the
+budget's own atomic permit count.
 The registered wire number selects the position, exact generation and row without a concurrent
 map lookup. The process identity is checked before routing. Generation exhaustion seals the
 position, and cancellation, timeout, terminal resolution and shutdown compete to take each row

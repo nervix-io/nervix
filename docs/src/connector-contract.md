@@ -346,7 +346,14 @@ message it unfolded into has completed its own route or error delivery.
 Remote delivery retains that host-owned ACK share in a bounded delivery owner, with independent
 row outcomes and an exact generation identity. Admission refusal or cancellation before admission
 returns the share negatively; admitted records remain pending through keepalives and required
-waits until their terminal outcome or the silence bound. Relay construction retains the domain's
+waits until their terminal outcome or the silence bound. A relay owner whose relay memory has no
+room for the acknowledgement watches of a delivery holds the delivery back unadmitted instead of
+refusing it, and the host's dispatch waits for that admission within its five-minute bound. A
+source in a `NO_ACK` mode therefore stops reading while its delivery is held, as under any relay
+backpressure, and its output is delivered once the relay owner has room rather than lost. In an
+acknowledged mode the held rows' shares stay pending without keepalives, so a hold longer than the
+source's `ACK TIMEOUT` rejects their positions and the source delivers them again, possibly after the
+held delivery was admitted. Relay construction retains the domain's
 ACK-root tracker, so intake does not resolve a mutable domain registry for each row. Receiver
 watchers retain the sender's full process identity and charge their memory to the relay budget;
 sender replacement or shutdown ends them. These correlations remain volatile and are never a

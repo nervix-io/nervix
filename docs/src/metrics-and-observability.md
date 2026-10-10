@@ -263,7 +263,10 @@ Relay admission:
   has not been retired, and transfer grants issued and not yet spent. These aggregate bounded
   authenticated peer owners. Ending a peer releases its protocol capacity immediately, including
   when the application still borrows an admitted intake; that intake's retained metadata stays
-  charged to relay memory until its last borrow ends.
+  charged to relay memory until its last borrow ends. A delivery the receiver holds back because
+  its relay memory has no room for the delivery's acknowledgement watches stays an unresolved
+  attempt here, with its relay memory near `nervix_execution_memory_capacity_bytes`, and counts no
+  rejection until it is admitted
 - `nervix_interconnect_relay_admissions_total` and
   `nervix_interconnect_relay_admission_wait_seconds_total`: attempts resolved, by `outcome`
   (`admitted`, `rejected`, `cancelled`), and the time they spent between an accepted reservation
