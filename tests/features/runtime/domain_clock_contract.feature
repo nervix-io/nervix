@@ -181,10 +181,10 @@ Feature: Domain clock contract regressions
     When runtime preparation on node "node-3" is paused
     And application health probes from node "node-1" to node "node-2" fail
     And application health probes from node "node-3" to node "node-2" fail
-    And consensus connectivity for node "node-2" is blocked
-    And gossip exchanges involving node "node-2" are blocked with a "5s" send delay
     Then node "node-1" eventually reports interconnect to "node-2" as "unavailable"
-    And node "node-3" reaches its runtime preparation pause
+    When consensus connectivity for node "node-2" is blocked
+    And gossip exchanges involving node "node-2" are blocked with a "5s" send delay
+    Then node "node-3" reaches its runtime preparation pause
     Given a clock session is opened on node "node-1"
     When the clock session attaches to the clock of domain "{{domain}}"
     Then the clock session is attached at generation 1 to a paced clock with period "100ms", skew "10ms", logical origin "2000-01-01T00:00:00Z" and time rate "4"
