@@ -827,6 +827,13 @@ struct GossipExchange {
 /// The refusal is the exchange's answer on the wire, so the sending node learns why its message was
 /// not taken without parsing text.
 #[derive(Debug, Clone, Archive, Serialize, Deserialize, PartialEq, Eq, thiserror::Error)]
+#[cfg_attr(
+    nervix_lint,
+    nervix::error_boundary(
+        outcome,
+        reason = "the fixed gossip wire answer carries a typed exchange refusal"
+    )
+)]
 enum GossipExchangeRefusal {
     #[error("a gossip message of {size} bytes exceeds the {limit}-byte bound")]
     Oversized { size: u64, limit: u64 },

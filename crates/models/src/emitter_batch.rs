@@ -25,6 +25,13 @@ use thiserror::Error;
 
 /// Why a batching limit is not a value an emitter can declare.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
+#[cfg_attr(
+    nervix_lint,
+    nervix::error_boundary(
+        outcome,
+        reason = "batch-limit construction returns pure range and literal validation refusals"
+    )
+)]
 pub enum EmitterBatchLimitError {
     #[error(
         "BATCH MAX MESSAGES must be between 1 and {max}, found {value}",

@@ -33,6 +33,12 @@ The representation depends on the question being asked:
 | Is a present value valid? | A validated type or a fallible conversion | Reject invalid input where the owner has enough context to explain it. |
 | Can a physical format encode the state? | A private wire, storage, Arrow, or atomic encoding | Decode at the boundary and expose typed operations to callers. |
 
+A pure conversion refusal is an ordinary typed outcome, even when it implements
+`std::error::Error` for a parsing trait. Its owner states that contract at the exact error type
+with reason-bearing `nervix::error_boundary(outcome, ...)` metadata. A contextual operation failure
+returns a report; a missing value does not silently turn one into a success. The resolved compiler
+gate and report-carrier obligations are described in [Errors And Diagnostics](errors-and-diagnostics.md).
+
 Zero work outstanding, an initial sequence value, an empty payload, and a genuinely empty result
 remain ordinary values. A documented scalar function may return zero for a particular input;
 that result is part of the function contract. Arrow values under a null or failure validity mask

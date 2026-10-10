@@ -374,6 +374,13 @@ pub struct ForcedOwnershipRecoveryPreparation {
 }
 
 #[derive(Debug, Clone, Archive, Serialize, Deserialize, PartialEq, Eq, Error)]
+#[cfg_attr(
+    nervix_lint,
+    nervix::error_boundary(
+        outcome,
+        reason = "the fixed handoff wire response carries its remote rejection outcome"
+    )
+)]
 pub enum OwnershipHandoffFailure {
     #[error("{reason}")]
     Rejected { reason: String },

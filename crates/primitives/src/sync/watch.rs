@@ -56,6 +56,14 @@ pub mod error {
 
     /// Every receiver was dropped; carries the value that could not be sent.
     #[derive(PartialEq, Eq, Clone, Copy)]
+    #[cfg_attr(
+        nervix_lint,
+        nervix::error_boundary(
+            library,
+            reason = "the modeled watch adapter must keep the external channel's returned value \
+                      and error contract"
+        )
+    )]
     pub struct SendError<T>(pub T);
 
     impl<T> fmt::Debug for SendError<T> {
@@ -74,6 +82,14 @@ pub mod error {
 
     /// Every sender was dropped.
     #[derive(Debug, Clone)]
+    #[cfg_attr(
+        nervix_lint,
+        nervix::error_boundary(
+            library,
+            reason = "the modeled watch adapter must keep the external channel's closed-channel \
+                      contract"
+        )
+    )]
     pub struct RecvError(pub(super) ());
 
     impl fmt::Display for RecvError {

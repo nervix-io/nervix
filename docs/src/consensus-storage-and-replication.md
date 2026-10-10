@@ -14,6 +14,13 @@ The replicated transaction report and its content-addressed topology use this du
 and actual facts that report retains. This chapter owns log reading, snapshot transfer, and the
 storage bounds that carry large reports.
 
+Consensus request and append-stream responses carry the fixed `ConsensusRequestError` wire
+outcome, classified at its source owner for the compiler failure-contract gate. Local storage and
+Raft failures retain their contextual reports before this projection. Opening the node database
+also preserves the typed storage cause below startup context; a consensus keyspace in that
+database returns the separate layout context. [Errors And Diagnostics](errors-and-diagnostics.md)
+owns the compiler and propagation rules.
+
 ## Durable Write Path
 
 Every consensus mutation uses a full synchronization barrier that asks the filesystem to persist

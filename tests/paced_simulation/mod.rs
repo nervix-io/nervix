@@ -587,6 +587,31 @@ fn start_driver(world: &mut ScenarioWorld, driver: &str, server: String, argumen
         Some(DriverRun::start(driver, &server, &arguments, &directory));
 }
 
+#[given(expr = "the paced simulation {word} file contains")]
+async fn given_the_driver_file_contains(
+    world: &mut ScenarioWorld,
+    file: String,
+    #[step] step: &Step,
+) {
+    assert!(
+        world.paced_simulation.running.is_none(),
+        "fixture files are prepared before a driver is running"
+    );
+    let file = match file.as_str() {
+        "ledger" => "ledger.jsonl",
+        "effects" => "effects.jsonl",
+        _ => panic!("the paced simulation file must be ledger or effects"),
+    };
+    let directory = world.paced_simulation.directory();
+    let contents = step
+        .docstring
+        .as_ref()
+        .assured("the fixture step supplies its file contents");
+    tokio::fs::write(directory.join(file), contents.trim())
+        .await
+        .assured("the scenario can prepare a driver file");
+}
+
 #[given("the leader node is configured with the paced simulation example graph")]
 async fn given_the_leader_node_is_configured_with_the_example_graph(world: &mut ScenarioWorld) {
     world.last_command_error = None;
@@ -829,6 +854,18 @@ async fn then_the_driver_errors_contain(world: &mut ScenarioWorld, text: String)
     assert!(
         finished.stderr.contains(&text),
         "the driver's errors do not contain '{text}': {}",
+        finished.describe()
+    );
+}
+
+#[then(expr = "the paced simulation driver's errors contain {string} exactly {int} times")]
+async fn then_the_driver_error_count(world: &mut ScenarioWorld, text: String, count: usize) {
+    let text = expand_placeholders(world, &text);
+    let finished = world.paced_simulation.finished();
+    assert_eq!(
+        finished.stderr.matches(&text).count(),
+        count,
+        "the driver's diagnostic count differs: {}",
         finished.describe()
     );
 }

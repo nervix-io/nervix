@@ -62,6 +62,11 @@ Arrow failure when one caused the call to fail. Jaq compilation, evaluation, and
 return their own typed reports to the codec or signaling caller. These reports are batch or setup
 failures; selected-row execution and `SideError` values remain the row-failure channel.
 
+The compiler failure-contract gate reads source-owned outcome classifications on
+`SideErrorReason`, CIDR `NetworkDefect` and JSON `JsonTargetDefect`. These are row or pure type
+conversion outcomes; their callers establish the operation report when a whole batch or setup
+fails. [Errors And Diagnostics](errors-and-diagnostics.md) owns those compiler contracts.
+
 For ordinary expression completion, the session resolver asks `FunctionName` for the VM's sorted
 builtin spellings, including datetime names and accepted aliases. That list excludes injected
 calls and `write_header`; it is a candidate catalog, while VM lowering and registry validation

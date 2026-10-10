@@ -707,8 +707,9 @@ build and the existing tests, and nothing in it changes behavior.
   fingerprint of its key, never by the key's field values.
 - `Result<_, String>` is rejected outright in product code. `just validate-typed-errors`, part of
   `just validate`, fails on any occurrence and names the rule; there is no baseline to raise. The
-  `bare_error_signatures` count in `just ratchet` rejects replacing a `String` error with an
-  unreported Nervix error.
+  resolved `nervix::bare_error_signature` compiler diagnostic in `just ratchet` rejects replacing
+  a `String` error with an unreported Nervix failure, including aliases, associated outputs,
+  generic calls and inferred future/stream or closure contracts.
 
 ### Panics and recovery
 
@@ -1124,16 +1125,16 @@ build and the existing tests, and nothing in it changes behavior.
   Keep native fuzz reports and the Python runner report distinct from ordinary coverage and CRAP.
 - Use `just validate` for formatting and validation.
 - Architecture debt is counted and only decreases. `just ratchet` counts oversized files, `as`
-  casts outside imports and qualified paths, bare `unwrap` and `expect`, outcomes dropped with
-  `let _ =` instead of stating their class, `saturating_*` and `wrapping_*` calls outside the time
-  API, control flow written as `Option` and `Result` combinator chains, signatures returning a
-  Nervix error without `Report`, node identities carried as `String`, struct fields gated on
+  casts outside imports and qualified paths, `saturating_*` and `wrapping_*` calls outside the time
+  API, control flow written as `Option` and `Result` combinator chains, node identities carried as
+  `String`, struct fields gated on
   `cfg(feature = "testing")`, parser references outside the language edges, and `Model` references
   in the data plane. It records `write_once_rwlock_fields` for names and shared references held as
   `RwLock<Option<...>>` fields. CI fails when a structural count exceeds `debt-baseline.json`.
   A change may lower a count and never raise one. When a count falls, run `just ratchet --update`
   and commit the baseline; `just ratchet --show <count>` lists its sites.
-- Synchronization uses real Nervix compiler diagnostics across the complete declared configuration
+- Synchronization, failure signatures, discarded outcomes and canonical panic APIs use real Nervix
+  compiler diagnostics across the complete declared configuration
   matrix. Finite API recognition is Rust code; execution contexts and reviewed exceptions belong
   beside their source owners. Gate them with `cfg_attr(nervix_lint, ...)`. Contracts state actual
   recurring, lifecycle, observer, outside or bounded execution, with reasons and bounded identities.
@@ -1141,6 +1142,12 @@ build and the existing tests, and nothing in it changes behavior.
   names its owning repair task. Blanket allow, broad/undocumented/unfulfilled expectations and an
   expectation widened to cover another operation fail. Generated reports are outputs under target,
   never enforcement inputs. Do not infer policy from filenames, sharing traits or method names.
+- Classify pure conversion refusals, cancellation signals, semantic row/record/wire outcomes and
+  modeled library error contracts with reason-bearing `nervix::error_boundary(outcome|library, ...)`
+  at the exact error type or return contract. Such classifications never inherit from an enclosing
+  callable, module or package. Foreign standard-error hooks retain a complete report carrier.
+  [Errors And Diagnostics](docs/src/errors-and-diagnostics.md) owns these contracts. The source
+  `Result<_, String>` rule remains distinct. No numeric allowance replaces these compiler rules.
 - Supported local helper/callback edges are re-evaluated, and callee/trait contracts cross compiler
   metadata boundaries. A hot caller of a lifecycle-only helper is diagnosed. Unknown dispatch needs
   a callable source contract or a diagnostic, not an inherited cold module classification. Preserve

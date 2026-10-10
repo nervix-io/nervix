@@ -74,6 +74,58 @@ class CompilerContractTests(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0, result.stderr)
         self.assertIn("nervix::lifecycle_call", result.stderr)
 
+    def test_typed_error_and_outcome_diagnostics(self) -> None:
+        for name, diagnostic in (
+            ("error_nested_alias", "nervix::bare_error_signature"),
+            ("error_discarded_named", "nervix::discarded_outcome"),
+            ("error_unwrap_ufcs", "nervix::bare_panic"),
+            ("error_associated", "nervix::bare_error_signature"),
+            ("error_stream", "nervix::bare_error_signature"),
+            ("error_closure", "nervix::bare_error_signature"),
+            ("error_generic", "nervix::bare_error_signature"),
+            ("error_async_block", "nervix::bare_error_signature"),
+            ("error_async_closure", "nervix::bare_error_signature"),
+            ("error_boxed_failure", "nervix::bare_error_signature"),
+            ("error_borrowed_failure", "nervix::bare_error_signature"),
+            ("error_optional_report", "nervix::bare_error_signature"),
+            ("error_discard_qualified", "nervix::discarded_outcome"),
+            ("error_discard_wrapper", "nervix::discarded_outcome"),
+            ("error_discard_box", "nervix::discarded_outcome"),
+            ("error_discard_vec", "nervix::discarded_outcome"),
+            ("error_discard_assignment", "nervix::discarded_outcome"),
+            ("error_nested_contract", "nervix::bare_error_signature"),
+            ("error_discard_partial", "nervix::discarded_outcome"),
+            ("error_panic_deref", "nervix::bare_panic"),
+            ("error_panic_alias", "nervix::bare_panic"),
+            ("error_boundary_malformed", "nervix::invalid_contract"),
+            ("error_boundary_broad", "nervix::invalid_contract"),
+            ("error_expectation_unfulfilled", "expectation is unfulfilled"),
+        ):
+            with self.subTest(name=name):
+                result = self.compile(name)
+                self.assertNotEqual(result.returncode, 0, result.stderr)
+                self.assertIn(diagnostic, result.stderr.replace("-", "_"))
+
+        for name in ("error_custom_apis", "error_handled", "error_reported", "error_outcomes", "error_expected", "error_storage_values", "error_resource_lifetimes", "error_return_contract"):
+            with self.subTest(name=name):
+                result = self.compile(name)
+                self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_error_classifications_cross_crate_metadata(self) -> None:
+        target = pathlib.Path(os.environ.get("CARGO_TARGET_DIR", ROOT / "target"))
+        for callee, caller, accepted in (("error_metadata_callee", "error_metadata_caller", True),
+                                         ("error_metadata_failure", "error_metadata_rejected", False)):
+            with self.subTest(callee=callee):
+                result = self.compile(callee, crate_name="callee")
+                self.assertEqual(result.returncode, 0, result.stderr)
+                metadata = target / "typed-ratchet/contracts" / callee / "libcallee.rmeta"
+                result = self.compile(caller, "--extern=callee=" + str(metadata))
+                if accepted:
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                else:
+                    self.assertNotEqual(result.returncode, 0, result.stderr)
+                    self.assertIn("nervix::bare_error_signature", result.stderr.replace("-", "_"))
+
     def test_source_contracts_and_narrow_expectations(self) -> None:
         for name in ("lifecycle_lock", "bounded_lock", "expected_lock", "expected_expression", "inherited_override", "contracted_dispatch", "contracted_trait", "bounded_task_body", "lifecycle_task_body"):
             with self.subTest(name=name):
