@@ -19,6 +19,15 @@ from scripts.release_evidence import CheckRun, EvidenceError, Method
 ROOT = Path(__file__).resolve().parents[2]
 REVISION = "0123456789abcdef0123456789abcdef01234567"
 
+
+def workflow_job(workflow: str, job: str) -> str:
+    """The lines of one top-level job of a workflow, up to the next job at the same indentation."""
+    start = re.search(rf"^  {re.escape(job)}:$", workflow, re.M)
+    assert start is not None, f"the workflow defines no job {job!r}"
+    end = re.compile(r"^  [A-Za-z0-9_-]+:$", re.M).search(workflow, start.end())
+    return workflow[start.end() : end.start() if end else len(workflow)]
+
+
 SMALL_INVENTORY = """
 [[method]]
 name = "ordinary"
@@ -78,17 +87,27 @@ class InventoryTests(unittest.TestCase):
         names = set()
         for text in workflows.values():
             names.update(match.strip().strip("'\"") for match in re.findall(r"^    name: (.+)$", text, re.M))
-        expansions = {
-            "build-${{ matrix.image }}-${{ matrix.arch }}": ["build-debian-amd64", "build-debian-arm64"],
-            "deloxide (${{ matrix.selection }})": [
-                "deloxide (deloxide)",
-                "deloxide (deloxide-order)",
-                "deloxide (deloxide-stress)",
-            ],
+        methods = {
+            method.name: method
+            for method in release_evidence.parse_inventory((ROOT / release_evidence.INVENTORY).read_text())
         }
-        for template, expanded in expansions.items():
-            self.assertIn(template, names)
-            names.update(expanded)
+        # A matrix job's checks are its matrix values, read from the workflow, so a value added
+        # there and missing here fails.
+        build = workflow_job(workflows["docker-build.yaml"], "build-arch")
+        images = re.findall(r"^\s+- image: (\S+)$", build, re.M)
+        arches = re.findall(r"^\s+arch: (\S+)$", build, re.M)
+        self.assertEqual(len(images), len(arches))
+        self.assertIn("build-${{ matrix.image }}-${{ matrix.arch }}", names)
+        builds = [f"build-{image}-{arch}" for image, arch in zip(images, arches)]
+        self.assertEqual(sorted(methods["release-images"].checks), sorted(builds))
+        names.update(builds)
+        deloxide = workflow_job(workflows["check.yaml"], "deloxide")
+        selections = re.search(r"^\s+selection: \[(.+)\]$", deloxide, re.M)
+        self.assertIsNotNone(selections)
+        self.assertIn("deloxide (${{ matrix.selection }})", names)
+        lanes = [f"deloxide ({selection.strip()})" for selection in selections.group(1).split(",")]
+        self.assertEqual(sorted(methods["deloxide"].checks), sorted(lanes))
+        names.update(lanes)
         # The reusable Chaos workflow names its verdict job after its suite and image kind.
         self.assertIn("${{ inputs.suite }} ${{ inputs.image-kind }} verdict", names)
         for caller in ("chaos-smoke", "chaos-smoke-diagnostic", "chaos-soak", "chaos-soak-diagnostic"):
@@ -98,8 +117,7 @@ class InventoryTests(unittest.TestCase):
             self.assertIn(f"image-kind: {kind}", workflows["docker-build.yaml"])
         self.assertIn("bolero-random", names)
         names.update(f"bolero / {job}" for job in ("bolero-random", "bolero-fuzz", "bolero-gate"))
-        methods = release_evidence.parse_inventory((ROOT / release_evidence.INVENTORY).read_text())
-        for method in methods:
+        for method in methods.values():
             for check in method.checks:
                 with self.subTest(method=method.name, check=check):
                     self.assertIn(check, names)

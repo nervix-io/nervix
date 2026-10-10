@@ -1169,8 +1169,10 @@ build and the existing tests, and nothing in it changes behavior.
 - `just release-evidence <pull-request>` holds a pull request's head revision to
   `tests/release-evidence.toml`: every label-gated method's label is on the pull request, the latest
   run of every required check passed on that revision, and no tracked-lock owner records a gap. A
-  qualification task records its register on its ClickUp task and keeps the inventory current when
-  it renames a CI job.
+  qualification task records its register on its ClickUp task. A change that renames a CI job the
+  inventory names, or adds a value to the matrix of one, updates the inventory in the same change;
+  `just test-release-evidence` reads the Deloxide lane and release image matrices from the
+  workflows and fails when the inventory lacks one of their jobs.
 - `just nspl-completion-walk` walks the NSPL completion graph and fails on any branch that cannot be
   completed by accepting the suggestions the parser offers. It is deliberately outside `just test`
   and runs in CI beside the main tests, in the job that carries the workspace-wide checks. Grammar

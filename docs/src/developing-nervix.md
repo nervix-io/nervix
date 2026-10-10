@@ -610,7 +610,7 @@ and artifacts, and how to reproduce or replay a failed run.
 `tests/release-evidence.toml` declares the evidence a revision needs before it qualifies for
 release: the checks every pull request runs, the release images, and each label-gated method with
 its label and checks, Bolero's sanitizer fuzzing, Loom and its weakening qualification, Shuttle,
-Turmoil, the three Deloxide lane selections, client conformance, and the smoke and soak suites
+Turmoil, every Deloxide lane selection, client conformance, and the smoke and soak suites
 against both the release image and the diagnostic image of the revision.
 
 ```bash
@@ -626,7 +626,9 @@ a failed job supersedes the run it repeats; a passing rerun of a nondeterministi
 needs the failure's own investigation, which the gate cannot see. The register of every check's
 verdict, run and time goes to `target/release-evidence/<revision>/` and belongs on the task that
 qualifies the revision, not in the repository. `just test-release-evidence` exercises the gate on
-recorded check runs, and a renamed CI job is renamed in the inventory in the same change.
+recorded check runs and reads the Deloxide lane and release image matrices from the workflows, so
+it fails when one of their jobs is missing from the inventory. A renamed CI job, or a value added to
+the matrix of one the inventory names, is updated in the inventory in the same change.
 
 ### SIMD kernel development
 

@@ -5,7 +5,8 @@
 # leave on the revision: the latest run of every check below must have completed successfully. A
 # `sharded` entry names the prefix of a matrix check, `prefix (I of N)`, whose shards 1 through N must
 # all have passed. A method whose label the pull request lacks never ran, and refuses the revision.
-# A renamed CI job is renamed here in the same change.
+# A renamed CI job is renamed here in the same change, and so is a value added to the matrix of a
+# job named here.
 
 [[method]]
 checks = [
@@ -58,8 +59,9 @@ checks = [
   "deloxide (deloxide)",
   "deloxide (deloxide-order)",
   "deloxide (deloxide-stress)",
+  "deloxide (deloxide-stress-restore)",
 ]
-description = "The diagnostic lane's active-only, order and stress selections and their supervision qualification"
+description = "The diagnostic lane's active-only, order, stress and stressed-restore selections and their supervision qualification"
 label = "deloxide"
 name = "deloxide"
 
