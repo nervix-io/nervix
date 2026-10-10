@@ -445,6 +445,20 @@ Feature: Paced simulation drivers
       | python |
 
   @paced_simulation
+  Scenario Outline: The rust driver fails clearly on a graph or domain with contextual causes on <cluster_size> nodes
+    Given a <cluster_size> node nervix cluster is started
+    And the active domain is "paced_simulation"
+    And the leader node is configured with the paced simulation example graph
+    When the rust paced simulation driver runs through node "node-1" with arguments "--ticks 5"
+    Then within "60s" the paced simulation driver exits with status 2
+    And the paced simulation driver's errors contain "simulation clock operation failed"
+    And the paced simulation driver's errors contain "the clock of domain 'paced_simulation' is stopped at generation 0; START the domain before running the simulation"
+
+    Examples:
+      | cluster_size |
+      | 1            |
+      | 3            |
+
   Scenario Outline: The <driver> driver fails clearly on a graph or domain it cannot run
     Given a 1 node nervix cluster is started
     And the active domain is "paced_simulation"

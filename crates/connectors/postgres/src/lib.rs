@@ -717,6 +717,13 @@ impl UnnestInserts {
 /// A mapped column this sink cannot bind, named with the exact type it carries.
 #[derive(Debug, thiserror::Error)]
 #[error("Postgres VALUES column '{column}' has unsupported exact type {data_type}")]
+#[cfg_attr(
+    nervix_lint,
+    nervix::error_boundary(
+        outcome,
+        reason = "unsupported mapped columns produce definitive semantic record rejections"
+    )
+)]
 struct UnsupportedMappedColumn {
     column: String,
     data_type: arrow_schema::DataType,

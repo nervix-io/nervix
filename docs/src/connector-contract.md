@@ -895,6 +895,12 @@ sequenceDiagram
 
 ## Failure and observation
 
+The compiler failure-contract gate reads exact source-owned semantic outcome classifications for
+SQL mapped-column refusals and MongoDB value/document refusals. Their callers produce definitive
+record rejections with the record position and safe field path. Infrastructure and batch failures
+return contextual reports. [Errors And Diagnostics](errors-and-diagnostics.md) owns the compiler
+classification contract; these annotations do not change acknowledgement or retry policy.
+
 An ingestor opens all source instances before registration, so a failed source start leaves no
 running ingestor. An invalid emitter declaration or expression fails planning before its new
 execution plan is published. A sink initialization failure is reported as an emitter initialization error;

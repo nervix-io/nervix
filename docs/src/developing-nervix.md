@@ -295,10 +295,10 @@ passed to the test binaries, so a test name filter narrows the run:
 just test-connectors <filter>
 ```
 
-### Compiler synchronization gate
+### Compiler architecture gate
 
 `just ratchet`, `just validate` and `just validate-ci` run the same source-driven compiler
-synchronization gate in the isolated `tools/nervix-lint` workspace. Product builds
+architecture gate in the isolated `tools/nervix-lint` workspace. Product builds
 remain stable. Tooling, analysis and product artifacts occupy separate target directories.
 Prepare the ordinary server build prerequisites, including `just build-web-console`.
 
@@ -320,6 +320,17 @@ invalid annotations and recurring acquisitions produce ordinary Rust diagnostics
 An expectation covering multiple operations or no operation fails. See
 [Data-Plane Concurrency](data-plane-concurrency.md#source-contracts) for the complete authoring
 contract, inheritance, supported call effects and limitations.
+
+The same gate checks contextual failure contracts, explicit outcome handling and canonical panic
+APIs through `nervix::bare_error_signature`, `nervix::discarded_outcome` and `nervix::bare_panic`.
+Aliases, associated outputs, generic calls, inferred closures and boxed future/stream returns
+are resolved by the compiler. Ordinary values and custom same-named methods keep their own
+contracts. Classify a semantic outcome or modeled library contract with a reason-bearing
+`nervix::error_boundary(outcome|library, reason = "...")` on its exact error type or return
+contract. These classifications do not inherit module defaults. Standard-error hooks retain a
+complete report carrier. [Errors And Diagnostics](errors-and-diagnostics.md) owns the classification
+rules and the current carriers. `just validate-typed-errors` separately guards textual
+`Result<_, String>` source, including inactive forms.
 
 The JSON output records resolved APIs, spans, owner variants, expansions, source contracts,
 compiled configurations and generated/external exclusions. It is generated evidence under

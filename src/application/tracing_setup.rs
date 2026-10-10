@@ -89,12 +89,31 @@ enum TraceConnectError {
     #[error("trace export connection exceeded its {timeout:?} timeout")]
     Timeout { timeout: Duration },
     #[error("trace export connection failed")]
-    Connect(#[source] <HttpConnector<DnsResolver> as Service<http::Uri>>::Error),
+    Connect,
+}
+
+/// Tonic requires a standard error; retain the complete connection report through that hook.
+#[derive(Debug)]
+struct TraceConnectFailure(Report<TraceConnectError>);
+
+impl std::fmt::Display for TraceConnectFailure {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        std::fmt::Display::fmt(&self.0, formatter)
+    }
+}
+
+impl std::error::Error for TraceConnectFailure {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        let cause = self
+            .0
+            .downcast_ref::<<HttpConnector<DnsResolver> as Service<http::Uri>>::Error>()?;
+        Some(cause)
+    }
 }
 
 impl Service<http::Uri> for NodeTraceConnector {
     type Response = <HttpConnector<DnsResolver> as Service<http::Uri>>::Response;
-    type Error = TraceConnectError;
+    type Error = TraceConnectFailure;
     type Future = Pin<Box<dyn Future<Output = Result<Self::Response, Self::Error>> + Send>>;
 
     fn poll_ready(&mut self, _context: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
@@ -104,12 +123,12 @@ impl Service<http::Uri> for NodeTraceConnector {
     fn call(&mut self, uri: http::Uri) -> Self::Future {
         let mut receiver = self.receiver.clone();
         let connection_timeout = self.timeout;
-        Box::pin(async move {
+        let connect = async move {
             let dns = {
                 let installed = receiver
                     .wait_for(Option::is_some)
                     .await
-                    .map_err(|_| TraceConnectError::Unavailable)?;
+                    .change_context(TraceConnectError::Unavailable)?;
                 installed
                     .as_ref()
                     .verified("wait_for returns only an installed resolver")
@@ -120,12 +139,13 @@ impl Service<http::Uri> for NodeTraceConnector {
             connector.set_nodelay(true);
             connector.set_connect_timeout(Some(connection_timeout));
             match timeout(connection_timeout, connector.call(uri)).await {
-                Ok(connection) => connection.map_err(TraceConnectError::Connect),
-                Err(_) => Err(TraceConnectError::Timeout {
+                Ok(connection) => connection.change_context(TraceConnectError::Connect),
+                Err(_) => Err(Report::new(TraceConnectError::Timeout {
                     timeout: connection_timeout,
-                }),
+                })),
             }
-        })
+        };
+        Box::pin(async move { connect.await.map_err(TraceConnectFailure) })
     }
 }
 

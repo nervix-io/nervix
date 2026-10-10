@@ -39,6 +39,13 @@ pub struct StressConfiguration {
 
 /// Why a configuration is not one [`StressConfiguration::new`] accepts.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(
+    nervix_lint,
+    nervix::error_boundary(
+        outcome,
+        reason = "stress configuration construction returns a pure validation refusal"
+    )
+)]
 pub enum StressOutOfBounds {
     /// The probability is above one.
     Probability { per_million: u32 },

@@ -47,6 +47,14 @@ impl SideError {
 
 /// Why one row of an operation failed.
 #[derive(Debug, Clone, PartialEq, Error)]
+#[cfg_attr(
+    nervix_lint,
+    nervix::error_boundary(
+        outcome,
+        reason = "row error reasons are the VM's semantic row channel rather than operation \
+                  failures"
+    )
+)]
 pub enum SideErrorReason {
     #[error("integer {0} overflowed")]
     IntegerOverflow(IntegerOperation),

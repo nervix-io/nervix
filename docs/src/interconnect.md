@@ -1550,6 +1550,12 @@ acknowledgement carries the registration report chain, including its admission c
 An answering node sends its established remote failure class or stream rejection text over the
 wire; a local report's cause chain is not serialized into an HTTP/2 response.
 
+The exact source owners classify `RemoteRequestFailure`, `RemoteOperationFailure`,
+`OwnershipHandoffFailure`, gossip refusals and resource-publication answers as fixed wire outcomes
+for the compiler failure-contract gate. The responding operation retains its local contextual
+report before projection. [Errors And Diagnostics](errors-and-diagnostics.md) owns that source
+contract, including the distinction between a wire outcome and an operation failure.
+
 Connections, request state, relay grants, delivery reconciliation, progress trackers, and
 acknowledgement maps are never persisted. Durable control-plane state remains in consensus, and
 selected runtime state remains in its owning snapshot or replication mechanism. This boundary is

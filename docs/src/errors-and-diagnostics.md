@@ -1346,25 +1346,65 @@ implementation it was running above those reports and above the client's own rep
 connection or statement, and prints the whole report when it exits with status 1; `run-all`
 records each failed implementation with its chain.
 
-The former `result_string_errors` debt measure is now a zero-tolerance rule:
-`just validate-typed-errors`, run by `just validate`, rejects `Result<_, String>` in product code
-without a baseline. `just ratchet` holds `bare_error_signatures` at zero, so a signature that
-returns a Nervix error without an `error-stack` report fails it. It reads a `Result` returned
-directly, as the output of a `Future` or the item of a `Stream` a callback contract names, and
-through a free type alias of such a `Result`; a file that imports `error_stack::Result` writes it as
-a bare `Result`, which is already a report. Three shapes return no Nervix error without a report,
-and it does not count them: an associated type whose trait defines the shape, such as a wire
-request's response; the error types a modeled primitive adapter declares to keep its library's
-interface, such as the Shuttle watch channel's mirror of Tokio's `RecvError`, which the ratchet
-lists by file; and a foreign trait that accepts only a standard error, which receives the report
-inside one, as above. A typed per-row or per-record outcome stays in its outcome channel, and a
-fixed wire, ABI or stored outcome is projected from a report only where it is constructed: the
-items of the consensus append stream are the wire records it answers with. The ratchet also guards
-raw dropped outcomes and panic sites. For a new fallible site, a reviewer asks in order: which layer decides its
-meaning; whether it is an ordinary outcome, a recoverable failure, or a broken invariant; which
-typed fields let the caller act; which context must cross each boundary; and which public
-diagnostic or recovery class closes the path. That classification must preserve branch and
-sensitivity rules, and it must not add a second form of a failure the owner already represents.
+`just validate-typed-errors`, run by `just validate`, rejects textual
+`Result<_, String>` in product code without a baseline. It remains a separate source rule,
+including inactive source. The compiler architecture gate, run by `just ratchet`, owns three
+resolved Rust diagnostics:
+
+| Diagnostic | Contract it checks |
+| --- | --- |
+| `nervix::bare_error_signature` | A canonical `Result` carrying a Nervix-owned standard error returns a contextual `Report`, directly or inside resolved `Future::Output` and `Stream::Item`. |
+| `nervix::discarded_outcome` | A `let` wildcard, unused statement or resolved `drop` consuming a `Result`, report, owning collection or transparent wrapper states its handling or recovery class. |
+| `nervix::bare_panic` | A resolved inherent `Option` or `Result` `unwrap`/`expect` uses `meticulous` to state its guarantee. |
+
+Aliases, renamed imports, borrowed failure definitions, associated types, generic substitutions,
+inferred closures and boxed future/stream contracts use compiler types and trait obligations.
+A same-named method on an
+ordinary type carries that type's own contract. A plain value, borrow or optional ordinary value
+is not a dropped failure. Matching an outcome, propagation and the resolved recovery traits are
+explicit handling.
+
+Resource state and guards can retain already observed reports while owning a separate lifetime.
+Releasing such a handle is ordinary lifetime management. The discard check follows transparent
+outcome storage and complete standard-error report carriers; it does not recursively treat every
+field of an arbitrary resource owner as a new operation outcome.
+
+An error's owner classifies a pure conversion refusal, cancellation signal, semantic row or
+record outcome, fixed wire response, or modeled external-library error at its exact type:
+
+```rust,ignore
+#[cfg_attr(nervix_lint, nervix::error_boundary(
+    outcome, reason = "this conversion returns a pure range validation refusal"
+))]
+```
+
+The `library` kind names the external contract a modeled primitive preserves. A classification
+may also name one exact return contract, including a trait method; it never inherits from a
+module, package or enclosing callable. Both kinds require a meaningful reason. Malformed,
+duplicate and misplaced classifications fail. Source metadata crosses crate boundaries.
+A type's `Error` suffix establishes no classification.
+
+Foreign hooks that require `std::error::Error` receive a carrier owning the complete report.
+The compiler checks that every carrier variant retains a report, including through boxed or
+shared ownership. Optional reports do not establish that guarantee. `DnsLookupReport` retains
+the lookup report at the Hyper boundary; the node trace connector retains its connection report
+through Tonic. The consensus append stream, control-operation responses and handoff responses
+keep their fixed semantic wire outcomes; local operation failures acquire context before their
+wire projection. VM row reasons and connector record rejections retain their semantic channels.
+
+Node database opening and runtime key reads preserve their storage cause beneath the owning
+failure. The paced simulation's ledger, effect store and run return reports, retain decoding and
+client causes, and classify exit status from typed contexts. Its terminal reporting prints the
+context chain. A newer consumer refusal or node observation may explicitly discard the report it
+supersedes.
+
+These diagnostics use normal Rust lint levels and one-operation reason-bearing expectations.
+The required gate rejects unresolved warnings, broad suppression and unfulfilled or widened
+expectations. No numeric allowance approves a failure site. Fixtures exercise real compiler
+resolution; current API doctests pair supported calls with `compile_fail` examples. For a new
+fallible site, a reviewer identifies the deciding layer, ordinary outcome or failure class,
+actionable fields, context across boundaries and the public diagnostic or recovery that ends the
+path. That classification preserves branch and sensitivity rules.
 
 The external Chaos controller distinguishes an `observation` failure from a product recovery
 failure. A degraded-link bandwidth probe that cannot establish its connection, deliver its full
@@ -1414,7 +1454,7 @@ failure it is.
 
 The isolated architecture compiler emits ordinary Rust tool diagnostics:
 `nervix::sync_acquisition`, `nervix::lifecycle_call`, `nervix::unknown_effect` and
-`nervix::invalid_contract`. Source contracts and narrow reason-bearing expectations own the
+`nervix::invalid_contract`, together with the typed error diagnostics above. Source contracts and narrow reason-bearing expectations own the
 architectural classification. Invalid contracts, unfulfilled or widened expectations, incomplete
 compiler reports and changed inputs fail the repository command; they are tooling failures, with
 no runtime error or public protocol disposition. The diagnostic gate rejects unresolved Nervix

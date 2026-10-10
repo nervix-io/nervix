@@ -1864,6 +1864,14 @@ fn ensure_requirement_domain(
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
+#[cfg_attr(
+    nervix_lint,
+    nervix::error_boundary(
+        outcome,
+        reason = "impact vocabulary construction returns pure identity and range validation \
+                  refusals"
+    )
+)]
 pub enum ImpactReportError {
     #[error("transaction operation number exceeds the target's addressable range")]
     OperationNumberOverflow,

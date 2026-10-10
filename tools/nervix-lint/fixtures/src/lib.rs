@@ -17,8 +17,17 @@ use std::{
     ops::Deref,
 };
 
+pub use error_stack;
+pub use futures_core;
 use indexmap::IndexMap;
+pub use meticulous;
 pub use nervix_primitives::expect_lint;
+pub use nervix_recovery;
+pub use thiserror;
+
+#[derive(Debug, thiserror::Error)]
+#[error("the fixture operation failed")]
+pub struct FixtureFailure;
 use nervix_primitives::{
     collections::DashMap,
     sync::{

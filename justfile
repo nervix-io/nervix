@@ -2042,6 +2042,25 @@ test-typed-ratchet-compiler:
 test-typed-ratchet-contracts: typed-ratchet-build
     python3 -m unittest scripts.tests.compiler_contract_checks
 
+# Error propagation uses the actual node startup and DNS hooks, plus both simulation drivers.
+test-typed-error-runtime: build-web-console download-onnxruntime
+    #!/usr/bin/env bash
+    set -euo pipefail
+    export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
+    cargo test --package nervix-server --lib --features testing application::startup::tests::
+    cargo test --package nervix-server --lib --features testing application::tracing_setup::tests::
+    just test-paced-simulation
+
+# Append native failure-path coverage to the public scenario collection.
+coverage-typed-error-runtime: build-web-console download-onnxruntime
+    #!/usr/bin/env bash
+    set -euo pipefail
+    export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
+    for owner in application::startup::tests:: application::tracing_setup::tests:: registry::restore_plan::tests:: runtime::state_store::tests::; do
+        cargo llvm-cov --no-report --package nervix-server --lib --features testing -- "$owner"
+    done
+    just coverage-paced-simulation-report target/typed-error-runtime.lcov
+
 test-typed-ratchet: test-typed-ratchet-ordinary test-typed-ratchet-product-docs test-typed-ratchet-modeled
 
 test-typed-ratchet-ordinary:
@@ -2071,6 +2090,8 @@ test-typed-ratchet-docs:
 test-typed-ratchet-product-docs:
     cargo +1.99 test --package nervix-primitives --doc expect_lint
     cargo +1.99 test --package nervix-vm --doc FunctionInjector
+    cargo +1.99 test --package nervix-dns --doc DnsLookupReport
+    cargo +1.99 test --package nervix-recovery --doc Discarded
     RUSTUP_TOOLCHAIN=1.99 just test-runtime-state-capabilities
 
 qualify-typed-ratchet-cache: typed-ratchet-build

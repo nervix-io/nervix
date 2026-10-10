@@ -14,6 +14,7 @@
 use std::{io, path::Path};
 
 use ahash::HashSet;
+use error_stack::Report;
 use nervix_models::Timestamp;
 use nervix_primitives::sync::watch;
 use serde::{Deserialize, Serialize};
@@ -96,10 +97,12 @@ pub(crate) struct EffectStore {
 
 impl EffectStore {
     /// Opens the store, reading back every effect an earlier run applied.
-    pub(crate) async fn open(path: &Path) -> Result<Self, EffectError> {
-        let open_error = |source| EffectError::Open {
-            path: path.display().to_string(),
-            source,
+    pub(crate) async fn open(path: &Path) -> Result<Self, Report<EffectError>> {
+        let open_error = |source| {
+            Report::new(EffectError::Open {
+                path: path.display().to_string(),
+                source,
+            })
         };
         let text = match tokio::fs::read_to_string(path).await {
             Ok(text) => text,
@@ -109,12 +112,14 @@ impl EffectStore {
         let mut readings = HashSet::default();
         let mut rejections = HashSet::default();
         for (index, line) in text.lines().enumerate() {
-            let record: EffectRecord =
-                serde_json::from_str(line).map_err(|error| EffectError::Malformed {
+            let record: EffectRecord = serde_json::from_str(line).map_err(|error| {
+                let reason = error.to_string();
+                Report::new(error).change_context(EffectError::Malformed {
                     path: path.display().to_string(),
                     line: index + 1,
-                    reason: error.to_string(),
-                })?;
+                    reason,
+                })
+            })?;
             match record {
                 EffectRecord::Reading { reading_id, .. } => {
                     readings.insert(reading_id);
@@ -154,7 +159,7 @@ impl EffectStore {
         &mut self,
         reading: &ObservedReading,
         generation: u64,
-    ) -> Result<Applied, EffectError> {
+    ) -> Result<Applied, Report<EffectError>> {
         if self.readings.contains(&reading.reading_id) {
             return Ok(Applied::Duplicate);
         }
@@ -178,7 +183,7 @@ impl EffectStore {
         &mut self,
         notice: &RejectionNotice,
         generation: u64,
-    ) -> Result<Applied, EffectError> {
+    ) -> Result<Applied, Report<EffectError>> {
         if self.rejections.contains(&notice.reading_id) {
             return Ok(Applied::Duplicate);
         }
@@ -195,15 +200,18 @@ impl EffectStore {
         Ok(Applied::New)
     }
 
-    async fn append(&mut self, record: &EffectRecord) -> Result<(), EffectError> {
+    async fn append(&mut self, record: &EffectRecord) -> Result<(), Report<EffectError>> {
         let mut line = serde_json::to_string(record)
-            .map_err(|error| EffectError::Record(io::Error::other(error)))?;
+            .map_err(|error| Report::new(EffectError::Record(io::Error::other(error))))?;
         line.push('\n');
         self.file
             .write_all(line.as_bytes())
             .await
-            .map_err(EffectError::Record)?;
-        self.file.flush().await.map_err(EffectError::Record)
+            .map_err(|error| Report::new(EffectError::Record(error)))?;
+        self.file
+            .flush()
+            .await
+            .map_err(|error| Report::new(EffectError::Record(error)))
     }
 }
 
@@ -296,8 +304,8 @@ mod tests {
         let expected = directory.path().display().to_string();
         let opened = EffectStore::open(directory.path()).await.err();
         assert!(matches!(
-            opened,
-            Some(EffectError::Open { path, .. }) if path == expected
+            opened.as_ref().map(Report::current_context),
+            Some(EffectError::Open { path, .. }) if path == &expected
         ));
     }
 }
