@@ -175,14 +175,16 @@ impl DomainClockProgressDeliveries {
         domain_id: &DomainName,
     ) {
         let gossip = service.inner.cluster.availability_state().await;
-        let ready = service
+        // Preparation installs the peer's mapping and authority fence before graph activation
+        // waits for the rest of the cluster. Each peer can receive progress independently.
+        let prepared = service
             .inner
             .cluster
-            .nodes_ready_for_runtime_revision(minimum_runtime_revision)
+            .nodes_prepared_for_runtime_revision(minimum_runtime_revision)
             .await;
         let mut desired = gossip
             .live_identities()
-            .intersection(&ready)
+            .intersection(&prepared)
             .cloned()
             .collect::<BTreeSet<_>>();
         desired.remove(&spec.authority);
@@ -438,29 +440,8 @@ async fn run_domain_clock(
     shutdown: CancellationToken,
 ) {
     let mut cluster_state = service.inner.cluster.subscribe_state_changes().await;
-    loop {
-        nervix_primitives::task::consume_budget().await;
-        let cluster_change = cluster_state.wait_for_change_or_next_unavailability();
-        tokio::pin!(cluster_change);
-        let live_targets = service
-            .inner
-            .cluster
-            .availability_state()
-            .await
-            .live_identities();
-        let ready_targets = service
-            .inner
-            .cluster
-            .nodes_ready_for_runtime_revision(minimum_runtime_revision)
-            .await;
-        if !live_targets.is_empty() && live_targets.is_subset(&ready_targets) {
-            break;
-        }
-        nervix_primitives::select! {
-            _ = shutdown.cancelled() => return,
-            _ = &mut cluster_change => {}
-        }
-    }
+    // Reconciliation checked this node's installed mapping and authority fence before starting
+    // the producer. Another node's preparation or graph activation must not delay its progress.
 
     // A valid rate may make the next physical interval unrepresentable. Tick one is already due
     // at START and must still be emitted before scheduling a later interval can fail.

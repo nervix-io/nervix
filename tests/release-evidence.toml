@@ -1,0 +1,89 @@
+# The evidence a revision needs before it qualifies for release, which
+# `just release-evidence <pull request>` holds a pull request's head revision to.
+#
+# Each method names the label that makes CI run it, when it is label-gated, and the checks it must
+# leave on the revision: the latest run of every check below must have completed successfully. A
+# `sharded` entry names the prefix of a matrix check, `prefix (I of N)`, whose shards 1 through N must
+# all have passed. A method whose label the pull request lacks never ran, and refuses the revision.
+# A renamed CI job is renamed here in the same change.
+
+[[method]]
+checks = [
+  "checks",
+  "tests",
+  "scenarios",
+  "coverage",
+  "extra-tests",
+  "diagnostic-evidence",
+]
+description = "Formatting, lints, validation and ratchets; unit, documentation, scenario and runner tests; coverage and its gates"
+name = "ordinary"
+
+[[method]]
+checks = ["build-debian-amd64", "build-debian-arm64"]
+description = "The release image of the revision for each architecture"
+name = "release-images"
+
+[[method]]
+checks = [
+  "bolero / bolero-random",
+  "bolero / bolero-fuzz",
+  "bolero / bolero-gate",
+]
+description = "Every registered property's randomized and corpus run, and its sanitizer-backed fuzz campaign"
+label = "fuzz"
+name = "bolero"
+
+[[method]]
+checks = ["loom"]
+description = "Every registered memory-ordering model's exploration, and each model failing under its weakening"
+label = "loom"
+name = "loom"
+sharded = ["loom-qualification"]
+
+[[method]]
+checks = ["shuttle"]
+description = "Every registered production-owner interleaving check, its nondeterminism run and schedule replay"
+label = "shuttle"
+name = "shuttle"
+
+[[method]]
+checks = ["turmoil"]
+description = "Every registered network simulation and its replay check"
+label = "turmoil"
+name = "turmoil"
+
+[[method]]
+checks = [
+  "deloxide (deloxide)",
+  "deloxide (deloxide-order)",
+  "deloxide (deloxide-stress)",
+]
+description = "The diagnostic lane's active-only, order and stress selections and their supervision qualification"
+label = "deloxide"
+name = "deloxide"
+
+[[method]]
+checks = ["client-conformance"]
+description = "The cross-language client probes against one- and three-node clusters"
+label = "client-conformance"
+name = "client-conformance"
+
+[[method]]
+checks = [
+  "build-diagnostic-deloxide-order-amd64",
+  "chaos-smoke / smoke ordinary verdict",
+  "chaos-smoke-diagnostic / smoke deloxide-order verdict",
+]
+description = "The external smoke suite against the release image and the deloxide-order diagnostic image of the revision"
+label = "chaos"
+name = "chaos-smoke"
+
+[[method]]
+checks = [
+  "chaos-soak / soak ordinary verdict",
+  "chaos-soak-diagnostic / soak deloxide-order verdict",
+]
+description = "The external soak suite against the release image and the deloxide-order diagnostic image of the revision"
+label = "chaos-soak"
+name = "chaos-soak"

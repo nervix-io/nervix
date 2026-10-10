@@ -147,17 +147,19 @@ offset affects a newly established `START AT NOW`, unpaced observations, and eac
 of a paced mapping; `TIME RATE` multiplies that projection error. `SKEW` is event-admission
 tolerance around logical tick centers, not an allowance for unsynchronized hosts.
 
-The authority begins producing only after every live node reports that it installed the consensus
-runtime revision containing the mapping and fence. Join, restart, owner loss, and membership change
-can select a new authority without changing the clock mapping. A progress report is accepted only
-when its `START` generation, authority revision, node incarnation, and authenticated peer match the
-committed authority. Duplicate, delayed, reordered, or superseded progress is ignored and cannot
+The authority begins producing after its own runtime installs the consensus revision containing
+the mapping and fence. Each live peer receives progress after its own installation is prepared,
+without waiting for other nodes to finish installation or graph activation. Join, restart, owner
+loss, and membership change can select a new authority without changing the clock mapping. A
+progress report is accepted only when its `START` generation, authority revision, node incarnation,
+and authenticated peer match the committed authority. Duplicate, delayed, reordered, or superseded
+progress is ignored and cannot
 create a domain. `STOP` revokes the authority in the same replicated lifecycle transition; a later
 `START` commits a new generation and mapping. Automatic ALTER quiescing keeps the authority and
 clock running.
 
 Progress crosses the interconnection as a typed HTTP/2 management request in the reserved progress
-subquota. For each ready remote node and domain, the authority retains one replaceable pending
+subquota. For each prepared remote node and domain, the authority retains one replaceable pending
 report and permits one delivery attempt at a time. A newer frontier replaces an older pending
 frontier while connection capacity or a response is delayed. The interconnection bounds all
 in-flight progress requests independently of the stream and memory reservations for health,
