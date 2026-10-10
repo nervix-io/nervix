@@ -1032,8 +1032,8 @@ holds the batch back unadmitted rather than failing it, because that lack of roo
 reports `RemoteAckAdmission`, with the typed `AdmissionError` beneath it rather than rendered into
 its own text, only for watches larger than the whole budget or a hold still without room when the
 five-minute admission bound has passed, before runtime admission. These refusals judge no payload
-and preserve source retry ownership. Ending a registered delivery before admission or shutting its owner down
-resolves its held shares negatively once. Stale generations and registrar runs are ordinary
+and preserve source retry ownership. Ending a registered delivery before admission or shutting its
+owner down resolves its held shares negatively once. Stale generations and registrar runs are ordinary
 unmatched reports logged at `debug`, and never resolve current work.
 
 A transport error describes connection, admission, framing, deadline, or delivery failure. A remote
