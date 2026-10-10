@@ -1412,6 +1412,26 @@ invocation = "stress-restore-scenarios"
 scenario = "Native lifecycle and Kafka metadata above the bulk budget on <cluster_size> nodes restore exactly"
 selections = ["deloxide-stress-restore"]
 
+[[workload]]
+coverage = "One- and three-node capture, interruption, retry and resumed restore of two 40 MiB WASM guest saves. The selected checkpoint and staged file use the existing storage owners; async reservations, the test fault map and stream waits are untracked."
+examples = 2
+feature = "tests/features/cluster/backup_guest_saves.feature"
+id = "scenario.guest-save-backup"
+invariant = "A selected guest save above the bulk budget is staged in bounded chunks, an interrupted capture publishes no archive, and a retry and resumed restore preserve both guest branches byte for byte."
+invocation = "scenarios"
+scenario = "Guest saves above the bulk budget stream, retry and resume on <cluster_size> nodes"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
+coverage = "Under scheduling stress: one- and three-node capture, interruption, retry and resumed restore of two 40 MiB guest saves through the tracked storage owners."
+examples = 2
+feature = "tests/features/cluster/backup_guest_saves.feature"
+id = "stress.guest-save-backup"
+invariant = "A selected guest save above the bulk budget is staged in bounded chunks, an interrupted capture publishes no archive, and a retry and resumed restore preserve both guest branches byte for byte."
+invocation = "stress-restore-scenarios"
+scenario = "Guest saves above the bulk budget stream, retry and resume on <cluster_size> nodes"
+selections = ["deloxide-stress-restore"]
+
 [[owner]]
 path = "crates/checkpoint-replication/src/replication.rs"
 workloads = [
@@ -1775,6 +1795,8 @@ workloads = ["scenario.client-alter-drain", "stress.client-alter-drain"]
 [[owner]]
 path = "src/runtime/branch_lifecycle_state.rs"
 workloads = [
+  "scenario.guest-save-backup",
+  "stress.guest-save-backup",
   "scenario.native-metadata-restore",
   "scenario.branch-state-resume",
   "scenario.branch-state-stale-coordinator",
@@ -1870,6 +1892,8 @@ workloads = [
 [[owner]]
 path = "src/runtime/state_store.rs"
 workloads = [
+  "scenario.guest-save-backup",
+  "stress.guest-save-backup",
   "scenario.native-metadata-restore",
   "owner.restore-storage",
   "scenario.restore-generation",

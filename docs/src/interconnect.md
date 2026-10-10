@@ -988,10 +988,15 @@ partitioned or cancelled fetch leaves any unconsumed stage available until expir
 An owner streams each branch lifecycle and Kafka offset section from the cut's database snapshot
 into its staged file under a `restore_metadata` conversion charge and a 64 KiB bulk buffer, so the
 inventory declares a section's exact length and digest without the owner holding the section
-whole. Materialized inventories distinguish archive descriptors, scalar identity groups and Arrow
-column groups. Their bounded sections are staged from a fresh assignment-qualified capture and
-fetched through the same authenticated stream; the capture never transfers an entire container
-as one bulk response allocation. The leader verifies each length and digest before assembly.
+whole. It also checks a WASM save's scheduled generation before opening that save, then streams
+its raw bytes from the same snapshot into a staged section under an independent
+`restore_metadata` charge and three fixed 64 KiB bulk buffers. The stored read supplies the descriptor's
+revision. An interruption fails the capture before its inventory is published, and the
+coordinator can retry with a new cut. Materialized inventories distinguish archive descriptors,
+scalar identity groups and Arrow column groups. Their bounded sections are staged from a fresh
+assignment-qualified capture and fetched through the same authenticated stream; the capture never
+transfers an entire container as one bulk response allocation. The leader verifies each length and
+digest before assembly.
 An opening refused solely for request capacity is retried within one 30-second opening deadline;
 other failures end the fetch. The captured stage remains unconsumed on an admission refusal.
 Completed backup and materialized-state response streams release their Snapshot request and

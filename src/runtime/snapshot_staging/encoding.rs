@@ -26,12 +26,31 @@ impl StagedSnapshotWriter {
         )
     )]
     pub(crate) async fn encode_artifact(
-        mut self,
+        self,
         charge: Reservation,
         encode: impl FnOnce(&mut dyn Write, &Cancellation) -> Result<(), Report<SnapshotStagingError>>
         + Send
         + 'static,
     ) -> Result<StagedArtifact, Report<SnapshotStagingError>> {
+        self.encode_artifact_with_result(charge, encode)
+            .await
+            .map(|(artifact, ())| artifact)
+    }
+
+    /// Encode a section while returning small metadata observed during the same source read.
+    /// The metadata is published only after the staged bytes have been synchronized.
+    #[cfg_attr(
+        nervix_lint,
+        nervix::dispatch(reason = "the caller supplies a cancellable encoder and a retained \
+                                   reservation to the admitted storage job")
+    )]
+    pub(crate) async fn encode_artifact_with_result<T: Send + 'static>(
+        mut self,
+        charge: Reservation,
+        encode: impl FnOnce(&mut dyn Write, &Cancellation) -> Result<T, Report<SnapshotStagingError>>
+        + Send
+        + 'static,
+    ) -> Result<(StagedArtifact, T), Report<SnapshotStagingError>> {
         if self.written != 0 {
             return Err(Report::new(SnapshotStagingError::LengthMismatch {
                 actual: self.written,
@@ -47,9 +66,10 @@ impl StagedSnapshotWriter {
             .take()
             .assured("a fresh staging writer owns its hasher");
         let executor = self.executor.clone();
+        let artifact_executor = executor.clone();
         let maximum = self.declared;
         let mut quota = self._reservation;
-        let (file, length, digest, quota) = executor
+        executor
             .run_storage(
                 StorageClass::Filesystem,
                 charge,
@@ -57,7 +77,7 @@ impl StagedSnapshotWriter {
                     cancellation
                         .check()
                         .change_context(SnapshotStagingError::Cancelled)?;
-                    let length = {
+                    let (length, result) = {
                         let mut buffered = BufWriter::with_capacity(
                             usize::try_from(super::READ_BLOCK_BYTES)
                                 .verified("a transfer block fits the address width"),
@@ -70,12 +90,12 @@ impl StagedSnapshotWriter {
                             maximum,
                             written: 0,
                         };
-                        encode(&mut writer, cancellation)?;
+                        let result = encode(&mut writer, cancellation)?;
                         writer
                             .flush()
                             .map_err(Report::new)
                             .change_context(SnapshotStagingError::Encode)?;
-                        writer.written
+                        (writer.written, result)
                     };
                     cancellation
                         .check()
@@ -95,22 +115,19 @@ impl StagedSnapshotWriter {
                         .verified("encoding cannot exceed the admitted maximum length");
                     drop(quota.split(excess));
                     Ok::<_, Report<SnapshotStagingError>>((
-                        file,
-                        length,
-                        *hasher.finalize().as_bytes(),
-                        quota,
+                        StagedArtifact {
+                            file,
+                            length,
+                            digest: *hasher.finalize().as_bytes(),
+                            executor: artifact_executor,
+                            _reservation: quota,
+                        },
+                        result,
                     ))
                 },
             )
             .await
-            .change_context(SnapshotStagingError::Execution)??;
-        Ok(StagedArtifact {
-            file,
-            length,
-            digest,
-            executor,
-            _reservation: quota,
-        })
+            .change_context(SnapshotStagingError::Execution)?
     }
 }
 
@@ -240,27 +257,28 @@ mod tests {
             .reserve(MemoryClass::Bulk, 2 * 1024 * 1024)
             .await
             .assured("the fixed working set is available");
-        let artifact = Arc::new(
-            writer
-                .encode_artifact(charge, |output, cancellation| {
-                    let block = vec![71; 64 * 1024];
-                    for _ in 0..48 {
-                        cancellation
-                            .check()
-                            .change_context(SnapshotStagingError::Cancelled)?;
-                        output
-                            .write_all(&block)
-                            .map_err(Report::new)
-                            .change_context(SnapshotStagingError::Encode)?;
-                    }
+        let (artifact, revision) = writer
+            .encode_artifact_with_result(charge, |output, cancellation| {
+                let block = vec![71; 64 * 1024];
+                for _ in 0..48 {
+                    cancellation
+                        .check()
+                        .change_context(SnapshotStagingError::Cancelled)?;
                     output
-                        .flush()
+                        .write_all(&block)
                         .map_err(Report::new)
-                        .change_context(SnapshotStagingError::Encode)
-                })
-                .await
-                .assured("encoding finishes under its admitted quota"),
-        );
+                        .change_context(SnapshotStagingError::Encode)?;
+                }
+                output
+                    .flush()
+                    .map_err(Report::new)
+                    .change_context(SnapshotStagingError::Encode)?;
+                Ok(37_u64)
+            })
+            .await
+            .assured("encoding finishes under its admitted quota");
+        let artifact = Arc::new(artifact);
+        assert_eq!(revision, 37);
         assert_eq!(artifact.length(), 3 * 1024 * 1024);
         assert_eq!(
             artifact.digest(),

@@ -69,6 +69,14 @@ The cut lists that snapshot's checkpoints without reading their payloads, and re
 archives, all from the same snapshot however late they are read. A branch lifecycle is read while
 the cut is taken only when a WASM, deduplicator or window branch of its entity needs a typed key,
 one lifecycle at a time, and only the keys those branches need are kept.
+Each selected WASM save stays in that snapshot until its scheduled generation has been checked.
+The capture storage job inspects a selected segmented header's bounded size; staging admission
+uses that recorded size without a database read on an async worker.
+The owner then opens one save at a time, charges its inline checkpoint conversion to
+`restore_metadata`, and streams its raw bytes into a quota-owned staged section under a fixed
+192 KiB bulk working charge. The checkpoint read supplies both the bytes and the descriptor's
+revision. The writer seals the section's actual length and BLAKE3 digest. Neither another save nor an
+encoded guest section is retained whole during the write; a superseded save is never opened.
 Each Kafka offset and branch lifecycle checkpoint then becomes its own archive section. It is read
 whole into one aligned allocation charged to `restore_metadata`, its entries convert one at a time,
 and its record streams through a 64 KiB bulk buffer into a quota-owned staged file that seals the
@@ -990,6 +998,10 @@ consecutive times with concurrency four and no retries. Each attempt retains its
 source patch, scenario output and node logs under `target/native-metadata-restore`; only ten passing
 examples produce a completion record. The same scenario remains registered in both complete
 Deloxide selections, which additionally exercise the tracked blocking locks on the restore path.
+The guest-save scenario uses two 40 MiB branch saves in both one- and three-node clusters. It
+measures every owner's bulk reservations during public backup, interrupts a guest section after
+two chunks and verifies that no archive appears, then retries, restores with `--resume`, compares
+the guest bytes exactly and checks the next even output of each branch.
 The deduplicator and window one-node and three-node scenarios re-export a stopped restore with
 identical descriptors and Arrow groups, stop an installation before its first deduplicator or
 window checkpoint, which leaves `START` gated, and release a delayed coordinator's publication
@@ -1016,6 +1028,7 @@ production-owner concurrency and recovery evidence.
 | Restore frames the Rust client queues ahead of the transport | 8 |
 | Restore archive retention | Until the restore finishes, or the retry validity of the execution reference ends |
 | State section staging on an owner | Charged to the same node staging quota until fetched or expired |
+| WASM guest save capture | One selected save at a time: `restore_metadata` reserves three times its stored checkpoint size for the inline Fjall value and decoded reader; three fixed 64 KiB bulk buffers cover segmented reads, transfer and staging. A save up to the 64 MiB guest limit can exceed the 32 MiB default bulk budget. |
 | Kafka offset or branch lifecycle section capture | One checkpoint at a time per owner: `restore_metadata` holds twice the stored checkpoint plus 64 KiB for the whole section, beside serializer scratch of one resolver per entry; a 64 KiB bulk buffer streams the record |
 | One Kafka offset or branch lifecycle section | The 64 MiB record limit |
 | Native conversion I/O, checkpoint installation and complete generation publication per node | Fixed 2 MiB bulk working-memory reservation; 64 KiB buffers and checkpoint chunks |
@@ -1062,6 +1075,8 @@ contents. The reasons are:
 - the archive is larger than one archive may be, or a record does not encode
 - a captured branch lifecycle or Kafka offset checkpoint does not decode, its record exceeds the
   64 MiB record limit, or `restore_metadata` cannot admit its conversion now, naming the entity
+- a selected WASM guest save cannot be read or its `restore_metadata` conversion cannot be
+  admitted, or its staged write is interrupted; the failure names the processor without guest bytes
 - a quiesced domain cannot pause, drain, capture its owners or resume within its timeout
 
 A capture that fails or is interrupted drops every section its owners staged for it. No archive is
