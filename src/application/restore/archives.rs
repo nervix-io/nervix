@@ -163,6 +163,13 @@ where
 
 /// Why a verified archive was not retained.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
+#[cfg_attr(
+    nervix_lint,
+    nervix::error_boundary(
+        outcome,
+        reason = "retention admission returns the ordinary not-owner refusal before changing state"
+    )
+)]
 pub(in crate::application) enum RetentionRefusal {
     #[error("execution reference '{reference}' belongs to another user's restore")]
     NotOwner {

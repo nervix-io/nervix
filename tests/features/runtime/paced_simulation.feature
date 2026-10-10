@@ -445,6 +445,45 @@ Feature: Paced simulation drivers
       | python |
 
   @paced_simulation
+  Scenario Outline: The rust driver reports a malformed <file> cause once on <cluster_size> nodes
+    Given a <cluster_size> node nervix cluster is started
+    And the active domain is "paced_simulation"
+    And the leader node is configured with the paced simulation example graph
+    And the paced simulation <file> file contains
+      """
+      not json
+      """
+    When these NSPL commands are executed on the leader node
+      """
+      START AT NOW TIME RATE 2.0;
+      """
+    And the rust paced simulation driver runs through node "node-1" with arguments "--ticks 0 --replay"
+    Then within "60s" the paced simulation driver exits with status 1
+    And the paced simulation driver's errors contain "simulation <operation> operation failed"
+    And the paced simulation driver's errors contain "expected ident at line 1 column 2" exactly 1 times
+
+    Examples:
+      | cluster_size | file    | operation    |
+      | 1            | ledger  | ledger       |
+      | 3            | ledger  | ledger       |
+      | 1            | effects | effect store |
+      | 3            | effects | effect store |
+
+  @paced_simulation
+  Scenario Outline: The rust driver fails clearly on a graph or domain with contextual causes on <cluster_size> nodes
+    Given a <cluster_size> node nervix cluster is started
+    And the active domain is "paced_simulation"
+    And the leader node is configured with the paced simulation example graph
+    When the rust paced simulation driver runs through node "node-1" with arguments "--ticks 5"
+    Then within "60s" the paced simulation driver exits with status 2
+    And the paced simulation driver's errors contain "simulation clock operation failed"
+    And the paced simulation driver's errors contain "the clock of domain 'paced_simulation' is stopped at generation 0; START the domain before running the simulation"
+
+    Examples:
+      | cluster_size |
+      | 1            |
+      | 3            |
+
   Scenario Outline: The <driver> driver fails clearly on a graph or domain it cannot run
     Given a 1 node nervix cluster is started
     And the active domain is "paced_simulation"

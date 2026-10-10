@@ -1710,45 +1710,68 @@ records each failed implementation with its chain.
 
 ### The Reported-Error Guard
 
-Two repository checks hold the report model. Both are part of `just validate`, and CI runs them in
-its validation job.
+`just validate-typed-errors`, run by `just validate`, rejects textual
+`Result<_, String>` in product code without a baseline. It remains a separate source rule,
+including inactive source. The compiler architecture gate, run by `just ratchet`, owns three
+resolved Rust diagnostics:
 
-- `just validate-typed-errors` rejects `Result<_, String>` in product code, wherever it is written:
-  a return type, a field, or a collected `Result`. It is a rule without a baseline, so any
-  occurrence fails and names the rule.
-- `just ratchet` holds `bare_error_signatures` at zero, so a signature that returns a Nervix error
-  without an `error-stack` report fails it. A Nervix error is any type the repository declares
-  whose name ends in `Error`.
+| Diagnostic | Contract it checks |
+| --- | --- |
+| `nervix::bare_error_signature` | A canonical `Result` carrying a Nervix-owned standard error returns a contextual `Report`, directly or inside resolved `Future::Output` and `Stream::Item`. |
+| `nervix::discarded_outcome` | A `let` wildcard, unused statement or resolved `drop` consuming a `Result`, report, owning collection or transparent wrapper states its handling or recovery class. |
+| `nervix::bare_panic` | A resolved inherent `Option` or `Result` `unwrap`/`expect` uses `meticulous` to state its guarantee. |
 
-The ratchet reads a `Result` returned directly, as the output of a `Future` or the item of a
-`Stream` a callback contract names, and through a free type alias of such a `Result`; a file that
-imports `error_stack::Result` writes it as a bare `Result`, which is already a report. Three shapes
-return no Nervix error without a report, and it does not count them: an associated type whose trait
-defines the shape, such as a wire request's response; the error types a modeled primitive adapter
-declares to keep its library's interface, such as the Shuttle watch channel's mirror of Tokio's
-`RecvError`, which the ratchet lists by file; and a foreign trait that accepts only a standard
-error, which receives the report inside one, as [Foreign Interfaces](#foreign-interfaces)
-describes. A typed per-row or per-record outcome stays in its outcome channel, and a fixed wire,
-ABI or stored outcome is projected from a report only where it is constructed: the items of the
-consensus append stream are the wire records it answers with.
+Aliases, renamed imports, borrowed failure definitions, associated types, generic substitutions,
+inferred closures and boxed future/stream contracts use compiler types and trait obligations.
+A same-named method on an
+ordinary type carries that type's own contract. A plain value, borrow or optional ordinary value
+is not a dropped failure. Matching an outcome, propagation and the resolved recovery traits are
+explicit handling.
 
-Both checks read source text, and neither resolves a type. They scan product code: the tracked
-Rust files outside test, benchmark and example directories, with comments, literals and
-`#[cfg(test)]` items left out. A `Result` behind a library alias that hides its binding, such as a
-boxed future or a boxed stream, and an error type whose name does not end in `Error` are outside
-what the scan can see; review holds those. The compiler lints of
-[Data-Plane Concurrency](./data-plane-concurrency.md#diagnostics-and-reviewed-exceptions) resolve
-synchronization, not error types.
+Resource state and guards can retain already observed reports while owning a separate lifetime.
+Releasing such a handle is ordinary lifetime management. The discard check follows transparent
+outcome storage and complete standard-error report carriers; it does not recursively treat every
+field of an arbitrary resource owner as a new operation outcome.
 
-The same ratchet holds the neighbouring rules. Bare `unwrap` and `expect`, outcomes dropped with
-`let _ =`, and control flow written as `Option` and `Result` combinator chains are each held at
-zero, and `saturating_*` and `wrapping_*` calls are counted against a baseline that only falls. No
-Clippy lint holds them: Clippy denies `as` conversions and the direct duration parser, and the
-ratchet owns the rest.
+An error's owner classifies a pure conversion refusal, cancellation signal, semantic row or
+record outcome, fixed wire response, or modeled external-library error at its exact type:
 
+```rust,ignore
+#[cfg_attr(nervix_lint, nervix::error_boundary(
+    outcome, reason = "this conversion returns a pure range validation refusal"
+))]
+```
+
+The `library` kind names the external contract a modeled primitive preserves. A classification
+may also name one exact return contract, including a trait method; it never inherits from a
+module, package or enclosing callable. Both kinds require a meaningful reason. Malformed,
+duplicate and misplaced classifications fail. Source metadata crosses crate boundaries.
+A type's `Error` suffix establishes no classification.
+
+Foreign hooks that require `std::error::Error` receive a carrier owning the complete report.
+The compiler checks that every carrier variant retains a report, including through boxed or
+shared ownership. Optional reports do not establish that guarantee. `DnsLookupReport` retains
+the lookup report at the Hyper boundary; the node trace connector retains its connection report
+through Tonic. The consensus append stream, control-operation responses and handoff responses
+keep their fixed semantic wire outcomes; local operation failures acquire context before their
+wire projection. VM row reasons and connector record rejections retain their semantic channels.
+
+Node database opening and runtime key reads preserve their storage cause beneath the owning
+failure. The paced simulation's ledger, effect store and run return reports, retain decoding and
+client causes, and classify exit status from typed contexts. Its terminal reporting prints the
+context chain. A newer consumer refusal or node observation may explicitly discard the report it
+supersedes.
+
+These diagnostics use normal Rust lint levels and one-operation reason-bearing expectations.
+The required gate rejects unresolved warnings, broad suppression and unfulfilled or widened
+expectations. No numeric allowance approves a failure site. Fixtures exercise real compiler
+resolution; current API doctests pair supported calls with `compile_fail` examples. For a new
+fallible site, a reviewer identifies the deciding layer, ordinary outcome or failure class,
+actionable fields, context across boundaries and the public diagnostic or recovery that ends the
+path. That classification preserves branch and sensitivity rules.
 ### Tooling And Diagnostic Runs
 
-The compiler synchronization gate owns typed tooling failures for invalid source contracts,
+The compiler architecture gate owns typed tooling failures for invalid source contracts,
 conflicting findings and incomplete compiler passes. `ContractProblem` retains the specific
 argument, kind or missing contract coordinate inside an `error-stack` report until the Rust
 diagnostic boundary formats it. Reports preserve source location, resolved receiver/operation,
@@ -1758,7 +1781,7 @@ zero debt count. These are repository validation errors and add no runtime failu
 
 The isolated architecture compiler emits ordinary Rust tool diagnostics:
 `nervix::sync_acquisition`, `nervix::lifecycle_call`, `nervix::unknown_effect` and
-`nervix::invalid_contract`. Source contracts and narrow reason-bearing expectations own the
+`nervix::invalid_contract`, together with the typed error diagnostics above. Source contracts and narrow reason-bearing expectations own the
 architectural classification. Invalid contracts, unfulfilled or widened expectations, incomplete
 compiler reports and changed inputs fail the repository command; they are tooling failures, with
 no runtime error or public protocol disposition. The diagnostic gate rejects unresolved Nervix
@@ -1813,13 +1836,14 @@ failure it is.
 
 ## Qualification Evidence
 
-The rules of this chapter are held by checks of four kinds: the source guard and its own unit
-tests, Cucumber scenarios through the public interface, registered Bolero properties for input a
-decoder must refuse, and unit tests beside each owner.
+The rules of this chapter are held by the source guard, resolved compiler fixtures, Cucumber
+scenarios through the public interface, registered Bolero properties for input a decoder must
+refuse, and unit tests beside each owner.
 
 | Guarantee | Evidence |
 | --- | --- |
-| The guard counts what it claims | The ratchet scanner's unit tests, run by `just test-ratchet-units`: reported and foreign errors, nested `Future` and `Stream` returns, an imported `error_stack::Result`, the library error mirrors and free `Result` aliases. The `Result<_, String>` rule's unit tests run with `just test-docs` |
+| The guard resolves the contracts it claims | `just test-typed-ratchet-contracts`: resolved error aliases, associated outputs, generic calls, inferred closures, nested `Future` and `Stream` returns, complete foreign report carriers, named discarded outcomes, canonical panic APIs and source classifications across crate metadata. The distinct `Result<_, String>` source rule's unit tests run with `just test-docs` |
+| Local storage and foreign hooks retain complete typed causes | `just test-typed-error-runtime` checks database opening and trace DNS causes. Paced-driver ledger and effect-store tests retain typed I/O and decoding causes; `paced_simulation.feature` checks a contextual clock failure and malformed-file causes rendered once on one and three nodes |
 | A parse or lex diagnostic locates its token in the submitted source, in any statement of a batch | `typed_error_qualification.feature`: the byte span and underlined text of a single statement, of a later statement of a batch, and of a rejected character |
 | A validation failure keeps its owning model and its specific cause | `typed_error_qualification.feature`: a VM compile failure names the model and the unknown function, a message-error branch mismatch names the node and route, and a rejected alteration names the model and the refused operation and changes nothing |
 | A message error keeps its concrete branch and omits sensitive input | `typed_error_qualification.feature`, with interleaved records of two branches, and `node_error_policies.feature` for the structured operation of a route filter |
@@ -1837,10 +1861,11 @@ request labeled `fuzz`; any other run skips it, and a skipped campaign is no fuz
 [Property Testing And Fuzzing](./property-testing-and-fuzzing.md#commands-and-enforcement) owns the
 commands and the gate.
 
-The compiler rejects nothing about an error type, so no error type has a `compile_fail` doctest.
-Paired `compile_fail` and compiling doctests hold the interfaces beside a failure path instead,
-such as the VM's function injection, which receives the selected rows' earlier errors together with
-the domain time. The source guard, not the compiler, holds the report rule.
+Paired `compile_fail` and compiling doctests hold current APIs beside their failure paths. The DNS
+hook accepts `DnsLookupReport` as a standard error, and the recovery API classifies a real outcome.
+The VM's function injection receives the selected rows' earlier errors together with domain time.
+Resolved compiler fixtures hold the contextual-report, discarded-outcome and canonical panic rules;
+the source guard separately rejects textual string errors, including inactive code.
 
 ## Adding A Fallible Operation
 
@@ -1896,7 +1921,9 @@ It does not guarantee:
   the node that created them.
 - **A rendered chain is display text.** Its wording changes with any context in it. A client
   decides from dispositions, statuses and typed outcomes, and a chain is for the person reading it.
-- **The guard reads text.** It does not resolve types, as its section describes.
+- **Compiler checks have a finite surface.** They resolve the declared configurations and the
+  documented owning wrappers and APIs. They do not prove whole-program ownership or determine an
+  arbitrary resource owner's recovery policy. The distinct string-error guard reads source text.
 - **A fingerprint is not a secret.** It hides a branch key only as far as the key is hard to guess.
 
 The shipped code falls short of the model in these places:
@@ -1914,8 +1941,9 @@ The shipped code falls short of the model in these places:
   name their node above a VM compile failure that names it again, and a start report beneath the
   domain build names the domain again, as in `failed to build domain execution for 'edge': failed
   to start emitter 'audit' in domain 'edge': ...`.
-- **Storage failures without their cause.** After the runtime state store is open, a failed read,
-  write or synchronization reports its own context without the storage engine's error.
+- **Storage failures without their cause.** Some runtime state-store reads, writes and
+  synchronizations still report their own context without the storage engine's error. Key walks
+  used by replica and WASM state operations retain that cause beneath their read context.
 - **A formatter defect without a statement.** A verification defect the formatter cannot attribute
   to a statement is reported at line 1.
 - **A literal canonical NSPL cannot spell.** A float literal too large for `F64` reads as infinity,

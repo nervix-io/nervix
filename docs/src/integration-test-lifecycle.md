@@ -290,7 +290,10 @@ The boundary between them is kept in four places.
   command and only while the session holds no subscription or transaction yet.
   The paced simulation's published graph is loaded through one native client so its
   BEGIN/COMMIT state and command references survive an interrupted finalization. Raw wire probes
-  expose the received dispositions directly for protocol assertions. No harness deadline shortens
+  retain the protocol's received dispositions. A paced-driver file fixture writes only the
+  scenario's ledger or effect file before the driver starts. The published driver reads that
+  file, and the scenario checks the process exit and the occurrence count of its terminal cause.
+  No harness deadline shortens
   native commands. Only
   the status path described below is harness-owned, and it is a separate test-only boundary: it
   opens its own session and never redirects, reconnects, or retries by itself, so it adds no second

@@ -1136,6 +1136,12 @@ or effect proof.
 call reached from recurring execution. `nervix::invalid_contract` rejects contract and exception
 errors. The lints use ordinary Rust warn/deny/expect levels; the required gate also rejects unresolved Nervix warnings.
 
+The driver also emits the resolved failure-contract, outcome-discard and panic diagnostics
+described in [Errors And Diagnostics](errors-and-diagnostics.md). Their exact error/return
+classifications use `nervix::error_boundary`; execution-context inheritance does not classify
+an error or exempt a failure. All diagnostics share the same one-operation expectation checks
+and complete configuration evidence.
+
 Retained repair debt names its owning task at the exact operation:
 
 ```rust,ignore

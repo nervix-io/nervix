@@ -43,6 +43,7 @@ pub struct Flow {
     calls: Vec<Call>,
     acquisitions: Vec<Operation>,
     validated: HashSet<HirId>,
+    diagnostics: Vec<(HirId, &'static Lint)>,
 }
 
 struct Call {
@@ -243,6 +244,19 @@ fn parse_context(
 }
 
 impl Flow {
+    pub fn diagnostic(
+        &mut self,
+        cx: &LateContext<'_>,
+        node: HirId,
+        span: Span,
+        lint: &'static Lint,
+        message: String,
+    ) {
+        self.diagnostics.push((node, lint));
+        cx.tcx
+            .emit_node_span_lint(lint, node, span, Message { message });
+    }
+
     pub fn validate(&mut self, cx: &LateContext<'_>, node: HirId, placement: bool) {
         if !self.validated.insert(node) {
             return;
@@ -252,16 +266,23 @@ impl Flow {
         for attribute in cx.tcx.hir_attrs(node) {
             let path = attribute.path();
             if path.first().is_some_and(|name| name.as_str() == "nervix")
-                && (path.len() != 2 || !matches!(path[1].as_str(), "context" | "dispatch"))
+                && (path.len() != 2
+                    || !matches!(path[1].as_str(), "context" | "dispatch" | "error_boundary"))
             {
                 cx.tcx.emit_node_span_lint(
                     INVALID_CONTRACT,
                     node,
                     attribute.span(),
                     Message {
-                        message: "unknown Nervix source annotation; use context or dispatch".into(),
+                        message: "unknown Nervix source annotation; use context, dispatch or \
+                                  error_boundary"
+                            .into(),
                     },
                 );
+            }
+            if attribute.path_matches(&[Symbol::intern("nervix"), Symbol::intern("error_boundary")])
+            {
+                crate::errors::validate_boundary(cx, node, attribute);
             }
             if attribute.path_matches(&[Symbol::intern("nervix"), Symbol::intern("context")]) {
                 contexts += 1;
@@ -515,6 +536,9 @@ impl Flow {
             }
         }
         let mut expectations = HashMap::new();
+        for &(node, lint) in &self.diagnostics {
+            self.count_expectation(cx, &mut expectations, node, lint);
+        }
         for operation in &self.acquisitions {
             let declared = context(cx.tcx, operation.owner.to_def_id());
             let actual = if recurring.contains(&operation.owner)

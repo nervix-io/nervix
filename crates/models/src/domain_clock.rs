@@ -30,6 +30,14 @@ pub use observation::{
 };
 
 #[derive(Debug, Error)]
+#[cfg_attr(
+    nervix_lint,
+    nervix::error_boundary(
+        outcome,
+        reason = "clock value parsing and arithmetic return pure validation refusals; operations \
+                  add their own report context"
+    )
+)]
 pub enum DomainClockError {
     #[error("time rate '{value}' must be a positive finite number")]
     InvalidTimeRate { value: String },
