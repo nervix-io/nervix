@@ -758,7 +758,7 @@ Feature: Inferencer resources
       | 1            | 0             | DENSE TENSOR<F32> | ARRAY<F32, 2>    | ARRAY<F32, 2>     |
       | 3            | 0             | DENSE TENSOR<F32> | ARRAY<F32, 2>    | ARRAY<F32, 2>     |
 
-  @inferencer_branch_batches
+  @inferencer_branch_batches @deloxide_stress
   Scenario Outline: Batched inferencer isolates interleaved concrete branches
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
