@@ -156,7 +156,7 @@ impl RuntimeStateStore {
     }
 }
 
-/// One checkpoint a database view listed. Listing read only its key and stored header; its
+/// One checkpoint a database view listed. Listing read only its key and stored length; its
 /// payload is read through that same view when its owner opens it, so every checkpoint read from
 /// one listing belongs to one cut, however late it is read.
 pub(in crate::runtime) struct ListedCheckpoint {
@@ -165,7 +165,7 @@ pub(in crate::runtime) struct ListedCheckpoint {
     latest: Keyspace,
     chunks: Keyspace,
     key: Vec<u8>,
-    stored_bytes: u64,
+    raw_bytes: u64,
 }
 
 /// A checkpoint's revision and its whole payload in one allocation aligned for archived access.
@@ -175,41 +175,43 @@ pub(in crate::runtime) struct AlignedCheckpoint {
 }
 
 impl ListedCheckpoint {
-    /// Lists the checkpoint `view` stores under `key` with the stored value `raw`. Only a value no
-    /// larger than a segmented header is decoded: a larger one is an inline checkpoint, and its
-    /// length is all a listing needs.
+    /// Lists a key without opening its value. A value larger than the segmented header is inline,
+    /// so its size alone determines its conversion charge. A small header is decoded only if the
+    /// caller later selects this checkpoint.
     pub(super) fn new(
         placement: StoredPlacement,
         view: fjall::Snapshot,
         latest: Keyspace,
         chunks: Keyspace,
         key: Vec<u8>,
-        raw: &[u8],
-    ) -> error_stack::Result<Self, RuntimePersistenceError> {
-        let raw_bytes =
-            u64::try_from(raw.len()).verified("a stored value is addressed within 64 bits");
-        let stored_bytes = if raw.len() > StoredCheckpoint::SEGMENTED_BYTES {
-            raw_bytes
-        } else {
-            match StoredCheckpoint::decode(raw)? {
-                StoredCheckpoint::Inline(_) => raw_bytes,
-                StoredCheckpoint::Segmented(metadata) => metadata.length,
-            }
-        };
-        Ok(Self {
+        raw_bytes: u32,
+    ) -> Self {
+        Self {
             placement,
             view,
             latest,
             chunks,
             key,
-            stored_bytes,
-        })
+            raw_bytes: u64::from(raw_bytes),
+        }
     }
 
     /// What the checkpoint occupies as stored: a segmented checkpoint's payload, or an inline
     /// checkpoint's whole stored value, which holds its payload beside its header.
-    pub(in crate::runtime) fn stored_bytes(&self) -> u64 {
-        self.stored_bytes
+    pub(in crate::runtime) fn stored_bytes(
+        &self,
+    ) -> error_stack::Result<u64, RuntimePersistenceError> {
+        if self.raw_bytes
+            > u64::try_from(StoredCheckpoint::SEGMENTED_BYTES)
+                .verified("the fixed archived header fits in u64")
+        {
+            return Ok(self.raw_bytes);
+        }
+        let raw = self.raw()?;
+        match StoredCheckpoint::decode(&raw)? {
+            StoredCheckpoint::Inline(_) => Ok(self.raw_bytes),
+            StoredCheckpoint::Segmented(metadata) => Ok(metadata.length),
+        }
     }
 
     fn raw(&self) -> error_stack::Result<fjall::Slice, RuntimePersistenceError> {
@@ -227,12 +229,24 @@ impl ListedCheckpoint {
     pub(in crate::runtime) fn open(
         &self,
     ) -> error_stack::Result<CheckpointReader, RuntimePersistenceError> {
+        self.open_with_revision().map(|(_, reader)| reader)
+    }
+
+    /// Open the payload and obtain its revision from the same stored value. The caller checks
+    /// whether this placement belongs to the captured generation before calling this method.
+    pub(in crate::runtime) fn open_with_revision(
+        &self,
+    ) -> error_stack::Result<(u64, CheckpointReader), RuntimePersistenceError> {
         let checkpoint = StoredCheckpoint::decode(&self.raw()?)?;
-        Ok(CheckpointReader::select(
-            self.view.clone(),
-            self.chunks.clone(),
-            &self.key,
-            checkpoint,
+        let revision = checkpoint.lsm();
+        Ok((
+            revision,
+            CheckpointReader::select(
+                self.view.clone(),
+                self.chunks.clone(),
+                &self.key,
+                checkpoint,
+            ),
         ))
     }
 
@@ -519,6 +533,238 @@ pub(super) mod tests {
                 .read(&mut [0_u8; 1])
                 .assured("empty checkpoint digest verifies"),
             0
+        );
+    }
+
+    #[test]
+    fn listed_inline_and_segmented_checkpoints_report_the_revision_of_their_bytes() {
+        let directory = tempfile::tempdir().assured("state directory opens");
+        let state = store(directory.path());
+        let placement = placement();
+        state
+            .persist_latest_snapshot(&placement, 7, b"inline-save")
+            .assured("inline checkpoint persists");
+        for (revision, expected) in [
+            (7, b"inline-save".to_vec()),
+            (8, vec![19_u8; RESTORE_STATE_CHUNK_BYTES + 13]),
+        ] {
+            if revision == 8 {
+                let authority = authority();
+                stage(&state, &authority, &placement, revision, &expected);
+                publish(&state, &authority, &placement, expected.len());
+            }
+            let view = state
+                .snapshot_backup_domain(&placement.domain, &[RuntimeStateKind::MaterializedRelay])
+                .assured("the cut lists one checkpoint");
+            let Ok([checkpoint]) = <[ListedCheckpoint; 1]>::try_from(view.checkpoints) else {
+                panic!("the cut lists exactly one checkpoint");
+            };
+            let (actual_revision, mut reader) = checkpoint
+                .open_with_revision()
+                .assured("the checkpoint opens once");
+            let mut actual = Vec::new();
+            reader
+                .read_to_end(&mut actual)
+                .assured("the selected payload reads");
+            assert_eq!(actual_revision, revision);
+            assert_eq!(actual, expected);
+        }
+    }
+
+    const LARGEST_GUEST_BYTES: usize = 64 * 1024 * 1024;
+
+    fn assert_largest_checkpoint_streams(
+        state: &RuntimeStateStore,
+        placement: &RuntimeStatePlacement,
+    ) {
+        let listed = state
+            .snapshot_backup_domain(&placement.domain, &[RuntimeStateKind::MaterializedRelay])
+            .assured("the cut lists its largest checkpoint");
+        let Ok([checkpoint]) = <[ListedCheckpoint; 1]>::try_from(listed.checkpoints) else {
+            panic!("the cut lists one largest checkpoint");
+        };
+        let stored_bytes = checkpoint.stored_bytes().assured("the selected size reads");
+        let heap_before = crate::memory_pressure::jemalloc_memory_usage()
+            .assured("the test allocator exposes its heap")
+            .allocated;
+        let started = nervix_primitives::time::Instant::now();
+        let (revision, mut reader) = checkpoint
+            .open_with_revision()
+            .assured("the largest checkpoint opens");
+        let opened = started.elapsed();
+        let payload_capacity = |reader: &CheckpointReader| match reader {
+            CheckpointReader::Inline(bytes) => bytes.get_ref().capacity(),
+            CheckpointReader::Segmented { buffer, .. } => buffer.get_ref().capacity(),
+        };
+        let opened_payload_capacity = payload_capacity(&reader);
+        let heap_opened = crate::memory_pressure::jemalloc_memory_usage()
+            .assured("the opened reader's heap is sampled")
+            .allocated;
+        assert_eq!(revision, 8);
+        assert_eq!(
+            reader.remaining(),
+            u64::try_from(LARGEST_GUEST_BYTES).verified("size fits")
+        );
+        let mut block = [0_u8; RESTORE_STATE_CHUNK_BYTES];
+        let mut total = 0;
+        loop {
+            let count = reader.read(&mut block).assured("a bounded block reads");
+            if count == 0 {
+                break;
+            }
+            if total == 0 {
+                let heap_reading = crate::memory_pressure::jemalloc_memory_usage()
+                    .assured("the first transfer block's heap is sampled")
+                    .allocated;
+                eprintln!(
+                    "64 MiB checkpoint payload buffer capacity: open {opened_payload_capacity}, \
+                     first block {}",
+                    payload_capacity(&reader)
+                );
+                // Process heap deltas include Fjall's background allocation and reclamation;
+                // they are observations of the process, not the reader's peak allocation.
+                eprintln!(
+                    "64 MiB checkpoint process heap: open delta {}, first-block delta {}",
+                    i128::from(heap_opened) - i128::from(heap_before),
+                    i128::from(heap_reading) - i128::from(heap_before)
+                );
+            }
+            assert!(block[..count].iter().all(|byte| *byte == 19));
+            total += count;
+        }
+        assert_eq!(total, LARGEST_GUEST_BYTES);
+        assert_eq!(reader.remaining(), 0);
+        eprintln!(
+            "64 MiB checkpoint: stored bytes {stored_bytes}, open {opened:?}, complete stream {:?}",
+            started.elapsed()
+        );
+    }
+
+    #[test]
+    fn largest_inline_checkpoint_streams_its_exact_bytes() {
+        let directory = tempfile::tempdir().assured("state directory opens");
+        let state = store(directory.path());
+        let placement = placement();
+        state
+            .persist_latest_snapshot(&placement, 8, &vec![19_u8; LARGEST_GUEST_BYTES])
+            .assured("the largest inline checkpoint persists");
+        assert_largest_checkpoint_streams(&state, &placement);
+    }
+
+    #[test]
+    fn largest_segmented_checkpoint_streams_its_exact_bytes() {
+        let directory = tempfile::tempdir().assured("state directory opens");
+        let state = store(directory.path());
+        let placement = placement();
+        let authority = authority();
+        stage(
+            &state,
+            &authority,
+            &placement,
+            8,
+            &vec![19_u8; LARGEST_GUEST_BYTES],
+        );
+        publish(&state, &authority, &placement, LARGEST_GUEST_BYTES);
+        assert_largest_checkpoint_streams(&state, &placement);
+    }
+
+    #[nervix_primitives::test]
+    async fn a_superseded_guest_value_is_not_opened_by_capture() {
+        use crate::runtime::{Runtime, ScheduledStateAssignment, ScheduledStateIdentity};
+
+        let directory = tempfile::tempdir().assured("state directory opens");
+        let database = Database::builder(directory.path())
+            .open()
+            .assured("database opens");
+        let runtime = Runtime::with_persistence(Some(database), std::time::Duration::from_secs(60))
+            .assured("runtime opens");
+        let state = runtime
+            .inner
+            .state_store
+            .as_ref()
+            .assured("storage is configured");
+        let mut placement = placement();
+        placement.kind = ModelKind::WasmProcessor;
+        placement.state = RuntimeState::WasmProcessor {
+            schema: nervix_models::SchemaFingerprint::from_digest([7; 32]),
+            generation: nervix_models::WasmStateGeneration::FIRST,
+        };
+        let key = StateNamespace::Initial
+            .key(&placement)
+            .assured("guest placement encodes");
+        state
+            .latest
+            .insert(key, [0xff_u8; 8])
+            .assured("an unread guest value persists");
+        let mut generations = nervix_models::WasmStateGenerations::first();
+        assert_ne!(
+            generations.begin_every_branch(),
+            nervix_models::WasmStateGeneration::FIRST
+        );
+        runtime.publish_state_assignment(
+            nervix_models::DomainNodeRef::node_in(
+                placement.domain.clone(),
+                placement.kind,
+                placement.identifier.clone(),
+            ),
+            ScheduledStateAssignment {
+                identity: ScheduledStateIdentity {
+                    schema_fingerprint: nervix_models::SchemaFingerprint::from_digest([7; 32]),
+                    wasm_state_generations: Some(generations),
+                },
+                checkpoint_owners: None,
+            },
+        );
+        let executor = runtime.executor().clone();
+        let charge = executor
+            .reserve(nervix_execution::MemoryClass::Bulk, 64 * 1024)
+            .await
+            .assured("capture working memory is admitted");
+        let captured = executor
+            .run_storage(
+                nervix_execution::StorageClass::Filesystem,
+                charge,
+                move |_charge, cancellation| {
+                    runtime.capture_backup_state(
+                        &placement.domain,
+                        true,
+                        nervix_models::DomainStatus::Stopped,
+                        cancellation,
+                    )
+                },
+            )
+            .await
+            .assured("capture runs")
+            .assured("the superseded invalid value is not opened");
+        assert!(captured.guest_saves.is_empty());
+    }
+
+    #[test]
+    fn backup_listing_defers_guest_value_decode_until_selection() {
+        let directory = tempfile::tempdir().assured("state directory opens");
+        let state = store(directory.path());
+        let mut placement = placement();
+        placement.kind = ModelKind::WasmProcessor;
+        placement.state = RuntimeState::WasmProcessor {
+            schema: nervix_models::SchemaFingerprint::from_digest([7; 32]),
+            generation: nervix_models::WasmStateGeneration::FIRST,
+        };
+        let key = StateNamespace::Initial
+            .key(&placement)
+            .assured("guest placement key is bounded");
+        state
+            .latest
+            .insert(key, [0xff_u8; 8])
+            .assured("invalid selected bytes are stored");
+        let view = state
+            .snapshot_backup_domain(&placement.domain, &[RuntimeStateKind::WasmProcessor])
+            .assured("the cut lists keys without decoding the guest value");
+        let Ok([checkpoint]) = <[ListedCheckpoint; 1]>::try_from(view.checkpoints) else {
+            panic!("the cut lists the one guest key");
+        };
+        assert!(
+            checkpoint.stored_bytes().is_err(),
+            "the invalid value fails only when the selected save needs its size"
         );
     }
 }

@@ -991,10 +991,15 @@ partitioned or cancelled fetch leaves any unconsumed stage available until expir
 An owner streams each branch lifecycle and Kafka offset section from the cut's database snapshot
 into its staged file under a `restore_metadata` conversion charge and a 64 KiB bulk buffer, so the
 inventory declares a section's exact length and digest without the owner holding the section
-whole. Materialized inventories distinguish archive descriptors, scalar identity groups and Arrow
-column groups. Their bounded sections are staged from a fresh assignment-qualified capture and
-fetched through the same authenticated stream; the capture never transfers an entire container
-as one bulk response allocation. The leader verifies each length and digest before assembly.
+whole. It also checks a WASM save's scheduled generation before opening that save, then streams
+its raw bytes from the same snapshot into a staged section under an independent
+`restore_metadata` charge and three fixed 64 KiB bulk buffers. The stored read supplies the descriptor's
+revision. An interruption fails the capture before its inventory is published, and the
+coordinator can retry with a new cut. Materialized inventories distinguish archive descriptors,
+scalar identity groups and Arrow column groups. Their bounded sections are staged from a fresh
+assignment-qualified capture and fetched through the same authenticated stream; the capture never
+transfers an entire container as one bulk response allocation. The leader verifies each length and
+digest before assembly.
 An opening refused solely for request capacity is retried within one 30-second opening deadline;
 other failures end the fetch. The captured stage remains unconsumed on an admission refusal.
 Completed backup and materialized-state response streams release their Snapshot request and
@@ -1362,16 +1367,18 @@ management request in the reserved progress subquota, rather than an unclassifie
 The response confirms that the authenticated receiver evaluated the report against its current
 fence; it does not establish or replace the receiver's committed clock mapping.
 
-For each domain and ready remote node, the authority owns one delivery loop with at most one request
+For each domain and prepared remote node, the authority owns one delivery loop with at most one request
 in flight and one latest pending report. A newer logical frontier replaces the pending report while
 the loop waits for capacity or a response, so a fast clock or slow peer cannot create an unbounded
 tick queue. The node-wide progress quota bounds attempts across every domain and peer. Liveness,
 relay admission, cancellation, and terminal outcomes retain their independent capacity.
 
-Only live peers that have installed the required runtime revision receive progress. A node that
-joins or reconnects receives the newest retained frontier once it becomes ready. Each attempt has a
-two-second physical deadline. A failed attempt waits 200 milliseconds, then retries the newest
-frontier; authority shutdown cancels both an active request and its retry delay.
+Only live peers that have prepared the required runtime revision receive progress. Preparation
+installs the mapping and authority fence before graph activation, so a receiver does not wait for
+other nodes to prepare or activate. A node that joins or reconnects receives the newest retained
+frontier once its own preparation is advertised. Each attempt has a two-second physical deadline.
+A failed attempt waits 200 milliseconds, then retries the newest frontier; authority shutdown
+cancels both an active request and its retry delay.
 
 The wire report contains typed logical and UTC timestamps and no process-local monotonic instant.
 The receiver authenticates the reporting node and applies the committed generation, revision,

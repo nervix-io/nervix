@@ -104,6 +104,8 @@ Use separate execution phases so transaction and active-domain rules stay clear.
    execution. One committed authority revision identifies the producing node incarnation; owner
    changes preserve the mapping, `STOP` revokes the authority, and automatic ALTER quiescing keeps
    the generation and authority running.
+   Clock progress resumes after the authority installs its revision; each peer receives progress
+   after its own installation, without waiting for another node's graph activation.
    Run and monitor UTC synchronization on every cluster host. Per-node reads do not move backward
    within a generation, but simultaneous cross-host reads need not match; `SKEW` controls event
    admission and does not compensate for host-clock offset.

@@ -351,7 +351,11 @@ mod tests {
             test_fixtures::{input_batch_with, input_schema, named},
         },
         runtime_ack::AckSet,
-        runtime_schema::compile_codec,
+        runtime_schema::{
+            codec_properties::{CodecCase, SchemafulFormat},
+            compile_codec,
+            generated_batches::BatchRows,
+        },
     };
 
     fn test_codec() -> Arc<CompiledCodec> {
@@ -807,5 +811,523 @@ mod tests {
         let attempts = attempts.into_inner();
         assert_eq!(attempts.get(..4), Some([8, 4, 2, 1].as_slice()));
         assert_eq!(attempts.get(4..8), Some([7, 4, 2, 1].as_slice()));
+    }
+
+    /// A generated member of a subdivision: the compatibility class it belongs to, the bytes it
+    /// adds to a candidate's encoding, and whether a container holding it fails.
+    #[derive(Debug, Clone, Copy, bolero::TypeGenerator)]
+    struct SyntheticMember {
+        class: u8,
+        weight: u8,
+        poison: u8,
+    }
+
+    impl SyntheticMember {
+        fn compatible(&self, other: &Self) -> bool {
+            self.class % 3 == other.class % 3
+        }
+
+        /// One member in sixteen fails every container that holds it.
+        fn fails(&self) -> bool {
+            self.poison < 16
+        }
+    }
+
+    /// A generated subdivision: members, the message limit, the size limit and an encoding whose
+    /// size is the members' weights plus an overhead chosen by the candidate's length, so a smaller
+    /// candidate can encode larger than a bigger one.
+    #[derive(Debug, bolero::TypeGenerator)]
+    struct SubdivisionCase {
+        #[generator(bolero::generator::produce_with::<Vec<SyntheticMember>>().len(0_usize..=96))]
+        members: Vec<SyntheticMember>,
+        max_messages: u8,
+        max_size: u16,
+        #[generator(bolero::generator::produce_with::<Vec<u8>>().len(1_usize..=12))]
+        overheads: Vec<u8>,
+    }
+
+    /// The subdivision the documented rule gives: the candidates in order, and the halvings that
+    /// found them.
+    struct ReferenceSubdivision {
+        candidates: Vec<Candidate<usize, usize>>,
+        subdivisions: u64,
+    }
+
+    impl SubdivisionCase {
+        fn max_messages(&self) -> NonZeroUsize {
+            limit(usize::from(self.max_messages % 24) + 1)
+        }
+
+        fn max_size(&self) -> usize {
+            usize::from(self.max_size % 1024) + 1
+        }
+
+        /// The encoding of `start..end`: the failing member's index, or the candidate's bytes,
+        /// which hold its member indices and its overhead, or its size when that exceeds the limit.
+        fn encode(&self, start: usize, end: usize) -> Result<CandidateEncoding<usize>, usize> {
+            let mut size = usize::from(self.overheads[(end - start) % self.overheads.len()]);
+            for (offset, member) in self.members[start..end].iter().enumerate() {
+                if member.fails() {
+                    return Err(start + offset);
+                }
+                size += usize::from(member.weight);
+            }
+            if size > self.max_size() {
+                return Ok(CandidateEncoding::Oversize(size));
+            }
+            let mut bytes = Vec::with_capacity(size);
+            for index in start..end {
+                bytes.push(u8::try_from(index).assured("at most 96 members"));
+            }
+            bytes.resize(size.max(end - start), 0);
+            Ok(CandidateEncoding::Fits(bytes))
+        }
+
+        /// The candidates the documented rule gives, with the number of halvings it takes.
+        fn reference(&self) -> ReferenceSubdivision {
+            let mut candidates = Vec::new();
+            let mut subdivisions = 0;
+            let mut start = 0;
+            while start < self.members.len() {
+                let mut end = start + 1;
+                while end - start < self.max_messages().get()
+                    && end < self.members.len()
+                    && self.members[start].compatible(&self.members[end])
+                {
+                    end += 1;
+                }
+                let result = loop {
+                    match self.encode(start, end) {
+                        Ok(CandidateEncoding::Fits(bytes)) => {
+                            break CandidateResult::Encoded(bytes);
+                        }
+                        Ok(CandidateEncoding::Oversize(size)) if end - start == 1 => {
+                            break CandidateResult::Oversize(size);
+                        }
+                        Ok(CandidateEncoding::Oversize(_)) => {
+                            end = start + (end - start).div_ceil(2);
+                            subdivisions += 1;
+                        }
+                        Err(index) => break CandidateResult::Failed(index),
+                    }
+                };
+                candidates.push(Candidate { start, end, result });
+                start = end;
+            }
+            ReferenceSubdivision {
+                candidates,
+                subdivisions,
+            }
+        }
+    }
+
+    /// Subdivision divides members, in order, into candidates of at most `MAX MESSAGES` members
+    /// compatible with their first, halving a candidate whose encoding reached the limit until it
+    /// fits or holds one member, failing a candidate whose container fails without halving it, and
+    /// encoding each first candidate at most `⌈log2(n)⌉ + 1` times.
+    #[test]
+    fn bolero_subdivision_follows_the_documented_rule_for_any_encoding_size() {
+        bolero::check!()
+            .with_iterations(256)
+            .with_max_len(1024)
+            .with_type::<SubdivisionCase>()
+            .for_each(|case| {
+                let encoded = RefCell::new(Vec::new());
+                let indices = (0..case.members.len()).collect::<Vec<_>>();
+                let subdivision = subdivide(
+                    &indices,
+                    case.max_messages(),
+                    |first, next| case.members[*first].compatible(&case.members[*next]),
+                    |candidate| {
+                        let start = *candidate.first().assured("a candidate is never empty");
+                        let end = start + candidate.len();
+                        encoded.borrow_mut().push(start..end);
+                        case.encode(start, end)
+                    },
+                );
+                let reference = case.reference();
+                assert_eq!(subdivision.candidates, reference.candidates);
+                assert_eq!(subdivision.subdivisions, reference.subdivisions);
+
+                let encoded = encoded.into_inner();
+                let mut calls = encoded.iter().peekable();
+                for candidate in &subdivision.candidates {
+                    let length = candidate.end - candidate.start;
+                    assert!(length <= case.max_messages().get());
+                    let first = &case.members[candidate.start];
+                    for member in &case.members[candidate.start..candidate.end] {
+                        assert!(first.compatible(member));
+                    }
+                    let mut count = 0_u32;
+                    let mut first = None;
+                    while let Some(call) = calls.next_if(|call| call.start == candidate.start) {
+                        first.get_or_insert(call.len());
+                        count += 1;
+                    }
+                    let first = first.assured("every candidate was encoded");
+                    let bound = first.next_power_of_two().trailing_zeros() + 1;
+                    assert!(
+                        count <= bound,
+                        "{count} encodings of {:?}",
+                        candidate.start..candidate.end
+                    );
+                }
+                assert!(
+                    calls.next().is_none(),
+                    "an encoding belongs to no candidate"
+                );
+            });
+    }
+
+    const PACKED_RELAYS: [&str; 2] = ["source_a", "source_b"];
+
+    /// One generated selected row of a carrier: which row of the batch it selects, read as that
+    /// choice modulo the batch's rows, or a seal.
+    #[derive(Debug, Clone)]
+    enum GeneratedRow {
+        Ready { row_choice: usize, envelope: usize },
+        Seal,
+    }
+
+    /// One generated carrier: its source relay, its branch and its selected rows.
+    #[derive(Debug, Clone)]
+    struct GeneratedCarrier {
+        relay: usize,
+        branch: Option<&'static str>,
+        rows: Vec<GeneratedRow>,
+    }
+
+    fn envelopes() -> [BatchEnvelope; 3] {
+        [
+            BatchEnvelope {
+                key: None,
+                headers: Vec::new(),
+                message_group: None,
+            },
+            BatchEnvelope {
+                key: Some("key".to_string()),
+                headers: vec![("trace".to_string(), "1".to_string())],
+                message_group: None,
+            },
+            BatchEnvelope {
+                key: None,
+                headers: Vec::new(),
+                message_group: Some("group".to_string()),
+            },
+        ]
+    }
+
+    fn branch_key(tenant: &str) -> BranchKey {
+        BranchKey::from_fields([(
+            FieldName::parse("tenant").assured("the fixed field satisfies the field name grammar"),
+            RuntimeValue::String(tenant.to_string()),
+        )])
+        .assured("the fixed field makes a concrete branch key")
+    }
+
+    impl GeneratedCarrier {
+        fn draw(entropy: &mut nervix_arbitrary::Entropy<'_>) -> Self {
+            let relay = entropy.count(PACKED_RELAYS.len() - 1);
+            let branch = entropy.pick([None, Some("acme"), Some("beta")]);
+            let count = entropy.count(6);
+            let mut selected = Vec::with_capacity(count);
+            for _ in 0..count {
+                if entropy.byte() < 24 {
+                    selected.push(GeneratedRow::Seal);
+                } else {
+                    selected.push(GeneratedRow::Ready {
+                        row_choice: usize::from(entropy.byte()),
+                        envelope: entropy.count(envelopes().len() - 1),
+                    });
+                }
+            }
+            Self {
+                relay,
+                branch,
+                rows: selected,
+            }
+        }
+
+        /// The selected rows of a batch of `rows` rows, which select nothing when it has none.
+        fn selected(&self, rows: usize) -> Vec<GeneratedRow> {
+            let mut selected = Vec::with_capacity(self.rows.len());
+            for row in &self.rows {
+                match row {
+                    GeneratedRow::Ready {
+                        row_choice,
+                        envelope,
+                    } => {
+                        if rows == 0 {
+                            continue;
+                        }
+                        selected.push(GeneratedRow::Ready {
+                            row_choice: row_choice % rows,
+                            envelope: *envelope,
+                        });
+                    }
+                    GeneratedRow::Seal => selected.push(GeneratedRow::Seal),
+                }
+            }
+            selected
+        }
+
+        fn packing(&self, batch_index: usize, batch: &Arc<RuntimeRecordBatch>) -> PackingCarrier {
+            let mut rows = Vec::with_capacity(self.rows.len());
+            for row in &self.rows {
+                match row {
+                    GeneratedRow::Ready {
+                        row_choice,
+                        envelope,
+                    } => rows.push(PackingRow::Ready {
+                        position: SinkRecordPosition {
+                            batch_index,
+                            row_index: *row_choice,
+                        },
+                        envelope: envelopes()[*envelope].clone(),
+                    }),
+                    GeneratedRow::Seal => rows.push(PackingRow::Seal),
+                }
+            }
+            let branch_key = self.branch.map(branch_key);
+            PackingCarrier {
+                source_relay: named(PACKED_RELAYS[self.relay]),
+                branch_key,
+                batch: batch.clone(),
+                rows,
+            }
+        }
+    }
+
+    /// One row of the reference packing: where it came from and the encoding it contributes.
+    struct ReferenceMember {
+        position: SinkRecordPosition,
+        relay: usize,
+        branch: Option<&'static str>,
+        envelope: usize,
+        encoding: Vec<u8>,
+    }
+
+    impl ReferenceMember {
+        fn shares_batch_with(&self, other: &Self) -> bool {
+            self.relay == other.relay
+                && self.branch == other.branch
+                && self.envelope == other.envelope
+        }
+    }
+
+    /// What the reference packing expects one outcome to be.
+    #[derive(Debug, PartialEq)]
+    enum ExpectedOutcome {
+        Payload {
+            rows: Vec<SinkRecordPosition>,
+            envelope: BatchEnvelope,
+            payload: Vec<u8>,
+        },
+        Oversize(SinkRecordPosition),
+    }
+
+    /// The documented packing of carriers, computed from each row's own encoding and the format's
+    /// container framing rather than the packer.
+    struct ReferencePacking {
+        format: SchemafulFormat,
+        max_messages: usize,
+        max_size: usize,
+        outcomes: Vec<ExpectedOutcome>,
+        subdivisions: u64,
+    }
+
+    impl ReferencePacking {
+        fn pack(&mut self, run: &mut Vec<ReferenceMember>) {
+            let mut start = 0;
+            while start < run.len() {
+                let mut end = (start + self.max_messages).min(run.len());
+                loop {
+                    let encodings = run[start..end]
+                        .iter()
+                        .map(|member| member.encoding.clone())
+                        .collect::<Vec<_>>();
+                    let payload = self.format.framed(&encodings);
+                    if payload.len() <= self.max_size {
+                        self.outcomes.push(ExpectedOutcome::Payload {
+                            rows: run[start..end]
+                                .iter()
+                                .map(|member| member.position)
+                                .collect(),
+                            envelope: envelopes()[run[start].envelope].clone(),
+                            payload,
+                        });
+                        break;
+                    }
+                    if end - start == 1 {
+                        self.outcomes
+                            .push(ExpectedOutcome::Oversize(run[start].position));
+                        break;
+                    }
+                    end = start + (end - start).div_ceil(2);
+                    self.subdivisions += 1;
+                }
+                start = end;
+            }
+            run.clear();
+        }
+    }
+
+    /// Packing the selected rows of generated carriers through a generated schemaful codec ends
+    /// every row exactly once, in order: as a member of a payload whose bytes are the format's
+    /// container of exactly its members' own encodings, at most `MAX SIZE` bytes and `MAX MESSAGES`
+    /// members, all from one source relay, one concrete branch and one envelope; or rejected alone
+    /// when even its own container exceeds `MAX SIZE`. A seal, a different relay, branch or envelope,
+    /// and a rejected row end the open payload.
+    #[test]
+    fn bolero_packed_payloads_hold_their_members_exactly_within_both_limits() {
+        bolero::check!()
+            .with_iterations(256)
+            .with_max_len(4096)
+            .for_each(|input| {
+                let mut arbitrary =
+                    nervix_arbitrary::Arbitrary::new(input, nervix_arbitrary::Domain::Vocabulary);
+                // The format, the rows, the carriers and the limits are read before the schema and
+                // its values, which an ordinary run's few bytes run out while generating.
+                let format = arbitrary.entropy().pick(SchemafulFormat::ALL);
+                let shape = BatchRows::draw(arbitrary.entropy());
+                let entropy = arbitrary.entropy();
+                let carrier_count = entropy.count(4) + 1;
+                let mut drawn = Vec::with_capacity(carrier_count);
+                for _ in 0..carrier_count {
+                    drawn.push(GeneratedCarrier::draw(entropy));
+                }
+                let max_messages = entropy.count(4) + 1;
+                let size_choice = entropy.up_to(u64::MAX);
+                let schema = format.domain().schema(&mut arbitrary);
+                let case = CodecCase::with_schema(&mut arbitrary, format, schema);
+                let rows = format
+                    .domain()
+                    .batch_of(&mut arbitrary, &case.schema, shape);
+                let batch = Arc::new(case.schema.runtime_batch(rows));
+                let row_count = batch.batch().num_rows();
+                let encoder = case
+                    .codec
+                    .batch_encoder(&batch)
+                    .assured("a batch of the codec's schema opens an encoder");
+                let mut encodings = Vec::with_capacity(row_count);
+                for row in 0..row_count {
+                    let mut encoding = Vec::new();
+                    encoder
+                        .encode_row_into(row, &mut encoding)
+                        .assured("every value of the codec's domain encodes");
+                    encodings.push(encoding);
+                }
+                let mut generated = Vec::with_capacity(drawn.len());
+                for carrier in &drawn {
+                    generated.push(GeneratedCarrier {
+                        relay: carrier.relay,
+                        branch: carrier.branch,
+                        rows: carrier.selected(row_count),
+                    });
+                }
+                // MAX SIZE lies from one byte below the smallest single-member container, where
+                // every row is oversize, to one byte above the container of every row, where a
+                // whole run fits, so most limits halve some candidates and fit others.
+                let mut smallest = usize::MAX;
+                for encoding in &encodings {
+                    smallest = smallest.min(format.framed(std::slice::from_ref(encoding)).len());
+                }
+                let largest = format.framed(&encodings).len();
+                let lowest = smallest.min(largest).max(2) - 1;
+                let span = u64::try_from(largest + 2 - lowest).assured("a small span fits u64");
+                let offset = usize::try_from(size_choice % span).assured("below the span");
+                let max_size = lowest + offset;
+                let policy = EmitterBatchPolicy {
+                    max_messages: BatchMessageLimit::try_from(
+                        u32::try_from(max_messages).assured("at most five"),
+                    )
+                    .assured("one to five messages is within the declared range"),
+                    max_size: nervix_models::PayloadSizeLimit::new(
+                        std::num::NonZeroU64::new(u64::try_from(max_size).assured("fits u64"))
+                            .assured("the size is at least one byte"),
+                        nervix_models::ByteSizeUnit::B,
+                    )
+                    .assured("a small byte count fits u64"),
+                };
+
+                let carriers = generated
+                    .iter()
+                    .enumerate()
+                    .map(|(index, carrier)| carrier.packing(index, &batch))
+                    .collect::<Vec<_>>();
+                let packed = pack_buffered_batches(&case.codec, carriers, policy)
+                    .assured("every carrier holds a batch of the codec's schema");
+
+                let mut reference = ReferencePacking {
+                    format: case.format,
+                    max_messages,
+                    max_size,
+                    outcomes: Vec::new(),
+                    subdivisions: 0,
+                };
+                let mut run: Vec<ReferenceMember> = Vec::new();
+                for (batch_index, carrier) in generated.iter().enumerate() {
+                    for row in &carrier.rows {
+                        let GeneratedRow::Ready {
+                            row_choice,
+                            envelope,
+                        } = row
+                        else {
+                            reference.pack(&mut run);
+                            continue;
+                        };
+                        let position = SinkRecordPosition {
+                            batch_index,
+                            row_index: *row_choice,
+                        };
+                        let encoding = encodings[*row_choice].clone();
+                        if encoding.len() > max_size {
+                            reference.pack(&mut run);
+                            reference.outcomes.push(ExpectedOutcome::Oversize(position));
+                            continue;
+                        }
+                        let member = ReferenceMember {
+                            position,
+                            relay: carrier.relay,
+                            branch: carrier.branch,
+                            envelope: *envelope,
+                            encoding,
+                        };
+                        if let Some(first) = run.first()
+                            && !first.shares_batch_with(&member)
+                        {
+                            reference.pack(&mut run);
+                        }
+                        run.push(member);
+                        if run.len() == max_messages {
+                            reference.pack(&mut run);
+                        }
+                    }
+                }
+                reference.pack(&mut run);
+
+                let mut outcomes = Vec::with_capacity(packed.outcomes.len());
+                for outcome in packed.outcomes {
+                    match outcome {
+                        PackedOutcome::Payload(payload) => {
+                            assert!(payload.payload.len() <= max_size);
+                            assert!(payload.rows.len() <= max_messages);
+                            outcomes.push(ExpectedOutcome::Payload {
+                                rows: payload.rows,
+                                envelope: payload.envelope,
+                                payload: payload.payload,
+                            });
+                        }
+                        PackedOutcome::Oversize { position, exceeded } => {
+                            let limit = format!("MAX SIZE {}", policy.max_size);
+                            assert!(exceeded.to_string().ends_with(&limit), "{exceeded}");
+                            outcomes.push(ExpectedOutcome::Oversize(position));
+                        }
+                        other => panic!("generated rows of the codec's domain packed as {other:?}"),
+                    }
+                }
+                assert_eq!(outcomes, reference.outcomes);
+                assert_eq!(packed.subdivisions, reference.subdivisions);
+            });
     }
 }

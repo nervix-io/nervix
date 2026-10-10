@@ -66,7 +66,10 @@ module path or a local type alias. They also reject a `static` or `const` initia
 body and an inline `const` block that construct one. A bare atomic type name counts as selected
 unless the file imports it only from the unmodeled path. The rules read declared types and
 constructions, so a struct that holds an atomic hides it from them when it is built lazily; the rule
-still applies to it.
+still applies to it. The static rules alone also read the owner's sources, where `crate::sync::atomic`
+names a selected atomic and `crate::unmodeled::sync::atomic`, `std::sync::atomic` and
+`core::sync::atomic` name real ones: the owner names every backend, but a static of its own holds
+only real atomics.
 
 Loom models atomics, its threads and thread-local storage, and nothing else, so Loom model code, an
 inline module or a module file whose declaration compiles it only for Loom, names no other selected
@@ -680,15 +683,35 @@ def _local_path(path: tuple[str, ...]) -> tuple[str, ...]:
     return path
 
 
+# The paths the owner's own sources reach real atomics by: the libraries it selects from.
+OWNER_REAL_ATOMICS = (("std", "sync", "atomic"), ("core", "sync", "atomic"))
+
+
 @dataclass
 class AtomicNames:
-    """The local names one file binds to atomic types: selected ones, and real unmodeled ones."""
+    """The local names one file binds to atomic types: selected ones, and real unmodeled ones.
+
+    `owner` reads the file as a source of the boundary itself, which names its own paths through
+    `crate` and reaches real atomics through the standard library as well as through `unmodeled`."""
 
     selected: set[str] = field(default_factory=set)
     unmodeled: set[str] = field(default_factory=set)
+    owner: bool = False
+
+    def canonical(self, path: tuple[str, ...]) -> tuple[str, ...]:
+        """`path` as a consumer of the boundary would spell it."""
+
+        if not self.owner:
+            return path
+        if path[:1] == ("crate",):
+            return ("nervix_primitives",) + path[1:]
+        for real in OWNER_REAL_ATOMICS:
+            if path[: len(real)] == real:
+                return UNMODELED + path[len(real) :]
+        return path
 
     def bind(self, leaf: UseLeaf) -> None:
-        path = leaf.path
+        path = self.canonical(leaf.path)
         if len(path) == len(SELECTED) + 1 and path[: len(SELECTED)] == SELECTED:
             item = path[-1]
             if item == "*":
@@ -722,7 +745,7 @@ class AtomicNames:
         """Whether `path` names a selected atomic type. A bare type name is selected unless this
         file imports it only from the unmodeled path."""
 
-        segments = _segments(path)
+        segments = self.canonical(_segments(path))
         last = segments[-1]
         if len(segments) == 1:
             if last in self.selected:
@@ -838,10 +861,11 @@ def check_statics(file: RustFile, names: AtomicNames) -> list[Site]:
     violations: list[Site] = []
     code = file.code
     names.bind_aliases(code)
-    owner_hint = (
-        "give it an owner that lives exactly as long as its state, or make it a real atomic from "
-        f"{'::'.join(UNMODELED)} with a permission"
-    )
+    if names.owner:
+        real = "a real atomic from `crate::unmodeled::sync::atomic`"
+    else:
+        real = f"a real atomic from {'::'.join(UNMODELED)} with a permission"
+    owner_hint = f"give it an owner that lives exactly as long as its state, or make it {real}"
     for match in _STATIC_ITEM.finditer(code):
         name = match.group("name")
         type_end = _end_of_type(code, match.end())
@@ -1414,6 +1438,27 @@ def check_source(file: RustFile, loom_only_file: bool = False) -> tuple[list[Sit
     violations.extend(check_mode_cfgs(file))
     violations.extend(check_analysis_cfg(file))
     return violations, uses
+
+
+def check_owner_source(file: RustFile) -> list[Site]:
+    """Return the static violations of one of the owner's own sources.
+
+    The owner names every backend, so the import rules do not read it. A selected atomic in its
+    sources still belongs to the model execution that constructs it: a static of the owner holds
+    only real atomics, named through `unmodeled` or the standard library."""
+
+    violations: list[Site] = []
+    names = AtomicNames(owner=True)
+    for match in _USE_ITEM.finditer(file.code):
+        try:
+            leaves = use_leaves(match.group("tree"))
+        except UseTreeError as error:
+            violations.append(file.site(match.start(), f"{RULE}: {error}"))
+            continue
+        for leaf in leaves:
+            names.bind(leaf)
+    violations.extend(check_statics(file, names))
+    return violations
 
 
 def _end_of_group(code: str, start: int) -> int:
@@ -2203,9 +2248,13 @@ def check(root: Path) -> list[str]:
     guests = guest_directories(packages)
     governed: dict[str, RustFile] = {}
     for path in files:
-        if not path.endswith(".rs") or path.startswith(OWNER_SOURCES) or path.startswith(guests):
+        if not path.endswith(".rs") or path.startswith(guests):
             continue
-        governed[path] = RustFile(path, (root / path).read_text(encoding="utf-8"))
+        file = RustFile(path, (root / path).read_text(encoding="utf-8"))
+        if path.startswith(OWNER_SOURCES):
+            problems.extend(site.render() for site in check_owner_source(file))
+            continue
+        governed[path] = file
     loom_only = loom_only_files(governed)
     uses: dict[str, FileUses] = {}
     for path, file in governed.items():

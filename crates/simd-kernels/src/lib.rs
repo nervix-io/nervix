@@ -231,12 +231,17 @@ impl JsonEscapeClassification {
 mod tests {
     use meticulous::ResultExt as _;
 
-    use super::{JsonEscapeClassification, supported_levels};
+    use super::{EscapeOffsetError, JsonEscapeClassification, supported_levels};
+
+    /// Whether JSON escapes `byte` inside a string: a quote, a backslash or a control character.
+    fn escapable(byte: u8) -> bool {
+        matches!(byte, b'"' | b'\\') || byte < 0x20
+    }
 
     fn reference_masks(bytes: &[u8]) -> Vec<u64> {
         let mut masks = vec![0; bytes.len().div_ceil(64)];
         for (index, &byte) in bytes.iter().enumerate() {
-            if matches!(byte, b'"' | b'\\') || byte < 0x20 {
+            if escapable(byte) {
                 masks[index / 64] |= 1_u64 << (index % 64);
             }
         }
@@ -283,9 +288,7 @@ mod tests {
             for (row, bounds) in offsets.windows(2).enumerate() {
                 let start = usize::try_from(bounds[0]).assured("test offsets are nonnegative");
                 let end = usize::try_from(bounds[1]).assured("test offsets are nonnegative");
-                let expected = bytes[start..end]
-                    .iter()
-                    .any(|&byte| matches!(byte, b'"' | b'\\') || byte < 0x20);
+                let expected = bytes[start..end].iter().copied().any(escapable);
                 assert_eq!(
                     classified.row_needs_escape(row),
                     expected,
@@ -300,5 +303,153 @@ mod tests {
         for offsets in [&[][..], &[0, 3][..], &[0, -1][..], &[0, 2, 1][..]] {
             assert!(JsonEscapeClassification::new(b"ab", offsets).is_err());
         }
+    }
+
+    /// A generated string-values buffer with the offsets of its rows. Sparse buffers keep only
+    /// rare escapable bytes, so most 64-byte blocks are clean; dense ones keep every byte. A defect
+    /// replaces one offset with a value outside the buffer, before the previous offset, or removes
+    /// every offset.
+    #[derive(Debug, bolero::TypeGenerator)]
+    struct EscapeCase {
+        #[generator(bolero::generator::produce_with::<Vec<u8>>().len(0_usize..=1100))]
+        bytes: Vec<u8>,
+        sparse: bool,
+        cuts: Vec<u16>,
+        defect: Option<OffsetDefect>,
+    }
+
+    #[derive(Debug, bolero::TypeGenerator)]
+    enum OffsetDefect {
+        Empty,
+        Negative { index: u8, offset: u16 },
+        BeyondBuffer { index: u8, excess: u16 },
+        Backward { index: u8, step: u16 },
+    }
+
+    impl EscapeCase {
+        fn bytes(&self) -> Vec<u8> {
+            let mut bytes = Vec::with_capacity(self.bytes.len());
+            for byte in &self.bytes {
+                if !self.sparse || !escapable(*byte) {
+                    bytes.push(*byte);
+                } else if *byte == 0 {
+                    bytes.push(b'\\');
+                } else {
+                    bytes.push(b'x');
+                }
+            }
+            bytes
+        }
+
+        /// Ascending offsets inside the buffer, which need not start at zero or end at its length,
+        /// as a sliced Arrow string array's do.
+        fn offsets(&self, length: usize) -> Vec<i32> {
+            let modulus = u32::try_from(length).assured("generated buffers are small") + 1;
+            let mut offsets = Vec::with_capacity(self.cuts.len() + 1);
+            for cut in &self.cuts {
+                let offset = u32::from(*cut) % modulus;
+                offsets.push(i32::try_from(offset).assured("generated buffers are small"));
+            }
+            offsets.sort_unstable();
+            if offsets.is_empty() {
+                offsets.push(0);
+            }
+            offsets
+        }
+    }
+
+    impl OffsetDefect {
+        fn apply(&self, offsets: &mut Vec<i32>, length: usize) {
+            let length = i32::try_from(length).assured("generated buffers are small");
+            match self {
+                Self::Empty => offsets.clear(),
+                Self::Negative { index, offset } => {
+                    let index = usize::from(*index) % offsets.len();
+                    offsets[index] = -1 - i32::from(*offset);
+                }
+                Self::BeyondBuffer { index, excess } => {
+                    let index = usize::from(*index) % offsets.len();
+                    offsets[index] = length + 1 + i32::from(*excess);
+                }
+                Self::Backward { index, step } => {
+                    let index = usize::from(*index) % offsets.len();
+                    if index == 0 {
+                        offsets.insert(1, offsets[0] - 1 - i32::from(*step));
+                    } else {
+                        offsets[index] = offsets[index - 1] - 1 - i32::from(*step);
+                    }
+                }
+            }
+        }
+    }
+
+    /// The first defect of `offsets` in the order the classifier checks them: no offsets, then
+    /// for each offset in turn one outside the buffer or one moving backward.
+    fn reference_offset_error(offsets: &[i32], bytes: usize) -> Option<EscapeOffsetError> {
+        let Some(&first) = offsets.first() else {
+            return Some(EscapeOffsetError::Empty);
+        };
+        let mut previous = first;
+        for (index, &offset) in offsets.iter().enumerate() {
+            let inside = match usize::try_from(offset) {
+                Ok(position) => position <= bytes,
+                Err(_) => false,
+            };
+            if !inside {
+                return Some(EscapeOffsetError::Invalid {
+                    index,
+                    offset,
+                    bytes,
+                });
+            }
+            if offset < previous {
+                return Some(EscapeOffsetError::Descending {
+                    index,
+                    previous,
+                    offset,
+                });
+            }
+            previous = offset;
+        }
+        None
+    }
+
+    #[test]
+    fn bolero_json_escape_classification_matches_the_scalar_definition_at_every_level() {
+        bolero::check!()
+            .with_iterations(256)
+            .with_max_len(4096)
+            .with_type::<EscapeCase>()
+            .for_each(|case| {
+                let bytes = case.bytes();
+                let mut offsets = case.offsets(bytes.len());
+                if let Some(defect) = &case.defect {
+                    defect.apply(&mut offsets, bytes.len());
+                }
+                let refusal = reference_offset_error(&offsets, bytes.len());
+                let expected_masks = reference_masks(&bytes);
+                for level in supported_levels() {
+                    let classified =
+                        match JsonEscapeClassification::with_level(level, &bytes, &offsets) {
+                            Ok(classified) => classified,
+                            Err(report) => {
+                                assert_eq!(Some(report.current_context()), refusal.as_ref());
+                                continue;
+                            }
+                        };
+                    assert_eq!(refusal, None, "level={level:?}");
+                    assert_eq!(classified.byte_masks(), expected_masks, "level={level:?}");
+                    for (row, bounds) in offsets.windows(2).enumerate() {
+                        let start = usize::try_from(bounds[0]).assured("offsets were checked");
+                        let end = usize::try_from(bounds[1]).assured("offsets were checked");
+                        let expected = bytes[start..end].iter().copied().any(escapable);
+                        assert_eq!(
+                            classified.row_needs_escape(row),
+                            expected,
+                            "level={level:?} row={row}"
+                        );
+                    }
+                }
+            });
     }
 }
