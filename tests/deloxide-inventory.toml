@@ -1072,6 +1072,11 @@ workloads = [
 ]
 
 [[owner]]
+gap = "The listed node workloads reach the armed-fault mutex and sync-delay RwLock during durable writes. They do not arm StoragePause's blocking condition-variable wait and release or inject a nonzero sync delay; those fault effects are outside the registered lane workloads."
+path = "crates/consensus/src/storage_fault.rs"
+workloads = ["scenario.diagnostic-nodes", "stress.diagnostic-nodes"]
+
+[[owner]]
 path = "crates/interconnect/src/connection.rs"
 workloads = [
   "scenario.diagnostic-nodes",
@@ -1209,6 +1214,18 @@ workloads = [
   "scenario.diagnostic-server-processes",
   "stress.diagnostic-nodes",
   "stress.diagnostic-server-processes",
+]
+
+[[owner]]
+gap = "The listed workloads reach scheduling, drain and entity-gate timing RwLocks. The holders mutex in occupy_execution and release_execution is reached by ordinary bounded-execution and branch-state-room scenarios, which the lane's registered scenario selections do not include."
+path = "src/fault_injection.rs"
+workloads = [
+  "scenario.diagnostic-nodes",
+  "scenario.client-alter-drain",
+  "scenario.client-alter-rejection",
+  "stress.diagnostic-nodes",
+  "stress.client-alter-drain",
+  "stress.client-alter-rejection",
 ]
 
 [[owner]]

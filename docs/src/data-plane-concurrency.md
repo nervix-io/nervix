@@ -1805,8 +1805,12 @@ why, or both. `just validate-deloxide-applicability`, part of `just validate` an
 job, reads the acquisition catalog `just ratchet` writes and fails on an owner without a record and
 on a record whose file no longer acquires a tracked lock. It reports how many owners registered
 workloads reach and how many record a path the lane does not reach. The catalog is the compiler's
-resolution of the Deloxide adapters' operations, not a search for lock names. A record is a reviewed
-declaration: the lane's coverage report is evidence about it, not a proof of ownership. Format
+resolution of the Deloxide adapters' operations, not a search for lock names. Every diagnostic
+library and binary configuration enables `testing`, as the lane's server builds do, so acquisitions
+in testing-only fault controls require owner records too. This includes the server's scheduling,
+drain and executor-occupancy controls and the consensus storage fault controls. Ordinary and
+modeled configurations retain their own feature selections. A record is a reviewed declaration:
+the lane's coverage report is evidence about it, not a proof of ownership. Format
 equality, malformed and out-of-bounds rejection, normalized-cycle deduplication and the summary's
 counts are registered Bolero properties with the same assertion in ordinary and sanitizer execution.
 
