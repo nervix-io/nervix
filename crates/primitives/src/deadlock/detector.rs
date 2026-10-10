@@ -42,9 +42,9 @@ use super::{
     ActiveCycle, DiagnosticSelection, Finding, MAX_CYCLE_THREADS, MAX_ORDER_EDGES, OverflowSource,
     handoff::ReportHandoff, registry::Registry,
 };
-use crate::sync::{
-    Arc,
-    atomic::{AtomicBool, Ordering},
+use crate::{
+    sync::Arc,
+    unmodeled::sync::atomic::{AtomicBool, Ordering},
 };
 
 /// How many reports wait for the sink at most. The first active cycle normally ends a diagnostic
@@ -55,6 +55,8 @@ const FINDINGS_THREAD: &str = "nervix-deadlock-findings";
 
 /// Set by the first installation attempt, successful or not. Standalone flags: neither publishes
 /// any other state, which the detector, the queue and the thread handles synchronize themselves.
+/// They are process-wide diagnostic state, as the detector they describe is, so they are real
+/// atomics that no model execution constructs.
 static CLAIMED: AtomicBool = AtomicBool::new(false);
 static ORDER_ENABLED: AtomicBool = AtomicBool::new(false);
 
