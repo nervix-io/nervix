@@ -108,17 +108,20 @@ pub enum JsonWriteError {
     RowOutOfBounds { row: usize, rows: usize },
     #[error("JSON field '{field}' contains null at row {row}")]
     RequiredNull { field: String, row: usize },
-    #[error("failed to escape a JSON string: {source}")]
+    /// The escaped string could not be written. serde_json only writes here, so its failure is
+    /// the writer's own error, kept as that error rather than serde_json's copy of its text.
+    #[error("failed to escape a JSON string")]
     StringEscape {
         #[source]
-        source: serde_json::Error,
+        source: io::Error,
     },
-    #[error("failed to write a JSON number: {source}")]
+    /// The widened number could not be written, for the same reason as `StringEscape`.
+    #[error("failed to write a JSON number")]
     NumberWrite {
         #[source]
-        source: serde_json::Error,
+        source: io::Error,
     },
-    #[error("failed to write JSON bytes: {source}")]
+    #[error("failed to write JSON bytes")]
     Write {
         #[source]
         source: io::Error,
@@ -412,7 +415,11 @@ impl<'a> JsonColumn<'a> {
                         }
                         Float32Encoding::WidenedF64 => {
                             serde_json::to_writer(&mut *output, &f64::from(value)).map_err(
-                                |source| Report::new(JsonWriteError::NumberWrite { source }),
+                                |error| {
+                                    Report::new(JsonWriteError::NumberWrite {
+                                        source: io::Error::from(error),
+                                    })
+                                },
                             )?;
                         }
                     }
@@ -422,8 +429,11 @@ impl<'a> JsonColumn<'a> {
             Self::String { values, escapes } => {
                 let value = values.value(row);
                 if escapes.row_needs_escape(row) {
-                    serde_json::to_writer(&mut *output, value)
-                        .map_err(|source| Report::new(JsonWriteError::StringEscape { source }))?;
+                    serde_json::to_writer(&mut *output, value).map_err(|error| {
+                        Report::new(JsonWriteError::StringEscape {
+                            source: io::Error::from(error),
+                        })
+                    })?;
                 } else {
                     write_json_bytes!(output.write_all(b"\""));
                     write_json_bytes!(output.write_all(value.as_bytes()));
@@ -870,5 +880,70 @@ mod tests {
             unsupported.current_context(),
             JsonColumnError::Unsupported { .. }
         ));
+    }
+
+    /// A sink that takes `remaining` bytes and then refuses every later write.
+    struct RefusingWriter {
+        remaining: usize,
+    }
+
+    impl io::Write for RefusingWriter {
+        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+            if self.remaining == 0 {
+                return Err(io::Error::other("the sink refused more bytes"));
+            }
+            let taken = buf.len().min(self.remaining);
+            self.remaining = self
+                .remaining
+                .checked_sub(taken)
+                .assured("taken is at most the remaining capacity");
+            Ok(taken)
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn a_refused_write_names_the_sink_failure_once_in_the_rendered_chain() {
+        let text = batch(vec![(
+            "s",
+            StdArc::new(StringArray::from(vec!["plain", "quote \" inside"])),
+        )]);
+        let text_specs = [JsonColumnSpec::new("s", FieldNulls::Reject)];
+        let text_columns = JsonColumns::new(&text, &text_specs, NestedNulls::Reject)
+            .assured("string columns are supported");
+        let number = batch(vec![("f", StdArc::new(Float32Array::from(vec![1.5])))]);
+        let number_specs = [JsonColumnSpec::new("f", FieldNulls::Reject)
+            .with_float32_encoding(Float32Encoding::WidenedF64)];
+        let number_columns = JsonColumns::new(&number, &number_specs, NestedNulls::Reject)
+            .assured("float columns are supported");
+        // `{"s":` and `{"f":` are five bytes, so the sink refuses the value that follows them.
+        let refused_bytes = text_columns
+            .write_row(0, &mut RefusingWriter { remaining: 0 })
+            .err()
+            .assured("the sink takes no byte");
+        let refused_escape = text_columns
+            .write_row(1, &mut RefusingWriter { remaining: 5 })
+            .err()
+            .assured("the sink refuses the escaped string");
+        let refused_number = number_columns
+            .write_row(0, &mut RefusingWriter { remaining: 5 })
+            .err()
+            .assured("the sink refuses the widened number");
+
+        assert_eq!(
+            format!("{refused_bytes:#}"),
+            "failed to write JSON bytes: the sink refused more bytes"
+        );
+        assert_eq!(
+            format!("{refused_escape:#}"),
+            "failed to escape a JSON string: the sink refused more bytes"
+        );
+        assert_eq!(
+            format!("{refused_number:#}"),
+            "failed to write a JSON number: the sink refused more bytes"
+        );
     }
 }

@@ -406,9 +406,9 @@ Each domain therefore advances independently through three states:
 
 A WASM processor branch keeps the acknowledgements of its latest guest callback open until that
 callback's checkpoint reaches stable storage and every assigned replica, so a drain waits for the
-checkpoint as it waits for any other outstanding acknowledgement. The checkpoint's ten-second
-deadline bounds that wait: a checkpoint that cannot complete fails and negatively acknowledges what
-it held.
+checkpoint as it waits for any other outstanding acknowledgement. The checkpoint has a
+ninety-second completion deadline, while the drain timeout may end the node's wait sooner. A
+checkpoint that cannot complete fails and negatively acknowledges what it held.
 
 Runtime teardown gives each processor task a stop grace, and the processor task gives each of its
 branch tasks one of its own. A processor task still stopping its branches when its grace ends is

@@ -665,7 +665,7 @@ async fn select_subscription_rows(
                 Ok(record) => {
                     execute_subscription_predicate_on_record(executor, predicate, &record, now)
                         .await
-                        .map_err(|error| error.to_string())
+                        .map_err(|error| format!("{error:#}"))
                 }
                 Err(error) => Err(error.to_string()),
             };

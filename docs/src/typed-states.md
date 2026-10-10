@@ -47,6 +47,14 @@ identifier access and verifies offsets and counts before constructing owned valu
 
 ## Absence And Distinct States
 
+**Runtime checkpoint exchange.** A state synchronization answer uses `None` only when the
+requester already holds the owner's current revision. `Some` carries a typed revision, byte length
+and digest; zero-length checkpoint bytes remain a present checkpoint. The subsequent bulk request
+names that exact revision. The receiver verifies the declared and received lengths and digest
+before it constructs an installable state entry, so a partial stream is a transfer failure rather
+than a different absence or an empty checkpoint. A handoff carries the same descriptions beside
+their typed placements and prepares state only after each selected stream verifies.
+
 **Node trace export.** A tracing guard either has no trace export or owns its provider and resolver
 publication together. The publication carries `Option<DnsResolver>`: absence means startup has not
 installed the node resolver, and presence carries that same resolver's shared handle. A closed

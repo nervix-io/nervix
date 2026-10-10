@@ -15,7 +15,7 @@ use std::net::IpAddr;
 
 use aws_smithy_runtime_api::client::dns::{DnsFuture, ResolveDns, ResolveDnsError};
 
-use crate::DnsResolver;
+use crate::{DnsLookupReport, DnsResolver};
 
 impl ResolveDns for DnsResolver {
     fn resolve_dns<'a>(&'a self, name: &'a str) -> DnsFuture<'a> {
@@ -28,7 +28,7 @@ impl DnsResolver {
         let addresses = self
             .hook_addresses(name)
             .await
-            .map_err(|report| ResolveDnsError::new(report.current_context().clone()))?;
+            .map_err(|report| ResolveDnsError::new(DnsLookupReport::from(report)))?;
         Ok(addresses.into_iter().collect())
     }
 }

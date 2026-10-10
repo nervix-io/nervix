@@ -2,6 +2,7 @@ use std::{fs, path::Path};
 
 use nervix_benchmark::{
     BenchmarkComparison, BenchmarkRunFailure, BenchmarkSuiteReport, ComparisonError,
+    ImageIdentityError, LoadReportError, MetricsReportError,
 };
 
 fn write(path: &Path, contents: &str) {
@@ -331,7 +332,7 @@ fn rejects_a_successful_nervix_run_without_observed_metrics() {
     let error = BenchmarkComparison::from_run_directories(&[nervix])
         .expect_err("a successful Nervix run must include scraped metrics");
     assert!(matches!(
-        error,
+        error.current_context(),
         ComparisonError::MissingMetricsReport { .. }
     ));
 }
@@ -441,7 +442,7 @@ fn rejects_runs_with_different_workload_configuration() {
     let error = BenchmarkComparison::from_run_directories(&[nervix, vector])
         .expect_err("different partition counts must not compare");
     assert!(matches!(
-        error,
+        error.current_context(),
         ComparisonError::MismatchedConfiguration {
             field: "partitions",
             ..
@@ -469,7 +470,11 @@ fn rejects_a_successful_run_without_messages() {
 
     let error = BenchmarkComparison::from_run_directories(&[nervix])
         .expect_err("a run without measured messages must not compare");
-    assert!(matches!(error, ComparisonError::InvalidReport { .. }));
+    assert!(matches!(
+        error.current_context(),
+        ComparisonError::InvalidReport { .. }
+    ));
+    assert!(error.contains::<LoadReportError>());
 }
 
 #[test]
@@ -490,13 +495,24 @@ fn rejects_a_completion_tail_that_excludes_the_producer_flush() {
         },
     );
 
-    let error = BenchmarkComparison::from_run_directories(&[nervix])
+    let error = BenchmarkComparison::from_run_directories(std::slice::from_ref(&nervix))
         .expect_err("completion must include the measured producer flush");
     assert!(matches!(
-        error,
-        ComparisonError::InvalidReport { reason, .. }
-            if reason == "completion tail is shorter than producer flush"
+        error.current_context(),
+        ComparisonError::InvalidReport { path } if *path == nervix
     ));
+    assert!(matches!(
+        error.downcast_ref::<LoadReportError>(),
+        Some(LoadReportError::CompletionShorterThanFlush)
+    ));
+    assert_eq!(
+        format!("{error:#}"),
+        format!(
+            "benchmark run {} has an invalid load report: completion tail is shorter than \
+             producer flush",
+            nervix.display()
+        )
+    );
 }
 
 #[test]
@@ -519,5 +535,391 @@ fn rejects_a_run_that_missed_the_output_records_its_shape_expects() {
 
     let error = BenchmarkComparison::from_run_directories(&[nervix])
         .expect_err("a run short of its expected output records must not compare");
-    assert!(matches!(error, ComparisonError::InvalidReport { .. }));
+    assert!(matches!(
+        error.current_context(),
+        ComparisonError::InvalidReport { .. }
+    ));
+    assert!(matches!(
+        error.downcast_ref::<LoadReportError>(),
+        Some(LoadReportError::OutputParity {
+            expected: 13_500,
+            measured: 13_499
+        })
+    ));
+}
+
+#[test]
+fn names_a_run_directory_without_artifacts_and_keeps_the_read_failure() {
+    let artifacts = tempfile::tempdir().expect("temporary artifacts should be created");
+    let missing = artifacts.path().join("kafka-filter-map/nervix/never-ran");
+
+    let error = BenchmarkComparison::from_run_directories(std::slice::from_ref(&missing))
+        .expect_err("a run directory that was never written must not compare");
+
+    let status_path = missing.join("status.txt");
+    assert!(matches!(
+        error.current_context(),
+        ComparisonError::Read { path } if *path == status_path
+    ));
+    let cause = error
+        .downcast_ref::<std::io::Error>()
+        .expect("the read failure should stay beneath the artifact context");
+    assert_eq!(cause.kind(), std::io::ErrorKind::NotFound);
+    assert_eq!(
+        format!("{error:#}"),
+        format!(
+            "failed to read benchmark artifact {}: {cause}",
+            status_path.display()
+        )
+    );
+}
+
+#[test]
+fn names_the_line_of_an_image_identity_that_is_not_a_pair() {
+    let artifacts = tempfile::tempdir().expect("temporary artifacts should be created");
+    let nervix = write_run(
+        artifacts.path(),
+        Fixture {
+            implementation: "nervix",
+            image: "nervix:test",
+            input_messages: 36_000,
+            expected_output_records: 13_500,
+            output_records: 13_500,
+            end_to_end_rate: 1_200.0,
+            payload_rate: 0.16,
+            completion_seconds: 4.5,
+            peak_backlog: 512,
+        },
+    );
+    let image_path = nervix.join("image.txt");
+    write(&image_path, "image=nervix:test\ndigest\n");
+
+    let error = BenchmarkComparison::from_run_directories(&[nervix])
+        .expect_err("an image identity line without '=' must not compare");
+
+    assert!(matches!(
+        error.current_context(),
+        ComparisonError::InvalidImageIdentity { path } if *path == image_path
+    ));
+    assert!(matches!(
+        error.downcast_ref::<ImageIdentityError>(),
+        Some(ImageIdentityError::NotAPair { line }) if line == "digest"
+    ));
+    assert_eq!(
+        format!("{error:#}"),
+        format!(
+            "benchmark run {} has an invalid image identity: line 'digest' is not a name=value \
+             pair",
+            image_path.display()
+        )
+    );
+}
+
+fn valid_vector_run(root: &Path) -> std::path::PathBuf {
+    write_run(
+        root,
+        Fixture {
+            implementation: "vector",
+            image: "timberio/vector:0.57.0-debian",
+            input_messages: 36_000,
+            expected_output_records: 13_500,
+            output_records: 13_500,
+            end_to_end_rate: 1_200.0,
+            payload_rate: 0.16,
+            completion_seconds: 4.5,
+            peak_backlog: 512,
+        },
+    )
+}
+
+/// Rewrites the `key=value` line of a run's load report with `value`.
+fn set_report_value(run: &Path, key: &str, value: &str) {
+    let path = run.join("load-report.txt");
+    let report = fs::read_to_string(&path).expect("the fixture load report should exist");
+    let prefix = format!("{key}=");
+    let mut rewritten = String::new();
+    let mut replaced = false;
+    for line in report.lines() {
+        if line.starts_with(&prefix) {
+            rewritten.push_str(&format!("{key}={value}\n"));
+            replaced = true;
+        } else {
+            rewritten.push_str(line);
+            rewritten.push('\n');
+        }
+    }
+    assert!(replaced, "the fixture load report has no '{key}'");
+    write(&path, &rewritten);
+}
+
+#[test]
+fn names_every_load_report_property_a_run_violates() {
+    let cases = [
+        (
+            "producer_flush_seconds",
+            "-1.0",
+            "producer_flush_seconds must be finite and non-negative",
+        ),
+        (
+            "generation_seconds",
+            "0.0",
+            "generation and end-to-end durations must be positive",
+        ),
+        (
+            "end_to_end_seconds",
+            "30.0",
+            "generation plus completion exceeds end-to-end duration",
+        ),
+        (
+            "target_duration_seconds",
+            "31.0",
+            "target duration does not match run.toml",
+        ),
+        (
+            "warmup_target_seconds",
+            "11.0",
+            "warm-up target does not match run.toml",
+        ),
+        (
+            "warmup_generation_seconds",
+            "9.0",
+            "warm-up generation ended before its target duration",
+        ),
+        (
+            "warmup_messages",
+            "0",
+            "a successful benchmark must warm up with at least one message",
+        ),
+        ("partitions", "8", "partition count does not match run.toml"),
+        (
+            "max_backlog_messages",
+            "2048",
+            "backlog cap does not match run.toml",
+        ),
+        (
+            "peak_backlog_messages",
+            "5000",
+            "peak backlog exceeds its configured cap",
+        ),
+        (
+            "backlog_messages_at_generation_end",
+            "600",
+            "backlog after generation exceeds observed peak",
+        ),
+        (
+            "backlog_messages_at_flush",
+            "1",
+            "backlog increased after producer flush",
+        ),
+        (
+            "end_to_end_messages_per_second",
+            "0.0",
+            "end-to-end message rate must be positive",
+        ),
+        (
+            "expected_output_records",
+            "0",
+            "a successful benchmark must expect at least one output record",
+        ),
+        (
+            "wire_bytes_per_message",
+            "0",
+            "wire message size must be positive",
+        ),
+    ];
+
+    for (key, value, expected) in cases {
+        let artifacts = tempfile::tempdir().expect("temporary artifacts should be created");
+        let run = valid_vector_run(artifacts.path());
+        set_report_value(&run, key, value);
+
+        let error = BenchmarkComparison::from_run_directories(std::slice::from_ref(&run))
+            .expect_err("the violated load report must not compare");
+
+        assert!(
+            matches!(
+                error.current_context(),
+                ComparisonError::InvalidReport { path } if *path == run
+            ),
+            "{key}: {error:?}"
+        );
+        let violation = error
+            .downcast_ref::<LoadReportError>()
+            .expect("the violated property should be beneath the run");
+        assert_eq!(violation.to_string(), expected, "{key}");
+    }
+}
+
+#[test]
+fn refuses_a_run_manifest_without_subject_nodes() {
+    let artifacts = tempfile::tempdir().expect("temporary artifacts should be created");
+    let run = valid_vector_run(artifacts.path());
+    let manifest_path = run.join("run.toml");
+    let manifest = fs::read_to_string(&manifest_path).expect("fixture manifest should exist");
+    write(
+        &manifest_path,
+        &manifest.replace("subject_nodes = 1", "subject_nodes = 0"),
+    );
+
+    let error = BenchmarkComparison::from_run_directories(&[run])
+        .expect_err("a run without subject nodes must not compare");
+
+    assert!(matches!(
+        error.downcast_ref::<LoadReportError>(),
+        Some(LoadReportError::NoSubjectNodes)
+    ));
+}
+
+#[test]
+fn refuses_two_runs_of_one_implementation_for_one_benchmark() {
+    let first = tempfile::tempdir().expect("temporary artifacts should be created");
+    let second = tempfile::tempdir().expect("temporary artifacts should be created");
+    let runs = [
+        valid_vector_run(first.path()),
+        valid_vector_run(second.path()),
+    ];
+
+    let error = BenchmarkComparison::from_run_directories(&runs)
+        .expect_err("duplicate implementations must not compare");
+
+    assert!(matches!(
+        error.current_context(),
+        ComparisonError::DuplicateImplementation { benchmark, implementation }
+            if benchmark == "kafka-filter-map" && implementation == "vector"
+    ));
+}
+
+#[test]
+fn refuses_to_compare_or_report_nothing() {
+    let error = BenchmarkComparison::from_run_directories(&[])
+        .expect_err("no run directories leave nothing to compare");
+    assert!(matches!(error.current_context(), ComparisonError::Empty));
+
+    let error = BenchmarkSuiteReport::from_run_directories(&[], Vec::new())
+        .expect_err("no runs and no failures leave nothing to report");
+    assert!(matches!(error.current_context(), ComparisonError::Empty));
+}
+
+#[test]
+fn writes_comparisons_and_names_the_path_it_cannot_write() {
+    let artifacts = tempfile::tempdir().expect("temporary artifacts should be created");
+    let run = valid_vector_run(artifacts.path());
+    let comparison = BenchmarkComparison::from_run_directories(std::slice::from_ref(&run))
+        .expect("a valid run should compare");
+    let suite = BenchmarkSuiteReport::from_run_directories(
+        &[run],
+        vec![BenchmarkRunFailure::new(
+            "kafka-dedup-window",
+            "vector",
+            "subject exited before parity",
+        )],
+    )
+    .expect("a run and a failure should report");
+
+    let written = artifacts.path().join("benchmark-comparison.md");
+    comparison
+        .write_markdown(&written)
+        .expect("the comparison should be written");
+    assert_eq!(
+        fs::read_to_string(&written).expect("the written comparison should be readable"),
+        comparison.render_markdown()
+    );
+    suite
+        .write_markdown(&written)
+        .expect("the suite report should be written");
+    assert_eq!(
+        fs::read_to_string(&written).expect("the written report should be readable"),
+        suite.render_markdown()
+    );
+
+    let unwritable = artifacts
+        .path()
+        .join("absent-directory/benchmark-comparison.md");
+    for error in [
+        comparison
+            .write_markdown(&unwritable)
+            .expect_err("a comparison cannot be written below a missing directory"),
+        suite
+            .write_markdown(&unwritable)
+            .expect_err("a suite report cannot be written below a missing directory"),
+    ] {
+        assert!(matches!(
+            error.current_context(),
+            ComparisonError::Write { path } if *path == unwritable
+        ));
+        assert!(error.contains::<std::io::Error>());
+    }
+}
+
+#[test]
+fn names_the_image_identity_fields_a_run_lacks_or_repeats() {
+    for (identity, expected) in [
+        (
+            "image=nervix:test\nid=sha256:a\nid=sha256:b\n",
+            "unexpected or duplicate field 'id'",
+        ),
+        ("image=nervix:test\n", "both image and id are required"),
+    ] {
+        let artifacts = tempfile::tempdir().expect("temporary artifacts should be created");
+        let run = valid_vector_run(artifacts.path());
+        write(&run.join("image.txt"), identity);
+
+        let error = BenchmarkComparison::from_run_directories(&[run])
+            .expect_err("an invalid image identity must not compare");
+
+        let issue = error
+            .downcast_ref::<ImageIdentityError>()
+            .expect("the identity issue should be beneath the run");
+        assert_eq!(issue.to_string(), expected);
+    }
+}
+
+#[test]
+fn keeps_the_metrics_report_failure_beneath_a_nervix_run() {
+    let artifacts = tempfile::tempdir().expect("temporary artifacts should be created");
+    let nervix = write_run(
+        artifacts.path(),
+        Fixture {
+            implementation: "nervix",
+            image: "nervix:test",
+            input_messages: 36_000,
+            expected_output_records: 13_500,
+            output_records: 13_500,
+            end_to_end_rate: 1_200.0,
+            payload_rate: 0.16,
+            completion_seconds: 4.5,
+            peak_backlog: 512,
+        },
+    );
+    let metrics_path = nervix.join("nervix-metrics.toml");
+    write(&metrics_path, "batch_targets = 7\n");
+
+    let error = BenchmarkComparison::from_run_directories(&[nervix])
+        .expect_err("an unreadable metrics report must not compare");
+
+    assert!(matches!(
+        error.current_context(),
+        ComparisonError::MetricsReport { path } if *path == metrics_path
+    ));
+    assert!(matches!(
+        error.downcast_ref::<MetricsReportError>(),
+        Some(MetricsReportError::Parse { .. })
+    ));
+}
+
+#[test]
+fn names_a_run_manifest_that_is_not_toml() {
+    let artifacts = tempfile::tempdir().expect("temporary artifacts should be created");
+    let run = valid_vector_run(artifacts.path());
+    let manifest_path = run.join("run.toml");
+    write(&manifest_path, "benchmark = [\n");
+
+    let error = BenchmarkComparison::from_run_directories(&[run])
+        .expect_err("a run manifest that is not TOML must not compare");
+
+    assert!(matches!(
+        error.current_context(),
+        ComparisonError::ParseManifest { path } if *path == manifest_path
+    ));
+    assert!(error.contains::<toml::de::Error>());
 }

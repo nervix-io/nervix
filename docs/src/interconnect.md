@@ -127,9 +127,9 @@ The standard pool layout is:
 | --- | --- | ---: | ---: | --- |
 | Management | Membership, health, consensus control, clock progress, relay progress and outcomes | 1 | 64 | Preconnected |
 | Commands | Control-plane and runtime requests | 1 | 32 | Preconnected |
-| Replication | Consensus log entries, runtime-state replication, ownership handoff | 1 | 8 | Preconnected |
+| Replication | Consensus log entries, runtime-state descriptions and acknowledgements, ownership handoff control | 1 | 8 | Preconnected |
 | Relay | Arrow record batches | 2 | 64 each | Preconnected |
-| Bulk | Resources, runtime snapshots, consensus snapshots | 1 | 4 | On demand |
+| Bulk | Resources, runtime checkpoints and snapshots, consensus snapshots | 1 | 4 | On demand |
 
 A peer is transport-ready only after all five preconnected outbound connections are live. Bulk
 traffic does not delay readiness; its connection is opened when needed. The two relay connections
@@ -926,7 +926,8 @@ Consensus separates traffic according to the progress it protects:
 - heartbeats, pre-votes, votes, leadership notifications, linearizable runtime-admission reads,
   and other small control exchanges use management capacity
 - each leader-to-follower log uses one ordered duplex stream on the replication pool
-- runtime-state replication and ownership handoff use the remaining replication capacity
+- runtime-state descriptions, catalog listings, acknowledgements and ownership handoff control use
+  the remaining replication capacity; checkpoint bodies use the bulk pool's Snapshot subquota
 - consensus snapshots use the snapshot reservation on the bulk pool
 
 The ordered append stream can keep multiple batches in flight while preserving follower order. Its
@@ -1121,7 +1122,7 @@ stable storage acknowledges nothing. The owner of a WASM processor branch releas
 acknowledgements a guest checkpoint covers only once every replica the committed schedule assigns
 has acknowledged that checkpoint's revision; a replica that is unreachable, lagging, or failing to
 install stops those acknowledgements from being released rather than letting them through, and the
-checkpoint fails after its ten-second deadline. The owner announces a WASM processor's new branch to
+checkpoint fails after its ninety-second deadline. The owner announces a WASM processor's new branch to
 its replicas as soon as the branch appears. Every catch-up round of a replica synchronizes the
 owner's branch lifecycle before it installs any branch checkpoint, and the replica refuses a
 checkpoint of a branch that lifecycle does not name, as for a branch the owner has evicted.
@@ -1129,12 +1130,19 @@ checkpoint of a branch that lifecycle does not name, as for a branch the owner h
 acknowledgements complete.
 
 A replica catches the branch-keyed entities it replicates up in rounds, one replica task for each
-entity, through two replication-class requests. A state synchronization request names one placement
-and the revision the replica holds of it. The owner answers through the actual state handle
-published when that placement was installed: with the checkpoint when it is newer, and with
-nothing otherwise. Only for
-a placement it holds no state for does the owner read its storage. A branch checkpoint listing
-request names the entity's branch lifecycle placement and the cursor the replica's previous listing
+entity, through two replication-class request kinds and, when a checkpoint advanced, a bulk stream.
+A state synchronization request names one placement and the revision the replica holds of it. The
+owner answers through the actual state handle published when that placement was installed: with
+the newer checkpoint's revision, length and BLAKE3 digest, or with nothing when it is current.
+The owner reads storage only when it holds no live state for the placement. The replica opens a
+Snapshot-subquota bulk stream for the described revision; the owner refuses a revision it no longer
+holds. Chunks are at most the configured bulk chunk size (64 KiB by default). Each side admits the
+whole captured or received allocation against `restore_metadata`, up to a 256 MiB checkpoint
+transfer bound. The replica checks the stream's declared length, received length and digest before
+the checkpoint can reach its assignment-fenced installation and stable-storage acknowledgement.
+Debug events name the placement, revision and declared length when streaming and after verification,
+without logging checkpoint bytes. A branch checkpoint listing request names the entity's branch
+lifecycle placement and the cursor the replica's previous listing
 returned. The owner answers with the next changes of its catalog of the entity's branch
 checkpoints, in the order they happened and at most 256 of them: each branch whose checkpoint
 changed, with the state that checkpoint belongs to and its newest revision, and each branch whose
@@ -1151,8 +1159,9 @@ round synchronizes the lifecycle, reads the catalog's changes, and requests only
 the branches that changed or were announced, so a round in which no branch changed sends two
 requests however many branches the entity has.
 
-Checkpoint synchronization and catalog listing each use their operation's five-second deadline,
-including admission, connection capacity, the answer and decoding. The one-second replication poll
+Checkpoint descriptions and catalog listings each use their operation's five-second deadline,
+including admission, connection capacity, the answer and decoding. A selected checkpoint's bulk
+stream has a sixty-second progress deadline. The one-second replication poll
 interval schedules the next idle round; it does not shorten an in-flight request's deadline. A
 branch-aggregated replica uses the same checkpoint operation deadline. Polls and announcements retry
 a failed exchange, while the owner's checkpoint completion deadline remains independent and may
@@ -1234,6 +1243,20 @@ replacement fences a retained poll's acknowledgement as well as its delayed inst
 Debug checkpoint events identify encoding, receive and installation boundaries by placement and
 revision, with declared byte length once known. Their timestamps distinguish encoding, transfer
 and conversion delays without logging checkpoint payloads or partition offsets.
+
+Ownership handoff capture returns the same checkpoint descriptions as a bounded control response.
+The destination fetches each exact revision from the source over the Snapshot bulk subquota before
+validating its state and publishing the prepared handoff. A failed, truncated, superseded or
+digest-mismatched fetch fails preparation without installing a partial checkpoint. The source
+serves a handoff fetch from the exact checkpoint capture persisted in its state store, or from
+the retained committed WASM checkpoint. An ordinary replica fetch selects the published state
+handle. A committed WASM save is already on stable storage before capture, even when a newer
+published save is waiting for replicas. Capture
+describes and releases each WASM branch save before reading the next branch, so its control
+inventory retains descriptors rather than every guest save allocation. Other state kinds complete
+their existing persistence steps before description. No checkpoint body enters a
+replication-class message. Preparation retains its verified checkpoint set until activation, so
+the destination's total held bytes still grow with the number and size of the entity's branches.
 
 Runtime-state synchronization replies and materialized-snapshot descriptions carry the shared
 typed remote-operation failure envelope. Rejection, absence, temporary unreadiness, and execution

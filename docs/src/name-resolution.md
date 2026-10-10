@@ -260,11 +260,18 @@ With a search list, the failure is the outcome of the last name that was asked, 
 still names the host as written. The error carries the host and the resolver's own description of
 the failure, and nothing from a request, a record or a credential.
 
-A client library that resolved through a hook receives the `DnsLookupError` itself as the failure of
-its lookup and keeps it among the causes of its own connection error, however many errors of its
-own it wraps around it. `DnsLookupError::find_in` finds it there again, including through the
-`Arc` and `std::io::Error` wrappers Redis places around its causes, so a connector can keep the
-typed lookup failure beneath its own context. Which paths do so is listed under
+A client library that resolved through a hook receives the lookup's whole report as the failure of
+its lookup. Every hook's trait accepts only a standard error, and an `error_stack::Report` is not
+one, so the report crosses that boundary inside a `DnsLookupReport`: Hyper's resolver service
+takes any error that converts into a boxed standard error, Reqwest's hooks take a boxed standard
+error, Smithy's a `ResolveDnsError`, and the MQTT and Redis dialers an `std::io::Error`. The library
+keeps it among the causes of its own connection error, however many errors of its own it wraps
+around it. It shows the lookup's own message, so a library that renders its causes names the
+failure once, and its `Debug` form keeps what the lookup recorded beneath its failure: the name
+servers' own answer, or the budget that ran out. `DnsLookupReport::find_in` finds the report there
+again, and `DnsLookupError::find_in` the typed failure in it, including through the `Arc` and
+`std::io::Error` wrappers Redis places around its causes, so a connector can keep the typed lookup
+failure beneath its own context. Which paths do so is listed under
 [Operator Diagnostics](#operator-diagnostics).
 
 ## Where Nervix Resolves
@@ -523,7 +530,7 @@ moved it, and each test and scenario by name.
 
 | Evidence | Command | What it establishes | What it does not |
 | --- | --- | --- | --- |
-| The resolver's own checks against an in-process DNS authority | `just test-dns` | Literal and hosts-file answers without a question; search completion and fully qualified names; IPv4-first dual-stack answers; positive and negative TTL reuse and expiry; missing names, empty answers, refusals and invalid names as distinct failures; a silent server ended by the budget and, sooner, by the configured `timeout` and `attempts`; lookups beyond 64 waiting and freed by cancellation; a resolver rebuilt and torn down with its runtime; the configuration grammar and its rejections; both Reqwest hooks, the Hyper connector and the Smithy hook dialling a later answer, keeping the URL authority, following a redirect, reconnecting after TTL expiry, being cancelled by a request timeout, and keeping the typed failure as a cause | The authority answers over UDP only, so truncation and DNS over TCP, a name server that cannot be reached, and the order in which several servers are asked are not exercised |
+| The resolver's own checks against an in-process DNS authority | `just test-dns` | Literal and hosts-file answers without a question; search completion and fully qualified names; IPv4-first dual-stack answers; positive and negative TTL reuse and expiry; missing names, empty answers, refusals and invalid names as distinct failures; a silent server ended by the budget and, sooner, by the configured `timeout` and `attempts`; lookups beyond 64 waiting and freed by cancellation; a resolver rebuilt and torn down with its runtime; the configuration grammar and its rejections; both Reqwest hooks, the Hyper connector and the Smithy hook dialling a later answer, keeping the URL authority, following a redirect, reconnecting after TTL expiry, being cancelled by a request timeout, and keeping the typed failure and the lookup's whole report as a cause | The authority answers over UDP only, so truncation and DNS over TCP, a name server that cannot be reached, and the order in which several servers are asked are not exercised |
 | Connector and client unit checks | `just test-package-lib <package>` | Each dialling connector's ordered attempts, the time an unresponsive address leaves for the next, literal addresses without a lookup, typed lookup failures beneath the connector's error, TLS failures and budgets; the native client's ordered answers, deadline and typed failure; SigV4 headers naming the configured host | Behavior through a whole node |
 | Public scenarios | `just test-scenarios --input <feature>` | Nodes whose resolver asks the harness's DNS authority, described in [DNS Authorities](./integration-test-lifecycle.md#dns-authorities), on one- and three-node clusters, with topology-specific cases on three: cluster formation through names and IPv6 literals, hosts-file and single-label names, a peer followed to a new address after its name stopped resolving, a stopped leader rejoining through its advertised name, and a recovered voter restoring quorum while its bootstrap name does not resolve; every migrated connector over plain and TLS transports through a fixture name; certificates checked against the configured host; outages answered as a missing name, no address or silence, with offsets held and delivery after recovery; changed answers followed after a restart; the CLI and a client's named seeds | Resolution through a real recursive resolver, and redirects to a named session endpoint, because every advertised client endpoint in the harness is a literal address |
 | The Turmoil simulation | `just test-turmoil` | The production transport resolving peer names through the simulated table on every connection, deterministically and under replay | Anything about Hickory, which the simulation never constructs |
