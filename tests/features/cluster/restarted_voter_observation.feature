@@ -1,6 +1,7 @@
 @restarted_voter_observation
 Feature: Restarted voter observation before automatic failover
 
+  @deloxide_stress
   Scenario: A voter first heard through a relayed heartbeat keeps its ownership after cluster restart
     Given the production sticky scheduler is configured
     And a 3 node nervix cluster is started
