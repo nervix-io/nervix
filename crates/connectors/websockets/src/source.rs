@@ -250,7 +250,9 @@ impl SourceConnector for WebsocketSource {
                 .run(&mut relay, &sink)
                 .await
                 .map_err(|error| {
-                    let reason = error.current_context().to_string();
+                    // A frame the peer could not take or send keeps the transport error beneath
+                    // the signaling context, so the reason is the whole chain.
+                    let reason = format!("{error:#}");
                     error
                         .change_context(SourceError::Resume {
                             connector: WEBSOCKETS,
@@ -372,7 +374,7 @@ mod tests {
             let hosts_file = files.path().join("hosts");
             std::fs::write(
                 &resolver_configuration,
-                "options ndots:1 timeout:1 attempts:1\n",
+                "search --\noptions ndots:1 timeout:1 attempts:1\n",
             )
             .assured("the fixture resolver configuration can be written");
             std::fs::write(&hosts_file, "").assured("the fixture hosts file can be written");

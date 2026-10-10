@@ -688,13 +688,13 @@ pub enum RuntimeError {
         operation: &'static str,
         limit: CollectionLimit,
     },
-    #[error("{operation} Arrow kernel failed: {source}")]
+    #[error("{operation} Arrow kernel failed")]
     CollectionArrow {
         operation: &'static str,
         #[source]
         source: ArrowError,
     },
-    #[error("{operation} Arrow string kernel failed: {source}")]
+    #[error("{operation} Arrow string kernel failed")]
     TextKernel {
         operation: &'static str,
         #[source]

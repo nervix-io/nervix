@@ -470,7 +470,7 @@ mod tests {
             let hosts_file = files.path().join("hosts");
             std::fs::write(
                 &resolver_configuration,
-                "options ndots:1 timeout:1 attempts:1\n",
+                "search --\noptions ndots:1 timeout:1 attempts:1\n",
             )
             .assured("the fixture resolver configuration can be written");
             std::fs::write(&hosts_file, hosts).assured("the fixture hosts file can be written");

@@ -49,29 +49,29 @@ pub struct SentrySink {
 /// Why one record's payload is not a Sentry event this sink can send.
 #[derive(Debug, Error)]
 enum SentryEventError {
-    #[error("Sentry codec payload is not a valid event JSON object: {source}")]
+    #[error("Sentry codec payload is not a valid event JSON object")]
     EventJson {
         #[source]
         source: serde_json::Error,
     },
-    #[error("Sentry codec payload is not a valid event: {source}")]
+    #[error("Sentry codec payload is not a valid event")]
     Event {
         #[source]
         source: serde_json::Error,
     },
-    #[error("failed to serialize Sentry event: {source}")]
+    #[error("failed to serialize Sentry event")]
     SerializeEvent {
         #[source]
         source: serde_json::Error,
     },
     #[error("encoded Sentry event is {size} bytes; maximum is {maximum}")]
     OversizedEvent { size: usize, maximum: usize },
-    #[error("failed to serialize Sentry envelope header: {source}")]
+    #[error("failed to serialize Sentry envelope header")]
     SerializeEnvelopeHeader {
         #[source]
         source: serde_json::Error,
     },
-    #[error("failed to serialize Sentry envelope item header: {source}")]
+    #[error("failed to serialize Sentry envelope item header")]
     SerializeItemHeader {
         #[source]
         source: serde_json::Error,
@@ -252,7 +252,9 @@ impl RecordSink for SentrySink {
             let body = match Self::encode_envelope(&record.payload, record.occurred_at) {
                 Ok(body) => body,
                 Err(error) => {
-                    outcome.reject(record.rejected(error.current_context().to_string()));
+                    // A payload that does not parse keeps its parser's error as the frame beneath
+                    // the context, so the reason is the whole chain.
+                    outcome.reject(record.rejected(format!("{error:#}")));
                     continue;
                 }
             };
@@ -368,6 +370,29 @@ mod tests {
         assert!(
             event.contains(r#""reading":1.4000000000000001"#),
             "the event keeps its number: {event}"
+        );
+    }
+
+    #[test]
+    fn a_payload_that_is_not_an_event_names_its_parser_error_once() {
+        let occurred_at = Timestamp::from_unix_nanos(946_684_800_000_000_000);
+        let not_json = SentrySink::encode_envelope(b"not json", occurred_at)
+            .expect_err("text that is not JSON is not an event");
+        let json_cause =
+            serde_json::from_slice::<serde_json::Map<String, serde_json::Value>>(b"not json")
+                .expect_err("text that is not JSON does not parse");
+        let wrong_level = SentrySink::encode_envelope(br#"{"level":5}"#, occurred_at)
+            .expect_err("a numeric level is not a Sentry level");
+        let event_cause = serde_json::from_value::<Event<'static>>(serde_json::json!({"level": 5}))
+            .expect_err("a numeric level does not read as an event");
+
+        assert_eq!(
+            format!("{not_json:#}"),
+            format!("Sentry codec payload is not a valid event JSON object: {json_cause}")
+        );
+        assert_eq!(
+            format!("{wrong_level:#}"),
+            format!("Sentry codec payload is not a valid event: {event_cause}")
         );
     }
 
