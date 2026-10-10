@@ -648,10 +648,14 @@ just release-evidence <pull-request>
 The gate reads the pull request's head revision, its labels and every check run GitHub recorded on
 that revision. It refuses the revision when a method's label is missing, so CI never ran it; when
 the latest run of a required check, or of any shard of a sharded one, is missing, still running,
-skipped, cancelled, timed out or failed; and while an owner of tracked locks in
-`tests/deloxide-inventory.toml` records a gap instead of workloads that reach its locks. A rerun of
-a failed job supersedes the run it repeats; a passing rerun of a nondeterministic failure still
-needs the failure's own investigation, which the gate cannot see. The register of every check's
+skipped, cancelled, timed out or failed. The register also lists every gap an owner of tracked
+locks declares in `tests/deloxide-inventory.toml`, the path the diagnostic lane does not reach and
+why. A declared gap is a reviewed declaration the Deloxide rule permits, so it does not refuse the
+revision: `just validate-deloxide-applicability`, part of the required `checks` job, holds the
+records to the compiler's acquisition catalog, and the register shows each declared limit of the
+diagnostic evidence to whoever qualifies the release. A rerun of a failed job supersedes the run it
+repeats; a passing rerun of a nondeterministic failure still needs the failure's own investigation,
+which the gate cannot see. The register of every check's
 verdict, run and time goes to `target/release-evidence/<revision>/` and belongs on the task that
 qualifies the revision, not in the repository. `just test-release-evidence` exercises the gate on
 recorded check runs and reads the Deloxide lane and release image matrices from the workflows, so

@@ -5,7 +5,6 @@ from __future__ import annotations
 import io
 import json
 import re
-import shutil
 import tempfile
 import unittest
 from collections.abc import Sequence
@@ -14,7 +13,7 @@ from pathlib import Path
 from unittest import mock
 
 from scripts import release_evidence
-from scripts.release_evidence import CheckRun, EvidenceError, Method
+from scripts.release_evidence import CheckRun, EvidenceError, Method, OwnerGap
 
 ROOT = Path(__file__).resolve().parents[2]
 REVISION = "0123456789abcdef0123456789abcdef01234567"
@@ -27,6 +26,23 @@ def workflow_job(workflow: str, job: str) -> str:
     end = re.compile(r"^  [A-Za-z0-9_-]+:$", re.M).search(workflow, start.end())
     return workflow[start.end() : end.start() if end else len(workflow)]
 
+
+DELOXIDE_OWNERS = """
+[[owner]]
+path = "src/a.rs"
+workloads = ["probe.one"]
+"""
+
+DELOXIDE_OWNERS_WITH_GAP = """
+[[owner]]
+path = "src/b.rs"
+gap = "  The lane reaches its locks but not its restart path.  "
+workloads = ["probe.one"]
+
+[[owner]]
+path = "src/a.rs"
+workloads = ["probe.one"]
+"""
 
 SMALL_INVENTORY = """
 [[method]]
@@ -145,22 +161,22 @@ class InventoryTests(unittest.TestCase):
                 with self.assertRaisesRegex(EvidenceError, message):
                     release_evidence.parse_inventory(text)
 
-    def test_owner_records_with_a_gap_are_unresolved_compliance(self) -> None:
-        text = """
-[[owner]]
-path = "src/b.rs"
-gap = "the lane does not reach its restart path"
-
-[[owner]]
-path = "src/a.rs"
-workloads = ["probe.one"]
-"""
-        self.assertEqual(release_evidence.owner_gaps(text), ("src/b.rs",))
-        self.assertEqual(release_evidence.owner_gaps((ROOT / release_evidence.DELOXIDE_INVENTORY).read_text()), ())
+    def test_owner_records_declare_their_gaps_with_reasons(self) -> None:
+        self.assertEqual(
+            release_evidence.owner_gaps(DELOXIDE_OWNERS_WITH_GAP),
+            (OwnerGap("src/b.rs", "The lane reaches its locks but not its restart path."),),
+        )
+        self.assertEqual(release_evidence.owner_gaps(DELOXIDE_OWNERS), ())
+        declared = release_evidence.owner_gaps((ROOT / release_evidence.DELOXIDE_INVENTORY).read_text())
+        self.assertEqual([gap.path for gap in declared], sorted({gap.path for gap in declared}))
         with self.assertRaisesRegex(EvidenceError, "names no path"):
             release_evidence.owner_gaps("[[owner]]\nworkloads = []\n")
         with self.assertRaisesRegex(EvidenceError, "not a list of tables"):
             release_evidence.owner_gaps("owner = 1\n")
+        for reason in ('""', '"  "', "1"):
+            with self.subTest(reason=reason):
+                with self.assertRaisesRegex(EvidenceError, "declares a gap without its reason"):
+                    release_evidence.owner_gaps(f'[[owner]]\npath = "src/c.rs"\ngap = {reason}\n')
 
 
 class JudgementTests(unittest.TestCase):
@@ -176,15 +192,12 @@ class JudgementTests(unittest.TestCase):
             run("loom-qualification (2 of 2)", identity=5),
         ]
 
-    def judge(self, entries: Sequence[dict[str, object]], labels: frozenset[str] = frozenset({"loom"}),
-              gaps: Sequence[str] = ()) -> list[str]:
-        _, problems = release_evidence.judge(self.methods, labels, runs(*entries), gaps)
+    def judge(self, entries: Sequence[dict[str, object]], labels: frozenset[str] = frozenset({"loom"})) -> list[str]:
+        _, problems = release_evidence.judge(self.methods, labels, runs(*entries))
         return problems
 
     def test_complete_evidence_qualifies(self) -> None:
-        requirements, problems = release_evidence.judge(
-            self.methods, frozenset({"loom"}), runs(*self.complete()), ()
-        )
+        requirements, problems = release_evidence.judge(self.methods, frozenset({"loom"}), runs(*self.complete()))
         self.assertEqual(problems, [])
         self.assertEqual(
             [requirement.check for requirement in requirements],
@@ -243,12 +256,6 @@ class JudgementTests(unittest.TestCase):
         entries[4] = run("loom-qualification (2 of 2)", conclusion="failure", identity=5)
         self.assertEqual(self.judge(entries), ["loom: `loom-qualification (2 of 2)`: its latest run is failure"])
 
-    def test_owner_gaps_refuse_the_revision(self) -> None:
-        self.assertEqual(
-            self.judge(self.complete(), gaps=("src/a.rs",)),
-            ["compliance: the tracked-lock owner src/a.rs records a path the diagnostic lane does not reach"],
-        )
-
     def test_malformed_check_runs_are_refused(self) -> None:
         with self.assertRaisesRegex(EvidenceError, "no check_runs list"):
             release_evidence.parse_check_runs([{}])
@@ -283,7 +290,7 @@ class CheckCommandTests(unittest.TestCase):
         self.root = Path(directory.name)
         (self.root / "tests").mkdir()
         (self.root / release_evidence.INVENTORY).write_text(SMALL_INVENTORY)
-        shutil.copy(ROOT / release_evidence.DELOXIDE_INVENTORY, self.root / release_evidence.DELOXIDE_INVENTORY)
+        (self.root / release_evidence.DELOXIDE_INVENTORY).write_text(DELOXIDE_OWNERS)
         self.entries = JudgementTests.complete(self)  # type: ignore[arg-type]
 
     def check(self, github: FakeGitHub) -> tuple[int, str]:
@@ -301,7 +308,7 @@ class CheckCommandTests(unittest.TestCase):
         self.assertEqual(record["verdict"], "qualified")
         self.assertEqual(record["pull_request"], 712)
         self.assertEqual(record["labels"], ["chaos", "loom"])
-        self.assertEqual(record["compliance"], {"deloxide_owner_gaps": []})
+        self.assertEqual(record["declared_gaps"], [])
         loom = record["methods"][1]
         self.assertEqual(loom["name"], "loom")
         self.assertEqual(
@@ -321,6 +328,19 @@ class CheckCommandTests(unittest.TestCase):
         self.assertIn("| loom | [loom](https://github.com/nervix-io/nervix/runs/3) | passed | success |", markdown)
         self.assertEqual(output.splitlines()[0], markdown.splitlines()[0])
         self.assertEqual(github.calls[0][:3], ["pr", "view", "712"])
+
+    def test_declared_gaps_are_listed_without_refusing_the_revision(self) -> None:
+        (self.root / release_evidence.DELOXIDE_INVENTORY).write_text(DELOXIDE_OWNERS_WITH_GAP)
+        status, output = self.check(FakeGitHub(["loom"], self.entries))
+        self.assertEqual(status, 0)
+        record = json.loads((self.root / release_evidence.OUTPUT / REVISION / "register.json").read_text())
+        self.assertEqual(record["verdict"], "qualified")
+        self.assertEqual(
+            record["declared_gaps"],
+            [{"path": "src/b.rs", "reason": "The lane reaches its locks but not its restart path."}],
+        )
+        self.assertIn("- `src/b.rs`: The lane reaches its locks but not its restart path.", output)
+        self.assertNotIn("Refused because:", output)
 
     def test_a_refused_revision_names_every_reason(self) -> None:
         entries = [entry for entry in self.entries if entry["name"] != "tests"]

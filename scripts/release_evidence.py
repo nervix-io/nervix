@@ -13,9 +13,12 @@ whose shards must all be present.
 on that revision. A revision qualifies only when the pull request carries every method's label and
 the latest run of every required check, and of every shard of a sharded one, completed successfully
 on it: a check that is missing, still running, skipped, cancelled, timed out or failed refuses the
-revision, and so does a sharded check whose shards are not numbered completely. It also refuses the
-revision while an owner of tracked locks in `tests/deloxide-inventory.toml` records a gap, a path the
-diagnostic lane does not reach, instead of being reached by registered workloads alone.
+revision, and so does a sharded check whose shards are not numbered completely. The register also
+lists every owner of tracked locks whose record in `tests/deloxide-inventory.toml` declares a gap, a
+path the diagnostic lane does not reach and why. A declared gap is a reviewed declaration that the
+Deloxide rule permits, so it does not refuse the revision: the applicability check in the required
+`checks` job holds the records to the compiler's acquisition catalog, and the register shows a
+reviewer each declared limit of the diagnostic evidence.
 
 It writes the register, every requirement with its verdict and every check with its conclusion, run
 URL and times, to `target/release-evidence/<revision>/register.json` and `register.md`, and exits 0
@@ -136,20 +139,33 @@ def _strings(value: object, what: str) -> tuple[str, ...]:
     return tuple(value)
 
 
-def owner_gaps(text: str) -> tuple[str, ...]:
-    """The owners of tracked locks whose record names a path the diagnostic lane does not reach."""
+@dataclass(frozen=True)
+class OwnerGap:
+    """An owner of tracked locks whose record declares a path the diagnostic lane does not reach."""
+
+    path: str
+    reason: str
+
+
+def owner_gaps(text: str) -> tuple[OwnerGap, ...]:
+    """Every owner of tracked locks whose record declares a gap, with its reason, in path order."""
 
     document = tomllib.loads(text)
     owners = document.get("owner", [])
     if not isinstance(owners, list):
         raise EvidenceError("the Deloxide inventory's owners are not a list of tables")
-    gaps: list[str] = []
+    gaps: list[OwnerGap] = []
     for owner in owners:
         if not isinstance(owner, dict) or not isinstance(owner.get("path"), str):
             raise EvidenceError("a Deloxide owner record names no path")
-        if owner.get("gap") is not None:
-            gaps.append(owner["path"])
-    return tuple(sorted(gaps))
+        reason = owner.get("gap")
+        if reason is None:
+            continue
+        if not isinstance(reason, str) or not reason.strip():
+            raise EvidenceError(f"the Deloxide owner record of {owner['path']} declares a gap without its reason")
+        gaps.append(OwnerGap(owner["path"], reason.strip()))
+    gaps.sort(key=lambda gap: gap.path)
+    return tuple(gaps)
 
 
 def parse_check_runs(pages: Sequence[Mapping[str, object]]) -> tuple[CheckRun, ...]:
@@ -237,7 +253,6 @@ def judge(
     methods: Sequence[Method],
     labels: frozenset[str],
     runs: Sequence[CheckRun],
-    gaps: Sequence[str],
 ) -> tuple[list[Requirement], list[str]]:
     """Every requirement with its verdict, and every reason the revision does not qualify."""
 
@@ -257,10 +272,6 @@ def judge(
     for requirement in requirements:
         if requirement.problem is not None:
             problems.append(f"{requirement.method}: `{requirement.check}`: {requirement.problem}")
-    for path in gaps:
-        problems.append(
-            f"compliance: the tracked-lock owner {path} records a path the diagnostic lane does not reach"
-        )
     return requirements, problems
 
 
@@ -270,7 +281,7 @@ def register(
     labels: frozenset[str],
     methods: Sequence[Method],
     requirements: Sequence[Requirement],
-    gaps: Sequence[str],
+    gaps: Sequence[OwnerGap],
     problems: Sequence[str],
 ) -> dict[str, object]:
     return {
@@ -299,7 +310,7 @@ def register(
             }
             for method in methods
         ],
-        "compliance": {"deloxide_owner_gaps": list(gaps)},
+        "declared_gaps": [{"path": gap.path, "reason": gap.reason} for gap in gaps],
         "problems": list(problems),
     }
 
@@ -323,6 +334,15 @@ def render_markdown(record: Mapping[str, object]) -> str:
                 f"| {method['name']} | {name} | {check['verdict']} | {check['conclusion'] or '—'} "
                 f"| {check['completed_at'] or '—'} |"
             )
+    gaps = record["declared_gaps"]
+    if gaps:
+        lines += [
+            "",
+            "Declared gaps of the diagnostic lane, reviewed in `tests/deloxide-inventory.toml`; they do not "
+            "refuse the revision:",
+            "",
+        ]
+        lines += [f"- `{gap['path']}`: {gap['reason']}" for gap in gaps]  # type: ignore[union-attr]
     problems = record["problems"]
     if problems:
         lines += ["", "Refused because:", ""]
@@ -381,7 +401,7 @@ def check(
     gaps = owner_gaps((root / DELOXIDE_INVENTORY).read_text(encoding="utf-8"))
     revision, labels = pull_request_head(number, gh)
     runs = parse_check_runs(check_run_pages(revision, gh))
-    requirements, problems = judge(methods, labels, runs, gaps)
+    requirements, problems = judge(methods, labels, runs)
     record = register(number, revision, labels, methods, requirements, gaps, problems)
     directory = root / OUTPUT / revision
     directory.mkdir(parents=True, exist_ok=True)

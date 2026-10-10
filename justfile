@@ -1027,9 +1027,10 @@ coverage-patch base="origin/main" report="lcov-workspace.info" *args:
     python3 -m scripts.patch_coverage --base {{ quote(base) }} --report {{ quote(report) }} --output {{ quote(cargo_target_dir + "/patch-coverage.md") }} {{ args }}
 
 # Judge whether a pull request's head revision holds the complete evidence a release needs: every
-# check tests/release-evidence.toml requires passed on that revision, the label of every label-gated
-# method is on the pull request, and no owner of tracked locks records a gap. Writes the register
-# under target/release-evidence/<revision>/ and exits 1 when the evidence is incomplete.
+# check tests/release-evidence.toml requires passed on that revision and the label of every
+# label-gated method is on the pull request. Writes the register, with every gap an owner of tracked
+# locks declares, under target/release-evidence/<revision>/ and exits 1 when the evidence is
+# incomplete.
 release-evidence pr:
     python3 -m scripts.release_evidence check --pr {{ quote(pr) }}
 
