@@ -1319,6 +1319,14 @@ twenty nested mutex and write acquisitions by at most 200µs, and the product's 
 deadlines are not widened for it. A stressed workload that misses a product deadline is a finding to
 reproduce and fix in its owner, not a bound to raise.
 
+The budget is measured on CI's runner, whose diagnostic builds kache serves warm, and a local run
+pays its cold builds out of the same budget. On 2026-10-10 a shared 40-CPU host already at a load
+of 36 to 50 spent 33 minutes building the stressed scenario binary and ran the heaviest restore
+scenarios two to three times slower than CI, so `deloxide-stress-restore` expired its budget after
+17 of its 43 runs, every one of which passed. Run the stress lanes where the CPUs are not already
+saturated, or again once their builds are warm; an expired budget ends the lane with status `124`,
+never as a clean result.
+
 When a step's `timeout` expires it sends `SIGTERM` to the step's process group. The collector
 records its attempt as interrupted and forwards the signal to the lane, which ends the process it is
 running with that process's whole group, records `interrupted` in `lane.json` and exits; the upload
