@@ -1,15 +1,16 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
-    fs, io,
+    fs,
     path::{Path, PathBuf},
 };
 
+use error_stack::{Report, ResultExt as _};
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_approx_into::{ApproxInto as _, CheckedApproxInto as _};
 use serde::Deserialize;
 use thiserror::Error;
 
-use crate::{MetricsReportError, NERVIX_METRICS_REPORT_FILE, NervixMetricsReport};
+use crate::{NERVIX_METRICS_REPORT_FILE, NervixMetricsReport};
 
 #[derive(Debug)]
 pub struct BenchmarkComparison {
@@ -113,44 +114,31 @@ pub enum ComparisonError {
     Empty,
 
     #[error("failed to read benchmark artifact {path}")]
-    Read {
-        path: PathBuf,
-        #[source]
-        source: io::Error,
-    },
+    Read { path: PathBuf },
 
     #[error("failed to parse benchmark run manifest {path}")]
-    ParseManifest {
-        path: PathBuf,
-        #[source]
-        source: toml::de::Error,
-    },
+    ParseManifest { path: PathBuf },
 
     #[error("failed to parse benchmark load report {path}")]
-    ParseReport {
-        path: PathBuf,
-        #[source]
-        source: toml::de::Error,
-    },
+    ParseReport { path: PathBuf },
 
     #[error("benchmark run {path} has status '{status}', expected 'pass'")]
     UnsuccessfulRun { path: PathBuf, status: String },
 
-    #[error("benchmark run {path} has an invalid image identity: {reason}")]
-    InvalidImageIdentity { path: PathBuf, reason: String },
+    /// The [`ImageIdentityError`] beneath says what is wrong with the identity file.
+    #[error("benchmark run {path} has an invalid image identity")]
+    InvalidImageIdentity { path: PathBuf },
 
-    #[error("benchmark run {path} has an invalid load report: {reason}")]
-    InvalidReport { path: PathBuf, reason: String },
+    /// The [`LoadReportError`] beneath names the property of the load report that does not hold.
+    #[error("benchmark run {path} has an invalid load report")]
+    InvalidReport { path: PathBuf },
 
     #[error("successful Nervix benchmark run {path} has no scraped metrics report")]
     MissingMetricsReport { path: PathBuf },
 
+    /// The [`crate::MetricsReportError`] that rejected the metrics report is beneath.
     #[error("failed to load Nervix metrics report {path}")]
-    MetricsReport {
-        path: PathBuf,
-        #[source]
-        source: Box<MetricsReportError>,
-    },
+    MetricsReport { path: PathBuf },
 
     #[error(
         "benchmark '{benchmark}' has duplicate artifacts for implementation '{implementation}'"
@@ -168,17 +156,94 @@ pub enum ComparisonError {
     },
 
     #[error("failed to write benchmark comparison {path}")]
-    Write {
-        path: PathBuf,
-        #[source]
-        source: io::Error,
-    },
+    Write { path: PathBuf },
+}
+
+/// What is wrong with a run's `image.txt`, beneath the [`ComparisonError::InvalidImageIdentity`]
+/// that names the run.
+#[derive(Debug, Error)]
+pub enum ImageIdentityError {
+    #[error("line '{line}' is not a name=value pair")]
+    NotAPair { line: String },
+
+    #[error("unexpected or duplicate field '{field}'")]
+    UnexpectedField { field: String },
+
+    #[error("both image and id are required")]
+    Incomplete,
+}
+
+/// Which property of a run's load report does not hold, beneath the
+/// [`ComparisonError::InvalidReport`] that names the run.
+#[derive(Debug, Error)]
+pub enum LoadReportError {
+    #[error("{field} must be finite and non-negative")]
+    NegativeOrNonFinite { field: &'static str },
+
+    #[error("generation and end-to-end durations must be positive")]
+    NonPositiveDuration,
+
+    #[error("completion tail is shorter than producer flush")]
+    CompletionShorterThanFlush,
+
+    #[error("generation plus completion exceeds end-to-end duration")]
+    PhasesExceedEndToEnd,
+
+    #[error("target duration does not match run.toml")]
+    TargetDurationMismatch,
+
+    #[error("warm-up target does not match run.toml")]
+    WarmupTargetMismatch,
+
+    #[error("warm-up generation ended before its target duration")]
+    WarmupEndedEarly,
+
+    #[error("a successful benchmark must warm up with at least one message")]
+    NoWarmupMessages,
+
+    #[error("partition count does not match run.toml")]
+    PartitionMismatch,
+
+    #[error("subject node count must be positive")]
+    NoSubjectNodes,
+
+    #[error("backlog cap does not match run.toml")]
+    BacklogCapMismatch,
+
+    #[error("peak backlog exceeds its configured cap")]
+    PeakBacklogAboveCap,
+
+    #[error("backlog after generation exceeds observed peak")]
+    GenerationBacklogAbovePeak,
+
+    #[error("backlog increased after producer flush")]
+    BacklogGrewAfterFlush,
+
+    #[error("a successful benchmark must measure at least one message")]
+    NoInputMessages,
+
+    #[error("end-to-end message rate must be positive")]
+    ZeroMessageRate,
+
+    #[error("a successful benchmark must expect at least one output record")]
+    NoExpectedOutput,
+
+    #[error(
+        "output parity failed: the workload's shape expects {expected} records, the run measured \
+         {measured}"
+    )]
+    OutputParity { expected: u64, measured: u64 },
+
+    #[error("wire message size must be positive")]
+    ZeroWireSize,
 }
 
 impl BenchmarkComparison {
-    pub fn from_run_directories(run_directories: &[PathBuf]) -> Result<Self, ComparisonError> {
+    pub fn from_run_directories(
+        run_directories: &[PathBuf],
+    ) -> error_stack::Result<Self, ComparisonError> {
         if run_directories.is_empty() {
-            return Err(ComparisonError::Empty);
+            return Err(Report::new(ComparisonError::Empty));
         }
         let mut grouped = BTreeMap::<String, Vec<RunArtifact>>::new();
         for directory in run_directories {
@@ -198,10 +263,10 @@ impl BenchmarkComparison {
             let mut implementations = BTreeSet::new();
             for run in &runs {
                 if !implementations.insert(run.manifest.implementation.as_str()) {
-                    return Err(ComparisonError::DuplicateImplementation {
+                    return Err(Report::new(ComparisonError::DuplicateImplementation {
                         benchmark: slug,
                         implementation: run.manifest.implementation.clone(),
-                    });
+                    }));
                 }
             }
             validate_matching_configuration(&slug, &runs)?;
@@ -227,11 +292,13 @@ impl BenchmarkComparison {
         }
     }
 
-    pub fn write_markdown(&self, path: impl AsRef<Path>) -> Result<(), ComparisonError> {
+    pub fn write_markdown(
+        &self,
+        path: impl AsRef<Path>,
+    ) -> error_stack::Result<(), ComparisonError> {
         let path = path.as_ref();
-        fs::write(path, self.render_markdown()).map_err(|source| ComparisonError::Write {
+        fs::write(path, self.render_markdown()).change_context_lazy(|| ComparisonError::Write {
             path: path.to_path_buf(),
-            source,
         })
     }
 }
@@ -255,9 +322,9 @@ impl BenchmarkSuiteReport {
     pub fn from_run_directories(
         run_directories: &[PathBuf],
         failures: Vec<BenchmarkRunFailure>,
-    ) -> Result<Self, ComparisonError> {
+    ) -> error_stack::Result<Self, ComparisonError> {
         if run_directories.is_empty() && failures.is_empty() {
-            return Err(ComparisonError::Empty);
+            return Err(Report::new(ComparisonError::Empty));
         }
         let comparison = if run_directories.is_empty() {
             None
@@ -357,11 +424,13 @@ impl BenchmarkSuiteReport {
         markdown
     }
 
-    pub fn write_markdown(&self, path: impl AsRef<Path>) -> Result<(), ComparisonError> {
+    pub fn write_markdown(
+        &self,
+        path: impl AsRef<Path>,
+    ) -> error_stack::Result<(), ComparisonError> {
         let path = path.as_ref();
-        fs::write(path, self.render_markdown()).map_err(|source| ComparisonError::Write {
+        fs::write(path, self.render_markdown()).change_context_lazy(|| ComparisonError::Write {
             path: path.to_path_buf(),
-            source,
         })
     }
 
@@ -578,49 +647,50 @@ impl BenchmarkRuns {
 }
 
 impl RunArtifact {
-    pub(crate) fn load(directory: &Path) -> Result<Self, ComparisonError> {
+    pub(crate) fn load(directory: &Path) -> error_stack::Result<Self, ComparisonError> {
         let status_path = directory.join("status.txt");
         let status = read(&status_path)?;
         if status.trim() != "pass" {
-            return Err(ComparisonError::UnsuccessfulRun {
+            return Err(Report::new(ComparisonError::UnsuccessfulRun {
                 path: directory.to_path_buf(),
                 status: status.trim().to_string(),
-            });
+            }));
         }
         let manifest_path = directory.join("run.toml");
-        let manifest = toml::from_str::<RunManifest>(&read(&manifest_path)?).map_err(|source| {
+        let manifest_contents = read(&manifest_path)?;
+        let manifest = toml::from_str::<RunManifest>(&manifest_contents).change_context(
             ComparisonError::ParseManifest {
                 path: manifest_path,
-                source,
-            }
-        })?;
+            },
+        )?;
         let report_path = directory.join("load-report.txt");
-        let report = toml::from_str::<LoadReport>(&read(&report_path)?).map_err(|source| {
-            ComparisonError::ParseReport {
-                path: report_path,
-                source,
+        let report_contents = read(&report_path)?;
+        let report = toml::from_str::<LoadReport>(&report_contents)
+            .change_context(ComparisonError::ParseReport { path: report_path })?;
+        validate_report(&manifest, &report).change_context_lazy(|| {
+            ComparisonError::InvalidReport {
+                path: directory.to_path_buf(),
             }
         })?;
-        validate_report(directory, &manifest, &report)?;
         let metrics_path = directory.join(NERVIX_METRICS_REPORT_FILE);
         let metrics = if manifest.implementation == "nervix" {
             if !metrics_path.is_file() {
-                return Err(ComparisonError::MissingMetricsReport {
+                return Err(Report::new(ComparisonError::MissingMetricsReport {
                     path: directory.to_path_buf(),
-                });
+                }));
             }
-            Some(NervixMetricsReport::read(&metrics_path).map_err(|source| {
-                ComparisonError::MetricsReport {
-                    path: metrics_path,
-                    source: Box::new(source),
-                }
-            })?)
+            let metrics = NervixMetricsReport::read(&metrics_path)
+                .change_context(ComparisonError::MetricsReport { path: metrics_path })?;
+            Some(metrics)
         } else {
             None
         };
         let image_path = directory.join("image.txt");
         let image_identity = if image_path.exists() {
-            Some(ImageIdentity::parse(&image_path, &read(&image_path)?)?)
+            let contents = read(&image_path)?;
+            let identity = ImageIdentity::parse(&contents)
+                .change_context(ComparisonError::InvalidImageIdentity { path: image_path })?;
+            Some(identity)
         } else {
             None
         };
@@ -679,24 +749,22 @@ impl NervixMetricsReport {
 }
 
 impl ImageIdentity {
-    fn parse(path: &Path, contents: &str) -> Result<Self, ComparisonError> {
+    fn parse(contents: &str) -> error_stack::Result<Self, ImageIdentityError> {
         let mut image = None;
         let mut id = None;
         for line in contents.lines() {
             let Some((name, value)) = line.split_once('=') else {
-                return Err(ComparisonError::InvalidImageIdentity {
-                    path: path.to_path_buf(),
-                    reason: format!("line '{line}' is not a name=value pair"),
-                });
+                return Err(Report::new(ImageIdentityError::NotAPair {
+                    line: line.to_string(),
+                }));
             };
             match name {
                 "image" if image.is_none() => image = Some(value.to_string()),
                 "id" if id.is_none() => id = Some(value.to_string()),
                 _ => {
-                    return Err(ComparisonError::InvalidImageIdentity {
-                        path: path.to_path_buf(),
-                        reason: format!("unexpected or duplicate field '{name}'"),
-                    });
+                    return Err(Report::new(ImageIdentityError::UnexpectedField {
+                        field: name.to_string(),
+                    }));
                 }
             }
         }
@@ -704,24 +772,16 @@ impl ImageIdentity {
         let id = id.filter(|value| !value.is_empty());
         match (image, id) {
             (Some(image), Some(id)) => Ok(Self { image, id }),
-            _ => Err(ComparisonError::InvalidImageIdentity {
-                path: path.to_path_buf(),
-                reason: "both image and id are required".to_string(),
-            }),
+            _ => Err(Report::new(ImageIdentityError::Incomplete)),
         }
     }
 }
 
 fn validate_report(
-    directory: &Path,
     manifest: &RunManifest,
     report: &LoadReport,
-) -> Result<(), ComparisonError> {
-    let invalid = |reason: String| ComparisonError::InvalidReport {
-        path: directory.to_path_buf(),
-        reason,
-    };
-    for (name, value) in [
+) -> error_stack::Result<(), LoadReportError> {
+    for (field, value) in [
         ("target_duration_seconds", report.target_duration_seconds),
         ("warmup_target_seconds", report.warmup_target_seconds),
         (
@@ -746,100 +806,72 @@ fn validate_report(
         ),
     ] {
         if !value.is_finite() || value < 0.0 {
-            return Err(invalid(format!("{name} must be finite and non-negative")));
+            return Err(Report::new(LoadReportError::NegativeOrNonFinite { field }));
         }
     }
     if report.generation_seconds == 0.0 || report.end_to_end_seconds == 0.0 {
-        return Err(invalid(
-            "generation and end-to-end durations must be positive".to_string(),
-        ));
+        return Err(Report::new(LoadReportError::NonPositiveDuration));
     }
     const TIMING_ROUNDING_TOLERANCE: f64 = 0.000_002;
     if report.completion_seconds + TIMING_ROUNDING_TOLERANCE < report.producer_flush_seconds {
-        return Err(invalid(
-            "completion tail is shorter than producer flush".to_string(),
-        ));
+        return Err(Report::new(LoadReportError::CompletionShorterThanFlush));
     }
     if report.generation_seconds + report.completion_seconds
         > report.end_to_end_seconds + TIMING_ROUNDING_TOLERANCE
     {
-        return Err(invalid(
-            "generation plus completion exceeds end-to-end duration".to_string(),
-        ));
+        return Err(Report::new(LoadReportError::PhasesExceedEndToEnd));
     }
     if (report.target_duration_seconds - manifest.duration_seconds.approx_into::<f64>()).abs()
         > 0.000_001
     {
-        return Err(invalid(
-            "target duration does not match run.toml".to_string(),
-        ));
+        return Err(Report::new(LoadReportError::TargetDurationMismatch));
     }
     if (report.warmup_target_seconds - manifest.warmup_seconds.approx_into::<f64>()).abs()
         > 0.000_001
     {
-        return Err(invalid(
-            "warm-up target does not match run.toml".to_string(),
-        ));
+        return Err(Report::new(LoadReportError::WarmupTargetMismatch));
     }
     if report.warmup_generation_seconds < report.warmup_target_seconds {
-        return Err(invalid(
-            "warm-up generation ended before its target duration".to_string(),
-        ));
+        return Err(Report::new(LoadReportError::WarmupEndedEarly));
     }
     if report.warmup_messages == 0 {
-        return Err(invalid(
-            "a successful benchmark must warm up with at least one message".to_string(),
-        ));
+        return Err(Report::new(LoadReportError::NoWarmupMessages));
     }
     if report.partitions != manifest.partitions {
-        return Err(invalid(
-            "partition count does not match run.toml".to_string(),
-        ));
+        return Err(Report::new(LoadReportError::PartitionMismatch));
     }
     if manifest.subject_nodes == 0 {
-        return Err(invalid("subject node count must be positive".to_string()));
+        return Err(Report::new(LoadReportError::NoSubjectNodes));
     }
     if report.max_backlog_messages != manifest.max_backlog_messages {
-        return Err(invalid("backlog cap does not match run.toml".to_string()));
+        return Err(Report::new(LoadReportError::BacklogCapMismatch));
     }
     if report.peak_backlog_messages > report.max_backlog_messages {
-        return Err(invalid(
-            "peak backlog exceeds its configured cap".to_string(),
-        ));
+        return Err(Report::new(LoadReportError::PeakBacklogAboveCap));
     }
     if report.backlog_messages_at_generation_end > report.peak_backlog_messages {
-        return Err(invalid(
-            "backlog after generation exceeds observed peak".to_string(),
-        ));
+        return Err(Report::new(LoadReportError::GenerationBacklogAbovePeak));
     }
     if report.backlog_messages_at_flush > report.backlog_messages_at_generation_end {
-        return Err(invalid(
-            "backlog increased after producer flush".to_string(),
-        ));
+        return Err(Report::new(LoadReportError::BacklogGrewAfterFlush));
     }
     if report.input_messages == 0 {
-        return Err(invalid(
-            "a successful benchmark must measure at least one message".to_string(),
-        ));
+        return Err(Report::new(LoadReportError::NoInputMessages));
     }
     if report.end_to_end_messages_per_second == 0.0 {
-        return Err(invalid(
-            "end-to-end message rate must be positive".to_string(),
-        ));
+        return Err(Report::new(LoadReportError::ZeroMessageRate));
     }
     if report.expected_output_records == 0 {
-        return Err(invalid(
-            "a successful benchmark must expect at least one output record".to_string(),
-        ));
+        return Err(Report::new(LoadReportError::NoExpectedOutput));
     }
     if report.output_records != report.expected_output_records {
-        return Err(invalid(format!(
-            "output parity failed: the workload's shape expects {} records, the run measured {}",
-            report.expected_output_records, report.output_records
-        )));
+        return Err(Report::new(LoadReportError::OutputParity {
+            expected: report.expected_output_records,
+            measured: report.output_records,
+        }));
     }
     if report.wire_bytes_per_message == 0 {
-        return Err(invalid("wire message size must be positive".to_string()));
+        return Err(Report::new(LoadReportError::ZeroWireSize));
     }
     Ok(())
 }
@@ -847,7 +879,7 @@ fn validate_report(
 fn validate_matching_configuration(
     benchmark: &str,
     runs: &[RunArtifact],
-) -> Result<(), ComparisonError> {
+) -> error_stack::Result<(), ComparisonError> {
     let baseline = &runs[0];
     for run in &runs[1..] {
         ensure_matching_run_configuration(benchmark, baseline, run)?;
@@ -859,11 +891,13 @@ pub(crate) fn ensure_matching_run_configuration(
     benchmark: &str,
     baseline: &RunArtifact,
     run: &RunArtifact,
-) -> Result<(), ComparisonError> {
-    let mismatch = |field| ComparisonError::MismatchedConfiguration {
-        benchmark: benchmark.to_string(),
-        implementation: run.manifest.implementation.clone(),
-        field,
+) -> error_stack::Result<(), ComparisonError> {
+    let mismatch = |field| {
+        Report::new(ComparisonError::MismatchedConfiguration {
+            benchmark: benchmark.to_string(),
+            implementation: run.manifest.implementation.clone(),
+            field,
+        })
     };
     if run.manifest.description != baseline.manifest.description {
         return Err(mismatch("description"));
@@ -892,10 +926,9 @@ pub(crate) fn ensure_matching_run_configuration(
     Ok(())
 }
 
-fn read(path: &Path) -> Result<String, ComparisonError> {
-    fs::read_to_string(path).map_err(|source| ComparisonError::Read {
+fn read(path: &Path) -> error_stack::Result<String, ComparisonError> {
+    fs::read_to_string(path).change_context_lazy(|| ComparisonError::Read {
         path: path.to_path_buf(),
-        source,
     })
 }
 

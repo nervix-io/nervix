@@ -229,6 +229,36 @@ test-scenarios *args: tests-deps
     export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
     cargo test --features testing --test scenarios -- {{ args }}
 
+# Qualify ten consecutive three-node native metadata restores, retaining every attempt without retries.
+test-native-metadata-restore-repeat: tests-deps
+    #!/usr/bin/env bash
+    set -euo pipefail
+    export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
+    evidence_root={{ quote(cargo_target_dir + "/native-metadata-restore") }}
+    mkdir -p "$evidence_root"
+    attempt=$(mktemp -d "$evidence_root/run.XXXXXXXX")
+    git rev-parse HEAD > "$attempt/source-revision.txt"
+    git diff HEAD -- > "$attempt/source.patch"
+    for repetition in {1..10}; do
+        log="$attempt/repetition-$repetition.log"
+        status=0
+        cargo test --features testing --test scenarios -- \
+            --input tests/features/cluster/backup_metadata.feature \
+            --name '^Native lifecycle and Kafka metadata above the bulk budget on 3 nodes restore exactly$' \
+            --concurrency 4 --retry 0 > "$log" 2>&1 || status=$?
+        if [[ -f tests/logs/scenarios.log ]]; then
+            cp tests/logs/scenarios.log "$attempt/repetition-$repetition-scenarios.log"
+        fi
+        if [[ "$status" != 0 ]] || ! rg -q '^1 scenario \(1 passed\)$' "$log"; then
+            cat "$log"
+            printf 'Native metadata restore repetition %s failed; evidence: %s\n' "$repetition" "$attempt" >&2
+            exit 1
+        fi
+        printf 'Native metadata restore repetition %s/10 passed\n' "$repetition"
+    done
+    printf '10 consecutive three-node scenarios passed with concurrency 4 and retry 0\n' > "$attempt/completion.txt"
+    printf 'Native metadata restore qualification complete; evidence: %s\n' "$attempt"
+
 # Replay a compiled scenario binary, including a saved pre-fix reproducer, without rebuilding it.
 test-scenarios-binary binary *args: download-onnxruntime
     ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)" {{ quote(binary) }} {{ args }}

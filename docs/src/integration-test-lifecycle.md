@@ -104,6 +104,12 @@ placement in the three-node case, and compares every saved placement after START
 receiving isolated output for every tenant. A failover that drops replicas or recreates guest state
 cannot make this oracle pass by moving all execution onto one node.
 
+`just test-native-metadata-restore-repeat` runs that scenario's three-node example ten consecutive
+times at concurrency four with zero retries, preserving its normal harness deadlines. It stops
+at the first failure or a summary that does not contain exactly one passing scenario. Every attempt
+keeps its source revision and patch, each process output and the available node log under
+`target/native-metadata-restore`; its completion record is written only after all ten pass.
+
 The complete-generation fixture allows 120 seconds for every post-restore input to reach its raw
 relay. Its forty one-mebibyte guest saves exercise sequential source acknowledgements and durable
 replica checkpoints beside the other diagnostic workloads. The full active diagnostic selection

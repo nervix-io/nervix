@@ -127,12 +127,12 @@ enum InferencerBindingValidationError {
     InspectionTask { node: InferencerName, file: String },
     #[error("failed to inspect ONNX model '{file}' for inferencer '{node}': inspection panicked")]
     InspectionPanic { node: InferencerName, file: String },
-    #[error("failed to initialize ONNX session builder for inferencer '{node}': {source}")]
+    #[error("failed to initialize ONNX session builder for inferencer '{node}'")]
     SessionBuilder {
         node: InferencerName,
         source: ort::Error,
     },
-    #[error("failed to inspect ONNX model '{file}' for inferencer '{node}': {source}")]
+    #[error("failed to inspect ONNX model '{file}' for inferencer '{node}'")]
     SessionModel {
         node: InferencerName,
         file: String,
@@ -776,6 +776,21 @@ mod tests {
         assert!(
             matches!(error.current_context(), InferencerBindingValidationError::SessionModel { node, file, .. } if node == &processor.name && file == "model.onnx")
         );
+        let InferencerBindingValidationError::SessionModel { source: cause, .. } =
+            error.current_context()
+        else {
+            panic!("the inspection failure is the current context: {error:?}");
+        };
+        let cause = cause.to_string();
+        let rendered = format!("{error:#}");
+        assert!(
+            rendered.starts_with(&format!(
+                "failed to inspect ONNX model 'model.onnx' for inferencer '{}': {cause}",
+                processor.name
+            )),
+            "{rendered}"
+        );
+        assert_eq!(rendered.matches(&cause).count(), 1, "{rendered}");
     }
 
     #[nervix_primitives::test]

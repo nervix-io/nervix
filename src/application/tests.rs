@@ -178,6 +178,36 @@ fn server_args_report_why_duration_text_is_malformed() {
 }
 
 #[test]
+fn a_refused_command_line_value_names_its_reason_once() {
+    let duration = parse_human_duration("oops").expect_err("the value is not a duration");
+    let ratio = parse_trace_sample_ratio("often").expect_err("the value is not a number");
+    let float_cause = "often"
+        .parse::<f64>()
+        .expect_err("the value is not a number");
+
+    assert_eq!(
+        format!("{duration:#}"),
+        "invalid duration: expected number at 0"
+    );
+    assert_eq!(
+        format!("{ratio:#}"),
+        format!("invalid trace sample ratio: {float_cause}")
+    );
+
+    let refused = try_test_args(&["--otel-trace-sample-ratio", "often"])
+        .expect_err("the value is not a number");
+    assert_eq!(refused.kind(), clap::error::ErrorKind::ValueValidation);
+    let rendered = refused.to_string();
+    assert_eq!(
+        rendered
+            .matches(&format!("invalid trace sample ratio: {float_cause}"))
+            .count(),
+        1,
+        "{rendered}"
+    );
+}
+
+#[test]
 fn server_args_parse_memory_pressure_options() {
     let args = test_args(&[
         "--memory-high-watermark",
