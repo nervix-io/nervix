@@ -421,7 +421,12 @@ choose a backend.
   is never constructed in a const context, which Loom's atomics do not support. Process-wide state
   moves onto the owner whose lifetime it has, such as a node's service or its Raft network; a count
   a unit test reads is kept per thread; and state that must outlive every test and model is a real
-  atomic under a permission.
+  atomic under a permission. The rule binds `nervix-primitives` too, which only the import rules
+  exempt: a `static` of the boundary, and the state it builds lazily for the process, hold real
+  atomics named through its `unmodeled` path or the standard library. The one shared mechanism such
+  state may reach, a queue whose own Shuttle check needs its atomics selected, is held that way only
+  by code a `deloxide` build alone compiles, where the selected atomics are the standard library's
+  and no model runs.
 - The primitive crate owns mode selection. At most one mode is enabled in a dependency graph, and
   every pair of modes, including a pair that separate dependencies enable, fails to compile there
   with a diagnostic naming both. Selection depends only on features, never on `cfg(test)`; there is

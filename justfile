@@ -2186,10 +2186,10 @@ validate-ci-targets: fmt-check lint-targets validate-skill validate-nspl-docs va
 # rejects a direct, renamed, grouped, qualified, glob, alias or macro path to another backend's
 # primitives, shared ownership and the `futures` crates' synchronization included; a manifest that
 # renames a governed crate; a mode selected by a bare `cfg` or a global `--cfg`; the analysis cfg
-# selecting code or set by a build; a selected atomic held by a static or constructed in a const
-# context; a family Loom does not model in Loom model code; an unmodeled primitive without its
-# permission; a stale or misplaced permission; a `loom` dependency outside its owner and harness;
-# and a mode feature that is not forwarded. Guest code compiled into user WASM guests is outside
+# selecting code or set by a build; a selected atomic held by a static, the owner's own included,
+# or constructed in a const context; a family Loom does not model in Loom model code; an unmodeled
+# primitive without its permission; a stale or misplaced permission; a `loom` dependency outside
+# its owner and harness; and a mode feature that is not forwarded. Guest code compiled into user WASM guests is outside
 # the source rules, and so is what a build wrote into a Cargo build directory. The check's own
 # tests run first, so a rule that stopped rejecting its bypass fails here too.
 validate-primitive-boundary:
