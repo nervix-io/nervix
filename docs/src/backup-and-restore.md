@@ -994,6 +994,14 @@ The deduplicator and window one-node and three-node scenarios re-export a stoppe
 identical descriptors and Arrow groups, stop an installation before its first deduplicator or
 window checkpoint, which leaves `START` gated, and release a delayed coordinator's publication
 after a resumed restore, which is refused without changing the active keyspaces and windows.
+The running restore scenario re-exports its deduplicator state after the endpoint accepts a metric
+probe and before admitting new payments, comparing exact descriptors and Arrow groups to the
+source archive. That comparison includes each key's original `seen_at`; the restored window's
+retained rows are checked by their subsequent output for both branches. A focused keyspace test
+checks that a restored duplicate stays suppressed until its original three-minute deadline and is
+accepted at that deadline. The public scenario observes eventual delivery after that boundary;
+its subscription receive time is not an expiry timestamp because a loaded runner may delay the
+first post or the read beyond the deadline.
 RESTORE explicitly resets the source ownership fence to zero in the stored checkpoint; revisions
 and branch generations remain exact. A stopped backup reads this checkpoint's ordered groups from
 the same immutable database view as its other state, stages one bounded group at a time and retains

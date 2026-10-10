@@ -449,6 +449,19 @@ fn then_restored_branch_states_match(world: &mut ScenarioWorld, before: String, 
     );
 }
 
+#[then(expr = "backup archives {string} and {string} have identical deduplicator state")]
+fn then_restored_deduplicator_states_match(
+    world: &mut ScenarioWorld,
+    before: String,
+    after: String,
+) {
+    assert_eq!(
+        state_sections(&archive_path(world, &before), &["deduplicator"]),
+        state_sections(&archive_path(world, &after), &["deduplicator"]),
+        "the running restore preserves each key and its original seen_at time"
+    );
+}
+
 /// A restore step pause a scenario armed, which it releases by the node it named.
 #[derive(Debug, Clone)]
 pub(crate) struct ArmedRestorePause {
