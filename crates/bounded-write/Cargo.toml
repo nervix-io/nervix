@@ -12,4 +12,5 @@ workspace = true
 thiserror = { workspace = true }
 
 [dev-dependencies]
+bolero = { workspace = true }
 meticulous = { workspace = true }

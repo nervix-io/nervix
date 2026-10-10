@@ -912,8 +912,11 @@ test-runtime-state-capabilities: tests-deps
 test-expiry-map:
     cargo test --package nervix-expiry-map
 
+# Bolero reads its checked-in corpus from the source tree, which Miri's isolation forbids, so the
+# Miri run lifts isolation and bounds the property's random cases beside that corpus.
 test-expiry-map-miri:
-    cargo +nightly miri test --package nervix-expiry-map
+    MIRIFLAGS="-Zmiri-disable-isolation" BOLERO_RANDOM_ITERATIONS=4 BOLERO_RANDOM_MAX_LEN=512 \
+        cargo +nightly miri test --package nervix-expiry-map
 
 test-expiry-map-mutants:
     cargo mutants --package nervix-expiry-map --timeout 120
@@ -2243,10 +2246,10 @@ validate-ci-targets: fmt-check lint-targets validate-skill validate-nspl-docs va
 # rejects a direct, renamed, grouped, qualified, glob, alias or macro path to another backend's
 # primitives, shared ownership and the `futures` crates' synchronization included; a manifest that
 # renames a governed crate; a mode selected by a bare `cfg` or a global `--cfg`; the analysis cfg
-# selecting code or set by a build; a selected atomic held by a static or constructed in a const
-# context; a family Loom does not model in Loom model code; an unmodeled primitive without its
-# permission; a stale or misplaced permission; a `loom` dependency outside its owner and harness;
-# and a mode feature that is not forwarded. Guest code compiled into user WASM guests is outside
+# selecting code or set by a build; a selected atomic held by a static, the owner's own included,
+# or constructed in a const context; a family Loom does not model in Loom model code; an unmodeled
+# primitive without its permission; a stale or misplaced permission; a `loom` dependency outside
+# its owner and harness; and a mode feature that is not forwarded. Guest code compiled into user WASM guests is outside
 # the source rules, and so is what a build wrote into a Cargo build directory. The check's own
 # tests run first, so a rule that stopped rejecting its bypass fails here too.
 validate-primitive-boundary:

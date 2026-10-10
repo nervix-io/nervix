@@ -517,6 +517,11 @@ installation authority; payload values stay exact-schema Arrow columns. Typed br
 watermark ordering, counts and framing are validated before those values reach the runtime, and
 each record identity's branch must be a key of the restored relay's branching.
 
+A captured archive section carries its publication key, content kind and staged artifact as named fields.
+Guest capture retains a selected checkpoint handle until its scheduled generation is checked;
+its admitted storage job records the size for later admission, and opening that handle returns
+the checkpoint revision with the reader for those exact bytes.
+
 A materialized capture carries either current rows or stored checkpoints as distinct variants.
 A captured materialized checkpoint is a selected immutable source. Opening it produces a reader
 whose complete header is required; there is no optional or defaulted generation metadata. Each

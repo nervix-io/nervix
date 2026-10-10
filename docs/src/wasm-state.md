@@ -65,6 +65,12 @@ checkpoints with crash-consistent semantics; `WITHOUT STATE` omits them. Capture
 current scheduled identity and active lifecycle before reconstructing branch keys. Retained
 checkpoints for TTL or LRU evicted branches are omitted; they remain available for local branch
 reappearance without preventing a backup of the current lifecycle.
+The owner checks the committed generation before opening each selected save from the cut's
+database view. It reads and stages one save at a time under an admitted `restore_metadata` charge
+for the inline checkpoint and three fixed 64 KiB bulk buffers, so an accepted guest save can exceed the
+node's bulk budget. The raw section and its descriptor take their bytes and revision from the same
+read; a superseded generation is not opened. A failed or interrupted write leaves no published
+archive, and retry takes a new cut.
 
 A restore creates the target domain stopped and publishes its models and schedule before installing
 state. It stages a complete replacement state set on each target node. It accepts a guest save
@@ -764,6 +770,7 @@ branches.
 | No resurrection, no double reset | `wasm_state_reset.feature`: failover, retry, a lost reply across a leader change, an expired identity, and rebinding |
 | Recovery budget | `wasm_state_recovery.feature`: preserve, recover once, and a failed fresh initialization that spends the attempt across a restart |
 | Restart | `wasm_processor.feature`: guest state restored after a cluster restart and not resurrected by a returning former owner |
+| Large backup and restore | `backup_guest_saves.feature`: two 40 MiB branch saves on one and three nodes, bounded bulk capture, interrupted capture cleanup, exact restored bytes and the next guest callback |
 
 The [WASM state qualification
 ledger](https://github.com/nervix-io/nervix/blob/main/tests/wasm-state-qualification-ledger.md)

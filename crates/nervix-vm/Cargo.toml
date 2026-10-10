@@ -53,6 +53,7 @@ uuid = { workspace = true, features = ["v4", "v7"] }
 xxhash-rust = { workspace = true }
 
 [dev-dependencies]
+bolero = { workspace = true }
 criterion = { workspace = true }
 fastrand = { workspace = true }
 nervix-nspl = { workspace = true }

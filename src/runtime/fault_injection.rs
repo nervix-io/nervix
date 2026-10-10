@@ -93,6 +93,14 @@ impl ConfiguredFaultInjection {
         None
     }
 
+    pub(in crate::runtime) fn guest_save_capture_interruption(
+        &self,
+        _domain: &DomainName,
+        _entity: &ModelName,
+    ) -> Option<u64> {
+        None
+    }
+
     pub(in crate::runtime) fn branch_instance_expiration_scan_interval(&self) -> Option<Duration> {
         None
     }
