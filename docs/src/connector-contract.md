@@ -640,6 +640,15 @@ time; a Postgres cardinality violation, which is how `ON CONFLICT DO UPDATE` ref
 carries a key twice, is isolated the same way. MongoDB answers per document, so it needs no
 isolation pass.
 
+Registered Bolero properties hold these rules against their owners, with measures that grow and
+shrink with a candidate: `connector-row-request-division` the division rule and both limits,
+`emitter-batch-subdivision` and `emitter-batch-packing` the candidates, seals, relay, branch and
+envelope grouping and the exact container bytes, `codec-bounded-encodings` and
+`bounded-write-limits` the exact sizes under `MAX SIZE`, `emitter-row-preparations` and
+`emitter-retained-payloads` the membership and byte-for-byte retry, and `sqs-batch-requests`,
+`mqtt-publish-packets` and `postgres-insert-measures` the connector-specific measures. See
+[Property Testing And Fuzzing](./property-testing-and-fuzzing.md#behavioral-properties).
+
 Iceberg is a row sink that stages each carrier of the run as its own file, which its commit
 publishes.
 
@@ -894,6 +903,12 @@ sequenceDiagram
   decoding, routing, flush cadence, and error reporting.
 
 ## Failure and observation
+
+The compiler failure-contract gate reads exact source-owned semantic outcome classifications for
+SQL mapped-column refusals and MongoDB value/document refusals. Their callers produce definitive
+record rejections with the record position and safe field path. Infrastructure and batch failures
+return contextual reports. [Errors And Diagnostics](errors-and-diagnostics.md) owns the compiler
+classification contract; these annotations do not change acknowledgement or retry policy.
 
 An ingestor opens all source instances before registration, so a failed source start leaves no
 running ingestor. An invalid emitter declaration or expression fails planning before its new

@@ -29,6 +29,14 @@ type SnapshotMetaOf =
     SnapshotMeta<super::CommittedLeaderIdOf<TypeConfig>, ClusterNodeName, BasicNode>;
 
 #[derive(Debug, Clone, Archive, Serialize, Deserialize, PartialEq, Eq, Error)]
+#[cfg_attr(
+    nervix_lint,
+    nervix::error_boundary(
+        outcome,
+        reason = "the fixed consensus wire response carries a projection of the answering node's \
+                  failure"
+    )
+)]
 pub(crate) enum ConsensusRequestError {
     #[error("the authenticated request origin is invalid: {0}")]
     InvalidOrigin(String),

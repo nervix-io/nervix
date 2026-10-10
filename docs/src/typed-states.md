@@ -33,6 +33,12 @@ The representation depends on the question being asked:
 | Is a present value valid? | A validated type or a fallible conversion | Reject invalid input where the owner has enough context to explain it. |
 | Can a physical format encode the state? | A private wire, storage, Arrow, or atomic encoding | Decode at the boundary and expose typed operations to callers. |
 
+A pure conversion refusal is an ordinary typed outcome, even when it implements
+`std::error::Error` for a parsing trait. Its owner states that contract at the exact error type
+with reason-bearing `nervix::error_boundary(outcome, ...)` metadata. A contextual operation failure
+returns a report; a missing value does not silently turn one into a success. The resolved compiler
+gate and report-carrier obligations are described in [Errors And Diagnostics](errors-and-diagnostics.md).
+
 Zero work outstanding, an initial sequence value, an empty payload, and a genuinely empty result
 remain ordinary values. A documented scalar function may return zero for a particular input;
 that result is part of the function contract. Arrow values under a null or failure validity mask
@@ -498,6 +504,11 @@ fingerprint binds once to the archived start generation for native storage, inde
 installation authority; payload values stay exact-schema Arrow columns. Typed branch identities,
 watermark ordering, counts and framing are validated before those values reach the runtime, and
 each record identity's branch must be a key of the restored relay's branching.
+
+A captured archive section carries its publication key, content kind and staged artifact as named fields.
+Guest capture retains a selected checkpoint handle until its scheduled generation is checked;
+its admitted storage job records the size for later admission, and opening that handle returns
+the checkpoint revision with the reader for those exact bytes.
 
 A materialized capture carries either current rows or stored checkpoints as distinct variants.
 A captured materialized checkpoint is a selected immutable source. Opening it produces a reader

@@ -131,6 +131,13 @@ impl TimestampSource {
 
 /// Why one argument of the command line is not a value of its option.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
+#[cfg_attr(
+    nervix_lint,
+    nervix::error_boundary(
+        outcome,
+        reason = "Clap parses arguments through a pure duration and size conversion refusal"
+    )
+)]
 pub(crate) enum ArgumentError {
     #[error("'{text}' is not a duration such as 250ms, 1s or 5m")]
     Duration { text: String },
@@ -142,6 +149,13 @@ pub(crate) enum ArgumentError {
 
 /// Why the command line describes no run.
 #[derive(Debug, Error)]
+#[cfg_attr(
+    nervix_lint,
+    nervix::error_boundary(
+        outcome,
+        reason = "settings construction returns pure command-line validation refusals"
+    )
+)]
 pub(crate) enum OptionsError {
     #[error("'{name}' is not a valid {kind} name")]
     InvalidName { kind: &'static str, name: String },

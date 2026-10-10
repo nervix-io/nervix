@@ -396,7 +396,7 @@ mod tests {
     use std::{collections::BTreeMap, num::NonZeroU64};
 
     use hdrhistogram::Histogram;
-    use meticulous::ResultExt as _;
+    use meticulous::{OptionExt as _, ResultExt as _};
 
     use super::{
         ElapsedBucket, ElapsedHistogram, ElapsedLayout, ElapsedLayoutError, elapsed_nanos,
@@ -606,6 +606,199 @@ mod tests {
         let samples = elapsed_nanos(i64::MAX, &[i64::MIN, i64::MAX, 0]).collect::<Vec<_>>();
         assert_eq!(samples, [u64::MAX, 0, i64::MAX.unsigned_abs()]);
         assert_eq!(elapsed_nanos(0, &[1, 2]).count(), 0);
+    }
+
+    /// A generated unit: a nanosecond, a microsecond, a millisecond or any 32-bit count of them.
+    #[derive(Debug, bolero::TypeGenerator)]
+    enum Unit {
+        Nanosecond,
+        Microsecond,
+        Millisecond,
+        Any(u32),
+    }
+
+    impl Unit {
+        fn nanos(&self) -> NonZeroU64 {
+            let nanos = match self {
+                Self::Nanosecond => 1,
+                Self::Microsecond => 1_000,
+                Self::Millisecond => 1_000_000,
+                Self::Any(nanos) => u64::from(*nanos),
+            };
+            NonZeroU64::new(nanos).unwrap_or(NonZeroU64::MIN)
+        }
+    }
+
+    /// A generated instant relative to the reference: before it within or beyond the highest unit,
+    /// beside a half unit, after it, or anywhere.
+    #[derive(Debug, bolero::TypeGenerator)]
+    enum Offset {
+        Before(u64),
+        BeforeHalfUnits { halves: u8, nanos: i8 },
+        After(u32),
+        Same,
+        Any(i64),
+    }
+
+    impl Offset {
+        /// The instant `now` and a unit of `unit_nanos` place the offset at.
+        fn instant(&self, now: i64, unit_nanos: u64) -> i64 {
+            // Saturation is the meaning here: an instant beside an end of the timeline is clamped
+            // to that end, as any instant a column holds is.
+            match self {
+                Self::Before(nanos) => {
+                    let nanos = i64::try_from(*nanos >> 1).assured("half a u64 fits i64");
+                    now.saturating_sub(nanos)
+                }
+                Self::BeforeHalfUnits { halves, nanos } => {
+                    let half = i128::from(unit_nanos / 2) * i128::from(*halves);
+                    let instant = i128::from(now) - half + i128::from(*nanos);
+                    let clamped = instant.clamp(i128::from(i64::MIN), i128::from(i64::MAX));
+                    i64::try_from(clamped).assured("the clamp keeps the instant in i64")
+                }
+                Self::After(nanos) => now.saturating_add(i64::from(*nanos) + 1),
+                Self::Same => now,
+                Self::Any(instant) => *instant,
+            }
+        }
+    }
+
+    #[derive(Debug, bolero::TypeGenerator)]
+    struct HistogramCase {
+        unit: Unit,
+        highest_exponent: u8,
+        highest_offset: u16,
+        significant_figures: u8,
+        now: i64,
+        #[generator(bolero::generator::produce_with::<Vec<Offset>>().len(0_usize..=300))]
+        instants: Vec<Offset>,
+    }
+
+    impl HistogramCase {
+        /// A highest unit from below the smallest a layout accepts to beyond the exact range of
+        /// most units.
+        fn highest_units(&self) -> u64 {
+            let power = 1_u64 << (self.highest_exponent % 32);
+            let raised = power
+                .checked_add(u64::from(self.highest_offset))
+                .assured("2^31 plus a u16 fits u64");
+            raised
+                .checked_sub(1)
+                .assured("a power of two is at least one")
+        }
+
+        fn instants(&self, unit_nanos: u64) -> Vec<i64> {
+            self.instants
+                .iter()
+                .map(|offset| offset.instant(self.now, unit_nanos))
+                .collect()
+        }
+    }
+
+    /// Why a layout refuses a range, computed in 128-bit arithmetic: the lanes divide
+    /// `2 × elapsed + unit` by `2 × unit` in `f64`, which is exact only below 2^53.
+    fn reference_layout_refusal(
+        unit_nanos: u64,
+        highest_units: u64,
+        significant_figures: u8,
+    ) -> Option<ElapsedLayoutError> {
+        if highest_units < 2 {
+            return Some(ElapsedLayoutError::HighestUnitsBelowTwo { highest_units });
+        }
+        if significant_figures > 5 {
+            return Some(ElapsedLayoutError::SignificantFigures {
+                significant_figures,
+            });
+        }
+        let numerator = (2 * u128::from(highest_units) + 1) * u128::from(unit_nanos);
+        if numerator >= 1_u128 << 53 {
+            return Some(ElapsedLayoutError::InexactRange {
+                unit_nanos,
+                highest_units,
+            });
+        }
+        None
+    }
+
+    /// The buckets HdrHistogram counts the reference units of `instants` into: an independent
+    /// statement of the log-linear layout, read through its lowest equivalent values.
+    fn hdr_buckets(
+        layout: &ElapsedLayout,
+        significant_figures: u8,
+        now: i64,
+        instants: &[i64],
+    ) -> Vec<ElapsedBucket> {
+        let hdr = Histogram::<u64>::new_with_max(layout.highest_units, significant_figures)
+            .assured("a layout's bounds are valid HdrHistogram bounds");
+        let mut counts = BTreeMap::<u64, u64>::new();
+        for &instant in instants {
+            if instant > now {
+                continue;
+            }
+            let units = reference_units(layout, now.abs_diff(instant));
+            *counts.entry(hdr.lowest_equivalent(units)).or_default() += 1;
+        }
+        counts
+            .into_iter()
+            .map(|(lowest_units, count)| ElapsedBucket {
+                lowest_units,
+                count,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn bolero_elapsed_histograms_match_hdrhistogram_at_every_level() {
+        bolero::check!()
+            .with_iterations(256)
+            .with_max_len(4096)
+            .with_type::<HistogramCase>()
+            .for_each(|case| {
+                let unit = case.unit.nanos();
+                let highest_units = case.highest_units();
+                let significant_figures = case.significant_figures % 7;
+                let refusal =
+                    reference_layout_refusal(unit.get(), highest_units, significant_figures);
+                let layout = match ElapsedLayout::new(unit, highest_units, significant_figures) {
+                    Ok(layout) => {
+                        assert_eq!(refusal, None);
+                        layout
+                    }
+                    Err(report) => {
+                        assert_eq!(Some(report.current_context()), refusal.as_ref());
+                        return;
+                    }
+                };
+                let instants = case.instants(unit.get());
+                let mut expected_samples = Vec::with_capacity(instants.len());
+                for &instant in &instants {
+                    if instant <= case.now {
+                        expected_samples.push(case.now.abs_diff(instant));
+                    }
+                }
+                let expected_buckets =
+                    hdr_buckets(&layout, significant_figures, case.now, &instants);
+                let expected_total =
+                    u64::try_from(expected_samples.len()).assured("a count fits u64");
+                let expected_latest = instants.iter().copied().max();
+                for level in supported_levels() {
+                    let folded = ElapsedHistogram::with_level(level, &layout, case.now, &instants);
+                    assert_eq!(folded.latest(), expected_latest, "level={level:?}");
+                    assert_eq!(folded.total(), expected_total, "level={level:?}");
+                    assert_eq!(
+                        folded.buckets().collect::<Vec<_>>(),
+                        expected_buckets,
+                        "level={level:?}"
+                    );
+                    assert_eq!(
+                        latest_instant_with_level(level, &instants),
+                        expected_latest,
+                        "level={level:?}"
+                    );
+                }
+                let samples = elapsed_nanos(case.now, &instants).collect::<Vec<_>>();
+                assert_eq!(samples, expected_samples);
+            });
     }
 
     #[test]

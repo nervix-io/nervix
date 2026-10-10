@@ -717,6 +717,13 @@ impl UnnestInserts {
 /// A mapped column this sink cannot bind, named with the exact type it carries.
 #[derive(Debug, thiserror::Error)]
 #[error("Postgres VALUES column '{column}' has unsupported exact type {data_type}")]
+#[cfg_attr(
+    nervix_lint,
+    nervix::error_boundary(
+        outcome,
+        reason = "unsupported mapped columns produce definitive semantic record rejections"
+    )
+)]
 struct UnsupportedMappedColumn {
     column: String,
     data_type: arrow_schema::DataType,
@@ -1169,6 +1176,142 @@ mod tests {
                 u64::try_from(inserts.sql.len() + encoded).expect("a test insert fits u64");
             assert_eq!(inserts.measure(range), expected);
         }
+    }
+
+    /// The characters a generated text is drawn from: ASCII, quotes and backslashes the SQL text
+    /// never carries, and characters of two, three and four UTF-8 bytes.
+    const TEXT_PIECES: [&str; 8] = ["a", "Z", "'", "\"", "\\", "é", "日", "😀"];
+
+    /// A generated mapped column: its name and the texts of its rows, NULL among them.
+    #[derive(Debug, bolero::TypeGenerator)]
+    struct GeneratedColumn {
+        #[generator(bolero::generator::produce_with::<Vec<u8>>().len(1_usize..=12))]
+        name: Vec<u8>,
+        #[generator(bolero::generator::produce_with::<Vec<Option<Vec<u8>>>>().len(1_usize..=8))]
+        cells: Vec<Option<Vec<u8>>>,
+    }
+
+    /// A generated insert: one to four mapped columns and the number of rows the write holds.
+    #[derive(Debug, bolero::TypeGenerator)]
+    struct InsertCase {
+        #[generator(bolero::generator::produce_with::<Vec<GeneratedColumn>>().len(1_usize..=4))]
+        columns: Vec<GeneratedColumn>,
+        rows: u8,
+    }
+
+    impl InsertCase {
+        /// One to eight rows.
+        fn rows(&self) -> usize {
+            usize::from(self.rows % 8) + 1
+        }
+    }
+
+    impl GeneratedColumn {
+        fn name(&self) -> String {
+            let mut name = String::new();
+            for byte in &self.name {
+                name.push(char::from(b"abcxyz_\"0"[usize::from(*byte) % 9]));
+            }
+            name
+        }
+
+        fn text(&self, row: usize) -> Option<String> {
+            let cell = self.cells[row % self.cells.len()].as_ref()?;
+            let mut text = String::new();
+            for byte in cell {
+                text.push_str(TEXT_PIECES[usize::from(*byte) % TEXT_PIECES.len()]);
+            }
+            Some(text)
+        }
+    }
+
+    /// The bytes of the Bind message the driver sends for an insert binding `arrays`, by the
+    /// extended-query protocol: the message type and length, an unnamed portal, a statement name
+    /// of at most `sqlx_s_` and ten digits, one format code per parameter, the parameter count,
+    /// each parameter's length word and bytes, and one result format code.
+    fn bind_message_bytes(arrays: &[usize]) -> usize {
+        let statement_name = "sqlx_s_".len() + 10 + 1;
+        let parameters = arrays.len();
+        let mut bytes = 1 + 4 + 1 + statement_name + 2 + 2 * parameters + 2 + 2 + 2;
+        for array in arrays {
+            bytes += 4 + array;
+        }
+        bytes
+    }
+
+    /// An insert of any run of a write's rows is measured at exactly its statement text and the
+    /// text arrays the driver encodes for that run, NULLs, quotes and multi-byte characters
+    /// included, and that size is never smaller than the Bind message carrying those arrays.
+    #[test]
+    fn bolero_measured_inserts_are_the_statement_and_arrays_the_driver_encodes() {
+        bolero::check!()
+            .with_iterations(256)
+            .with_max_len(1024)
+            .with_type::<InsertCase>()
+            .for_each(|case| {
+                let generated = &case.columns;
+                let rows = case.rows();
+                let sink = PostgresSink {
+                    connections: Box::new(NoConnections),
+                    table: TableName::parse("events").assured("the table name is valid"),
+                    conflict_action: PostgresConflictAction::None,
+                    limits: RowRequestLimits::from(EmitterBatchPolicy {
+                        max_messages: nervix_models::BatchMessageLimit::try_from(8_u32)
+                            .assured("eight is a valid message limit"),
+                        max_size: "1MiB".parse().assured("1MiB is a valid size"),
+                    }),
+                };
+                let names = generated
+                    .iter()
+                    .map(GeneratedColumn::name)
+                    .collect::<Vec<_>>();
+                let types = vec!["text".to_string(); names.len()];
+                let sql = sink
+                    .insert_sql(&names, &types)
+                    .assured("the insert statement builds");
+                let mut fields = Vec::with_capacity(generated.len());
+                let mut arrays: Vec<arrow_array::ArrayRef> = Vec::with_capacity(generated.len());
+                for (index, column) in generated.iter().enumerate() {
+                    fields.push(Field::new(format!("column_{index}"), DataType::Utf8, true));
+                    let texts = (0..rows).map(|row| column.text(row)).collect::<Vec<_>>();
+                    arrays.push(StdArc::new(StringArray::from(texts)));
+                }
+                let batch = RecordBatch::try_new(StdArc::new(Schema::new(fields)), arrays)
+                    .assured("every generated column has one text per row");
+                let columns =
+                    MappedTextColumns::new(&batch, &names).assured("text columns are mapped");
+                let members = (0..rows)
+                    .map(|row| MappedSinkMember { carrier: 0, row })
+                    .collect::<Vec<_>>();
+                let inserts = UnnestInserts::bind(sql, &[columns], &members, names.len());
+                for start in 0..rows {
+                    for end in start + 1..=rows {
+                        let mut array_bytes = Vec::with_capacity(inserts.columns.len());
+                        for column in &inserts.columns {
+                            let mut buffer = sqlx::postgres::PgArgumentBuffer::default();
+                            let texts = &column[start..end];
+                            let written =
+                                <&[Option<String>] as sqlx::Encode<'_, Postgres>>::encode_by_ref(
+                                    &texts,
+                                    &mut buffer,
+                                )
+                                .assured("a text array encodes");
+                            assert!(matches!(written, sqlx::encode::IsNull::No));
+                            array_bytes.push(buffer.len());
+                        }
+                        let encoded = inserts.sql.len() + array_bytes.iter().sum::<usize>();
+                        let measured = inserts.measure(start..end);
+                        assert_eq!(
+                            measured,
+                            u64::try_from(encoded).assured("an encoded insert fits u64"),
+                            "rows {start}..{end}"
+                        );
+                        let bind = u64::try_from(bind_message_bytes(&array_bytes))
+                            .assured("a Bind message fits u64");
+                        assert!(measured >= bind, "rows {start}..{end}: {measured} < {bind}");
+                    }
+                }
+            });
     }
 
     /// Stands in for the pool where a test never opens a connection.

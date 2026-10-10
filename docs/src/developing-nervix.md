@@ -295,10 +295,10 @@ passed to the test binaries, so a test name filter narrows the run:
 just test-connectors <filter>
 ```
 
-### Compiler synchronization gate
+### Compiler architecture gate
 
 `just ratchet`, `just validate` and `just validate-ci` run the same source-driven compiler
-synchronization gate in the isolated `tools/nervix-lint` workspace. Product builds
+architecture gate in the isolated `tools/nervix-lint` workspace. Product builds
 remain stable. Tooling, analysis and product artifacts occupy separate target directories.
 Prepare the ordinary server build prerequisites, including `just build-web-console`.
 
@@ -321,6 +321,17 @@ An expectation covering multiple operations or no operation fails. See
 [Data-Plane Concurrency](data-plane-concurrency.md#source-contracts) for the complete authoring
 contract, inheritance, supported call effects and limitations.
 
+The same gate checks contextual failure contracts, explicit outcome handling and canonical panic
+APIs through `nervix::bare_error_signature`, `nervix::discarded_outcome` and `nervix::bare_panic`.
+Aliases, associated outputs, generic calls, inferred closures and boxed future/stream returns
+are resolved by the compiler. Ordinary values and custom same-named methods keep their own
+contracts. Classify a semantic outcome or modeled library contract with a reason-bearing
+`nervix::error_boundary(outcome|library, reason = "...")` on its exact error type or return
+contract. These classifications do not inherit module defaults. Standard-error hooks retain a
+complete report carrier. [Errors And Diagnostics](errors-and-diagnostics.md) owns the classification
+rules and the current carriers. `just validate-typed-errors` separately guards textual
+`Result<_, String>` source, including inactive forms.
+
 The JSON output records resolved APIs, spans, owner variants, expansions, source contracts,
 compiled configurations and generated/external exclusions. It is generated evidence under
 `target/`, not an approval database. Partial selections are inventories; the required diagnostic
@@ -339,6 +350,23 @@ fixture doctests twice, and cross-worktree rejection in two isolated worktrees. 
 workspace-wrapper chains directly while caching ordinary dependencies; complete evidence is
 validated independently of that detail. Compiler semantic fixtures qualify resolved lints and
 cross-crate metadata.
+
+### Typed errors and reports
+
+`just validate` rejects a `Result<_, String>` in product code and a signature that returns a Nervix
+failure without an `error-stack` report. Run the distinct source check, the complete compiler gate,
+its semantic fixtures and the structural scanner tests with:
+
+```bash
+just validate-typed-errors
+just ratchet
+just test-typed-ratchet-contracts
+just test-ratchet-units
+```
+
+[Errors And Diagnostics](./errors-and-diagnostics.md#adding-a-fallible-operation) holds the
+checklist for a new fallible operation: which layer owns the failure, what its context carries,
+where the report ends, how it is rendered and which evidence holds it.
 
 ### Capability doctests
 

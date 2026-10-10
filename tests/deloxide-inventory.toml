@@ -110,6 +110,7 @@ tags = [
   "@remote_ack_owners",
   "@backup_wait",
   "@restarted_voter_observation",
+  "@domain_clock_takeover",
   "@udf_column_builder",
   "@vhost_tls_rebinding",
   "@inferencer_branch_batches",
@@ -722,6 +723,26 @@ scenario = "A paced RESUME retains its mapping and admits TIMESTAMP AT in the pr
 selections = ["deloxide", "deloxide-order"]
 
 [[workload]]
+coverage = "Clock authority reassignment after health, consensus and gossip loss while a surviving node holds runtime preparation. Consensus, cluster observation and session output use tracked locks; async installation, notifications and network waits remain outside Deloxide."
+examples = 1
+feature = "tests/features/runtime/domain_clock_contract.feature"
+id = "scenario.clock-takeover-local"
+invariant = "An installed replacement authority emits increasing ticks within ten seconds while another survivor's preparation is paused, preserving the committed generation and mapping."
+invocation = "scenarios"
+scenario = "An installed survivor takes over the clock while another survivor installs the authority revision"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
+coverage = "Clock progress delivery to a prepared observer after a directed application-health failure and leadership transfer, while another node holds preparation. Tracked consensus, cluster observation and session locks are exercised; async delivery and transport waits remain outside Deloxide."
+examples = 1
+feature = "tests/features/runtime/domain_clock_contract.feature"
+id = "scenario.clock-takeover-observer"
+invariant = "A prepared observer receives increasing replacement ticks within ten seconds without waiting for another node's preparation or graph activation."
+invocation = "scenarios"
+scenario = "A prepared clock observer receives replacement ticks before another node activates the revision"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
 coverage = "Restore staging quota, reclamation and retry across restart."
 examples = 2
 feature = "tests/features/cluster/backup_staging.feature"
@@ -1052,6 +1073,26 @@ scenario = "A producer and consumer resume their unchanged endpoint after a sess
 selections = ["deloxide-stress"]
 
 [[workload]]
+coverage = "Under scheduling stress: clock authority reassignment while a surviving node holds runtime preparation, including tracked consensus, cluster observation and session output locks. Async installation and transport waits remain outside Deloxide."
+examples = 1
+feature = "tests/features/runtime/domain_clock_contract.feature"
+id = "stress.clock-takeover-local"
+invariant = "An installed replacement authority emits increasing ticks within ten seconds while another survivor's preparation is paused, preserving the committed generation and mapping."
+invocation = "stress-scenarios"
+scenario = "An installed survivor takes over the clock while another survivor installs the authority revision"
+selections = ["deloxide-stress"]
+
+[[workload]]
+coverage = "Under scheduling stress: clock delivery to a prepared observer after directed application-health failure and leadership transfer, with another preparation held. Tracked consensus, cluster observation and session locks are exercised; async delivery and network waits remain outside Deloxide."
+examples = 1
+feature = "tests/features/runtime/domain_clock_contract.feature"
+id = "stress.clock-takeover-observer"
+invariant = "A prepared observer receives increasing replacement ticks within ten seconds without waiting for another node's preparation or graph activation."
+invocation = "stress-scenarios"
+scenario = "A prepared clock observer receives replacement ticks before another node activates the revision"
+selections = ["deloxide-stress"]
+
+[[workload]]
 coverage = "Under scheduling stress: Rust client and WebSocket consumers closed by a domain stop and reopened after its restart."
 examples = 2
 feature = "tests/features/runtime/client_emitters.feature"
@@ -1371,6 +1412,26 @@ invocation = "stress-restore-scenarios"
 scenario = "Native lifecycle and Kafka metadata above the bulk budget on <cluster_size> nodes restore exactly"
 selections = ["deloxide-stress-restore"]
 
+[[workload]]
+coverage = "One- and three-node capture, interruption, retry and resumed restore of two 40 MiB WASM guest saves. The selected checkpoint and staged file use the existing storage owners; async reservations, the test fault map and stream waits are untracked."
+examples = 2
+feature = "tests/features/cluster/backup_guest_saves.feature"
+id = "scenario.guest-save-backup"
+invariant = "A selected guest save above the bulk budget is staged in bounded chunks, an interrupted capture publishes no archive, and a retry and resumed restore preserve both guest branches byte for byte."
+invocation = "scenarios"
+scenario = "Guest saves above the bulk budget stream, retry and resume on <cluster_size> nodes"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
+coverage = "Under scheduling stress: one- and three-node capture, interruption, retry and resumed restore of two 40 MiB guest saves through the tracked storage owners."
+examples = 2
+feature = "tests/features/cluster/backup_guest_saves.feature"
+id = "stress.guest-save-backup"
+invariant = "A selected guest save above the bulk budget is staged in bounded chunks, an interrupted capture publishes no archive, and a retry and resumed restore preserve both guest branches byte for byte."
+invocation = "stress-restore-scenarios"
+scenario = "Guest saves above the bulk budget stream, retry and resume on <cluster_size> nodes"
+selections = ["deloxide-stress-restore"]
+
 [[owner]]
 path = "crates/checkpoint-replication/src/replication.rs"
 workloads = [
@@ -1468,6 +1529,10 @@ workloads = ["scenario.diagnostic-nodes", "stress.diagnostic-nodes"]
 [[owner]]
 path = "crates/consensus/src/lib.rs"
 workloads = [
+  "scenario.clock-takeover-local",
+  "scenario.clock-takeover-observer",
+  "stress.clock-takeover-local",
+  "stress.clock-takeover-observer",
   "scenario.diagnostic-nodes",
   "scenario.diagnostic-server-processes",
   "stress.diagnostic-nodes",
@@ -1502,6 +1567,11 @@ workloads = [
   "stress.diagnostic-nodes",
   "stress.diagnostic-server-processes",
 ]
+
+[[owner]]
+gap = "The listed node workloads reach the armed-fault mutex and sync-delay RwLock during durable writes. They do not arm StoragePause's blocking condition-variable wait and release or inject a nonzero sync delay; those fault effects are outside the registered lane workloads."
+path = "crates/consensus/src/storage_fault.rs"
+workloads = ["scenario.diagnostic-nodes", "stress.diagnostic-nodes"]
 
 [[owner]]
 path = "crates/interconnect/src/connection.rs"
@@ -1602,6 +1672,10 @@ workloads = [
 [[owner]]
 path = "src/application/session/mod.rs"
 workloads = [
+  "scenario.clock-takeover-local",
+  "scenario.clock-takeover-observer",
+  "stress.clock-takeover-local",
+  "stress.clock-takeover-observer",
   "scenario.diagnostic-nodes",
   "scenario.client-alter-drain",
   "paced.reopen-generation",
@@ -1613,6 +1687,10 @@ workloads = [
 [[owner]]
 path = "src/application/session/outbound.rs"
 workloads = [
+  "scenario.clock-takeover-local",
+  "scenario.clock-takeover-observer",
+  "stress.clock-takeover-local",
+  "stress.clock-takeover-observer",
   "scenario.diagnostic-nodes",
   "paced.reopen-generation",
   "stress.diagnostic-nodes",
@@ -1659,12 +1737,28 @@ workloads = [
 [[owner]]
 path = "src/cluster.rs"
 workloads = [
+  "scenario.clock-takeover-local",
+  "scenario.clock-takeover-observer",
+  "stress.clock-takeover-local",
+  "stress.clock-takeover-observer",
   "scenario.restarted-voter-observation",
   "scenario.diagnostic-nodes",
   "scenario.diagnostic-server-processes",
   "stress.restarted-voter-observation",
   "stress.diagnostic-nodes",
   "stress.diagnostic-server-processes",
+]
+
+[[owner]]
+gap = "The listed workloads reach scheduling, drain and entity-gate timing RwLocks. The holders mutex in occupy_execution and release_execution is reached by ordinary bounded-execution and branch-state-room scenarios, which the lane's registered scenario selections do not include."
+path = "src/fault_injection.rs"
+workloads = [
+  "scenario.diagnostic-nodes",
+  "scenario.client-alter-drain",
+  "scenario.client-alter-rejection",
+  "stress.diagnostic-nodes",
+  "stress.client-alter-drain",
+  "stress.client-alter-rejection",
 ]
 
 [[owner]]
@@ -1701,6 +1795,8 @@ workloads = ["scenario.client-alter-drain", "stress.client-alter-drain"]
 [[owner]]
 path = "src/runtime/branch_lifecycle_state.rs"
 workloads = [
+  "scenario.guest-save-backup",
+  "stress.guest-save-backup",
   "scenario.native-metadata-restore",
   "scenario.branch-state-resume",
   "scenario.branch-state-stale-coordinator",
@@ -1796,6 +1892,8 @@ workloads = [
 [[owner]]
 path = "src/runtime/state_store.rs"
 workloads = [
+  "scenario.guest-save-backup",
+  "stress.guest-save-backup",
   "scenario.native-metadata-restore",
   "owner.restore-storage",
   "scenario.restore-generation",

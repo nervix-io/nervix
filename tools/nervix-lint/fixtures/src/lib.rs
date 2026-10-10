@@ -17,8 +17,18 @@ use std::{
     ops::Deref,
 };
 
+pub use error_stack;
+pub use futures_core;
 use indexmap::IndexMap;
+pub use meticulous;
 pub use nervix_primitives::expect_lint;
+pub use nervix_recovery;
+use nervix_recovery::Discarded as _;
+pub use thiserror;
+
+#[derive(Debug, thiserror::Error)]
+#[error("the fixture operation failed")]
+pub struct FixtureFailure;
 use nervix_primitives::{
     collections::DashMap,
     sync::{
@@ -114,7 +124,9 @@ pub fn owned_iteration(map: MapAlias) {
 
 #[cfg(not(feature = "shuttle"))]
 pub fn reserve_shared_map(map: &mut MapAlias) {
-    drop(map.try_reserve(1));
+    map.try_reserve(1).discarded(
+        "the compiler fixture observes the reservation API without deciding its runtime outcome",
+    );
 }
 
 include!(concat!(env!("OUT_DIR"), "/acquisition.rs"));
@@ -156,5 +168,7 @@ pub fn read_write_lock(lock: &RwLock<u32>) {
 
 pub async fn asynchronous_lock(lock: &nervix_primitives::sync::Mutex<u32>) {
     drop(lock.lock().await);
-    drop(lock.try_lock());
+    lock.try_lock().discarded(
+        "the compiler fixture observes the try-lock API without deciding its runtime outcome",
+    );
 }

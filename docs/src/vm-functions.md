@@ -62,6 +62,11 @@ Arrow failure when one caused the call to fail. Jaq compilation, evaluation, and
 return their own typed reports to the codec or signaling caller. These reports are batch or setup
 failures; selected-row execution and `SideError` values remain the row-failure channel.
 
+The compiler failure-contract gate reads source-owned outcome classifications on
+`SideErrorReason`, CIDR `NetworkDefect` and JSON `JsonTargetDefect`. These are row or pure type
+conversion outcomes; their callers establish the operation report when a whole batch or setup
+fails. [Errors And Diagnostics](errors-and-diagnostics.md) owns those compiler contracts.
+
 For ordinary expression completion, the session resolver asks `FunctionName` for the VM's sorted
 builtin spellings, including datetime names and accepted aliases. That list excludes injected
 calls and `write_header`; it is a candidate catalog, while VM lowering and registry validation
@@ -1335,6 +1340,9 @@ Treat this as the checklist for a new builtin, or for a new family.
    - a public Cucumber scenario outline on one and three nodes that proves values and failures
      through a graph and a session subscription, run with `just test-scenarios --input <feature>`
    - a row in the [qualification ledger](https://github.com/nervix-io/nervix/blob/main/tests/vm-function-qualification.md)
+   - for a kernel with an independent reference, a registered Bolero property over its column
+     kernel, as `round(value, digits)` has in `vm-decimal-rounding-floats` and
+     `vm-decimal-rounding-integers`; see [Property Testing And Fuzzing](./property-testing-and-fuzzing.md)
    - window structures also need interleaved branches, eviction, and snapshot restore
 10. **Measure it.** Add a Criterion case to `crates/nervix-vm/benches/vm.rs` or its workload
     shapes, and run it with `just bench-vm`. Use `just bench-vm-alloc` for allocation evidence, and

@@ -304,6 +304,15 @@ clock or lifecycle handle bound at startup. Each WASM state retains its entity a
 which publishes state identity and checkpoint execution/replica owners together. A generation
 replacement or removal therefore fences a callback without a runtime registry lookup.
 
+Clock authority reconciliation binds a producer to its locally installed mapping, generation and
+authority fence before starting it. Progress production does not wait for another node's graph
+activation. Each remote delivery loop starts after its own receiver advertises preparation of that
+revision, so a held preparation elsewhere cannot stall an installed authority or prepared observer.
+An obsolete producer still retires before its successor starts. The takeover Cucumber scenarios in
+`domain_clock_contract.feature` exercise this ownership path in the active, order and lifecycle
+stress Deloxide selections;
+their async installation, watch and transport waits remain outside tracked-lock detection.
+
 Force-flush participants retain a private idle, available or closed scalar. Idle and already-claimed
 polls acquire no coordinator mutex. An available indication enters the mutex, which remains the
 sole authority for generations and claims. The coordinator visits participants in participant-ID
@@ -1127,6 +1136,12 @@ or effect proof.
 call reached from recurring execution. `nervix::invalid_contract` rejects contract and exception
 errors. The lints use ordinary Rust warn/deny/expect levels; the required gate also rejects unresolved Nervix warnings.
 
+The driver also emits the resolved failure-contract, outcome-discard and panic diagnostics
+described in [Errors And Diagnostics](errors-and-diagnostics.md). Their exact error/return
+classifications use `nervix::error_boundary`; execution-context inheritance does not classify
+an error or exempt a failure. All diagnostics share the same one-operation expectation checks
+and complete configuration evidence.
+
 Retained repair debt names its owning task at the exact operation:
 
 ```rust,ignore
@@ -1382,6 +1397,17 @@ identities of the snapshot transfers it sends. A count a unit test reads is kept
 state that must outlive every test and model is a real atomic under a permission, which may live in
 a `static`.
 
+The rule binds the boundary itself. The boundary names every backend, so the import rules do not
+read its sources, but a `static` it declares holds only real atomics, named through
+`crate::unmodeled::sync::atomic` or the standard library, and the state it builds lazily for the
+life of the process is real too. The deadlock detector's process-wide state is that kind: whether
+this process claimed its installation, whether order checking is on, and the order history its
+registry keeps are real atomics. One mechanism the detector reaches is shared rather than owned: its
+report queue is the `ReportHandoff` that Shuttle checks, whose refusal counter must stay a selected
+atomic for the check to explore it. The detector holds that queue in a `static` only in a `deloxide`
+build, which selects the standard library's atomics and compiles no model, so no model execution
+ever constructs or outlives it.
+
 `just validate-primitive-boundary` rejects every other path to a governed family however it is
 spelled: a direct, renamed, grouped or glob import, a fully qualified path, an attribute, a renamed
 crate, an imported `sync`, `time` or `net` module, or a path in a macro body or an inactive `cfg`
@@ -1423,8 +1449,10 @@ path is rejected in the code an annotation gates as it is anywhere else.
 The check rejects a `static`, including one a `thread_local!` declares, whose declared type names a
 selected atomic, directly or through a wrapper, an array, a reference, a module path or a local type
 alias, and a `static` or `const` initializer, `const fn` or `const` block that constructs one. It
-reads declared types and constructions, so a struct holding an atomic that a static builds lazily is
-left to review.
+applies this rule, and only this one, to the boundary's own sources as well, where
+`crate::sync::atomic` names a selected atomic and `crate::unmodeled::sync::atomic` and the standard
+library's and `core`'s atomics name real ones. It reads declared types and constructions, so a
+struct holding an atomic that a static builds lazily is left to review.
 
 Guest code is outside the source rules: the WASM guest SDK and every guest library built on it are
 compiled into a user's WASM guest, a single-threaded program in the host's sandbox where no mode
@@ -1824,8 +1852,12 @@ why, or both. `just validate-deloxide-applicability`, part of `just validate` an
 job, reads the acquisition catalog `just ratchet` writes and fails on an owner without a record and
 on a record whose file no longer acquires a tracked lock. It reports how many owners registered
 workloads reach and how many record a path the lane does not reach. The catalog is the compiler's
-resolution of the Deloxide adapters' operations, not a search for lock names. A record is a reviewed
-declaration: the lane's coverage report is evidence about it, not a proof of ownership. Format
+resolution of the Deloxide adapters' operations, not a search for lock names. Every diagnostic
+library and binary configuration enables `testing`, as the lane's server builds do, so acquisitions
+in testing-only fault controls require owner records too. This includes the server's scheduling,
+drain and executor-occupancy controls and the consensus storage fault controls. Ordinary and
+modeled configurations retain their own feature selections. A record is a reviewed declaration:
+the lane's coverage report is evidence about it, not a proof of ownership. Format
 equality, malformed and out-of-bounds rejection, normalized-cycle deduplication and the summary's
 counts are registered Bolero properties with the same assertion in ordinary and sanitizer execution.
 

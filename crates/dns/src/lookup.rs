@@ -97,6 +97,26 @@ impl DnsLookupError {
 /// whole report through that boundary, with what the name servers answered and the budget that ran
 /// out, rather than a copy of its top context. It shows the lookup's message, its alternate form
 /// shows the report's chain, and its `Debug` form shows every frame with its attachments.
+///
+/// A hook requiring a standard error accepts the complete carrier:
+///
+/// ```
+/// use error_stack::Report;
+/// use nervix_dns::{DnsLookupError, DnsLookupReport};
+/// fn hook(report: Report<DnsLookupError>) -> impl std::error::Error {
+///     DnsLookupReport::from(report)
+/// }
+/// ```
+///
+/// A report needs that carrier at the standard-error boundary:
+///
+/// ```compile_fail
+/// use error_stack::Report;
+/// use nervix_dns::DnsLookupError;
+/// fn hook(report: Report<DnsLookupError>) -> impl std::error::Error {
+///     report
+/// }
+/// ```
 #[derive(Debug)]
 pub struct DnsLookupReport(Report<DnsLookupError>);
 

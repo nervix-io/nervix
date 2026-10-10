@@ -290,7 +290,10 @@ The boundary between them is kept in four places.
   command and only while the session holds no subscription or transaction yet.
   The paced simulation's published graph is loaded through one native client so its
   BEGIN/COMMIT state and command references survive an interrupted finalization. Raw wire probes
-  expose the received dispositions directly for protocol assertions. No harness deadline shortens
+  retain the protocol's received dispositions. A paced-driver file fixture writes only the
+  scenario's ledger or effect file before the driver starts. The published driver reads that
+  file, and the scenario checks the process exit and the occurrence count of its terminal cause.
+  No harness deadline shortens
   native commands. Only
   the status path described below is harness-owned, and it is a separate test-only boundary: it
   opens its own session and never redirects, reconnects, or retries by itself, so it adds no second
@@ -1236,6 +1239,12 @@ separately, and stops on the first failed chunk. Each process of the active-only
 selections runs the inventory's fixed number of scenarios at once, four, rather than one per CPU: a diagnostic
 build pays for its tracked acquisitions on every lock, and a fixed count puts the same load on its
 nodes locally and on CI's 16-vCPU runner.
+
+The lane resolves every feature pattern against its repository root before passing it to
+Cucumber. A relative pattern would make Cucumber traverse the whole working directory, including
+generated build artifacts. An exact feature uses an absolute pattern with two identical literal
+alternatives, so the walker starts at that feature's parent directory and still selects only
+that file. This bounds discovery without changing the registered examples or their deadlines.
 
 Under the native coverage collector the lane instruments only workspace crates, the scope the
 ordinary coverage build has. When every crate was instrumented, wasmtime's compiler included, CI's

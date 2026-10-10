@@ -27,6 +27,7 @@ mod branch_state;
 mod console;
 mod delivery;
 mod fidelity;
+mod guest_saves;
 mod large_branch_state;
 mod materialized;
 pub(crate) mod memory;
