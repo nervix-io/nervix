@@ -1071,12 +1071,15 @@ have set; see [Topology Cases](./shutdown.md#topology-cases). A unit whose owner
 cannot prepare within its share of the stopping node's drain budget appears in the leader's failed
 drain report with its kind, name, former owner and typed entity-gate cause, including pending node
 and work counts when quiescence timed out. Exhausting the remaining unit budget is reported as a
-failed drain instead of waiting for the sender's outer timeout. A handoff whose local admitted work cannot drain before gate engagement is ready retains a pending
+failed drain instead of waiting for the sender's outer timeout.
+
+A handoff whose local admitted work cannot drain before gate engagement is ready retains a pending
 engagement; lease expiry reports the runtime's typed `EntityGateOperationError::EngagementExpired`
 and releases its partial intake and relay holds. The coordinator's preparation deadline bounds
 its wait independently and reports the owning domain's entity-gate failure. A typed reply timeout
 can retry the same handoff identity and scope within that budget; rejection and other request
 failures keep their existing classification.
+
 A listing that arrives but names a
 branch key that does not decode is a failure of its own, distinct
 from a failed request. A relay payload that does not decode is `RuntimeError::DecodeRemoteRelay`,
