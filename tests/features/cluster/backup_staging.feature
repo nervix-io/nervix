@@ -1,7 +1,7 @@
 Feature: Restore staging reclamation and storage accounting
   Failed unpublished installations are reclaimed while durable activation gates stay closed.
 
-  @restore_installation
+  @restore_installation @deloxide_stress_restore
   Scenario Outline: Restore quota failures reclaim storage across restart and preserve an active retry on <cluster_size> nodes
     Given restore checkpoint staging is limited to 524288 bytes
     And Kafka is running

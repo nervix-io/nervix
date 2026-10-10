@@ -1,9 +1,10 @@
 # The workloads of the Deloxide diagnostic lane, and the owners of tracked locks they reach.
 #
-# `just test-deloxide`, `just test-deloxide-order` and `just test-deloxide-stress` build every
-# invocation below that their selection runs, and run it supervised: each process in a session of its own, within its bound and the
-# lane's budget, with its output, evidence and exit kept in a fresh attempt directory. A selection
-# runs every workload that lists it. The lane fails when a registered workload is missing, ignored
+# `just test-deloxide`, `just test-deloxide-order`, `just test-deloxide-stress` and
+# `just test-deloxide-stress-restore` build every invocation below that their selection runs, and
+# run it supervised: each process in a session of its own, within its bound and the lane's budget,
+# with its output, evidence and exit kept in a fresh attempt directory. A selection runs every
+# workload that lists it. The lane fails when a registered workload is missing, ignored
 # or did not complete; when a discovered test or tagged scenario is not registered; when an
 # invocation selects or executes nothing; when a process deadlocks, fails its diagnostics, is killed
 # by a signal, outlives its bound or leaves a process behind; and when evidence is missing, partly
@@ -37,10 +38,19 @@ name = "deloxide-order"
 recorded = "OrderAnalysis"
 
 # The active-only build with Deloxide's bounded scheduling disturbance, `StressConfiguration::LANE`.
-# It runs every probe, conformance check and owner test, and the lifecycle scenarios of the
-# `stress-scenarios` invocation.
+# It runs every probe, conformance check and owner test, the lifecycle scenarios of the
+# `stress-scenarios` invocation and the paced-driver scenarios of `stress-paced-simulation`.
 [[selection]]
 name = "deloxide-stress"
+recorded = "StressedActiveOnly"
+
+# The same stressed build's capture, restore and checkpoint-transfer scenarios, in a lane of their
+# own. Stressed scenarios run one at a time, and those of both selections together would take most
+# of one lane's budget, so each selection keeps its own budget and CI runs each on a runner of its
+# own.
+[[selection]]
+feature = "deloxide-stress"
+name = "deloxide-stress-restore"
 recorded = "StressedActiveOnly"
 
 [[invocation]]
@@ -63,6 +73,7 @@ id = "primitive-conformance"
 kind = "libtest-each"
 marker = "tests::tracked_locks::"
 package = "nervix-primitives"
+selections = ["deloxide", "deloxide-order", "deloxide-stress"]
 target = "lib"
 
 [[invocation]]
@@ -73,6 +84,7 @@ id = "owner-tests"
 kind = "libtest-each"
 marker = "deloxide_"
 package = "nervix-server"
+selections = ["deloxide", "deloxide-order", "deloxide-stress"]
 target = "lib"
 
 # The scenario binary runs four scenarios at once in each scenario invocation, on any machine, so a
@@ -123,8 +135,11 @@ target = "test:scenarios"
 # `@deloxide_stress`, in one process and one scenario at a time. A stress build enters Deloxide's
 # process-wide detector twice on every mutex and write acquisition, so the nodes of several
 # scenarios in one process contend on it and miss product deadlines; one at a time they meet them.
+# Together with the paced-driver scenarios below and `stress-restore-scenarios`, the stressed
+# scenarios are every scenario of the active-only selection but the report tool's triage, which
+# drives no lifecycle path.
 [[invocation]]
-bound_seconds = 3000
+bound_seconds = 1800
 concurrency = 1
 evidence = true
 features = ["testing"]
@@ -136,12 +151,48 @@ selections = ["deloxide-stress"]
 tags = ["@deloxide_stress"]
 target = "test:scenarios"
 
+# The paced-driver scenarios under the same disturbance, one at a time, with the stressed build of
+# the Rust driver.
+[[invocation]]
+bound_seconds = 2400
+concurrency = 1
+driver = "nervix-paced-simulation"
+evidence = true
+features = ["testing"]
+id = "stress-paced-simulation"
+inputs = ["tests/features/runtime/paced_simulation.feature"]
+kind = "cucumber"
+package = "nervix-server"
+selections = ["deloxide-stress"]
+tags = ["@paced_simulation_reopen"]
+target = "test:scenarios"
+
+# The capture, restore and checkpoint-transfer scenarios, tagged `@deloxide_stress_restore`, one at
+# a time in the restore selection's lane.
+[[invocation]]
+bound_seconds = 4200
+concurrency = 1
+evidence = true
+features = ["testing"]
+id = "stress-restore-scenarios"
+inputs = ["tests/features/**/*.feature"]
+kind = "cucumber"
+package = "nervix-server"
+selections = ["deloxide-stress-restore"]
+tags = ["@deloxide_stress_restore"]
+target = "test:scenarios"
+
 [[workload]]
 coverage = "Tracked mutex acquisitions waiting in a two-thread wait-for cycle."
 id = "probe.opposite-order-mutexes"
 invariant = "Two named threads that each hold one mutex and want the other's report one active cycle naming both threads, both locks and where each waits, record it, and end the child with status 3."
 invocation = "probes"
-selections = ["deloxide", "deloxide-order", "deloxide-stress"]
+selections = [
+  "deloxide",
+  "deloxide-order",
+  "deloxide-stress",
+  "deloxide-stress-restore",
+]
 test = "two_threads_locking_two_mutexes_in_opposite_orders_report_one_cycle"
 
 [[workload]]
@@ -149,7 +200,12 @@ coverage = "A mutex acquisition by the thread that already holds its guard."
 id = "probe.self-relock"
 invariant = "A thread that locks a mutex it holds reports a cycle of one naming the construction and waiting lines, and ends the child with status 3."
 invocation = "probes"
-selections = ["deloxide", "deloxide-order", "deloxide-stress"]
+selections = [
+  "deloxide",
+  "deloxide-order",
+  "deloxide-stress",
+  "deloxide-stress-restore",
+]
 test = "a_thread_relocking_its_own_mutex_reports_a_cycle_of_one"
 
 [[workload]]
@@ -157,7 +213,12 @@ coverage = "A write acquisition by the thread holding a read guard of the same l
 id = "probe.read-upgrade"
 invariant = "A thread that asks for write access to a read-write lock it reads reports a cycle of one with exclusive access and ends the child with status 3."
 invocation = "probes"
-selections = ["deloxide", "deloxide-order", "deloxide-stress"]
+selections = [
+  "deloxide",
+  "deloxide-order",
+  "deloxide-stress",
+  "deloxide-stress-restore",
+]
 test = "a_thread_upgrading_its_own_read_lock_reports_a_cycle_of_one"
 
 [[workload]]
@@ -165,7 +226,12 @@ coverage = "Shared and exclusive acquisitions of a read-write lock and a mutex i
 id = "probe.writer-reader"
 invariant = "A writer and a reader that each hold one lock the other wants report one cycle with the reader's shared and the writer's exclusive access and end the child with status 3."
 invocation = "probes"
-selections = ["deloxide", "deloxide-order", "deloxide-stress"]
+selections = [
+  "deloxide",
+  "deloxide-order",
+  "deloxide-stress",
+  "deloxide-stress-restore",
+]
 test = "a_writer_and_a_reader_across_two_locks_report_one_cycle"
 
 [[workload]]
@@ -173,7 +239,12 @@ coverage = "A condition variable waiter reacquiring its mutex while its notifier
 id = "probe.notified-waiter"
 invariant = "A notified waiter and a notifier that holds the waiter's mutex while it wants the waiter's lock report one cycle and end the child with status 3."
 invocation = "probes"
-selections = ["deloxide", "deloxide-order", "deloxide-stress"]
+selections = [
+  "deloxide",
+  "deloxide-order",
+  "deloxide-stress",
+  "deloxide-stress-restore",
+]
 test = "a_notified_waiter_and_a_notifier_holding_its_mutex_report_one_cycle"
 
 [[workload]]
@@ -181,7 +252,12 @@ coverage = "Repeated nested mutex acquisitions in one consistent order."
 id = "probe.consistent-order"
 invariant = "Two threads that take two mutexes in one order for many rounds end cleanly with evidence that records no finding."
 invocation = "probes"
-selections = ["deloxide", "deloxide-order", "deloxide-stress"]
+selections = [
+  "deloxide",
+  "deloxide-order",
+  "deloxide-stress",
+  "deloxide-stress-restore",
+]
 test = "threads_taking_two_mutexes_in_one_order_complete_without_findings"
 
 [[workload]]
@@ -189,7 +265,12 @@ coverage = "A condition variable handing values between two threads through wait
 id = "probe.condition-handoff"
 invariant = "A value handed between two threads through a condition variable for many rounds ends cleanly with evidence that records no finding."
 invocation = "probes"
-selections = ["deloxide", "deloxide-order", "deloxide-stress"]
+selections = [
+  "deloxide",
+  "deloxide-order",
+  "deloxide-stress",
+  "deloxide-stress-restore",
+]
 test = "a_condition_handed_between_threads_completes_without_findings"
 
 [[workload]]
@@ -197,7 +278,12 @@ coverage = "Concurrent shared acquisitions of one read-write lock."
 id = "probe.shared-readers"
 invariant = "Three readers that share a read-write lock across a barrier end cleanly with evidence that records no finding."
 invocation = "probes"
-selections = ["deloxide", "deloxide-order", "deloxide-stress"]
+selections = [
+  "deloxide",
+  "deloxide-order",
+  "deloxide-stress",
+  "deloxide-stress-restore",
+]
 test = "readers_sharing_a_read_write_lock_complete_without_findings"
 
 [[workload]]
@@ -205,7 +291,7 @@ coverage = "Deloxide's scheduling disturbance before nested mutex acquisitions, 
 id = "probe.stress-disturbance"
 invariant = "A thread that takes an inner mutex while it holds an outer one for twenty thousand rounds waits at least the shortest delay for half the preemptions the lane's configuration expects, and its evidence records that configuration and no finding."
 invocation = "probes"
-selections = ["deloxide-stress"]
+selections = ["deloxide-stress", "deloxide-stress-restore"]
 test = "stress_delays_nested_acquisitions_and_records_its_configuration"
 
 [[workload]]
@@ -213,7 +299,12 @@ coverage = "Detector installation and the process's standard streams."
 id = "probe.quiet-start"
 invariant = "Installing the detector writes nothing of its own to standard output or standard error, and the process's later output still arrives."
 invocation = "probes"
-selections = ["deloxide", "deloxide-order", "deloxide-stress"]
+selections = [
+  "deloxide",
+  "deloxide-order",
+  "deloxide-stress",
+  "deloxide-stress-restore",
+]
 test = "the_detector_keeps_its_start_up_output_off_standard_output"
 
 [[workload]]
@@ -221,7 +312,12 @@ coverage = "The once-per-process diagnostic run."
 id = "probe.one-run"
 invariant = "A second diagnostic run in one process is refused as an installation failure and the first run stays current."
 invocation = "probes"
-selections = ["deloxide", "deloxide-order", "deloxide-stress"]
+selections = [
+  "deloxide",
+  "deloxide-order",
+  "deloxide-stress",
+  "deloxide-stress-restore",
+]
 test = "a_process_starts_one_run"
 
 [[workload]]
@@ -229,7 +325,12 @@ coverage = "A tracked lock constructed before installation."
 id = "probe.lock-before-run"
 invariant = "A process that constructs a tracked lock before its diagnostic run fails with the configuration error instead of running untracked."
 invocation = "probes"
-selections = ["deloxide", "deloxide-order", "deloxide-stress"]
+selections = [
+  "deloxide",
+  "deloxide-order",
+  "deloxide-stress",
+  "deloxide-stress-restore",
+]
 test = "a_tracked_lock_before_the_run_fails_the_process"
 
 [[workload]]
@@ -237,7 +338,12 @@ coverage = "Starting a run whose evidence directory does not exist."
 id = "probe.missing-directory"
 invariant = "A run refuses an evidence directory that does not exist with a typed start failure and creates nothing."
 invocation = "probes"
-selections = ["deloxide", "deloxide-order", "deloxide-stress"]
+selections = [
+  "deloxide",
+  "deloxide-order",
+  "deloxide-stress",
+  "deloxide-stress-restore",
+]
 test = "a_run_refuses_an_evidence_directory_that_does_not_exist"
 
 [[workload]]
@@ -245,7 +351,12 @@ coverage = "Recording an active finding into a directory that can no longer hold
 id = "probe.unrecordable-evidence"
 invariant = "An active cycle whose evidence cannot be written is still described on standard error and ends the child with the diagnostic failure status 4."
 invocation = "probes"
-selections = ["deloxide", "deloxide-order", "deloxide-stress"]
+selections = [
+  "deloxide",
+  "deloxide-order",
+  "deloxide-stress",
+  "deloxide-stress-restore",
+]
 test = "a_deadlock_whose_evidence_cannot_be_recorded_fails_the_diagnostic_run"
 
 [[workload]]
@@ -253,7 +364,12 @@ coverage = "A run without an evidence directory."
 id = "probe.standard-error-only"
 invariant = "A run without an evidence directory describes an active cycle on standard error alone and ends the child with status 3."
 invocation = "probes"
-selections = ["deloxide", "deloxide-order", "deloxide-stress"]
+selections = [
+  "deloxide",
+  "deloxide-order",
+  "deloxide-stress",
+  "deloxide-stress-restore",
+]
 test = "a_run_without_an_evidence_directory_reports_on_standard_error"
 
 [[workload]]
@@ -876,23 +992,23 @@ scenario = "Interleaved branches complete attached deliveries and commit their s
 selections = ["deloxide-stress"]
 
 [[workload]]
-coverage = "Under scheduling stress: capture, archive and restore of deduplicator keys and half-filled window rows, and their per-branch continuation."
-examples = 2
-feature = "tests/features/cluster/backup_branch_state.feature"
-id = "stress.branch-state-resume"
-invariant = "Deduplicator keys and half-filled windows captured at a quiesced cut continue per branch after RESUME on one node and on three nodes with a replica."
+coverage = "Under scheduling stress: a lost remote acknowledgement, source redelivery and bounded correlation retirement."
+examples = 1
+feature = "tests/features/cluster/lost_remote_acknowledgements.feature"
+id = "stress.remote-ack-loss"
+invariant = "Losing an acknowledgement on the return path redelivers the record instead of stalling its source and leaves no diagnostic lock finding."
 invocation = "stress-scenarios"
-scenario = "Deduplicator keys and half-filled windows captured at a quiesced cut continue per branch after RESUME"
+scenario = "A record acknowledgement lost on its way back to the relay owner is redelivered instead of stalling its source"
 selections = ["deloxide-stress"]
 
 [[workload]]
-coverage = "Under scheduling stress: the applied-state authority guard for resumed deduplicator and window state across a leadership transfer."
+coverage = "Under scheduling stress: producer restart fencing of an acknowledgement for an earlier process incarnation."
 examples = 1
-feature = "tests/features/cluster/backup_branch_state.feature"
-id = "stress.branch-state-stale-coordinator"
-invariant = "A delayed restore coordinator cannot replace deduplicator keys and windows a new leader resumed."
+feature = "tests/features/cluster/producer_restart_acknowledgements.feature"
+id = "stress.remote-ack-restart"
+invariant = "An acknowledgement addressed to the earlier producer incarnation leaves new records pending and does not strand or alias owner state."
 invocation = "stress-scenarios"
-scenario = "A delayed coordinator cannot replace resumed deduplicator keys and windows"
+scenario = "An acknowledgement addressed to a restarted producer's earlier process leaves its new records pending"
 selections = ["deloxide-stress"]
 
 [[workload]]
@@ -926,7 +1042,7 @@ scenario = "Memory high watermark pauses scheduled ingestors"
 selections = ["deloxide-stress"]
 
 [[workload]]
-coverage = "Under scheduling stress: rust client consumers, producers and the attached domain clock resuming across a cluster restart."
+coverage = "Under scheduling stress: Rust client consumers, producers and the attached domain clock resuming across a cluster restart."
 examples = 2
 feature = "tests/features/runtime/client_emitters.feature"
 id = "stress.client-consumer-restore"
@@ -936,7 +1052,7 @@ scenario = "A producer and consumer resume their unchanged endpoint after a sess
 selections = ["deloxide-stress"]
 
 [[workload]]
-coverage = "Under scheduling stress: rust client and WebSocket consumers closed by a domain stop and reopened after its restart."
+coverage = "Under scheduling stress: Rust client and WebSocket consumers closed by a domain stop and reopened after its restart."
 examples = 2
 feature = "tests/features/runtime/client_emitters.feature"
 id = "stress.client-consumer-generation"
@@ -946,14 +1062,104 @@ scenario = "Stopping and restarting a domain closes the consumer and creates a n
 selections = ["deloxide-stress"]
 
 [[workload]]
-coverage = "Under scheduling stress: diagnostic domain capture, refusal and resumption around an ordinary CLI subprocess's second-domain cut expiry."
+coverage = "Under scheduling stress: the bool column builder a Roto function shares across its callbacks: push, push_null and finish within each admitted call."
 examples = 2
-feature = "tests/features/cluster/backup_wait.feature"
-id = "stress.backup-cut-expiry"
-invariant = "A second-domain cut expiry returns its bounded failure and resumes both domains on one and three nodes."
+feature = "tests/features/runtime/udf.feature"
+id = "stress.udf-column-builder"
+invariant = "A Roto function that validates card numbers one element at a time through the bool column builder selects the valid card and drops the invalid and the absent one, on one and three nodes."
 invocation = "stress-scenarios"
-scenario = "A second-domain quiesce expiry returns its failure and resumes both domains"
+scenario = "A Roto UDF uses the per-element escape hatch for Luhn validation"
 selections = ["deloxide-stress"]
+
+[[workload]]
+coverage = "Under scheduling stress: the HTTPS listener's TLS configuration: installed by every node as a TLS VHOST is created and rebound, and read by every connection accepted meanwhile."
+examples = 2
+feature = "tests/features/runtime/vhost.feature"
+id = "stress.vhost-tls-rebinding"
+invariant = "Rebinding a VHOST to another version of its TLS bundle makes every node's HTTPS listener present the new certificate while background HTTPS ingestion is accepted throughout, on one and three nodes."
+invocation = "stress-scenarios"
+scenario = "Rebinding a VHOST to another version of its TLS bundle refreshes every HTTPS listener without pausing ingestion"
+selections = ["deloxide-stress"]
+
+[[workload]]
+coverage = "Under scheduling stress: the ONNX session lock of a batched inferencer whose model runs for interleaved concrete branches."
+examples = 2
+feature = "tests/features/runtime/inferencer.feature"
+id = "stress.inferencer-branch-batches"
+invariant = "A batched inferencer scores interleaved records of two branches in one batch for each branch and keeps each branch's rows apart, on one and three nodes."
+invocation = "stress-scenarios"
+scenario = "Batched inferencer isolates interleaved concrete branches"
+selections = ["deloxide-stress"]
+
+[[workload]]
+coverage = "Under scheduling stress: whole-cluster teardown, node-owned store reopening and automatic scheduling after a voter's first relayed heartbeat. Watch channels and the test fault map are untracked."
+examples = 1
+feature = "tests/features/cluster/restarted_voter_observation.feature"
+id = "stress.restarted-voter-observation"
+invariant = "A voter first heard through a relayed heartbeat keeps every scheduled owner during the original startup grace and after becoming live and catching up to Raft."
+invocation = "stress-scenarios"
+scenario = "A voter first heard through a relayed heartbeat keeps its ownership after cluster restart"
+selections = ["deloxide-stress"]
+
+[[workload]]
+coverage = "Under scheduling stress: the Rust client library in a diagnostic paced driver, and the nodes it drives, across a reopen."
+examples = 4
+feature = "tests/features/runtime/paced_simulation.feature"
+id = "stress.paced.reopen-generation"
+invariant = "The Rust and Python drivers drain buffered routes and reopen their consumers and producer within one START generation on one and three nodes."
+invocation = "stress-paced-simulation"
+scenario = "The <driver> driver drains buffered routes and reopens its consumers and producer within one START generation on <cluster_size> nodes"
+selections = ["deloxide-stress"]
+
+[[workload]]
+coverage = "Under scheduling stress: diagnostic Rust driver and nodes across domain stop and a later START generation; Python runs through its ordinary shared binding. Channels, async waits and Python synchronization are untracked."
+examples = 4
+feature = "tests/features/runtime/paced_simulation.feature"
+id = "stress.paced.follow-start-generation"
+invariant = "The Rust and Python drivers stop with their domain and explicitly open the later START generation on one and three nodes, preserving exactly one effect per completed reading and admitting no prior-generation reading after the new generation begins."
+invocation = "stress-paced-simulation"
+scenario = "The <driver> driver stops with its domain and continues in the next START generation without mixing generations on <cluster_size> nodes"
+selections = ["deloxide-stress"]
+
+[[workload]]
+coverage = "Under scheduling stress: refused ticks retained across a producer contract change."
+examples = 4
+feature = "tests/features/runtime/paced_simulation.feature"
+id = "stress.paced.refused-tick-replay"
+invariant = "The drivers retain a refused tick across a producer contract change and explicitly replay it on one and three nodes."
+invocation = "stress-paced-simulation"
+scenario = "The <driver> driver retains a refused tick across a producer contract change and explicitly replays it on <cluster_size> nodes"
+selections = ["deloxide-stress"]
+
+[[workload]]
+coverage = "Under scheduling stress: a delayed refusal while a driver awaits its final outcome."
+examples = 4
+feature = "tests/features/runtime/paced_simulation.feature"
+id = "stress.paced.delayed-refusal"
+invariant = "The drivers report a delayed refusal while awaiting their final outcome on one and three nodes."
+invocation = "stress-paced-simulation"
+scenario = "The <driver> driver reports a delayed refusal while awaiting its final outcome on <cluster_size> nodes"
+selections = ["deloxide-stress"]
+
+[[workload]]
+coverage = "Under scheduling stress: reopen failures of every changed endpoint kind."
+examples = 20
+feature = "tests/features/runtime/paced_simulation.feature"
+id = "stress.paced.reopen-failure"
+invariant = "The drivers fail clearly, naming the refusal, when reopening a removed or schema-mismatched consumer or producer, or a credit-mismatched consumer, on one and three nodes."
+invocation = "stress-paced-simulation"
+scenario = "The <driver> driver fails clearly when reopening a <change_kind> <endpoint> on <cluster_size> nodes"
+selections = ["deloxide-stress"]
+
+[[workload]]
+coverage = "Under scheduling stress: the applied-state authority guard and restore publication across a leadership transfer."
+examples = 1
+feature = "tests/features/cluster/backup.feature"
+id = "stress.stale-restore-coordinator"
+invariant = "A delayed restore coordinator cannot republish after a new leader resumes the archived lifecycle."
+invocation = "stress-restore-scenarios"
+scenario = "A stale restore coordinator cannot republish after a new leader resumes the archived lifecycle"
+selections = ["deloxide-stress-restore"]
 
 [[workload]]
 coverage = "Under scheduling stress: quiesced capture and restore of WASM guest state and Kafka source offsets."
@@ -961,15 +1167,217 @@ examples = 2
 feature = "tests/features/cluster/backup.feature"
 id = "stress.wasm-kafka-restore"
 invariant = "A quiesced backup restores two WASM branches and the domain's Kafka offsets on one and three nodes."
-invocation = "stress-scenarios"
+invocation = "stress-restore-scenarios"
 scenario = "A quiesced backup restores two WASM branches and Kafka domain offsets"
-selections = ["deloxide-stress"]
+selections = ["deloxide-stress-restore"]
+
+[[workload]]
+coverage = "Under scheduling stress: bounded restore generations of large and many guest saves, staging, publication and cluster restart."
+examples = 4
+feature = "tests/features/cluster/backup_generation.feature"
+id = "stress.restore-generation"
+invariant = "A complete restore generation of two 20 MiB or forty 1 MiB saves on one and three nodes preserves branches and source offsets through publication and restart."
+invocation = "stress-restore-scenarios"
+scenario = "A complete restore generation with <branches> saves of <save_mib> MiB on <cluster_size> nodes preserves branches and source offsets"
+selections = ["deloxide-stress-restore"]
+
+[[workload]]
+coverage = "Under scheduling stress: capture, archive and restore of deduplicator keys and half-filled window rows, and their per-branch continuation."
+examples = 2
+feature = "tests/features/cluster/backup_branch_state.feature"
+id = "stress.branch-state-resume"
+invariant = "Deduplicator keys and half-filled windows captured at a quiesced cut continue per branch after RESUME on one node and on three nodes with a replica."
+invocation = "stress-restore-scenarios"
+scenario = "Deduplicator keys and half-filled windows captured at a quiesced cut continue per branch after RESUME"
+selections = ["deloxide-stress-restore"]
+
+[[workload]]
+coverage = "Under scheduling stress: re-export of stopped restores, interrupted installation of deduplicator and window state, and WITHOUT STATE restores."
+examples = 2
+feature = "tests/features/cluster/backup_branch_state.feature"
+id = "stress.branch-state-reexport"
+invariant = "A stopped restore re-exports identical deduplicator and window sections, an interrupted installation keeps START gated, and WITHOUT STATE installs neither, on one and three nodes."
+invocation = "stress-restore-scenarios"
+scenario = "A stopped restore re-exports identical deduplicator and window sections, an interrupted installation keeps START gated, and WITHOUT STATE installs neither"
+selections = ["deloxide-stress-restore"]
+
+[[workload]]
+coverage = "Under scheduling stress: the applied-state authority guard for resumed deduplicator and window state across a leadership transfer."
+examples = 1
+feature = "tests/features/cluster/backup_branch_state.feature"
+id = "stress.branch-state-stale-coordinator"
+invariant = "A delayed restore coordinator cannot replace deduplicator keys and windows a new leader resumed."
+invocation = "stress-restore-scenarios"
+scenario = "A delayed coordinator cannot replace resumed deduplicator keys and windows"
+selections = ["deloxide-stress-restore"]
+
+[[workload]]
+coverage = "Under scheduling stress: restore of window state against a changed window model or branch incarnation."
+examples = 2
+feature = "tests/features/cluster/backup_branch_state.feature"
+id = "stress.branch-state-model-change"
+invariant = "A changed window model or branch incarnation starts an empty window with a restore warning on one and three nodes."
+invocation = "stress-restore-scenarios"
+scenario = "A changed window model or branch incarnation starts an empty window with a restore warning"
+selections = ["deloxide-stress-restore"]
+
+[[workload]]
+coverage = "Under scheduling stress: bounded restore conversion of a deduplicator keyspace and a window above the bulk budget, their publication through an interrupted installation, and segmented persistence of the restored window under the installation barrier through restart, on one node. The three-node example runs in the ordinary suite, so that the lane's diagnostic clusters do not share their process with its 80 MiB of state."
+examples = 1
+feature = "tests/features/cluster/backup_branch_state_large.feature"
+id = "stress.branch-state-large"
+invariant = "On one node, a 40 MiB keyspace and a 40 MiB window beside 24 small branches restore exactly after an interrupted publication, re-export identically from a stopped restore, and continue with exact keys and aggregates across a restart."
+invocation = "stress-restore-scenarios"
+scenario = "A keyspace and a window above the bulk budget resume exactly beside many small branches on <cluster_size> nodes"
+selections = ["deloxide-stress-restore"]
+
+[[workload]]
+coverage = "Under scheduling stress: a three-node WASM processor commits two branch saves above the replication-message limit, then drains its owner through checkpoint capture, bulk fetch, verification, and successor installation while state-store locks are tracked. Async stream waits and interconnect transport scheduling remain outside Deloxide."
+examples = 1
+feature = "tests/features/runtime/large_wasm_state_replication.feature"
+id = "stress.wasm-large-handoff"
+invariant = "The planned handoff completes after both branches reach a replica-confirmed checkpoint, and the successor restores each branch once without a tracked-lock cycle."
+invocation = "stress-restore-scenarios"
+scenario = "Draining a large-state owner prepares its successor through bulk checkpoint streams"
+selections = ["deloxide-stress-restore"]
+
+[[workload]]
+coverage = "Under scheduling stress: materialized relay capture, restore and generator resumption through restart."
+examples = 2
+feature = "tests/features/cluster/backup_materialized.feature"
+id = "stress.materialized-cut"
+invariant = "A resumed materialized cut preserves interleaved branches and generators through restart."
+invocation = "stress-restore-scenarios"
+scenario = "A resumed materialized cut preserves interleaved branches and generators through restart"
+selections = ["deloxide-stress-restore"]
+
+[[workload]]
+coverage = "Under scheduling stress: materialized generations transferred in bulk to owners and replicas."
+examples = 4
+feature = "tests/features/cluster/backup_materialized.feature"
+id = "stress.materialized-bulk-generations"
+invariant = "Materialized generations larger than the bulk budget resume on every assigned owner and replica."
+invocation = "stress-restore-scenarios"
+scenario = "Materialized generations larger than the bulk budget resume on every assigned owner and replica"
+selections = ["deloxide-stress-restore"]
+
+[[workload]]
+coverage = "Under scheduling stress: a delayed restore coordinator racing a resumed materialized generation."
+examples = 2
+feature = "tests/features/cluster/backup_materialized.feature"
+id = "stress.materialized-delayed-coordinator"
+invariant = "A delayed coordinator cannot replace a resumed materialized generation larger than the bulk budget."
+invocation = "stress-restore-scenarios"
+scenario = "A delayed coordinator cannot replace a resumed materialized generation larger than the bulk budget"
+selections = ["deloxide-stress-restore"]
+
+[[workload]]
+coverage = "Under scheduling stress: domain clock mapping and paced admission after an archived lifecycle resumes."
+examples = 2
+feature = "tests/features/cluster/backup_materialized.feature"
+id = "stress.paced-resume"
+invariant = "A paced RESUME retains its clock mapping and admits TIMESTAMP AT in the projected window."
+invocation = "stress-restore-scenarios"
+scenario = "A paced RESUME retains its mapping and admits TIMESTAMP AT in the projected window"
+selections = ["deloxide-stress-restore"]
+
+[[workload]]
+coverage = "Under scheduling stress: restore staging quota, reclamation and retry across restart."
+examples = 2
+feature = "tests/features/cluster/backup_staging.feature"
+id = "stress.restore-staging-quota"
+invariant = "Restore quota failures reclaim storage across restart and preserve an active retry on one and three nodes."
+invocation = "stress-restore-scenarios"
+scenario = "Restore quota failures reclaim storage across restart and preserve an active retry on <cluster_size> nodes"
+selections = ["deloxide-stress-restore"]
+
+[[workload]]
+coverage = "Under scheduling stress: diagnostic domain capture, refusal and resumption around an ordinary CLI subprocess's second-domain cut expiry."
+examples = 2
+feature = "tests/features/cluster/backup_wait.feature"
+id = "stress.backup-cut-expiry"
+invariant = "A second-domain cut expiry returns its bounded failure and resumes both domains on one and three nodes."
+invocation = "stress-restore-scenarios"
+scenario = "A second-domain quiesce expiry returns its failure and resumes both domains"
+selections = ["deloxide-stress-restore"]
+
+[[workload]]
+coverage = "Under scheduling stress: diagnostic node capture and retained-result recovery through a raw session, followed by ordinary CLI archive download to stdout."
+examples = 2
+feature = "tests/features/cluster/backup_wait.feature"
+id = "stress.backup-destination-recovery"
+invariant = "One- and three-node clusters recover the same completed backup execution to another local destination and stdout."
+invocation = "stress-restore-scenarios"
+scenario = "A backup execution can be recovered to another local destination"
+selections = ["deloxide-stress-restore"]
+
+[[workload]]
+coverage = "Under scheduling stress: diagnostic cluster lifetimes and leader routing around an ordinary CLI capture spanning independently quiesced domain cuts."
+examples = 1
+feature = "tests/features/cluster/backup_wait.feature"
+id = "stress.backup-leader-recovery"
+invariant = "A leader change between domain cuts preserves the execution reference and completes the original multi-domain capture."
+invocation = "stress-restore-scenarios"
+scenario = "A leader change between domain cuts preserves multi-domain backup recovery"
+selections = ["deloxide-stress-restore"]
+
+[[workload]]
+coverage = "Under scheduling stress: diagnostic session refusal for an ordinary CLI recovery under an expired execution reference."
+examples = 2
+feature = "tests/features/cluster/backup_wait.feature"
+id = "stress.backup-reference-expiry"
+invariant = "An expired reference refuses recovery without starting a fresh capture on one and three nodes."
+invocation = "stress-restore-scenarios"
+scenario = "An expired reference refuses CLI recovery without starting another backup"
+selections = ["deloxide-stress-restore"]
+
+[[workload]]
+coverage = "Under scheduling stress: diagnostic harness and node lifetimes around an ordinary CLI subprocess's bounded wait, recovery and conflicting capture-input refusal."
+examples = 2
+feature = "tests/features/cluster/backup_wait.feature"
+id = "stress.backup-bounded-recovery"
+invariant = "A bounded CLI wait preserves the original multi-domain execution for recovery to another file and rejects changed capture inputs."
+invocation = "stress-restore-scenarios"
+scenario = "A bounded CLI wait recovers the same multi-domain backup to another file"
+selections = ["deloxide-stress-restore"]
+
+[[workload]]
+coverage = "Under scheduling stress: diagnostic native-client pending-reply cancellation after wait expiry, followed by a fresh client's reference-preserving recovery and archive download."
+examples = 2
+feature = "tests/features/cluster/backup_wait.feature"
+id = "stress.backup-native-recovery"
+invariant = "A bounded native wait preserves the original multi-domain execution for recovery by a fresh client on one and three nodes."
+invocation = "stress-restore-scenarios"
+scenario = "A bounded native wait recovers the original multi-domain backup"
+selections = ["deloxide-stress-restore"]
+
+[[workload]]
+coverage = "Under scheduling stress: client command and pending-reply lifetimes while two delayed domain cuts each stay within their own budget and together exceed the ordinary request budget."
+examples = 2
+feature = "tests/features/cluster/backup_wait.feature"
+id = "stress.backup-multi-domain-wait"
+invariant = "One- and three-node cluster backups wait across independent domain cut budgets and retain both quiesced cuts."
+invocation = "stress-restore-scenarios"
+scenario = "An NSPL cluster backup waits across independent domain cut budgets"
+selections = ["deloxide-stress-restore"]
+
+[[workload]]
+coverage = "Under scheduling stress: distributed native lifecycle and Kafka metadata restoration above the bulk budget, durable generation publication, checkpoint replication and acknowledgement, and exact owner and replica values after restart. Stream waits and assignment atomics are untracked."
+examples = 2
+feature = "tests/features/cluster/backup_metadata.feature"
+id = "stress.native-metadata-restore"
+invariant = "One- and three-node clusters restore every native lifecycle and Kafka offset value above the bulk budget, preserve distributed owners and replicas through restart and START, and recover the complete typed restore report under its original execution reference."
+invocation = "stress-restore-scenarios"
+scenario = "Native lifecycle and Kafka metadata above the bulk budget on <cluster_size> nodes restore exactly"
+selections = ["deloxide-stress-restore"]
 
 [[owner]]
 path = "crates/checkpoint-replication/src/replication.rs"
 workloads = [
   "scenario.materialized-bulk-generations",
   "scenario.materialized-delayed-coordinator",
+  "stress.materialized-bulk-generations",
+  "stress.materialized-delayed-coordinator",
 ]
 
 [[owner]]
@@ -979,6 +1387,10 @@ workloads = [
   "paced.delayed-refusal",
   "scenario.backup-native-recovery",
   "scenario.backup-multi-domain-wait",
+  "stress.paced.reopen-generation",
+  "stress.paced.delayed-refusal",
+  "stress.backup-native-recovery",
+  "stress.backup-multi-domain-wait",
 ]
 
 [[owner]]
@@ -991,6 +1403,9 @@ workloads = [
   "paced.reopen-failure",
   "stress.client-consumer-restore",
   "stress.client-consumer-generation",
+  "stress.paced.reopen-generation",
+  "stress.paced.follow-start-generation",
+  "stress.paced.reopen-failure",
 ]
 
 [[owner]]
@@ -999,6 +1414,9 @@ workloads = [
   "scenario.paced-resume",
   "paced.reopen-generation",
   "paced.follow-start-generation",
+  "stress.paced-resume",
+  "stress.paced.reopen-generation",
+  "stress.paced.follow-start-generation",
 ]
 
 [[owner]]
@@ -1009,6 +1427,9 @@ workloads = [
   "scenario.backup-native-recovery",
   "scenario.backup-multi-domain-wait",
   "stress.client-alter-drain",
+  "stress.paced.reopen-generation",
+  "stress.backup-native-recovery",
+  "stress.backup-multi-domain-wait",
 ]
 
 [[owner]]
@@ -1019,6 +1440,7 @@ workloads = [
   "paced.reopen-generation",
   "stress.client-alter-drain",
   "stress.client-alter-rejection",
+  "stress.paced.reopen-generation",
 ]
 
 [[owner]]
@@ -1027,11 +1449,17 @@ workloads = [
   "scenario.client-alter-drain",
   "paced.refused-tick-replay",
   "stress.client-alter-drain",
+  "stress.paced.refused-tick-replay",
 ]
 
 [[owner]]
 path = "crates/client-core/src/restoration.rs"
-workloads = ["paced.reopen-generation", "paced.follow-start-generation"]
+workloads = [
+  "paced.reopen-generation",
+  "paced.follow-start-generation",
+  "stress.paced.reopen-generation",
+  "stress.paced.follow-start-generation",
+]
 
 [[owner]]
 path = "crates/client-core/src/subscriptions.rs"
@@ -1052,6 +1480,9 @@ workloads = [
   "scenario.restore-generation",
   "scenario.stale-restore-coordinator",
   "scenario.restore-staging-quota",
+  "stress.restore-generation",
+  "stress.stale-restore-coordinator",
+  "stress.restore-staging-quota",
 ]
 
 [[owner]]
@@ -1059,6 +1490,7 @@ path = "crates/consensus/src/snapshot.rs"
 workloads = [
   "scenario.restore-generation",
   "scenario.wasm-kafka-restore",
+  "stress.restore-generation",
   "stress.wasm-kafka-restore",
 ]
 
@@ -1070,6 +1502,11 @@ workloads = [
   "stress.diagnostic-nodes",
   "stress.diagnostic-server-processes",
 ]
+
+[[owner]]
+gap = "The listed node workloads reach the armed-fault mutex and sync-delay RwLock during durable writes. They do not arm StoragePause's blocking condition-variable wait and release or inject a nonzero sync delay; those fault effects are outside the registered lane workloads."
+path = "crates/consensus/src/storage_fault.rs"
+workloads = ["scenario.diagnostic-nodes", "stress.diagnostic-nodes"]
 
 [[owner]]
 path = "crates/interconnect/src/connection.rs"
@@ -1087,11 +1524,13 @@ workloads = [
   "scenario.remote-ack-loss",
   "scenario.remote-ack-restart",
   "stress.remote-ack-branches",
+  "stress.remote-ack-loss",
+  "stress.remote-ack-restart",
 ]
 
 [[owner]]
 path = "crates/nervix-roto/src/lib.rs"
-workloads = ["scenario.udf-column-builder"]
+workloads = ["scenario.udf-column-builder", "stress.udf-column-builder"]
 
 [[owner]]
 path = "crates/primitives/src/sync/blocking/tracked.rs"
@@ -1105,6 +1544,11 @@ workloads = [
   "paced.refused-tick-replay",
   "paced.delayed-refusal",
   "paced.reopen-failure",
+  "stress.paced.reopen-generation",
+  "stress.paced.follow-start-generation",
+  "stress.paced.refused-tick-replay",
+  "stress.paced.delayed-refusal",
+  "stress.paced.reopen-failure",
 ]
 
 [[owner]]
@@ -1115,6 +1559,11 @@ workloads = [
   "paced.refused-tick-replay",
   "paced.delayed-refusal",
   "paced.reopen-failure",
+  "stress.paced.reopen-generation",
+  "stress.paced.follow-start-generation",
+  "stress.paced.refused-tick-replay",
+  "stress.paced.delayed-refusal",
+  "stress.paced.reopen-failure",
 ]
 
 [[owner]]
@@ -1123,6 +1572,7 @@ workloads = [
   "scenario.wasm-kafka-restore",
   "scenario.restore-generation",
   "stress.wasm-kafka-restore",
+  "stress.restore-generation",
 ]
 
 [[owner]]
@@ -1141,11 +1591,18 @@ workloads = [
   "scenario.restore-generation",
   "scenario.restore-staging-quota",
   "stress.wasm-kafka-restore",
+  "stress.restore-generation",
+  "stress.restore-staging-quota",
 ]
 
 [[owner]]
 path = "src/application/session/consumers.rs"
-workloads = ["paced.reopen-generation", "paced.reopen-failure"]
+workloads = [
+  "paced.reopen-generation",
+  "paced.reopen-failure",
+  "stress.paced.reopen-generation",
+  "stress.paced.reopen-failure",
+]
 
 [[owner]]
 path = "src/application/session/mod.rs"
@@ -1155,6 +1612,7 @@ workloads = [
   "paced.reopen-generation",
   "stress.diagnostic-nodes",
   "stress.client-alter-drain",
+  "stress.paced.reopen-generation",
 ]
 
 [[owner]]
@@ -1163,6 +1621,7 @@ workloads = [
   "scenario.diagnostic-nodes",
   "paced.reopen-generation",
   "stress.diagnostic-nodes",
+  "stress.paced.reopen-generation",
 ]
 
 [[owner]]
@@ -1173,11 +1632,12 @@ workloads = [
   "paced.reopen-generation",
   "stress.client-alter-drain",
   "stress.client-alter-rejection",
+  "stress.paced.reopen-generation",
 ]
 
 [[owner]]
 path = "src/application/tls.rs"
-workloads = ["scenario.vhost-tls-rebinding"]
+workloads = ["scenario.vhost-tls-rebinding", "stress.vhost-tls-rebinding"]
 
 [[owner]]
 path = "src/application/tracing_setup.rs"
@@ -1207,8 +1667,21 @@ workloads = [
   "scenario.restarted-voter-observation",
   "scenario.diagnostic-nodes",
   "scenario.diagnostic-server-processes",
+  "stress.restarted-voter-observation",
   "stress.diagnostic-nodes",
   "stress.diagnostic-server-processes",
+]
+
+[[owner]]
+gap = "The listed workloads reach scheduling, drain and entity-gate timing RwLocks. The holders mutex in occupy_execution and release_execution is reached by ordinary bounded-execution and branch-state-room scenarios, which the lane's registered scenario selections do not include."
+path = "src/fault_injection.rs"
+workloads = [
+  "scenario.diagnostic-nodes",
+  "scenario.client-alter-drain",
+  "scenario.client-alter-rejection",
+  "stress.diagnostic-nodes",
+  "stress.client-alter-drain",
+  "stress.client-alter-rejection",
 ]
 
 [[owner]]
@@ -1249,8 +1722,10 @@ workloads = [
   "scenario.branch-state-resume",
   "scenario.branch-state-stale-coordinator",
   "scenario.restore-generation",
+  "stress.native-metadata-restore",
   "stress.branch-state-resume",
   "stress.branch-state-stale-coordinator",
+  "stress.restore-generation",
 ]
 
 [[owner]]
@@ -1277,7 +1752,10 @@ workloads = ["scenario.client-alter-drain", "stress.client-alter-drain"]
 
 [[owner]]
 path = "src/runtime/inferencer.rs"
-workloads = ["scenario.inferencer-branch-batches"]
+workloads = [
+  "scenario.inferencer-branch-batches",
+  "stress.inferencer-branch-batches",
+]
 
 [[owner]]
 path = "src/runtime/ingestor_quiesce.rs"
@@ -1296,6 +1774,8 @@ workloads = [
   "owner.materialized-publications",
   "scenario.materialized-cut",
   "scenario.materialized-bulk-generations",
+  "stress.materialized-cut",
+  "stress.materialized-bulk-generations",
 ]
 
 [[owner]]
@@ -1326,6 +1806,8 @@ workloads = [
   "scenario.remote-ack-loss",
   "scenario.remote-ack-restart",
   "stress.remote-ack-branches",
+  "stress.remote-ack-loss",
+  "stress.remote-ack-restart",
 ]
 
 [[owner]]
@@ -1337,6 +1819,11 @@ workloads = [
   "scenario.restore-staging-quota",
   "scenario.branch-state-large",
   "scenario.wasm-large-handoff",
+  "stress.native-metadata-restore",
+  "stress.restore-generation",
+  "stress.restore-staging-quota",
+  "stress.branch-state-large",
+  "stress.wasm-large-handoff",
 ]
 
 [[owner]]
