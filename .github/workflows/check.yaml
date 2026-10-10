@@ -1163,6 +1163,9 @@ jobs:
       - name: Paced simulation Python open policy
         run: just coverage-paced-simulation-python
 
+      - name: Release evidence gate
+        run: just coverage-release-evidence
+
       # The collector that the steps below run their checks through, including its refusal of
       # every incomplete collection.
       - name: Native coverage collector
@@ -1215,6 +1218,7 @@ jobs:
             target/primitive-boundary/python.lcov
             target/patch-coverage/python.lcov
             target/paced-simulation/python.lcov
+            target/release-evidence-coverage/python.lcov
             target/coverage-source-root.txt
             target/typed-ratchet/cache-qualification/**/qualification.json
           if-no-files-found: warn

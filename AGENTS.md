@@ -966,7 +966,8 @@ build and the existing tests, and nothing in it changes behavior.
   production owners, Loom for memory-ordering claims of synchronous production owners, Turmoil for
   network claims within the supported simulation, Deloxide for active deadlocks among the tracked
   thread-blocking locks of real diagnostic processes, Cucumber for public behavior, and the
-  external Chaos suite against an immutable product image for real-process recovery.
+  external Chaos suite against an immutable product image and its diagnostic image for real-process
+  recovery.
 - A change that adds or alters thread-blocking synchronization, a `sync::blocking` lock or
   condition variable, the order in which tracked locks are acquired, or a shutdown, drain, restore,
   cancellation, handoff or other lifecycle or ownership path that uses tracked locks runs
@@ -1188,10 +1189,22 @@ build and the existing tests, and nothing in it changes behavior.
   `client-conformance`; a pull request that changes the client protocol, the shared binding or a
   probe carries that label.
 - `just chaos suite smoke|soak --image IMAGE` runs the external chaos suites against an already
-  built image. CI runs the smoke suite against a pull request's own image only for a pull request
+  built image. CI runs the smoke suite against a pull request's own images only for a pull request
   labeled `chaos`, and the soak suite for one labeled `chaos-soak` and nightly on `main`; a pull
   request that changes the chaos runner, or the membership, failover, recovery or delivery behavior
-  its scenarios verify, carries the `chaos` label.
+  its scenarios verify, carries the `chaos` label. Each suite runs against the release image and
+  against the Deloxide diagnostic image of the same revision, whose label makes every run fail
+  unless the deadlock evidence of each process its nodes started qualifies; a change to the
+  diagnostic image, its evidence collection or a path its scenarios exercise under tracked locks
+  keeps both green.
+- `just release-evidence <pull-request>` holds a pull request's head revision to
+  `tests/release-evidence.toml`: every label-gated method's label is on the pull request and the
+  latest run of every required check passed on that revision. Its register lists each gap a
+  tracked-lock owner declares, a reviewed declaration that does not refuse the revision. A
+  qualification task records its register on its ClickUp task. A change that renames a CI job the
+  inventory names, or adds a value to the matrix of one, updates the inventory in the same change;
+  `just test-release-evidence` reads the Deloxide lane and release image matrices from the
+  workflows and fails when the inventory lacks one of their jobs.
 - `just nspl-completion-walk` walks the NSPL completion graph and fails on any branch that cannot be
   completed by accepting the suggestions the parser offers. It is deliberately outside `just test`
   and runs in CI beside the main tests, in the job that carries the workspace-wide checks. Grammar

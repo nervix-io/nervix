@@ -21,7 +21,8 @@ usage() {
     cat <<'EOF'
 Usage:
   just chaos suite list
-  just chaos suite SUITE --image IMAGE [--shard N] [--entry ID]... [--artifacts DIR] [--suite-id ID]
+  just chaos suite SUITE --image IMAGE [--image-kind KIND] [--image-revision REVISION] [--shard N]
+      [--entry ID]... [--artifacts DIR] [--suite-id ID]
   just chaos suite shards SUITE
   just chaos suite cleanup [--wait SECONDS] SUITE_DIRECTORY
   just chaos suite report [--expect-shards N] SUITE_JSON...
@@ -29,7 +30,13 @@ Usage:
 SUITE names a suite of suites.json, such as smoke or soak. Each entry runs as its own
 `just chaos run` command with the entry's budget as --timeout, and every entry runs even after one
 fails. --shard runs one shard of the suite and --entry the named entries; both may be combined.
-The suite writes ARTIFACTS/SUITE_ID/suite.json, summary.md, suite.log with its whole console, one
+An image that declares a Deloxide diagnostic selection in its io.nervix.diagnostic.selection label
+runs as a diagnostic image: every run judges the deadlock evidence of every process its nodes
+started, and an entry passes only with a passing evidence verdict. --image-kind KIND refuses an
+image that is not of that kind: ordinary, or the diagnostic selection deloxide, deloxide-order or
+deloxide-stress. --image-revision REVISION refuses an image whose org.opencontainers.image.revision
+label names another revision, so suites of two images can show both were built from one. The suite
+writes ARTIFACTS/SUITE_ID/suite.json, summary.md, suite.log with its whole console, one
 directory per run and one console log per entry under logs/. It exits 0 when every entry passed,
 1 when any failed or did not run, 2 for a setup error before any run, and 128 plus the signal
 number when it was interrupted.
@@ -227,10 +234,12 @@ entry_verdict() {
     local exit_status="$2"
     local suite_interrupted="$3"
     local suite_image_id="$4"
+    local suite_selection="$5"
     local run_dir="${suite_dir}/${run_id}"
-    local manifest finding ledger resources
+    local manifest finding ledger resources diagnostic
     manifest="$(optional_record "${run_dir}/manifest.json")"
     finding="$(optional_record "${run_dir}/results/finding.json")"
+    diagnostic="$(optional_record "${run_dir}/results/diagnostic-evidence.json")"
     ledger="$(optional_record "${run_dir}/results/ledger.json")"
     resources="$(optional_record "${run_dir}/results/mixed-resources.json")"
     # The scenario's own result file, which embeds its progress record or names it.
@@ -264,14 +273,17 @@ entry_verdict() {
         --arg exit "${exit_status}" \
         --argjson suite_interrupted "${suite_interrupted}" \
         --arg suite_image_id "${suite_image_id}" \
+        --arg suite_selection "${suite_selection}" \
         --argjson results "${results_json}" \
         --slurpfile manifest_input "${manifest}" \
         --slurpfile finding_input "${finding}" \
         --slurpfile ledger_input "${ledger}" \
         --slurpfile result_input "${result}" \
         --slurpfile progress_input "${progress}" \
-        --slurpfile resources_input "${resources}" '
+        --slurpfile resources_input "${resources}" \
+        --slurpfile diagnostic_input "${diagnostic}" '
         ($manifest_input[0] // null) as $manifest
+        | ($diagnostic_input[0] // null) as $diagnostic
         | ($finding_input[0] // null) as $finding
         | ($ledger_input[0] // null) as $ledger
         | ($result_input[0] // null) as $result
@@ -300,6 +312,12 @@ entry_verdict() {
            elif $exit_code == 0 and $suite_image_id != "" and $manifest.resolved_image_id != $suite_image_id then
              {status: "failed", category: "controller",
               reason: "the run resolved image \($manifest.resolved_image_id), not the suite image \($suite_image_id)"}
+           elif $exit_code == 0 and $suite_selection != "" and ($manifest.diagnostic.selection // "") != $suite_selection then
+             {status: "failed", category: "controller",
+              reason: "the suite image declares the \($suite_selection) diagnostic selection, but the run did not record its nodes as diagnostic nodes of it"}
+           elif $exit_code == 0 and $suite_selection != "" and ($diagnostic.verdict // null) != "passed" then
+             {status: "failed", category: "controller",
+              reason: "the run of a diagnostic image exited 0 without a passing diagnostic evidence verdict"}
            elif $exit_code == 0 then
              {status: "passed", category: null, reason: null}
            elif $suite_interrupted then
@@ -348,6 +366,11 @@ entry_verdict() {
                           | {max_node_memory_bytes: ([.nodes[]?.max_memory_bytes | numbers] | max),
                              max_backlog: .max_backlog,
                              longest_output_stall_ms: .longest_output_stall_ms} end),
+            diagnostic: (if $diagnostic == null then null else
+                           {verdict: $diagnostic.verdict, category: $diagnostic.category,
+                            selection: $diagnostic.selection}
+                           + ($diagnostic.totals // {})
+                           + {problems: [$diagnostic.problems[]?.reason]} end),
             results: $results
           }'
 }
@@ -357,16 +380,18 @@ record_entry() {
     local entry_index="$1"
     local exit_status="$2"
     local suite_interrupted="$3"
-    local run_id finished_at duration verdict suite_image_id started_epoch
+    local run_id finished_at duration verdict suite_image_id suite_selection started_epoch
     run_id="$(jq -r --argjson index "${entry_index}" '.entries[$index].run_id' "${suite_dir}/suite.json")"
     suite_image_id="$(jq -r '.image.id // ""' "${suite_dir}/suite.json")"
+    suite_selection="$(jq -r '.image.diagnostic_selection // ""' "${suite_dir}/suite.json")"
     started_epoch="$(jq -r --argjson index "${entry_index}" '.entries[$index].started_epoch // empty' "${suite_dir}/suite.json")"
     finished_at="$(now)"
     duration=null
     if [[ -n "${started_epoch}" && "${exit_status}" != unknown ]]; then
         duration=$(($(date +%s) - started_epoch))
     fi
-    verdict="$(entry_verdict "${run_id}" "${exit_status}" "${suite_interrupted}" "${suite_image_id}")"
+    verdict="$(entry_verdict "${run_id}" "${exit_status}" "${suite_interrupted}" "${suite_image_id}" \
+        "${suite_selection}")"
     local artifacts=null
     if [[ -d "${suite_dir}/${run_id}" ]]; then
         artifacts="\"${run_id}\""
@@ -439,12 +464,24 @@ run_suite() {
     local artifact_root="target/chaos"
     local suite_id=""
     local shard=""
+    local image_kind=""
+    local image_revision=""
     local selected_entries=()
     while [[ "$#" -gt 0 ]]; do
         case "$1" in
             --image)
                 [[ "$#" -ge 2 ]] || suite_error '--image requires a value'
                 image_ref="$2"
+                shift 2
+                ;;
+            --image-kind)
+                [[ "$#" -ge 2 ]] || suite_error '--image-kind requires a kind'
+                image_kind="$2"
+                shift 2
+                ;;
+            --image-revision)
+                [[ "$#" -ge 2 && -n "$2" ]] || suite_error '--image-revision requires a revision'
+                image_revision="$2"
                 shift 2
                 ;;
             --artifacts)
@@ -481,6 +518,10 @@ run_suite() {
     if [[ -n "${shard}" && ! "${shard}" =~ ^[1-9][0-9]{0,2}$ ]]; then
         suite_error '--shard must be a positive integer'
     fi
+    case "${image_kind}" in
+        "" | ordinary | deloxide | deloxide-order | deloxide-stress) ;;
+        *) suite_error '--image-kind must be ordinary, deloxide, deloxide-order or deloxide-stress' ;;
+    esac
     local entries_json
     entries_json="$(printf '%s\n' ${selected_entries[@]+"${selected_entries[@]}"} \
         | jq -Rsc 'split("\n") | map(select(length > 0))')"
@@ -597,6 +638,33 @@ run_suite() {
     run_image="${image_id}"
     if [[ "${image_ref}" == *@sha256:* ]]; then
         run_image="${image_ref}"
+    fi
+    # A diagnostic image declares its Deloxide selection in a label, and every image may declare the
+    # revision it was built from; an ordinary image declares no selection.
+    local labels diagnostic_selection revision
+    labels="$(timeout --kill-after=5s 30s docker image inspect --format '{{json .Config.Labels}}' "${image_ref}")"
+    diagnostic_selection="$(jq -r '(. // {})["io.nervix.diagnostic.selection"] // ""' <<<"${labels}")"
+    revision="$(jq -r '(. // {})["org.opencontainers.image.revision"] // ""' <<<"${labels}")"
+    # The dollars in this jq filter are jq variables, not shell expansion.
+    # shellcheck disable=SC2016
+    update_record '.image += {revision: (if $revision == "" then null else $revision end),
+                              diagnostic_selection: (if $selection == "" then null else $selection end)}' \
+        --arg revision "${revision}" --arg selection "${diagnostic_selection}"
+    local refusal=""
+    if [[ -n "${image_kind}" && "${image_kind}" != "${diagnostic_selection:-ordinary}" ]]; then
+        refusal="the suite was asked for a ${image_kind} image, but ${image_ref} declares ${diagnostic_selection:-no diagnostic selection, so it is ordinary}"
+    elif [[ -n "${image_revision}" && "${image_revision}" != "${revision}" ]]; then
+        refusal="the suite was asked for an image of revision ${image_revision}, but ${image_ref} declares ${revision:-no revision}"
+    fi
+    if [[ -n "${refusal}" ]]; then
+        # The dollars in this jq filter are jq variables, not shell expansion.
+        # shellcheck disable=SC2016
+        update_record '.status = "failed"
+            | .entries |= map(. + {status: "not-started", reason: "the suite image is not the requested one"})
+            | .error = {category: "setup", message: $message}' \
+            --arg message "${refusal}"
+        render_summary
+        suite_error "${refusal}"
     fi
 
     local kernel docker_version compose_version cpus memory_bytes

@@ -855,4 +855,5 @@ printf 'chaos harness self-test passed\n'
 "${script_dir}/stateful-self-test.sh"
 "${script_dir}/load-self-test.sh"
 "${script_dir}/mixed-self-test.sh"
+"${script_dir}/diagnostic-self-test.sh"
 "${script_dir}/suite-self-test.sh"

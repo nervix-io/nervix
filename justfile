@@ -1026,6 +1026,27 @@ check-coverage report="lcov-workspace.info":
 coverage-patch base="origin/main" report="lcov-workspace.info" *args:
     python3 -m scripts.patch_coverage --base {{ quote(base) }} --report {{ quote(report) }} --output {{ quote(cargo_target_dir + "/patch-coverage.md") }} {{ args }}
 
+# Judge whether a pull request's head revision holds the complete evidence a release needs: every
+# check tests/release-evidence.toml requires passed on that revision and the label of every
+# label-gated method is on the pull request. Writes the register, with every gap an owner of tracked
+# locks declares, under target/release-evidence/<revision>/ and exits 1 when the evidence is
+# incomplete.
+release-evidence pr:
+    python3 -m scripts.release_evidence check --pr {{ quote(pr) }}
+
+# Exercise the release evidence gate on recorded check runs, without GitHub.
+test-release-evidence:
+    python3 -m unittest --quiet scripts.tests.test_release_evidence
+
+# Retain the release evidence gate's own measured line coverage beside the other Python tooling.
+coverage-release-evidence:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    mkdir -p "{{ cargo_target_dir }}/release-evidence-coverage"
+    coverage=(uvx --from coverage==7.11.0 coverage)
+    "${coverage[@]}" run --data-file "{{ cargo_target_dir }}/release-evidence-coverage/python.coverage" --branch --source=scripts.release_evidence,scripts.tests.test_release_evidence -m unittest scripts.tests.test_release_evidence
+    "${coverage[@]}" lcov --data-file "{{ cargo_target_dir }}/release-evidence-coverage/python.coverage" -o "{{ cargo_target_dir }}/release-evidence-coverage/python.lcov"
+
 # Exercise line accounting, Git source changes and advisory comment publication.
 test-patch-coverage:
     python3 -m unittest scripts.tests.test_patch_coverage
@@ -2569,6 +2590,41 @@ build-chaos-local-image tag="nervix:backup-local" base="nervix:chaos-current":
     EOF
     docker build --build-arg BASE={{ quote(base) }} --tag {{ quote(tag) }} "${stage}"
 
+# Overlay a diagnostic server of one Deloxide selection, built in release mode from this checkout,
+# with this checkout's CLI and the evidence report tool, on an already available packaged image, for
+# a local Chaos run of a diagnostic image. Its labels name the selection and this checkout's revision,
+# as `docker-build-diagnostic` does for the image CI runs.
+build-chaos-diagnostic-image tag="nervix:diagnostic-local" base="ghcr.io/nervix-io/nervix:debian-latest" selection="deloxide-order": build-web-console
+    #!/usr/bin/env bash
+    set -euo pipefail
+    case {{ quote(selection) }} in
+        deloxide | deloxide-order | deloxide-stress) ;;
+        *) echo "unknown diagnostic selection: {{ selection }}" >&2; exit 2 ;;
+    esac
+    CARGO_TARGET_DIR={{ quote(cargo_target_dir + "/deloxide") }} cargo build --release \
+        --package nervix-server --bin nervix-server --features {{ quote(selection) }}
+    cargo build --release --package nervix-cli --bin nervix-cli
+    cargo build --release --package nervix-deadlock --features report-tool --bin nervix-deadlock-report
+    revision="$(git rev-parse HEAD)"
+    if [[ -n "$(git status --porcelain --untracked-files=no)" ]]; then
+        revision="${revision}-dirty"
+    fi
+    stage="$(mktemp -d {{ quote(cargo_target_dir + "/diagnostic-chaos-image.XXXXXX") }})"
+    trap 'rm -rf "${stage}"' EXIT
+    install -m 755 {{ quote(cargo_target_dir + "/deloxide/release/nervix-server") }} "${stage}/nervix-server"
+    install -m 755 {{ quote(cargo_target_dir + "/release/nervix-cli") }} "${stage}/nervix-cli"
+    install -m 755 {{ quote(cargo_target_dir + "/release/nervix-deadlock-report") }} "${stage}/nervix-deadlock-report"
+    llvm-strip-23 "${stage}/nervix-server" "${stage}/nervix-cli" "${stage}/nervix-deadlock-report"
+    cat >"${stage}/Dockerfile" <<'EOF'
+    ARG BASE
+    FROM ${BASE}
+    COPY nervix-server nervix-cli nervix-deadlock-report /usr/local/bin/
+    EOF
+    docker build --build-arg BASE={{ quote(base) }} \
+        --label io.nervix.diagnostic.selection={{ quote(selection) }} \
+        --label "org.opencontainers.image.revision=${revision}" \
+        --tag {{ quote(tag) }} "${stage}"
+
 # Build a diagnostic node: nervix-server in the `deloxide` mode, whose tracked locks report an active
 # deadlock with evidence and end the process. Its own target directory keeps it from replacing the
 # ordinary binary; it is a diagnostic artifact, never a release product.
@@ -2855,17 +2911,39 @@ docker-prepare-qemu platform="linux/amd64":
 # Build the CPU image for amd64 or arm64.
 docker-build-debian llvm_version="23" tag="nervix:debian" platform="linux/amd64" push="false" cache_from="" cache_to="":
     just docker-build-linux cpu {{ quote(llvm_version) }} \
-        {{ quote(tag) }} {{ quote(platform) }} {{ quote(push) }} {{ quote(cache_from) }} {{ quote(cache_to) }}
+        {{ quote(tag) }} {{ quote(platform) }} {{ quote(push) }} {{ quote(cache_from) }} {{ quote(cache_to) }} ""
 
 # Build Debian trixie -> CUDA 13/cuDNN 9 -> Nervix, reusing CUDA across application builds.
 docker-build-cuda llvm_version="23" tag="nervix:cuda" platform="linux/amd64" push="false" cache_from="" cache_to="":
     just docker-build-linux cuda {{ quote(llvm_version) }} \
-        {{ quote(tag) }} {{ quote(platform) }} {{ quote(push) }} {{ quote(cache_from) }} {{ quote(cache_to) }}
+        {{ quote(tag) }} {{ quote(platform) }} {{ quote(push) }} {{ quote(cache_from) }} {{ quote(cache_to) }} ""
+
+# Build the Deloxide diagnostic image of the CPU runtime: the diagnostic server of one selection,
+# deloxide, deloxide-order or deloxide-stress, with the ordinary CLI and formatter and the evidence
+# report tool. Its io.nervix.diagnostic.selection label makes every chaos run judge the deadlock
+# evidence of its nodes; it is a test artifact and never a release.
+docker-build-diagnostic selection="deloxide-order" llvm_version="23" tag="nervix:diagnostic" platform="linux/amd64" push="false" cache_from="" cache_to="":
+    just docker-build-linux diagnostic {{ quote(llvm_version) }} \
+        {{ quote(tag) }} {{ quote(platform) }} {{ quote(push) }} {{ quote(cache_from) }} {{ quote(cache_to) }} \
+        {{ quote(selection) }}
 
 [private]
-docker-build-linux image_target llvm_version tag platform push cache_from cache_to:
+docker-build-linux image_target llvm_version tag platform push cache_from cache_to diagnostic_selection:
     #!/usr/bin/env bash
     set -euo pipefail
+    case {{ quote(image_target) }}:{{ quote(diagnostic_selection) }} in
+        cpu: | cuda: | diagnostic:deloxide | diagnostic:deloxide-order | diagnostic:deloxide-stress) ;;
+        *)
+            echo "the {{ image_target }} image cannot be built with diagnostic selection '{{ diagnostic_selection }}'" >&2
+            exit 1
+            ;;
+    esac
+    # Every image names the revision it was built from, so two images of one revision can be told
+    # apart from two of different ones.
+    revision="$(git rev-parse HEAD)"
+    if [[ -n "$(git status --porcelain --untracked-files=no)" ]]; then
+        revision="${revision}-dirty"
+    fi
     normalized_platform={{ quote(platform) }}
     if [[ "${normalized_platform}" == "linux/aarch64" ]]; then
         normalized_platform="linux/arm64"
@@ -2904,6 +2982,8 @@ docker-build-linux image_target llvm_version tag platform push cache_from cache_
         --build-arg "KACHE_S3_ENDPOINT=${KACHE_S3_ENDPOINT}" \
         --build-arg "KACHE_S3_ACCESS_KEY=${KACHE_S3_ACCESS_KEY}" \
         --build-arg "KACHE_S3_SECRET_KEY=${KACHE_S3_SECRET_KEY}" \
+        --build-arg NERVIX_DIAGNOSTIC_SELECTION={{ quote(diagnostic_selection) }} \
+        --label "org.opencontainers.image.revision=${revision}" \
         "${cache_flags[@]}" \
         -t {{ quote(tag) }} \
         "${output_flag}" \
