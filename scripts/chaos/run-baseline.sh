@@ -564,6 +564,16 @@ run_event_recording_covered=false
 # Every teardown step after the run's timeout is bounded on its own, and together they fit this
 # reserve, which the live event subscriber also outlives the timeout by.
 teardown_reserve_seconds=900
+# The Deloxide selection a diagnostic image declares in its io.nervix.diagnostic.selection label,
+# and nothing for an ordinary image. Every process a diagnostic node starts records one evidence
+# file; a node keeps at most this many files and the run at most this many bytes of evidence, and a
+# run that recorded more fails instead of growing its artifacts.
+diagnostic_selection=""
+deadlock_evidence_files_per_node=64
+deadlock_evidence_bytes_limit=67108864
+# Qualifying the evidence takes a second or two a file; within the teardown reserve it gets this
+# long altogether, and a file it did not reach is not qualified, which fails the run.
+deadlock_qualification_budget_seconds=300
 
 export CHAOS_RUN_ID="${run_id}"
 export CHAOS_CLUSTER_ID="${cluster_id}"
@@ -914,6 +924,133 @@ capture_diagnostics() {
     set -e
 }
 
+# Reads the labels of the resolved image and records its revision. An image that declares a Deloxide
+# diagnostic selection runs every node as a diagnostic node: the compose overlay mounts a directory
+# of this run into each node, which records its deadlock evidence there, and the run judges that
+# evidence with the image's own report tool before it removes anything.
+prepare_diagnostic_evidence() {
+    local labels
+    labels="$(run_bounded 30 docker image inspect --format '{{json .Config.Labels}}' "${image_id}")" \
+        || setup_error "image '${image_ref}' cannot be inspected for its labels"
+    diagnostic_selection="$(jq -r '(. // {})["io.nervix.diagnostic.selection"] // ""' <<<"${labels}")"
+    local revision
+    revision="$(jq -r '(. // {})["org.opencontainers.image.revision"] // ""' <<<"${labels}")"
+    # The dollars in this jq filter are jq variables, not shell expansion.
+    # shellcheck disable=SC2016
+    update_manifest '.image_revision = (if $revision == "" then null else $revision end)
+        | .diagnostic = null' --arg revision "${revision}"
+    case "${diagnostic_selection}" in
+        "") return 0 ;;
+        deloxide | deloxide-order | deloxide-stress) ;;
+        *) setup_error "image '${image_ref}' declares the unknown diagnostic selection '${diagnostic_selection}'" ;;
+    esac
+    run_bounded 30 docker run --rm --entrypoint /bin/sh "${image_id}" -eu -c \
+        'test -x /usr/local/bin/nervix-deadlock-report' \
+        || setup_error "diagnostic image '${image_ref}' does not package an executable nervix-deadlock-report"
+    local number
+    for number in 1 2 3; do
+        mkdir -p "${artifact_dir}/deadlock/node-${number}"
+        # The image's user records the evidence, and the controller reads it back.
+        chmod 0777 "${artifact_dir}/deadlock/node-${number}"
+    done
+    export CHAOS_DEADLOCK_DIR="${artifact_dir}/deadlock"
+    compose_args+=(--file "${script_dir}/compose.diagnostic.yaml")
+    # The dollars in this jq filter are jq variables, not shell expansion.
+    # shellcheck disable=SC2016
+    update_manifest '.diagnostic = {selection: $selection, evidence: "deadlock",
+                                    qualification: "deadlock/qualification.ndjson",
+                                    verdict: "results/diagnostic-evidence.json"}
+        | .artifact_limits += {deadlock_evidence_files_per_node: $files, deadlock_evidence_bytes: $bytes}' \
+        --arg selection "${diagnostic_selection}" \
+        --argjson files "${deadlock_evidence_files_per_node}" \
+        --argjson bytes "${deadlock_evidence_bytes_limit}"
+    printf 'diagnostic image: %s selection; every node records deadlock evidence under %s\n' \
+        "${diagnostic_selection}" "${artifact_dir}/deadlock"
+}
+
+# Freezes every node container that still runs, so no process records a finding after its evidence
+# is read, then qualifies each evidence file the nodes recorded with the image's own report tool,
+# in a container without a network whose only mount is the node's evidence directory, read-only.
+# Writes one record per file to deadlock/qualification.ndjson: its size, the tool's exit status and
+# output, and the first line of its inspection, which names the recorded selection. A node's files
+# beyond the run's bound, or beyond the qualification budget, are listed unjudged, and partially
+# written files are listed as such. The frozen nodes run again afterwards, for cleanup or a retained
+# deployment.
+qualify_deadlock_evidence() {
+    local records="${artifact_dir}/deadlock/qualification.ndjson"
+    : >"${records}"
+    local qualification_deadline=$((SECONDS + deadlock_qualification_budget_seconds))
+    local running=()
+    mapfile -t running < <(timeout --foreground --kill-after=5s 20s docker container ls --quiet \
+        --filter "label=io.nervix.chaos.run=${run_id}" --filter label=io.nervix.chaos.role=node \
+        --filter status=running 2>/dev/null)
+    if ((${#running[@]} > 0)); then
+        timeout --foreground --kill-after=5s 30s docker pause "${running[@]}" \
+            >"${artifact_dir}/deadlock/pause.txt" 2>&1
+    fi
+    local number
+    for number in 1 2 3; do
+        local node="node-${number}"
+        local node_dir="${artifact_dir}/deadlock/${node}"
+        [[ -d "${node_dir}" ]] || continue
+        local judged=0
+        local path
+        while IFS= read -r path; do
+            local name="${path##*/}"
+            local file="deadlock/${node}/${name}"
+            local bytes
+            bytes="$(stat -c %s "${path}" 2>/dev/null || printf '0')"
+            if [[ "${name}" == *.partial ]]; then
+                jq -nc --arg node "${node}" --arg file "${file}" --argjson bytes "${bytes}" \
+                    '{node: $node, kind: "partial", file: $file, bytes: $bytes}' >>"${records}"
+                continue
+            fi
+            local skipped=""
+            if ((judged >= deadlock_evidence_files_per_node)); then
+                skipped="the node recorded more evidence files than the run keeps"
+            elif ((SECONDS >= qualification_deadline)); then
+                skipped="the qualification budget of ${deadlock_qualification_budget_seconds} seconds expired first"
+            fi
+            if [[ -n "${skipped}" ]]; then
+                jq -nc --arg node "${node}" --arg file "${file}" --argjson bytes "${bytes}" \
+                    --arg skipped "${skipped}" \
+                    '{node: $node, kind: "evidence", file: $file, bytes: $bytes, qualify_exit: null,
+                      skipped: $skipped}' >>"${records}"
+                continue
+            fi
+            judged=$((judged + 1))
+            local tool_status=0
+            local tool_bound=$((qualification_deadline - SECONDS))
+            if ((tool_bound > 60)); then
+                tool_bound=60
+            fi
+            # The dollars in this script are the container shell's arguments, not shell expansion.
+            # shellcheck disable=SC2016
+            timeout --foreground --kill-after=5s "${tool_bound}s" docker run --rm --pull never --network none \
+                --label "io.nervix.chaos.run=${run_id}" --label io.nervix.chaos.role=deadlock-report \
+                --mount "type=bind,src=${node_dir},dst=/evidence,readonly" \
+                --entrypoint /bin/sh "${image_id}" -c \
+                'nervix-deadlock-report inspect "$1" >&2 && exec nervix-deadlock-report qualify "$1"' \
+                qualify "/evidence/${name}" \
+                >"${path}.qualify.txt" 2>"${path}.inspect.txt" || tool_status=$?
+            trim_file "${path}.qualify.txt" 65536
+            trim_file "${path}.inspect.txt" 1048576
+            jq -nc --arg node "${node}" --arg file "${file}" --argjson bytes "${bytes}" \
+                --argjson status "${tool_status}" --rawfile qualify "${path}.qualify.txt" \
+                --arg inspect_head "$(head -n 1 "${path}.inspect.txt")" \
+                '{node: $node, kind: "evidence", file: $file, bytes: $bytes, qualify_exit: $status,
+                  qualify_output: $qualify, inspect_head: $inspect_head,
+                  qualification: "\($file).qualify.txt", inspection: "\($file).inspect.txt"}' \
+                >>"${records}"
+        done < <(find "${node_dir}" -maxdepth 1 -type f \
+            \( -name 'deadlock-*.rkyv' -o -name 'deadlock-*.partial' \) 2>/dev/null | sort)
+    done
+    if ((${#running[@]} > 0)); then
+        timeout --foreground --kill-after=5s 30s docker unpause "${running[@]}" \
+            >>"${artifact_dir}/deadlock/pause.txt" 2>&1
+    fi
+}
+
 remove_private_keys() {
     rm -f \
         "${artifact_dir}/tls/ca-key.pem" \
@@ -1058,8 +1195,45 @@ finish() {
             printf '%s\n' 'controller failure: every run-owned container must come from a recorded image; see results/container-images.json' >&2
         fi
     fi
+    # A diagnostic image's evidence is judged once the closed recording names every process the
+    # nodes started, and before cleanup removes anything. An active deadlock or a failed diagnostic
+    # execution ended a node, which explains whatever else the run observed, so it classifies a run
+    # that already failed too; any other problem fails a run that otherwise passed.
+    local diagnostic_failed=false
+    if [[ -n "${diagnostic_selection}" && "${compose_ready}" == true ]]; then
+        qualify_deadlock_evidence
+        local diagnostic_status=0
+        "${script_dir}/verify-diagnostic-evidence.sh" \
+            --recording "${artifact_dir}/diagnostics/docker-events.ndjson" \
+            --recording-covered "${run_event_recording_covered}" \
+            --qualification "${artifact_dir}/deadlock/qualification.ndjson" \
+            --selection "${diagnostic_selection}" --nodes "${node_count}" \
+            --max-files-per-node "${deadlock_evidence_files_per_node}" \
+            --max-bytes "${deadlock_evidence_bytes_limit}" \
+            --output "${artifact_dir}/results/diagnostic-evidence.json" \
+            2>"${artifact_dir}/deadlock/verdict.txt" || diagnostic_status=$?
+        if [[ "${diagnostic_status}" -ne 0 ]]; then
+            local diagnostic_category=controller
+            if [[ "${diagnostic_status}" -eq 1 ]]; then
+                diagnostic_category="$(jq -r '.category // "controller"' \
+                    "${artifact_dir}/results/diagnostic-evidence.json" 2>/dev/null || printf 'controller')"
+            fi
+            if [[ "${status}" -eq 0 ]]; then
+                status=1
+                diagnostic_failed=true
+                failure_category="${diagnostic_category}"
+                current_phase='diagnostic evidence'
+            elif jq -e '.active_deadlock or .diagnostic_failure' \
+                "${artifact_dir}/results/diagnostic-evidence.json" >/dev/null 2>&1; then
+                diagnostic_failed=true
+                failure_category=diagnostic
+            fi
+            printf 'diagnostic evidence did not qualify; see results/diagnostic-evidence.json:\n' >&2
+            sed 's/^/  /' "${artifact_dir}/deadlock/verdict.txt" >&2
+        fi
+    fi
 
-    if [[ "${status}" -ne 0 && ( "${scenario}" == *-crash || "${scenario}" == pause-resume || "${scenario}" == partition-recovery || "${scenario}" == degraded-links || "${recovery_scenario}" == true ) ]]; then
+    if [[ "${status}" -ne 0 && ( "${scenario}" == *-crash || "${scenario}" == pause-resume || "${scenario}" == partition-recovery || "${scenario}" == degraded-links || "${recovery_scenario}" == true || "${diagnostic_failed}" == true ) ]]; then
         local reproducer_image="${image_id:-${image_ref}}"
         if [[ "${image_ref}" == *@sha256:* ]]; then
             reproducer_image="${image_ref}"
@@ -1142,6 +1316,17 @@ finish() {
                 evidence_paths+=("${evidence_path}")
             fi
         done
+        if [[ -n "${diagnostic_selection}" ]]; then
+            for evidence_path in results/diagnostic-evidence.json deadlock/qualification.ndjson \
+                deadlock/verdict.txt; do
+                if [[ -s "${artifact_dir}/${evidence_path}" ]]; then
+                    evidence_paths+=("${evidence_path}")
+                fi
+            done
+            while IFS= read -r evidence_path; do
+                evidence_paths+=("${evidence_path#"${artifact_dir}/"}")
+            done < <(find "${artifact_dir}/deadlock" -mindepth 2 -maxdepth 2 -type f -size +0c 2>/dev/null | sort)
+        fi
         # Every Docker-event window records the bounds of the recording it was read from.
         while IFS= read -r evidence_path; do
             evidence_paths+=("${evidence_path#"${artifact_dir}/"}")
@@ -1726,6 +1911,7 @@ export NERVIX_IMAGE="${image_id}"
 run_bounded 30 docker run --rm --entrypoint /bin/sh "${image_id}" -eu -c \
     'test -x /usr/local/bin/nervix-server; test -x /usr/local/bin/nervix-cli' \
     || setup_error "image '${image_ref}' does not package executable nervix-server and nervix-cli binaries"
+prepare_diagnostic_evidence
 
 start_run_event_recording
 if [[ "${scenario}" != "baseline" && "${scenario}" != backup ]]; then

@@ -1877,6 +1877,28 @@ channels, `Notify`, DashMap shards, dependency locks, atomic protocols, missing 
 cross-node waits remain outside its detection claims and retain Shuttle/Loom/Turmoil/Chaos checks.
 No diagnostic check proves safety for an untracked path or an order the workload did not take.
 
+**Diagnostic images under external chaos.** The lane runs diagnostic nodes in a scenario binary or
+as local processes; the external chaos suite runs them as packaged containers under real process,
+pause and network faults. The `diagnostic` target of `Dockerfile.debian` builds the server of one
+selection, `NERVIX_DIAGNOSTIC_SELECTION`, with the ordinary CLI and formatter and the
+`nervix-deadlock-report` tool, on the release image's CPU runtime. It declares the selection in its
+`io.nervix.diagnostic.selection` label, and every image, release or diagnostic, declares the revision
+it was built from in `org.opencontainers.image.revision`. The release targets copy their binaries
+from the builder's release artifacts and the diagnostic target from its diagnostic ones, so a build
+of one kind cannot produce an image of the other, and the diagnostic image never enters a published
+manifest. `just docker-build-diagnostic` builds it; CI's `build-diagnostic` job builds the
+`deloxide-order` image beside the release images whenever a chaos suite runs, and the suites run
+against both. The chaos runner reads the label: every node records its evidence in a directory of
+the run, the run freezes the nodes once its Docker event recording is closed, and the image's own
+report tool qualifies every file before cleanup. A run fails unless each node holds one complete,
+qualifying evidence file of the declared selection for every process start the recording shows,
+and no node ended with status `3` or `4`; an unreviewed potential cycle fails it as in the lane.
+The suite refuses an image whose labels name another kind or revision than its caller asks for.
+`scripts/chaos/README.md` owns the runner's contract and artifacts. The evidence observes each
+process up to its kill, pause, stop or the freeze, without an upstream flush barrier, and only its
+tracked thread-blocking locks; recovery, ledger and timing verdicts stay the scenarios' own, with
+the product's deadlines and the suite's budgets unchanged.
+
 ### Blocking work outside the executor
 
 A node runs its variable-size encoding, decoding, validation, hashing, compilation, program

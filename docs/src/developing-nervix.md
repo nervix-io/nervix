@@ -580,12 +580,47 @@ just chaos suite soak --image ghcr.io/nervix-io/nervix@sha256:<digest>
 
 The smoke suite runs a baseline, a leader crash with its restart and a partition with its recovery;
 the soak suite runs every delivered scenario with fixed and rotating mixed-instability seeds. CI
-runs the smoke suite against a pull request's own image only for a pull request labeled `chaos`,
+runs the smoke suite against a pull request's own images only for a pull request labeled `chaos`,
 and the soak suite for one labeled `chaos-soak`. The nightly build of `main` runs the soak suite,
-and a manual run of the `Chaos` workflow takes a suite and an immutable image digest. Label a pull
-request that changes the chaos runner, or the membership, failover, recovery or delivery behavior
-its scenarios verify, with `chaos`. `scripts/chaos/README.md` describes every scenario, the suites,
-their budgets and artifacts, and how to reproduce or replay a failed run.
+and a manual run of the `Chaos` workflow takes a suite, an immutable image digest and its kind.
+Label a pull request that changes the chaos runner, or the membership, failover, recovery or
+delivery behavior its scenarios verify, with `chaos`.
+
+Each suite runs twice on CI: against the release image and against the Deloxide diagnostic image
+of the same revision, which `just docker-build-diagnostic` builds and whose label makes every run
+judge the deadlock evidence of its nodes. Locally, `just build-chaos-diagnostic-image` overlays a
+release-mode diagnostic server of this checkout on an available image:
+
+```bash
+just build-chaos-diagnostic-image nervix:diagnostic-local ghcr.io/nervix-io/nervix:debian-latest deloxide-order
+just chaos suite smoke --image nervix:diagnostic-local --image-kind deloxide-order
+```
+
+`scripts/chaos/README.md` describes every scenario, the suites, diagnostic images, their budgets
+and artifacts, and how to reproduce or replay a failed run.
+
+### Release evidence
+
+`tests/release-evidence.toml` declares the evidence a revision needs before it qualifies for
+release: the checks every pull request runs, the release images, and each label-gated method with
+its label and checks, Bolero's sanitizer fuzzing, Loom and its weakening qualification, Shuttle,
+Turmoil, the three Deloxide lane selections, client conformance, and the smoke and soak suites
+against both the release image and the diagnostic image of the revision.
+
+```bash
+just release-evidence <pull-request>
+```
+
+The gate reads the pull request's head revision, its labels and every check run GitHub recorded on
+that revision. It refuses the revision when a method's label is missing, so CI never ran it; when
+the latest run of a required check, or of any shard of a sharded one, is missing, still running,
+skipped, cancelled, timed out or failed; and while an owner of tracked locks in
+`tests/deloxide-inventory.toml` records a gap instead of workloads that reach its locks. A rerun of
+a failed job supersedes the run it repeats; a passing rerun of a nondeterministic failure still
+needs the failure's own investigation, which the gate cannot see. The register of every check's
+verdict, run and time goes to `target/release-evidence/<revision>/` and belongs on the task that
+qualifies the revision, not in the repository. `just test-release-evidence` exercises the gate on
+recorded check runs, and a renamed CI job is renamed in the inventory in the same change.
 
 ### SIMD kernel development
 
