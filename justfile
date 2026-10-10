@@ -229,6 +229,36 @@ test-scenarios *args: tests-deps
     export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
     cargo test --features testing --test scenarios -- {{ args }}
 
+# Qualify ten consecutive three-node native metadata restores, retaining every attempt without retries.
+test-native-metadata-restore-repeat: tests-deps
+    #!/usr/bin/env bash
+    set -euo pipefail
+    export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
+    evidence_root={{ quote(cargo_target_dir + "/native-metadata-restore") }}
+    mkdir -p "$evidence_root"
+    attempt=$(mktemp -d "$evidence_root/run.XXXXXXXX")
+    git rev-parse HEAD > "$attempt/source-revision.txt"
+    git diff HEAD -- > "$attempt/source.patch"
+    for repetition in {1..10}; do
+        log="$attempt/repetition-$repetition.log"
+        status=0
+        cargo test --features testing --test scenarios -- \
+            --input tests/features/cluster/backup_metadata.feature \
+            --name '^Native lifecycle and Kafka metadata above the bulk budget on 3 nodes restore exactly$' \
+            --concurrency 4 --retry 0 > "$log" 2>&1 || status=$?
+        if [[ -f tests/logs/scenarios.log ]]; then
+            cp tests/logs/scenarios.log "$attempt/repetition-$repetition-scenarios.log"
+        fi
+        if [[ "$status" != 0 ]] || ! rg -q '^1 scenario \(1 passed\)$' "$log"; then
+            cat "$log"
+            printf 'Native metadata restore repetition %s failed; evidence: %s\n' "$repetition" "$attempt" >&2
+            exit 1
+        fi
+        printf 'Native metadata restore repetition %s/10 passed\n' "$repetition"
+    done
+    printf '10 consecutive three-node scenarios passed with concurrency 4 and retry 0\n' > "$attempt/completion.txt"
+    printf 'Native metadata restore qualification complete; evidence: %s\n' "$attempt"
+
 # Replay a compiled scenario binary, including a saved pre-fix reproducer, without rebuilding it.
 test-scenarios-binary binary *args: download-onnxruntime
     ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)" {{ quote(binary) }} {{ args }}
@@ -463,11 +493,18 @@ test-deloxide-order: tests-deps test-deloxide-order-workloads
 # of its further acquisitions, between 20µs and 200µs, as `StressConfiguration::LANE` records in
 # every process's evidence. Every probe, conformance check and owner test of the active-only
 # selection runs again under that disturbance, together with the probe that proves it is applied,
-# and the lifecycle scenarios tagged `@deloxide_stress` run one at a time, so the transactions,
-# drains, restores, reconnections and shutdowns they drive meet orders of nested acquisitions an
-# idle schedule rarely takes. Deloxide draws its delays from entropy it seeds itself, so a replay repeats the
-# workload and the configuration, not the schedule.
+# and the lifecycle scenarios tagged `@deloxide_stress` and the paced-driver scenarios run one at a
+# time, so the transactions, drains, reconnections, reopens and shutdowns they drive meet orders of
+# nested acquisitions an idle schedule rarely takes. Deloxide draws its delays from entropy it
+# seeds itself, so a replay repeats the workload and the configuration, not the schedule.
 test-deloxide-stress: tests-deps test-deloxide-stress-workloads
+
+# The stressed build's capture, restore and checkpoint-transfer scenarios, tagged
+# `@deloxide_stress_restore`, in the `deloxide-stress-restore` selection: the same build and
+# disturbance as `test-deloxide-stress`, its probes, and these scenarios one at a time, in a lane
+# with a budget of its own, because the stressed scenarios of both selections together would take
+# most of one lane's budget.
+test-deloxide-stress-restore: tests-deps test-deloxide-stress-restore-workloads
 
 # The part of each selection's lane that executes Nervix code. It has no dependencies, so the native
 # coverage collector runs exactly the lane inside its instrumentation.
@@ -479,6 +516,9 @@ test-deloxide-order-workloads:
 
 test-deloxide-stress-workloads:
     python3 -m scripts.deloxide_lane --target-dir {{ quote(cargo_target_dir) }} run deloxide-stress
+
+test-deloxide-stress-restore-workloads:
+    python3 -m scripts.deloxide_lane --target-dir {{ quote(cargo_target_dir) }} run deloxide-stress-restore
 
 # Prove the lane's supervision on real failing processes: probe workloads that deadlock, fail their
 # diagnostics, hang on an untracked wait, abort, retain an unreviewed potential cycle or overflow

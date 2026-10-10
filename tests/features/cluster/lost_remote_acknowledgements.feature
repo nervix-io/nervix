@@ -1,6 +1,7 @@
 @remote_ack_owners
 Feature: Remote record acknowledgements lost between nodes
 
+  @deloxide_stress
   Scenario: A record acknowledgement lost on its way back to the relay owner is redelivered instead of stalling its source
     Given Kafka is running
     And the production sticky scheduler is configured
