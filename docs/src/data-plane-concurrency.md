@@ -200,7 +200,8 @@ writer.
 Restore storage qualification includes the store's cancellation, corruption, snapshot, queued
 writer, active chunk liveness and many-key cleanup regressions in `just test-deloxide`,
 `just test-deloxide-order` and `just test-deloxide-stress`, plus the public one-node and three-node `@restore_installation`
-workloads for large saves, many checkpoints, native lifecycle and Kafka records above the default
+workloads, which `just test-deloxide-stress-restore` also runs under the bounded scheduling
+disturbance, for large saves, many checkpoints, native lifecycle and Kafka records above the default
 32 MiB bulk budget, active chunk replacement and purge, durable publication failure, restart and
 delayed coordinators. The many-checkpoint three-node case includes one replica per state; its
 one-MiB saves fit the replication operation's limit. Deloxide tracks the installation barrier and other
@@ -1452,7 +1453,7 @@ one invocation:
 | Shuttle | `just cargo-clippy-shuttle`: every Shuttle library, and each package `just test-shuttle` explores in test mode, where its checks are compiled | `just test-shuttle [filter]`, `just test-shuttle-replay-check`, `just test-primitives-shuttle` | `just coverage-native-extras test-shuttle test-primitives-shuttle`; `just coverage-shuttle <output> [filter]` |
 | Loom | `just cargo-clippy-loom` | `just test-loom [filter]`, `just test-loom-qualification`, `just test-primitives-loom` | `just coverage-native-extras test-loom test-primitives-loom`; `just coverage-loom <output> [filter]` |
 | Turmoil | The Turmoil targets of `just cargo-clippy` | `just test-turmoil`, `just test-turmoil-replay-check`, `just test-primitives-turmoil` | `just coverage-turmoil`; native conformance through `just coverage-native-extras test-primitives-turmoil` |
-| Deloxide | `just cargo-clippy-deloxide`: every diagnostic selection of the boundary, reporting owner, paced driver and server, including probes and scenarios | `just test-deloxide`, `just test-deloxide-order`, `just test-deloxide-stress`, `just test-primitives-deloxide` and diagnostic compile checks in `just test-primitives-compile` | Native conformance through `just coverage-native-extras test-primitives-deloxide`; `just coverage-deadlock` collects the `test-deadlock-evidence-order` and ordinary `test-deadlock-report` producers in separate builds with canonical completion records and separately flagged diagnostic-evidence coverage; full diagnostic workloads retain separate evidence |
+| Deloxide | `just cargo-clippy-deloxide`: every diagnostic selection of the boundary, reporting owner, paced driver and server, including probes and scenarios | `just test-deloxide`, `just test-deloxide-order`, `just test-deloxide-stress`, `just test-deloxide-stress-restore`, `just test-primitives-deloxide` and diagnostic compile checks in `just test-primitives-compile` | Native conformance through `just coverage-native-extras test-primitives-deloxide`; `just coverage-deadlock` collects the `test-deadlock-evidence-order` and ordinary `test-deadlock-report` producers in separate builds with canonical completion records and separately flagged diagnostic-evidence coverage; full diagnostic workloads retain separate evidence |
 
 Model coverage uses the canonical inventories and runners, including per-test process isolation,
 Shuttle random/PCT exploration and nondeterminism checking, and Loom InvariantIds and exhaustive
@@ -1548,9 +1549,14 @@ cost per acquisition grow with the life of the process. The random strategy keep
 counter per lock it delayed, which grows with the locks a process constructs and is bounded by the
 process's life within its invocation bound.
 
-The stress selection runs every active-only probe, conformance check and owner test again, and
-the lifecycle scenarios tagged `@deloxide_stress`, and the `probe.stress-disturbance` probe proves
-the disturbance is applied: twenty thousand nested acquisitions must wait at least the shortest
+The stress selections run every active-only probe, conformance check and owner test again, and
+between them every scenario of the active-only selection but the report tool's triage, which drives
+no lifecycle path. `deloxide-stress` runs the lifecycle scenarios tagged `@deloxide_stress` and the
+paced-driver scenarios with the stressed Rust driver; `deloxide-stress-restore` compiles the same
+build under its own name and runs its probes and the capture, restore and checkpoint-transfer
+scenarios tagged `@deloxide_stress_restore`, in a lane of its own because the stressed scenarios of
+both, one at a time, would take most of one lane's budget. The `probe.stress-disturbance` probe proves the
+disturbance is applied in each: twenty thousand nested acquisitions must wait at least the shortest
 delay for half the preemptions the configuration expects, and record the lane's configuration. Its first run found that the adapters'
 immediate try bypassed the disturbance entirely, and that a self wait went unreported once
 Deloxide's held set was populated; both are fixed in the adapters, and the probe and the stress
@@ -1681,21 +1687,32 @@ checks, the run selection, pending-callback limit, revision and declared coverag
 copies separate from files a live recorder replaces. The operator's workload is not ended merely
 because an unreviewed historical cycle exists.
 
-**The diagnostic lane.** `just test-deloxide`, `just test-deloxide-order` and
-`just test-deloxide-stress` run the lane of each selection, and CI's `deloxide` job runs all three
-side by side for every pull request labeled `deloxide`, the label each change the Deloxide rule
-applies to carries. An invocation runs in every selection unless the inventory names the
-selections that run it. The stress selection runs every probe, conformance check and owner test of
-the active-only selection, and its own `stress-scenarios` invocation: the one- and three-node
-lifecycle scenarios tagged `@deloxide_stress`, one at a time, which drive client contract
-transactions and their rejected rollbacks, the drain of buffered branches before an alteration,
-a quiesce expiry across two domains, backup capture and restore of WASM branches, Kafka offsets,
-deduplicator keys and windows, a delayed restore coordinator, interleaved branches with remote
-acknowledgement owners, session restarts that resume a producer and consumer, a domain restart that
-replaces its consumer, a memory-pressure pause of scheduled ingestors, and graceful shutdown with a
-slow cordon release and diagnostic server processes that stop gracefully. Each stressed scenario is
-registered under its own `stress.` identity; the full tagged suite and the paced-driver scenarios
-stay in the active-only and order selections.
+**The diagnostic lane.** `just test-deloxide`, `just test-deloxide-order`,
+`just test-deloxide-stress` and `just test-deloxide-stress-restore` run the lane of each selection,
+and CI's `deloxide` job runs all four side by side for every pull request labeled `deloxide`, the
+label each change the Deloxide rule applies to carries. A selection is named after the diagnostic
+build feature it compiles, or extends that name and declares the feature when it runs workloads of
+the same build in a lane, budget and CI runner of their own; a
+build records one diagnostic selection in its evidence whichever selection runs it. An invocation
+runs in every selection unless the inventory names the selections that run it. The stress selection
+runs every probe, conformance check and owner test of the active-only selection, its
+`stress-scenarios` invocation of the one- and three-node lifecycle scenarios tagged
+`@deloxide_stress`, which drive client contract transactions and their rejected rollbacks, the
+drain of buffered branches before an alteration, interleaved branches with remote acknowledgement
+owners, a lost acknowledgement and a producer restart, session restarts that resume a producer and
+consumer, a domain restart that replaces its consumer, a memory-pressure pause of scheduled
+ingestors, a Roto function's column builder, TLS rebinding of every HTTPS listener, batched
+inference over interleaved branches, a restarted voter's ownership, and graceful shutdown with a
+slow cordon release and diagnostic server processes that stop gracefully, and its
+`stress-paced-simulation` invocation of the paced-driver scenarios with the stressed Rust driver.
+The restore selection runs the build's probes and its `stress-restore-scenarios` invocation of the
+scenarios tagged `@deloxide_stress_restore`: backup capture and restore of WASM branches, Kafka
+offsets, deduplicator keys and windows, materialized relays and native metadata, complete restore
+generations, staging quota and reclamation, delayed restore coordinators, bounded multi-domain
+backup waits and their recovery, and the drain of a large-state WASM owner through bulk checkpoint
+streams. Every stressed scenario runs one at a time under its own `stress.` identity, with the
+scenario, examples and invariant of its active-only counterpart and the owners that counterpart
+reaches.
 `tests/deloxide-inventory.toml` is the lane's bounded inventory. It registers every workload a
 selection runs, each with a stable identity, the invariant it owns, the selections that must run it
 and the coverage it declares: the disposable-process probes of `nervix-deadlock`, the tracked
@@ -1722,8 +1739,9 @@ analysis starts a fresh process per feature and gives the six large materialized
 complete-generation restore examples their own processes. These restores each start several nodes
 and carry large state payloads, so per-example order histories stay within the detector and host
 budgets. Their `order_tags` in the inventory select and account for every example. Every diagnostic
-server and paced driver process installs its own detector. The selections are separate builds,
-apart from ordinary, fuzz, Loom, Shuttle and Turmoil builds.
+server and paced driver process installs its own detector. Each selection compiles one diagnostic
+build, `deloxide-stress-restore` the stress selection's under its own name, and the diagnostic
+builds stay apart from ordinary, fuzz, Loom, Shuttle and Turmoil builds.
 
 The conformance checks are the tracked adapters' own: which locks a diagnostic build selects, that
 `Debug` formatting tries a lock and never waits for it, that a value moves in and out of a lock, the
@@ -1792,8 +1810,9 @@ its own class and status, keep their output and the evidence they could write, a
 behind. A consistent-order control must pass, and the recorded deadlock must replay to the same
 class.
 
-Under `just coverage-native-extras test-deloxide`, `test-deloxide-order` or `test-deloxide-stress`, the lane builds in the
-collector's instrumented target, with instrumentation on workspace crates only, so dependencies such
+Under `just coverage-native-extras test-deloxide`, `test-deloxide-order`, `test-deloxide-stress` or
+`test-deloxide-stress-restore`, the lane builds in the collector's instrumented target of the
+feature its selection compiles, with instrumentation on workspace crates only, so dependencies such
 as wasmtime's compiler keep the speed the product's deadlines assume. It takes the report tool, CLI
 and shared client binding from the target its prerequisites built, starts every test executable
 through Cargo's configured runner, and hands `lane.json` to the collector, which exports nothing
@@ -1811,8 +1830,12 @@ why, or both. `just validate-deloxide-applicability`, part of `just validate` an
 job, reads the acquisition catalog `just ratchet` writes and fails on an owner without a record and
 on a record whose file no longer acquires a tracked lock. It reports how many owners registered
 workloads reach and how many record a path the lane does not reach. The catalog is the compiler's
-resolution of the Deloxide adapters' operations, not a search for lock names. A record is a reviewed
-declaration: the lane's coverage report is evidence about it, not a proof of ownership. Format
+resolution of the Deloxide adapters' operations, not a search for lock names. Every diagnostic
+library and binary configuration enables `testing`, as the lane's server builds do, so acquisitions
+in testing-only fault controls require owner records too. This includes the server's scheduling,
+drain and executor-occupancy controls and the consensus storage fault controls. Ordinary and
+modeled configurations retain their own feature selections. A record is a reviewed declaration:
+the lane's coverage report is evidence about it, not a proof of ownership. Format
 equality, malformed and out-of-bounds rejection, normalized-cycle deduplication and the summary's
 counts are registered Bolero properties with the same assertion in ordinary and sanitizer execution.
 

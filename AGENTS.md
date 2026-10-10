@@ -946,13 +946,19 @@ build and the existing tests, and nothing in it changes behavior.
 - A change that adds or alters thread-blocking synchronization, a `sync::blocking` lock or
   condition variable, the order in which tracked locks are acquired, or a shutdown, drain, restore,
   cancellation, handoff or other lifecycle or ownership path that uses tracked locks runs
-  `just test-deloxide`, `just test-deloxide-order` and `just test-deloxide-stress` and carries the
-  `deloxide` label, so that CI's `deloxide` job, which runs only for a pull request with that label,
-  runs all three. The stress selection runs the active-only probes, conformance checks and owner
-  tests and the lifecycle scenarios tagged `@deloxide_stress` under Deloxide's bounded scheduling
-  disturbance; a change to a lifecycle path those scenarios do not reach tags one that does; a stressed workload that fails is a finding, reproduced first as a
-  focused failing test against its owner and fixed there, never hidden by a passing rerun, a wider
-  product deadline or a weaker assertion. Where the lane's
+  `just test-deloxide`, `just test-deloxide-order`, `just test-deloxide-stress` and
+  `just test-deloxide-stress-restore` and carries the `deloxide` label, so that CI's `deloxide` job,
+  which runs only for a pull request with that label, runs all four. The two stress selections
+  compile one build with Deloxide's bounded scheduling disturbance and each keeps its own lane
+  budget: `deloxide-stress` runs the active-only probes, conformance checks and owner tests, the
+  lifecycle scenarios tagged `@deloxide_stress` and the paced-driver scenarios, and
+  `deloxide-stress-restore` the capture, restore and checkpoint-transfer scenarios tagged
+  `@deloxide_stress_restore`. Between them they run every scenario of the active-only selection but
+  the report tool's triage, so a scenario that joins the active-only selection joins the stress
+  selection of its family under a `stress.` identity, and a change to a lifecycle path those
+  scenarios do not reach tags one that does. A stressed workload that fails is a finding,
+  reproduced first as a focused failing test against its owner and fixed there, never hidden by a
+  passing rerun, a wider product deadline or a weaker assertion. Where the lane's
   workloads do not yet reach the changed path, the change
   extends its probes, owner tests or tagged scenarios and registers each in
   `tests/deloxide-inventory.toml` with a stable identity, the invariant it owns, its selections and
@@ -1172,8 +1178,9 @@ build and the existing tests, and nothing in it changes behavior.
   affects: `just test-shuttle [filter]` for interleavings, `just test-loom [filter]` for
   memory-ordering claims, `just test-turmoil` for the simulated network, and `just test-deloxide`
   for active deadlocks, `just test-deloxide-order` for potential acquisition-order cycles among
-  tracked locks and `just test-deloxide-stress` for active deadlocks under bounded scheduling
-  disturbance, beside the ordinary suite. The three Deloxide commands run the diagnostic lane over
+  tracked locks, and `just test-deloxide-stress` and `just test-deloxide-stress-restore` for active
+  deadlocks under bounded scheduling disturbance, beside the ordinary suite. The four Deloxide
+  commands run the diagnostic lane over
   the bounded inventory in `tests/deloxide-inventory.toml`: a registered workload that is missing,
   ignored or incomplete fails it, so does a discovered probe, owner test or tagged scenario that is
   not registered, and every run keeps an attempt that `just test-deloxide-replay` replays.
@@ -1205,7 +1212,8 @@ build and the existing tests, and nothing in it changes behavior.
   instrumentation: `test-typed-ratchet`, `bench-smoke`, `nspl-completion-walk`, the canonical
   `test-shuttle` and `test-loom` runners, each `test-primitives-<mode>` conformance recipe,
   `test-deadlock-evidence-order`, `test-deadlock-report`, and the `test-deloxide`,
-  `test-deloxide-order` and `test-deloxide-stress` lanes, which export only from a complete `lane.json` and instrument only
+  `test-deloxide-order`, `test-deloxide-stress` and `test-deloxide-stress-restore` lanes, which
+  export only from a complete `lane.json` and instrument only
   workspace crates, through a workspace compiler wrapper beneath kache, so their nodes meet the
   product's deadlines.
   `test-primitives` selects every native conformance mode. CI runs these checks through collection;

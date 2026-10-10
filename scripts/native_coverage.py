@@ -10,8 +10,9 @@ compiler's matching LLVM tools; `bench-smoke` exercises every Criterion body onc
 walks the NSPL completion graph. `test-shuttle` and `test-loom` collect the canonical inventories,
 `test-deadlock-evidence-order` executes diagnostic owners and disposable-process probes,
 `test-deadlock-report` exercises the ordinary local report command in its own build, and
-`test-deloxide`, `test-deloxide-order` and `test-deloxide-stress` run the whole Deloxide diagnostic
-lane of each selection.
+`test-deloxide`, `test-deloxide-order`, `test-deloxide-stress` and `test-deloxide-stress-restore`
+run the whole Deloxide diagnostic lane of each selection, each in the instrumented build of the
+diagnostic feature its selection compiles.
 `test-primitives` selects the native conformance producers of every mode. Without names every producer runs. A producer runs
 its check exactly as `just <producer>` does and fails when the check fails, which is why CI's
 jobs run those checks through this command instead of beside it.
@@ -201,8 +202,9 @@ class Producer:
     finish: tuple[str, ...]
     toolchain: str | None = None
     filterable: bool = False
-    # Its instrumented recipe is the Deloxide lane, whose complete record export requires.
-    diagnostic_lane: bool = False
+    # The Deloxide lane selection its instrumented recipe runs, whose complete record export
+    # requires; `None` for a check that is not the lane. The lane builds in the mode's build.
+    lane: str | None = None
     instrumented_crates: InstrumentedCrates = InstrumentedCrates.EVERY
 
     def rerun(self, filter_text: str = "") -> str:
@@ -270,14 +272,21 @@ PRODUCERS: tuple[Producer, ...] = (
         instrumented="test-deadlock-report", finish=(),
     ),
     # The lanes' nodes must meet product deadlines while they prepare WASM processors and Arrow
-    # state, which instrumented dependencies made several times slower.
+    # state, which instrumented dependencies made several times slower. Each lane selection
+    # collects in the build of the diagnostic feature it compiles, as tests/deloxide-inventory.toml
+    # declares it: the stressed restore scenarios share the stress selection's build.
     *(
         Producer(
-            name=f"test-{mode}", mode=mode, prepare=("tests-deps",),
-            instrumented=f"test-{mode}-workloads", finish=(), diagnostic_lane=True,
+            name=f"test-{selection}", mode=feature, prepare=("tests-deps",),
+            instrumented=f"test-{selection}-workloads", finish=(), lane=selection,
             instrumented_crates=InstrumentedCrates.WORKSPACE,
         )
-        for mode in ("deloxide", "deloxide-order", "deloxide-stress")
+        for selection, feature in (
+            ("deloxide", "deloxide"),
+            ("deloxide-order", "deloxide-order"),
+            ("deloxide-stress", "deloxide-stress"),
+            ("deloxide-stress-restore", "deloxide-stress"),
+        )
     ),
 )
 
@@ -1442,7 +1451,7 @@ def collect(
         if producer.filterable:
             instrumented.environment[MODEL_VARIABLE] = str(attempt / MODEL_REPORT)
             record.content["filter"] = filter_text
-        if producer.diagnostic_lane:
+        if producer.lane is not None:
             instrumented.environment[LANE_VARIABLE] = str(attempt / LANE_REPORT)
         record.content["instrumentation"] = instrumented.describe(workspace)
         record.write()
@@ -1462,8 +1471,8 @@ def collect(
             if producer.filterable:
                 record.content["models"] = read_complete(attempt / MODEL_REPORT, producer.mode, filter_text)
                 record.write()
-            if producer.diagnostic_lane:
-                lane = read_complete_lane(attempt / LANE_REPORT, producer.mode)
+            if producer.lane is not None:
+                lane = read_complete_lane(attempt / LANE_REPORT, producer.lane)
                 record.content["lane"] = {
                     "record": LANE_REPORT,
                     "attempt": dict(lane["workspace"])["attempt"],
