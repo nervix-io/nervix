@@ -104,10 +104,12 @@ used the whole drain timeout; see [Releasing The Drain Cordon](#releasing-the-dr
 Two bounds are deliberately outside the deadline. Terminal teardown's final stops — the runtime,
 consensus, cluster membership, and the interconnect — run to completion rather than being cut short,
 because stopping them is what releases the node's tasks, connections, and storage. The interconnect
-applies its own ten-second transport drain. Closing the node's databases flushes and joins their
-background work synchronously, so the services that own them are dropped last, as one job on the
-node's filesystem storage workers; a node that cannot take that job reports teardown `Abandoned`.
-The deadline supervisor, not those bounds, is what guarantees the process ends.
+applies its own ten-second transport drain. Closing the node's databases synchronizes their journals
+and blocks until their background workers have left, so the services that own them are dropped
+last, as one job on the node's filesystem storage workers; a node that cannot take that job reports
+teardown `Abandoned`. A background worker whose flush or compaction failed never holds that close
+open; see [Terminal Teardown](#terminal-teardown). The deadline supervisor, not those bounds, is what
+guarantees the process ends.
 
 ### Exit Status
 
@@ -707,6 +709,18 @@ dropped. The registry and runtime database is released separately after the serv
 handles. Terminal teardown does not finish until both database locks have been released. See
 [Consensus Storage And Replication](./consensus-storage-and-replication.md) for the write, replay,
 retention, and snapshot contracts behind this barrier.
+
+Releasing a database stops its background workers, which flush memtables into tables and compact
+them, and waits until none is left. A worker normally leaves when it takes its stop request, but a
+flush or compaction that fails, for example on a full or failing disk, ends its worker at once,
+without taking one. The close never waits for such a worker to answer. It keeps checking whether
+any worker is left, discards the flushes and compactions still queued, and finishes once the last
+worker is gone, so a storage failure during the close cannot hold terminal teardown open. Discarding
+that work loses nothing: every write it would have moved into a table is in the database's journal,
+which the close synchronizes and the next start replays. The storage engine logs each failed worker
+at `error` as `Worker #N crashed` with its cause, and a journal it cannot synchronize as
+`Flush error on drop`. Either failure reaches the node's log, while teardown goes on to release the
+lock.
 
 The interconnect rejects new admission, cancels pool and operation waiters, and retires the pool
 and peer protocol owners. An ending peer owner cancels unadmitted records and releases item and
