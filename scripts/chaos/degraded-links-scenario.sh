@@ -253,7 +253,7 @@ run_degraded_links() {
     jq '.traffic_observed_before_degradation = true' \
         "${artifact_dir}/results/remote-path.json" >"${remote_path_tmp}"
     mv "${remote_path_tmp}" "${artifact_dir}/results/remote-path.json"
-    link_ping "${degradation_root}/ping-baseline.txt" nervix-2 nervix-3
+    link_ping "${degradation_root}/ping-baseline.txt" nervix-2 nervix-3 baseline
     link_rate_probe "${degradation_root}/rate-baseline.json" nervix-2 nervix-3
     degradation_action healthy baseline_started
     degradation_sample_window baseline healthy "${baseline_seconds}"
@@ -280,7 +280,7 @@ run_degraded_links() {
         phase "degraded-links ${ordinal}/${#cases[@]}: ${profile}"
         check_support_containers || degradation_fail setup 'load ended before all profiles completed; increase --records'
         degradation_install "${case_dir}" "${profile}" "${ordinal}"
-        link_ping "${case_dir}/ping-fault.txt" nervix-2 nervix-3
+        link_ping "${case_dir}/ping-fault.txt" nervix-2 nervix-3 "${profile}"
         if [[ "${profile}" == rate-limit || "${profile}" == combined ]]; then
             link_rate_probe "${case_dir}/rate-fault.json" nervix-2 nervix-3
         fi

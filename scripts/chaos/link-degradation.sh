@@ -24,12 +24,27 @@ link_degradation_effect() {
     esac
 }
 
-# Pings RECEIVER forty times from SENDER's network namespace and summarizes the result as JSON beside
-# OUTPUT.
+# Samples RECEIVER from SENDER's network namespace in approximately four seconds, and summarizes
+# the complete packet count as JSON beside OUTPUT. Correlated burst loss needs more observations
+# in that same window; every other profile and healthy observation uses forty packets.
 link_ping() {
+    [[ "$#" -eq 4 ]] || {
+        link_degradation_fail observation 'link ping needs output, sender, receiver and profile'
+        return 1
+    }
     local output="$1"
     local sender="$2"
     local receiver="$3"
+    local profile="$4"
+    local probe_count=40 probe_interval=0.1
+    case "${profile}" in
+        burst-loss) probe_count=400; probe_interval=0.01 ;;
+        baseline | healed | delay | jitter | random-loss | rate-limit | combined) ;;
+        *)
+            link_degradation_fail observation "unknown link probe profile ${profile}"
+            return 1
+            ;;
+    esac
     local sender_id address
     sender_id="$(owned_service_container "${sender}")"
     address="$(node_address "${receiver}")"
@@ -38,10 +53,10 @@ link_ping() {
         --label "io.nervix.chaos.run=${run_id}" \
         --label io.nervix.chaos.role=link-probe \
         --network "container:${sender_id}" "${CHAOS_PROBE_IMAGE}" \
-        ping -c 40 -i 0.1 -W 1 "${address}" >"${output}" 2>&1 || ping_status=$?
+        ping -c "${probe_count}" -i "${probe_interval}" -W 1 "${address}" >"${output}" 2>&1 || ping_status=$?
     [[ "${ping_status}" -eq 0 || "${ping_status}" -eq 1 ]] \
         || link_degradation_fail observation "ping helper failed with ${ping_status}"
-    "${script_dir}/verify-degraded-evidence.sh" ping "${output}" "${output%.txt}.json"
+    "${script_dir}/verify-degraded-evidence.sh" ping "${output}" "${output%.txt}.json" "${probe_count}"
 }
 
 # Times one 262,144-byte transfer, including TCP connection and retransmissions, within one total
@@ -271,7 +286,7 @@ link_degradation_heal() {
         "${script_dir}/verify-degraded-evidence.sh" rules default \
             "${case_dir}/rules-healed-${host}.txt" "${address}"
     done
-    link_ping "${case_dir}/ping-healed.txt" "${sender}" "${receiver}"
+    link_ping "${case_dir}/ping-healed.txt" "${sender}" "${receiver}" healed
     "${script_dir}/verify-degraded-evidence.sh" effect healed \
         "${baseline}" "${case_dir}/ping-healed.json"
 }

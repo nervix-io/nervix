@@ -52,7 +52,7 @@ must_fail "${verify}" rules delay "${tmp_dir}/rules-delay.txt" 10.213.1.12
     printf '40 packets transmitted, 38 packets received, 5%% packet loss\n'
     printf 'round-trip min/avg/max = 100.000/180.000/260.000 ms\n'
 } >"${tmp_dir}/ping.txt"
-"${verify}" ping "${tmp_dir}/ping.txt" "${tmp_dir}/ping.json"
+"${verify}" ping "${tmp_dir}/ping.txt" "${tmp_dir}/ping.json" 40
 jq -e '.sent==40 and .received==38 and .lost==2 and .longest_loss_run==2 and .avg_ms==180' \
     "${tmp_dir}/ping.json" >/dev/null || fail 'ping parser did not retain the loss burst'
 
@@ -102,5 +102,66 @@ jq 'if .at_ms == 41000 then .output_end = 63 | .backlog = 21 else . end' \
 "${verify}" recovery "${tmp_dir}/recovery-over-limit.ndjson" rate-limit 2 50 20 \
     | jq -e '.qualified == false' >/dev/null \
     || fail 'recovery passed above the committed backlog limit'
+
+# A larger sample keeps the received and lost fractions of the directed-link contract.
+# Four replies per forty packets are below the required received fraction at every sample size.
+jq -n '{sent:400,received:40,lost:360,longest_loss_run:10,min_ms:1,avg_ms:2,max_ms:3}' \
+    >"${tmp_dir}/burst-excess-loss.json"
+must_fail "${verify}" effect burst-loss "${tmp_dir}/baseline.json" "${tmp_dir}/burst-excess-loss.json"
+
+# A correlated-loss sample starts with the four replies seen in the failed soak observation,
+# then continues with a qualifying loss distribution. Drive the production sampler, parser and
+# effect verifier together: a short prefix must not stand in for the complete burst observation.
+(
+    # shellcheck source=../link-degradation.sh
+    source "${chaos_dir}/link-degradation.sh"
+    scenario=degraded-probe-control
+    run_id=degraded-probe-control
+    script_dir="${chaos_dir}"
+    CHAOS_PROBE_IMAGE=probe-control
+    owned_service_container() { printf 'sender-control\n'; }
+    node_address() { printf '10.213.1.13\n'; }
+    run_bounded() {
+        [[ "$1" -eq 30 ]] || fail 'link probe changed its total deadline'
+        shift
+        local count=0 interval=0
+        while [[ "$#" -gt 0 ]]; do
+            case "$1" in
+                -c) count="$2"; shift ;;
+                -i) interval="$2"; shift ;;
+            esac
+            shift
+        done
+        awk -v count="${count}" -v interval="${interval}" '
+            BEGIN {
+                if (count * interval > 4) exit 2
+                print "PING 10.213.1.13: 56 data bytes"
+                received = 0
+                for (seq = 0; seq < count; seq++) {
+                    if (seq < 40 && seq != 10 && seq != 17 && seq != 26 && seq != 30) continue
+                    if (seq >= 40 && seq % 5 < 2) continue
+                    printf "64 bytes from 10.213.1.13: seq=%d ttl=64 time=0.060 ms\n", seq
+                    received++
+                }
+                printf "%d packets transmitted, %d packets received, %.1f%% packet loss\n", count, received, (count - received) * 100 / count
+                print "round-trip min/avg/max = 0.050/0.060/0.067 ms"
+            }
+        '
+    }
+    link_ping "${tmp_dir}/burst-sample.txt" sender receiver burst-loss
+    "${verify}" effect burst-loss "${tmp_dir}/baseline.json" "${tmp_dir}/burst-sample.json" \
+        >/dev/null || fail 'the complete bounded burst sample did not qualify'
+    must_fail "${verify}" ping "${tmp_dir}/ping.txt" "${tmp_dir}/burst-truncated.json" 400
+    must_fail "${verify}" ping "${tmp_dir}/burst-sample.txt" "${tmp_dir}/invalid-count.json" 0
+    must_fail "${verify}" ping "${tmp_dir}/burst-sample.txt" "${tmp_dir}/invalid-count.json" 401
+    must_fail "${verify}" ping "${tmp_dir}/burst-sample.txt" "${tmp_dir}/invalid-count.json" 18446744073709551656
+    must_fail "${verify}" effect burst-loss "${tmp_dir}/baseline.json" "${tmp_dir}/baseline.json"
+    jq '.longest_loss_run = 1' "${tmp_dir}/burst-sample.json" >"${tmp_dir}/burst-isolated-loss.json"
+    must_fail "${verify}" effect burst-loss "${tmp_dir}/baseline.json" "${tmp_dir}/burst-isolated-loss.json"
+    link_ping "${tmp_dir}/healthy-sample.txt" sender receiver baseline
+    jq -e '.sent == 40' "${tmp_dir}/healthy-sample.json" >/dev/null \
+        || fail 'healthy observation did not retain its packet count'
+    must_fail link_ping "${tmp_dir}/invalid-profile.txt" sender receiver unrecognized
+)
 
 printf 'degraded evidence self-test passed\n'

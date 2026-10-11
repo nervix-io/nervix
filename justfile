@@ -2554,6 +2554,20 @@ chaos *args:
 test-chaos-rate-probe:
     exec bash scripts/chaos/tests/rate-probe-self-test.sh
 
+# Exercise bounded packet sampling and the directed-link effect limits without a product image.
+test-chaos-degraded-evidence:
+    exec bash scripts/chaos/tests/degraded-self-test.sh
+
+# Retain shell coverage of packet sampling, evidence parsing and effect controls.
+coverage-chaos-degraded-evidence:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    descriptor_limit="$(ulimit -n)"
+    if [[ "${descriptor_limit}" == unlimited ]] || ((descriptor_limit > 65536)); then
+        ulimit -n 65536
+    fi
+    kcov --clean --include-path={{ quote(invocation_directory() / "scripts/chaos/link-degradation.sh") }},{{ quote(invocation_directory() / "scripts/chaos/verify-degraded-evidence.sh") }},{{ quote(invocation_directory() / "scripts/chaos/tests/degraded-self-test.sh") }} {{ quote(cargo_target_dir / "chaos-degraded-evidence-coverage") }} scripts/chaos/tests/degraded-self-test.sh
+
 # Judge retained public clock transcripts through the external verifier.
 verify-chaos-clock *args:
     exec bash scripts/chaos/verify-clock-evidence.sh {{ args }}

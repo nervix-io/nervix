@@ -1202,6 +1202,11 @@ build and the existing tests, and nothing in it changes behavior.
   unless the deadlock evidence of each process its nodes started qualifies; a change to the
   diagnostic image, its evidence collection or a path its scenarios exercise under tracked locks
   keeps both green.
+- Directed-link burst-loss proof samples 400 packets at 10 ms intervals within the same
+  approximately four-second observation window and 30-second probe budget. Other profiles and
+  healthy observations use 40 packets at 100 ms intervals. Effect limits retain their received
+  and lost fractions at every sample size; an incomplete sample, ineffective fault, excessive loss
+  or missing consecutive burst fails qualification. Sampling never extends a product deadline.
 - `just release-evidence <pull-request>` holds a pull request's head revision to
   `tests/release-evidence.toml`: every label-gated method's label is on the pull request and the
   latest run of every required check passed on that revision. Its register lists each gap a

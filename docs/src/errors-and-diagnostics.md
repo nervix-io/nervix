@@ -1849,6 +1849,12 @@ transfer to alter a later measurement. A failed required attempt remains evidenc
 subsequent successful qualification. The controller's measurement budget does not extend the
 product's recovery budget. [The external Chaos runner](https://github.com/nervix-io/nervix/blob/main/scripts/chaos/README.md) owns the
 commands, measurement interpretation and retained artifact paths.
+Directed-link packet observations distinguish an incomplete sample from an effect outside the
+configured limits. The latter is an injection qualification failure whether too few packets were
+lost or too few replies remained; it does not assert that the fault was absent or that product
+recovery failed. Burst samples use 400 packets inside the existing observation window, and the
+effect verifier preserves the original received and lost fractions. Failed observations remain
+retained alongside subsequent qualified samples.
 
 The end-to-end benchmark driver distinguishes fresh Kafka partition leader readiness from a
 failed measurement. Before any warm-up input, its empty-topic preparation retries only the

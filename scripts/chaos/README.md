@@ -264,6 +264,16 @@ prebuilt Alpine netcat transfer. A node's readiness is not part of that check, b
 leader's link can start an election, during which a node can report no leader for a moment. The
 transfer counts all bytes at the receiver and times their arrival. It records a healthy ICMP and
 transfer baseline before any fault.
+ICMP observations have one 30-second total helper budget. Burst loss uses 400 packets at
+10 ms intervals; every other profile, healthy baseline and healing check uses 40 at 100 ms.
+Both sample in approximately four seconds. The parser requires the declared complete packet
+count. Effect limits scale by the number sent: loss profiles still need at least 7.5% loss and
+12.5% replies, and burst loss still needs at least two consecutive lost packets. Combined loss
+keeps its 5% minimum loss. A missing effect, an excessive loss fraction or a truncated sample
+fails injection qualification; a large sample cannot turn four replies per forty packets into
+passing evidence. Pumba parameters, action hold times and product recovery deadlines do not
+change with the sample size. `just test-chaos-degraded-evidence` runs the focused controller,
+parser and effect controls; `just coverage-chaos-degraded-evidence` retains their shell coverage.
 The 262,144-byte transfer has one 90-second deadline shared by the sender and receiver, covering
 connection establishment, TCP retransmissions, byte delivery and receiver completion. It uses
 the pinned BusyBox netcat's EOF half-close rather than an idle timeout. At 256 kbit/s the payload
