@@ -1,3 +1,5 @@
+mod paced_interconnect;
+
 use std::{
     collections::{BTreeMap, BTreeSet},
     fs::OpenOptions,
@@ -54,6 +56,7 @@ use nervix_primitives::{
     },
     time::Instant,
 };
+use paced_interconnect::PacedInterconnect;
 
 /// Cucumber node ids are fixed strings from the feature files, so they always parse.
 pub(crate) fn node_name(raw: &str) -> ClusterNodeName {
@@ -3473,6 +3476,8 @@ struct NodeSpec {
     interconnect_ip: IpAddr,
     /// The host the node advertises for its interconnect endpoint.
     interconnect_host: String,
+    /// A scenario-owned byte pacer at this node's advertised endpoint.
+    paced_interconnect: Option<PacedInterconnect>,
     /// The resolver configuration the node loads, or `None` for the host's own.
     dns: Option<DnsConfiguration>,
 }
@@ -3534,6 +3539,7 @@ impl NodeSpec {
             interconnect_port: ports.interconnect,
             interconnect_ip: HOST,
             interconnect_host: HOST.to_string(),
+            paced_interconnect: None,
             dns: None,
         })
     }
@@ -3697,7 +3703,11 @@ impl NodeSpec {
 
     /// The `host:port` endpoint the node advertises and a joining node bootstraps from.
     fn interconnect_endpoint(&self) -> String {
-        NodeEndpoint::new(self.interconnect_host.clone(), self.interconnect_port).to_string()
+        let port = self
+            .paced_interconnect
+            .as_ref()
+            .map_or(self.interconnect_port, PacedInterconnect::port);
+        NodeEndpoint::new(self.interconnect_host.clone(), port).to_string()
     }
 
     fn db_path(&self) -> io::Result<PathBuf> {

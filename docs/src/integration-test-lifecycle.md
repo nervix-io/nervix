@@ -1,5 +1,24 @@
 # Integration Test Lifecycle
 
+## Paced Interconnect Fixture
+
+The rate-limited follower catch-up scenario starts a TCP byte pacer before restarting a stopped
+node. Its listener takes the existing advertised endpoint and forwards opaque bytes to a private
+interconnect listener on the restarted node. The advertised endpoint stays fixed so retained peer
+routes also reach the pacer. Its port remains reserved for the test run, as for other retired test
+endpoints. The host, TLS identity, resolver policy and product deadlines stay fixed. Each accepted
+connection uses a 1024-byte inbound buffer, delays each chunk
+by its configured byte rate before forwarding, and forwards responses promptly. A scenario-owned
+task set retains and reaps connections. Cancellation or fixture drop closes the listener and aborts
+all its connections; the fixture cannot survive its node specification.
+
+The scenario starts the follower once without the harness's catch-up retries, records append
+stream opening baselines before that start, and waits for the applied NSPL domain backlog within
+its explicit assertion bound. The opening count is a diagnostic observation because normal initial
+catch-up probes can also open streams. An atomic maximum of bytes forwarded on one connection proves
+that the paced path carried more than one production progress interval. This observation does not inspect TLS or frame bytes
+and establishes no ordering the product relies on.
+
 The Cucumber scenario suite runs Nervix the way an operator does. It starts clusters, drives them
 through the session API, brokers, and HTTP endpoints, and asserts on what they do. Many scenarios
 run at once in one test process, each with nodes of its own, so the harness around them is a

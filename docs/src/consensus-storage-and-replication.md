@@ -190,6 +190,14 @@ these are true:
 An answer or transport flow-control progress restarts the idle window. A stream with no outstanding
 batch can remain idle indefinitely. The time required for a follower to synchronize one batch is
 therefore not treated as a failure while the transfer is still moving.
+The interconnect frame writer uses the same progress contract: every nonzero flow-control grant
+restarts its write idle bound, including grants within one large append frame. Catch-up at a
+limited byte rate can therefore preserve its append stream across many five-second intervals.
+The native writer checks both a moving and a stalled receiver. The public rate-limited follower
+scenario sends opaque TLS bytes through a bounded test proxy at 32768 bytes per second and checks
+the applied domain backlog within its assertion bound and the bytes carried by the paced path.
+Append stream openings are diagnostic observations, including initial catch-up probes; the scenario
+changes no product deadline.
 
 Heartbeats keep the shorter deadline derived from the configured heartbeat interval, capped at five
 seconds. With the default 250 ms heartbeat, the current soft deadline is 187.5 ms. Replication

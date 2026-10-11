@@ -1,5 +1,13 @@
 Feature: Pipelined raft replication and bounded log retention
 
+  Scenario: A rate-limited follower catches up without restarting a moving append stream
+    Given a 3 node nervix cluster is started
+    When node "node-3" is stopped
+    And 1024 domains named "moving_append" are created on the leader node
+    Given inbound interconnect traffic to stopped node "node-3" is paced at 32768 bytes per second
+    When node "node-3" starts catching up through its paced interconnect
+    Then within "120s" the paced follower applies 1024 domains named "moving_append"
+
   Scenario: Failed follower stream setup stays paced while the surviving quorum commits
     Given a 3 node nervix cluster is started
     When node "node-3" is stopped

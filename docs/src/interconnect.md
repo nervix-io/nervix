@@ -579,8 +579,11 @@ operation's domain semantics.
    deadline. An idle established stream is valid; the owning protocol sets deadlines for answers it
    is awaiting. The initiator's sender reports when the peer's flow control last accepted its
    bytes, so that protocol can tell a slow answer from a peer that accepts nothing. Receiving is
-   cancel-safe on both ends: a frame is decoded under the pool's memory and CPU admission after it
-   leaves the stream, and a receive its caller abandons, because a timer or command it selects
+   cancel-safe on both ends. While a frame is being written, each nonzero flow-control grant
+   restarts the five-second write progress bound. A frame has no total transfer deadline while
+   bytes keep advancing; zero-capacity notifications do not restart the bound. Expiry resets that
+   stream with the typed transport progress timeout. A frame is decoded under the pool's memory
+   and CPU admission after it leaves the stream, and a receive its caller abandons, because a timer or command it selects
    against won, leaves that decoding to the next receive, which finishes the frame before it reads
    another. No abandoned receive loses a frame or reorders one. Consensus append traffic,
    [client producer links](#client-producer-links) and

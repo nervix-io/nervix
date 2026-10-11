@@ -1030,6 +1030,11 @@ carries no acknowledgement, without logging branch field values.
 
 ### Interconnect
 
+The duplex writer's typed `TransportError::ProgressTimeout` means that a frame awaiting send
+capacity received no nonzero flow-control grant for its write progress bound. It does not bound
+the total time to transfer a frame. Expiry resets the exact stream; steady byte progress preserves
+the stream even when a large frame spans several progress intervals.
+
 The interconnect owns three kinds of failure. `TransportError` is a connection, TLS, framing,
 limit, deadline or relay delivery failure of the transport itself. `RequestError` is a typed
 request that could not be admitted, encoded, delivered or answered, with the peer's own

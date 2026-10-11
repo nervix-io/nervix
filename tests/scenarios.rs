@@ -160,6 +160,7 @@ mod deadlock_reports;
 mod domain_clock_attachment;
 mod endpoint_intake;
 mod ingestion_time;
+mod paced_replication;
 mod paced_simulation;
 mod process_cluster;
 mod restarted_voter;
@@ -426,6 +427,7 @@ struct ScenarioWorld {
     saved_raft_log_heads: BTreeMap<String, Option<u64>>,
     durable_catch_up: Option<DurableCatchUpObservation>,
     append_setup_observation: Option<AppendSetupObservation>,
+    moving_catch_up: Option<paced_replication::MovingCatchUp>,
     durable_catch_up_writer: Option<DurableCatchUpWriter>,
     follower_commands_memory: Option<FollowerCommandsMemoryObservation>,
     transaction_qualification: Option<TransactionQualificationObservation>,
