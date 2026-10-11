@@ -459,7 +459,8 @@ class WorkflowTests(unittest.TestCase):
         self.assertIn('CARGO_BUILD_JOBS: "1"', preparation)
         self.assertIn("python3 scripts/record_runner_load.py", shards)
         evidence = shards.split("name: bolero-fuzz-evidence-${{ matrix.shard }}")[1].split("- name:")[0]
-        self.assertIn("!target/native-coverage/bolero-fuzz/**/profiles/", evidence)
+        for excluded in ("**/profiles/**", "**/*.profdata", "**/targets/*/lcov.info"):
+            self.assertIn(f"!target/native-coverage/bolero-fuzz/{excluded}", evidence)
         self.assertEqual(len(bolero.shard_plan(bolero.load_inventory(), count)), count)
         combined = self.job("bolero-fuzz-combined")
         self.assertIn(label, combined)

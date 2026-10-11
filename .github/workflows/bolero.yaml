@@ -251,6 +251,8 @@ jobs:
             cat "${RUNNER_TEMP}/runner-load.md" >> "${GITHUB_STEP_SUMMARY}"
           fi
 
+      # The combining job needs only the records and each shard's aggregate report; raw and merged
+      # profiles and per-target reports stay in the shard's full coverage artifact.
       - name: Upload shard completion evidence
         if: always()
         uses: actions/upload-artifact@v4
@@ -258,7 +260,9 @@ jobs:
           name: bolero-fuzz-evidence-${{ matrix.shard }}
           path: |
             target/native-coverage/bolero-fuzz/
-            !target/native-coverage/bolero-fuzz/**/profiles/
+            !target/native-coverage/bolero-fuzz/**/profiles/**
+            !target/native-coverage/bolero-fuzz/**/*.profdata
+            !target/native-coverage/bolero-fuzz/**/targets/*/lcov.info
           if-no-files-found: error
 
       - name: Upload live campaign coverage and completion evidence

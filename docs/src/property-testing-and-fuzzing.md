@@ -563,8 +563,8 @@ independent qualification, with their original failure retained. No corpus repla
 the live measurement.
 
 Each CI shard publishes `coverage-bolero-fuzz-<number>` with its live campaign reports, records
-and raw profiles, `bolero-fuzz-evidence-<number>` with the same reports and records without the
-profiles, `bolero-runs-<number>` for corpus/crash and qualification artifacts with the Python
+and raw profiles, `bolero-fuzz-evidence-<number>` with its records and aggregate report but no
+profiles or per-target reports, `bolero-runs-<number>` for corpus/crash and qualification artifacts with the Python
 runner report as `python.lcov`, and `runner-load-bolero-fuzz-<number>` with its CPU and memory
 samples. `coverage-bolero-fuzz` holds the combined record and the merged report, which sums the
 shards' line, function and branch counters because they ran disjoint campaigns, and
