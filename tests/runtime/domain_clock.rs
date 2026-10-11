@@ -227,13 +227,13 @@ fn a_paced_generation_without_an_authority_is_observed_uninstalled() {
     ));
     let domains = BTreeMap::from([(domain_id.clone(), state)]);
     let assigned = BTreeMap::from([(domain_id.clone(), test_domain_clock_authority())]);
-    runtime.sync_committed_domains(&domains, &assigned);
+    runtime.sync_committed_domains(1, &domains, &assigned);
     let mut observer = runtime
         .observe_domain_clock(&domain_id)
         .expect("the synchronized domain is observable");
     let installed = observer.current().expect("the assigned clock is installed");
 
-    runtime.sync_committed_domains(&domains, &BTreeMap::new());
+    runtime.sync_committed_domains(2, &domains, &BTreeMap::new());
     observer
         .changed()
         .now_or_never()
@@ -246,7 +246,7 @@ fn a_paced_generation_without_an_authority_is_observed_uninstalled() {
         })
     );
 
-    runtime.sync_committed_domains(&domains, &assigned);
+    runtime.sync_committed_domains(3, &domains, &assigned);
     observer
         .changed()
         .now_or_never()
