@@ -9,6 +9,10 @@
 //!
 //! The connector dials a literal IPv4 or IPv6 host without asking this service, and applies the
 //! URL's port, or its scheme's default, to every address the service answers.
+//!
+//! `hyper-util` takes any `Service<Name>` whose error converts into a
+//! `Box<dyn std::error::Error + Send + Sync>`, and wraps it as the cause of its connection error.
+//! A [`DnsLookupReport`] meets that bound and keeps the lookup's whole report.
 
 use std::{
     future::Future,
@@ -22,14 +26,14 @@ use error_stack::Report;
 use hyper_util::client::legacy::connect::dns::Name;
 use tower_service::Service;
 
-use crate::{DnsLookupError, DnsResolver};
+use crate::{DnsLookupError, DnsLookupReport, DnsResolver};
 
 type Addresses = vec::IntoIter<SocketAddr>;
-type Resolving = Pin<Box<dyn Future<Output = Result<Addresses, DnsLookupError>> + Send>>;
+type Resolving = Pin<Box<dyn Future<Output = Result<Addresses, DnsLookupReport>> + Send>>;
 
 impl Service<Name> for DnsResolver {
     type Response = Addresses;
-    type Error = DnsLookupError;
+    type Error = DnsLookupReport;
     type Future = Resolving;
 
     /// A lookup waits for a slot inside its own budget, so the resolver always takes another.
@@ -43,7 +47,7 @@ impl Service<Name> for DnsResolver {
             resolver
                 .hyper_addresses(name)
                 .await
-                .map_err(|report| report.current_context().clone())
+                .map_err(DnsLookupReport::from)
         })
     }
 }

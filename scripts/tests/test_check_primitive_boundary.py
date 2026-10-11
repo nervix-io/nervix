@@ -436,6 +436,65 @@ class StaticTests(CheckTestCase):
         self.assertEqual(status, 0, report)
 
 
+class OwnerStaticTests(CheckTestCase):
+    def test_a_static_selected_atomic_of_the_owner_fails(self) -> None:
+        status, report = self.check(
+            {
+                "crates/primitives/src/deadlock/detector.rs": (
+                    "use crate::sync::{Arc, atomic::{AtomicBool, Ordering}};\n"
+                    "static CLAIMED: AtomicBool = AtomicBool::new(false);\n"
+                    "static ORDER: crate::sync::atomic::AtomicBool =\n"
+                    "    crate::sync::atomic::AtomicBool::new(false);\n"
+                )
+            }
+        )
+        self.assertEqual(status, 1, report)
+        self.assertIn("crates/primitives/src/deadlock/detector.rs:2", report)
+        self.assertIn("static `CLAIMED` holds a selected atomic", report)
+        self.assertIn("crates/primitives/src/deadlock/detector.rs:3", report)
+        self.assertIn("static `ORDER` holds a selected atomic", report)
+        self.assertIn("`crate::unmodeled::sync::atomic`", report)
+
+    def test_a_lazily_built_selected_atomic_of_the_owner_fails(self) -> None:
+        status, report = self.check(
+            {
+                "crates/primitives/src/registry.rs": (
+                    "use std::sync::LazyLock;\n"
+                    "use crate::sync::atomic::AtomicU64;\n"
+                    "static LOST: LazyLock<AtomicU64> = LazyLock::new(Default::default);\n"
+                )
+            }
+        )
+        self.assertEqual(status, 1, report)
+        self.assertIn("static `LOST` holds a selected atomic", report)
+
+    def test_a_static_real_atomic_of_the_owner_passes(self) -> None:
+        status, report = self.check(
+            {
+                "crates/primitives/src/deadlock/detector.rs": (
+                    "use crate::{sync::Arc, unmodeled::sync::atomic::{AtomicBool, Ordering}};\n"
+                    "use std::sync::atomic::AtomicU64;\n"
+                    "static CLAIMED: AtomicBool = AtomicBool::new(false);\n"
+                    "static LOST: AtomicU64 = AtomicU64::new(0);\n"
+                    "static RUNS: core::sync::atomic::AtomicUsize =\n"
+                    "    core::sync::atomic::AtomicUsize::new(0);\n"
+                )
+            }
+        )
+        self.assertEqual(status, 0, report)
+
+    def test_the_owner_keeps_its_import_exemption(self) -> None:
+        status, report = self.check(
+            {
+                "crates/primitives/src/sync/atomic.rs": (
+                    "pub use loom::sync::atomic::{AtomicU64, Ordering};\n"
+                    "pub use std::sync::atomic::fence;\n"
+                )
+            }
+        )
+        self.assertEqual(status, 0, report)
+
+
 class PermissionTests(CheckTestCase):
     def test_a_permitted_unmodeled_use_passes(self) -> None:
         status, report = self.check({})

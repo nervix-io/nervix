@@ -172,32 +172,6 @@ mod tests {
 
             self.assertEqual(count(root, "as_casts"), 1)
 
-    def test_bare_unwrap_and_expect_exclude_unit_tests(self) -> None:
-        with TemporaryDirectory() as directory:
-            root = Path(directory)
-            write_repository(
-                root,
-                {
-                    "src/lib.rs": """
-fn read(value: Option<u8>) -> u8 {
-    let first = value.unwrap();
-    let second = value.expect("checked above");
-    let kept = value.unwrap_or_default();
-    first + second + kept
-}
-
-#[cfg(test)]
-mod tests {
-    #[test]
-    fn reads() {
-        Some(1u8).unwrap();
-    }
-}
-""",
-                },
-            )
-
-            self.assertEqual(count(root, "bare_unwrap_and_expect"), 2)
 
     def test_combinator_control_flow_spares_pipelines_and_single_adapters(self) -> None:
         with TemporaryDirectory() as directory:
@@ -240,55 +214,6 @@ mod tests {
 
             self.assertEqual(count(root, "combinator_control_flow"), 3)
 
-    def test_bare_error_signatures_skip_reported_and_foreign_errors(self) -> None:
-        with TemporaryDirectory() as directory:
-            root = Path(directory)
-            write_repository(
-                root,
-                {
-                    "src/error.rs": "pub enum StoreError { Missing }\n",
-                    "src/lib.rs": """
-fn bare() -> Result<(), StoreError> {
-    Ok(())
-}
-
-fn reported() -> Result<(), Report<StoreError>> {
-    Ok(())
-}
-
-fn foreign() -> Result<(), std::io::Error> {
-    Ok(())
-}
-
-fn associated() -> Result<(), Self::Error> {
-    Ok(())
-}
-""",
-                },
-            )
-
-            self.assertEqual(count(root, "bare_error_signatures"), 1)
-
-    def test_bare_error_signatures_cover_nested_stream_callbacks(self) -> None:
-        with TemporaryDirectory() as directory:
-            root = Path(directory)
-            write_repository(
-                root,
-                {
-                    "src/lib.rs": """
-pub struct StreamHandlerError;
-
-type StreamFuture = Pin<Box<dyn Future<Output = Result<(), StreamHandlerError>>>>;
-type ByteStream = Pin<Box<dyn Stream<Item = Result<(), StreamHandlerError>>>>;
-
-fn register<F>() where F: Future<Output = Result<(), StreamHandlerError>> {}
-fn register_reported<F>() where F: Future<Output = Result<(), Report<StreamHandlerError>>> {}
-fn stream_reported<S>() where S: Stream<Item = Result<(), Report<StreamHandlerError>>> {}
-""",
-                },
-            )
-
-            self.assertEqual(count(root, "bare_error_signatures"), 3)
 
     def test_string_node_ids_cover_fields_parameters_and_aliases(self) -> None:
         with TemporaryDirectory() as directory:

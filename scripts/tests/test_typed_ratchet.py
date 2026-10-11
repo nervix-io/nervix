@@ -146,6 +146,16 @@ class RunnerIdentityTests(unittest.TestCase):
 
 
 class ConfigurationTests(unittest.TestCase):
+    def test_diagnostic_configurations_include_the_lanes_testing_capability(self) -> None:
+        diagnostic_features = {"deloxide", "deloxide-order", "deloxide-stress"}
+        diagnostic_configurations = 0
+        for configuration in typed_ratchet.load_configurations(ROOT):
+            if diagnostic_features.intersection(configuration.features):
+                diagnostic_configurations += 1
+                with self.subTest(configuration=configuration.name):
+                    self.assertIn("testing", configuration.features)
+        self.assertEqual(diagnostic_configurations, 6)
+
     def test_arguments_keep_modes_targets_and_selected_packages_explicit(self) -> None:
         self.assertEqual(Configuration("selected", "Cargo.toml", ("one", "two"), ("lib", "bin"), ("native", "shuttle"), "native-target").cargo_arguments(), ["--manifest-path", "Cargo.toml", "--package", "one", "--package", "two", "--lib", "--bins", "--features", "native shuttle", "--target", "native-target"])
         self.assertIn("--workspace", Configuration("ordinary", "Cargo.toml", ()).cargo_arguments())

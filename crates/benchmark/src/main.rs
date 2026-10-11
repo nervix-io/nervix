@@ -1,14 +1,15 @@
 use std::{
+    collections::BTreeMap,
     fs, io,
     net::{Ipv4Addr, SocketAddrV4},
     num::NonZeroUsize,
     path::{Path, PathBuf},
-    process::Stdio,
+    process::{ExitStatus, Stdio},
     time::Duration,
 };
 
-use anyhow::{Context as _, Result, anyhow, bail, ensure};
 use clap::{Parser, Subcommand, ValueEnum};
+use error_stack::{Report, ResultExt as _};
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_benchmark::{
     AbArm, AbSummary, BenchmarkCatalog, BenchmarkDependency, BenchmarkRunFailure,
@@ -16,21 +17,24 @@ use nervix_benchmark::{
     LoadedBenchmark, NERVIX_METRICS_PROMETHEUS_FILE, NERVIX_METRICS_REPORT_FILE,
     NervixImplementation, NervixMetricsReport, RunSettings, provision_topics,
 };
-use nervix_client_core::{Client, ConnectOptions, DomainName, split_query_statements};
+use nervix_client_core::{
+    Client, CommandOutcome, ConnectOptions, DomainName, split_query_statements,
+};
 use nervix_models::ClusterNodeName;
 use nervix_primitives::unmodeled::net::TcpListener;
 use nervix_test_environment::{
     ContainerMode, ContainerReadiness, DependencyEnvironment, KAFKA_ADDR, KAFKA_DOCKER_ADDR,
-    KAFKA_DOCKER_NETWORK, ManagedContainerInfo, configure_process_lifecycle,
+    KAFKA_DOCKER_NETWORK, ManagedContainerInfo, TeardownFailures, configure_process_lifecycle,
 };
 use rcgen::{
-    BasicConstraints, CertificateParams, ExtendedKeyUsagePurpose, IsCa, KeyPair, KeyUsagePurpose,
-    SanType,
+    BasicConstraints, CertificateParams, ExtendedKeyUsagePurpose, Ia5String, IsCa, KeyPair,
+    KeyUsagePurpose, SanType,
 };
 use testcontainers::{
     CopyTargetOptions, GenericImage, ImageExt,
     core::{ContainerPort, WaitFor, wait::HttpWaitStrategy},
 };
+use thiserror::Error;
 use tokio::process::{Child, Command};
 use uuid::Uuid;
 
@@ -50,6 +54,8 @@ const NERVIX_CONTAINER_ROLES: [&str; 3] = [
     "benchmark-subject-node-2",
     "benchmark-subject-node-3",
 ];
+/// The largest value payload a benchmark run may generate.
+const MAX_VALUE_BYTES: u64 = 1024 * 1024;
 
 #[derive(Debug, Parser)]
 #[command(about = "Run declarative end-to-end streaming benchmarks")]
@@ -178,8 +184,54 @@ struct ResolvedRun {
     run_directory: PathBuf,
 }
 
+/// The workload bounds one run resolved from its benchmark and the command line.
+struct WorkloadBounds {
+    partitions: u32,
+    value_bytes: u64,
+    max_backlog_messages: u64,
+    wait_timeout_seconds: u64,
+    warmup_seconds: u64,
+}
+
+impl WorkloadBounds {
+    fn validate(&self) -> error_stack::Result<(), WorkloadError> {
+        if self.partitions == 0 {
+            return Err(Report::new(WorkloadError::ZeroPartitions));
+        }
+        if i32::try_from(self.partitions).is_err() {
+            return Err(Report::new(WorkloadError::PartitionsBeyondKafka {
+                partitions: self.partitions,
+            }));
+        }
+        if self.value_bytes == 0 {
+            return Err(Report::new(WorkloadError::ZeroValueBytes));
+        }
+        if self.value_bytes > MAX_VALUE_BYTES {
+            return Err(Report::new(WorkloadError::ValueBytesAboveLimit {
+                value_bytes: self.value_bytes,
+            }));
+        }
+        if self.max_backlog_messages == 0 {
+            return Err(Report::new(WorkloadError::ZeroBacklog));
+        }
+        if self.wait_timeout_seconds == 0 {
+            return Err(Report::new(WorkloadError::ZeroWaitTimeout));
+        }
+        if self.warmup_seconds == 0 {
+            return Err(Report::new(WorkloadError::ZeroWarmup));
+        }
+        Ok(())
+    }
+}
+
+/// One local Nervix process of the benchmark subject.
+struct LocalNode {
+    name: ClusterNodeName,
+    child: Child,
+}
+
 enum SubjectRuntime {
-    Local { children: Vec<Child> },
+    Local { nodes: Vec<LocalNode> },
     Container { infos: Vec<ManagedContainerInfo> },
 }
 
@@ -191,23 +243,339 @@ struct Subject {
     node_count: usize,
 }
 
-fn main() -> Result<()> {
+/// Why a benchmark command failed. Beneath each context is the report of the catalog,
+/// comparison, client, dependency, process or file operation that failed, so the rendered chain
+/// names every cause once.
+#[derive(Debug, Error)]
+enum BenchmarkCliError {
+    #[error("failed to build the benchmark runtime")]
+    BuildRuntime,
+
+    #[error("failed to resolve repository root {}", path.display())]
+    ResolveRepositoryRoot { path: PathBuf },
+
+    #[error("failed to load the benchmark catalog")]
+    Catalog,
+
+    #[error("benchmark catalog is empty")]
+    EmptyCatalog,
+
+    #[error("failed to load benchmark '{benchmark}'")]
+    LoadBenchmark { benchmark: String },
+
+    #[error("benchmark '{benchmark}' has no implementation named '{implementation}'")]
+    UnknownImplementation {
+        benchmark: String,
+        implementation: String,
+    },
+
+    #[error("invalid run settings for benchmark '{benchmark}'")]
+    RunSettings { benchmark: String },
+
+    /// The [`WorkloadError`] beneath names the bound that does not hold.
+    #[error("invalid workload for benchmark '{benchmark}'")]
+    Workload { benchmark: String },
+
+    #[error("failed to create directory {}", path.display())]
+    CreateDirectory { path: PathBuf },
+
+    #[error("failed to create file {}", path.display())]
+    CreateFile { path: PathBuf },
+
+    #[error("failed to duplicate the log file handle of {}", path.display())]
+    DuplicateLog { path: PathBuf },
+
+    #[error("failed to write {}", path.display())]
+    WriteFile { path: PathBuf },
+
+    #[error("failed to read {}", path.display())]
+    ReadFile { path: PathBuf },
+
+    #[error("path {} is not valid UTF-8", path.display())]
+    NonUtf8Path { path: PathBuf },
+
+    #[error("run manifest field '{field}' exceeds the TOML integer range")]
+    ManifestField { field: &'static str },
+
+    #[error("failed to serialize the run manifest")]
+    SerializeRunManifest,
+
+    #[error("failed to compare benchmark runs")]
+    Comparison,
+
+    #[error(
+        "{failed} of {total} benchmark implementations failed; all catalog entries were attempted"
+    )]
+    FailedImplementations { failed: usize, total: usize },
+
+    #[error("benchmark dependency teardown failed: {failures}")]
+    DependencyTeardown { failures: TeardownFailures },
+
+    #[error("benchmark dependency teardown also failed: {failures}")]
+    DependencyTeardownAfterFailure { failures: TeardownFailures },
+
+    #[error("{arm} server binary does not exist at {}", path.display())]
+    MissingArmServerBinary { arm: &'static str, path: PathBuf },
+
+    #[error("A/B {arm} arm ({label}) failed on run {run}/{runs}")]
+    AbRun {
+        arm: &'static str,
+        label: String,
+        run: usize,
+        runs: usize,
+    },
+
+    #[error("failed to summarize the A/B comparison")]
+    AbComparison,
+
+    #[error("failed to start benchmark dependency {dependency:?}")]
+    StartDependency { dependency: BenchmarkDependency },
+
+    #[error("benchmark dependency endpoint '{key}' is unavailable")]
+    DependencyEndpoint { key: &'static str },
+
+    #[error("failed to provision benchmark Kafka topics")]
+    ProvisionTopics,
+
+    #[error("failed to render benchmark implementation '{implementation}'")]
+    RenderImplementation { implementation: String },
+
+    #[error("failed to render post-start statements of implementation '{implementation}'")]
+    RenderAfterStart { implementation: String },
+
+    #[error("benchmark dependency returned an invalid container id '{container}'")]
+    InvalidContainerId { container: String },
+
+    #[error("failed to run docker {}", .arguments.join(" "))]
+    RunDocker { arguments: Vec<String> },
+
+    #[error("docker {} failed with {status}: {stderr}", .arguments.join(" "))]
+    DockerFailed {
+        arguments: Vec<String>,
+        status: ExitStatus,
+        stderr: String,
+    },
+
+    #[error("failed to collect the logs of benchmark container {container}")]
+    CollectContainerLogs { container: String },
+
+    #[error("Nervix server binary does not exist at {}", path.display())]
+    MissingServerBinary { path: PathBuf },
+
+    #[error("failed to reserve local ports for the benchmark subject")]
+    ReservePorts,
+
+    #[error(
+        "each benchmark node must have one TLS endpoint name: {nodes} nodes, {endpoints} names"
+    )]
+    TlsEndpointCount { nodes: usize, endpoints: usize },
+
+    #[error("failed to generate the benchmark interconnect certificate authority")]
+    GenerateAuthority,
+
+    #[error("failed to generate the interconnect certificate of benchmark node {node}")]
+    GenerateNodeCertificate { node: ClusterNodeName },
+
+    #[error("failed to start local Nervix {node}")]
+    StartLocalNode { node: ClusterNodeName },
+
+    #[error("failed to poll local Nervix {node}")]
+    WatchLocalNode { node: ClusterNodeName },
+
+    #[error("local Nervix {node} exited before readiness with {status}")]
+    LocalNodeExitedBeforeReady {
+        node: ClusterNodeName,
+        status: ExitStatus,
+    },
+
+    #[error("local Nervix {node} did not become ready at {url} before timeout")]
+    LocalNodeNotReady { node: ClusterNodeName, url: String },
+
+    #[error("local Nervix {node} exited unexpectedly with {status}")]
+    LocalNodeExited {
+        node: ClusterNodeName,
+        status: ExitStatus,
+    },
+
+    #[error("failed to stop local Nervix {node}")]
+    StopLocalNode { node: ClusterNodeName },
+
+    #[error("invalid metrics URL {url}")]
+    MetricsUrl { url: String },
+
+    #[error("--nervix-image is required with --nervix-mode image")]
+    MissingNervixImage,
+
+    /// The [`ImageReferenceError`] beneath says what the reference lacks.
+    #[error("invalid image reference '{image}'")]
+    ImageReference { image: String },
+
+    #[error("failed to start Nervix benchmark image {node}")]
+    StartNervixImage { node: ClusterNodeName },
+
+    #[error("failed to start benchmark container image {image}")]
+    StartContainerImage { image: String },
+
+    #[error("Nervix image did not expose container port {port}")]
+    UnexposedImagePort { port: u16 },
+
+    #[error("failed to inspect image {image}")]
+    InspectImage { image: String },
+
+    #[error("failed to inspect image {image}: {stderr}")]
+    ImageInspectionFailed { image: String, stderr: String },
+
+    #[error("Nervix control plane did not become ready")]
+    ControlPlaneNotReady,
+
+    #[error(
+        "Nervix control plane did not report all {expected} benchmark nodes: {}\ndiagnostics: {:?}",
+        .outcome.message,
+        .outcome.diagnostics
+    )]
+    ClusterIncomplete {
+        expected: usize,
+        outcome: Box<CommandOutcome>,
+    },
+
+    #[error("failed to query Nervix cluster status")]
+    QueryClusterStatus,
+
+    #[error("benchmark subject has no Nervix control endpoint")]
+    MissingControlEndpoint,
+
+    #[error("benchmark subject has no Nervix password")]
+    MissingPassword,
+
+    #[error("benchmark domain '{domain}' is invalid")]
+    InvalidDomain { domain: String },
+
+    #[error("failed to connect to Nervix at {url}")]
+    Connect { url: String },
+
+    #[error("failed to split the benchmark graph into statements")]
+    SplitGraph,
+
+    #[error("benchmark graph contains no statements")]
+    EmptyGraph,
+
+    #[error("failed to execute Nervix benchmark command: {statement}")]
+    ExecuteCommand { statement: String },
+
+    #[error(
+        "Nervix benchmark command failed: {}\nstatement: {statement}\ndiagnostics: {:?}",
+        .outcome.message,
+        .outcome.diagnostics
+    )]
+    CommandRejected {
+        statement: String,
+        outcome: Box<CommandOutcome>,
+    },
+
+    #[error("failed to build the benchmark metrics client")]
+    BuildMetricsClient,
+
+    #[error("failed to scrape Nervix metrics from {url}")]
+    ScrapeMetrics { url: reqwest::Url },
+
+    #[error("failed to produce the Nervix benchmark metrics report")]
+    MetricsReport,
+
+    #[error("failed to resolve the benchmark executable")]
+    LocateExecutable,
+
+    #[error("benchmark executable {} has no parent directory", path.display())]
+    ExecutableWithoutDirectory { path: PathBuf },
+
+    #[error("benchmark load driver does not exist at {}", path.display())]
+    MissingLoadDriver { path: PathBuf },
+
+    #[error("failed to start load driver {}", path.display())]
+    StartLoadDriver { path: PathBuf },
+
+    #[error("failed to poll the load driver")]
+    WatchLoadDriver,
+
+    #[error("load driver exited before warmup with {status}:\n{diagnostics}")]
+    LoadDriverExitedEarly {
+        status: ExitStatus,
+        diagnostics: String,
+    },
+
+    #[error("load driver did not complete consumer stabilization and warmup before timeout")]
+    LoadDriverWarmupTimeout,
+
+    #[error("load driver exceeded its bounded completion timeout")]
+    LoadDriverCompletionTimeout,
+
+    #[error("load driver failed with {status}:\n{diagnostics}")]
+    LoadDriverFailed {
+        status: ExitStatus,
+        diagnostics: String,
+    },
+}
+
+/// Which workload bound a run violates, beneath the [`BenchmarkCliError::Workload`] that names
+/// the benchmark.
+#[derive(Debug, Error)]
+enum WorkloadError {
+    #[error("partition count must be positive")]
+    ZeroPartitions,
+
+    #[error("partition count {partitions} exceeds Kafka's supported range")]
+    PartitionsBeyondKafka { partitions: u32 },
+
+    #[error("value byte count must be positive")]
+    ZeroValueBytes,
+
+    #[error("value byte count {value_bytes} must not exceed 1 MiB")]
+    ValueBytesAboveLimit { value_bytes: u64 },
+
+    #[error("maximum backlog must be positive")]
+    ZeroBacklog,
+
+    #[error("wait timeout must be positive")]
+    ZeroWaitTimeout,
+
+    #[error("warm-up duration must be positive")]
+    ZeroWarmup,
+}
+
+/// What an image reference lacks, beneath the [`BenchmarkCliError::ImageReference`] that names
+/// it.
+#[derive(Debug, Error, PartialEq, Eq)]
+enum ImageReferenceError {
+    #[error("digest image references are not yet supported")]
+    Digest,
+
+    #[error("an image reference must include an explicit tag")]
+    MissingTag,
+
+    #[error("an image reference needs both a name and a tag")]
+    Incomplete,
+}
+
+fn main() -> Result<(), Report<BenchmarkCliError>> {
     configure_process_lifecycle(ContainerMode::Ephemeral);
     let runtime = nervix_primitives::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
-        .context("failed to build the benchmark runtime")?;
+        .change_context(BenchmarkCliError::BuildRuntime)?;
     runtime.block_on(run())
 }
 
-async fn run() -> Result<()> {
-    let args = Args::parse();
-    let repository_root = args.repository_root.canonicalize().with_context(|| {
-        format!(
-            "failed to resolve repository root {}",
-            args.repository_root.display()
-        )
-    })?;
+async fn run() -> error_stack::Result<(), BenchmarkCliError> {
+    run_command(Args::parse()).await
+}
+
+/// Runs one parsed benchmark command against the catalog of its repository root.
+async fn run_command(args: Args) -> error_stack::Result<(), BenchmarkCliError> {
+    let repository_root = args
+        .repository_root
+        .canonicalize()
+        .change_context_lazy(|| BenchmarkCliError::ResolveRepositoryRoot {
+            path: args.repository_root.clone(),
+        })?;
     let catalog =
         BenchmarkCatalog::from_benchmarks_root(repository_root.join(DEFAULT_BENCHMARKS_ROOT));
     match args.command {
@@ -225,8 +593,11 @@ async fn run() -> Result<()> {
     }
 }
 
-fn list_benchmarks(catalog: &BenchmarkCatalog) -> Result<()> {
-    for benchmark in catalog.discover()? {
+fn list_benchmarks(catalog: &BenchmarkCatalog) -> error_stack::Result<(), BenchmarkCliError> {
+    let benchmarks = catalog
+        .discover()
+        .change_context(BenchmarkCliError::Catalog)?;
+    for benchmark in benchmarks {
         let implementations = benchmark
             .definition()
             .implementations
@@ -248,15 +619,18 @@ async fn run_all_benchmarks(
     repository_root: &Path,
     catalog: &BenchmarkCatalog,
     options: RunOptions,
-) -> Result<()> {
-    let benchmarks = catalog.discover()?;
-    ensure!(!benchmarks.is_empty(), "benchmark catalog is empty");
+) -> error_stack::Result<(), BenchmarkCliError> {
+    let benchmarks = catalog
+        .discover()
+        .change_context(BenchmarkCliError::Catalog)?;
+    if benchmarks.is_empty() {
+        return Err(Report::new(BenchmarkCliError::EmptyCatalog));
+    }
     let artifacts_root = options.workload.resolve_artifacts_root(repository_root);
-    fs::create_dir_all(&artifacts_root).with_context(|| {
-        format!(
-            "failed to create benchmark artifact root {}",
-            artifacts_root.display()
-        )
+    fs::create_dir_all(&artifacts_root).change_context_lazy(|| {
+        BenchmarkCliError::CreateDirectory {
+            path: artifacts_root.clone(),
+        }
     })?;
     let mut run_directories = Vec::new();
     let mut failures = Vec::new();
@@ -281,8 +655,8 @@ async fn run_all_benchmarks(
             .await;
             match result {
                 Ok(run_directory) => run_directories.push(run_directory),
-                Err(error) => {
-                    let message = format!("{error:#}");
+                Err(report) => {
+                    let message = format!("{report:#}");
                     eprintln!(
                         "Benchmark '{}' implementation '{}' failed: {message}",
                         benchmark.slug(),
@@ -297,16 +671,20 @@ async fn run_all_benchmarks(
             }
         }
     }
-    let report = BenchmarkSuiteReport::from_run_directories(&run_directories, failures)?;
+    let report = BenchmarkSuiteReport::from_run_directories(&run_directories, failures)
+        .change_context(BenchmarkCliError::Comparison)?;
     let comparison_path = artifacts_root.join("benchmark-comparison.md");
-    report.write_markdown(&comparison_path)?;
+    report
+        .write_markdown(&comparison_path)
+        .change_context(BenchmarkCliError::Comparison)?;
     println!("comparison={}", comparison_path.display());
     let failed = report.failed_runs();
-    ensure!(
-        failed == 0,
-        "{failed} of {} benchmark implementations failed; all catalog entries were attempted",
-        report.total_runs()
-    );
+    if failed != 0 {
+        return Err(Report::new(BenchmarkCliError::FailedImplementations {
+            failed,
+            total: report.total_runs(),
+        }));
+    }
     Ok(())
 }
 
@@ -314,25 +692,28 @@ async fn run_benchmark(
     repository_root: &Path,
     catalog: &BenchmarkCatalog,
     args: RunArgs,
-) -> Result<PathBuf> {
-    let benchmark = catalog.load(&args.benchmark)?;
-    let implementation = benchmark
+) -> error_stack::Result<PathBuf, BenchmarkCliError> {
+    let benchmark =
+        catalog
+            .load(&args.benchmark)
+            .change_context_lazy(|| BenchmarkCliError::LoadBenchmark {
+                benchmark: args.benchmark.clone(),
+            })?;
+    let Some(implementation) = benchmark
         .definition()
         .implementations
         .get(&args.implementation)
-        .ok_or_else(|| {
-            anyhow!(
-                "benchmark '{}' has no implementation named '{}'",
-                benchmark.slug(),
-                args.implementation
-            )
-        })?;
+    else {
+        return Err(Report::new(BenchmarkCliError::UnknownImplementation {
+            benchmark: benchmark.slug().to_string(),
+            implementation: args.implementation.clone(),
+        }));
+    };
     let resolved = ResolvedRun::new(repository_root, &benchmark, &args)?;
-    fs::create_dir_all(&resolved.run_directory).with_context(|| {
-        format!(
-            "failed to create benchmark artifact directory {}",
-            resolved.run_directory.display()
-        )
+    fs::create_dir_all(&resolved.run_directory).change_context_lazy(|| {
+        BenchmarkCliError::CreateDirectory {
+            path: resolved.run_directory.clone(),
+        }
     })?;
     write_run_manifest(
         &resolved,
@@ -363,14 +744,17 @@ async fn run_benchmark(
     let outcome = match teardown {
         Ok(()) => execution,
         Err(failures) => match execution {
-            Ok(()) => Err(anyhow!("benchmark dependency teardown failed: {failures}")),
-            Err(error) => Err(error.context(format!(
-                "benchmark dependency teardown also failed: {failures}"
-            ))),
+            Ok(()) => Err(Report::new(BenchmarkCliError::DependencyTeardown {
+                failures,
+            })),
+            Err(report) => Err(report
+                .change_context(BenchmarkCliError::DependencyTeardownAfterFailure { failures })),
         },
     };
     let status = if outcome.is_ok() { "pass\n" } else { "fail\n" };
-    fs::write(resolved.run_directory.join("status.txt"), status)?;
+    let status_path = resolved.run_directory.join("status.txt");
+    fs::write(&status_path, status)
+        .change_context(BenchmarkCliError::WriteFile { path: status_path })?;
     outcome?;
     Ok(resolved.run_directory)
 }
@@ -390,13 +774,14 @@ impl AbRunArm {
         name: &'static str,
         binary: &Path,
         label: Option<String>,
-    ) -> Result<Self> {
+    ) -> error_stack::Result<Self, BenchmarkCliError> {
         let server_binary = absolute_or_repository_path(repository_root, binary);
-        ensure!(
-            server_binary.is_file(),
-            "{name} server binary does not exist at {}",
-            server_binary.display()
-        );
+        if !server_binary.is_file() {
+            return Err(Report::new(BenchmarkCliError::MissingArmServerBinary {
+                arm: name,
+                path: server_binary,
+            }));
+        }
         Ok(Self {
             name,
             label: label.unwrap_or_else(|| server_binary.display().to_string()),
@@ -419,7 +804,7 @@ async fn run_ab_benchmark(
     repository_root: &Path,
     catalog: &BenchmarkCatalog,
     args: RunAbArgs,
-) -> Result<()> {
+) -> error_stack::Result<(), BenchmarkCliError> {
     let ab_root = args
         .workload
         .resolve_artifacts_root(repository_root)
@@ -443,13 +828,14 @@ async fn run_ab_benchmark(
 
     let runs = args.runs.get();
     for index in 0..runs {
+        let run = index
+            .checked_add(1)
+            .assured("the run index stays below the requested run count, a usize");
         for arm in &mut arms {
             nervix_primitives::task::consume_budget().await;
             println!(
-                "A/B run {}/{runs} for the {} arm ({})",
-                index + 1,
-                arm.name,
-                arm.label
+                "A/B run {run}/{runs} for the {} arm ({})",
+                arm.name, arm.label
             );
             let options = RunOptions {
                 nervix_mode: NervixMode::Local,
@@ -470,23 +856,24 @@ async fn run_ab_benchmark(
                 },
             )
             .await
-            .with_context(|| {
-                format!(
-                    "A/B {} arm ({}) failed on run {}/{runs}",
-                    arm.name,
-                    arm.label,
-                    index + 1
-                )
+            .change_context_lazy(|| BenchmarkCliError::AbRun {
+                arm: arm.name,
+                label: arm.label.clone(),
+                run,
+                runs,
             })?;
             arm.run_directories.push(run_directory);
         }
     }
 
     let [baseline, candidate] = arms;
-    let summary = AbSummary::from_arms(baseline.into_ab_arm(), candidate.into_ab_arm())?;
+    let summary = AbSummary::from_arms(baseline.into_ab_arm(), candidate.into_ab_arm())
+        .change_context(BenchmarkCliError::AbComparison)?;
     println!("{}", summary.render_markdown());
     let summary_path = ab_root.join("ab-comparison.md");
-    summary.write_markdown(&summary_path)?;
+    summary
+        .write_markdown(&summary_path)
+        .change_context(BenchmarkCliError::AbComparison)?;
     println!("ab-comparison={}", summary_path.display());
     Ok(())
 }
@@ -498,18 +885,15 @@ async fn execute_run(
     args: &RunArgs,
     resolved: &ResolvedRun,
     environment: &mut DependencyEnvironment,
-) -> Result<()> {
+) -> error_stack::Result<(), BenchmarkCliError> {
     start_declared_dependencies(environment, &benchmark.definition().dependencies).await?;
-    let mut dependency_endpoints = std::collections::BTreeMap::new();
+    let mut dependency_endpoints = BTreeMap::new();
     environment
         .endpoints()
         .apply_placeholders(&mut dependency_endpoints);
-    let host_bootstrap = environment.endpoints().get(KAFKA_ADDR)?.to_string();
-    let docker_bootstrap = environment.endpoints().get(KAFKA_DOCKER_ADDR)?.to_string();
-    let docker_network = environment
-        .endpoints()
-        .get(KAFKA_DOCKER_NETWORK)?
-        .to_string();
+    let host_bootstrap = dependency_endpoint(environment, KAFKA_ADDR)?;
+    let docker_bootstrap = dependency_endpoint(environment, KAFKA_DOCKER_ADDR)?;
+    let docker_network = dependency_endpoint(environment, KAFKA_DOCKER_NETWORK)?;
     provision_topics(
         &host_bootstrap,
         &resolved.input_topic,
@@ -518,7 +902,7 @@ async fn execute_run(
         resolved.wait_timeout,
     )
     .await
-    .context("failed to provision benchmark Kafka topics")?;
+    .change_context(BenchmarkCliError::ProvisionTopics)?;
 
     let subject_bootstrap = match implementation {
         Implementation::Nervix(_) if args.options.nervix_mode == NervixMode::Local => {
@@ -540,14 +924,18 @@ async fn execute_run(
             render_inputs,
             &resolved.parameters,
         )
-        .map_err(|report| anyhow!("failed to render benchmark implementation: {report:?}"))?;
+        .change_context_lazy(|| BenchmarkCliError::RenderImplementation {
+            implementation: resolved.implementation.clone(),
+        })?;
     let after_start = benchmark
         .render_after_start_with_parameters(
             &resolved.implementation,
             render_inputs,
             &resolved.parameters,
         )
-        .map_err(|report| anyhow!("failed to render post-start statements: {report:?}"))?;
+        .change_context_lazy(|| BenchmarkCliError::RenderAfterStart {
+            implementation: resolved.implementation.clone(),
+        })?;
     let rendered_path = match implementation {
         Implementation::Nervix(_) => resolved.run_directory.join("graph.nspl"),
         Implementation::Container(container) => resolved.run_directory.join(
@@ -557,20 +945,12 @@ async fn execute_run(
                 .unwrap_or_else(|| std::ffi::OsStr::new("subject.conf")),
         ),
     };
-    fs::write(&rendered_path, &rendered).with_context(|| {
-        format!(
-            "failed to write rendered configuration {}",
-            rendered_path.display()
-        )
+    fs::write(&rendered_path, &rendered).change_context(BenchmarkCliError::WriteFile {
+        path: rendered_path,
     })?;
     if let Some(after_start) = &after_start {
         let path = resolved.run_directory.join("after-start.nspl");
-        fs::write(&path, after_start).with_context(|| {
-            format!(
-                "failed to write rendered post-start configuration {}",
-                path.display()
-            )
-        })?;
+        fs::write(&path, after_start).change_context(BenchmarkCliError::WriteFile { path })?;
     }
 
     let mut subject = match implementation {
@@ -641,26 +1021,42 @@ async fn execute_run(
     log_result?;
     container_diagnostics_result?;
     stop_result?;
-    let report = fs::read_to_string(resolved.run_directory.join("load-report.txt"))
-        .context("failed to read the completed load report")?;
+    let report_path = resolved.run_directory.join("load-report.txt");
+    let report = fs::read_to_string(&report_path)
+        .change_context(BenchmarkCliError::ReadFile { path: report_path })?;
     println!("{report}");
     println!("artifacts={}", resolved.run_directory.display());
     Ok(())
 }
 
+/// The address or name the started dependencies publish under `key`.
+fn dependency_endpoint(
+    environment: &DependencyEnvironment,
+    key: &'static str,
+) -> error_stack::Result<String, BenchmarkCliError> {
+    let endpoint = environment
+        .endpoints()
+        .get(key)
+        .change_context(BenchmarkCliError::DependencyEndpoint { key })?;
+    Ok(endpoint.to_string())
+}
+
 async fn capture_container_diagnostics(
     container_ids: &[String],
     run_directory: &Path,
-) -> Result<()> {
+) -> error_stack::Result<(), BenchmarkCliError> {
     let directory = run_directory.join("container-diagnostics");
-    fs::create_dir_all(&directory).context("failed to create container diagnostics directory")?;
+    fs::create_dir_all(&directory).change_context_lazy(|| BenchmarkCliError::CreateDirectory {
+        path: directory.clone(),
+    })?;
     for (index, container_id) in container_ids.iter().enumerate() {
         nervix_primitives::task::consume_budget().await;
         let short_id = container_id.chars().take(12).collect::<String>();
-        ensure!(
-            !short_id.is_empty() && short_id.bytes().all(|byte| byte.is_ascii_alphanumeric()),
-            "benchmark dependency returned an invalid container id"
-        );
+        if short_id.is_empty() || !short_id.bytes().all(|byte| byte.is_ascii_alphanumeric()) {
+            return Err(Report::new(BenchmarkCliError::InvalidContainerId {
+                container: container_id.clone(),
+            }));
+        }
         let prefix = directory.join(format!("{index:02}-{short_id}"));
         capture_docker_output(
             &["inspect", container_id],
@@ -683,87 +1079,101 @@ async fn capture_container_diagnostics(
     Ok(())
 }
 
-async fn capture_docker_output(arguments: &[&str], path: &Path) -> Result<()> {
+async fn capture_docker_output(
+    arguments: &[&str],
+    path: &Path,
+) -> error_stack::Result<(), BenchmarkCliError> {
+    let owned_arguments = || {
+        arguments
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+    };
     let output = Command::new("docker")
         .args(arguments)
         .output()
         .await
-        .with_context(|| format!("failed to run docker {}", arguments.join(" ")))?;
-    ensure!(
-        output.status.success(),
-        "docker {} failed with {}: {}",
-        arguments.join(" "),
-        output.status,
-        String::from_utf8_lossy(&output.stderr).trim()
-    );
+        .change_context_lazy(|| BenchmarkCliError::RunDocker {
+            arguments: owned_arguments(),
+        })?;
+    if !output.status.success() {
+        return Err(Report::new(BenchmarkCliError::DockerFailed {
+            arguments: owned_arguments(),
+            status: output.status,
+            stderr: String::from_utf8_lossy(&output.stderr).trim().to_string(),
+        }));
+    }
     let mut captured = output.stdout;
     if !output.stderr.is_empty() {
         captured.extend_from_slice(&output.stderr);
     }
-    fs::write(path, captured)
-        .with_context(|| format!("failed to write container diagnostics {}", path.display()))
+    fs::write(path, captured).change_context_lazy(|| BenchmarkCliError::WriteFile {
+        path: path.to_path_buf(),
+    })
 }
 
 async fn start_declared_dependencies(
     environment: &mut DependencyEnvironment,
     dependencies: &[BenchmarkDependency],
-) -> Result<()> {
+) -> error_stack::Result<(), BenchmarkCliError> {
     for dependency in dependencies {
         nervix_primitives::task::consume_budget().await;
         let result = match dependency {
             BenchmarkDependency::Kafka => environment.start_kafka().await,
         };
-        result.with_context(|| format!("failed to start benchmark dependency {dependency:?}"))?;
+        result.change_context(BenchmarkCliError::StartDependency {
+            dependency: *dependency,
+        })?;
     }
     Ok(())
 }
 
 impl ResolvedRun {
-    fn new(repository_root: &Path, benchmark: &LoadedBenchmark, args: &RunArgs) -> Result<Self> {
+    fn new(
+        repository_root: &Path,
+        benchmark: &LoadedBenchmark,
+        args: &RunArgs,
+    ) -> error_stack::Result<Self, BenchmarkCliError> {
         let settings = RunSettings::resolve(
             benchmark.definition(),
             &args.options.workload.parameter_overrides,
             args.options.workload.duration_seconds,
         )
-        .map_err(|error| anyhow!("{error:#}"))?;
-        let partitions = args
-            .options
-            .workload
-            .partitions
-            .unwrap_or(benchmark.definition().load.partitions);
-        let value_bytes = args
-            .options
-            .workload
-            .value_bytes
-            .unwrap_or(benchmark.definition().load.value_bytes);
-        let max_backlog_messages = args
-            .options
-            .workload
-            .max_backlog_messages
-            .unwrap_or(benchmark.definition().load.max_backlog_messages);
-        let wait_timeout_seconds = args
-            .options
-            .workload
-            .wait_timeout_seconds
-            .unwrap_or(benchmark.definition().load.wait_timeout_seconds);
-        let warmup_seconds = args
-            .options
-            .workload
-            .warmup_seconds
-            .unwrap_or(benchmark.definition().load.warmup_seconds);
-        ensure!(partitions > 0, "partition count must be positive");
-        ensure!(
-            i32::try_from(partitions).is_ok(),
-            "partition count exceeds Kafka's supported range"
-        );
-        ensure!(value_bytes > 0, "value byte count must be positive");
-        ensure!(
-            value_bytes <= 1024 * 1024,
-            "value byte count must not exceed 1 MiB"
-        );
-        ensure!(max_backlog_messages > 0, "maximum backlog must be positive");
-        ensure!(wait_timeout_seconds > 0, "wait timeout must be positive");
-        ensure!(warmup_seconds > 0, "warm-up duration must be positive");
+        .change_context_lazy(|| BenchmarkCliError::RunSettings {
+            benchmark: benchmark.slug().to_string(),
+        })?;
+        let bounds = WorkloadBounds {
+            partitions: args
+                .options
+                .workload
+                .partitions
+                .unwrap_or(benchmark.definition().load.partitions),
+            value_bytes: args
+                .options
+                .workload
+                .value_bytes
+                .unwrap_or(benchmark.definition().load.value_bytes),
+            max_backlog_messages: args
+                .options
+                .workload
+                .max_backlog_messages
+                .unwrap_or(benchmark.definition().load.max_backlog_messages),
+            wait_timeout_seconds: args
+                .options
+                .workload
+                .wait_timeout_seconds
+                .unwrap_or(benchmark.definition().load.wait_timeout_seconds),
+            warmup_seconds: args
+                .options
+                .workload
+                .warmup_seconds
+                .unwrap_or(benchmark.definition().load.warmup_seconds),
+        };
+        bounds
+            .validate()
+            .change_context_lazy(|| BenchmarkCliError::Workload {
+                benchmark: benchmark.slug().to_string(),
+            })?;
 
         let run_token = Uuid::now_v7()
             .as_simple()
@@ -787,12 +1197,12 @@ impl ResolvedRun {
         Ok(Self {
             slug: benchmark.slug().to_string(),
             implementation: args.implementation.clone(),
-            partitions,
-            value_bytes,
-            max_backlog_messages,
-            wait_timeout: Duration::from_secs(wait_timeout_seconds),
+            partitions: bounds.partitions,
+            value_bytes: bounds.value_bytes,
+            max_backlog_messages: bounds.max_backlog_messages,
+            wait_timeout: Duration::from_secs(bounds.wait_timeout_seconds),
             duration_seconds: settings.duration_seconds,
-            warmup_seconds,
+            warmup_seconds: bounds.warmup_seconds,
             shape: benchmark.definition().load.shape.clone(),
             parameters: settings.parameters,
             input_topic: format!("{topic_prefix}_input"),
@@ -812,7 +1222,7 @@ async fn start_nervix(
     resolved: &ResolvedRun,
     environment: &mut DependencyEnvironment,
     docker_network: &str,
-) -> Result<Subject> {
+) -> error_stack::Result<Subject, BenchmarkCliError> {
     let password = format!("benchmark-{}", resolved.run_token);
     let cluster_id = format!("benchmark-{}", resolved.run_token);
     let node_count = usize::from(implementation.nodes);
@@ -825,14 +1235,15 @@ async fn start_nervix(
                     .as_deref()
                     .unwrap_or(Path::new(DEFAULT_SERVER_BINARY)),
             );
-            ensure!(
-                server_binary.is_file(),
-                "Nervix server binary does not exist at {}",
-                server_binary.display()
-            );
+            if !server_binary.is_file() {
+                return Err(Report::new(BenchmarkCliError::MissingServerBinary {
+                    path: server_binary,
+                }));
+            }
             let ports = (0..node_count)
                 .map(|_| LocalPorts::reserve())
-                .collect::<io::Result<Vec<_>>>()?;
+                .collect::<io::Result<Vec<_>>>()
+                .change_context(BenchmarkCliError::ReservePorts)?;
             let node_names = benchmark_node_names(node_count);
             let endpoint_names = node_names
                 .iter()
@@ -845,7 +1256,7 @@ async fn start_nervix(
                 &endpoint_names,
             )?;
             let bootstrap_addr = format!("127.0.0.1:{}", ports[0].interconnect);
-            let mut children = Vec::with_capacity(node_count);
+            let mut nodes = Vec::with_capacity(node_count);
             for index in 0..node_count {
                 nervix_primitives::task::consume_budget().await;
                 let node_id = &node_names[index];
@@ -853,14 +1264,25 @@ async fn start_nervix(
                     .run_directory
                     .join("nervix-state")
                     .join(node_id.as_str());
-                fs::create_dir_all(&state_directory)?;
+                fs::create_dir_all(&state_directory).change_context_lazy(|| {
+                    BenchmarkCliError::CreateDirectory {
+                        path: state_directory.clone(),
+                    }
+                })?;
                 let log_name = if node_count == 1 {
                     "subject.log".to_string()
                 } else {
                     format!("subject-{}.log", node_id.as_str())
                 };
-                let log = fs::File::create(resolved.run_directory.join(log_name))?;
-                let stderr = log.try_clone()?;
+                let log_path = resolved.run_directory.join(log_name);
+                let log = fs::File::create(&log_path).change_context_lazy(|| {
+                    BenchmarkCliError::CreateFile {
+                        path: log_path.clone(),
+                    }
+                })?;
+                let stderr = log
+                    .try_clone()
+                    .change_context(BenchmarkCliError::DuplicateLog { path: log_path })?;
                 let mut command = Command::new(&server_binary);
                 command
                     .current_dir(repository_root)
@@ -877,39 +1299,45 @@ async fn start_nervix(
                     .stdout(Stdio::from(log))
                     .stderr(Stdio::from(stderr))
                     .kill_on_drop(true);
-                let mut child = command.spawn().with_context(|| {
-                    format!("failed to start local Nervix {}", node_id.as_str())
-                })?;
-                wait_for_local_nervix(
-                    &mut child,
-                    ports[index].observability,
-                    resolved.wait_timeout,
-                )
-                .await?;
-                children.push(child);
+                let child =
+                    command
+                        .spawn()
+                        .change_context_lazy(|| BenchmarkCliError::StartLocalNode {
+                            node: node_id.clone(),
+                        })?;
+                let mut node = LocalNode {
+                    name: node_id.clone(),
+                    child,
+                };
+                node.wait_until_ready(ports[index].observability, resolved.wait_timeout)
+                    .await?;
+                nodes.push(node);
+            }
+            let mut metrics_urls = Vec::with_capacity(node_count);
+            for ports in &ports {
+                let url = format!("http://127.0.0.1:{}/metrics", ports.observability);
+                let metrics_url = reqwest::Url::parse(&url)
+                    .change_context(BenchmarkCliError::MetricsUrl { url })?;
+                metrics_urls.push(metrics_url);
             }
             Ok(Subject {
-                runtime: SubjectRuntime::Local { children },
+                runtime: SubjectRuntime::Local { nodes },
                 control_url: Some(format!("http://127.0.0.1:{}", ports[0].grpc)),
-                metrics_urls: ports
-                    .iter()
-                    .map(|ports| {
-                        reqwest::Url::parse(&format!(
-                            "http://127.0.0.1:{}/metrics",
-                            ports.observability
-                        ))
-                    })
-                    .collect::<Result<Vec<_>, _>>()?,
+                metrics_urls,
                 password: Some(password),
                 node_count,
             })
         }
         NervixMode::Image => {
-            let image =
-                args.options.nervix_image.as_deref().ok_or_else(|| {
-                    anyhow!("--nervix-image is required with --nervix-mode image")
+            let Some(image) = args.options.nervix_image.as_deref() else {
+                return Err(Report::new(BenchmarkCliError::MissingNervixImage));
+            };
+            let (image_name, image_tag) =
+                split_image_reference(image).change_context_lazy(|| {
+                    BenchmarkCliError::ImageReference {
+                        image: image.to_string(),
+                    }
                 })?;
-            let (image_name, image_tag) = split_image_reference(image)?;
             let timeout = resolved.wait_timeout;
             let node_names = benchmark_node_names(node_count);
             let container_names = node_names
@@ -977,29 +1405,27 @@ async fn start_nervix(
                         },
                     )
                     .await
-                    .with_context(|| {
-                        format!(
-                            "failed to start Nervix benchmark image {}",
-                            node_id.as_str()
-                        )
-                    })?;
+                    .change_context(BenchmarkCliError::StartNervixImage { node: node_id })?;
                 infos.push(info);
             }
             write_image_identity(&resolved.run_directory, image).await?;
-            let grpc_port = infos[0]
-                .host_port(NERVIX_GRPC_PORT)
-                .ok_or_else(|| anyhow!("Nervix image did not expose its gRPC port"))?;
-            let metrics_urls = infos
-                .iter()
-                .map(|info| {
-                    let observability_port =
-                        info.host_port(NERVIX_OBSERVABILITY_PORT).ok_or_else(|| {
-                            anyhow!("Nervix image did not expose its observability port")
-                        })?;
-                    reqwest::Url::parse(&format!("http://127.0.0.1:{observability_port}/metrics"))
-                        .context("failed to build a Nervix image metrics URL")
-                })
-                .collect::<Result<Vec<_>>>()?;
+            let Some(grpc_port) = infos[0].host_port(NERVIX_GRPC_PORT) else {
+                return Err(Report::new(BenchmarkCliError::UnexposedImagePort {
+                    port: NERVIX_GRPC_PORT.as_u16(),
+                }));
+            };
+            let mut metrics_urls = Vec::with_capacity(infos.len());
+            for info in &infos {
+                let Some(observability_port) = info.host_port(NERVIX_OBSERVABILITY_PORT) else {
+                    return Err(Report::new(BenchmarkCliError::UnexposedImagePort {
+                        port: NERVIX_OBSERVABILITY_PORT.as_u16(),
+                    }));
+                };
+                let url = format!("http://127.0.0.1:{observability_port}/metrics");
+                let metrics_url = reqwest::Url::parse(&url)
+                    .change_context(BenchmarkCliError::MetricsUrl { url })?;
+                metrics_urls.push(metrics_url);
+            }
             Ok(Subject {
                 runtime: SubjectRuntime::Container { infos },
                 control_url: Some(format!("http://127.0.0.1:{grpc_port}")),
@@ -1017,13 +1443,12 @@ async fn start_container_subject(
     resolved: &ResolvedRun,
     environment: &mut DependencyEnvironment,
     docker_network: &str,
-) -> Result<Subject> {
-    let (image_name, image_tag) = split_image_reference(&implementation.image)?;
-    let config_path = implementation
-        .config_path
-        .to_str()
-        .ok_or_else(|| anyhow!("container configuration path is not valid UTF-8"))?
-        .to_string();
+) -> error_stack::Result<Subject, BenchmarkCliError> {
+    let (image_name, image_tag) = split_image_reference(&implementation.image)
+        .change_context_lazy(|| BenchmarkCliError::ImageReference {
+            image: implementation.image.clone(),
+        })?;
+    let config_path = utf8_path(&implementation.config_path)?.to_string();
     let readiness_port = implementation.readiness_port.map(ContainerPort::Tcp);
     let mapped_ports = readiness_port.into_iter().collect::<Vec<_>>();
     let readiness_path = implementation.readiness_path.clone();
@@ -1065,11 +1490,8 @@ async fn start_container_subject(
             },
         )
         .await
-        .with_context(|| {
-            format!(
-                "failed to start benchmark container image {}",
-                implementation.image
-            )
+        .change_context_lazy(|| BenchmarkCliError::StartContainerImage {
+            image: implementation.image.clone(),
         })?;
     write_image_identity(&resolved.run_directory, &implementation.image).await?;
     Ok(Subject {
@@ -1081,6 +1503,44 @@ async fn start_container_subject(
     })
 }
 
+impl LocalNode {
+    async fn wait_until_ready(
+        &mut self,
+        observability_port: u16,
+        timeout: Duration,
+    ) -> error_stack::Result<(), BenchmarkCliError> {
+        let url = format!("http://127.0.0.1:{observability_port}/readyz");
+        let client = reqwest::Client::new();
+        let deadline = nervix_primitives::time::Instant::now() + timeout;
+        loop {
+            nervix_primitives::task::consume_budget().await;
+            let exited = self.child.try_wait().change_context_lazy(|| {
+                BenchmarkCliError::WatchLocalNode {
+                    node: self.name.clone(),
+                }
+            })?;
+            if let Some(status) = exited {
+                return Err(Report::new(BenchmarkCliError::LocalNodeExitedBeforeReady {
+                    node: self.name.clone(),
+                    status,
+                }));
+            }
+            if let Ok(response) = client.get(&url).send().await
+                && response.status().is_success()
+            {
+                return Ok(());
+            }
+            if nervix_primitives::time::Instant::now() >= deadline {
+                return Err(Report::new(BenchmarkCliError::LocalNodeNotReady {
+                    node: self.name.clone(),
+                    url,
+                }));
+            }
+            nervix_primitives::time::sleep(Duration::from_millis(100)).await;
+        }
+    }
+}
+
 impl Subject {
     async fn configure_nervix(
         &mut self,
@@ -1089,7 +1549,7 @@ impl Subject {
         after_start: Option<&str>,
         timeout: Duration,
         resolved: &ResolvedRun,
-    ) -> Result<()> {
+    ) -> error_stack::Result<(), BenchmarkCliError> {
         let deadline = nervix_primitives::time::Instant::now() + timeout;
         let client = loop {
             nervix_primitives::task::consume_budget().await;
@@ -1098,10 +1558,8 @@ impl Subject {
                 let outcome = client
                     .execute("SHOW CLUSTER STATUS;")
                     .await
-                    .map_err(|report| {
-                        anyhow!("failed to query Nervix cluster status: {report:#}")
-                    })?;
-                Ok::<_, anyhow::Error>((client, outcome))
+                    .change_context(BenchmarkCliError::QueryClusterStatus)?;
+                Ok::<_, Report<BenchmarkCliError>>((client, outcome))
             }
             .await;
             match connection {
@@ -1109,25 +1567,23 @@ impl Subject {
                     if outcome.succeeded()
                         && cluster_status_is_ready(&outcome.message, self.node_count) =>
                 {
-                    fs::write(
-                        resolved.run_directory.join("cluster-status.txt"),
-                        format!("{outcome:#?}\n"),
-                    )?;
+                    let status_path = resolved.run_directory.join("cluster-status.txt");
+                    fs::write(&status_path, format!("{outcome:#?}\n"))
+                        .change_context(BenchmarkCliError::WriteFile { path: status_path })?;
                     break client;
                 }
                 Ok(_) | Err(_) if nervix_primitives::time::Instant::now() < deadline => {
                     self.ensure_running()?;
                     nervix_primitives::time::sleep(Duration::from_millis(100)).await;
                 }
-                Ok((_, outcome)) => bail!(
-                    "Nervix control plane did not report all {} benchmark nodes: {}\ndiagnostics: \
-                     {:?}",
-                    self.node_count,
-                    outcome.message,
-                    outcome.diagnostics
-                ),
-                Err(error) => {
-                    return Err(error.context("Nervix control plane did not become ready"));
+                Ok((_, outcome)) => {
+                    return Err(Report::new(BenchmarkCliError::ClusterIncomplete {
+                        expected: self.node_count,
+                        outcome: Box::new(outcome),
+                    }));
+                }
+                Err(report) => {
+                    return Err(report.change_context(BenchmarkCliError::ControlPlaneNotReady));
                 }
             }
         };
@@ -1137,8 +1593,10 @@ impl Subject {
             &resolved.run_directory.join("create-domain.txt"),
         )
         .await?;
-        let selected = DomainName::parse(domain)
-            .map_err(|report| anyhow!("benchmark domain '{domain}' is invalid: {report}"))?;
+        let selected =
+            DomainName::parse(domain).change_context_lazy(|| BenchmarkCliError::InvalidDomain {
+                domain: domain.to_string(),
+            })?;
         client.set_domain(Some(selected)).await;
         self.execute_graph_statements(
             &client,
@@ -1175,51 +1633,55 @@ impl Subject {
         client: &Client,
         graph: &str,
         output_path: &Path,
-    ) -> Result<()> {
-        let statements = split_query_statements(graph)
-            .map_err(|error| anyhow!("failed to split the benchmark graph: {error:#}"))?;
-        ensure!(
-            !statements.is_empty(),
-            "benchmark graph contains no statements"
-        );
+    ) -> error_stack::Result<(), BenchmarkCliError> {
+        let statements = graph_statements(graph)?;
         let mut transcript = String::new();
         for statement in statements {
+            nervix_primitives::task::consume_budget().await;
             let source = statement.trim();
-            let outcome = client.execute(source).await.map_err(|report| {
-                anyhow!("failed to execute a Nervix benchmark command: {report:#}")
+            let outcome = client.execute(source).await.change_context_lazy(|| {
+                BenchmarkCliError::ExecuteCommand {
+                    statement: source.to_string(),
+                }
             })?;
             transcript.push_str(&format!("{source}\n{outcome:#?}\n\n"));
             if !outcome.succeeded() {
-                fs::write(output_path, &transcript)?;
-                bail!(
-                    "Nervix benchmark command failed: {}\nstatement: {source}\ndiagnostics: {:?}",
-                    outcome.message,
-                    outcome.diagnostics
-                );
+                fs::write(output_path, &transcript).change_context_lazy(|| {
+                    BenchmarkCliError::WriteFile {
+                        path: output_path.to_path_buf(),
+                    }
+                })?;
+                return Err(Report::new(BenchmarkCliError::CommandRejected {
+                    statement: source.to_string(),
+                    outcome: Box::new(outcome),
+                }));
             }
         }
-        fs::write(output_path, transcript)?;
-        Ok(())
+        fs::write(output_path, transcript).change_context_lazy(|| BenchmarkCliError::WriteFile {
+            path: output_path.to_path_buf(),
+        })
     }
 
-    async fn connect_client(&self, domain: &str) -> Result<Client> {
-        let control_url = self
-            .control_url
-            .as_deref()
-            .ok_or_else(|| anyhow!("benchmark subject has no Nervix control endpoint"))?;
-        let password = self
-            .password
-            .as_deref()
-            .ok_or_else(|| anyhow!("benchmark subject has no Nervix password"))?;
-        let domain = DomainName::parse(domain)
-            .map_err(|report| anyhow!("benchmark domain '{domain}' is invalid: {report}"))?;
+    async fn connect_client(&self, domain: &str) -> error_stack::Result<Client, BenchmarkCliError> {
+        let Some(control_url) = self.control_url.as_deref() else {
+            return Err(Report::new(BenchmarkCliError::MissingControlEndpoint));
+        };
+        let Some(password) = self.password.as_deref() else {
+            return Err(Report::new(BenchmarkCliError::MissingPassword));
+        };
+        let selected =
+            DomainName::parse(domain).change_context_lazy(|| BenchmarkCliError::InvalidDomain {
+                domain: domain.to_string(),
+            })?;
         Client::connect_with_options(
             control_url,
-            Some(domain),
+            Some(selected),
             ConnectOptions::default().with_basic_auth(DEFAULT_USERNAME, password),
         )
         .await
-        .map_err(|report| anyhow!("failed to connect to Nervix at {control_url}: {report:#}"))
+        .change_context_lazy(|| BenchmarkCliError::Connect {
+            url: control_url.to_string(),
+        })
     }
 
     async fn execute_checked(
@@ -1227,28 +1689,39 @@ impl Subject {
         client: &Client,
         query: &str,
         output_path: &Path,
-    ) -> Result<()> {
-        let outcome = client.execute(query).await.map_err(|report| {
-            anyhow!("failed to execute a Nervix benchmark command: {report:#}")
+    ) -> error_stack::Result<(), BenchmarkCliError> {
+        let outcome = client.execute(query).await.change_context_lazy(|| {
+            BenchmarkCliError::ExecuteCommand {
+                statement: query.to_string(),
+            }
         })?;
-        fs::write(output_path, format!("{outcome:#?}\n"))?;
-        ensure!(
-            outcome.succeeded(),
-            "Nervix benchmark command failed: {}\ndiagnostics: {:?}",
-            outcome.message,
-            outcome.diagnostics
-        );
+        fs::write(output_path, format!("{outcome:#?}\n")).change_context_lazy(|| {
+            BenchmarkCliError::WriteFile {
+                path: output_path.to_path_buf(),
+            }
+        })?;
+        if !outcome.succeeded() {
+            return Err(Report::new(BenchmarkCliError::CommandRejected {
+                statement: query.to_string(),
+                outcome: Box::new(outcome),
+            }));
+        }
         Ok(())
     }
 
-    fn ensure_running(&mut self) -> Result<()> {
-        if let SubjectRuntime::Local { children } = &mut self.runtime {
-            for (index, child) in children.iter_mut().enumerate() {
-                if let Some(status) = child.try_wait()? {
-                    let node_number = index
-                        .checked_add(1)
-                        .assured("a benchmark cluster has at most three nodes");
-                    bail!("local Nervix node-{node_number} exited unexpectedly with {status}");
+    fn ensure_running(&mut self) -> error_stack::Result<(), BenchmarkCliError> {
+        if let SubjectRuntime::Local { nodes } = &mut self.runtime {
+            for node in nodes.iter_mut() {
+                let exited = node.child.try_wait().change_context_lazy(|| {
+                    BenchmarkCliError::WatchLocalNode {
+                        node: node.name.clone(),
+                    }
+                })?;
+                if let Some(status) = exited {
+                    return Err(Report::new(BenchmarkCliError::LocalNodeExited {
+                        node: node.name.clone(),
+                        status,
+                    }));
                 }
             }
         }
@@ -1260,51 +1733,50 @@ impl Subject {
         domain: &str,
         run_directory: &Path,
         timeout: Duration,
-    ) -> Result<()> {
+    ) -> error_stack::Result<(), BenchmarkCliError> {
         if self.metrics_urls.is_empty() {
             return Ok(());
         }
         let client = reqwest::Client::builder()
             .timeout(timeout.min(Duration::from_secs(30)))
             .build()
-            .context("failed to build the benchmark metrics client")?;
+            .change_context(BenchmarkCliError::BuildMetricsClient)?;
         let mut prometheus_scrapes = Vec::with_capacity(self.metrics_urls.len());
         for metrics_url in &self.metrics_urls {
             nervix_primitives::task::consume_budget().await;
+            let scrape_failed = || BenchmarkCliError::ScrapeMetrics {
+                url: metrics_url.clone(),
+            };
             let response = client
                 .get(metrics_url.clone())
                 .send()
                 .await
-                .with_context(|| format!("failed to scrape Nervix metrics from {metrics_url}"))?
+                .change_context_lazy(scrape_failed)?;
+            let response = response
                 .error_for_status()
-                .with_context(|| {
-                    format!("Nervix metrics scrape at {metrics_url} was unsuccessful")
-                })?;
-            let scrape = response
-                .text()
-                .await
-                .with_context(|| format!("failed to read Nervix metrics from {metrics_url}"))?;
+                .change_context_lazy(scrape_failed)?;
+            let scrape = response.text().await.change_context_lazy(scrape_failed)?;
             prometheus_scrapes.push(scrape);
         }
         let prometheus = prometheus_scrapes.join("\n");
-        fs::write(
-            run_directory.join(NERVIX_METRICS_PROMETHEUS_FILE),
-            &prometheus,
-        )
-        .context("failed to write the raw Nervix metrics scrape")?;
+        let prometheus_path = run_directory.join(NERVIX_METRICS_PROMETHEUS_FILE);
+        fs::write(&prometheus_path, &prometheus).change_context(BenchmarkCliError::WriteFile {
+            path: prometheus_path,
+        })?;
         let report = NervixMetricsReport::from_prometheus_scrapes(
             prometheus_scrapes.iter().map(String::as_str),
             domain,
         )
-        .map_err(|report| {
-            anyhow!("failed to derive the Nervix benchmark metrics report: {report:?}")
-        })?;
+        .change_context(BenchmarkCliError::MetricsReport)?;
         report
             .write(run_directory.join(NERVIX_METRICS_REPORT_FILE))
-            .context("failed to write the Nervix benchmark metrics report")
+            .change_context(BenchmarkCliError::MetricsReport)
     }
 
-    async fn capture_logs(&self, run_directory: &Path) -> Result<()> {
+    async fn capture_logs(
+        &self,
+        run_directory: &Path,
+    ) -> error_stack::Result<(), BenchmarkCliError> {
         let SubjectRuntime::Container { infos } = &self.runtime else {
             return Ok(());
         };
@@ -1314,7 +1786,9 @@ impl Subject {
                 .args(["logs", info.id()])
                 .output()
                 .await
-                .context("failed to collect benchmark container logs")?;
+                .change_context_lazy(|| BenchmarkCliError::CollectContainerLogs {
+                    container: info.id().to_string(),
+                })?;
             let mut logs = output.stdout;
             logs.extend_from_slice(&output.stderr);
             let node_number = index
@@ -1325,18 +1799,23 @@ impl Subject {
             } else {
                 format!("subject-node-{node_number}.log")
             };
-            fs::write(run_directory.join(name), logs)?;
+            let path = run_directory.join(name);
+            fs::write(&path, logs).change_context(BenchmarkCliError::WriteFile { path })?;
         }
         Ok(())
     }
 
-    async fn stop(&mut self) -> Result<()> {
-        if let SubjectRuntime::Local { children } = &mut self.runtime {
-            for child in children.iter_mut().rev() {
+    async fn stop(&mut self) -> error_stack::Result<(), BenchmarkCliError> {
+        if let SubjectRuntime::Local { nodes } = &mut self.runtime {
+            for node in nodes.iter_mut().rev() {
                 nervix_primitives::task::consume_budget().await;
-                if child.try_wait()?.is_none() {
-                    child.start_kill()?;
-                    child.wait().await?;
+                let stop_failed = || BenchmarkCliError::StopLocalNode {
+                    node: node.name.clone(),
+                };
+                let exited = node.child.try_wait().change_context_lazy(stop_failed)?;
+                if exited.is_none() {
+                    node.child.start_kill().change_context_lazy(stop_failed)?;
+                    node.child.wait().await.change_context_lazy(stop_failed)?;
                 }
             }
         }
@@ -1351,22 +1830,29 @@ async fn run_load_driver(
     bootstrap_servers: &str,
     subject: &mut Subject,
     minimum_consumers: u32,
-) -> Result<()> {
+) -> error_stack::Result<(), BenchmarkCliError> {
     let load_driver = match &args.options.workload.load_driver {
         Some(path) => absolute_or_repository_path(repository_root, path),
         None => sibling_binary("nervix-benchmark-load")?,
     };
-    ensure!(
-        load_driver.is_file(),
-        "benchmark load driver does not exist at {}",
-        load_driver.display()
-    );
+    if !load_driver.is_file() {
+        return Err(Report::new(BenchmarkCliError::MissingLoadDriver {
+            path: load_driver,
+        }));
+    }
     let ready_file = resolved.run_directory.join("load-ready");
     let go_file = resolved.run_directory.join("load-go");
+    let output_diagnostics_file = resolved.run_directory.join("output-diagnostics.json");
     let stdout_path = resolved.run_directory.join("load-report.txt");
     let stderr_path = resolved.run_directory.join("load-driver.log");
-    let stdout = fs::File::create(&stdout_path)?;
-    let stderr = fs::File::create(&stderr_path)?;
+    let stdout =
+        fs::File::create(&stdout_path).change_context_lazy(|| BenchmarkCliError::CreateFile {
+            path: stdout_path.clone(),
+        })?;
+    let stderr =
+        fs::File::create(&stderr_path).change_context_lazy(|| BenchmarkCliError::CreateFile {
+            path: stderr_path.clone(),
+        })?;
     let mut child = Command::new(&load_driver)
         .args([
             "--bootstrap-servers",
@@ -1390,26 +1876,20 @@ async fn run_load_driver(
             "--wait-timeout-seconds",
             &resolved.wait_timeout.as_secs().to_string(),
             "--ready-file",
-            ready_file
-                .to_str()
-                .ok_or_else(|| anyhow!("ready path is not UTF-8"))?,
+            utf8_path(&ready_file)?,
             "--go-file",
-            go_file
-                .to_str()
-                .ok_or_else(|| anyhow!("go path is not UTF-8"))?,
+            utf8_path(&go_file)?,
             "--output-diagnostics-file",
-            resolved
-                .run_directory
-                .join("output-diagnostics.json")
-                .to_str()
-                .ok_or_else(|| anyhow!("output diagnostics path is not UTF-8"))?,
+            utf8_path(&output_diagnostics_file)?,
         ])
         .args(shape_arguments(&resolved.shape))
         .stdout(Stdio::from(stdout))
         .stderr(Stdio::from(stderr))
         .kill_on_drop(true)
         .spawn()
-        .with_context(|| format!("failed to start load driver {}", load_driver.display()))?;
+        .change_context_lazy(|| BenchmarkCliError::StartLoadDriver {
+            path: load_driver.clone(),
+        })?;
 
     let ready_deadline = nervix_primitives::time::Instant::now() + resolved.wait_timeout;
     loop {
@@ -1417,18 +1897,23 @@ async fn run_load_driver(
         if ready_file.exists() {
             break;
         }
-        if let Some(status) = child.try_wait()? {
+        let exited = child
+            .try_wait()
+            .change_context(BenchmarkCliError::WatchLoadDriver)?;
+        if let Some(status) = exited {
             let diagnostics = fs::read_to_string(&stderr_path).unwrap_or_default();
-            bail!("load driver exited before warmup with {status}:\n{diagnostics}");
+            return Err(Report::new(BenchmarkCliError::LoadDriverExitedEarly {
+                status,
+                diagnostics,
+            }));
         }
         subject.ensure_running()?;
-        ensure!(
-            nervix_primitives::time::Instant::now() < ready_deadline,
-            "load driver did not complete consumer stabilization and warmup before timeout"
-        );
+        if nervix_primitives::time::Instant::now() >= ready_deadline {
+            return Err(Report::new(BenchmarkCliError::LoadDriverWarmupTimeout));
+        }
         nervix_primitives::time::sleep(Duration::from_millis(100)).await;
     }
-    fs::write(&go_file, b"go\n")?;
+    fs::write(&go_file, b"go\n").change_context(BenchmarkCliError::WriteFile { path: go_file })?;
 
     const COMPLETION_GRACE_SECONDS: u64 = 30;
     const SECONDS_FIT: &str =
@@ -1449,19 +1934,24 @@ async fn run_load_driver(
     let completion_deadline = nervix_primitives::time::Instant::now() + completion_timeout;
     let status = loop {
         nervix_primitives::task::consume_budget().await;
-        if let Some(status) = child.try_wait()? {
+        let exited = child
+            .try_wait()
+            .change_context(BenchmarkCliError::WatchLoadDriver)?;
+        if let Some(status) = exited {
             break status;
         }
         subject.ensure_running()?;
-        ensure!(
-            nervix_primitives::time::Instant::now() < completion_deadline,
-            "load driver exceeded its bounded completion timeout"
-        );
+        if nervix_primitives::time::Instant::now() >= completion_deadline {
+            return Err(Report::new(BenchmarkCliError::LoadDriverCompletionTimeout));
+        }
         nervix_primitives::time::sleep(Duration::from_millis(100)).await;
     };
     if !status.success() {
         let diagnostics = fs::read_to_string(&stderr_path).unwrap_or_default();
-        bail!("load driver failed with {status}:\n{diagnostics}");
+        return Err(Report::new(BenchmarkCliError::LoadDriverFailed {
+            status,
+            diagnostics,
+        }));
     }
     Ok(())
 }
@@ -1551,16 +2041,17 @@ impl InterconnectTlsFiles {
         cluster_id: &str,
         node_ids: &[ClusterNodeName],
         endpoint_names: &[String],
-    ) -> Result<Self> {
-        ensure!(
-            node_ids.len() == endpoint_names.len(),
-            "each benchmark node must have one TLS endpoint name"
-        );
-        fs::create_dir_all(directory).with_context(|| {
-            format!(
-                "failed to create benchmark interconnect TLS directory {}",
-                directory.display()
-            )
+    ) -> error_stack::Result<Self, BenchmarkCliError> {
+        if node_ids.len() != endpoint_names.len() {
+            return Err(Report::new(BenchmarkCliError::TlsEndpointCount {
+                nodes: node_ids.len(),
+                endpoints: endpoint_names.len(),
+            }));
+        }
+        fs::create_dir_all(directory).change_context_lazy(|| {
+            BenchmarkCliError::CreateDirectory {
+                path: directory.to_path_buf(),
+            }
         })?;
 
         let mut authority_parameters = CertificateParams::default();
@@ -1570,41 +2061,59 @@ impl InterconnectTlsFiles {
             KeyUsagePurpose::KeyCertSign,
             KeyUsagePurpose::CrlSign,
         ];
-        let authority_key = KeyPair::generate().context("failed to generate benchmark CA key")?;
+        let authority_key =
+            KeyPair::generate().change_context(BenchmarkCliError::GenerateAuthority)?;
         let authority = authority_parameters
             .self_signed(&authority_key)
-            .context("failed to generate benchmark CA certificate")?;
+            .change_context(BenchmarkCliError::GenerateAuthority)?;
         let ca = directory.join("ca.pem");
-        fs::write(&ca, authority.pem())?;
+        fs::write(&ca, authority.pem())
+            .change_context_lazy(|| BenchmarkCliError::WriteFile { path: ca.clone() })?;
 
         let mut nodes = Vec::with_capacity(node_ids.len());
         for (node_id, endpoint_name) in node_ids.iter().zip(endpoint_names) {
             let node_directory = directory.join(node_id.as_str());
-            fs::create_dir_all(&node_directory)?;
+            fs::create_dir_all(&node_directory).change_context_lazy(|| {
+                BenchmarkCliError::CreateDirectory {
+                    path: node_directory.clone(),
+                }
+            })?;
+            let certificate_failed = || BenchmarkCliError::GenerateNodeCertificate {
+                node: node_id.clone(),
+            };
             let mut parameters = CertificateParams::new(vec![
                 "localhost".to_string(),
                 "127.0.0.1".to_string(),
                 endpoint_name.clone(),
             ])
-            .context("failed to prepare benchmark node certificate")?;
-            parameters.subject_alt_names.push(SanType::URI(
-                format!("nervix://cluster/{cluster_id}/node/{}", node_id.as_str())
-                    .try_into()
-                    .context("failed to construct benchmark node identity URI")?,
-            ));
+            .change_context_lazy(certificate_failed)?;
+            let identity = Ia5String::try_from(format!(
+                "nervix://cluster/{cluster_id}/node/{}",
+                node_id.as_str()
+            ))
+            .change_context_lazy(certificate_failed)?;
+            parameters.subject_alt_names.push(SanType::URI(identity));
             parameters.key_usages = vec![KeyUsagePurpose::DigitalSignature];
             parameters.extended_key_usages = vec![
                 ExtendedKeyUsagePurpose::ServerAuth,
                 ExtendedKeyUsagePurpose::ClientAuth,
             ];
-            let key = KeyPair::generate().context("failed to generate benchmark node key")?;
+            let key = KeyPair::generate().change_context_lazy(certificate_failed)?;
             let certificate = parameters
                 .signed_by(&key, &authority, &authority_key)
-                .context("failed to sign benchmark node certificate")?;
+                .change_context_lazy(certificate_failed)?;
             let certificate_path = node_directory.join("node.pem");
             let private_key_path = node_directory.join("node-key.pem");
-            fs::write(&certificate_path, certificate.pem())?;
-            fs::write(&private_key_path, key.serialize_pem())?;
+            fs::write(&certificate_path, certificate.pem()).change_context_lazy(|| {
+                BenchmarkCliError::WriteFile {
+                    path: certificate_path.clone(),
+                }
+            })?;
+            fs::write(&private_key_path, key.serialize_pem()).change_context_lazy(|| {
+                BenchmarkCliError::WriteFile {
+                    path: private_key_path.clone(),
+                }
+            })?;
             nodes.push(InterconnectNodeTlsFiles {
                 certificate: certificate_path,
                 private_key: private_key_path,
@@ -1666,6 +2175,15 @@ fn container_server_arguments(
     arguments
 }
 
+/// The statements of a rendered graph, in the order they are submitted.
+fn graph_statements(graph: &str) -> error_stack::Result<Vec<&str>, BenchmarkCliError> {
+    let statements = split_query_statements(graph).change_context(BenchmarkCliError::SplitGraph)?;
+    if statements.is_empty() {
+        return Err(Report::new(BenchmarkCliError::EmptyGraph));
+    }
+    Ok(statements)
+}
+
 fn cluster_status_is_ready(status: &str, expected: usize) -> bool {
     let mut in_membership = false;
     let mut voters = 0_usize;
@@ -1696,39 +2214,13 @@ fn cluster_status_is_ready(status: &str, expected: usize) -> bool {
     voters == expected && last_log_index.is_some() && last_log_index == last_applied
 }
 
-async fn wait_for_local_nervix(
-    child: &mut Child,
-    observability_port: u16,
-    timeout: Duration,
-) -> Result<()> {
-    let url = format!("http://127.0.0.1:{observability_port}/readyz");
-    let client = reqwest::Client::new();
-    let deadline = nervix_primitives::time::Instant::now() + timeout;
-    loop {
-        nervix_primitives::task::consume_budget().await;
-        if let Some(status) = child.try_wait()? {
-            bail!("local nervix-server exited before readiness with {status}");
-        }
-        if let Ok(response) = client.get(&url).send().await
-            && response.status().is_success()
-        {
-            return Ok(());
-        }
-        ensure!(
-            nervix_primitives::time::Instant::now() < deadline,
-            "local nervix-server did not become ready at {url} before timeout"
-        );
-        nervix_primitives::time::sleep(Duration::from_millis(100)).await;
-    }
-}
-
 fn write_run_manifest(
     resolved: &ResolvedRun,
     description: &str,
     implementation: &Implementation,
     args: &RunArgs,
     repository_root: &Path,
-) -> Result<()> {
+) -> error_stack::Result<(), BenchmarkCliError> {
     let mut table = toml::Table::new();
     table.insert("benchmark".to_string(), resolved.slug.clone().into());
     table.insert(
@@ -1754,11 +2246,11 @@ fn write_run_manifest(
     }
     table.insert(
         "duration_seconds".to_string(),
-        i64::try_from(resolved.duration_seconds)?.into(),
+        manifest_integer("duration_seconds", resolved.duration_seconds)?.into(),
     );
     table.insert(
         "warmup_seconds".to_string(),
-        i64::try_from(resolved.warmup_seconds)?.into(),
+        manifest_integer("warmup_seconds", resolved.warmup_seconds)?.into(),
     );
     table.insert(
         "partitions".to_string(),
@@ -1766,15 +2258,15 @@ fn write_run_manifest(
     );
     table.insert(
         "value_bytes".to_string(),
-        i64::try_from(resolved.value_bytes)?.into(),
+        manifest_integer("value_bytes", resolved.value_bytes)?.into(),
     );
     table.insert(
         "max_backlog_messages".to_string(),
-        i64::try_from(resolved.max_backlog_messages)?.into(),
+        manifest_integer("max_backlog_messages", resolved.max_backlog_messages)?.into(),
     );
     table.insert(
         "wait_timeout_seconds".to_string(),
-        i64::try_from(resolved.wait_timeout.as_secs())?.into(),
+        manifest_integer("wait_timeout_seconds", resolved.wait_timeout.as_secs())?.into(),
     );
     table.insert(
         "input_topic".to_string(),
@@ -1814,51 +2306,72 @@ fn write_run_manifest(
         "parameters".to_string(),
         toml::Value::Table(resolved.parameters.clone()),
     );
-    fs::write(
-        resolved.run_directory.join("run.toml"),
-        toml::to_string_pretty(&table)?,
-    )?;
+    let manifest =
+        toml::to_string_pretty(&table).change_context(BenchmarkCliError::SerializeRunManifest)?;
+    let manifest_path = resolved.run_directory.join("run.toml");
+    fs::write(&manifest_path, manifest).change_context(BenchmarkCliError::WriteFile {
+        path: manifest_path,
+    })?;
     Ok(())
 }
 
-async fn write_image_identity(run_directory: &Path, image: &str) -> Result<()> {
+/// A run manifest integer, which TOML stores as an `i64`.
+fn manifest_integer(
+    field: &'static str,
+    value: u64,
+) -> error_stack::Result<i64, BenchmarkCliError> {
+    i64::try_from(value).change_context(BenchmarkCliError::ManifestField { field })
+}
+
+async fn write_image_identity(
+    run_directory: &Path,
+    image: &str,
+) -> error_stack::Result<(), BenchmarkCliError> {
     let output = Command::new("docker")
         .args(["image", "inspect", "--format={{.Id}}", image])
         .output()
         .await
-        .with_context(|| format!("failed to inspect image {image}"))?;
-    ensure!(
-        output.status.success(),
-        "failed to inspect image {image}: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
+        .change_context_lazy(|| BenchmarkCliError::InspectImage {
+            image: image.to_string(),
+        })?;
+    if !output.status.success() {
+        return Err(Report::new(BenchmarkCliError::ImageInspectionFailed {
+            image: image.to_string(),
+            stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+        }));
+    }
+    let identity_path = run_directory.join("image.txt");
     fs::write(
-        run_directory.join("image.txt"),
+        &identity_path,
         format!(
             "image={image}\nid={}\n",
             String::from_utf8_lossy(&output.stdout).trim()
         ),
-    )?;
+    )
+    .change_context(BenchmarkCliError::WriteFile {
+        path: identity_path,
+    })?;
     Ok(())
 }
 
-fn split_image_reference(image: &str) -> Result<(String, String)> {
-    ensure!(
-        !image.contains('@'),
-        "digest image references are not yet supported"
-    );
+fn split_image_reference(
+    image: &str,
+) -> error_stack::Result<(String, String), ImageReferenceError> {
+    if image.contains('@') {
+        return Err(Report::new(ImageReferenceError::Digest));
+    }
     let slash = image.rfind('/');
     let colon = image
         .rfind(':')
         .filter(|colon| slash.is_none_or(|slash| *colon > slash));
-    let colon =
-        colon.ok_or_else(|| anyhow!("image reference '{image}' must include an explicit tag"))?;
+    let Some(colon) = colon else {
+        return Err(Report::new(ImageReferenceError::MissingTag));
+    };
     let (name, tag) = image.split_at(colon);
     let tag = &tag[1..];
-    ensure!(
-        !name.is_empty() && !tag.is_empty(),
-        "invalid image reference '{image}'"
-    );
+    if name.is_empty() || tag.is_empty() {
+        return Err(Report::new(ImageReferenceError::Incomplete));
+    }
     Ok((name.to_string(), tag.to_string()))
 }
 
@@ -1868,6 +2381,15 @@ fn absolute_or_repository_path(repository_root: &Path, path: &Path) -> PathBuf {
     } else {
         repository_root.join(path)
     }
+}
+
+/// A path passed to a child process as a UTF-8 argument.
+fn utf8_path(path: &Path) -> error_stack::Result<&str, BenchmarkCliError> {
+    path.to_str().ok_or_else(|| {
+        Report::new(BenchmarkCliError::NonUtf8Path {
+            path: path.to_path_buf(),
+        })
+    })
 }
 
 /// The load driver's subcommand and arguments for the workload's declared shape.
@@ -1900,11 +2422,13 @@ fn shape_arguments(shape: &LoadShape) -> Vec<String> {
     }
 }
 
-fn sibling_binary(name: &str) -> Result<PathBuf> {
-    let executable = std::env::current_exe().context("failed to resolve benchmark executable")?;
-    let directory = executable
-        .parent()
-        .ok_or_else(|| anyhow!("benchmark executable has no parent directory"))?;
+fn sibling_binary(name: &str) -> error_stack::Result<PathBuf, BenchmarkCliError> {
+    let executable = std::env::current_exe().change_context(BenchmarkCliError::LocateExecutable)?;
+    let Some(directory) = executable.parent() else {
+        return Err(Report::new(BenchmarkCliError::ExecutableWithoutDirectory {
+            path: executable,
+        }));
+    };
     Ok(directory.join(name))
 }
 
@@ -1921,3 +2445,7 @@ fn reserve_available_ports(count: usize) -> io::Result<Vec<u16>> {
         .map(|listener| listener.local_addr().map(|address| address.port()))
         .collect()
 }
+
+#[cfg(test)]
+#[path = "main_tests.rs"]
+mod tests;

@@ -6,7 +6,7 @@ Use it for:
 
 - control-plane and data-plane structure
 - [execution plans: the committed schedule, typed revisions, local binding, publication, and recovery](./execution-plans.md)
-- [typed failure ownership, propagation, recovery, and public diagnostics](./errors-and-diagnostics.md)
+- [typed failure ownership, the report model, fixed outcome boundaries, sensitivity, recovery, enforcement, and public diagnostics](./errors-and-diagnostics.md)
 - [typed absence, semantic states, validation boundaries, state identity, and boundary encodings](./typed-states.md)
 - [connector crate ownership, the shared source and sink contract, and host execution](./connector-contract.md)
 - [HTTP emitter request preparation, delivery, lifecycle, and qualification](./http-emitter-architecture.md)

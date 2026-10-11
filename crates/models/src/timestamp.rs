@@ -21,6 +21,13 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer, ser::Error as _};
 use thiserror::Error;
 
 #[derive(Debug, Error)]
+#[cfg_attr(
+    nervix_lint,
+    nervix::error_boundary(
+        outcome,
+        reason = "timestamp parsing and arithmetic return pure conversion refusals"
+    )
+)]
 pub enum TimestampError {
     #[error("invalid RFC 3339 timestamp: {0}")]
     InvalidRfc3339(#[source] chrono::ParseError),

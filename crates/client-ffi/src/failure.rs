@@ -191,9 +191,9 @@ impl Failure {
             | BackupDownloadError::RedirectLoop
             | BackupDownloadError::SessionLost => FailureKind::Transport,
             BackupDownloadError::OutOfOrder
-            | BackupDownloadError::InvalidFrame(_)
+            | BackupDownloadError::InvalidFrame
             | BackupDownloadError::Mismatch => FailureKind::Protocol,
-            BackupDownloadError::EncodeRequest(_) | BackupDownloadError::Write { .. } => {
+            BackupDownloadError::EncodeRequest | BackupDownloadError::Write { .. } => {
                 FailureKind::InvalidArgument
             }
         }

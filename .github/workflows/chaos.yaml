@@ -1,14 +1,25 @@
 name: Chaos
 
 # Runs a suite of the external chaos runner against an already built Nervix image: the Docker
-# Build workflow calls it with the image its build job published, and a manual run names an
-# immutable image. Every shard runs `just chaos suite` on its own Docker worker, which needs no
-# Rust toolchain, compiles nothing and runs no repository test binary.
+# Build workflow calls it with each image its build jobs published, the release image and the
+# Deloxide diagnostic image of the same revision, and a manual run names an immutable image. Every
+# shard runs `just chaos suite` on its own Docker worker, which needs no Rust toolchain, compiles
+# nothing and runs no repository test binary. The suite refuses an image of another kind or
+# revision than the caller names, and on a diagnostic image every run judges the deadlock evidence
+# of its nodes with the image's own report tool.
 on:
   workflow_call:
     inputs:
       image:
         description: Nervix image the image-build job published; the plan resolves it to its digest.
+        type: string
+        required: true
+      image-kind:
+        description: ordinary, or the Deloxide selection a diagnostic image declares.
+        type: string
+        required: true
+      revision:
+        description: Revision the image's org.opencontainers.image.revision label must name.
         type: string
         required: true
       suite:
@@ -21,6 +32,19 @@ on:
         description: Immutable Nervix image, REPOSITORY@sha256:DIGEST.
         type: string
         required: true
+      image-kind:
+        description: ordinary, or the Deloxide selection a diagnostic image declares.
+        type: choice
+        options:
+          - ordinary
+          - deloxide-order
+          - deloxide
+          - deloxide-stress
+        default: ordinary
+      revision:
+        description: Revision the image must declare; empty accepts any.
+        type: string
+        required: false
       suite:
         description: Suite of scripts/chaos/suites.json.
         type: choice
@@ -35,6 +59,8 @@ permissions:
 
 env:
   CHAOS_IMAGE_INPUT: ${{ inputs.image }}
+  CHAOS_IMAGE_KIND: ${{ inputs.image-kind }}
+  CHAOS_IMAGE_REVISION: ${{ inputs.revision }}
   CHAOS_SUITE: ${{ inputs.suite }}
   NO_COLOR: "1"
 
@@ -101,7 +127,7 @@ jobs:
         run: docker logout ghcr.io
 
   run:
-    name: ${{ inputs.suite }} shard ${{ matrix.shard.shard }}
+    name: ${{ inputs.suite }} ${{ inputs.image-kind }} shard ${{ matrix.shard.shard }}
     needs: plan
     # A GitHub-hosted worker: Pumba's network faults need the prio, sfq and netem queueing
     # disciplines, which the Blacksmith workers' kernel does not provide, so every run there stops
@@ -117,7 +143,7 @@ jobs:
     env:
       CHAOS_IMAGE: ${{ needs.plan.outputs.image }}
       CHAOS_SHARD: ${{ matrix.shard.shard }}
-      CHAOS_SUITE_ID: ci-${{ github.run_id }}-${{ github.run_attempt }}-${{ inputs.suite }}-${{ matrix.shard.shard }}
+      CHAOS_SUITE_ID: ci-${{ github.run_id }}-${{ github.run_attempt }}-${{ inputs.suite }}${{ inputs.image-kind != 'ordinary' && '-diagnostic' || '' }}-${{ matrix.shard.shard }}
       # The chaos scripts need jq 1.8; the worker's own jq is Ubuntu's 1.7.
       CHAOS_JQ_URL: https://github.com/jqlang/jq/releases/download/jq-1.8.1/jq-linux-amd64
       CHAOS_JQ_SHA256: 020468de7539ce70ef1bceaf7cde2e8c4f2ca6c3afb84642aabc5c97d9fc2a0d
@@ -191,7 +217,12 @@ jobs:
         timeout-minutes: ${{ matrix.shard.step_minutes }}
         run: |
           export PATH="${CHAOS_PATH}"
+          revision=()
+          if [[ -n "${CHAOS_IMAGE_REVISION}" ]]; then
+            revision=(--image-revision "${CHAOS_IMAGE_REVISION}")
+          fi
           exec just chaos suite "${CHAOS_SUITE}" --shard "${CHAOS_SHARD}" --image "${CHAOS_IMAGE}" \
+            --image-kind "${CHAOS_IMAGE_KIND}" "${revision[@]}" \
             --artifacts "${RUNNER_TEMP}/chaos" --suite-id "${CHAOS_SUITE_ID}"
 
       # A cancelled or timed-out suite step ends with the runner killing only `just`, so the suite
@@ -214,14 +245,14 @@ jobs:
           if [[ -s "${summary}" ]]; then
             cat "${summary}" >> "${GITHUB_STEP_SUMMARY}"
           else
-            echo "## Chaos ${CHAOS_SUITE} shard ${CHAOS_SHARD}: no suite record" >> "${GITHUB_STEP_SUMMARY}"
+            echo "## Chaos ${CHAOS_SUITE} ${CHAOS_IMAGE_KIND} shard ${CHAOS_SHARD}: no suite record" >> "${GITHUB_STEP_SUMMARY}"
           fi
 
       - name: Upload the shard verdict
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: chaos-verdict-${{ inputs.suite }}-${{ matrix.shard.shard }}-${{ github.run_id }}-${{ github.run_attempt }}
+          name: chaos-verdict-${{ inputs.suite }}-${{ matrix.shard.shard }}-${{ inputs.image-kind }}-${{ github.run_id }}-${{ github.run_attempt }}
           path: |
             ${{ runner.temp }}/chaos/${{ env.CHAOS_SUITE_ID }}/suite.json
             ${{ runner.temp }}/chaos/${{ env.CHAOS_SUITE_ID }}/summary.md
@@ -234,13 +265,13 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: chaos-${{ inputs.suite }}-${{ matrix.shard.shard }}-${{ github.run_id }}-${{ github.run_attempt }}
+          name: chaos-${{ inputs.suite }}-${{ matrix.shard.shard }}-${{ inputs.image-kind }}-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/chaos/${{ env.CHAOS_SUITE_ID }}
           if-no-files-found: warn
           retention-days: 14
 
   verdict:
-    name: ${{ inputs.suite }} verdict
+    name: ${{ inputs.suite }} ${{ inputs.image-kind }} verdict
     needs: [plan, run]
     if: always() && needs.plan.result == 'success'
     runs-on: blacksmith-2vcpu-ubuntu-2404
@@ -257,7 +288,8 @@ jobs:
       - name: Download the shard verdicts
         uses: actions/download-artifact@v4
         with:
-          pattern: chaos-verdict-${{ inputs.suite }}-*-${{ github.run_id }}-*
+          # The kind sits between the shard and the run, so no kind's pattern matches another's.
+          pattern: chaos-verdict-${{ inputs.suite }}-*-${{ inputs.image-kind }}-${{ github.run_id }}-*
           path: ${{ runner.temp }}/verdicts
 
       # The suite passes only when the latest attempt of every planned shard recorded a passing

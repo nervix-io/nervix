@@ -295,10 +295,10 @@ passed to the test binaries, so a test name filter narrows the run:
 just test-connectors <filter>
 ```
 
-### Compiler synchronization gate
+### Compiler architecture gate
 
 `just ratchet`, `just validate` and `just validate-ci` run the same source-driven compiler
-synchronization gate in the isolated `tools/nervix-lint` workspace. Product builds
+architecture gate in the isolated `tools/nervix-lint` workspace. Product builds
 remain stable. Tooling, analysis and product artifacts occupy separate target directories.
 Prepare the ordinary server build prerequisites, including `just build-web-console`.
 
@@ -321,6 +321,17 @@ An expectation covering multiple operations or no operation fails. See
 [Data-Plane Concurrency](data-plane-concurrency.md#source-contracts) for the complete authoring
 contract, inheritance, supported call effects and limitations.
 
+The same gate checks contextual failure contracts, explicit outcome handling and canonical panic
+APIs through `nervix::bare_error_signature`, `nervix::discarded_outcome` and `nervix::bare_panic`.
+Aliases, associated outputs, generic calls, inferred closures and boxed future/stream returns
+are resolved by the compiler. Ordinary values and custom same-named methods keep their own
+contracts. Classify a semantic outcome or modeled library contract with a reason-bearing
+`nervix::error_boundary(outcome|library, reason = "...")` on its exact error type or return
+contract. These classifications do not inherit module defaults. Standard-error hooks retain a
+complete report carrier. [Errors And Diagnostics](errors-and-diagnostics.md) owns the classification
+rules and the current carriers. `just validate-typed-errors` separately guards textual
+`Result<_, String>` source, including inactive forms.
+
 The JSON output records resolved APIs, spans, owner variants, expansions, source contracts,
 compiled configurations and generated/external exclusions. It is generated evidence under
 `target/`, not an approval database. Partial selections are inventories; the required diagnostic
@@ -339,6 +350,23 @@ fixture doctests twice, and cross-worktree rejection in two isolated worktrees. 
 workspace-wrapper chains directly while caching ordinary dependencies; complete evidence is
 validated independently of that detail. Compiler semantic fixtures qualify resolved lints and
 cross-crate metadata.
+
+### Typed errors and reports
+
+`just validate` rejects a `Result<_, String>` in product code and a signature that returns a Nervix
+failure without an `error-stack` report. Run the distinct source check, the complete compiler gate,
+its semantic fixtures and the structural scanner tests with:
+
+```bash
+just validate-typed-errors
+just ratchet
+just test-typed-ratchet-contracts
+just test-ratchet-units
+```
+
+[Errors And Diagnostics](./errors-and-diagnostics.md#adding-a-fallible-operation) holds the
+checklist for a new fallible operation: which layer owns the failure, what its context carries,
+where the report ends, how it is rendered and which evidence holds it.
 
 ### Capability doctests
 
@@ -489,12 +517,18 @@ handoff or other lifecycle path that uses tracked locks:
 just test-deloxide
 just test-deloxide-order
 just test-deloxide-stress
+just test-deloxide-stress-restore
 just deadlock-report inspect target/deloxide/test-deloxide/deloxide-order/run.XXXX/evidence/scenarios/deadlock-PID-TIME.rkyv --source potential
 ```
 
 The lane runs every workload `tests/deloxide-inventory.toml` registers for its selection: the
 disposable-process probes, the tracked locks' conformance checks, the diagnostic owner tests and the
-tagged one- and three-node scenarios, without retries. It fails when a registered workload is
+tagged one- and three-node scenarios, without retries. The two stress selections compile one
+build: `deloxide-stress` runs the probes, conformance checks, owner tests, lifecycle scenarios and
+paced-driver scenarios under the disturbance, and `deloxide-stress-restore` its capture, restore
+and checkpoint-transfer scenarios, one at a time in a lane of their own. A scenario that joins the
+active-only selection also joins the stress selection of its family, tagged `@deloxide_stress` or
+`@deloxide_stress_restore`, under a `stress.` identity. It fails when a registered workload is
 missing or ignored, when a probe, conformance check, owner test or tagged scenario is not
 registered, when a process deadlocks, fails its diagnostics, is killed by a signal, outlives its
 bound or leaves a process behind, and when evidence is missing, partly written or does not qualify.
@@ -520,7 +554,7 @@ why: `just validate-deloxide-applicability`, part of `just validate`, holds the 
 compiler's acquisition catalog. For a pull request labeled `deloxide`, which every change the
 Deloxide rule applies to carries, CI's `deloxide` job runs every selection through the native
 coverage collector, as `just coverage-native-extras test-deloxide test-deloxide-order
-test-deloxide-stress` does locally,
+test-deloxide-stress test-deloxide-stress-restore` does locally,
 and keeps their attempts, completion records and diagnostic coverage reports as artifacts. The
 ordinary report tool also exports selected artifacts, records explicit proofs in reviewed copies and
 qualifies whole-process evidence. `just coverage-deadlock` measures the diagnostic implementation
@@ -580,12 +614,53 @@ just chaos suite soak --image ghcr.io/nervix-io/nervix@sha256:<digest>
 
 The smoke suite runs a baseline, a leader crash with its restart and a partition with its recovery;
 the soak suite runs every delivered scenario with fixed and rotating mixed-instability seeds. CI
-runs the smoke suite against a pull request's own image only for a pull request labeled `chaos`,
+runs the smoke suite against a pull request's own images only for a pull request labeled `chaos`,
 and the soak suite for one labeled `chaos-soak`. The nightly build of `main` runs the soak suite,
-and a manual run of the `Chaos` workflow takes a suite and an immutable image digest. Label a pull
-request that changes the chaos runner, or the membership, failover, recovery or delivery behavior
-its scenarios verify, with `chaos`. `scripts/chaos/README.md` describes every scenario, the suites,
-their budgets and artifacts, and how to reproduce or replay a failed run.
+and a manual run of the `Chaos` workflow takes a suite, an immutable image digest and its kind.
+Label a pull request that changes the chaos runner, or the membership, failover, recovery or
+delivery behavior its scenarios verify, with `chaos`.
+
+Each suite runs twice on CI: against the release image and against the Deloxide diagnostic image
+of the same revision, which `just docker-build-diagnostic` builds and whose label makes every run
+judge the deadlock evidence of its nodes. Locally, `just build-chaos-diagnostic-image` overlays a
+release-mode diagnostic server of this checkout on an available image:
+
+```bash
+just build-chaos-diagnostic-image nervix:diagnostic-local ghcr.io/nervix-io/nervix:debian-latest deloxide-order
+just chaos suite smoke --image nervix:diagnostic-local --image-kind deloxide-order
+```
+
+`scripts/chaos/README.md` describes every scenario, the suites, diagnostic images, their budgets
+and artifacts, and how to reproduce or replay a failed run.
+
+### Release evidence
+
+`tests/release-evidence.toml` declares the evidence a revision needs before it qualifies for
+release: the checks every pull request runs, the release images, and each label-gated method with
+its label and checks, Bolero's sanitizer fuzzing, Loom and its weakening qualification, Shuttle,
+Turmoil, every Deloxide lane selection, client conformance, and the smoke and soak suites
+against both the release image and the diagnostic image of the revision.
+
+```bash
+just release-evidence <pull-request>
+```
+
+The gate reads the pull request's head revision, its labels and every check run GitHub recorded on
+that revision. It refuses the revision when a method's label is missing, so CI never ran it; when
+the latest run of a required check, or of any shard of a sharded one, is missing, still running,
+skipped, cancelled, timed out or failed. The register also lists every gap an owner of tracked
+locks declares in `tests/deloxide-inventory.toml`, the path the diagnostic lane does not reach and
+why. A declared gap is a reviewed declaration the Deloxide rule permits, so it does not refuse the
+revision: `just validate-deloxide-applicability`, part of the required `checks` job, holds the
+records to the compiler's acquisition catalog, and the register shows each declared limit of the
+diagnostic evidence to whoever qualifies the release. A rerun of a failed job supersedes the run it
+repeats; a passing rerun of a nondeterministic failure still needs the failure's own investigation,
+which the gate cannot see. The register of every check's
+verdict, run and time goes to `target/release-evidence/<revision>/` and belongs on the task that
+qualifies the revision, not in the repository. `just test-release-evidence` exercises the gate on
+recorded check runs and reads the Deloxide lane and release image matrices from the workflows, so
+it fails when one of their jobs is missing from the inventory. A renamed CI job, or a value added to
+the matrix of one the inventory names, is updated in the inventory in the same change.
 
 ### SIMD kernel development
 
@@ -611,10 +686,11 @@ just coverage-native-extras
 
 Name producers to run only those: `test-typed-ratchet`, `bench-smoke`, `nspl-completion-walk`,
 `test-shuttle`, `test-loom`, `test-deadlock-evidence-order`, `test-deadlock-report`,
-`test-deloxide`, `test-deloxide-order`, `test-deloxide-stress`, or an individual
-`test-primitives-<mode>` recipe. The focused diagnostic owner and probes use the `deloxide-order`
-build; the local report command uses the ordinary build; the three diagnostic lanes build in their
-own selections and export only after their
+`test-deloxide`, `test-deloxide-order`, `test-deloxide-stress`, `test-deloxide-stress-restore`, or
+an individual `test-primitives-<mode>` recipe. The focused diagnostic owner and probes use the
+`deloxide-order` build; the local report command uses the ordinary build; each diagnostic lane
+builds in the instrumented build of the feature its selection compiles, the two stress lanes in one,
+and exports only after its
 `lane.json` records a complete run. `test-primitives`
 selects native conformance in ordinary, Shuttle, Loom, Turmoil and Deloxide execution:
 
@@ -634,7 +710,8 @@ that executes Nervix code then runs in the environment `cargo llvm-cov show-env 
 --no-rustc-wrapper` describes: every crate is compiled with source coverage instrumentation into
 `target/native-coverage-build` for ordinary mode and `target/native-coverage-build-<mode>` for
 each other mode, and the configured kache wrapper stays in place. The `test-deloxide`,
-`test-deloxide-order` and `test-deloxide-stress` lanes instrument only workspace crates: the collector moves the
+`test-deloxide-order`, `test-deloxide-stress` and `test-deloxide-stress-restore` lanes instrument
+only workspace crates: the collector moves the
 instrumentation flags into `scripts/coverage_workspace_wrapper.py`, which Cargo runs beneath kache
 as the workspace compiler wrapper, the scope `cargo llvm-cov` gives the ordinary coverage build.
 Their nodes must meet product deadlines while they compile WASM processors and process Arrow state,

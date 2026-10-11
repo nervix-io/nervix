@@ -1,7 +1,7 @@
 Feature: Bounded complete restore generations
   Restoring a complete state set publishes one durable generation before START.
 
-  @restore_installation
+  @restore_installation @deloxide_stress_restore
   Scenario Outline: A complete restore generation with <branches> saves of <save_mib> MiB on <cluster_size> nodes preserves branches and source offsets
     Given Kafka is running
     And runtime replication is configured with replica count <replicas> and snapshot interval "10m"

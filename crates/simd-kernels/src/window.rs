@@ -796,6 +796,324 @@ mod tests {
         assert_eq!(empty.count, 0);
     }
 
+    /// A generated window run: raw value bits read as every typed slice, an optional validity
+    /// bitmap and the bit offset of the run's first value in it, and a packed boolean run with its
+    /// own offset.
+    #[derive(Debug, bolero::TypeGenerator)]
+    struct WindowRun {
+        #[generator(bolero::generator::produce_with::<Vec<u64>>().len(0_usize..=300))]
+        values: Vec<u64>,
+        validity: Option<Vec<u8>>,
+        validity_offset: u8,
+        booleans: Vec<u8>,
+        booleans_offset: u8,
+    }
+
+    /// `bits` repeated, or a fixed pattern when it is empty, until it holds `needed` bits.
+    fn bitmap_of(bits: &[u8], needed: usize) -> Vec<u8> {
+        let bytes = needed.div_ceil(8);
+        if bits.is_empty() {
+            return vec![0b1011_0110; bytes];
+        }
+        bits.iter().copied().cycle().take(bytes).collect()
+    }
+
+    fn bit(bits: &[u8], position: usize) -> bool {
+        bits[position / 8] & (1 << (position % 8)) != 0
+    }
+
+    /// The exact sum of `values`, as Shewchuk's non-overlapping partials, which add without error.
+    fn exact_partials(values: impl IntoIterator<Item = f64>) -> Vec<f64> {
+        let mut partials: Vec<f64> = Vec::new();
+        for value in values {
+            let mut carried = value;
+            let mut kept = 0;
+            for index in 0..partials.len() {
+                let mut other = partials[index];
+                if carried.abs() < other.abs() {
+                    std::mem::swap(&mut carried, &mut other);
+                }
+                let high = carried + other;
+                let low = other - (high - carried);
+                if low != 0.0 {
+                    partials[kept] = low;
+                    kept += 1;
+                }
+                carried = high;
+            }
+            partials.truncate(kept);
+            partials.push(carried);
+        }
+        partials
+    }
+
+    /// The value of non-overlapping partials, added from the smallest so it rounds once.
+    fn partials_value(partials: &[f64]) -> f64 {
+        partials.iter().sum()
+    }
+
+    impl WindowRun {
+        fn validity_bits(&self) -> Option<Vec<u8>> {
+            match &self.validity {
+                Some(bits) => {
+                    let needed = usize::from(self.validity_offset) + self.values.len();
+                    Some(bitmap_of(bits, needed))
+                }
+                None => None,
+            }
+        }
+
+        fn present(&self, validity: Option<&[u8]>, index: usize) -> bool {
+            match validity {
+                Some(bits) => bit(bits, usize::from(self.validity_offset) + index),
+                None => true,
+            }
+        }
+
+        /// A float run whose exponents keep every partial sum far from overflow, so the error of a
+        /// compensated sum is bounded by the magnitude of its inputs.
+        fn bounded_floats(&self) -> Vec<f64> {
+            let mut floats = Vec::with_capacity(self.values.len());
+            for raw in &self.values {
+                let significand = raw & ((1_u64 << 52) - 1);
+                let exponent = i32::try_from((raw >> 52) % 401).assured("below 401") - 200;
+                let negative = raw >> 63 == 1;
+                let significand: f64 = (significand | (1 << 52)).approx_into();
+                let magnitude = significand * 2_f64.powi(exponent - 52);
+                floats.push(if negative { -magnitude } else { magnitude });
+            }
+            floats
+        }
+    }
+
+    #[test]
+    fn bolero_window_runs_match_scalar_folds_at_every_level() {
+        bolero::check!()
+            .with_iterations(256)
+            .with_max_len(4096)
+            .with_type::<WindowRun>()
+            .for_each(|run| {
+                let len = run.values.len();
+                let validity_bits = run.validity_bits();
+                let validity_slice = validity_bits.as_deref();
+                let validity = RunValidity::new(validity_slice, usize::from(run.validity_offset));
+                let present = (0..len)
+                    .map(|index| run.present(validity_slice, index))
+                    .collect::<Vec<_>>();
+                let mut present_count = 0_u64;
+                for (index, kept) in present.iter().enumerate() {
+                    assert_eq!(validity.contains(index), *kept, "index {index}");
+                    if *kept {
+                        present_count += 1;
+                    }
+                }
+                assert_eq!(validity.count(len), present_count);
+
+                let booleans_offset = usize::from(run.booleans_offset);
+                let booleans = bitmap_of(&run.booleans, booleans_offset + len);
+                let mut expected_booleans = (0_u64, 0_u64);
+                for (index, kept) in present.iter().enumerate() {
+                    if !*kept {
+                        continue;
+                    }
+                    if bit(&booleans, booleans_offset + index) {
+                        expected_booleans.0 += 1;
+                    } else {
+                        expected_booleans.1 += 1;
+                    }
+                }
+                assert_eq!(
+                    count_booleans(&booleans, booleans_offset, validity, len),
+                    expected_booleans
+                );
+
+                let signed = run
+                    .values
+                    .iter()
+                    .map(|raw| raw.cast_signed())
+                    .collect::<Vec<_>>();
+                let mut signed_sum = 0_i128;
+                let mut unsigned_sum = 0_i128;
+                for (index, raw) in run.values.iter().enumerate() {
+                    if present[index] {
+                        signed_sum += i128::from(signed[index]);
+                        unsigned_sum += i128::from(*raw);
+                    }
+                }
+                for level in crate::supported_levels() {
+                    assert_eq!(
+                        sum_i64_lanes_for_level(level, &signed, validity),
+                        (present_count, signed_sum),
+                        "level={level:?}"
+                    );
+                    let unsigned =
+                        dispatch!(level, simd => sum_u64_lanes(simd, &run.values, validity));
+                    assert_eq!(unsigned, (present_count, unsigned_sum), "level={level:?}");
+                }
+                assert_eq!(sum_i64(&signed, validity), (present_count, signed_sum));
+                assert_eq!(
+                    sum_u64(&run.values, validity),
+                    (present_count, unsigned_sum)
+                );
+
+                macro_rules! narrow_sum {
+                    ($($native:ty),+) => {$(
+                        let narrow = run
+                            .values
+                            .iter()
+                            .map(|raw| <$native>::from_le_bytes(
+                                raw.to_le_bytes()[..size_of::<$native>()]
+                                    .try_into()
+                                    .assured("the slice has the type's byte width"),
+                            ))
+                            .collect::<Vec<_>>();
+                        let mut sum = 0_i128;
+                        for (index, value) in narrow.iter().enumerate() {
+                            if present[index] {
+                                sum += i128::from(*value);
+                            }
+                        }
+                        assert_eq!(sum_integer(&narrow, validity), (present_count, sum));
+                    )+};
+                }
+                narrow_sum!(i8, u8, i16, u16, i32, u32);
+
+                assert_eq!(
+                    min_max(&signed, validity),
+                    first_extremes(&signed, &present)
+                );
+                assert_eq!(
+                    min_max(&run.values, validity),
+                    first_extremes(&run.values, &present)
+                );
+
+                let wide = run
+                    .values
+                    .iter()
+                    .map(|raw| f64::from_bits(*raw))
+                    .collect::<Vec<_>>();
+                let narrow = run
+                    .values
+                    .iter()
+                    .map(|raw| f32::from_bits(u32::try_from(raw >> 32).assured("32 bits")))
+                    .collect::<Vec<_>>();
+                let mut expected_wide = vec![0_u8; len.div_ceil(8)];
+                let mut expected_narrow = vec![0_u8; len.div_ceil(8)];
+                for index in 0..len {
+                    if present[index] && !wide[index].is_finite() {
+                        expected_wide[index / 8] |= 1 << (index % 8);
+                    }
+                    if present[index] && !narrow[index].is_finite() {
+                        expected_narrow[index / 8] |= 1 << (index % 8);
+                    }
+                }
+                for level in crate::supported_levels() {
+                    let wide_bits =
+                        dispatch!(level, simd => non_finite_f64_lanes(simd, &wide, validity));
+                    assert_eq!(wide_bits, expected_wide, "level={level:?}");
+                    let narrow_bits =
+                        dispatch!(level, simd => non_finite_f32_lanes(simd, &narrow, validity));
+                    assert_eq!(narrow_bits, expected_narrow, "level={level:?}");
+                }
+
+                let mut visited = Vec::with_capacity(len);
+                reverse_values(
+                    &signed,
+                    validity,
+                    |value| value.approx_into::<f64>(),
+                    |value| {
+                        visited.push(value);
+                    },
+                );
+                let mut expected_visits = Vec::with_capacity(len);
+                for index in (0..len).rev() {
+                    if present[index] {
+                        expected_visits.push(Some(signed[index].approx_into::<f64>()));
+                    } else {
+                        expected_visits.push(None);
+                    }
+                }
+                assert_eq!(visited, expected_visits);
+
+                assert_compensated_sums(run, validity, &present);
+            });
+    }
+
+    /// The first present minimum and maximum by the integers' total order, with their positions.
+    fn first_extremes<T: Copy + Ord>(
+        values: &[T],
+        present: &[bool],
+    ) -> Option<((usize, T), (usize, T))> {
+        let mut smallest: Option<(usize, T)> = None;
+        let mut largest: Option<(usize, T)> = None;
+        for (index, value) in values.iter().enumerate() {
+            if !present[index] {
+                continue;
+            }
+            match smallest {
+                Some((_, current)) if current <= *value => {}
+                _ => smallest = Some((index, *value)),
+            }
+            match largest {
+                Some((_, current)) if current >= *value => {}
+                _ => largest = Some((index, *value)),
+            }
+        }
+        match (smallest, largest) {
+            (Some(smallest), Some(largest)) => Some((smallest, largest)),
+            _ => None,
+        }
+    }
+
+    /// A compensated sum of 32-bit integers is exact with no compensation left, and of any
+    /// floats is within the bound of compensated summation of the exact sum: `2u|s|` plus
+    /// `(2(n + 16)u)^2` times the sum of the magnitudes.
+    fn assert_compensated_sums(run: &WindowRun, validity: RunValidity<'_>, present: &[bool]) {
+        let integers = run
+            .values
+            .iter()
+            .map(|raw| u32::try_from(raw >> 32).assured("32 bits").cast_signed())
+            .collect::<Vec<_>>();
+        let mut exact = 0_i64;
+        let mut count = 0_u64;
+        for (index, value) in integers.iter().enumerate() {
+            if present[index] {
+                exact += i64::from(*value);
+                count += 1;
+            }
+        }
+        let summed = compensated_sum(&integers, validity, f64::from);
+        let exact: f64 = exact.approx_into();
+        assert_eq!(summed.count, count);
+        assert_eq!(summed.sum.to_bits(), exact.to_bits());
+        assert_eq!(summed.compensation, 0.0);
+
+        let floats = run.bounded_floats();
+        let mut kept = Vec::with_capacity(floats.len());
+        for (index, value) in floats.iter().enumerate() {
+            if present[index] {
+                kept.push(*value);
+            }
+        }
+        let summed = compensated_sum(&floats, validity, |value| value);
+        assert_eq!(summed.count, count);
+        let total = summed.sum + summed.compensation;
+        let mut difference = exact_partials(kept.iter().copied());
+        let exact_sum = partials_value(&difference);
+        difference = exact_partials(difference.into_iter().chain([-total]));
+        let error = partials_value(&difference).abs();
+        let unit = f64::EPSILON / 2.0;
+        let terms: f64 = (count + 16).approx_into();
+        let magnitudes: f64 = kept.iter().map(|value| value.abs()).sum();
+        let bound = 2.0 * unit * exact_sum.abs()
+            + (2.0 * terms * unit).powi(2) * magnitudes * 2.0
+            + f64::from_bits(1);
+        assert!(
+            error <= bound,
+            "compensated sum {total:e} is {error:e} from the exact {exact_sum:e}, beyond {bound:e}"
+        );
+    }
+
     #[test]
     fn reverse_typed_visits_keep_null_positions() {
         let mut values = Vec::new();

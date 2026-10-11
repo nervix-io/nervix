@@ -18,7 +18,7 @@ use nervix_interconnect::{RemoteOperationFailure, StateSchema};
 use nervix_models::{DomainName, DomainSchedule, NodeRef, SchemaFingerprint};
 
 use super::{
-    CaptureSectionKey,
+    CaptureSectionKey, CapturedSection,
     interconnect::{CaptureDomainStateRequest, failed},
 };
 use crate::{
@@ -35,8 +35,7 @@ impl SessionServiceImpl {
         captured: Vec<CapturedBranchState>,
         schedule: Option<&DomainSchedule>,
         request: &CaptureDomainStateRequest,
-    ) -> Result<Vec<(CaptureSectionKey, SectionContent, StagedArtifact)>, RemoteOperationFailure>
-    {
+    ) -> Result<Vec<CapturedSection>, RemoteOperationFailure> {
         let mut staged = Vec::new();
         if captured.is_empty() {
             return Ok(staged);
@@ -85,8 +84,7 @@ impl SessionServiceImpl {
         schema: SchemaFingerprint,
         schemas: &BranchStateSchemas,
         request: &CaptureDomainStateRequest,
-    ) -> Result<Vec<(CaptureSectionKey, SectionContent, StagedArtifact)>, RemoteOperationFailure>
-    {
+    ) -> Result<Vec<CapturedSection>, RemoteOperationFailure> {
         let domain = &request.domain;
         let CapturedBranchStateKind::Deduplicator(keyspace) = captured.state else {
             return Ok(Vec::new());
@@ -114,14 +112,14 @@ impl SessionServiceImpl {
         let bytes = descriptor
             .encode()
             .map_err(|error| failed(domain, &error.to_string()))?;
-        let mut staged = vec![(
-            capture_key(
+        let mut staged = vec![CapturedSection {
+            key: capture_key(
                 request,
                 SectionPath::deduplicator_descriptor(domain, &entity, branch.as_ref()),
             ),
-            SectionContent::Record(DeduplicatorStateDescriptor::KIND),
-            self.stage_captured_section(bytes, domain).await?,
-        )];
+            content: SectionContent::Record(DeduplicatorStateDescriptor::KIND),
+            artifact: self.stage_captured_section(bytes, domain).await?,
+        }];
         let executor = self.inner.runtime.executor();
         for (index, group) in groups.into_iter().enumerate() {
             nervix_primitives::task::consume_budget().await;
@@ -130,14 +128,14 @@ impl SessionServiceImpl {
                 .encode_group(executor, key_schema, group)
                 .await
                 .map_err(|error| failed(domain, &format!("{error:#}")))?;
-            staged.push((
-                capture_key(
+            staged.push(CapturedSection {
+                key: capture_key(
                     request,
                     SectionPath::deduplicator_keys(domain, &entity, branch.as_ref(), index),
                 ),
-                SectionContent::DeduplicatorKeys,
-                self.stage_branch_state_group(keys, domain).await?,
-            ));
+                content: SectionContent::DeduplicatorKeys,
+                artifact: self.stage_branch_state_group(keys, domain).await?,
+            });
         }
         Ok(staged)
     }
@@ -148,8 +146,7 @@ impl SessionServiceImpl {
         schema: SchemaFingerprint,
         schemas: &BranchStateSchemas,
         request: &CaptureDomainStateRequest,
-    ) -> Result<Vec<(CaptureSectionKey, SectionContent, StagedArtifact)>, RemoteOperationFailure>
-    {
+    ) -> Result<Vec<CapturedSection>, RemoteOperationFailure> {
         let domain = &request.domain;
         let CapturedBranchStateKind::Window(window) = captured.state else {
             return Ok(Vec::new());
@@ -198,14 +195,14 @@ impl SessionServiceImpl {
         let bytes = descriptor
             .encode()
             .map_err(|error| failed(domain, &error.to_string()))?;
-        let mut staged = vec![(
-            capture_key(
+        let mut staged = vec![CapturedSection {
+            key: capture_key(
                 request,
                 SectionPath::window_descriptor(domain, &entity, branch.as_ref()),
             ),
-            SectionContent::Record(WindowStateDescriptor::KIND),
-            self.stage_captured_section(bytes, domain).await?,
-        )];
+            content: SectionContent::Record(WindowStateDescriptor::KIND),
+            artifact: self.stage_captured_section(bytes, domain).await?,
+        }];
         for (index, group) in groups.into_iter().enumerate() {
             nervix_primitives::task::consume_budget().await;
             let index = u32::try_from(index).verified("the group count was checked above");
@@ -213,26 +210,26 @@ impl SessionServiceImpl {
                 .encode_input_group(executor, &group)
                 .await
                 .map_err(|error| failed(domain, &format!("{error:#}")))?;
-            staged.push((
-                capture_key(
+            staged.push(CapturedSection {
+                key: capture_key(
                     request,
                     SectionPath::window_input_rows(domain, &entity, branch.as_ref(), index),
                 ),
-                SectionContent::WindowInputRows,
-                self.stage_branch_state_group(input, domain).await?,
-            ));
+                content: SectionContent::WindowInputRows,
+                artifact: self.stage_branch_state_group(input, domain).await?,
+            });
             let arguments = window
                 .encode_argument_group(executor, &group)
                 .await
                 .map_err(|error| failed(domain, &format!("{error:#}")))?;
-            staged.push((
-                capture_key(
+            staged.push(CapturedSection {
+                key: capture_key(
                     request,
                     SectionPath::window_argument_columns(domain, &entity, branch.as_ref(), index),
                 ),
-                SectionContent::WindowArgumentColumns,
-                self.stage_branch_state_group(arguments, domain).await?,
-            ));
+                content: SectionContent::WindowArgumentColumns,
+                artifact: self.stage_branch_state_group(arguments, domain).await?,
+            });
         }
         Ok(staged)
     }

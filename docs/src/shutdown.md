@@ -406,9 +406,9 @@ Each domain therefore advances independently through three states:
 
 A WASM processor branch keeps the acknowledgements of its latest guest callback open until that
 callback's checkpoint reaches stable storage and every assigned replica, so a drain waits for the
-checkpoint as it waits for any other outstanding acknowledgement. The checkpoint's ten-second
-deadline bounds that wait: a checkpoint that cannot complete fails and negatively acknowledges what
-it held.
+checkpoint as it waits for any other outstanding acknowledgement. The checkpoint has a
+ninety-second completion deadline, while the drain timeout may end the node's wait sooner. A
+checkpoint that cannot complete fails and negatively acknowledges what it held.
 
 Runtime teardown gives each processor task a stop grace, and the processor task gives each of its
 branch tasks one of its own. A processor task still stopping its branches when its grace ends is
@@ -730,10 +730,15 @@ retention, and snapshot contracts behind this barrier.
 The interconnect rejects new admission, cancels pool and operation waiters, and retires the pool
 and peer protocol owners. An ending peer owner cancels unadmitted records and releases item and
 terminal-outcome permits even if the runtime retains an intake already admitted; that intake's
-verdict remains admitted. Decoded metadata stays charged while a borrower keeps it. Runtime
+verdict remains admitted. A batch the runtime holds back for room for its acknowledgement watches
+is unadmitted, so that cancellation ends its hold, and so does the end of the relay intake lane
+when the node stops; it is never admitted afterwards. Decoded metadata stays charged while a borrower keeps it. Runtime
 teardown cancels and joins its charged ACK watcher tasks, closes delivery and admission routing
-queues, and negatively resolves remaining volatile correlations exactly once. No ACK owner state
-is stored for restart. The interconnect also retires the pool
+queues, and negatively resolves remaining volatile correlations exactly once. The once-a-second
+silence sweep is one of the joined tasks and observes the cancellation between sweeps, so the join
+waits for at most the sweep in progress; that sweep, like the resolution that follows, visits only
+the correlation positions the node's deliveries and admissions have claimed, never its fixed
+capacity. No ACK owner state is stored for restart. The interconnect also retires the pool
 connections the node opened, giving their leased streams up to ten seconds before closing whatever
 remains. Connections that peers opened to the node close at once, together with the handlers still
 serving their streams, so a peer's request the node has not answered fails instead of completing.

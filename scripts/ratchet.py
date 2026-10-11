@@ -378,68 +378,6 @@ def _use_item_spans(code: str) -> Iterator[tuple[int, int]]:
         yield match.start(), len(code) if end < 0 else end
 
 
-_PANIC_CALL = re.compile(r"\.\s*(?:unwrap\s*\(\s*\)|expect\s*\()")
-
-
-def count_bare_unwrap_and_expect(files: Sequence[RustFile]) -> list[Site]:
-    sites: list[Site] = []
-    for file in product_files(files):
-        for match in _PANIC_CALL.finditer(file.product):
-            sites.append(file.site(match.start(), file.source_line(match.start())))
-    return sites
-
-
-_DISCARDED_BINDING = re.compile(r"\blet\s+_\s*(?::\s*[^=;]+?)?=")
-
-# A `let _` whose initializer is a plain name, or a tuple of them, silences an unused parameter
-# rather than dropping an outcome. There is no result there to classify. The count is `let _`
-# only: `_ = fut => …` is a `select!` arm pattern, not a discard, and matching it would flag every
-# such arm in the workspace.
-_PLAIN_BINDING = re.compile(
-    r"^(?:[A-Za-z_][A-Za-z0-9_]*"
-    r"|\(\s*[A-Za-z_][A-Za-z0-9_]*(?:\s*,\s*[A-Za-z_][A-Za-z0-9_]*)*\s*,?\s*\))$"
-)
-
-
-def count_discarded_results(files: Sequence[RustFile]) -> list[Site]:
-    """Count outcomes dropped with `let _ = …`.
-
-    A dropped outcome states no class. It reads the same whether the failure was considered and
-    recovered from or never considered at all, so it is the one form that cannot be reviewed.
-    `meticulous` spells the panic class and `nervix-recovery` spells the recovery class; a site
-    left here has chosen neither, so this count only falls.
-    """
-
-    sites: list[Site] = []
-    for file in product_files(files):
-        for match in _DISCARDED_BINDING.finditer(file.product):
-            initializer = _initializer(file.product, match.end())
-            if initializer is None or _PLAIN_BINDING.match(initializer.strip()):
-                continue
-            sites.append(file.site(match.start(), file.source_line(match.start())))
-    return sites
-
-
-def _initializer(code: str, start: int) -> str | None:
-    """Return the initializer beginning at `start`, up to the `;` that ends its statement."""
-
-    depth = 0
-    index = start
-    length = len(code)
-    while index < length:
-        character = code[index]
-        if character in "([{":
-            depth += 1
-        elif character in ")]}":
-            depth -= 1
-            if depth < 0:
-                return None
-        elif character == ";" and depth == 0:
-            return code[start:index]
-        index += 1
-    return None
-
-
 # `saturating_duration_since` is `Instant`'s query for "how long since, or zero if it has not
 # happened yet". It answers a question about time rather than choosing what an overflow means, so
 # it is not what this count is about.
@@ -745,38 +683,6 @@ def count_string_node_ids(files: Sequence[RustFile]) -> list[Site]:
     return sites
 
 
-_ERROR_DECLARATION = re.compile(r"\b(?:enum|struct)\s+([A-Za-z_][A-Za-z0-9_]*Error)\b")
-_RESULT_RETURN = re.compile(r"->\s*((?:[A-Za-z_][A-Za-z0-9_]*\s*::\s*)*)Result\s*<")
-_NESTED_RESULT_RETURN = re.compile(
-    r"\b(?:Future|Stream)\s*<\s*(?:Output|Item)\s*=\s*"
-    r"((?:[A-Za-z_][A-Za-z0-9_]*\s*::\s*)*)Result\s*<"
-)
-_PLAIN_TYPE = re.compile(r"^(?:[A-Za-z_][A-Za-z0-9_]*\s*::\s*)*([A-Za-z_][A-Za-z0-9_]*)$")
-
-
-def count_bare_error_signatures(files: Sequence[RustFile]) -> list[Site]:
-    """Count signatures returning a Nervix error that carries no `error_stack` context."""
-
-    declared = {
-        match.group(1)
-        for file in files
-        for match in _ERROR_DECLARATION.finditer(file.code)
-    }
-    sites: list[Site] = []
-    for file in product_files(files):
-        for pattern in (_RESULT_RETURN, _NESTED_RESULT_RETURN):
-            for match in pattern.finditer(file.product):
-                if match.group(1).replace(" ", "") == "error_stack::":
-                    continue
-                arguments = generic_arguments(file.product, match.end() - 1)
-                if not arguments or len(arguments) < 2:
-                    continue
-                error = _PLAIN_TYPE.match(arguments[-1].strip())
-                if error and error.group(1) in declared:
-                    sites.append(file.site(match.start(), file.source_line(match.start())))
-    return sites
-
-
 def count_files_over_3000_lines(files: Sequence[RustFile]) -> list[Site]:
     return [
         Site(file.path, 1, f"{file.lines} lines")
@@ -804,16 +710,6 @@ COUNTS: tuple[Count, ...] = (
     ),
     Count("as_casts", "`as` casts outside imports and qualified paths", count_as_casts),
     Count(
-        "bare_unwrap_and_expect",
-        "bare `unwrap()` and `expect()` calls",
-        count_bare_unwrap_and_expect,
-    ),
-    Count(
-        "discarded_results",
-        "outcomes dropped with `let _ =` instead of stating their class",
-        count_discarded_results,
-    ),
-    Count(
         "clamped_arithmetic",
         "`saturating_*` and `wrapping_*` calls outside the time API",
         count_clamped_arithmetic,
@@ -822,11 +718,6 @@ COUNTS: tuple[Count, ...] = (
         "combinator_control_flow",
         "control flow written as `Option` and `Result` combinator chains",
         count_combinator_control_flow,
-    ),
-    Count(
-        "bare_error_signatures",
-        "signatures returning a Nervix error without `Report`",
-        count_bare_error_signatures,
     ),
     Count(
         "string_node_ids",

@@ -4,8 +4,9 @@
 //! Must not know: production scheduling or control-plane orchestration.
 
 use nervix_interconnect::{
-    BranchCheckpointListing, BranchCheckpointListingResponse, StateSnapshotEnvelope,
-    StateSyncRequest, StateSyncResponse,
+    BranchCheckpointListing, BranchCheckpointListingResponse, FetchStateCheckpoint,
+    StateCheckpointRead, StateSnapshotEnvelope, StateSyncRequest, StateSyncResponse,
+    StreamHandlerError, StreamingResponse,
 };
 use nervix_models::NodeEndpoint;
 use nervix_primitives::time::sleep;
@@ -18,7 +19,20 @@ use crate::runtime::test_fixtures::{
 /// The real owner answers after the replica's polling cadence, within the operation's deadline.
 const OWNER_ANSWER_DELAY: Duration = Duration::from_millis(1200);
 
-async fn remote_owner(answer_delay: Duration) -> (RemoteStateOwner, RuntimeStatePlacement) {
+#[derive(Clone, Copy)]
+enum CheckpointStreamCase {
+    Complete,
+    WrongDigest,
+    WrongOpenedLength,
+    Truncated,
+    ExcessBytes,
+    UnboundedLength,
+}
+
+async fn remote_owner(
+    answer_delay: Duration,
+    stream_case: CheckpointStreamCase,
+) -> (RemoteStateOwner, RuntimeStatePlacement) {
     let runtime = Runtime::default();
     let node = named::<ClusterNodeName>("node-1");
     attach_loopback_cluster(&runtime, &node).await;
@@ -37,11 +51,49 @@ async fn remote_owner(answer_delay: Duration) -> (RemoteStateOwner, RuntimeState
             StateSyncResponse {
                 result: Ok(Some(StateSnapshotEnvelope {
                     lsm: 7,
-                    payload: vec![1, 2, 3],
+                    length: if matches!(stream_case, CheckpointStreamCase::UnboundedLength) {
+                        u64::MAX
+                    } else {
+                        3
+                    },
+                    digest: if matches!(stream_case, CheckpointStreamCase::WrongDigest) {
+                        [0; 32]
+                    } else {
+                        *blake3::hash(&[1, 2, 3]).as_bytes()
+                    },
                 })),
             }
         })
         .expect("the checkpoint handler registers once");
+    let executor = runtime.inner.executor.clone();
+    transport
+        .register_stream_handler::<FetchStateCheckpoint, _, _>(move |_context, request| {
+            let executor = executor.clone();
+            async move {
+                assert_eq!(request.lsm, 7);
+                assert_eq!(request.read, StateCheckpointRead::Published);
+                let payload = match stream_case {
+                    CheckpointStreamCase::WrongOpenedLength | CheckpointStreamCase::Truncated => {
+                        vec![1, 2]
+                    }
+                    CheckpointStreamCase::ExcessBytes => vec![1, 2, 3, 4],
+                    _ => vec![1, 2, 3],
+                };
+                let chunk = executor
+                    .charge_owned(nervix_execution::MemoryClass::Bulk, payload)
+                    .await
+                    .map_err(StreamHandlerError::with_cause)?;
+                Ok(StreamingResponse::new(
+                    if matches!(stream_case, CheckpointStreamCase::WrongOpenedLength) {
+                        2
+                    } else {
+                        3
+                    },
+                    futures_util::stream::once(async move { Ok(chunk) }),
+                ))
+            }
+        })
+        .expect("the checkpoint stream handler registers once");
     transport
         .register_handler::<BranchCheckpointListingRequest, _, _>(
             move |_context, _request| async move {
@@ -75,7 +127,7 @@ async fn remote_owner(answer_delay: Duration) -> (RemoteStateOwner, RuntimeState
 
 #[nervix_primitives::test]
 async fn checkpoint_answer_after_the_poll_interval_uses_its_operation_deadline() {
-    let (owner, placement) = remote_owner(OWNER_ANSWER_DELAY).await;
+    let (owner, placement) = remote_owner(OWNER_ANSWER_DELAY, CheckpointStreamCase::Complete).await;
     let checkpoint = owner
         .checkpoint_after(&placement, Some(6))
         .await
@@ -95,8 +147,76 @@ async fn checkpoint_answer_after_the_poll_interval_uses_its_operation_deadline()
 }
 
 #[nervix_primitives::test]
+async fn checkpoint_stream_with_a_different_digest_never_becomes_installable() {
+    let (owner, placement) = remote_owner(Duration::ZERO, CheckpointStreamCase::WrongDigest).await;
+    let failure = owner
+        .checkpoint_after(&placement, Some(6))
+        .await
+        .expect_err("a complete stream with the wrong digest cannot be installed");
+    assert!(matches!(
+        failure.current_context(),
+        StateReplicationError::Request { .. }
+    ));
+    assert!(format!("{failure:?}").contains("digest verification"));
+    owner
+        .runtime
+        .inner
+        .remote_dispatcher
+        .load_full()
+        .expect("attached dispatcher")
+        .interconnect
+        .shutdown()
+        .await;
+}
+
+#[nervix_primitives::test]
+async fn checkpoint_stream_requires_the_complete_declared_byte_count() {
+    for (stream_case, cause) in [
+        (
+            CheckpointStreamCase::WrongOpenedLength,
+            Some("opened a 2-byte stream"),
+        ),
+        (CheckpointStreamCase::Truncated, None),
+        (CheckpointStreamCase::ExcessBytes, None),
+        (
+            CheckpointStreamCase::UnboundedLength,
+            Some("above the 268435456-byte transfer bound"),
+        ),
+    ] {
+        let (owner, placement) = remote_owner(Duration::ZERO, stream_case).await;
+        let failure = owner
+            .checkpoint_after(&placement, Some(6))
+            .await
+            .expect_err("a mismatched stream cannot become an installable checkpoint");
+        assert!(matches!(
+            failure.current_context(),
+            StateReplicationError::Request { .. }
+        ));
+        if let Some(cause) = cause {
+            assert!(format!("{failure:?}").contains(cause), "{failure:?}");
+        } else {
+            // The stream transport rejects a short or overlong producer before handing its
+            // invalid terminal body to the checkpoint decoder.
+            assert!(
+                format!("{failure:?}").contains("fetch_state_checkpoint"),
+                "{failure:?}"
+            );
+        }
+        owner
+            .runtime
+            .inner
+            .remote_dispatcher
+            .load_full()
+            .expect("attached dispatcher")
+            .interconnect
+            .shutdown()
+            .await;
+    }
+}
+
+#[nervix_primitives::test]
 async fn catalog_answer_after_the_poll_interval_uses_its_operation_deadline() {
-    let (owner, placement) = remote_owner(OWNER_ANSWER_DELAY).await;
+    let (owner, placement) = remote_owner(OWNER_ANSWER_DELAY, CheckpointStreamCase::Complete).await;
     let listing = owner
         .checkpoint_listing(&placement, None)
         .await
@@ -115,7 +235,8 @@ async fn catalog_answer_after_the_poll_interval_uses_its_operation_deadline() {
 
 #[nervix_primitives::test]
 async fn checkpoint_answer_beyond_its_operation_deadline_retains_the_typed_timeout() {
-    let (owner, placement) = remote_owner(Duration::from_secs(6)).await;
+    let (owner, placement) =
+        remote_owner(Duration::from_secs(6), CheckpointStreamCase::Complete).await;
     let failure = owner
         .checkpoint_after(&placement, Some(6))
         .await
@@ -142,7 +263,8 @@ async fn checkpoint_answer_beyond_its_operation_deadline_retains_the_typed_timeo
 
 #[nervix_primitives::test]
 async fn catalog_answer_beyond_its_operation_deadline_retains_the_typed_timeout() {
-    let (owner, placement) = remote_owner(Duration::from_secs(6)).await;
+    let (owner, placement) =
+        remote_owner(Duration::from_secs(6), CheckpointStreamCase::Complete).await;
     let failure = owner
         .checkpoint_listing(&placement, None)
         .await

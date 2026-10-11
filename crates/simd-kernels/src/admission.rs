@@ -252,4 +252,148 @@ mod tests {
         let kernel = AdmissionKernel::new(0, 0, NonZeroU64::MIN, 0);
         assert!(kernel.admit(&[]).is_empty());
     }
+
+    /// A generated instant: anywhere on the timeline, or beside one of its ends.
+    #[derive(Debug, bolero::TypeGenerator)]
+    enum Instant {
+        Any(i64),
+        AfterMin(u16),
+        BeforeMax(u16),
+        AroundZero(i16),
+    }
+
+    impl Instant {
+        fn value(&self) -> i64 {
+            match self {
+                Self::Any(value) => *value,
+                Self::AfterMin(distance) => i64::MIN + i64::from(*distance),
+                Self::BeforeMax(distance) => i64::MAX - i64::from(*distance),
+                Self::AroundZero(offset) => i64::from(*offset),
+            }
+        }
+    }
+
+    /// A generated period, from one nanosecond to the whole unsigned range: every reduction the
+    /// kernel prepares.
+    #[derive(Debug, bolero::TypeGenerator)]
+    enum Period {
+        Any(u64),
+        Small(u8),
+        PowerOfTwo(u8),
+        WholeSeconds(u16),
+    }
+
+    impl Period {
+        fn value(&self) -> NonZeroU64 {
+            let period = match self {
+                Self::Any(period) => *period,
+                Self::Small(period) => u64::from(*period % 16),
+                Self::PowerOfTwo(exponent) => 1_u64 << (exponent % 64),
+                Self::WholeSeconds(seconds) => u64::from(*seconds) * 1_000_000_000,
+            };
+            NonZeroU64::new(period).unwrap_or(NonZeroU64::MIN)
+        }
+    }
+
+    /// A generated skew: none, a few nanoseconds, any amount, or one relative to the period.
+    #[derive(Debug, bolero::TypeGenerator)]
+    enum Skew {
+        Any(u64),
+        Small(u8),
+        PeriodFraction { numerator: u8, denominator: u8 },
+    }
+
+    impl Skew {
+        fn value(&self, period: NonZeroU64) -> u64 {
+            match self {
+                Self::Any(skew) => *skew,
+                Self::Small(skew) => u64::from(*skew % 8),
+                Self::PeriodFraction {
+                    numerator,
+                    denominator,
+                } => {
+                    let denominator = u128::from(*denominator % 8) + 1;
+                    let scaled = u128::from(period.get()) * u128::from(*numerator % 9);
+                    u64::try_from(scaled / denominator).unwrap_or(u64::MAX)
+                }
+            }
+        }
+    }
+
+    /// A generated timestamp: anywhere, or beside an edge center or an interior center.
+    #[derive(Debug, bolero::TypeGenerator)]
+    enum Event {
+        Any(i64),
+        NearFirst(i16),
+        NearLast(i16),
+        NearCenter { periods: u16, offset: i16 },
+    }
+
+    impl Event {
+        /// The timestamp of the event relative to the first and last reached centers.
+        fn instant(&self, first: i64, last: i64, period: NonZeroU64) -> i64 {
+            // Saturation is the meaning here: an instant beside an end of the timeline is clamped
+            // to that end, as any instant a column holds is.
+            match self {
+                Self::Any(value) => *value,
+                Self::NearFirst(offset) => first.saturating_add(i64::from(*offset)),
+                Self::NearLast(offset) => last.saturating_add(i64::from(*offset)),
+                Self::NearCenter { periods, offset } => {
+                    let distance = i128::from(period.get()) * i128::from(*periods);
+                    let center = i128::from(first) + distance + i128::from(*offset);
+                    let clamped = center.clamp(i128::from(i64::MIN), i128::from(i64::MAX));
+                    i64::try_from(clamped).assured("the clamp keeps the instant in i64")
+                }
+            }
+        }
+    }
+
+    #[derive(Debug, bolero::TypeGenerator)]
+    struct AdmissionCase {
+        first: Instant,
+        last: Instant,
+        period: Period,
+        skew: Skew,
+        #[generator(bolero::generator::produce_with::<Vec<Event>>().len(0_usize..=200))]
+        events: Vec<Event>,
+    }
+
+    impl AdmissionCase {
+        fn events(&self, first: i64, last: i64, period: NonZeroU64) -> Vec<i64> {
+            self.events
+                .iter()
+                .map(|event| event.instant(first, last, period))
+                .collect()
+        }
+    }
+
+    #[test]
+    fn bolero_admission_matches_the_scalar_definition_at_every_level() {
+        bolero::check!()
+            .with_iterations(256)
+            .with_max_len(2048)
+            .with_type::<AdmissionCase>()
+            .for_each(|case| {
+                let ends = [case.first.value(), case.last.value()];
+                let first = ends[0].min(ends[1]);
+                let last = ends[0].max(ends[1]);
+                let period = case.period.value();
+                let skew = case.skew.value(period);
+                let events = case.events(first, last, period);
+                let mut expected = vec![0_u8; events.len().div_ceil(8)];
+                for (row, event) in events.iter().enumerate() {
+                    if scalar(first, last, period.get(), skew, *event) {
+                        expected[row / 8] |= 1_u8 << (row % 8);
+                    }
+                }
+                let kernel = AdmissionKernel::new(first, last, period, skew);
+                for level in supported_levels() {
+                    assert_eq!(
+                        kernel.with_level(level, &events),
+                        expected,
+                        "level={level:?} first={first} last={last} period={period} skew={skew}"
+                    );
+                }
+            });
+    }
 }

@@ -25,10 +25,7 @@ use nervix_primitives::{
     time::Instant,
 };
 
-use super::{
-    CaptureSectionKey, CapturedSectionStage, PlannedContent, restore_storage::RestoredStateSource,
-    state_sections::plan_state_sections,
-};
+use super::{CaptureSectionKey, CapturedSectionStage, restore_storage::RestoredStateSource};
 use crate::{
     application::session_service::SessionServiceImpl,
     runtime::{
@@ -322,28 +319,13 @@ impl SessionServiceImpl {
         let state = self
             .capture_local_state(&request.domain, request.quiesced, status)
             .await?;
-        let sections = plan_state_sections(
-            state.guest_saves,
-            capture.schedule.domain(&request.domain),
-            self.inner.consensus.local_node_id(),
-        )
-        .map_err(|error| failed(&request.domain, &error.to_string()))?;
-        let mut staged = Vec::with_capacity(sections.len());
-        for section in sections {
-            let PlannedContent::Held { content, bytes } = section.content else {
-                continue;
-            };
-            let artifact = self.stage_captured_section(bytes, &request.domain).await?;
-            staged.push((
-                CaptureSectionKey {
-                    coordination: request.coordination.clone(),
-                    domain: request.domain.clone(),
-                    path: section.path.as_str().to_string(),
-                },
-                content,
-                artifact,
-            ));
-        }
+        let mut staged = self
+            .stage_guest_state_sections(
+                state.guest_saves,
+                capture.schedule.domain(&request.domain),
+                &request,
+            )
+            .await?;
         staged.extend(
             self.stage_native_metadata_sections(
                 state.native_metadata,
@@ -386,12 +368,12 @@ impl SessionServiceImpl {
             key.coordination != request.coordination || key.domain != request.domain
         });
         let expires_at = Instant::now() + Duration::from_secs(600);
-        for (key, content, artifact) in staged {
+        for section in staged {
             self.inner.captured_backup_sections.insert(
-                key,
+                section.key,
                 CapturedSectionStage {
-                    artifact: Arc::new(artifact),
-                    content,
+                    artifact: Arc::new(section.artifact),
+                    content: section.content,
                     expires_at,
                 },
             );

@@ -5,7 +5,9 @@
 //!   snapshot and reading only the checkpoints the cut archives, reattaching typed branch keys
 //!   from lifecycle checkpoints for the branches that need them, handing Kafka offset and
 //!   lifecycle checkpoints on in that snapshot and reading each one whole under its own admitted
-//!   charge, selecting stored materialized readers for stopped domains or fresh shared Arrow rows
+//!   charge, retaining WASM guest checkpoints until their scheduled generation is checked and
+//!   streaming selected saves one at a time, selecting stored materialized readers for stopped
+//!   domains or fresh shared Arrow rows
 //!   under the assignment barrier for running and paused domains, and taking each active
 //!   deduplicator and window branch from the generation its branch task published or, without
 //!   one, from its checkpoint.
@@ -49,13 +51,70 @@ use super::{
     },
 };
 
-/// One WASM branch's durable guest save at the cut, read whole.
-#[derive(Debug, Clone)]
+/// One WASM branch's durable guest save, retained in the cut's database view until selected for
+/// its staged section. The payload is opened only after the scheduled generation is checked.
 pub(crate) struct CapturedGuestSave {
     pub(crate) placement: StatePlacementEnvelope,
     pub(crate) branch_fingerprint: Option<BranchKeyFingerprint>,
-    pub(crate) revision: u64,
-    pub(crate) payload: Vec<u8>,
+    checkpoint: ListedCheckpoint,
+    stored_bytes: u64,
+}
+
+impl CapturedGuestSave {
+    /// Covers the Fjall value and its decoded inline copy with room for conversion. Transfer
+    /// buffers are charged separately to the fixed bulk staging reservation.
+    pub(crate) fn size_and_conversion_charge(
+        &self,
+    ) -> error_stack::Result<(u64, u64), BackupStateCaptureError> {
+        let conversion = self.stored_bytes.checked_mul(3).ok_or_else(|| {
+            Report::new(BackupStateCaptureError::Admission {
+                entity: self.placement.identifier.clone(),
+            })
+        })?;
+        Ok((self.stored_bytes, conversion))
+    }
+
+    /// Read this one save from the cut and stream it to a quota-owned section. The returned
+    /// revision comes from the same read as its bytes. An armed interruption stops between chunks.
+    pub(crate) fn write(
+        &self,
+        output: &mut dyn Write,
+        cancellation: &Cancellation,
+        interrupt_after_chunks: Option<u64>,
+    ) -> error_stack::Result<u64, BackupStateCaptureError> {
+        cancellation
+            .check()
+            .change_context(BackupStateCaptureError::Cancelled)?;
+        let (revision, mut reader) = self
+            .checkpoint
+            .open_with_revision()
+            .change_context(BackupStateCaptureError::Storage)?;
+        let mut block = [0_u8; RESTORE_STATE_CHUNK_BYTES];
+        let mut chunks = 0_u64;
+        loop {
+            cancellation
+                .check()
+                .change_context(BackupStateCaptureError::Cancelled)?;
+            if interrupt_after_chunks.is_some_and(|limit| chunks >= limit) {
+                return Err(Report::new(BackupStateCaptureError::GuestSaveInterrupted {
+                    entity: self.placement.identifier.clone(),
+                }));
+            }
+            let count = reader
+                .read(&mut block)
+                .map_err(Report::new)
+                .change_context(BackupStateCaptureError::Storage)?;
+            if count == 0 {
+                break;
+            }
+            output
+                .write_all(&block[..count])
+                .map_err(Report::new)
+                .change_context(BackupStateCaptureError::Storage)?;
+            chunks += 1;
+        }
+        Ok(revision)
+    }
 }
 
 /// One domain cut, including the materialized source selected by the domain's lifecycle.
@@ -74,13 +133,14 @@ pub(crate) struct CapturedDomainState {
 pub(crate) struct CapturedNativeMetadata {
     pub(crate) placement: StatePlacementEnvelope,
     checkpoint: ListedCheckpoint,
+    stored_bytes: u64,
 }
 
 impl CapturedNativeMetadata {
     /// The memory reading this checkpoint and converting it takes, which its reader's
     /// `restore_metadata` charge must cover.
     pub(crate) fn conversion_bytes(&self) -> error_stack::Result<u64, BackupStateCaptureError> {
-        native_conversion_bytes(self.checkpoint.stored_bytes()).ok_or_else(|| {
+        native_conversion_bytes(self.stored_bytes).ok_or_else(|| {
             Report::new(BackupStateCaptureError::Admission {
                 entity: self.checkpoint.placement.identifier.clone(),
             })
@@ -309,8 +369,12 @@ pub enum BackupStateCaptureError {
     Keyspace { entity: ModelName },
     #[error("the Kafka domain offsets of ingestor '{entity}' could not be read")]
     KafkaOffsets { entity: ModelName },
-    #[error("reading the native metadata of '{entity}' could not be admitted")]
+    #[error("reading the state of '{entity}' could not be admitted")]
     Admission { entity: ModelName },
+    #[error("the stored state size of '{entity}' could not be inspected")]
+    StateSize { entity: ModelName },
+    #[error("guest save capture of '{entity}' was interrupted")]
+    GuestSaveInterrupted { entity: ModelName },
     #[error("the cut was cancelled between bounded units")]
     Cancelled,
 }
@@ -648,6 +712,9 @@ impl Runtime {
         let mut native_metadata = Vec::new();
         let mut stored_materialized = Vec::new();
         for checkpoint in current {
+            cancellation
+                .check()
+                .change_context(BackupStateCaptureError::Cancelled)?;
             let kind = checkpoint.placement.state.kind();
             let publishes = matches!(
                 kind,
@@ -665,20 +732,28 @@ impl Runtime {
             let branch_fingerprint = placement.branch_key.as_ref().map(BranchKey::fingerprint);
             match kind {
                 RuntimeStateKind::KafkaOffset | RuntimeStateKind::BranchLru => {
+                    let stored_bytes = checkpoint.stored_bytes().change_context_lazy(|| {
+                        BackupStateCaptureError::StateSize {
+                            entity: placement.identifier.clone(),
+                        }
+                    })?;
                     native_metadata.push(CapturedNativeMetadata {
                         placement: placement.to_remote(),
                         checkpoint,
+                        stored_bytes,
                     });
                 }
                 RuntimeStateKind::WasmProcessor => {
-                    let snapshot = checkpoint
-                        .read_entry()
-                        .change_context(BackupStateCaptureError::Storage)?;
+                    let stored_bytes = checkpoint.stored_bytes().change_context_lazy(|| {
+                        BackupStateCaptureError::StateSize {
+                            entity: placement.identifier.clone(),
+                        }
+                    })?;
                     guest_saves.push(CapturedGuestSave {
                         placement: placement.to_remote(),
                         branch_fingerprint,
-                        revision: snapshot.lsm,
-                        payload: snapshot.payload,
+                        checkpoint,
+                        stored_bytes,
                     });
                 }
                 RuntimeStateKind::Deduplicator => {
@@ -798,7 +873,10 @@ impl Runtime {
             let entity = || BackupStateCaptureError::Lifecycle {
                 entity: stored.identifier.clone(),
             };
-            let Some(conversion) = native_conversion_bytes(checkpoint.stored_bytes()) else {
+            let stored_bytes = checkpoint
+                .stored_bytes()
+                .change_context(BackupStateCaptureError::Storage)?;
+            let Some(conversion) = native_conversion_bytes(stored_bytes) else {
                 return Err(Report::new(entity()));
             };
             let _charge = self
@@ -1222,19 +1300,38 @@ mod tests {
         let captured = capture(&runtime, &domain)
             .await
             .assured("an unread lifecycle does not fail the cut");
-        let [guest] = captured.guest_saves.as_slice() else {
+        let Ok([guest]) = <[CapturedGuestSave; 1]>::try_from(captured.guest_saves) else {
             panic!("exactly the saved guest is archived");
         };
-        assert_eq!(guest.payload, b"saved-beta");
-        assert_eq!(guest.revision, 8);
+        struct ReadGuest {
+            payload: Vec<u8>,
+            revision: u64,
+            placement: StatePlacementEnvelope,
+            branch_fingerprint: Option<BranchKeyFingerprint>,
+        }
+        let read = in_storage_job(&runtime, move |cancellation| {
+            let mut payload = Vec::new();
+            let revision = guest
+                .write(&mut payload, cancellation, None)
+                .assured("the selected guest streams from the cut");
+            ReadGuest {
+                payload,
+                revision,
+                placement: guest.placement,
+                branch_fingerprint: guest.branch_fingerprint,
+            }
+        })
+        .await;
+        assert_eq!(read.payload, b"saved-beta");
+        assert_eq!(read.revision, 8);
         let beta = super::super::string_branch_key("tenant", "beta");
         assert_eq!(
-            guest.placement.branch_key,
+            read.placement.branch_key,
             BranchKey::to_remote_key(&beta),
             "the guest takes its typed key from the lifecycle"
         );
         assert_eq!(
-            guest.branch_fingerprint,
+            read.branch_fingerprint,
             beta.as_ref().map(BranchKey::fingerprint)
         );
         let mut native = captured.native_metadata;
@@ -1276,6 +1373,68 @@ mod tests {
             failure.current_context(),
             BackupStateCaptureError::Lifecycle { entity } if *entity == ingestor
         ));
+    }
+
+    #[nervix_primitives::test]
+    async fn a_guest_save_streams_from_its_cut_and_an_interrupted_read_can_retry() {
+        let dir = tempfile::tempdir().assured("state directory opens");
+        let runtime = persisted_runtime(dir.path());
+        let store = runtime
+            .inner
+            .state_store
+            .as_ref()
+            .assured("state store is configured");
+        let domain = DomainName::parse("orders").assured("domain is valid");
+        let processor = ModelName::parse("accumulator").assured("processor is valid");
+        schedule(&runtime, &domain, ModelKind::WasmProcessor, &processor);
+        let lifecycle = lifecycle_of(&domain, ModelKind::WasmProcessor, &processor);
+        store
+            .publish_sealed_snapshot(
+                &lifecycle,
+                9,
+                &encode_branch_lru_snapshot(&[branch("alpha", 3)]).assured("lifecycle encodes"),
+            )
+            .assured("lifecycle persists");
+        let payload = vec![17_u8; 2 * RESTORE_STATE_CHUNK_BYTES + 19];
+        store
+            .publish_sealed_snapshot(&guest_of(&lifecycle, "alpha"), 8, &payload)
+            .assured("guest persists");
+        let captured = capture(&runtime, &domain)
+            .await
+            .assured("the cut lists its guest");
+        let Ok([guest]) = <[CapturedGuestSave; 1]>::try_from(captured.guest_saves) else {
+            panic!("one guest is selected");
+        };
+        let (partial, failure) = in_storage_job(&runtime, move |cancellation| {
+            let mut partial = Vec::new();
+            let failure = guest
+                .write(&mut partial, cancellation, Some(2))
+                .err()
+                .assured("the test interrupts after two chunks");
+            (partial, failure)
+        })
+        .await;
+        assert_eq!(partial, payload[..2 * RESTORE_STATE_CHUNK_BYTES]);
+        assert!(matches!(
+            failure.current_context(),
+            BackupStateCaptureError::GuestSaveInterrupted { entity } if *entity == processor
+        ));
+        let captured = capture(&runtime, &domain)
+            .await
+            .assured("the same checkpoint remains retryable");
+        let Ok([guest]) = <[CapturedGuestSave; 1]>::try_from(captured.guest_saves) else {
+            panic!("one guest is selected on retry");
+        };
+        let (restored, revision) = in_storage_job(&runtime, move |cancellation| {
+            let mut restored = Vec::new();
+            let revision = guest
+                .write(&mut restored, cancellation, None)
+                .assured("the retry streams the complete guest");
+            (restored, revision)
+        })
+        .await;
+        assert_eq!(restored, payload);
+        assert_eq!(revision, 8);
     }
 
     #[nervix_primitives::test]

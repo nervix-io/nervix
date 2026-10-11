@@ -16,7 +16,7 @@ use super::*;
 
 /// How long one checkpoint may take to reach its boundary, from the guest's save to the
 /// confirmation of its last replica. A checkpoint still short of its boundary then fails.
-pub(super) const WASM_CHECKPOINT_DEADLINE: Duration = Duration::from_secs(10);
+pub(super) const WASM_CHECKPOINT_DEADLINE: Duration = Duration::from_secs(90);
 
 /// The success acknowledgements guest callbacks decided, held back until the checkpoint that covers
 /// those callbacks reaches its boundary.

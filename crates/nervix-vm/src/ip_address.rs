@@ -281,6 +281,14 @@ impl FromStr for IpNetwork {
 
 /// Why text is not a network in CIDR notation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
+#[cfg_attr(
+    nervix_lint,
+    nervix::error_boundary(
+        outcome,
+        reason = "CIDR conversion defects are semantic input outcomes reported on their selected \
+                  row"
+    )
+)]
 pub enum NetworkDefect {
     #[error("is not written as address/prefix")]
     NotAddressAndPrefix,

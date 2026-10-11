@@ -655,6 +655,8 @@ mod shuttle_tests;
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeSet;
+
     use nervix_connector::SinkPublishError;
 
     use super::*;
@@ -1191,5 +1193,641 @@ mod tests {
                 "the same sink would prepare the same rows the same way again"
             );
         }
+    }
+
+    /// How a generated preparation is spoiled after it was built answering every row once in
+    /// order, so both kept and refused preparations are reached.
+    #[derive(Debug, bolero::TypeGenerator)]
+    enum PreparationDefect {
+        /// A member is carried again at the end of a request.
+        RepeatMember { member: u8, request: u8 },
+        /// Two members trade places.
+        SwapMembers { first: u8, second: u8 },
+        /// A member is left out of its request.
+        DropMember { member: u8 },
+        /// A request carries no row.
+        EmptyRequest { at: u8 },
+        /// A request carries a row the write did not hand over, or a row of another batch.
+        ForeignMember {
+            request: u8,
+            row: u8,
+            other_batch: bool,
+        },
+        /// A member of a request is refused as well.
+        RefuseMember { member: u8 },
+    }
+
+    /// Where one member of a preparation sits: its request and its place in that request.
+    #[derive(Debug, Clone, Copy)]
+    struct MemberSlot {
+        request: usize,
+        slot: usize,
+    }
+
+    impl MemberSlot {
+        /// Every member of `requests`, request by request.
+        fn all(requests: &[PreparedRowRequest]) -> Vec<Self> {
+            let mut members = Vec::new();
+            for (request, prepared) in requests.iter().enumerate() {
+                for slot in 0..prepared.members.len() {
+                    members.push(Self { request, slot });
+                }
+            }
+            members
+        }
+    }
+
+    impl PreparationDefect {
+        /// Spoils a preparation of the rows `selected` selects from batch `batch_index`. A defect
+        /// that names a member or a request leaves a preparation without one as it is.
+        fn apply(
+            &self,
+            requests: &mut Vec<PreparedRowRequest>,
+            rejected: &mut Vec<RejectedSinkRecord<SinkRecordPosition>>,
+            batch_index: usize,
+            selected: &[usize],
+        ) {
+            let members = MemberSlot::all(requests);
+            match self {
+                Self::RepeatMember { member, request } => {
+                    if members.is_empty() {
+                        return;
+                    }
+                    let from = members[usize::from(*member) % members.len()];
+                    let repeated = requests[from.request].members[from.slot];
+                    let into = usize::from(*request) % requests.len();
+                    requests[into].members.push(repeated);
+                }
+                Self::SwapMembers { first, second } => {
+                    if members.is_empty() {
+                        return;
+                    }
+                    let first = members[usize::from(*first) % members.len()];
+                    let second = members[usize::from(*second) % members.len()];
+                    let first_position = requests[first.request].members[first.slot];
+                    let second_position = requests[second.request].members[second.slot];
+                    requests[first.request].members[first.slot] = second_position;
+                    requests[second.request].members[second.slot] = first_position;
+                }
+                Self::DropMember { member } => {
+                    if members.is_empty() {
+                        return;
+                    }
+                    let dropped = members[usize::from(*member) % members.len()];
+                    requests[dropped.request].members.remove(dropped.slot);
+                }
+                Self::EmptyRequest { at } => {
+                    let at = usize::from(*at) % (requests.len() + 1);
+                    requests.insert(
+                        at,
+                        PreparedRowRequest {
+                            members: Vec::new(),
+                            body: b"empty".to_vec(),
+                        },
+                    );
+                }
+                Self::ForeignMember {
+                    request,
+                    row,
+                    other_batch,
+                } => {
+                    if requests.is_empty() {
+                        return;
+                    }
+                    let position = if *other_batch {
+                        SinkRecordPosition {
+                            batch_index: batch_index + 1,
+                            row_index: usize::from(*row % 24),
+                        }
+                    } else {
+                        let mut row = usize::from(*row % 24);
+                        while selected.binary_search(&row).is_ok() {
+                            row += 1;
+                        }
+                        SinkRecordPosition {
+                            batch_index,
+                            row_index: row,
+                        }
+                    };
+                    let into = usize::from(*request) % requests.len();
+                    requests[into].members.push(position);
+                }
+                Self::RefuseMember { member } => {
+                    if members.is_empty() {
+                        return;
+                    }
+                    let refused = members[usize::from(*member) % members.len()];
+                    rejected.push(RejectedSinkRecord::invalid(
+                        requests[refused.request].members[refused.slot],
+                        Timestamp::from_unix_nanos(1),
+                        "refused twice".to_string(),
+                        [],
+                    ));
+                }
+            }
+        }
+    }
+
+    /// A generated preparation of the rows `rows` select from batch `batch_index`: a plan that
+    /// sends each selected row in the open request, in a new request, or refuses it, then defects.
+    #[derive(Debug, bolero::TypeGenerator)]
+    struct PreparationCase {
+        batch_index: u8,
+        #[generator(bolero::generator::produce_with::<Vec<u8>>().len(0_usize..=12))]
+        rows: Vec<u8>,
+        #[generator(bolero::generator::produce_with::<Vec<u8>>().len(0_usize..=12))]
+        plan: Vec<u8>,
+        #[generator(bolero::generator::produce_with::<Vec<PreparationDefect>>().len(0_usize..=2))]
+        defects: Vec<PreparationDefect>,
+    }
+
+    impl PreparationCase {
+        fn batch_index(&self) -> usize {
+            usize::from(self.batch_index % 4)
+        }
+
+        /// The selected rows, ascending and distinct as a projection selects them.
+        fn selected(&self) -> Vec<usize> {
+            let mut rows = self
+                .rows
+                .iter()
+                .map(|row| usize::from(row % 24))
+                .collect::<Vec<_>>();
+            rows.sort_unstable();
+            rows.dedup();
+            rows
+        }
+
+        fn preparation(&self, selected: &[usize]) -> RowRequestPreparation {
+            let batch_index = self.batch_index();
+            let mut requests: Vec<PreparedRowRequest> = Vec::new();
+            let mut rejected = Vec::new();
+            for (index, row) in selected.iter().enumerate() {
+                let position = SinkRecordPosition {
+                    batch_index,
+                    row_index: *row,
+                };
+                let choice = match self.plan.get(index) {
+                    Some(choice) => choice % 3,
+                    None => 0,
+                };
+                if choice == 2 {
+                    rejected.push(RejectedSinkRecord::invalid(
+                        position,
+                        Timestamp::from_unix_nanos(1),
+                        format!("refused {row}"),
+                        [],
+                    ));
+                    continue;
+                }
+                if choice == 0
+                    && let Some(open) = requests.last_mut()
+                {
+                    open.members.push(position);
+                    continue;
+                }
+                let body = format!("request {}", requests.len()).into_bytes();
+                requests.push(PreparedRowRequest {
+                    members: vec![position],
+                    body,
+                });
+            }
+            for defect in &self.defects {
+                defect.apply(&mut requests, &mut rejected, batch_index, selected);
+            }
+            RowRequestPreparation { requests, rejected }
+        }
+    }
+
+    /// The selected rows a preparation has answered for, in the order the reference reads them.
+    struct AnsweredRows<'a> {
+        batch_index: usize,
+        selected: &'a [usize],
+        answered: Vec<bool>,
+    }
+
+    impl<'a> AnsweredRows<'a> {
+        fn new(batch_index: usize, selected: &'a [usize]) -> Self {
+            Self {
+                batch_index,
+                selected,
+                answered: vec![false; selected.len()],
+            }
+        }
+
+        /// Answers for the row at `position`, or names how answering for it breaks the contract.
+        fn answer(&mut self, position: SinkRecordPosition) -> Option<RowPreparationViolation> {
+            let unselected = RowPreparationViolation::Unselected {
+                batch: position.batch_index,
+                row: position.row_index,
+            };
+            if position.batch_index != self.batch_index {
+                return Some(unselected);
+            }
+            let Ok(slot) = self.selected.binary_search(&position.row_index) else {
+                return Some(unselected);
+            };
+            if self.answered[slot] {
+                return Some(RowPreparationViolation::AnsweredTwice {
+                    row: position.row_index,
+                });
+            }
+            self.answered[slot] = true;
+            None
+        }
+
+        /// The violation of leaving selected rows unanswered, when any are.
+        fn unanswered(&self) -> Option<RowPreparationViolation> {
+            let unanswered = self.answered.iter().filter(|answered| !**answered).count();
+            if unanswered == 0 {
+                return None;
+            }
+            Some(RowPreparationViolation::Unanswered {
+                unanswered,
+                rows: self.selected.len(),
+            })
+        }
+    }
+
+    /// The first way `preparation` breaks its contract, in the order the requests, their members
+    /// and then the refusals are read, before the rows left unanswered are counted.
+    fn reference_violation(
+        preparation: &RowRequestPreparation,
+        batch_index: usize,
+        selected: &[usize],
+    ) -> Option<RowPreparationViolation> {
+        let mut answered = AnsweredRows::new(batch_index, selected);
+        let mut previous: Option<SinkRecordPosition> = None;
+        for request in &preparation.requests {
+            if request.members.is_empty() {
+                return Some(RowPreparationViolation::EmptyRequest);
+            }
+            for member in &request.members {
+                if let Some(violation) = answered.answer(*member) {
+                    return Some(violation);
+                }
+                if let Some(previous) = previous
+                    && *member < previous
+                {
+                    return Some(RowPreparationViolation::OutOfOrder {
+                        row: member.row_index,
+                    });
+                }
+                previous = Some(*member);
+            }
+        }
+        for refusal in &preparation.rejected {
+            if let Some(violation) = answered.answer(refusal.id) {
+                return Some(violation);
+            }
+        }
+        answered.unanswered()
+    }
+
+    /// A row request sink's preparation is kept, request by request and byte for byte, exactly
+    /// when every selected row is a member of one request or refused, no request is empty and the
+    /// members follow source order; otherwise it fails with the first violation and no retry.
+    #[test]
+    fn bolero_preparations_are_kept_exactly_when_every_row_is_answered_once_in_order() {
+        bolero::check!()
+            .with_iterations(256)
+            .with_max_len(256)
+            .with_type::<PreparationCase>()
+            .for_each(|case| {
+                let selected = case.selected();
+                let batch_index = case.batch_index();
+                let preparation = case.preparation(&selected);
+                let expected = reference_violation(&preparation, batch_index, &selected);
+                let requests = preparation
+                    .requests
+                    .iter()
+                    .map(|request| (request.members.clone(), request.body.clone()))
+                    .collect::<Vec<_>>();
+                let refusals = preparation
+                    .rejected
+                    .iter()
+                    .map(|refusal| (refusal.id, refusal.error.message.clone()))
+                    .collect::<Vec<_>>();
+                let occurred_at = Timestamp::from_unix_nanos(30);
+                let checked =
+                    CheckedPreparation::check(preparation, batch_index, &selected, occurred_at);
+                match (checked, expected) {
+                    (Ok(checked), None) => {
+                        let kept = checked
+                            .requests
+                            .iter()
+                            .map(|request| (request.members.clone(), request.content.body.clone()))
+                            .collect::<Vec<_>>();
+                        assert_eq!(kept, requests);
+                        for request in &checked.requests {
+                            assert_eq!(request.occurred_at, occurred_at);
+                        }
+                        let mut kept_refusals = Vec::with_capacity(checked.rejected.len());
+                        for refusal in &checked.rejected {
+                            let error = refusal
+                                .structured_error
+                                .as_ref()
+                                .assured("a refused row keeps the sink's error");
+                            kept_refusals.push((refusal.position, error.message.clone()));
+                        }
+                        assert_eq!(kept_refusals, refusals);
+                    }
+                    (Err(error), Some(violation)) => {
+                        assert_eq!(
+                            *error.current_context(),
+                            EmitterRuntimeError::RowPreparation {
+                                batch_index,
+                                violation,
+                            }
+                        );
+                        assert!(!emitter_publish_error_is_retryable(&error));
+                    }
+                    (checked, expected) => {
+                        panic!("checked {checked:?}, expected the violation {expected:?}")
+                    }
+                }
+            });
+    }
+
+    /// The rows of the batches a retention sequence buffers, in batch order.
+    const RETAINED_BATCH_ROWS: [usize; 3] = [3, 1, 4];
+
+    /// One generated step over the payloads retained for a sink.
+    #[derive(Debug, bolero::TypeGenerator)]
+    enum RetentionStep {
+        /// The next rows of the buffered batches, in packing order, are prepared as one payload.
+        Pack { members: u8, envelope: u8 },
+        /// One write of every retained payload, answered record by record, and possibly failed.
+        Write {
+            #[generator(bolero::generator::produce_with::<Vec<u8>>().len(0_usize..=8))]
+            answers: Vec<u8>,
+            failed: bool,
+        },
+    }
+
+    /// What the model retains for one payload: its members, bytes and envelope.
+    #[derive(Debug, Clone, PartialEq)]
+    struct RetainedModel {
+        members: Vec<SinkRecordPosition>,
+        payload: Vec<u8>,
+        envelope: BatchEnvelope,
+    }
+
+    fn envelope_variant(variant: u8) -> BatchEnvelope {
+        match variant % 3 {
+            0 => BatchEnvelope {
+                key: None,
+                headers: Vec::new(),
+                message_group: None,
+            },
+            1 => BatchEnvelope {
+                key: Some(format!("key-{variant}")),
+                headers: vec![("trace".to_string(), variant.to_string())],
+                message_group: None,
+            },
+            _ => BatchEnvelope {
+                key: None,
+                headers: Vec::new(),
+                message_group: Some(format!("group-{variant}")),
+            },
+        }
+    }
+
+    /// The payloads retained for a sink beside a model of them: the payloads the model still
+    /// retains by their first member, the members it resolved, and the members of rejected
+    /// payloads that wait for their message error.
+    struct RetentionCheck {
+        batches: Vec<EmitterPublishBatch>,
+        positions: Vec<SinkRecordPosition>,
+        next_position: usize,
+        prepared: PreparedPayloads<EncodedPayload>,
+        retained: BTreeMap<SinkRecordPosition, RetainedModel>,
+        resolved: Vec<SinkRecordPosition>,
+        awaiting_errors: Vec<SinkRecordPosition>,
+        /// The completions of every row's acknowledgement root, held until the sequence ends.
+        _completions: Vec<Vec<AckCompletion>>,
+    }
+
+    impl RetentionCheck {
+        /// The batches of [`RETAINED_BATCH_ROWS`] buffered, with nothing prepared.
+        fn new() -> Self {
+            let mut batches = Vec::with_capacity(RETAINED_BATCH_ROWS.len());
+            let mut completions = Vec::with_capacity(RETAINED_BATCH_ROWS.len());
+            let mut positions = Vec::new();
+            for (batch_index, rows) in RETAINED_BATCH_ROWS.into_iter().enumerate() {
+                let values = (0..rows)
+                    .map(|row| i64::try_from(row).assured("a few rows fit i64"))
+                    .collect::<Vec<_>>();
+                let now = i64::try_from(batch_index * 10 + 10).assured("a small time fits i64");
+                let (batch, batch_completions) = batch(&values, now);
+                batches.push(batch);
+                completions.push(batch_completions);
+                for row in 0..rows {
+                    positions.push(position(batch_index, row));
+                }
+            }
+            Self {
+                batches,
+                positions,
+                next_position: 0,
+                prepared: PreparedPayloads::default(),
+                retained: BTreeMap::new(),
+                resolved: Vec::new(),
+                awaiting_errors: Vec::new(),
+                _completions: completions,
+            }
+        }
+
+        fn apply(&mut self, step_index: usize, step: &RetentionStep) {
+            match step {
+                RetentionStep::Pack { members, envelope } => {
+                    self.pack(step_index, *members, *envelope);
+                }
+                RetentionStep::Write { answers, failed } => self.write(answers, *failed),
+            }
+        }
+
+        /// Prepares the next one to three rows in packing order as one payload, which the model
+        /// retains by its first member.
+        fn pack(&mut self, step_index: usize, members: u8, envelope: u8) {
+            let count = usize::from(members % 3) + 1;
+            let end = (self.next_position + count).min(self.positions.len());
+            if self.next_position == end {
+                return;
+            }
+            let members = self.positions[self.next_position..end].to_vec();
+            self.next_position = end;
+            let model = RetainedModel {
+                members: members.clone(),
+                payload: format!("payload {step_index} {members:?}").into_bytes(),
+                envelope: envelope_variant(envelope),
+            };
+            self.prepared
+                .retain(
+                    PreparedPayload {
+                        members: members.clone(),
+                        occurred_at: Timestamp::from_unix_nanos(1),
+                        content: EncodedPayload {
+                            envelope: model.envelope.clone(),
+                            payload: model.payload.clone(),
+                        },
+                    },
+                    &mut self.batches,
+                )
+                .assured("every member is a pending row of a buffered batch");
+            self.retained.insert(members[0], model);
+        }
+
+        /// Writes every retained payload and answers each record as `answers` says: delivered,
+        /// rejected, or unanswered once the answers run out, with the whole write failed when
+        /// `failed` is set.
+        fn write(&mut self, answers: &[u8], failed: bool) {
+            let write = self.prepared.next_write();
+            self.assert_written_unchanged(&write);
+            let first_members = self.retained.keys().copied().collect::<Vec<_>>();
+            let mut outcome = PerRecordOutcome::with_capacity(first_members.len());
+            let mut delivered = Vec::new();
+            let mut rejected = Vec::new();
+            for (index, first_member) in first_members.iter().enumerate() {
+                let answer = match answers.get(index) {
+                    Some(answer) => answer % 3,
+                    None => 2,
+                };
+                match answer {
+                    0 => {
+                        outcome.deliver(SinkRecordId::new(index));
+                        delivered.push(*first_member);
+                    }
+                    1 => {
+                        outcome.reject(RejectedSinkRecord::external(
+                            SinkRecordId::new(index),
+                            Timestamp::from_unix_nanos(1),
+                            format!("refused {index}"),
+                        ));
+                        rejected.push(*first_member);
+                    }
+                    _ => {}
+                }
+            }
+            if failed {
+                outcome.fail(Report::new(SinkPublishError::Publish { sink: "test" }));
+            }
+            let unanswered = first_members.len() - delivered.len() - rejected.len();
+            let answered = self
+                .prepared
+                .answers(&mut self.batches, write.payloads, outcome)
+                .assured("the answers name records of this write once each");
+            assert_eq!(answered.unresolved.is_some(), failed || unanswered > 0);
+
+            let mut expected_rejections = Vec::new();
+            let mut payload_of = BTreeMap::new();
+            for first_member in &rejected {
+                let model = self
+                    .retained
+                    .remove(first_member)
+                    .assured("the model retains every written payload");
+                for member in model.members {
+                    expected_rejections.push(member);
+                    self.awaiting_errors.push(member);
+                    payload_of.insert(member, *first_member);
+                }
+            }
+            let rejections = answered
+                .rejected
+                .iter()
+                .map(|rejection| rejection.position)
+                .collect::<Vec<_>>();
+            assert_eq!(rejections, expected_rejections);
+            let mut references = BTreeMap::new();
+            for rejection in &answered.rejected {
+                let error = rejection
+                    .structured_error
+                    .as_ref()
+                    .assured("a sink rejection carries its structured error");
+                let batch = &self.batches[rejection.position.batch_index];
+                assert_eq!(error.occurred_at, batch.execution_now());
+                let payload = payload_of
+                    .get(&rejection.position)
+                    .assured("every rejected member belongs to a rejected payload");
+                let reference = references.entry(*payload).or_insert(error.reference);
+                assert_eq!(*reference, error.reference, "one error per payload");
+            }
+            for first_member in &delivered {
+                let model = self
+                    .retained
+                    .remove(first_member)
+                    .assured("the model retains every written payload");
+                self.resolved.extend(model.members);
+            }
+        }
+
+        /// The records one write hands the sink, compared with the retained payloads in packing
+        /// order: each carries exactly the bytes, key, headers and ordering group it was prepared
+        /// with.
+        fn assert_written_unchanged(&self, write: &PreparedWrite<SinkRecord>) {
+            assert_eq!(write.records.len(), self.retained.len());
+            for (index, (record, model)) in
+                write.records.iter().zip(self.retained.values()).enumerate()
+            {
+                assert_eq!(record.id, SinkRecordId::new(index));
+                assert_eq!(record.payload, model.payload);
+                assert_eq!(record.key, model.envelope.key);
+                assert_eq!(record.headers, model.envelope.headers);
+                assert_eq!(record.message_group, model.envelope.message_group);
+            }
+        }
+
+        /// Compares the next write and every buffered row with the model: resolved members stay
+        /// resolved, members of rejected payloads stay pending for their message error, and
+        /// members still retained are neither.
+        fn check_state(&self) {
+            self.assert_written_unchanged(&self.prepared.next_write());
+            let mut resolved_rows = Vec::with_capacity(self.batches.len());
+            let mut pending_rows = Vec::with_capacity(self.batches.len());
+            for batch in &self.batches {
+                resolved_rows.push(batch.resolved_rows());
+                pending_rows.push(
+                    batch
+                        .pending_record_rows()
+                        .into_iter()
+                        .collect::<BTreeSet<_>>(),
+                );
+            }
+            for member in &self.resolved {
+                assert!(resolved_rows[member.batch_index][member.row_index]);
+            }
+            for member in &self.awaiting_errors {
+                assert!(
+                    pending_rows[member.batch_index].contains(&member.row_index),
+                    "{member:?} awaits its error"
+                );
+            }
+            for model in self.retained.values() {
+                for member in &model.members {
+                    assert!(!resolved_rows[member.batch_index][member.row_index]);
+                    assert!(!pending_rows[member.batch_index].contains(&member.row_index));
+                }
+            }
+        }
+    }
+
+    /// Retained payloads are written in packing order, each with exactly the members and bytes it
+    /// was prepared with, write after write, until the sink answers for it. A confirmed payload
+    /// resolves every member; a rejected one rejects every member with its one error and leaves
+    /// them waiting for that message error; one left unanswered stays retained unchanged and the
+    /// write reports itself unresolved.
+    #[test]
+    fn bolero_retained_payloads_are_written_unchanged_until_answered() {
+        bolero::check!()
+            .with_iterations(256)
+            .with_max_len(512)
+            .with_type::<Vec<RetentionStep>>()
+            .for_each(|steps| {
+                let mut check = RetentionCheck::new();
+                for (step_index, step) in steps.iter().enumerate() {
+                    check.apply(step_index, step);
+                    check.check_state();
+                }
+            });
     }
 }

@@ -127,9 +127,9 @@ The standard pool layout is:
 | --- | --- | ---: | ---: | --- |
 | Management | Membership, health, consensus control, clock progress, relay progress and outcomes | 1 | 64 | Preconnected |
 | Commands | Control-plane and runtime requests | 1 | 32 | Preconnected |
-| Replication | Consensus log entries, runtime-state replication, ownership handoff | 1 | 8 | Preconnected |
+| Replication | Consensus log entries, runtime-state descriptions and acknowledgements, ownership handoff control | 1 | 8 | Preconnected |
 | Relay | Arrow record batches | 2 | 64 each | Preconnected |
-| Bulk | Resources, runtime snapshots, consensus snapshots | 1 | 4 | On demand |
+| Bulk | Resources, runtime checkpoints and snapshots, consensus snapshots | 1 | 4 | On demand |
 
 A peer is transport-ready only after all five preconnected outbound connections are live. Bulk
 traffic does not delay readiness; its connection is opened when needed. The two relay connections
@@ -645,7 +645,10 @@ A delivery proceeds as follows:
    registration is refused the same way, with no registration to answer.
 7. When the concrete runtime branch accepts the batch, the receiver sends a terminal admission
    outcome over the reserved management capacity. The sender can then release the channel for the
-   next batch.
+   next batch. A batch that carries record acknowledgements is admitted only once the receiver has
+   charged its acknowledgement watches; while the relay budget has no room for them, the receiver
+   holds the batch back unadmitted, as
+   [Bounded Correlation And Peer Owners](#bounded-correlation-and-peer-owners) describes.
 8. If the send includes record acknowledgements, later acknowledgement events report downstream
    processing completion. Detached sends and subscription fan-out end at admission.
 
@@ -738,19 +741,39 @@ identity. An exhausted generation is sealed permanently. A delayed report, termi
 cleanup cannot change a replacement occupying the same position.
 Unused positions are claimed on demand; only retired positions enter the bounded free queues.
 Shutdown seals fresh claims before scanning positions that were ever claimed, so a concurrent
-registrar either occupies a position shutdown visits or finds it closed.
+registrar either occupies a position shutdown visits or finds it closed. The once-a-second silence
+sweep scans the same claimed positions and no others: a share whose first claim races a sweep is
+counted from that sweep or from the first one after its registration, and a node that has forwarded
+nothing sweeps nothing.
 
 Record storage and receiver ACK watches are charged to the relay memory budget. One task per
-admitted batch multiplexes its row watches, with a fixed charge per row plus one task charge; a
-wide frame therefore does not allocate one task per acknowledgement. Pending rows report progress
-every 100 milliseconds, below the registrar's fifteen-second silence bound even when two reports
-each exhaust their dispatch deadline. The same cadence keeps local emitter and message-error
-acknowledgements alive while a connector request is pending, giving a one-second source
-`ACK TIMEOUT` multiple chances to observe progress. Admission
-refusal is typed and occurs before runtime admission. Cancellation before admission resolves every
-held share negatively and returns its position. Completion of the last record returns the delivery
-storage and its charge. Watcher memory remains charged through its dispatch attempts and ends on
-completion, runtime shutdown, or the registrar run leaving or changing. The membership writer
+admitted batch multiplexes its row watches, with a fixed charge of 1 KiB per row plus 4 KiB for the
+task; a wide frame therefore does not allocate one task per acknowledgement. Pending rows report
+progress every 100 milliseconds, below the registrar's fifteen-second silence bound even when two
+reports each exhaust their dispatch deadline. The same cadence keeps local emitter and
+message-error acknowledgements alive while a connector request is pending, giving a one-second
+source `ACK TIMEOUT` multiple chances to observe progress. Refusing record storage is typed and
+occurs before the delivery is sent. Cancellation before admission resolves every held share
+negatively and returns its position. Completion of the last record returns the delivery storage and
+its charge.
+
+The receiver charges a batch's watches before it decodes the batch and before runtime admission.
+While the relay budget has no room for them, typically because the watches of earlier batches are
+still reporting their rows, the receiver holds the batch back instead of refusing it. The batch
+stays unadmitted, so the transport keeps reporting it alive and its sender keeps waiting within the
+five-second progress and five-minute total admission bounds; the sender's channel carries nothing
+else meanwhile, which pushes back on the source that fills it. The held batch keeps the reservation
+of its grant. Every 10 milliseconds the receiver reads the budget and takes the charge once it
+fits. It never waits in the budget's queue, because a place there takes every byte the class
+releases until it is satisfied, which would keep the node's other relay work, including forwarding
+the rows whose acknowledgements end the watches it waits for, behind it. A held batch counts no
+refusal. The hold ends as soon as the sender cancels the delivery, its peer ends, or the runtime
+stops. Only watches larger than the whole budget, or a hold still without room when the
+five-minute bound has passed, are refused, with the typed admission cause beneath the runtime's
+`RemoteAckAdmission`. Each watch returns its row's share as soon as it reports the row's terminal
+outcome, gives that outcome up, or ends because the registrar run left or changed, so room
+returns at the rate rows are reported rather than a whole batch at a time; the task's share
+returns when the batch's last watch ends or the runtime shuts down. The membership writer
 publishes immutable process identities; a watcher gives initial discovery five seconds and stops
 once a previously observed registrar is absent. Terminal delivery retains the five-second event
 deadline described above; this does not promise suppression of replay duplicates after lost outcomes.
@@ -922,7 +945,8 @@ Consensus separates traffic according to the progress it protects:
 - heartbeats, pre-votes, votes, leadership notifications, linearizable runtime-admission reads,
   and other small control exchanges use management capacity
 - each leader-to-follower log uses one ordered duplex stream on the replication pool
-- runtime-state replication and ownership handoff use the remaining replication capacity
+- runtime-state descriptions, catalog listings, acknowledgements and ownership handoff control use
+  the remaining replication capacity; checkpoint bodies use the bulk pool's Snapshot subquota
 - consensus snapshots use the snapshot reservation on the bulk pool
 
 The ordered append stream can keep multiple batches in flight while preserving follower order. Its
@@ -990,10 +1014,15 @@ partitioned or cancelled fetch leaves any unconsumed stage available until expir
 An owner streams each branch lifecycle and Kafka offset section from the cut's database snapshot
 into its staged file under a `restore_metadata` conversion charge and a 64 KiB bulk buffer, so the
 inventory declares a section's exact length and digest without the owner holding the section
-whole. Materialized inventories distinguish archive descriptors, scalar identity groups and Arrow
-column groups. Their bounded sections are staged from a fresh assignment-qualified capture and
-fetched through the same authenticated stream; the capture never transfers an entire container
-as one bulk response allocation. The leader verifies each length and digest before assembly.
+whole. It also checks a WASM save's scheduled generation before opening that save, then streams
+its raw bytes from the same snapshot into a staged section under an independent
+`restore_metadata` charge and three fixed 64 KiB bulk buffers. The stored read supplies the descriptor's
+revision. An interruption fails the capture before its inventory is published, and the
+coordinator can retry with a new cut. Materialized inventories distinguish archive descriptors,
+scalar identity groups and Arrow column groups. Their bounded sections are staged from a fresh
+assignment-qualified capture and fetched through the same authenticated stream; the capture never
+transfers an entire container as one bulk response allocation. The leader verifies each length and
+digest before assembly.
 An opening refused solely for request capacity is retried within one 30-second opening deadline;
 other failures end the fetch. The captured stage remains unconsumed on an admission refusal.
 Completed backup and materialized-state response streams release their Snapshot request and
@@ -1113,7 +1142,7 @@ stable storage acknowledges nothing. The owner of a WASM processor branch releas
 acknowledgements a guest checkpoint covers only once every replica the committed schedule assigns
 has acknowledged that checkpoint's revision; a replica that is unreachable, lagging, or failing to
 install stops those acknowledgements from being released rather than letting them through, and the
-checkpoint fails after its ten-second deadline. The owner announces a WASM processor's new branch to
+checkpoint fails after its ninety-second deadline. The owner announces a WASM processor's new branch to
 its replicas as soon as the branch appears. Every catch-up round of a replica synchronizes the
 owner's branch lifecycle before it installs any branch checkpoint, and the replica refuses a
 checkpoint of a branch that lifecycle does not name, as for a branch the owner has evicted.
@@ -1121,12 +1150,19 @@ checkpoint of a branch that lifecycle does not name, as for a branch the owner h
 acknowledgements complete.
 
 A replica catches the branch-keyed entities it replicates up in rounds, one replica task for each
-entity, through two replication-class requests. A state synchronization request names one placement
-and the revision the replica holds of it. The owner answers through the actual state handle
-published when that placement was installed: with the checkpoint when it is newer, and with
-nothing otherwise. Only for
-a placement it holds no state for does the owner read its storage. A branch checkpoint listing
-request names the entity's branch lifecycle placement and the cursor the replica's previous listing
+entity, through two replication-class request kinds and, when a checkpoint advanced, a bulk stream.
+A state synchronization request names one placement and the revision the replica holds of it. The
+owner answers through the actual state handle published when that placement was installed: with
+the newer checkpoint's revision, length and BLAKE3 digest, or with nothing when it is current.
+The owner reads storage only when it holds no live state for the placement. The replica opens a
+Snapshot-subquota bulk stream for the described revision; the owner refuses a revision it no longer
+holds. Chunks are at most the configured bulk chunk size (64 KiB by default). Each side admits the
+whole captured or received allocation against `restore_metadata`, up to a 256 MiB checkpoint
+transfer bound. The replica checks the stream's declared length, received length and digest before
+the checkpoint can reach its assignment-fenced installation and stable-storage acknowledgement.
+Debug events name the placement, revision and declared length when streaming and after verification,
+without logging checkpoint bytes. A branch checkpoint listing request names the entity's branch
+lifecycle placement and the cursor the replica's previous listing
 returned. The owner answers with the next changes of its catalog of the entity's branch
 checkpoints, in the order they happened and at most 256 of them: each branch whose checkpoint
 changed, with the state that checkpoint belongs to and its newest revision, and each branch whose
@@ -1143,8 +1179,9 @@ round synchronizes the lifecycle, reads the catalog's changes, and requests only
 the branches that changed or were announced, so a round in which no branch changed sends two
 requests however many branches the entity has.
 
-Checkpoint synchronization and catalog listing each use their operation's five-second deadline,
-including admission, connection capacity, the answer and decoding. The one-second replication poll
+Checkpoint descriptions and catalog listings each use their operation's five-second deadline,
+including admission, connection capacity, the answer and decoding. A selected checkpoint's bulk
+stream has a sixty-second progress deadline. The one-second replication poll
 interval schedules the next idle round; it does not shorten an in-flight request's deadline. A
 branch-aggregated replica uses the same checkpoint operation deadline. Polls and announcements retry
 a failed exchange, while the owner's checkpoint completion deadline remains independent and may
@@ -1226,6 +1263,20 @@ replacement fences a retained poll's acknowledgement as well as its delayed inst
 Debug checkpoint events identify encoding, receive and installation boundaries by placement and
 revision, with declared byte length once known. Their timestamps distinguish encoding, transfer
 and conversion delays without logging checkpoint payloads or partition offsets.
+
+Ownership handoff capture returns the same checkpoint descriptions as a bounded control response.
+The destination fetches each exact revision from the source over the Snapshot bulk subquota before
+validating its state and publishing the prepared handoff. A failed, truncated, superseded or
+digest-mismatched fetch fails preparation without installing a partial checkpoint. The source
+serves a handoff fetch from the exact checkpoint capture persisted in its state store, or from
+the retained committed WASM checkpoint. An ordinary replica fetch selects the published state
+handle. A committed WASM save is already on stable storage before capture, even when a newer
+published save is waiting for replicas. Capture
+describes and releases each WASM branch save before reading the next branch, so its control
+inventory retains descriptors rather than every guest save allocation. Other state kinds complete
+their existing persistence steps before description. No checkpoint body enters a
+replication-class message. Preparation retains its verified checkpoint set until activation, so
+the destination's total held bytes still grow with the number and size of the entity's branches.
 
 Runtime-state synchronization replies and materialized-snapshot descriptions carry the shared
 typed remote-operation failure envelope. Rejection, absence, temporary unreadiness, and execution
@@ -1339,16 +1390,18 @@ management request in the reserved progress subquota, rather than an unclassifie
 The response confirms that the authenticated receiver evaluated the report against its current
 fence; it does not establish or replace the receiver's committed clock mapping.
 
-For each domain and ready remote node, the authority owns one delivery loop with at most one request
+For each domain and prepared remote node, the authority owns one delivery loop with at most one request
 in flight and one latest pending report. A newer logical frontier replaces the pending report while
 the loop waits for capacity or a response, so a fast clock or slow peer cannot create an unbounded
 tick queue. The node-wide progress quota bounds attempts across every domain and peer. Liveness,
 relay admission, cancellation, and terminal outcomes retain their independent capacity.
 
-Only live peers that have installed the required runtime revision receive progress. A node that
-joins or reconnects receives the newest retained frontier once it becomes ready. Each attempt has a
-two-second physical deadline. A failed attempt waits 200 milliseconds, then retries the newest
-frontier; authority shutdown cancels both an active request and its retry delay.
+Only live peers that have prepared the required runtime revision receive progress. Preparation
+installs the mapping and authority fence before graph activation, so a receiver does not wait for
+other nodes to prepare or activate. A node that joins or reconnects receives the newest retained
+frontier once its own preparation is advertised. Each attempt has a two-second physical deadline.
+A failed attempt waits 200 milliseconds, then retries the newest frontier; authority shutdown
+cancels both an active request and its retry delay.
 
 The wire report contains typed logical and UTC timestamps and no process-local monotonic instant.
 The receiver authenticates the reporting node and applies the committed generation, revision,
@@ -1529,6 +1582,12 @@ When remote ACK registration cannot reserve correlation memory, the affected rec
 acknowledgement carries the registration report chain, including its admission cause.
 An answering node sends its established remote failure class or stream rejection text over the
 wire; a local report's cause chain is not serialized into an HTTP/2 response.
+
+The exact source owners classify `RemoteRequestFailure`, `RemoteOperationFailure`,
+`OwnershipHandoffFailure`, gossip refusals and resource-publication answers as fixed wire outcomes
+for the compiler failure-contract gate. The responding operation retains its local contextual
+report before projection. [Errors And Diagnostics](errors-and-diagnostics.md) owns that source
+contract, including the distinction between a wire outcome and an operation failure.
 
 Connections, request state, relay grants, delivery reconciliation, progress trackers, and
 acknowledgement maps are never persisted. Durable control-plane state remains in consensus, and

@@ -381,13 +381,12 @@ impl Runtime {
             .change_context_lazy(not_completed)?;
         let file_descriptor_set = compiled?;
 
-        ProtobufDescriptorPool::from_file_descriptor_set(file_descriptor_set).map_err(|error| {
-            Report::new(RuntimeResourceError::InvalidProtobufDescriptorSet {
+        ProtobufDescriptorPool::from_file_descriptor_set(file_descriptor_set).change_context(
+            RuntimeResourceError::InvalidProtobufDescriptorSet {
                 resource: id.identifier,
                 version: id.version,
-            })
-            .attach_printable(error)
-        })
+            },
+        )
     }
 
     pub(crate) fn attach_resource_store(&self, resource_store: StdArc<ResourceStore>) {

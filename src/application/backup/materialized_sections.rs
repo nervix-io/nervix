@@ -18,12 +18,12 @@ use nervix_interconnect::{RemoteOperationFailure, RuntimeState};
 use nervix_models::{DomainSchedule, NodeRef};
 
 use super::{
-    CaptureSectionKey,
+    CaptureSectionKey, CapturedSection,
     interconnect::{CaptureDomainStateRequest, failed},
 };
 use crate::{
     application::session_service::SessionServiceImpl,
-    runtime::{BranchKey, CapturedMaterializedRelay, StagedArtifact},
+    runtime::{BranchKey, CapturedMaterializedRelay},
 };
 
 impl SessionServiceImpl {
@@ -32,8 +32,7 @@ impl SessionServiceImpl {
         captured: Vec<CapturedMaterializedRelay>,
         schedule: Option<&DomainSchedule>,
         request: &CaptureDomainStateRequest,
-    ) -> Result<Vec<(CaptureSectionKey, SectionContent, StagedArtifact)>, RemoteOperationFailure>
-    {
+    ) -> Result<Vec<CapturedSection>, RemoteOperationFailure> {
         let mut staged = Vec::new();
         let executor = self.inner.runtime.executor();
         for captured in captured {
@@ -80,14 +79,14 @@ impl SessionServiceImpl {
                 domain: request.domain.clone(),
                 path: path.to_string(),
             };
-            staged.push((
-                key(SectionPath::materialized_descriptor(
+            staged.push(CapturedSection {
+                key: key(SectionPath::materialized_descriptor(
                     &request.domain,
                     &placement.identifier,
                 )),
-                SectionContent::Record(MaterializedRelayDescriptor::KIND),
+                content: SectionContent::Record(MaterializedRelayDescriptor::KIND),
                 artifact,
-            ));
+            });
             for (index, group) in groups.into_iter().enumerate() {
                 nervix_primitives::task::consume_budget().await;
                 let index = u32::try_from(index).verified("group count was checked");
@@ -147,15 +146,15 @@ impl SessionServiceImpl {
                     .finish_artifact()
                     .await
                     .map_err(|error| failed(&request.domain, &error.to_string()))?;
-                staged.push((
-                    key(SectionPath::materialized_identities(
+                staged.push(CapturedSection {
+                    key: key(SectionPath::materialized_identities(
                         &request.domain,
                         &placement.identifier,
                         index,
                     )),
-                    SectionContent::Record(MaterializedIdentitiesRecord::KIND),
+                    content: SectionContent::Record(MaterializedIdentitiesRecord::KIND),
                     artifact,
-                ));
+                });
                 let columns = generation
                     .encode_columns(executor, &group)
                     .await
@@ -181,15 +180,15 @@ impl SessionServiceImpl {
                     .finish_artifact()
                     .await
                     .map_err(|error| failed(&request.domain, &error.to_string()))?;
-                staged.push((
-                    key(SectionPath::materialized_columns(
+                staged.push(CapturedSection {
+                    key: key(SectionPath::materialized_columns(
                         &request.domain,
                         &placement.identifier,
                         index,
                     )),
-                    SectionContent::MaterializedColumns,
+                    content: SectionContent::MaterializedColumns,
                     artifact,
-                ));
+                });
             }
         }
         Ok(staged)

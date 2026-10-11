@@ -40,8 +40,8 @@ const DATABASE_RESERVATION_BYTES: u64 = 4096;
 
 #[derive(Debug, Error)]
 enum NodeDatabaseOpenError {
-    #[error("failed to open the node database: {0}")]
-    Open(#[source] fjall::Error),
+    #[error("failed to open the node database")]
+    Open,
     #[error("consensus keyspaces are present in the node database")]
     ConsensusNotDedicated,
 }
@@ -75,13 +75,13 @@ impl ApplicationStartup {
             .run_storage(StorageClass::Filesystem, reservation, move |_, _| {
                 let db = Database::builder(opened_path)
                     .open()
-                    .map_err(NodeDatabaseOpenError::Open)?;
+                    .change_context(NodeDatabaseOpenError::Open)?;
                 if db
                     .list_keyspace_names()
                     .iter()
                     .any(|name| name.starts_with(CONSENSUS_KEYSPACE_PREFIX))
                 {
-                    return Err(NodeDatabaseOpenError::ConsensusNotDedicated);
+                    return Err(Report::new(NodeDatabaseOpenError::ConsensusNotDedicated));
                 }
                 Ok(db)
             })
@@ -89,13 +89,18 @@ impl ApplicationStartup {
             .change_context(AppError::OpenRegistry)?;
         match opened {
             Ok(db) => Ok(db),
-            Err(NodeDatabaseOpenError::Open(error)) => {
-                error!(db_path = %path.display(), error = %error, "failed to open node fjall database");
-                Err(Report::new(AppError::OpenRegistry).attach_printable(error))
-            }
-            Err(NodeDatabaseOpenError::ConsensusNotDedicated) => {
-                error!(db_path = %path.display(), "consensus keyspaces found in node fjall database");
-                Err(Report::new(AppError::ConsensusStorageLayout))
+            Err(report) => {
+                let context = match report.current_context() {
+                    NodeDatabaseOpenError::Open => {
+                        error!(db_path = %path.display(), error = ?report, "failed to open node fjall database");
+                        AppError::OpenRegistry
+                    }
+                    NodeDatabaseOpenError::ConsensusNotDedicated => {
+                        error!(db_path = %path.display(), "consensus keyspaces found in node fjall database");
+                        AppError::ConsensusStorageLayout
+                    }
+                };
+                Err(report.change_context(context))
             }
         }
     }
@@ -386,6 +391,22 @@ mod tests {
         Application, ApplicationStartup, CONSENSUS_KEYSPACE_PREFIX, DATABASE_RESERVATION_BYTES,
     };
     use crate::application::test_fixtures::{test_addr, test_tls_files};
+
+    #[nervix_primitives::test]
+    async fn opening_the_node_database_retains_the_typed_storage_cause() {
+        use meticulous::{OptionExt as _, ResultExt as _};
+        let file = tempfile::NamedTempFile::new().assured("the fixture can create a file");
+        let executor = Executor::default();
+        let failure = ApplicationStartup::open_node_database(file.path().to_path_buf(), &executor)
+            .await
+            .err()
+            .assured("a file cannot be opened as a database directory");
+        assert!(matches!(
+            failure.current_context(),
+            crate::application::error::AppError::OpenRegistry
+        ));
+        assert!(failure.contains::<fjall::Error>());
+    }
 
     #[nervix_primitives::test]
     async fn startup_failure_releases_the_split_databases_before_returning() {

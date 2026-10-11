@@ -67,10 +67,66 @@ fn remote_ack_owner_cost() {
         assert!(owners.fail_silent_acks().is_empty());
     }
     println!(
-        "remote-ack-owner positions={} empty_sweep_ns={}",
+        "remote-ack-owner positions={} swept_positions={} empty_sweep_ns={}",
         owners.slots.len(),
+        owners.swept_positions().count(),
         start.elapsed().as_nanos() / 100
     );
+}
+
+#[test]
+fn a_silence_sweep_visits_only_the_positions_a_side_has_claimed() {
+    let owners = RemoteDispatchRegistry::with_capacity(4);
+    let swept = |owners: &RemoteDispatchRegistry| owners.swept_positions().collect::<Vec<_>>();
+    assert_eq!(
+        swept(&owners),
+        Vec::<usize>::new(),
+        "an owner that registered nothing sweeps no position"
+    );
+
+    let (first_acks, first_completion) = AckSet::root();
+    let first = owners
+        .register_ack(receiver(), first_acks)
+        .assured("the fixture has free delivery positions");
+    let (second_acks, second_completion) = AckSet::root();
+    let second = owners
+        .register_ack(receiver(), second_acks)
+        .assured("the fixture has free delivery positions");
+    let (admission, _updates) = owners
+        .register_admission()
+        .assured("the fixture has free admission positions");
+    // Four delivery positions come first, so the first admission position is the fifth.
+    assert_eq!(swept(&owners), vec![0, 1, 4]);
+
+    // A retired position is reused before a fresh one is claimed, so reuse does not grow the scan.
+    assert!(owners.resolve_ack(first, AckOutcome::Ack));
+    assert_eq!(
+        first_completion.wait().now_or_never(),
+        Some(AckOutcome::Ack)
+    );
+    let (third_acks, third_completion) = AckSet::root();
+    let third = owners
+        .register_ack(receiver(), third_acks)
+        .assured("the retired delivery returned its position");
+    assert_eq!(owners.position(third), owners.position(first));
+    assert_eq!(swept(&owners), vec![0, 1, 4]);
+
+    // Every claimed position is still swept: silence fails both pending deliveries.
+    owners.admit_ack(second);
+    owners.admit_ack(third);
+    for _ in 0..REMOTE_ACK_SILENT_SWEEPS {
+        assert!(owners.fail_silent_acks().is_empty());
+    }
+    assert_eq!(owners.fail_silent_acks().get(&receiver()), Some(&2));
+    assert!(matches!(
+        second_completion.wait().now_or_never(),
+        Some(AckOutcome::NoAck(_))
+    ));
+    assert!(matches!(
+        third_completion.wait().now_or_never(),
+        Some(AckOutcome::NoAck(_))
+    ));
+    assert!(owners.holds_ack(admission));
 }
 
 #[test]

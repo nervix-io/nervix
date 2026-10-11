@@ -104,6 +104,13 @@ impl FromStr for NodeEndpoint {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
+#[cfg_attr(
+    nervix_lint,
+    nervix::error_boundary(
+        outcome,
+        reason = "advertised endpoint parsing returns a pure validation refusal"
+    )
+)]
 pub enum NodeEndpointParseError {
     #[error("advertised endpoint '{advertised}' has no ':port' suffix")]
     MissingPort { advertised: String },
@@ -168,6 +175,13 @@ impl FromStr for NodeServiceUrl {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
+#[cfg_attr(
+    nervix_lint,
+    nervix::error_boundary(
+        outcome,
+        reason = "advertised service URL parsing returns a pure validation refusal"
+    )
+)]
 pub enum NodeServiceUrlParseError {
     #[error("advertised service url '{advertised}' is not a url")]
     Malformed { advertised: String },

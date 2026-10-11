@@ -75,6 +75,13 @@ pub(in crate::application) struct CaptureSectionKey {
     pub(in crate::application) path: String,
 }
 
+/// One captured section's publication key, content kind, and quota-owned staged bytes.
+pub(super) struct CapturedSection {
+    key: CaptureSectionKey,
+    content: SectionContent,
+    artifact: StagedArtifact,
+}
+
 pub(in crate::application) struct CapturedSectionStage {
     pub(in crate::application) artifact: Arc<StagedArtifact>,
     pub(in crate::application) content: SectionContent,

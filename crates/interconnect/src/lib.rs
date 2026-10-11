@@ -74,9 +74,10 @@ use request::{RequestEnvelope, RequestState, ResponseEnvelope};
 pub use runtime_state::{
     BranchCheckpointCursor, BranchCheckpointListing, BranchCheckpointListingRequest,
     BranchCheckpointListingResponse, BranchCheckpointPage, BranchCheckpointRevision,
-    DescribeKafkaOffsets, KafkaOffsetRevision, OwnershipHandoffCheckpoint, RuntimeState,
-    RuntimeStateKind, StateCheckpointAvailable, StatePlacementEnvelope, StateReplicationAck,
-    StateSchema, StateSnapshotEnvelope, StateSyncRequest, StateSyncResponse, SyncKafkaOffsets,
+    DescribeKafkaOffsets, FetchStateCheckpoint, KafkaOffsetRevision, OwnershipHandoffCheckpoint,
+    RuntimeState, RuntimeStateKind, StateCheckpointAvailable, StateCheckpointRead,
+    StatePlacementEnvelope, StateReplicationAck, StateSchema, StateSnapshotEnvelope,
+    StateSyncRequest, StateSyncResponse, SyncKafkaOffsets,
 };
 pub use wasm_state::{
     CoordinateWasmStateResetRequest, CoordinateWasmStateResetResponse,
@@ -373,6 +374,13 @@ pub struct ForcedOwnershipRecoveryPreparation {
 }
 
 #[derive(Debug, Clone, Archive, Serialize, Deserialize, PartialEq, Eq, Error)]
+#[cfg_attr(
+    nervix_lint,
+    nervix::error_boundary(
+        outcome,
+        reason = "the fixed handoff wire response carries its remote rejection outcome"
+    )
+)]
 pub enum OwnershipHandoffFailure {
     #[error("{reason}")]
     Rejected { reason: String },

@@ -65,6 +65,44 @@ Feature: Inferencer resources
       | 1            | 0             | ARRAY<F32, 2> | ARRAY<F32, 1> | DENSE TENSOR<F32> |
       | 3            | 0             | ARRAY<F32, 2> | ARRAY<F32, 1> | DENSE TENSOR<F32> |
 
+  Scenario Outline: Inferencer creation names why its ONNX model cannot be inspected
+    Given a <cluster_size> node nervix cluster is started
+    And node "node-1" has ONNX fixture resource directory "onnx_model" with "models/not_a_model.onnx" copied from fixture "not_a_model.txt"
+    And the leader node is configured with these NSPL commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
+    When these NSPL commands fail with "failed to inspect ONNX model 'models/not_a_model.onnx' for inferencer 'score_model': "
+      """
+      CREATE RESOURCE fraud_model;
+      UPLOAD RESOURCE fraud_model VERSION '{{onnx_model}}';
+      CREATE SCHEMA features (
+        tenant STRING,
+        vector <vector_type>
+      );
+      CREATE SCHEMA scored (
+        score <score_type>
+      );
+      CREATE RELAY features SCHEMA features UNBRANCHED;
+      CREATE RELAY scored SCHEMA scored UNBRANCHED;
+      CREATE INFERENCER score_model FROM features
+        USING RESOURCE fraud_model VERSION 1
+        FILE 'models/not_a_model.onnx'
+        INPUTS { "features" <tensor_type>[2] = input.vector }
+        OUTPUT SCHEMA { "score" <tensor_type>[1] }
+        UNBRANCHED
+        TO scored
+        SET score = score
+        FLUSH IMMEDIATE
+        ON MESSAGE ERROR LOG;
+      """
+    Then the last command error message contains "Protobuf parsing failed" exactly once
+
+    Examples:
+      | cluster_size | vector_type   | score_type    | tensor_type       |
+      | 1            | ARRAY<F32, 2> | ARRAY<F32, 1> | DENSE TENSOR<F32> |
+      | 3            | ARRAY<F32, 2> | ARRAY<F32, 1> | DENSE TENSOR<F32> |
+
   Scenario Outline: Inferencer creation rejects incompatible ONNX bindings
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
@@ -720,7 +758,7 @@ Feature: Inferencer resources
       | 1            | 0             | DENSE TENSOR<F32> | ARRAY<F32, 2>    | ARRAY<F32, 2>     |
       | 3            | 0             | DENSE TENSOR<F32> | ARRAY<F32, 2>    | ARRAY<F32, 2>     |
 
-  @inferencer_branch_batches
+  @inferencer_branch_batches @deloxide_stress
   Scenario Outline: Batched inferencer isolates interleaved concrete branches
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started

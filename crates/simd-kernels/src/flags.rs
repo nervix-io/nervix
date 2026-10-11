@@ -160,4 +160,47 @@ mod tests {
         assert_eq!(lane_mask(WORD_LANES), u64::MAX);
         assert_eq!(lane_mask(WORD_LANES + 1), u64::MAX);
     }
+
+    /// A generated run of flag bytes and the words a caller already holds. A byte below `clear`
+    /// becomes a clear flag, so runs range from mostly set to mostly clear, and every other byte is
+    /// kept as it is: any nonzero byte is a set flag.
+    #[derive(Debug, bolero::TypeGenerator)]
+    struct FlagRun {
+        #[generator(bolero::generator::produce_with::<Vec<u8>>().len(0_usize..=600))]
+        bytes: Vec<u8>,
+        clear: u8,
+        held: Vec<u64>,
+    }
+
+    #[test]
+    fn bolero_packed_words_match_the_scalar_shifts_at_every_level() {
+        bolero::check!()
+            .with_iterations(256)
+            .with_max_len(2048)
+            .with_type::<FlagRun>()
+            .for_each(|run| {
+                let mut flags = Vec::with_capacity(run.bytes.len());
+                for byte in &run.bytes {
+                    if *byte < run.clear {
+                        flags.push(0);
+                    } else {
+                        flags.push(*byte);
+                    }
+                }
+                let mut expected = run.held.clone();
+                expected.extend(scalar_words(&flags));
+                for level in supported_levels() {
+                    let mut words = run.held.clone();
+                    FlagPacker { level }.pack(&flags, &mut words);
+                    assert_eq!(words, expected, "level={level:?} lanes={}", flags.len());
+                }
+                for lanes in [0, flags.len(), flags.len() % 129] {
+                    let mut expected_mask = 0_u64;
+                    for lane in 0..lanes.min(WORD_LANES) {
+                        expected_mask |= 1 << lane;
+                    }
+                    assert_eq!(lane_mask(lanes), expected_mask, "lanes={lanes}");
+                }
+            });
+    }
 }

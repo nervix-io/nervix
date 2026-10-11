@@ -115,18 +115,22 @@ class InventoryTests(unittest.TestCase):
              "test-primitives-shuttle", "test-primitives-loom", "test-primitives-turmoil",
              "test-primitives-deloxide", "nspl-completion-walk", "test-shuttle", "test-loom",
              "test-deadlock-evidence-order", "test-deadlock-report", "test-deloxide",
-             "test-deloxide-order", "test-deloxide-stress"],
+             "test-deloxide-order", "test-deloxide-stress", "test-deloxide-stress-restore"],
         )
+        inventory = deloxide_lane.load_inventory(REPOSITORY)
         for producer in native_coverage.PRODUCERS:
             self.assertEqual(producer.rerun(), f"just coverage-native-extras {producer.name}")
             if producer.name.startswith("test-primitives-"):
                 self.assertEqual(producer.name, f"test-primitives-{producer.mode}")
-            # Each selection of the diagnostic lane collects in its own mode's build, and only
-            # after the prerequisites the lane takes its prepared binaries from.
-            if producer.diagnostic_lane:
-                self.assertEqual(producer.name, f"test-{producer.mode}")
+            # Each selection of the diagnostic lane collects in the build of the feature it
+            # compiles, and only after the prerequisites the lane takes its prepared binaries from.
+            if producer.lane is not None:
+                self.assertEqual(producer.name, f"test-{producer.lane}")
+                self.assertEqual(producer.mode, inventory.selection(producer.lane).feature)
                 self.assertEqual(producer.prepare, ("tests-deps",))
-                self.assertEqual(producer.instrumented, f"test-{producer.mode}-workloads")
+                self.assertEqual(producer.instrumented, f"test-{producer.lane}-workloads")
+        lanes = [producer.lane for producer in native_coverage.PRODUCERS if producer.lane is not None]
+        self.assertEqual(lanes, list(inventory.selections))
 
     def test_a_check_composed_otherwise_than_its_producer_is_refused(self) -> None:
         producer = Producer("check", "ordinary", ("prepare",), "body", ("finish",))
@@ -200,9 +204,9 @@ class InventoryTests(unittest.TestCase):
                     selected_job = job_section(workflow, "shuttle")
                 elif producer.name == "test-loom":
                     selected_job = job_section(workflow, "loom")
-                elif producer.diagnostic_lane:
+                elif producer.lane is not None:
                     lane = job_section(workflow, "deloxide")
-                    self.assertRegex(lane, r"selection: \[deloxide, deloxide-order, deloxide-stress\]")
+                    self.assertIn(f"selection: [{', '.join(deloxide_lane.load_inventory(REPOSITORY).selections)}]", lane)
                     self.assertIn("SELECTION: ${{ matrix.selection }}", lane)
                     self.assertRegex(lane, r"tool: [^\n]*\bcargo-llvm-cov\b")
                     self.assertIn('just coverage-native-extras "test-${SELECTION}"\n', lane)
@@ -430,7 +434,7 @@ class InstrumentationTests(unittest.TestCase):
     def test_only_the_diagnostic_lanes_instrument_workspace_crates_alone(self) -> None:
         for producer in native_coverage.PRODUCERS:
             with self.subTest(producer=producer.name):
-                if producer.diagnostic_lane:
+                if producer.lane is not None:
                     expected = native_coverage.InstrumentedCrates.WORKSPACE
                 else:
                     expected = native_coverage.InstrumentedCrates.EVERY
@@ -1308,7 +1312,7 @@ class CollectTests(unittest.TestCase):
     def test_a_diagnostic_lane_is_exported_only_from_its_complete_record(self) -> None:
         lane_producer = Producer(
             "test-deloxide", "deloxide", ("tests-deps",), "test-deloxide-workloads", (),
-            diagnostic_lane=True,
+            lane="deloxide",
             instrumented_crates=native_coverage.InstrumentedCrates.WORKSPACE,
         )
 
@@ -1356,6 +1360,44 @@ class CollectTests(unittest.TestCase):
                 self.assertEqual(record["verdict"], "failed")
                 self.assertEqual(record["failure"]["stage"], "run")
                 self.assertNotIn("sources", record)
+
+    def test_a_lane_selection_collects_in_the_build_it_compiles_and_exports_its_own_record(self) -> None:
+        lane_producer = Producer(
+            "test-deloxide-stress-restore", "deloxide-stress", ("tests-deps",),
+            "test-deloxide-stress-restore-workloads", (), lane="deloxide-stress-restore",
+            instrumented_crates=native_coverage.InstrumentedCrates.WORKSPACE,
+        )
+
+        def writes(selection: str) -> Callable[[], int]:
+            def run() -> int:
+                path = Path(commands.streamed[-1].environment[deloxide_lane.REPORT_VARIABLE])
+                path.write_text(json.dumps({
+                    "selection": selection,
+                    "verdict": "complete",
+                    "workspace": {"attempt": "target/native-coverage-build-deloxide-stress/test-deloxide/x/run.y"},
+                    "counts": {"discovered": 2, "selected": 2, "executed": 2, "completed": 2},
+                    "workloads": [{"id": "stress.a", "completed": True}],
+                    "findings": {"observations": 1, "qualifying": 1},
+                }))
+                return 0
+            return run
+
+        commands = FakeCommands(self.root, {"test-deloxide-stress-restore-workloads": writes("deloxide-stress-restore")})
+        collected = self.collect(commands, producer=lane_producer)
+        self.assertEqual(collected.status, 0)
+        self.assertEqual(self.record(collected)["lane"]["counts"]["completed"], 2)
+        self.assertTrue(collected.attempt.is_relative_to(
+            self.root / "target/native-coverage/test-deloxide-stress-restore/deloxide-stress"
+        ))
+        lane = commands.streamed[1].environment
+        self.assertEqual(lane["CARGO_TARGET_DIR"], str(self.root / "target/native-coverage-build-deloxide-stress"))
+
+        # The record of another selection of the same build does not complete this one.
+        self.setUp()
+        commands = FakeCommands(self.root, {"test-deloxide-stress-restore-workloads": writes("deloxide-stress")})
+        collected = self.collect(commands, producer=lane_producer)
+        self.assertEqual(collected.status, 1)
+        self.assertEqual(self.record(collected)["failure"]["stage"], "run")
 
     def test_a_failing_part_fails_the_collection_at_its_stage(self) -> None:
         cases = {

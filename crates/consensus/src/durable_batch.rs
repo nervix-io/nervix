@@ -39,9 +39,9 @@ pub enum StorageFailure {
     InvalidState,
     #[error("the snapshot generation this transfer was reading has been superseded")]
     SnapshotSuperseded,
-    #[error("failed to encode consensus record: {0}")]
+    #[error("failed to encode consensus record")]
     Encode(#[source] RkyvError),
-    #[error("consensus database write failed: {0}")]
+    #[error("consensus database write failed")]
     Write(#[source] fjall::Error),
 }
 
@@ -361,5 +361,31 @@ impl Write for RecordWriter {
 
     fn flush(&mut self) -> io::Result<()> {
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use error_stack::Report;
+    use rkyv::rancor::Source as _;
+
+    use super::*;
+
+    #[test]
+    fn a_failed_write_or_encoding_names_its_cause_once_in_a_rendered_chain() {
+        let database = fjall::Error::InvalidTrailer;
+        let database_cause = database.to_string();
+        let write = Report::new(io::Error::other(StorageFailure::Write(database)));
+        let encoding = RkyvError::new(io::Error::other("the record does not fit its archive"));
+        let encode = Report::new(io::Error::other(StorageFailure::Encode(encoding)));
+
+        assert_eq!(
+            format!("{write:#}"),
+            format!("consensus database write failed: {database_cause}")
+        );
+        assert_eq!(
+            format!("{encode:#}"),
+            "failed to encode consensus record: the record does not fit its archive"
+        );
     }
 }

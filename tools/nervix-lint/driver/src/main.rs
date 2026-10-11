@@ -11,12 +11,14 @@ extern crate rustc_data_structures;
 extern crate rustc_driver;
 extern crate rustc_errors;
 extern crate rustc_hir;
+extern crate rustc_infer;
 extern crate rustc_interface;
 extern crate rustc_lint;
 extern crate rustc_lint_defs;
 extern crate rustc_middle;
 extern crate rustc_session;
 extern crate rustc_span;
+extern crate rustc_trait_selection;
 
 use std::{
     collections::BTreeMap,
@@ -37,18 +39,20 @@ use rustc_lint::{LateContext, LateLintPass};
 use rustc_lint_defs::impl_lint_pass;
 
 mod contracts;
+mod errors;
 use contracts::{Flow, INVALID_CONTRACT, LIFECYCLE_CALL, SYNC_ACQUISITION, UNKNOWN_EFFECT};
 use rustc_middle::ty::{self, Ty, TyCtxt};
 use rustc_span::Span;
 
 struct AcquisitionPass {
     flow: Flow,
+    errors: errors::ErrorRules,
     authored_files: BTreeMap<String, bool>,
     root: PathBuf,
     report: Arc<Mutex<CompilerReport>>,
 }
 
-impl_lint_pass!(AcquisitionPass => [SYNC_ACQUISITION, LIFECYCLE_CALL, UNKNOWN_EFFECT, INVALID_CONTRACT]);
+impl_lint_pass!(AcquisitionPass => [SYNC_ACQUISITION, LIFECYCLE_CALL, UNKNOWN_EFFECT, INVALID_CONTRACT, errors::BARE_ERROR_SIGNATURE, errors::DISCARDED_OUTCOME, errors::BARE_PANIC]);
 
 struct PassInputs {
     root: PathBuf,
@@ -202,6 +206,20 @@ impl<'tcx> LateLintPass<'tcx> for AcquisitionPass {
     fn check_body(&mut self, cx: &LateContext<'tcx>, body: &rustc_hir::Body<'tcx>) {
         self.flow.body(cx, body);
     }
+    fn check_fn(
+        &mut self,
+        cx: &LateContext<'tcx>,
+        _: rustc_hir::intravisit::FnKind<'tcx>,
+        declaration: &'tcx rustc_hir::FnDecl<'tcx>,
+        _body: &'tcx rustc_hir::Body<'tcx>,
+        span: Span,
+        owner: rustc_span::def_id::LocalDefId,
+    ) {
+        if self.authored(cx, span) {
+            self.errors
+                .signature(cx, owner, declaration.output.span(), &mut self.flow);
+        }
+    }
     fn check_item(&mut self, cx: &LateContext<'tcx>, item: &'tcx rustc_hir::Item<'tcx>) {
         self.flow.validate(
             cx,
@@ -231,6 +249,10 @@ impl<'tcx> LateLintPass<'tcx> for AcquisitionPass {
             item.hir_id(),
             matches!(item.kind, rustc_hir::TraitItemKind::Fn(..)),
         );
+        if matches!(item.kind, rustc_hir::TraitItemKind::Fn(..)) && self.authored(cx, item.span) {
+            self.errors
+                .signature(cx, item.owner_id.def_id, item.span, &mut self.flow);
+        }
     }
     fn check_field_def(&mut self, cx: &LateContext<'tcx>, field: &'tcx rustc_hir::FieldDef<'tcx>) {
         self.flow.validate(cx, field.hir_id, false);
@@ -247,9 +269,15 @@ impl<'tcx> LateLintPass<'tcx> for AcquisitionPass {
     }
     fn check_local(&mut self, cx: &LateContext<'tcx>, local: &'tcx rustc_hir::LetStmt<'tcx>) {
         self.flow.validate(cx, local.hir_id, false);
+        if self.authored(cx, local.span) {
+            self.errors.binding(cx, local, &mut self.flow);
+        }
     }
     fn check_stmt(&mut self, cx: &LateContext<'tcx>, statement: &'tcx rustc_hir::Stmt<'tcx>) {
         self.flow.validate(cx, statement.hir_id, false);
+        if self.authored(cx, statement.span) {
+            self.errors.statement(cx, statement, &mut self.flow);
+        }
     }
 
     fn check_expr(&mut self, cx: &LateContext<'tcx>, expression: &'tcx Expr<'tcx>) {
@@ -258,6 +286,9 @@ impl<'tcx> LateLintPass<'tcx> for AcquisitionPass {
             expression.hir_id,
             matches!(expression.kind, ExprKind::Closure(..)),
         );
+        if self.authored(cx, expression.span) {
+            self.errors.expression(cx, expression, &mut self.flow);
+        }
         if let ExprKind::Closure(closure) = expression.kind {
             let authored = self.authored(cx, expression.span);
             self.flow.call(
@@ -449,6 +480,9 @@ impl Callbacks for Analysis {
                 LIFECYCLE_CALL,
                 UNKNOWN_EFFECT,
                 INVALID_CONTRACT,
+                errors::BARE_ERROR_SIGNATURE,
+                errors::DISCARDED_OUTCOME,
+                errors::BARE_PANIC,
             ]);
             let inputs = IntoDynSyncSend(PassInputs {
                 root: root.clone(),
@@ -458,6 +492,7 @@ impl Callbacks for Analysis {
                 let inputs = &*inputs;
                 Box::new(AcquisitionPass {
                     flow: Flow::default(),
+                    errors: errors::ErrorRules::new(inputs.root.clone()),
                     authored_files: BTreeMap::new(),
                     root: inputs.root.clone(),
                     report: inputs.report.clone(),
@@ -574,6 +609,9 @@ fn main() -> anyhow::Result<()> {
                 "-Wnervix::sync_acquisition",
                 "-Wnervix::lifecycle_call",
                 "-Wnervix::unknown_effect",
+                "-Wnervix::bare_error_signature",
+                "-Wnervix::discarded_outcome",
+                "-Wnervix::bare_panic",
             ]
             .map(String::from),
         );

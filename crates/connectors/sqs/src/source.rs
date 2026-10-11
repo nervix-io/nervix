@@ -376,8 +376,10 @@ mod tests {
             "sqs.nervix.test",
             nervix_dns::DnsLookupFailure::Timeout,
         );
+        // The Smithy hook hands the SDK the lookup's whole report, as `DnsLookupReport`.
+        let carried = nervix_dns::DnsLookupReport::from(Report::new(lookup));
         let unresolved = SdkError::<GetQueueUrlError, ()>::dispatch_failure(ConnectorError::io(
-            Box::new(lookup),
+            Box::new(carried),
         ));
         let unresolved = SqsSourcePlan::queue_lookup_error("orders", &unresolved);
         assert!(matches!(

@@ -15,6 +15,13 @@ use thiserror::Error;
 /// The caller stopped waiting for this job before it finished.
 #[derive(Debug, Error, PartialEq, Eq)]
 #[error("the work was cancelled between bounded units")]
+#[cfg_attr(
+    nervix_lint,
+    nervix::error_boundary(
+        outcome,
+        reason = "cancellation is the ordinary signal checked between bounded work units"
+    )
+)]
 pub struct Cancelled;
 
 /// Raised when the caller stops awaiting a submitted job. A job that has already started keeps

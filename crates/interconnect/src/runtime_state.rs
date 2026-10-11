@@ -153,12 +153,30 @@ pub struct StatePlacementEnvelope {
     pub branch_key: Option<Vec<RemoteRuntimeField>>,
 }
 
-/// One checkpoint of the state a placement names. It travels only beside that placement, which
-/// alone says what the payload is laid out by.
+/// The exact checkpoint of the state a placement names. Its bytes travel through the bulk pool;
+/// the receiving node verifies their length and digest before installing them.
 #[derive(Debug, Clone, Archive, Serialize, Deserialize, PartialEq, Eq)]
 pub struct StateSnapshotEnvelope {
     pub lsm: u64,
-    pub payload: Vec<u8>,
+    pub length: u64,
+    pub digest: [u8; 32],
+}
+
+/// Fetch the checkpoint selected by a preceding state-sync or handoff description. An owner
+/// refuses a revision it no longer holds rather than substituting newer state.
+#[derive(Debug, Clone, Copy, Archive, Serialize, Deserialize, PartialEq, Eq)]
+pub enum StateCheckpointRead {
+    /// Use the state selected at request admission, or storage when it has no live state.
+    Published,
+    /// Use the exact checkpoint the source persisted while capturing a planned handoff.
+    HandoffCapture,
+}
+
+#[derive(Debug, Clone, Archive, Serialize, Deserialize)]
+pub struct FetchStateCheckpoint {
+    pub placement: StatePlacementEnvelope,
+    pub lsm: u64,
+    pub read: StateCheckpointRead,
 }
 
 /// Kafka checkpoints may exceed either the replication message or bulk memory ceiling. The
@@ -301,4 +319,63 @@ impl InterconnectRequest for StateSyncRequest {
     const NAME: &'static str = "state_sync";
     const CLASS: PoolClass = PoolClass::Replication;
     const TIMEOUT: Duration = Duration::from_secs(5);
+}
+
+impl InterconnectStreamRequest for FetchStateCheckpoint {
+    const NAME: &'static str = "fetch_state_checkpoint";
+    const CLASS: PoolClass = PoolClass::Bulk;
+    const SUBQUOTA: RequestSubquota = RequestSubquota::Snapshot;
+    const TIMEOUT: Duration = Duration::from_secs(60);
+}
+
+#[cfg(all(test, not(any(feature = "shuttle", feature = "turmoil"))))]
+mod wire_properties {
+    use meticulous::ResultExt as _;
+    use nervix_execution::Executor;
+
+    use super::*;
+    use crate::request::RkyvMessage;
+
+    #[derive(Debug, bolero::TypeGenerator)]
+    struct CheckpointDescriptionCase {
+        lsm: u64,
+        length: u32,
+        digest: [u8; 32],
+        present: bool,
+    }
+
+    #[test]
+    fn bolero_checkpoint_descriptions_round_trip_through_the_replication_wire() {
+        let runtime = nervix_primitives::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .assured("the ordinary test runtime builds");
+        bolero::check!()
+            .with_iterations(256)
+            .with_max_len(64)
+            .with_type::<CheckpointDescriptionCase>()
+            .for_each(|case| {
+                runtime.block_on(async {
+                    let executor = Executor::default();
+                    let response = StateSyncResponse {
+                        result: Ok(case.present.then_some(StateSnapshotEnvelope {
+                            lsm: case.lsm,
+                            length: u64::from(case.length),
+                            digest: case.digest,
+                        })),
+                    };
+                    let class = StateSyncRequest::CLASS;
+                    let (encoded, _reservation) = response
+                        .clone()
+                        .encode_rkyv(executor.clone(), class, class.payload_limit(&executor))
+                        .await
+                        .assured("a bounded checkpoint description encodes");
+                    let (decoded, _reservation) =
+                        StateSyncResponse::decode_rkyv(executor, class, encoded)
+                            .await
+                            .assured("the encoded checkpoint description decodes");
+                    assert_eq!(decoded, response);
+                });
+            });
+    }
 }

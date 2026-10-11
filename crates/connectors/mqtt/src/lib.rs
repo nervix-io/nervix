@@ -713,6 +713,8 @@ impl RecordSink for MqttSink {
 
 #[cfg(test)]
 mod tests {
+    use meticulous::ResultExt as _;
+
     use super::*;
     use crate::test_fixtures::DnsFixture;
 
@@ -911,6 +913,171 @@ mod tests {
             properties: None,
         });
         assert_eq!(limit.declared(), None);
+    }
+
+    /// The characters a generated topic is drawn from: every character a topic name holds.
+    const TOPIC_CHARACTERS: &[u8] = b"abcdefghijklmnopqrstuvwxyz0123456789-_~.";
+
+    /// The Remaining Lengths at which its variable byte integer grows by one byte.
+    const REMAINING_LENGTH_WIDTHS: [usize; 3] = [128, 16_384, 2_097_152];
+
+    /// A generated payload length: small, beside a Remaining Length width boundary, or beside the
+    /// largest Remaining Length the protocol expresses.
+    #[derive(Debug, bolero::TypeGenerator)]
+    enum PayloadLength {
+        Small(u16),
+        NearWidth { width: u8, offset: i8 },
+        NearProtocolLimit(i16),
+    }
+
+    /// A generated PUBLISH: its topic, quality of service, payload length, and the Maximum Packet
+    /// Size the broker's latest CONNACK declared.
+    #[derive(Debug, bolero::TypeGenerator)]
+    struct PublishCase {
+        #[generator(bolero::generator::produce_with::<Vec<u8>>().len(1_usize..=128))]
+        topic: Vec<u8>,
+        qos: u8,
+        payload: PayloadLength,
+        broker_maximum: Option<u32>,
+    }
+
+    impl PublishCase {
+        fn topic(&self) -> String {
+            let mut topic = String::with_capacity(self.topic.len());
+            for byte in &self.topic {
+                let index = usize::from(*byte) % TOPIC_CHARACTERS.len();
+                topic.push(char::from(TOPIC_CHARACTERS[index]));
+            }
+            topic
+        }
+
+        fn mode(&self) -> (MqttPublishingMode, rumqttc::QoS) {
+            match self.qos % 3 {
+                0 => (MqttPublishingMode::Qos0, rumqttc::QoS::AtMostOnce),
+                1 => (
+                    MqttPublishingMode::Qos1(confirmed()),
+                    rumqttc::QoS::AtLeastOnce,
+                ),
+                _ => (
+                    MqttPublishingMode::Qos2(confirmed()),
+                    rumqttc::QoS::ExactlyOnce,
+                ),
+            }
+        }
+
+        /// The payload length, placed relative to the Remaining Length that `header` bytes of
+        /// variable header leave for it.
+        fn payload_bytes(&self, header: usize) -> usize {
+            let (target, offset) = match self.payload {
+                PayloadLength::Small(bytes) => return usize::from(bytes),
+                PayloadLength::NearWidth { width, offset } => {
+                    let boundary = REMAINING_LENGTH_WIDTHS[usize::from(width) % 3];
+                    (boundary, i64::from(offset))
+                }
+                PayloadLength::NearProtocolLimit(offset) => {
+                    (MQTT_MAX_REMAINING_LENGTH, i64::from(offset))
+                }
+            };
+            let target = i64::try_from(target).assured("the protocol's lengths fit i64");
+            let header = i64::try_from(header).assured("a header of a short topic fits i64");
+            let payload = (target - header + offset).max(0);
+            usize::try_from(payload).assured("the payload length is not negative")
+        }
+    }
+
+    /// The bytes of a variable byte integer holding `value`: seven value bits a byte.
+    fn variable_integer_bytes(value: usize) -> usize {
+        let mut bytes = 1;
+        let mut rest = value >> 7;
+        while rest > 0 {
+            bytes += 1;
+            rest >>= 7;
+        }
+        bytes
+    }
+
+    /// The size a sink measures a PUBLISH at is the length of the packet the client writes for it:
+    /// the fixed header, a Remaining Length of the variable header and payload, the topic, the
+    /// packet identifier QoS 1 and 2 carry, the property length and the payload, across every
+    /// Remaining Length width. A payload past the largest Remaining Length has no packet, and the
+    /// broker's latest declared maximum admits exactly the packets at most that size.
+    #[test]
+    fn bolero_measured_packets_are_the_bytes_the_client_writes() {
+        bolero::check!()
+            .with_iterations(256)
+            .with_max_len(512)
+            .with_type::<PublishCase>()
+            .for_each(|case| {
+                let name = case.topic();
+                let (mode, qos) = case.mode();
+                let framing = MqttPublishFraming::new(&topic(&name), mode);
+                let identifier = if qos == rumqttc::QoS::AtMostOnce {
+                    0
+                } else {
+                    2
+                };
+                let header = 2 + name.len() + identifier + 1;
+                assert_eq!(framing.variable_header_bytes, header);
+                let payload_bytes = case.payload_bytes(header);
+                let remaining = header + payload_bytes;
+                let measured = framing.packet_bytes(payload_bytes);
+                if remaining > MQTT_MAX_REMAINING_LENGTH {
+                    let Err(error) = measured else {
+                        panic!("a remaining length of {remaining} bytes has no packet");
+                    };
+                    assert_eq!(
+                        error.current_context(),
+                        &MqttRecordError::BeyondProtocol { payload_bytes }
+                    );
+                    return;
+                }
+                let Ok(packet_bytes) = measured else {
+                    panic!("a remaining length of {remaining} bytes is a packet");
+                };
+                assert_eq!(
+                    packet_bytes,
+                    1 + variable_integer_bytes(remaining) + remaining
+                );
+                if payload_bytes <= 2_200_000 {
+                    let mut publish =
+                        rumqttc::Publish::new(name.as_str(), qos, vec![0_u8; payload_bytes], None);
+                    if qos != rumqttc::QoS::AtMostOnce {
+                        publish.pkid = 1;
+                    }
+                    let mut written = bytes::BytesMut::new();
+                    let length = publish
+                        .write(&mut written)
+                        .assured("the client writes every packet within the protocol's length");
+                    assert_eq!(written.len(), length);
+                    assert_eq!(packet_bytes, written.len(), "{payload_bytes}-byte payload");
+                }
+
+                let limit = MqttBrokerPacketLimit::default();
+                limit.declare(&connack(case.broker_maximum));
+                let maximum = match case.broker_maximum {
+                    Some(maximum) => NonZeroU32::new(maximum),
+                    None => None,
+                };
+                let admitted = limit.admit(packet_bytes);
+                match maximum {
+                    Some(maximum)
+                        if packet_bytes
+                            > usize::try_from(maximum.get()).assured("u32 fits usize") =>
+                    {
+                        let Err(refused) = admitted else {
+                            panic!("a {packet_bytes}-byte packet passed a {maximum}-byte maximum");
+                        };
+                        assert_eq!(
+                            refused.current_context(),
+                            &MqttRecordError::PacketTooLarge {
+                                packet_bytes,
+                                maximum,
+                            }
+                        );
+                    }
+                    Some(_) | None => assert!(admitted.is_ok()),
+                }
+            });
     }
 
     /// A host that ignores what the sink reports, for tests that only read its publish outcomes.

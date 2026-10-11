@@ -128,6 +128,27 @@ own Cucumber, Shuttle, Loom, Turmoil and external Chaos evidence.
 | `typed-report` | `nervix-lint-report` complete compiler-report serialization equality | bounded current findings, spans, expansions and completion metadata, v1 | 256 | 32 bytes |
 | `typed-source-contract` | `nervix-lint-report` complete source-contract parsing equality | bounded current execution-contract annotations, v1 | 256 | 32 bytes |
 | `typed-site-union` | `nervix-lint-report` authored-site deduplication preserves every configuration | repeated ordinary/modeled findings over bounded current sites, v1 | 256 | 32 bytes |
+| `expiry-map-operations` | `nervix-expiry-map` operation sequences against an `IndexMap` reference: iteration order, lengths, oldest entry, lookups, shared key allocations and one drop per value | up to 480 weighted insert, shared insert, keyed and oldest removal, lookup, shared-key copy and clear steps over 96 keys, v1 | 256 | 1024 bytes |
+| `vm-decimal-rounding-floats` | `nervix-vm` `round(value, digits)` over `F64` and `F32` columns against the exact decimal expansion, the identity on values holding no more digits, symmetry about zero and lane null and failure classification | any bit pattern, values rounded within their own digits, decimal-looking values and exact binary ties, counts near, within and beyond the bound, v1 | 256 | 1024 bytes |
+| `vm-decimal-rounding-integers` | `nervix-vm` integer rounding against a 128-bit reference, overflow failures, lane nulls and digit columns of every integer type clamped to the bound | every integer width, values anywhere and beside both limits, counts near, within and beyond the bound, v1 | 256 | 1024 bytes |
+| `approx-into-rounding` | `nervix-approx-into` integer-to-float and `F64`-to-`F32` rounding against a bit-level IEEE 754 reference, and float-to-integer truncation against an exact reference | 128-bit patterns read at every width, integers and floats beside powers of two, ties and the integer limits, any `F64` and `F32`, v1 | 256 | 64 bytes |
+| `approx-into-exact` | `nervix-approx-into` lossless round trips on the exact domain | integers whose significant bits fit each float's significand, every non-NaN `F32` through `F64`, v1 | 256 | 32 bytes |
+| `simd-json-escapes` | `nervix-simd-kernels` JSON escape block masks and row bits at every level against the scalar class, and the first offset defect | sparse and dense buffers up to 1,100 bytes, ascending offsets not starting at zero, empty, negative, out-of-buffer and descending offsets, v1 | 256 | 4096 bytes |
+| `simd-paced-admission` | `nervix-simd-kernels` packed admission bits at every level against the scalar definition | reached centers anywhere and at the timeline's ends, every period reduction, skews to beyond half a period, timestamps beside edge and interior centers, v1 | 256 | 2048 bytes |
+| `simd-elapsed-histograms` | `nervix-simd-kernels` layout refusals against an integer reference, and latest instant, totals and buckets at every level against HdrHistogram | units from a nanosecond to any 32-bit count, highest units to 2^31, up to six figures, instants before, beside half units and after the reference, v1 | 256 | 4096 bytes |
+| `simd-flag-packing` | `nervix-simd-kernels` packed flag words at every level against scalar shifts, appended to held words | runs of up to 600 flag bytes of any density, v1 | 256 | 2048 bytes |
+| `simd-window-runs` | `nervix-simd-kernels` validity, boolean, sum, extreme, non-finite and reverse folds against scalar folds at every level; compensated sums exact for integers and within their bound of an exact sum for floats | up to 300 values read at every width and as floats, unaligned validity and boolean bitmaps, v1 | 256 | 4096 bytes |
+| `columnar-json-rows` | `nervix-columnar-json` written rows against an independent rendering of their logical values and the first refused null | every supported scalar, list, fixed-size and nested list column, sliced, every null policy and number and bytes encoding, v1 | 256 | 8192 bytes |
+| `bounded-write-limits` | `nervix-bounded-write` whole writes within the limit, capacity within it, and the outcome classification against a reference of the rule | writes, encoder failures and writing on after a refusal under limits of 1 to 1,021 bytes, v1 | 256 | 1024 bytes |
+| `connector-row-request-division` | `nervix-connector` row request division against the documented halving rule, both limits and the measurement bound | declared and native row and byte limits, up to 160 rows, measures that grow and shrink with a candidate, v1 | 256 | 1024 bytes |
+| `emitter-batch-subdivision` | `nervix-server` batch candidates against the documented rule, message limit, compatibility and encoding bound | up to 96 members in three compatibility classes, failing containers, encodings that grow and shrink, v1 | 256 | 1024 bytes |
+| `emitter-batch-packing` | `nervix-server` packed payloads and rejected rows against the documented packing of exact member encodings and container framing | generated schemaful codecs and rows in carriers across two relays, three branches, three envelopes and seals, `MAX SIZE` from below one member's container to above the whole run's, v1 | 256 | 4096 bytes |
+| `codec-bounded-encodings` | `nervix-server` bounded row, member and container encodings against the unbounded bytes, and container framing | generated schemaful codecs and batches under limits short of, at, past and around each encoding, and containers of 24, 64 and 256 repeated members where a count's encoding grows, v1 | 256 | 4096 bytes |
+| `emitter-row-preparations` | `nervix-server` row request preparations kept unchanged or refused with the first violation | preparations of up to 12 selected rows spoiled by repeated, swapped, dropped, foreign and refused members and empty requests, v1 | 256 | 256 bytes |
+| `emitter-retained-payloads` | `nervix-server` retained payloads written unchanged in packing order and answered member by member | packing and write steps with delivered, rejected and unanswered records and failed writes over three buffered batches, v1 | 256 | 512 bytes |
+| `sqs-batch-requests` | `nervix-connector-sqs` measured record sizes, refusals above 256 KiB, and batch requests within every limit, ended only by a limit | small and near-limit bodies of one- to four-byte characters, attributes and FIFO groups, v1 | 256 | 1024 bytes |
+| `mqtt-publish-packets` | `nervix-connector-mqtt` measured PUBLISH sizes against the packet the client writes, the protocol's largest packet and the broker maximum | topics up to 128 bytes, every quality of service, payloads beside every Remaining Length width and the protocol limit, v1 | 256 | 512 bytes |
+| `postgres-insert-measures` | `nervix-connector-postgres` measured inserts against the statement and the arrays the driver encodes, and the Bind message bound | up to four text columns of up to eight rows with NULLs, quotes and multi-byte characters, every run of rows, v1 | 256 | 1024 bytes |
 
 Each target declares its Cargo manifest. Product targets use the root workspace; the synchronization
 properties use `tools/nervix-lint/Cargo.toml`. The shared runner discovers declared tooling workspaces
@@ -269,6 +290,43 @@ recorded boundary, not a claim:
   with `float_roundtrip`, which reads a decimal as the float nearest to it; its default reader is
   best-effort and lands one unit in the last place away for a tenth to a quarter of the decimals
   that computed floats print as.
+
+## Behavioral Properties
+
+Registered properties also hold behavioral contracts against independent references:
+
+- **Operation sequences.** `expiry-map-operations` drives the expiry map with weighted operation
+  sequences against an `IndexMap` model and a ledger that counts every stored value's drops. Miri
+  runs the same property through `just test-expiry-map-miri`, which lifts Miri's isolation so
+  Bolero reads its checked-in corpus, with four random cases of at most 512 input bytes; every step
+  still runs and checks its own answer, and the complete state is compared every sixteenth step and
+  at the end. Mutation testing runs the property in every mutant through
+  `just test-expiry-map-mutants`.
+- **Numeric references.** The decimal rounding kernels are compared with the exact decimal
+  expansion of each value and with a 128-bit integer reference. That a value holding no more
+  fractional digits than the count is its own rounding is checked apart from the rounded results.
+  `approx-into-exact` holds the lossless round trips, and `approx-into-rounding` compares every
+  rounding and truncating conversion with a bit-level IEEE 754 reference: round to nearest, ties to
+  even, and an infinity past the largest finite value, so `u128::MAX` narrows to an `F32` infinity.
+- **Kernel differentials.** SIMD targets compare every level the host supports, the baseline and
+  the forced scalar fallback with a complete scalar oracle, tails, offsets and unused bits included.
+  A compensated float sum is checked against an exact sum of Shewchuk partials within the bound of
+  compensated summation, because the window contract promises no bit equality across run partitions.
+- **JSON rendering.** `columnar-json-rows` renders generated logical values on its own: strings
+  through `serde_json`, bytes through a reference base64 encoder or octet escaping, and instants as
+  RFC 3339. A float must be a JSON number of at most its type's significant digits that reads back
+  to its exact bits; its exponent's spelling is the writer's, which writes `1e172` where `serde_json`
+  writes `1e+172`.
+- **Encoded sizes.** The bounded writer, codec row and container encodings, emitter subdivision and
+  packing, row request division, row preparations, retained retry payloads, SQS records and batch
+  requests, MQTT PUBLISH packets and Postgres inserts are checked against the final bytes, framing,
+  headers and escaping included where the size contract includes them. Generated measures grow and
+  shrink with a candidate, so no property assumes that a larger candidate encodes larger.
+
+Lifecycle, acknowledgement and cancellation races keep their production-owner Shuttle checks.
+Kafka, NATS and Pulsar enforce their size limits inside their client libraries, and the MySQL,
+MongoDB, ClickHouse and OTEL measures share the division rule while their own measurements keep
+example tests.
 
 ## Commands And Enforcement
 

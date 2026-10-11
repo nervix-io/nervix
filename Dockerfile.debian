@@ -9,6 +9,11 @@ ARG FLATBUFFERS_SHA256=f81c3162b1046fe8b84b9a0dbdd383e24fdbcf88583b9cb6028f90d04
 
 ARG SONIC_PARALLELISM=2
 ARG SONIC_TARGET_CPUS=x86-64-v3
+# Empty builds the release artifacts. A Deloxide selection, deloxide, deloxide-order or
+# deloxide-stress, builds the artifacts of the diagnostic image instead, which only the diagnostic
+# target packages: the release targets copy from /artifacts/release and the diagnostic target from
+# /artifacts/diagnostic, so a build of either kind cannot produce an image of the other.
+ARG NERVIX_DIAGNOSTIC_SELECTION=
 
 FROM --platform=$BUILDPLATFORM ${DEBIAN_IMAGE} AS builder
 
@@ -23,6 +28,7 @@ ARG FLATBUFFERS_VERSION
 ARG FLATBUFFERS_SHA256
 ARG SONIC_PARALLELISM
 ARG SONIC_TARGET_CPUS
+ARG NERVIX_DIAGNOSTIC_SELECTION
 ARG KACHE_S3_BUCKET
 ARG KACHE_S3_REGION
 ARG KACHE_S3_ENDPOINT
@@ -130,7 +136,7 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
     && export KACHE_CONFIG=/tmp/kache.toml \
     && bash scripts/configure_kache_remote.sh "${KACHE_CONFIG}" \
     && export KACHE_DAEMON_IDLE_TIMEOUT=0 \
-    && export KACHE_MANIFEST_KEY="docker-${TARGETARCH}" \
+    && export KACHE_MANIFEST_KEY="docker-${TARGETARCH}${NERVIX_DIAGNOSTIC_SELECTION:+-${NERVIX_DIAGNOSTIC_SELECTION}}" \
     && export KACHE_NAMESPACE="${KACHE_MANIFEST_KEY}" \
     && kache daemon start \
     && trap 'build_status=$?; python3 scripts/publish_kache_report.py /tmp/kache-report || true; kache stats || true; kache daemon stop >/dev/null 2>&1 || true; exit "${build_status}"' EXIT \
@@ -173,16 +179,30 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
     && cd crates/web-console \
     && RUSTFLAGS="-D warnings" trunk build --release \
     && cd /app \
-    && cargo sonic --target-cpus="${SONIC_TARGET_CPUS}" --parallelism="${SONIC_PARALLELISM}" --loader bundle --auditable build --release --target "${RUST_TARGET}" --package nervix-server --bin nervix-server \
-    && cargo auditable build --release --target "${RUST_TARGET}" --package nervix-cli \
-    && cargo auditable build --release --target "${RUST_TARGET}" --package nervix-nspl-format \
+    && case "${NERVIX_DIAGNOSTIC_SELECTION}" in \
+    "") \
+      cargo sonic --target-cpus="${SONIC_TARGET_CPUS}" --parallelism="${SONIC_PARALLELISM}" --loader bundle --auditable build --release --target "${RUST_TARGET}" --package nervix-server --bin nervix-server \
+      && cargo auditable build --release --target "${RUST_TARGET}" --package nervix-cli \
+      && cargo auditable build --release --target "${RUST_TARGET}" --package nervix-nspl-format \
+      && mkdir -p /artifacts/release \
+      && cp "/app/target/sonic/${RUST_TARGET}/release/nervix-server" /artifacts/release/nervix-server \
+      && cp -R "/app/target/sonic/${RUST_TARGET}/release/nervix-server.bundle" /artifacts/release/nervix-server.bundle \
+      && cp "/app/target/${RUST_TARGET}/release/nervix-cli" /artifacts/release/nervix-cli \
+      && cp "/app/target/${RUST_TARGET}/release/nervix-nspl-format" /artifacts/release/nervix-nspl-format;; \
+    deloxide | deloxide-order | deloxide-stress) \
+      cargo auditable build --release --target "${RUST_TARGET}" --package nervix-server --bin nervix-server --features "${NERVIX_DIAGNOSTIC_SELECTION}" \
+      && cargo auditable build --release --target "${RUST_TARGET}" --package nervix-cli \
+      && cargo auditable build --release --target "${RUST_TARGET}" --package nervix-nspl-format \
+      && cargo auditable build --release --target "${RUST_TARGET}" --package nervix-deadlock --features report-tool --bin nervix-deadlock-report \
+      && mkdir -p /artifacts/diagnostic \
+      && cp "/app/target/${RUST_TARGET}/release/nervix-server" /artifacts/diagnostic/nervix-server \
+      && cp "/app/target/${RUST_TARGET}/release/nervix-cli" /artifacts/diagnostic/nervix-cli \
+      && cp "/app/target/${RUST_TARGET}/release/nervix-nspl-format" /artifacts/diagnostic/nervix-nspl-format \
+      && cp "/app/target/${RUST_TARGET}/release/nervix-deadlock-report" /artifacts/diagnostic/nervix-deadlock-report;; \
+    *) echo "unknown NERVIX_DIAGNOSTIC_SELECTION=${NERVIX_DIAGNOSTIC_SELECTION}" >&2; exit 1 ;; \
+    esac \
     && kache save-manifest --manifest-key "${KACHE_MANIFEST_KEY}" --namespace "${KACHE_NAMESPACE}" \
-    && kache sync --push \
-    && mkdir -p /artifacts \
-    && cp "/app/target/sonic/${RUST_TARGET}/release/nervix-server" /artifacts/nervix-server \
-    && cp -R "/app/target/sonic/${RUST_TARGET}/release/nervix-server.bundle" /artifacts/nervix-server.bundle \
-    && cp "/app/target/${RUST_TARGET}/release/nervix-cli" /artifacts/nervix-cli \
-    && cp "/app/target/${RUST_TARGET}/release/nervix-nspl-format" /artifacts/nervix-nspl-format
+    && kache sync --push
 
 FROM --platform=$BUILDPLATFORM ${DEBIAN_IMAGE} AS onnxruntime-base
 
@@ -328,10 +348,29 @@ RUN ldconfig
 # cuda builds Nervix above the reusable CUDA/cuDNN base.
 FROM runtime-cuda AS cuda
 
-COPY --link --from=builder /artifacts/nervix-server /usr/local/bin/nervix-server
-COPY --link --from=builder /artifacts/nervix-server.bundle /usr/local/bin/nervix-server.bundle
-COPY --link --from=builder /artifacts/nervix-cli /usr/local/bin/nervix-cli
-COPY --link --from=builder /artifacts/nervix-nspl-format /usr/local/bin/nervix-nspl-format
+COPY --link --from=builder /artifacts/release/nervix-server /usr/local/bin/nervix-server
+COPY --link --from=builder /artifacts/release/nervix-server.bundle /usr/local/bin/nervix-server.bundle
+COPY --link --from=builder /artifacts/release/nervix-cli /usr/local/bin/nervix-cli
+COPY --link --from=builder /artifacts/release/nervix-nspl-format /usr/local/bin/nervix-nspl-format
+
+USER nervix:nervix
+
+CMD ["/usr/local/bin/nervix-server"]
+
+# diagnostic packages the Deloxide diagnostic server, never a release: a test artifact of the
+# selection NERVIX_DIAGNOSTIC_SELECTION names, which its label declares, with the ordinary CLI and
+# formatter and the evidence report tool beside it. The chaos runner reads the label and judges
+# the deadlock evidence every node records.
+FROM runtime-cpu AS diagnostic
+
+ARG NERVIX_DIAGNOSTIC_SELECTION
+
+LABEL io.nervix.diagnostic.selection="${NERVIX_DIAGNOSTIC_SELECTION}"
+
+COPY --link --from=builder /artifacts/diagnostic/nervix-server /usr/local/bin/nervix-server
+COPY --link --from=builder /artifacts/diagnostic/nervix-cli /usr/local/bin/nervix-cli
+COPY --link --from=builder /artifacts/diagnostic/nervix-nspl-format /usr/local/bin/nervix-nspl-format
+COPY --link --from=builder /artifacts/diagnostic/nervix-deadlock-report /usr/local/bin/nervix-deadlock-report
 
 USER nervix:nervix
 
@@ -340,10 +379,10 @@ CMD ["/usr/local/bin/nervix-server"]
 # cpu builds Nervix on Debian and is the default target.
 FROM runtime-cpu AS cpu
 
-COPY --link --from=builder /artifacts/nervix-server /usr/local/bin/nervix-server
-COPY --link --from=builder /artifacts/nervix-server.bundle /usr/local/bin/nervix-server.bundle
-COPY --link --from=builder /artifacts/nervix-cli /usr/local/bin/nervix-cli
-COPY --link --from=builder /artifacts/nervix-nspl-format /usr/local/bin/nervix-nspl-format
+COPY --link --from=builder /artifacts/release/nervix-server /usr/local/bin/nervix-server
+COPY --link --from=builder /artifacts/release/nervix-server.bundle /usr/local/bin/nervix-server.bundle
+COPY --link --from=builder /artifacts/release/nervix-cli /usr/local/bin/nervix-cli
+COPY --link --from=builder /artifacts/release/nervix-nspl-format /usr/local/bin/nervix-nspl-format
 
 USER nervix:nervix
 

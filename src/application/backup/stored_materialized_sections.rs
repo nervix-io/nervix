@@ -17,7 +17,7 @@ use nervix_interconnect::{RemoteOperationFailure, RuntimeState};
 use nervix_models::{DomainName, DomainSchedule, NodeRef};
 
 use super::{
-    CaptureSectionKey,
+    CaptureSectionKey, CapturedSection,
     interconnect::{CaptureDomainStateRequest, failed},
 };
 use crate::{
@@ -31,8 +31,7 @@ impl SessionServiceImpl {
         captured: Vec<CapturedStoredMaterializedRelay>,
         schedule: Option<&DomainSchedule>,
         request: &CaptureDomainStateRequest,
-    ) -> Result<Vec<(CaptureSectionKey, SectionContent, StagedArtifact)>, RemoteOperationFailure>
-    {
+    ) -> Result<Vec<CapturedSection>, RemoteOperationFailure> {
         let mut staged = Vec::new();
         let executor = self.inner.runtime.executor();
         for captured in captured {
@@ -77,14 +76,14 @@ impl SessionServiceImpl {
                 .encode()
                 .map_err(|error| failed(&request.domain, &error.to_string()))?;
             let artifact = self.stage_captured_section(bytes, &request.domain).await?;
-            staged.push((
-                key(SectionPath::materialized_descriptor(
+            staged.push(CapturedSection {
+                key: key(SectionPath::materialized_descriptor(
                     &request.domain,
                     &placement.identifier,
                 )),
-                SectionContent::Record(MaterializedRelayDescriptor::KIND),
+                content: SectionContent::Record(MaterializedRelayDescriptor::KIND),
                 artifact,
-            ));
+            });
             let mut index = 0;
             while let Some(group) = reader
                 .next_group(
@@ -136,27 +135,27 @@ impl SessionServiceImpl {
                 let artifact = self
                     .stage_materialized_section(bytes, &request.domain)
                     .await?;
-                staged.push((
-                    key(SectionPath::materialized_identities(
+                staged.push(CapturedSection {
+                    key: key(SectionPath::materialized_identities(
                         &request.domain,
                         &placement.identifier,
                         index,
                     )),
-                    SectionContent::Record(MaterializedIdentitiesRecord::KIND),
+                    content: SectionContent::Record(MaterializedIdentitiesRecord::KIND),
                     artifact,
-                ));
+                });
                 let artifact = self
                     .stage_materialized_section(group.columns, &request.domain)
                     .await?;
-                staged.push((
-                    key(SectionPath::materialized_columns(
+                staged.push(CapturedSection {
+                    key: key(SectionPath::materialized_columns(
                         &request.domain,
                         &placement.identifier,
                         index,
                     )),
-                    SectionContent::MaterializedColumns,
+                    content: SectionContent::MaterializedColumns,
                     artifact,
-                ));
+                });
                 index += 1;
             }
         }

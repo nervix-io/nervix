@@ -1,0 +1,38 @@
+# Added to a run's deployment when its Nervix image declares a Deloxide diagnostic selection. Every
+# node records its deadlock evidence in a directory of the run's own, which outlives the node's
+# container and volume, so the controller qualifies the evidence of every process each node started
+# before it removes anything. The runner creates each directory, writable by the image's user,
+# before the first node starts.
+x-deadlock-environment: &deadlock-environment
+  NERVIX_DEADLOCK_EVIDENCE: /var/lib/nervix-deadlock
+
+services:
+  nervix-1:
+    environment:
+      <<: *deadlock-environment
+    volumes:
+      - type: bind
+        source: ${CHAOS_DEADLOCK_DIR:?CHAOS_DEADLOCK_DIR is required}/node-1
+        target: /var/lib/nervix-deadlock
+        bind:
+          create_host_path: false
+
+  nervix-2:
+    environment:
+      <<: *deadlock-environment
+    volumes:
+      - type: bind
+        source: ${CHAOS_DEADLOCK_DIR:?CHAOS_DEADLOCK_DIR is required}/node-2
+        target: /var/lib/nervix-deadlock
+        bind:
+          create_host_path: false
+
+  nervix-3:
+    environment:
+      <<: *deadlock-environment
+    volumes:
+      - type: bind
+        source: ${CHAOS_DEADLOCK_DIR:?CHAOS_DEADLOCK_DIR is required}/node-3
+        target: /var/lib/nervix-deadlock
+        bind:
+          create_host_path: false

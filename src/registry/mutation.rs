@@ -48,6 +48,13 @@ pub(crate) enum RegistryMutation<Version = u64> {
 
 #[derive(Debug, Error)]
 #[error("the statement is not a model mutation")]
+#[cfg_attr(
+    nervix_lint,
+    nervix::error_boundary(
+        outcome,
+        reason = "statement conversion returns the ordinary not-a-mutation outcome"
+    )
+)]
 pub(crate) struct RegistryMutationConversionError;
 
 impl TryFrom<&Statement> for RegistryMutation<RequestedResourceVersion> {

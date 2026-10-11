@@ -31,7 +31,7 @@ Feature: Materialized backup and archived lifecycle resumption
       | 1            |
       | 3            |
 
-  @restore_installation
+  @restore_installation @deloxide_stress_restore
   Scenario Outline: A resumed materialized cut preserves interleaved branches and generators through restart
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "10m"
     And the production sticky scheduler is configured
@@ -183,7 +183,7 @@ Feature: Materialized backup and archived lifecycle resumption
       | 1            | 0             |
       | 3            | 1             |
 
-  @restore_installation
+  @restore_installation @deloxide_stress_restore
   Scenario Outline: Materialized generations larger than the bulk budget resume on every assigned owner and replica
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "10m"
     And the production sticky scheduler is configured
@@ -264,7 +264,7 @@ Feature: Materialized backup and archived lifecycle resumption
       | cluster_size | replica_count | relays | row_kib | tenants |
       | 3            | 1             | 1      | 1024    | 40      |
 
-  @restore_installation
+  @restore_installation @deloxide_stress_restore
   Scenario Outline: A delayed coordinator cannot replace a resumed materialized generation larger than the bulk budget
     Given runtime replication is configured with replica count 1 and snapshot interval "10m"
     And the production sticky scheduler is configured
@@ -317,7 +317,7 @@ Feature: Materialized backup and archived lifecycle resumption
       | relays | row_kib | tenants |
       | 1      | 1024    | 40      |
 
-  @restore_installation
+  @restore_installation @deloxide_stress_restore
   Scenario Outline: A paced RESUME retains its mapping and admits TIMESTAMP AT in the projected window
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "10m"
     And the production sticky scheduler is configured

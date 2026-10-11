@@ -1739,9 +1739,10 @@ impl RuntimeStateStore {
                 self.lsm_index
                     .prefix(lsm_prefix)
                     .map(|item| {
-                        item.key()
-                            .map(|key| key.as_ref().to_vec())
-                            .map_err(|_| RuntimePersistenceError::ReadValue)
+                        let key = item
+                            .key()
+                            .change_context(RuntimePersistenceError::ReadValue)?;
+                        Ok::<_, Report<RuntimePersistenceError>>(key.as_ref().to_vec())
                     })
                     .collect::<Result<Vec<_>, _>>()?,
             );
@@ -1886,9 +1887,10 @@ impl RuntimeStateStore {
                 self.lsm_index
                     .prefix(lsm_prefix)
                     .map(|item| {
-                        item.key()
-                            .map(|key| key.as_ref().to_vec())
-                            .map_err(|_| RuntimePersistenceError::ReadValue)
+                        let key = item
+                            .key()
+                            .change_context(RuntimePersistenceError::ReadValue)?;
+                        Ok::<_, Report<RuntimePersistenceError>>(key.as_ref().to_vec())
                     })
                     .collect::<Result<Vec<_>, _>>()?,
             );
@@ -2085,9 +2087,10 @@ impl RuntimeStateStore {
                 self.lsm_index
                     .prefix(lsm_prefix)
                     .map(|item| {
-                        item.key()
-                            .map(|key| key.as_ref().to_vec())
-                            .map_err(|_| RuntimePersistenceError::ReadValue)
+                        let key = item
+                            .key()
+                            .change_context(RuntimePersistenceError::ReadValue)?;
+                        Ok::<_, Report<RuntimePersistenceError>>(key.as_ref().to_vec())
                     })
                     .collect::<Result<Vec<_>, _>>()?,
             );

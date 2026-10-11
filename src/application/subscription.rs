@@ -665,7 +665,7 @@ async fn select_subscription_rows(
                 Ok(record) => {
                     execute_subscription_predicate_on_record(executor, predicate, &record, now)
                         .await
-                        .map_err(|error| error.to_string())
+                        .map_err(|error| format!("{error:#}"))
                 }
                 Err(error) => Err(error.to_string()),
             };
@@ -995,7 +995,9 @@ impl SessionServiceImpl {
         while let Some((node_id, result)) = checks.next().await {
             nervix_primitives::task::consume_budget().await;
             if let Err(error) = result {
-                errors.insert(node_id.clone(), error);
+                errors.insert(node_id.clone(), error).discarded(
+                    "the latest check for this node supersedes its previous observation failure",
+                );
             }
         }
         let nodes = errors.keys().cloned().collect();

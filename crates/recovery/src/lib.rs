@@ -33,6 +33,17 @@ use tracing::debug;
 /// The reason is part of the call, exactly as it is for `meticulous`. Write the guarantee that
 /// makes the outcome uninteresting — where the failure is already recorded, or why the absent case
 /// is ordinary — and not a restatement of the operation being performed.
+///
+/// ```
+/// use nervix_recovery::Discarded as _;
+/// let outcome: Result<(), std::io::Error> = Ok(());
+/// outcome.discarded("the caller already recorded this attempt");
+/// ```
+///
+/// ```compile_fail
+/// use nervix_recovery::Discarded as _;
+/// 5_u32.discarded("the caller already recorded this attempt");
+/// ```
 pub trait Discarded {
     /// Drop this outcome because `because` says nothing is owed for it.
     fn discarded(self, because: &str);

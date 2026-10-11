@@ -105,9 +105,10 @@ async fn node_trace_resolution_waits_for_startup_and_retains_the_lookup_failure(
     };
     guard.install_dns(&fixture.resolver);
     match lookup.await {
-        Err(TraceConnectError::Connect(source)) => {
+        Err(failure) if matches!(failure.0.current_context(), TraceConnectError::Connect) => {
             let error =
-                DnsLookupError::find_in(&source).verified("Hyper retains its resolver error");
+                DnsLookupError::find_in(&failure).verified("Hyper retains its resolver error");
+            assert!(failure.0.contains::<<hyper_util::client::legacy::connect::HttpConnector<DnsResolver> as tower_service::Service<http::Uri>>::Error>());
             assert_eq!(error.failure(), DnsLookupFailure::NameNotFound);
             assert_eq!(error.name(), NAME);
         }
@@ -133,7 +134,14 @@ async fn startup_wait_retains_early_exports_and_closes_if_startup_ends() {
     nervix_primitives::time::advance(Duration::from_secs(60)).await;
     assert!(poll!(&mut lookup).is_pending());
     drop(guard);
-    assert!(matches!(lookup.await, Err(TraceConnectError::Unavailable)));
+    let failure = lookup
+        .await
+        .err()
+        .assured("startup ended before installing DNS");
+    assert!(matches!(
+        failure.0.current_context(),
+        TraceConnectError::Unavailable
+    ));
 }
 
 #[nervix_primitives::test]

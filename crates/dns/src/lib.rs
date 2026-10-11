@@ -36,8 +36,9 @@
 //! Reqwest 0.13 and 0.12, `hyper-util`'s `HttpConnector`, and Smithy's HTTP client. A hook cannot
 //! see the deadline of the request it resolves for, so its lookups get [`HOOK_LOOKUP_BUDGET`], and
 //! the library's own request or connection deadline cancels a lookup sooner. A failed lookup reaches
-//! the library as the resolver's [`DnsLookupError`], which the library keeps among the causes of its
-//! own connection error; [`DnsLookupError::find_in`] finds it there again.
+//! the library as a [`DnsLookupReport`], which keeps the lookup's whole report through the hook's
+//! standard-error bound; the library keeps it among the causes of its own connection error, and
+//! [`DnsLookupError::find_in`] finds the typed failure there again.
 
 use std::{
     fmt,
@@ -71,7 +72,7 @@ pub use configuration::{
     SYSTEM_RESOLVER_CONFIGURATION,
 };
 pub use dial::{AddressAttempt, ConnectionBudget};
-pub use lookup::{DnsLookupError, DnsLookupFailure};
+pub use lookup::{DnsLookupError, DnsLookupFailure, DnsLookupReport};
 
 use crate::{configuration::LoadedConfiguration, hosts::HostsTable};
 

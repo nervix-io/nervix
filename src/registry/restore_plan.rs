@@ -522,30 +522,29 @@ fn pin_model(
 ) -> Result<Model<u64>, Report<RestorePlanError>> {
     let kind = model.kind().keyword_phrase();
     let name = model.name();
-    let pin = |resource: &ResourceName, requested: RequestedResourceVersion| {
+    let pin = |resource: &ResourceName,
+               requested: RequestedResourceVersion|
+     -> Result<u64, Report<RestorePlanError>> {
         let RequestedResourceVersion::Number(version) = requested else {
-            return Err(RestorePlanError::ModelsNotPinned {
+            return Err(Report::new(RestorePlanError::ModelsNotPinned {
                 domain: domain.clone(),
                 kind,
                 model: name.clone(),
-            });
+            }));
         };
         let id = ResourceId::new(domain.clone(), resource.clone(), version);
         if !restored.contains(&id) {
-            return Err(RestorePlanError::UnrestoredBinding {
+            return Err(Report::new(RestorePlanError::UnrestoredBinding {
                 domain: domain.clone(),
                 kind,
                 model: name.clone(),
                 resource: resource.clone(),
                 version,
-            });
+            }));
         }
         Ok(version)
     };
-    match model.clone().try_map_resource_versions(pin) {
-        Ok(pinned) => Ok(pinned),
-        Err(error) => Err(Report::new(error)),
-    }
+    model.clone().try_map_resource_versions(pin)
 }
 
 #[cfg(test)]

@@ -33,7 +33,7 @@ impl Fixture {
         required(
             std::fs::write(
                 &resolver_configuration,
-                "options ndots:1 timeout:1 attempts:1\n",
+                "search --\noptions ndots:1 timeout:1 attempts:1\n",
             ),
             "the resolver configuration can be written",
         );

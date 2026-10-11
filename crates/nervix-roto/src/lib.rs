@@ -84,7 +84,7 @@ impl UdfProgram {
 
 #[derive(Debug, Error)]
 pub enum UdfError {
-    #[error("failed to initialize the ROTO_0_13 runtime: {source}")]
+    #[error("failed to initialize the ROTO_0_13 runtime")]
     RuntimeRegistration {
         #[source]
         source: RegistrationError,
@@ -1568,6 +1568,25 @@ mod tests {
             false,
             "fn add_one(value: I64Column) -> I64Column { value.add_s(1) }".to_string(),
         )
+    }
+
+    #[test]
+    fn a_failed_runtime_registration_names_its_cause_once() {
+        // Without the base library the column types are unregistered, so an impl block for one of
+        // them cannot register.
+        let unregistered = match Runtime::<NoCtx>::from_lib(bool_library()) {
+            Ok(_) => panic!("an impl block for an unregistered type must not register"),
+            Err(error) => error,
+        };
+        let cause = unregistered.to_string();
+        let report = Report::new(UdfError::RuntimeRegistration {
+            source: unregistered,
+        });
+
+        assert_eq!(
+            format!("{report:#}"),
+            format!("failed to initialize the ROTO_0_13 runtime: {cause}")
+        );
     }
 
     /// One declared argument of a test UDF, before its name is parsed into a `FieldName`.

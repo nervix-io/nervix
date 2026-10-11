@@ -39,6 +39,13 @@ const MAX_NAME_LEN: usize = 128;
 
 /// Why a string is not a name.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
+#[cfg_attr(
+    nervix_lint,
+    nervix::error_boundary(
+        outcome,
+        reason = "name construction returns pure alphabet and length validation refusals"
+    )
+)]
 pub enum NameError {
     #[error("name must not be empty")]
     Empty,

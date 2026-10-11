@@ -683,7 +683,10 @@ mod connection_tests;
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
+
     use aws_sdk_sqs::{error::ConnectorError, types::error::QueueDoesNotExist};
+    use meticulous::ResultExt as _;
 
     use super::*;
     use crate::connection_tests::Fixture;
@@ -986,6 +989,180 @@ mod tests {
             .collect::<Vec<_>>();
 
         assert_eq!(records, [vec![0, 1], vec![2, 3]]);
+    }
+
+    /// The attribute names a generated record draws from.
+    const ATTRIBUTE_NAMES: [&str; 5] = ["tenant", "trace-id", "a.b", "x_1", "Region"];
+
+    /// The FIFO message groups a generated record draws from.
+    const MESSAGE_GROUPS: [&str; 4] = ["orders", "b", "group-with-a-longer-name", "#1"];
+
+    /// What a generated body repeats: characters of one, two, three and four UTF-8 bytes, and the
+    /// whitespace XML admits.
+    const BODY_PIECES: [&str; 6] = ["x", "é", "日", "😀", "\t", "\n"];
+
+    /// A generated body length: small, or within a few bytes either side of what fills the
+    /// request limit beside the record's attributes and message group.
+    #[derive(Debug, bolero::TypeGenerator)]
+    enum BodyLength {
+        Small { pieces: u16, piece: u8 },
+        NearLimit(i16),
+    }
+
+    #[derive(Debug, bolero::TypeGenerator)]
+    struct GeneratedAttribute {
+        name: u8,
+        value_bytes: u8,
+    }
+
+    #[derive(Debug, bolero::TypeGenerator)]
+    struct GeneratedRecord {
+        body: BodyLength,
+        #[generator(bolero::generator::produce_with::<Vec<GeneratedAttribute>>().len(0_usize..=4))]
+        attributes: Vec<GeneratedAttribute>,
+        group: Option<u8>,
+    }
+
+    impl GeneratedRecord {
+        /// The record's attributes, each name once, the last value written for a name kept.
+        fn headers(&self) -> Vec<(String, String)> {
+            let mut values = BTreeMap::new();
+            for attribute in &self.attributes {
+                let name = ATTRIBUTE_NAMES[usize::from(attribute.name) % ATTRIBUTE_NAMES.len()];
+                let value = "v".repeat(usize::from(attribute.value_bytes % 64) + 1);
+                values.insert(name, value);
+            }
+            let mut headers = Vec::with_capacity(values.len());
+            for (name, value) in values {
+                headers.push((name.to_string(), value));
+            }
+            headers
+        }
+
+        fn group(&self) -> Option<String> {
+            self.group
+                .map(|group| MESSAGE_GROUPS[usize::from(group) % MESSAGE_GROUPS.len()].to_string())
+        }
+
+        /// The bytes SQS counts for everything but the body: each attribute's name, its `String`
+        /// data type and its value, and the message group.
+        fn envelope_bytes(&self) -> usize {
+            let mut bytes = 0;
+            for (name, value) in self.headers() {
+                bytes += name.len() + "String".len() + value.len();
+            }
+            if let Some(group) = self.group() {
+                bytes += group.len();
+            }
+            bytes
+        }
+
+        fn body(&self) -> String {
+            match self.body {
+                BodyLength::Small { pieces, piece } => {
+                    let piece = BODY_PIECES[usize::from(piece) % BODY_PIECES.len()];
+                    piece.repeat(usize::from(pieces % 2048))
+                }
+                BodyLength::NearLimit(offset) => {
+                    let target = i64::try_from(SQS_MAX_REQUEST_BYTES - self.envelope_bytes())
+                        .assured("the request limit fits i64");
+                    let length = (target + i64::from(offset % 64)).max(0);
+                    "x".repeat(usize::try_from(length).assured("the length is not negative"))
+                }
+            }
+        }
+
+        fn record(&self, index: usize) -> SinkRecord {
+            let mut record = record(index, self.body().into_bytes());
+            record.headers = self.headers();
+            if let Some(group) = self.group() {
+                record = record.with_message_group(group);
+            }
+            record
+        }
+    }
+
+    /// A record's measured size is its body, every attribute's name, data type and value, and its
+    /// message group, and a record above 256 KiB is refused with that size. Batch requests take the
+    /// accepted records in order, never more than ten, never more than 256 KiB together and never
+    /// two of one message group, and a request ends only where the next record would break one of
+    /// those limits.
+    #[test]
+    fn bolero_batch_requests_hold_their_records_within_every_sqs_limit() {
+        /// What one batch request held, which decides whether the request after it began early.
+        struct HeldRequest {
+            records: usize,
+            bytes: usize,
+            groups: HashSet<String>,
+        }
+
+        // Up to 24 records fill at least two batch requests while every case fits its input bytes.
+        let records = bolero::generator::produce_with::<Vec<GeneratedRecord>>().len(0_usize..=24);
+        bolero::check!()
+            .with_iterations(256)
+            .with_max_len(1024)
+            .with_generator(records)
+            .for_each(|generated| {
+                let mut accepted = Vec::new();
+                for (index, generated) in generated.iter().enumerate() {
+                    let size = generated.body().len() + generated.envelope_bytes();
+                    match PreparedSqsRecord::new(generated.record(index)) {
+                        Ok(prepared) => {
+                            assert!(
+                                size <= SQS_MAX_REQUEST_BYTES,
+                                "record {index} of {size} bytes"
+                            );
+                            assert_eq!(prepared.encoded_bytes, size, "record {index}");
+                            accepted.push(prepared);
+                        }
+                        Err(report) => {
+                            assert_eq!(
+                                report.current_context(),
+                                &SqsRecordError::RequestSize {
+                                    bytes: size,
+                                    maximum: SQS_MAX_REQUEST_BYTES,
+                                },
+                                "record {index}"
+                            );
+                        }
+                    }
+                }
+                let order = accepted
+                    .iter()
+                    .map(|record| record.record)
+                    .collect::<Vec<_>>();
+                let chunks = SqsSink::batch_chunks(accepted);
+                let mut chunked = Vec::new();
+                let mut previous: Option<HeldRequest> = None;
+                for chunk in &chunks {
+                    assert!(!chunk.is_empty() && chunk.len() <= SQS_MAX_BATCH_ENTRIES);
+                    let mut held = HeldRequest {
+                        records: chunk.len(),
+                        bytes: 0,
+                        groups: HashSet::new(),
+                    };
+                    for record in chunk {
+                        held.bytes += record.encoded_bytes;
+                        if let Some(group) = &record.group_id {
+                            assert!(held.groups.insert(group.clone()), "two records of {group}");
+                        }
+                        chunked.push(record.record);
+                    }
+                    assert!(held.bytes <= SQS_MAX_REQUEST_BYTES);
+                    if let Some(previous) = &previous {
+                        let next = &chunk[0];
+                        let full = previous.records == SQS_MAX_BATCH_ENTRIES;
+                        let too_large = previous.bytes + next.encoded_bytes > SQS_MAX_REQUEST_BYTES;
+                        let repeats = match &next.group_id {
+                            Some(group) => previous.groups.contains(group),
+                            None => false,
+                        };
+                        assert!(full || too_large || repeats, "a request ended early");
+                    }
+                    previous = Some(held);
+                }
+                assert_eq!(chunked, order);
+            });
     }
 
     fn delivered_entry(id: &str) -> aws_sdk_sqs::types::SendMessageBatchResultEntry {

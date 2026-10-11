@@ -10,7 +10,7 @@
 use error_stack::ResultExt as _;
 use nervix_interconnect::{
     BranchCheckpointListingRequest, BranchCheckpointListingResponse, DescribeKafkaOffsets,
-    RemoteOperationFailure, RemoteOperationSubject, StateSnapshotEnvelope, StateSyncRequest,
+    FetchStateCheckpoint, RemoteOperationFailure, RemoteOperationSubject, StateSyncRequest,
     StateSyncResponse, SyncKafkaOffsets,
 };
 
@@ -36,6 +36,15 @@ impl SessionServiceImpl {
             .register_stream_handler::<SyncKafkaOffsets, _, _>(move |_context, request| {
                 let service = kafka_offsets_service.clone();
                 async move { service.inner.runtime.stream_kafka_offsets(request).await }
+            })
+            .change_context(AppError::RegisterInterconnectRequestHandler)?;
+
+        let checkpoint_service = self.clone();
+        self.inner
+            .interconnect
+            .register_stream_handler::<FetchStateCheckpoint, _, _>(move |_context, request| {
+                let service = checkpoint_service.clone();
+                async move { service.inner.runtime.stream_state_checkpoint(request).await }
             })
             .change_context(AppError::RegisterInterconnectRequestHandler)?;
 
@@ -70,15 +79,20 @@ impl SessionServiceImpl {
                         .inner
                         .runtime
                         .answer_state_sync_request(admitted, request.after_lsm)
-                        .await
-                        .map_err(|error| error.current_context().as_remote_failure(subject));
+                        .await;
+                    let described = match snapshot {
+                        Ok(Some(snapshot)) => service
+                            .inner
+                            .runtime
+                            .describe_state_checkpoint(&placement, snapshot)
+                            .await
+                            .map(Some),
+                        Ok(None) => Ok(None),
+                        Err(error) => Err(error),
+                    };
                     StateSyncResponse {
-                        result: snapshot.map(|snapshot| {
-                            snapshot.map(|snapshot| StateSnapshotEnvelope {
-                                lsm: snapshot.lsm,
-                                payload: snapshot.payload,
-                            })
-                        }),
+                        result: described
+                            .map_err(|error| error.current_context().as_remote_failure(subject)),
                     }
                 }
             })

@@ -118,7 +118,7 @@ pub enum ProtocolError {
     InvalidIdentifier,
     #[error("WASM size-prefixed FlatBuffer declares {declared} bytes but received {actual}")]
     LengthMismatch { declared: usize, actual: usize },
-    #[error("WASM FlatBuffer failed verification: {0}")]
+    #[error("WASM FlatBuffer failed verification")]
     InvalidFlatbuffer(#[source] flatbuffers::InvalidFlatbuffer),
     #[error("expected WASM {expected} payload, found {actual}")]
     UnexpectedPayload {
@@ -942,6 +942,24 @@ mod tests {
                 reason: "invalid".to_string(),
             }],
         }
+    }
+
+    #[test]
+    fn a_frame_that_fails_verification_names_the_verifier_error_once() {
+        // A size prefix and identifier that pass, around a root offset outside the buffer.
+        let mut bytes = 8_u32.to_le_bytes().to_vec();
+        bytes.extend_from_slice(&0xFFFF_u32.to_le_bytes());
+        bytes.extend_from_slice(FILE_IDENTIFIER.as_bytes());
+        let error = EnvelopeRef::decode(&bytes).expect_err("the root offset is outside the frame");
+        let ProtocolError::InvalidFlatbuffer(cause) = error.current_context() else {
+            panic!("the frame must fail verification: {error:?}");
+        };
+        let cause = cause.to_string();
+
+        assert_eq!(
+            format!("{error:#}"),
+            format!("WASM FlatBuffer failed verification: {cause}")
+        );
     }
 
     #[test]

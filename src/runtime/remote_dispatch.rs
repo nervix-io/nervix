@@ -19,7 +19,10 @@
 
 use error_stack::ResultExt as _;
 
-use super::*;
+use super::{
+    remote_ack_watch_charge::{RemoteAckWatchCharge, RemoteAckWatchHold},
+    *,
+};
 
 pub(super) const REMOTE_RELAY_INSTANTIATION_WAIT: Duration = Duration::from_secs(5);
 
@@ -157,6 +160,20 @@ pub(super) enum RelayAdmissionUpdate {
     Alive,
     Admitted,
     Rejected(String),
+}
+
+/// What a receiver holds for the acknowledgement watches of a batch delivered to it.
+enum RemoteAckWatchAdmission {
+    /// No row asks this node to report its acknowledgement, or this node has not joined a cluster
+    /// to report one to.
+    Unwatched,
+    /// The relay budget took the watches' charge, and `dispatcher` reports their outcomes.
+    Charged {
+        dispatcher: StdArc<RemoteDispatcher>,
+        charge: RemoteAckWatchCharge,
+    },
+    /// The delivery stopped being admissible while it was held for that charge.
+    Cancelled,
 }
 
 struct RemoteRelayAdmissionContext<'a> {
@@ -1022,6 +1039,24 @@ impl Runtime {
                 &remote.relay,
             )));
         }
+        // The watches are charged before the rows are decoded, so a delivery held for that charge
+        // holds its received body and grant, not a decoded batch beside them.
+        let watch_count = remote.acks.iter().flatten().count();
+        let cancelled = async {
+            match &admission {
+                Some(admission) => admission.transport.cancelled().await,
+                None => std::future::pending().await,
+            }
+        };
+        let watch_owner = match self.hold_remote_ack_watches(watch_count, cancelled).await {
+            Ok(RemoteAckWatchAdmission::Cancelled) => return Ok(()),
+            Ok(watch_owner) => watch_owner,
+            Err(report) => {
+                return Err(report.change_context(RuntimeError::RemoteAckAdmission {
+                    domain: remote.domain.clone(),
+                }));
+            }
+        };
         let decoded = match self.decode_remote_rows(&schema, &mut remote).await {
             Ok(decoded) => decoded,
             Err(report) => {
@@ -1031,13 +1066,6 @@ impl Runtime {
                 )));
             }
         };
-        let watch_count = remote.acks.iter().flatten().count();
-        let watcher_owner = self
-            .reserve_remote_ack_watcher_memory(watch_count)
-            .map_err(|report| RuntimeError::RemoteAckAdmission {
-                domain: remote.domain.clone(),
-                report,
-            })?;
         let mut watches = Vec::with_capacity(watch_count);
         let mut acks = Vec::with_capacity(remote.acks.len());
         for registration in remote.acks {
@@ -1057,8 +1085,8 @@ impl Runtime {
             });
             acks.push(record_acks);
         }
-        if let Some((dispatcher, memory)) = watcher_owner {
-            self.spawn_remote_ack_watchers(remote.domain.clone(), dispatcher, watches, memory);
+        if let RemoteAckWatchAdmission::Charged { dispatcher, charge } = watch_owner {
+            self.spawn_remote_ack_watchers(remote.domain.clone(), dispatcher, watches, charge);
         }
         let batch = RelayRecordBatch::from_runtime_batch(
             schema,
@@ -1256,34 +1284,39 @@ impl Runtime {
         }
     }
 
-    fn reserve_remote_ack_watcher_memory(
+    /// Charge the relay budget for the acknowledgement watches of `watches` delivered rows,
+    /// holding the delivery back while the budget has no room for them.
+    ///
+    /// The delivery is not admitted while it is held, so its sender keeps waiting for the
+    /// admission and the transport keeps reporting the delivery alive to it. The hold ends when
+    /// `cancelled` resolves.
+    async fn hold_remote_ack_watches(
         &self,
-        count: usize,
-    ) -> error_stack::Result<
-        Option<(StdArc<RemoteDispatcher>, nervix_execution::Reservation)>,
-        nervix_execution::AdmissionError,
-    > {
-        if count == 0 {
-            return Ok(None);
-        }
-        let Some(dispatcher) = self.inner.remote_dispatcher.load_full() else {
-            return Ok(None);
+        watches: usize,
+        cancelled: impl std::future::Future<Output = ()>,
+    ) -> error_stack::Result<RemoteAckWatchAdmission, nervix_execution::AdmissionError> {
+        let Some(watches) = NonZeroUsize::new(watches) else {
+            return Ok(RemoteAckWatchAdmission::Unwatched);
         };
-        // A row's poll future, queue node, ACK root, and registration fit within this charge.
-        // One batch owns one task and its scheduler allocation, even for a wide relay frame.
-        let bytes = count
-            .checked_mul(1024)
-            .and_then(|bytes| bytes.checked_add(4096))
-            .assured("one bounded relay frame's ACK watchers fit in usize");
-        let memory = dispatcher.executor.try_reserve(
-            nervix_execution::MemoryClass::Relay,
-            u64::try_from(bytes).assured("one relay frame's watcher allocation fits in u64"),
-        )?;
-        Ok(Some((dispatcher, memory)))
+        let Some(dispatcher) = self.inner.remote_dispatcher.load_full() else {
+            return Ok(RemoteAckWatchAdmission::Unwatched);
+        };
+        self.inner
+            .fault_injection
+            .fill_relay_memory_before_acknowledgement_watches_if_armed(
+                dispatcher.local_node_id(),
+                &dispatcher.executor,
+            );
+        match RemoteAckWatchCharge::hold(&dispatcher.executor, watches, cancelled).await? {
+            RemoteAckWatchHold::Charged(charge) => {
+                Ok(RemoteAckWatchAdmission::Charged { dispatcher, charge })
+            }
+            RemoteAckWatchHold::Cancelled => Ok(RemoteAckWatchAdmission::Cancelled),
+        }
     }
 
     #[cfg(test)]
-    pub(in crate::runtime) fn spawn_remote_ack_watcher(
+    pub(in crate::runtime) async fn spawn_remote_ack_watcher(
         &self,
         domain: DomainName,
         completion: AckCompletion,
@@ -1292,7 +1325,10 @@ impl Runtime {
         let Some(ack) = ack else {
             return Ok(());
         };
-        let Some((dispatcher, memory)) = self.reserve_remote_ack_watcher_memory(1)? else {
+        let RemoteAckWatchAdmission::Charged { dispatcher, charge } = self
+            .hold_remote_ack_watches(1, std::future::pending())
+            .await?
+        else {
             return Ok(());
         };
         self.spawn_remote_ack_watchers(
@@ -1306,7 +1342,7 @@ impl Runtime {
                     .assured("the bounded registrar discovery grace fits the monotonic clock"),
                 observed_registrar: false,
             }],
-            memory,
+            charge,
         );
         Ok(())
     }
@@ -1321,11 +1357,13 @@ impl Runtime {
         domain: DomainName,
         dispatcher: StdArc<RemoteDispatcher>,
         watches: Vec<RemoteAckWatch>,
-        memory: nervix_execution::Reservation,
+        charge: RemoteAckWatchCharge,
     ) {
         let fault_injection = self.inner.fault_injection.clone();
         let watcher = async move {
-            let _memory = memory;
+            // Each watch returns its share of the charge as it ends, so a held delivery finds room
+            // as soon as rows are reported rather than when the whole batch is.
+            let mut charge = charge;
             let mut pending = FuturesUnordered::new();
             for watch in watches {
                 pending.push(wait_remote_ack_progress(watch));
@@ -1336,11 +1374,15 @@ impl Runtime {
                     .cluster
                     .live_node_incarnation(ack.registrar.node_id())
                 {
-                    Some(incarnation) if incarnation != ack.registrar.incarnation() => continue,
+                    Some(incarnation) if incarnation != ack.registrar.incarnation() => {
+                        charge = charge.release_watch();
+                        continue;
+                    }
                     Some(_) => watch.observed_registrar = true,
                     None if watch.observed_registrar
                         || Instant::now() >= watch.discovery_deadline =>
                     {
+                        charge = charge.release_watch();
                         continue;
                     }
                     None => {}
@@ -1361,6 +1403,7 @@ impl Runtime {
                         ack.registrar.node_id(),
                     )
                 {
+                    charge = charge.release_watch();
                     continue;
                 }
                 if let Err(error) = dispatcher
@@ -1374,7 +1417,9 @@ impl Runtime {
                         target_node = %ack.registrar, error = %format_args!("{error:#}"),
                         "failed to return remote ack progress");
                 }
-                if !terminal {
+                if terminal {
+                    charge = charge.release_watch();
+                } else {
                     pending.push(wait_remote_ack_progress(watch));
                 }
             }
@@ -1713,6 +1758,7 @@ mod tests {
                 completion,
                 Some(registration),
             )
+            .await
             .assured("the fixture watcher fits");
         timeout(ASYNC_EVENT_FAILSAFE, async {
             while runtime.inner.remote_ack_watcher_tasks.len() > 1 {
@@ -1747,19 +1793,22 @@ mod tests {
                 observed_registrar: false,
             });
         }
-        let (dispatcher, memory) = runtime
-            .reserve_remote_ack_watcher_memory(count)
+        let RemoteAckWatchAdmission::Charged { dispatcher, charge } = runtime
+            .hold_remote_ack_watches(count, std::future::pending())
+            .await
             .assured("the wide batch fits its relay budget")
-            .assured("the runtime has joined its cluster");
+        else {
+            panic!("a joined runtime charges the watches of a wide batch at once");
+        };
         let executor = dispatcher.executor.clone();
         let expected_bytes = u64::try_from(count * 1024 + 4096)
             .assured("the fixture's watcher allocation fits in u64");
-        assert_eq!(memory.bytes(), expected_bytes);
+        assert_eq!(charge.bytes_held(), expected_bytes);
         runtime.spawn_remote_ack_watchers(
             named::<DomainName>("watcher"),
             dispatcher,
             watches,
-            memory,
+            charge,
         );
         assert_eq!(runtime.inner.remote_ack_watcher_tasks.len(), 2);
         assert_eq!(
@@ -1771,8 +1820,10 @@ mod tests {
         drop(roots);
     }
 
+    /// A watcher that finds the relay budget full waits for room instead of being refused, and
+    /// starts with its charge once the memory that filled the budget returns.
     #[nervix_primitives::test]
-    async fn remote_ack_watcher_refusal_preserves_the_typed_memory_cause() {
+    async fn a_watcher_held_by_a_full_relay_budget_starts_once_room_returns() {
         let (runtime, dispatcher) = joined_runtime().await;
         let capacity = dispatcher.executor.snapshot().relay_memory.capacity_bytes;
         let occupied = dispatcher
@@ -1780,21 +1831,32 @@ mod tests {
             .try_reserve(nervix_execution::MemoryClass::Relay, capacity)
             .assured("the fixture reserves exactly its relay budget");
         let (acks, completion) = AckSet::root();
-        let error = runtime
-            .spawn_remote_ack_watcher(
-                named::<DomainName>("watcher"),
-                completion,
-                Some(dispatcher.registration(1)),
-            )
-            .expect_err("a watcher must reserve its retained memory");
-        assert!(matches!(
-            error.current_context(),
-            nervix_execution::AdmissionError::BudgetExhausted { .. }
-        ));
+        let watcher = runtime.spawn_remote_ack_watcher(
+            named::<DomainName>("watcher"),
+            completion,
+            Some(dispatcher.registration(1)),
+        );
+        let mut watcher = std::pin::pin!(watcher);
+        assert!(watcher.as_mut().now_or_never().is_none());
         assert_eq!(runtime.inner.remote_ack_watcher_tasks.len(), 1);
+        assert_eq!(dispatcher.executor.snapshot().relay_memory.refused, 0);
+
         drop(occupied);
-        acks.no_ack("fixture refusal");
+        timeout(ASYNC_EVENT_FAILSAFE, watcher)
+            .await
+            .assured("the watcher takes its charge at its first recheck after room returns")
+            .assured("one watch fits the emptied relay budget");
+        assert_eq!(runtime.inner.remote_ack_watcher_tasks.len(), 2);
+        assert_eq!(
+            dispatcher.executor.snapshot().relay_memory.reserved_bytes,
+            1024 + 4096
+        );
+        acks.ack_success();
         runtime.shutdown().await;
+        assert_eq!(
+            dispatcher.executor.snapshot().relay_memory.reserved_bytes,
+            0
+        );
     }
 
     /// The node the tests' deliveries go to, which resolves the acknowledgements they forward.

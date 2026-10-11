@@ -97,9 +97,9 @@ mod tests {
             ResponseKind,
         },
         node_startup::{
-            ATTEMPT_READINESS_BUDGET, AttemptCleanup, AttemptFailure, FULL_LENGTH_ATTEMPTS,
-            NODE_START_ATTEMPTS, NODE_STARTUP_BUDGET, NodeStartup, NodeStartupExhausted,
-            StartableNode, StartupEnd, StartupRetry, cluster_startup_budget,
+            ATTEMPT_READINESS_BUDGET, AttemptCleanup, AttemptFailure, NODE_START_ATTEMPTS,
+            NODE_STARTUP_BUDGET, NodeStartup, NodeStartupExhausted, StartableNode, StartupEnd,
+            StartupRetry, cluster_startup_budget,
         },
         phase_deadline::{BeforeDeadline, PhaseDeadline},
         port_pool::{
@@ -897,11 +897,6 @@ mod tests {
         usize::try_from(NODE_START_ATTEMPTS).assured("the attempt limit is a small count")
     }
 
-    /// The attempts the budget pays for at full length, as a number of recorded attempts.
-    fn full_length_attempts() -> usize {
-        usize::try_from(FULL_LENGTH_ATTEMPTS).assured("the full-length attempts are a small count")
-    }
-
     /// How the startup owner classified each attempt it spent, in the order they ran.
     fn attempt_retries(exhausted: &NodeStartupExhausted) -> Vec<StartupRetry> {
         exhausted
@@ -1002,7 +997,6 @@ mod tests {
             "last readiness outcome: status request failed: the status session ended before the \
              command result arrived"
         ));
-        task.abort();
     }
 
     #[nervix_primitives::test]
@@ -1388,7 +1382,6 @@ mod tests {
             "last readiness outcome: status request failed: response receive was still pending \
              when the"
         ));
-        task.abort();
     }
 
     #[nervix_primitives::test]
@@ -1489,7 +1482,7 @@ mod tests {
     }
 
     #[nervix_primitives::test]
-    async fn stop_and_drop_paths_use_the_task_inspected_for_diagnostics() {
+    async fn stop_and_keeper_paths_use_the_task_inspected_for_diagnostics() {
         let completed_drops = Arc::new(AtomicUsize::new(0));
         let completed_guard = completed_drops.clone();
         let mut completed = OwnedNodeTask::spawn(async move {
@@ -1518,30 +1511,59 @@ mod tests {
         ));
         assert_eq!(completed_drops.load(Ordering::SeqCst), 1);
 
-        let aborted_drops = Arc::new(AtomicUsize::new(0));
-        let aborted_guard = aborted_drops.clone();
+        let kept_drops = Arc::new(AtomicUsize::new(0));
+        let kept_guard = kept_drops.clone();
         let (started_tx, started_rx) = oneshot::channel();
+        let stop = CancellationToken::new();
+        let task_stop = stop.clone();
         let mut running = OwnedNodeTask::spawn(async move {
-            let _guard = DropCount(aborted_guard);
+            let _guard = DropCount(kept_guard);
             started_tx
                 .send(())
                 .assured("the test retains the startup receiver until the task begins");
-            future::pending::<()>().await;
+            task_stop.cancelled().await;
             Ok(())
         });
         started_rx
             .await
             .assured("the running task sends after installing its drop guard");
         assert!(matches!(running.inspect().await, NodeTaskState::Running));
-        running.abort();
-        timeout(TEST_TIMEOUT, async {
-            while aborted_drops.load(Ordering::SeqCst) == 0 {
-                nervix_primitives::task::yield_now().await;
-            }
-        })
-        .await
-        .assured("aborting the owned task drops its future before the test deadline");
-        assert_eq!(aborted_drops.load(Ordering::SeqCst), 1);
+
+        let (ended_tx, ended_rx) = oneshot::channel();
+        assert!(
+            running.keep_until_ended(move |outcome| {
+                let clean = matches!(outcome, NodeTaskTerminalOutcome::CleanApplicationExit);
+                ended_tx
+                    .send(clean)
+                    .assured("the test retains the keeper's receiver until the task ends");
+            }),
+            "a running task must be handed to its keeper"
+        );
+        assert!(matches!(running.state(), NodeTaskState::LeftStopping));
+        assert!(
+            matches!(
+                running.wait(PhaseDeadline::after(TEST_TIMEOUT)).await,
+                NodeTaskWaitOutcome::LeftStopping
+            ),
+            "an owner that handed its task over has nothing left to wait for"
+        );
+        assert!(
+            !running.keep_until_ended(|_| panic!("a task is handed to one keeper only")),
+            "a task that was handed over cannot be handed over again"
+        );
+        // Handing the task over ends nothing: the node still runs until it ends itself.
+        for _ in 0..8 {
+            nervix_primitives::task::yield_now().await;
+        }
+        assert_eq!(kept_drops.load(Ordering::SeqCst), 0);
+
+        stop.cancel();
+        let ended_cleanly = timeout(TEST_TIMEOUT, ended_rx)
+            .await
+            .assured("the keeper reports the task's end before the test deadline")
+            .assured("the keeper sends how the task ended");
+        assert!(ended_cleanly, "the keeper must report how the task ended");
+        assert_eq!(kept_drops.load(Ordering::SeqCst), 1);
     }
 
     /// How a stand-in node's task ends once cleanup has asked it to stop.
@@ -1550,8 +1572,9 @@ mod tests {
         StopsWhenAsked,
         FailsWhenAsked,
         PanicsWhenAsked,
-        /// Ignores the stop request, so only the cleanup deadline can end it.
-        NeverStops,
+        /// Ignores the stop request and ends only once the regression lets it, after cleanup has
+        /// stopped waiting for it.
+        OutlastsCleanup,
     }
 
     impl StandInEnding {
@@ -1570,8 +1593,10 @@ mod tests {
                         )
                 ),
                 Self::PanicsWhenAsked => matches!(outcome, NodeTaskTerminalOutcome::Panic(_)),
-                // A task the cleanup deadline aborted is joined for the cancellation it left.
-                Self::NeverStops => matches!(outcome, NodeTaskTerminalOutcome::Cancellation(_)),
+                // Nothing cancels a node that outlasts its cleanup: it ends itself, cleanly.
+                Self::OutlastsCleanup => {
+                    matches!(outcome, NodeTaskTerminalOutcome::CleanApplicationExit)
+                }
             }
         }
     }
@@ -1590,6 +1615,16 @@ mod tests {
             /// The phase the scenario published while this node was releasing, when the node was
             /// given a registration to read.
             phase: Option<ScenarioPhase>,
+        },
+        /// Cleanup stopped waiting for the node and left it to end itself.
+        LeftStopping {
+            node: String,
+        },
+        /// The keeper of a node that was left stopping gave back what the node held, having seen
+        /// the node end the way the regression asked.
+        KeptUntilEnded {
+            node: String,
+            ended_as_asked: bool,
         },
     }
 
@@ -1650,9 +1685,49 @@ mod tests {
                 })
                 .collect()
         }
+
+        fn left_stopping(&self) -> Vec<String> {
+            self.events()
+                .into_iter()
+                .filter_map(|event| match event {
+                    CleanupEvent::LeftStopping { node } => Some(node),
+                    _ => None,
+                })
+                .collect()
+        }
+
+        /// The nodes whose keeper gave back what they held.
+        fn kept_until_ended(&self) -> Vec<String> {
+            self.events()
+                .into_iter()
+                .filter_map(|event| match event {
+                    CleanupEvent::KeptUntilEnded { node, .. } => Some(node),
+                    _ => None,
+                })
+                .collect()
+        }
+
+        /// Whether the keeper of `node` gave back what the node held only once the node's own task
+        /// had ended, and saw it end the way the regression asked.
+        fn kept_until_its_task_ended(&self, node: &str) -> bool {
+            let events = self.events();
+            let ended = events.iter().position(
+                |event| matches!(event, CleanupEvent::TaskEnded { node: ended } if ended == node),
+            );
+            let given_back = events.iter().position(|event| {
+                matches!(
+                    event,
+                    CleanupEvent::KeptUntilEnded { node: kept, ended_as_asked: true } if kept == node
+                )
+            });
+            match (ended, given_back) {
+                (Some(ended), Some(given_back)) => ended < given_back,
+                (None, _) | (_, None) => false,
+            }
+        }
     }
 
-    /// Records that a node's task ended, whether it returned, failed, panicked or was aborted.
+    /// Records that a node's task ended, whether it returned, failed or panicked.
     struct TaskEnd {
         node: String,
         log: Arc<CleanupLog>,
@@ -1670,7 +1745,10 @@ mod tests {
     /// given and the harness state it gave back, and its task ends the way the regression asked.
     struct StandInTeardownNode {
         name: String,
+        ending: StandInEnding,
         stop: Arc<Notify>,
+        /// Lets a node that outlasts its cleanup end, which nothing but the regression does.
+        let_end: CancellationToken,
         task: OwnedNodeTask,
         log: Arc<CleanupLog>,
         scenario: Option<Arc<ActiveScenarioRegistration>>,
@@ -1680,6 +1758,8 @@ mod tests {
         fn new(name: &str, ending: StandInEnding, log: &Arc<CleanupLog>) -> Self {
             let stop = Arc::new(Notify::new());
             let task_stop = stop.clone();
+            let let_end = CancellationToken::new();
+            let task_let_end = let_end.clone();
             let task_end = TaskEnd {
                 node: name.to_string(),
                 log: log.clone(),
@@ -1687,8 +1767,8 @@ mod tests {
             let task = OwnedNodeTask::spawn(async move {
                 let _ended = task_end;
                 match ending {
-                    StandInEnding::NeverStops => {
-                        future::pending::<()>().await;
+                    StandInEnding::OutlastsCleanup => {
+                        task_let_end.cancelled().await;
                         Ok(())
                     }
                     StandInEnding::StopsWhenAsked => {
@@ -1707,7 +1787,9 @@ mod tests {
             });
             Self {
                 name: name.to_string(),
+                ending,
                 stop,
+                let_end,
                 task,
                 log: log.clone(),
                 scenario: None,
@@ -1748,6 +1830,21 @@ mod tests {
                 phase,
             });
         }
+
+        fn leave_stopping(&mut self) {
+            self.log.record(CleanupEvent::LeftStopping {
+                node: self.name.clone(),
+            });
+            let log = self.log.clone();
+            let node = self.name.clone();
+            let ending = self.ending;
+            self.task.keep_until_ended(move |outcome| {
+                log.record(CleanupEvent::KeptUntilEnded {
+                    node,
+                    ended_as_asked: ending.ended_as(outcome),
+                });
+            });
+        }
     }
 
     /// What the registry publishes for one scenario, read the way a suite watchdog reads it.
@@ -1785,17 +1882,31 @@ mod tests {
                 teardown.elapsed < TEST_TEARDOWN_BUDGET,
                 "a node that stops when asked must not reach the cleanup deadline: {teardown}"
             );
-            assert!(!teardown.was_forced(), "{teardown}");
+            assert!(!teardown.left_nodes_stopping(), "{teardown}");
             let [node] = teardown.nodes.as_slice() else {
                 panic!("a cluster of one reports one node: {teardown}");
             };
             let NodeTaskWaitOutcome::Joined(outcome) = &node.stop else {
-                panic!("a node that ends itself must be joined, not forced: {node}");
+                panic!("a node that ends itself must be joined, not left stopping: {node}");
             };
             assert!(
                 ending.ended_as(outcome.as_ref()),
                 "cleanup must keep how the task of a node that {ending:?} ended, got {outcome}"
             );
+            // A caller that failed before this cleanup reports only what the cleanup left
+            // unclean: an application error is how a node ended, and a panic is a record.
+            match (ending, teardown.unclean()) {
+                (StandInEnding::PanicsWhenAsked, Some(unclean)) => {
+                    assert!(unclean.contains("node-1"), "{unclean}");
+                }
+                (StandInEnding::PanicsWhenAsked, None) => {
+                    panic!("a node that panicked while stopping must be named: {teardown}")
+                }
+                (_, Some(unclean)) => {
+                    panic!("a node that ended without a panic leaves no record: {unclean}")
+                }
+                (_, None) => {}
+            }
             assert_eq!(log.released(), vec!["node-1".to_string()]);
             assert!(
                 log.released_only_after_every_task_ended(),
@@ -1819,7 +1930,7 @@ mod tests {
 
         let teardown = ClusterTeardown::stop_all(nodes.iter_mut(), TEST_TEARDOWN_BUDGET).await;
 
-        assert!(!teardown.was_forced(), "{teardown}");
+        assert!(!teardown.left_nodes_stopping(), "{teardown}");
         let panicked = teardown
             .panics()
             .map(|node| node.node.clone())
@@ -1849,7 +1960,7 @@ mod tests {
                 .collect::<Vec<_>>();
             let stuck = names
                 .iter()
-                .map(|name| (name.as_str(), StandInEnding::NeverStops))
+                .map(|name| (name.as_str(), StandInEnding::OutlastsCleanup))
                 .collect::<Vec<_>>();
             let mut nodes = stand_in_cluster(&stuck, &log);
 
@@ -1865,22 +1976,105 @@ mod tests {
             );
             for node in &teardown.nodes {
                 assert!(log.stop_was_requested(&node.node));
-                let NodeTaskWaitOutcome::AbortedAtDeadline(outcome) = &node.stop else {
-                    panic!("a node that never stops must be aborted at the deadline: {node}");
-                };
                 assert!(
-                    StandInEnding::NeverStops.ended_as(outcome.as_ref()),
-                    "an aborted node task must be joined for its outcome: {outcome}"
+                    matches!(node.stop, NodeTaskWaitOutcome::StillRunning),
+                    "a node that outlasts the deadline must be left stopping, not ended: {node}"
                 );
             }
-            assert_eq!(teardown.forced().count(), node_count, "{teardown}");
-            assert_eq!(log.released().len(), node_count);
+            assert_eq!(teardown.still_stopping().count(), node_count, "{teardown}");
+            assert_eq!(log.left_stopping(), names);
             assert!(
-                log.released_only_after_every_task_ended(),
-                "harness state must be given back only once every task has ended: {:?}",
+                log.released().is_empty() && log.kept_until_ended().is_empty(),
+                "nothing a node still uses may be given back while its task runs: {:?}",
                 log.events()
             );
+            for node in &nodes {
+                assert!(
+                    matches!(node.task.state(), NodeTaskState::LeftStopping),
+                    "a node left stopping is owned by its keeper"
+                );
+            }
         }
+    }
+
+    #[nervix_primitives::test(start_paused = true)]
+    async fn a_node_left_stopping_keeps_what_it_holds_until_its_own_task_ends() {
+        let log = Arc::new(CleanupLog::default());
+        let mut nodes = stand_in_cluster(
+            &[
+                ("node-1", StandInEnding::StopsWhenAsked),
+                ("node-2", StandInEnding::OutlastsCleanup),
+                ("node-3", StandInEnding::OutlastsCleanup),
+            ],
+            &log,
+        );
+
+        let teardown = ClusterTeardown::stop_all(nodes.iter_mut(), TEST_TEARDOWN_BUDGET).await;
+
+        let still_stopping = teardown
+            .still_stopping()
+            .map(|node| node.node.clone())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            still_stopping,
+            vec!["node-2".to_string(), "node-3".to_string()],
+            "{teardown}"
+        );
+        assert_eq!(
+            teardown.to_string(),
+            format!(
+                "stopped 1 of 3 node(s) in {:?} of a {TEST_TEARDOWN_BUDGET:?} budget, 2 still \
+                 stopping",
+                teardown.elapsed
+            )
+        );
+        let unclean = teardown
+            .unclean()
+            .assured("nodes left stopping are a record for the caller");
+        assert!(
+            unclean.contains("node \"node-2\" was still stopping at the cleanup deadline")
+                && unclean.contains("node \"node-3\" was still stopping at the cleanup deadline")
+                && !unclean.contains("node-1"),
+            "{unclean}"
+        );
+        // The node that ended gives back what it held; the two still stopping keep theirs.
+        assert_eq!(log.released(), vec!["node-1".to_string()]);
+        assert!(log.kept_until_ended().is_empty(), "{:?}", log.events());
+
+        // One of them ends: its keeper gives back what it held, and the other keeps running.
+        nodes[1].let_end.cancel();
+        timeout(TEST_TIMEOUT, async {
+            while log.kept_until_ended().is_empty() {
+                nervix_primitives::task::yield_now().await;
+            }
+        })
+        .await
+        .assured("the keeper sees its node end before the test deadline");
+        assert_eq!(log.kept_until_ended(), vec!["node-2".to_string()]);
+        assert!(
+            log.kept_until_its_task_ended("node-2"),
+            "{:?}",
+            log.events()
+        );
+
+        nodes[2].let_end.cancel();
+        timeout(TEST_TIMEOUT, async {
+            while log.kept_until_ended().len() < 2 {
+                nervix_primitives::task::yield_now().await;
+            }
+        })
+        .await
+        .assured("the second keeper sees its node end before the test deadline");
+        assert!(
+            log.kept_until_its_task_ended("node-3"),
+            "{:?}",
+            log.events()
+        );
+        assert_eq!(
+            log.released(),
+            vec!["node-1".to_string()],
+            "a node left stopping is given back by its keeper, never by the cleanup that left it"
+        );
     }
 
     /// How a node of a diagnostics regression answers the status request its cleanup sends.
@@ -1962,7 +2156,7 @@ mod tests {
                     "a stalled diagnostic must not keep a node from being asked to stop: {node}"
                 );
             }
-            assert!(!teardown.was_forced(), "{teardown}");
+            assert!(!teardown.left_nodes_stopping(), "{teardown}");
             assert_eq!(log.released().len(), cluster.len());
         }
     }
@@ -1976,7 +2170,8 @@ mod tests {
         ));
         let log = Arc::new(CleanupLog::default());
         let mut nodes = [
-            StandInTeardownNode::new("node-1", StandInEnding::NeverStops, &log).reading(&scenario),
+            StandInTeardownNode::new("node-1", StandInEnding::StopsWhenAsked, &log)
+                .reading(&scenario),
         ];
 
         scenario.enter(ScenarioPhase::BodyComplete);
@@ -1987,7 +2182,7 @@ mod tests {
         assert_eq!(published(&scenario).phase, ScenarioPhase::Stopping);
         scenario.enter(ScenarioPhase::Finished);
 
-        assert!(teardown.was_forced(), "{teardown}");
+        assert!(!teardown.left_nodes_stopping(), "{teardown}");
         assert_eq!(
             log.phase_while_releasing("node-1"),
             Some(ScenarioPhase::Stopping),
@@ -2037,7 +2232,7 @@ mod tests {
     }
 
     #[nervix_primitives::test]
-    async fn forced_cleanup_aborts_and_joins_the_owned_task_once() {
+    async fn a_wait_past_its_deadline_leaves_the_task_running_with_its_owner() {
         let mut not_started = OwnedNodeTask::not_started();
         assert!(matches!(
             not_started.wait(PhaseDeadline::after(TEST_TIMEOUT)).await,
@@ -2058,37 +2253,54 @@ mod tests {
         let drops = Arc::new(AtomicUsize::new(0));
         let task_guard = drops.clone();
         let (started_tx, started_rx) = oneshot::channel();
+        let stop = CancellationToken::new();
+        let task_stop = stop.clone();
         let mut task = OwnedNodeTask::spawn(async move {
             let _guard = DropCount(task_guard);
             started_tx
                 .send(())
-                .assured("the forced-cleanup receiver remains alive until the task begins");
-            future::pending::<()>().await;
+                .assured("the waiting test's receiver remains alive until the task begins");
+            task_stop.cancelled().await;
             Ok(())
         });
         assert!(task.is_running());
         started_rx
             .await
-            .assured("the forced-cleanup task sends after installing its drop guard");
+            .assured("the task sends after installing its drop guard");
 
-        let NodeTaskWaitOutcome::AbortedAtDeadline(first_outcome) =
-            task.wait(PhaseDeadline::after(Duration::ZERO)).await
+        // The deadline ends the wait and nothing else: the task is neither cancelled nor dropped,
+        // and its owner still holds it.
+        assert!(
+            matches!(
+                task.wait(PhaseDeadline::after(Duration::ZERO)).await,
+                NodeTaskWaitOutcome::StillRunning
+            ),
+            "a pending task with an expired deadline must be left running"
+        );
+        assert!(task.is_running());
+        assert!(matches!(task.inspect().await, NodeTaskState::Running));
+        assert_eq!(drops.load(Ordering::SeqCst), 0);
+
+        // The node ends itself, and the same owner joins it for how it ended.
+        stop.cancel();
+        let NodeTaskWaitOutcome::Joined(first_outcome) =
+            task.wait(PhaseDeadline::after(TEST_TIMEOUT)).await
         else {
-            panic!("a pending task with an expired deadline must be aborted and joined");
+            panic!("a task that ends inside the deadline must be joined");
         };
         assert!(matches!(
             first_outcome.as_ref(),
-            NodeTaskTerminalOutcome::Cancellation(_)
+            NodeTaskTerminalOutcome::CleanApplicationExit
         ));
         assert_eq!(drops.load(Ordering::SeqCst), 1);
 
         let NodeTaskWaitOutcome::AlreadyObserved(observed_outcome) =
             task.wait(PhaseDeadline::after(TEST_TIMEOUT)).await
         else {
-            panic!("a second cleanup must reuse the retained terminal outcome");
+            panic!("a second wait must reuse the retained terminal outcome");
         };
         let NodeTaskState::Terminal(second_outcome) = task.state() else {
-            panic!("a second cleanup must leave the retained terminal outcome available");
+            panic!("a second wait must leave the retained terminal outcome available");
         };
         assert!(std::ptr::eq(
             first_outcome.as_ref(),
@@ -2152,11 +2364,16 @@ mod tests {
             );
         }
         // The last attempt polls readiness to the end of the budget, so its cleanup has nothing
-        // left to wait with and aborts the node task at once.
+        // left to wait with: the node has been asked to stop and is still stopping when the
+        // startup ends.
         assert!(
-            matches!(last.cleanup, AttemptCleanup::AbortedAtDeadline(_)),
-            "cleanup after the budget is spent must abort rather than wait: {}",
+            matches!(last.cleanup, AttemptCleanup::StillStopping),
+            "cleanup after the budget is spent must not wait past it: {}",
             last.cleanup
+        );
+        assert!(
+            node.task.is_running(),
+            "a node still stopping when its startup ends stays owned"
         );
         assert!(
             exhausted.elapsed >= NODE_STARTUP_BUDGET,
@@ -2281,39 +2498,56 @@ mod tests {
     }
 
     #[nervix_primitives::test(start_paused = true)]
-    async fn cleanup_that_never_completes_is_aborted_inside_the_same_budget() {
+    async fn a_node_that_does_not_stop_ends_the_startup_instead_of_being_launched_over() {
         let mut node = StandInStartupNode::new(
             "node-unstoppable",
             [
                 LaunchBehavior::NeverReadyAndNeverStops,
-                LaunchBehavior::NeverReadyAndNeverStops,
-                LaunchBehavior::NeverReadyAndNeverStops,
+                LaunchBehavior::Ready,
             ],
         );
 
         let error = node
             .start_within(PhaseDeadline::after(NODE_STARTUP_BUDGET))
             .await
-            .expect_err("a node that never stops must still exhaust one startup budget");
+            .expect_err("a node that never stops must end its startup");
 
-        // Cleanup spends the same budget as readiness, so a node that has to be aborted every time
-        // spends the whole budget on the attempts it pays for at full length, and the launch a
-        // fast failure would have left room for never starts.
+        // The node the first attempt launched still holds whatever a node holds, so the launch
+        // that would have become ready never starts and the node keeps its ports.
         let exhausted = error.current_context();
-        assert!(matches!(exhausted.end, StartupEnd::BudgetSpent));
-        assert_eq!(node.launches, FULL_LENGTH_ATTEMPTS);
-        assert_eq!(exhausted.attempts.spent.len(), full_length_attempts());
-        for attempt in &exhausted.attempts.spent {
-            assert!(
-                matches!(attempt.cleanup, AttemptCleanup::AbortedAtDeadline(_)),
-                "a node that ignores its stop must be aborted: {}",
-                attempt.cleanup
-            );
-        }
+        assert!(matches!(exhausted.end, StartupEnd::StillStopping));
+        assert_eq!(node.launches, 1);
+        assert_eq!(node.ports_moved, 0);
+        let [attempt] = exhausted.attempts.spent.as_slice() else {
+            panic!("a startup that ends at its first cleanup records one attempt");
+        };
+        assert_eq!(attempt.retry, StartupRetry::Transient);
         assert!(
-            exhausted.elapsed <= STARTUP_BUDGET_CEILING,
-            "cleanup must spend the startup budget rather than a shutdown watchdog: {:?}",
+            matches!(attempt.cleanup, AttemptCleanup::StillStopping),
+            "a node that ignores its stop is still stopping at the cleanup deadline: {}",
+            attempt.cleanup
+        );
+        assert!(
+            node.task.is_running(),
+            "the node that did not stop stays owned by the harness"
+        );
+        assert!(
+            exhausted.elapsed < NODE_STARTUP_BUDGET,
+            "a startup that cannot launch again ends at the cleanup slice rather than spending \
+             its budget: {:?}",
             exhausted.elapsed
+        );
+        let rendered = error.to_string();
+        assert!(
+            rendered.contains(
+                "the node the last attempt launched had not stopped, and a fresh launch cannot \
+                 take the database and listeners it still holds"
+            ),
+            "{rendered}"
+        );
+        assert!(
+            rendered.contains("cleanup: still stopping at the cleanup deadline"),
+            "{rendered}"
         );
     }
 
@@ -2323,7 +2557,7 @@ mod tests {
             "node-history",
             [
                 LaunchBehavior::ApplicationError(AppError::BindHttpListenAddress),
-                LaunchBehavior::NeverReadyAndNeverStops,
+                LaunchBehavior::NeverReady,
                 LaunchBehavior::NeverReady,
             ],
         );
@@ -2348,7 +2582,7 @@ mod tests {
         );
         assert!(rendered.contains("attempt 2/3 [transient]"), "{rendered}");
         assert!(
-            rendered.contains("cleanup: aborted at the cleanup deadline (cancellation:"),
+            rendered.contains("cleanup: stopped (clean application exit)"),
             "{rendered}"
         );
         assert!(rendered.contains("attempt 3/3 [transient]"), "{rendered}");
@@ -2605,8 +2839,11 @@ mod tests {
     /// A node the watchdog can reach: it publishes itself to the live-cluster registry for as long
     /// as its task runs, and it ends only the way the regression asked.
     struct StandInLiveNode {
-        task: OwnedNodeTask,
+        /// Kept so the node's task stays owned for as long as the regression holds the node.
+        _task: OwnedNodeTask,
         requests: Arc<AtomicUsize>,
+        /// Ends the node when the regression drops it, whatever it does with a stop request.
+        dropped: CancellationToken,
     }
 
     impl StandInLiveNode {
@@ -2618,15 +2855,26 @@ mod tests {
                 requests: requests.clone(),
             });
             let live = cluster.node_started(name, published);
+            let dropped = CancellationToken::new();
+            let task_dropped = dropped.clone();
             let task = OwnedNodeTask::spawn(async move {
                 let _live = live;
                 match behavior {
-                    StandInStopBehavior::StopsWhenAsked => stop.cancelled().await,
-                    StandInStopBehavior::IgnoresTheRequest => future::pending::<()>().await,
+                    StandInStopBehavior::StopsWhenAsked => {
+                        nervix_primitives::select! {
+                            () = stop.cancelled() => {}
+                            () = task_dropped.cancelled() => {}
+                        }
+                    }
+                    StandInStopBehavior::IgnoresTheRequest => task_dropped.cancelled().await,
                 }
                 Ok(())
             });
-            Self { task, requests }
+            Self {
+                _task: task,
+                requests,
+                dropped,
+            }
         }
 
         fn stop_requests(&self) -> usize {
@@ -2636,7 +2884,7 @@ mod tests {
 
     impl Drop for StandInLiveNode {
         fn drop(&mut self) {
-            self.task.abort();
+            self.dropped.cancel();
         }
     }
 
@@ -2734,7 +2982,7 @@ mod tests {
             dropped.load(Ordering::Relaxed),
             1,
             "a timed-out suite must drop the run it was holding, so the scenarios it still owns \
-             are aborted"
+             end"
         );
         timeout
     }

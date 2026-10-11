@@ -715,6 +715,7 @@ impl Runtime {
                 .await?
         };
         let mut checkpoints = Vec::new();
+        let mut described = Vec::new();
         // Branch states leave their maps before they are encoded, so an encode never holds a map
         // shard that a branch appearing or leaving elsewhere has to write.
         let mut deduplicators = Vec::new();
@@ -791,7 +792,13 @@ impl Runtime {
             }
         }
         for (placement, state) in wasm_processors {
-            checkpoints.push((placement, state.latest_snapshot()));
+            // Describe and release each committed guest save before reading the next branch.
+            // A handoff with many large branches keeps its inventory, not all save allocations.
+            let descriptor = self
+                .describe_state_checkpoint(&placement, state.latest_snapshot())
+                .await
+                .map_err(|error| OwnershipHandoffError::checkpoint(error.to_string()))?;
+            described.push((placement, descriptor));
         }
         for state in self.inner.replicated_branch_aggregated_states.iter() {
             if matches_entity(state.key()) {
@@ -849,9 +856,11 @@ impl Runtime {
         let expected =
             self.expected_ownership_handoff_placements(domain, &scheduled, &checkpoints)?;
         checkpoints.retain(|(placement, _)| expected.contains(placement));
+        described.retain(|(placement, _)| expected.contains(placement));
         let captured = checkpoints
             .iter()
             .map(|(placement, _)| placement.clone())
+            .chain(described.iter().map(|(placement, _)| placement.clone()))
             .collect::<HashSet<_>>();
         for placement in expected.difference(&captured) {
             let stored = match self.inner.state_store.as_ref() {
@@ -901,15 +910,29 @@ impl Runtime {
                 self.announce_stored_checkpoint(placement, snapshot.lsm);
             }
         }
-        Ok(checkpoints
+        for (placement, snapshot) in checkpoints {
+            let descriptor = self
+                .describe_state_checkpoint(&placement, snapshot)
+                .await
+                .map_err(|error| OwnershipHandoffError::checkpoint(error.to_string()))?;
+            described.push((placement, descriptor));
+        }
+        described.sort_by(|(left, _), (right, _)| {
+            u8::from(left.state.kind())
+                .cmp(&u8::from(right.state.kind()))
+                .then_with(|| {
+                    left.branch_key
+                        .as_ref()
+                        .map(BranchKey::as_str)
+                        .cmp(&right.branch_key.as_ref().map(BranchKey::as_str))
+                })
+        });
+        Ok(described
             .into_iter()
             .map(
                 |(placement, snapshot)| nervix_interconnect::OwnershipHandoffCheckpoint {
                     placement: placement.to_remote(),
-                    snapshot: nervix_interconnect::StateSnapshotEnvelope {
-                        lsm: snapshot.lsm,
-                        payload: snapshot.payload,
-                    },
+                    snapshot,
                 },
             )
             .collect())
@@ -1597,16 +1620,21 @@ impl Runtime {
                     entity.identifier.as_str()
                 )));
             }
-            let snapshot = PersistedRuntimeStateEntry {
-                lsm: checkpoint.snapshot.lsm,
-                payload: checkpoint.snapshot.payload,
-            };
             if !self.runtime_state_placement_is_current(&placement) {
                 return Err(OwnershipHandoffError::state(format!(
                     "checkpoint for {:?} state has a stale model or schema fingerprint",
                     placement.state
                 )));
             }
+            let snapshot = self
+                .fetch_state_checkpoint(
+                    &source,
+                    &placement,
+                    &checkpoint.snapshot,
+                    nervix_interconnect::StateCheckpointRead::HandoffCapture,
+                )
+                .await
+                .map_err(|error| OwnershipHandoffError::state(error.to_string()))?;
             self.validate_ownership_handoff_snapshot(&placement, &snapshot)?;
             decoded.push((placement, snapshot));
         }
@@ -2511,10 +2539,18 @@ impl Runtime {
                 failure,
             })
         })?;
-        Ok(snapshot.map(|snapshot| PersistedRuntimeStateEntry {
-            lsm: snapshot.lsm,
-            payload: snapshot.payload,
-        }))
+        match snapshot {
+            Some(snapshot) => self
+                .fetch_state_checkpoint(
+                    target_node_id,
+                    placement,
+                    &snapshot,
+                    nervix_interconnect::StateCheckpointRead::Published,
+                )
+                .await
+                .map(Some),
+            None => Ok(None),
+        }
     }
 
     pub(in crate::runtime) async fn persist_kafka_offset_snapshot(

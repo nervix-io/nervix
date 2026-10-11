@@ -494,6 +494,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "error-stack"
+version = "0.6.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b878b3fac9613c3c7f22eb70bc8a3c6ebdc03cc11479ee60fde1692d747fd45f"
+dependencies = [
+ "anyhow",
+ "rustc_version",
+]
+
+[[package]]
 name = "fastrand"
 version = "2.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1034,10 +1044,15 @@ version = "0.1.0"
 name = "nervix-lint-fixtures"
 version = "0.1.0"
 dependencies = [
+ "error-stack 0.6.0",
+ "futures-core",
  "indexmap",
+ "meticulous",
  "nervix-lint-fixture-macros",
  "nervix-primitives",
+ "nervix-recovery",
  "serde_json",
+ "thiserror",
 ]
 
 [[package]]
@@ -1048,7 +1063,7 @@ dependencies = [
  "concurrent-queue",
  "dashmap",
  "deloxide",
- "error-stack",
+ "error-stack 0.5.0",
  "futures-channel",
  "futures-util",
  "loom",
@@ -1073,6 +1088,13 @@ dependencies = [
 [[package]]
 name = "nervix-primitives-macros"
 version = "0.1.0-dev"
+
+[[package]]
+name = "nervix-recovery"
+version = "0.1.0-dev"
+dependencies = [
+ "tracing",
+]
 
 [[package]]
 name = "nix"
@@ -1501,7 +1523,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys",
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -1929,7 +1951,7 @@ dependencies = [
  "getrandom 0.3.4",
  "once_cell",
  "rustix",
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

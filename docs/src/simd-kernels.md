@@ -266,8 +266,11 @@ just build-vm-bench-x86-64-v3
 
 Registered Bolero targets use the same production path and complete assertion in ordinary
 randomized/corpus runs and sanitizer-backed libFuzzer. Current targets include
-`simd-checked-lanes`, `simd-constant-division`, `simd-byte-classes`, and `simd-xml-chars`;
-`syslog-stream-framing` and `syslog-structured-data` cover the connector/codec consumers.
+`simd-checked-lanes`, `simd-constant-division`, `simd-byte-classes`, `simd-xml-chars`,
+`simd-json-escapes`, `simd-paced-admission`, `simd-elapsed-histograms`, `simd-flag-packing`, and
+`simd-window-runs`; `syslog-stream-framing`, `syslog-structured-data`, and `columnar-json-rows`
+cover the connector/codec consumers. Elapsed buckets are compared with HdrHistogram's lowest
+equivalent values, and float window sums with an exact sum within the compensated-summation bound.
 Every applicable property must remain registered in `tests/bolero-targets.toml`. Ordinary runs
 remain required on PRs; sanitizer CI runs only for PRs labeled `fuzz`. Scheduled,
 `workflow_dispatch`, and unlabeled PR runs expect a sanitizer skip. A skip is neither execution

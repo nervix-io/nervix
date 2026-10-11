@@ -104,8 +104,9 @@ selecting a different authority.
    storing a paced mapping or authority.
 5. Every node applies the resulting control-plane revision to its local domain-clock lifecycle
    before materializing executable work from that revision.
-6. The selected authority waits until every currently live node reports that it installed at least
-   that runtime revision before producing progress.
+6. The selected authority produces progress once its own runtime has installed the mapping and
+   authority fence. It delivers progress to each live peer after that peer reports preparation of
+   the required runtime revision, which installs its mapping and fence before graph activation.
 
 The mapping is therefore available before a graph task can bind its clock. A node joining later
 installs the existing mapping, logical origin, rate, generation, and authority fence. Its join time
@@ -167,6 +168,10 @@ An obsolete producer is cancelled and retired before that node starts a successo
 domain. The old task retains its immutable fence while it exits, so even an in-flight delivery
 cannot impersonate the replacement authority.
 
+An unrelated node's pending installation or graph activation does not hold back the installed
+authority. After reassignment, that authority reconstructs the frontier from the unchanged mapping;
+each receiver's own installation controls when it can receive progress.
+
 ## Tick Production And Progress Delivery
 
 Tick identifiers are one-based. Tick 1 is the logical origin, and tick `n` is at:
@@ -189,15 +194,17 @@ identity, tick id, logical boundary, authority UTC observation, and period. The 
 the report to its own runtime directly. Remote delivery uses the typed `domain_clock_progress`
 HTTP/2 management request described by [Cluster Interconnect](./interconnect.md#domain-clock-progress).
 
-For each ready remote node and domain, the producer owns one delivery loop with at most one request
+For each prepared remote node and domain, the producer owns one delivery loop with at most one request
 in flight and one replaceable pending report. Publishing another tick overwrites the pending value,
 so a fast clock or slow peer cannot create an unbounded queue. A node-wide progress subquota bounds
 concurrent attempts independently of health, relay admission, cancellation, and terminal outcomes.
 
-Targets must be both live and ready for the runtime revision that installed the generation. A new
-or reconnected target receives the producer's newest retained report when it becomes ready. Each
-request has a two-second physical deadline. Failure waits on a 200-millisecond physical backoff and
-then retries the newest report. Cancelling the authority stops an in-flight request and its backoff.
+Targets must be both live and prepared for the runtime revision that installed the generation and
+authority fence. Preparation precedes the cluster's graph-activation barrier; a target need not
+wait for other nodes to prepare or activate before receiving progress. A new or reconnected target
+receives the producer's newest retained report when its own preparation is advertised. Each request
+has a two-second physical deadline. Failure waits on a 200-millisecond physical backoff and then
+retries the newest report. Cancelling the authority stops an in-flight request and its backoff.
 
 A process stop request does not cancel clock authority reconciliation, progress production,
 progress delivery, or local installation. Those services remain active during application drain
@@ -455,7 +462,7 @@ The monotonic timer is an implementation mechanism for waiting; the due predicat
 domain's logical coordinate. Lifecycle changes are checked after every wake. Cancellation is a
 separate typed outcome rather than a clock read.
 
-Reset coordination and its ten-second initial-checkpoint deadline are physical, monotonic bounds.
+Reset coordination and its ninety-second initial-checkpoint deadline are physical, monotonic bounds.
 They do not wait for, pause, or re-anchor logical time. A reset that fails before generation
 publication restores the old branch instance with its existing logical deadlines. After generation
 publication, recovery completes the fresh lifetime and never recreates the old instance or its

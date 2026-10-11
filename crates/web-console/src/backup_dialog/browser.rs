@@ -37,11 +37,25 @@ pub(crate) enum Received {
 /// The connection failed while a message was sent.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
 #[error("the console connection failed")]
+#[cfg_attr(
+    nervix_lint,
+    nervix::error_boundary(
+        outcome,
+        reason = "the browser adapter reports an ordinary unavailable socket capability"
+    )
+)]
 pub(crate) struct SocketFailed;
 
 /// The browser could not keep or save a downloaded archive.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
 #[error("the browser could not keep or save the archive")]
+#[cfg_attr(
+    nervix_lint,
+    nervix::error_boundary(
+        outcome,
+        reason = "the browser adapter reports an ordinary unavailable download capability"
+    )
+)]
 pub(crate) struct ArchiveSaveFailed;
 
 /// A console WebSocket that carries one download or one restore attempt.

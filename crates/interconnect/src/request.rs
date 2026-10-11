@@ -65,6 +65,14 @@ pub struct ResponseEnvelope {
 
 #[doc(hidden)]
 #[derive(Debug, Clone, Archive, Serialize, Deserialize, PartialEq, Eq, Error)]
+#[cfg_attr(
+    nervix_lint,
+    nervix::error_boundary(
+        outcome,
+        reason = "the fixed wire response classifies remote request outcomes; local failures \
+                  retain reports"
+    )
+)]
 pub enum RemoteRequestFailure {
     #[error("no handler is registered")]
     HandlerNotRegistered,

@@ -27,7 +27,7 @@ use super::{
 };
 use crate::{
     collections::{DashMap, dash_map::Entry},
-    sync::atomic::{AtomicU64, AtomicUsize, Ordering},
+    unmodeled::sync::atomic::{AtomicU64, AtomicUsize, Ordering},
 };
 
 /// History does not grow with workload duration once these capacities are reached: lost context
@@ -98,6 +98,8 @@ struct EdgeContext {
     witnesses: Vec<OrderWitness>,
 }
 
+/// Held by the process-wide registry for the life of the process, so its counters are real atomics
+/// that no model execution constructs.
 #[derive(Default)]
 pub(crate) struct OrderHistory {
     edges: DashMap<EdgeKey, EdgeRecord>,
