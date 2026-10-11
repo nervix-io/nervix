@@ -121,14 +121,18 @@ jobs:
           just test-bolero
 
   bolero-fuzz:
-    name: bolero-fuzz
+    name: bolero-fuzz (${{ matrix.shard }} of ${{ strategy.job-total }})
     if: inputs.event-name == 'pull_request' && contains(fromJSON(inputs.labels-json || '[]'), 'fuzz')
+    strategy:
+      fail-fast: false
+      matrix:
+        # Each shard runs whole harnesses of the inventory; `just fuzz-plan 3` shows the division.
+        shard: [1, 2, 3]
     runs-on: blacksmith-16vcpu-ubuntu-2404
-    # The measured 68-target campaign took 125 minutes after preparation; the
-    # 85-target run needs room for cold builds, qualification and report uploads.
-    timeout-minutes: 300
-    env:
-      CARGO_BUILD_JOBS: "1"
+    # The single job that ran all 159 targets took 209 to 258 minutes: discovery, both server
+    # sanitizer builds with one Cargo job, 132 minutes of campaigns, qualification and uploads.
+    # A shard builds at most one server harness and runs about a third of the campaigns.
+    timeout-minutes: 180
     permissions:
       contents: read
     steps:
@@ -202,7 +206,7 @@ jobs:
           sync: "false"
           cache-executables: "true"
           max-size: "1TiB"
-          manifest-key: bolero-fuzz-${{ runner.os }}-${{ runner.arch }}
+          manifest-key: bolero-fuzz-${{ matrix.shard }}-${{ runner.os }}-${{ runner.arch }}
           pr-comment: "false"
           s3-bucket: ${{ vars.KACHE_BUCKET }}
           s3-prefix: "artifacts"
@@ -211,24 +215,57 @@ jobs:
           s3-access-key-id: ${{ secrets.KACHE_BUCKET_ACCESS_KEY_ID }}
           s3-secret-access-key: ${{ secrets.KACHE_BUCKET_SECRET_ACCESS_KEY }}
 
+      - name: Start runner load recorder
+        run: |
+          python3 scripts/record_runner_load.py "${RUNNER_TEMP}/runner-load.csv" "${RUNNER_TEMP}/runner-load.md" > "${RUNNER_TEMP}/runner-load.log" 2>&1 &
+          echo "$!" > "${RUNNER_TEMP}/runner-load.pid"
+
       - name: Install pinned cargo-bolero
         run: just install-cargo-bolero
 
-      - name: Prepare the registered server sanitizer harnesses
+      - name: Discover every registered target
         run: |
           just toolchains-install
-          just prepare-archive-counts-fuzz
-          just prepare-bolero client-arrow-rows
+          just validate-bolero
 
-      - name: Run every sanitizer libFuzzer target and qualify failures
+      - name: Prepare this shard's declared server harnesses
+        env:
+          # One Cargo build job bounds the instrumented server build's compiler memory.
+          CARGO_BUILD_JOBS: "1"
+        run: just prepare-bolero-shard ${{ matrix.shard }}/${{ strategy.job-total }}
+
+      - name: Run this shard's sanitizer libFuzzer targets and qualify failures
+        run: just coverage-bolero 30 ${{ matrix.shard }}/${{ strategy.job-total }}
+
+      - name: Stop runner load recorder
+        if: always()
         run: |
-          just coverage-bolero 30
+          if [[ -f "${RUNNER_TEMP}/runner-load.pid" ]]; then
+            kill -TERM "$(cat "${RUNNER_TEMP}/runner-load.pid")" || true
+            for _ in {1..10}; do
+              [[ -f "${RUNNER_TEMP}/runner-load.md" ]] && break
+              sleep 1
+            done
+          fi
+          if [[ -f "${RUNNER_TEMP}/runner-load.md" ]]; then
+            cat "${RUNNER_TEMP}/runner-load.md" >> "${GITHUB_STEP_SUMMARY}"
+          fi
+
+      - name: Upload shard completion evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: bolero-fuzz-evidence-${{ matrix.shard }}
+          path: |
+            target/native-coverage/bolero-fuzz/
+            !target/native-coverage/bolero-fuzz/**/profiles/
+          if-no-files-found: error
 
       - name: Upload live campaign coverage and completion evidence
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: coverage-bolero-fuzz
+          name: coverage-bolero-fuzz-${{ matrix.shard }}
           path: target/native-coverage/bolero-fuzz/
           if-no-files-found: error
 
@@ -236,16 +273,63 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: bolero-runs
+          name: bolero-runs-${{ matrix.shard }}
           path: |
             target/bolero/runs/
             target/bolero/python.lcov
           if-no-files-found: warn
 
+      - name: Upload runner load
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: runner-load-bolero-fuzz-${{ matrix.shard }}
+          path: |
+            ${{ runner.temp }}/runner-load.csv
+            ${{ runner.temp }}/runner-load.md
+            ${{ runner.temp }}/runner-load.log
+          if-no-files-found: warn
+
+  bolero-fuzz-combined:
+    name: bolero-fuzz-combined
+    if: inputs.event-name == 'pull_request' && contains(fromJSON(inputs.labels-json || '[]'), 'fuzz')
+    needs: [bolero-fuzz]
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tested-sha || github.sha }}
+
+      - name: Install just
+        uses: taiki-e/install-action@v2
+        with:
+          tool: just@latest
+
+      - name: Download every shard's completion evidence
+        uses: actions/download-artifact@v4
+        with:
+          pattern: bolero-fuzz-evidence-*
+          path: target/bolero-fuzz-shards
+
+      - name: Prove the shards ran every registered target once and merge their reports
+        run: just combine-bolero-fuzz target/bolero-fuzz-shards target/native-coverage/bolero-fuzz/combined
+
+      - name: Upload the combined campaign record and report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-bolero-fuzz
+          path: target/native-coverage/bolero-fuzz/combined/
+          if-no-files-found: error
+
   bolero-gate:
     name: bolero-gate
     if: always()
-    needs: [bolero-random, bolero-fuzz]
+    needs: [bolero-random, bolero-fuzz, bolero-fuzz-combined]
     runs-on: ubuntu-latest
     timeout-minutes: 5
     outputs:
@@ -258,13 +342,16 @@ jobs:
         env:
           RANDOM_RESULT: ${{ needs.bolero-random.result }}
           FUZZ_RESULT: ${{ needs.bolero-fuzz.result }}
+          COMBINED_RESULT: ${{ needs.bolero-fuzz-combined.result }}
           FUZZ_REQUIRED: ${{ inputs.event-name == 'pull_request' && contains(fromJSON(inputs.labels-json || '[]'), 'fuzz') }}
         run: |
           test "$RANDOM_RESULT" = success
           if [[ "$FUZZ_REQUIRED" == "true" ]]; then
             test "$FUZZ_RESULT" = success
+            test "$COMBINED_RESULT" = success
           else
             test "$FUZZ_RESULT" = skipped
+            test "$COMBINED_RESULT" = skipped
           fi
           python3 - <<'PYTHON'
           import json, os, pathlib
@@ -274,6 +361,7 @@ jobs:
               "run": os.environ["GITHUB_RUN_ID"], "attempt": os.environ["GITHUB_RUN_ATTEMPT"],
               "event": os.environ["BOLERO_EVENT_NAME"], "labels": json.loads(os.environ["BOLERO_LABELS"]),
               "randomized": os.environ["RANDOM_RESULT"], "sanitizer": os.environ["FUZZ_RESULT"],
+              "sanitizer_combined": os.environ["COMBINED_RESULT"],
               "sanitizer_required": os.environ["FUZZ_REQUIRED"] == "true",
           }
           pathlib.Path("selection.json").write_text(json.dumps(record, indent=2) + "\n")

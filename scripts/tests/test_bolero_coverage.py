@@ -7,6 +7,7 @@ import json
 import os
 import pathlib
 import re
+import shutil
 import subprocess
 import tempfile
 import textwrap
@@ -56,6 +57,7 @@ class CampaignTests(unittest.TestCase):
         targets = []
         for target in selected:
             paths = {field: self.root / getattr(target, field).relative_to(bolero.ROOT) for field in ("source", "corpus", "manifest")}
+            shutil.copytree(target.corpus, paths["corpus"])
             targets.append(dataclasses.replace(target, **paths))
         self.inventory = dataclasses.replace(inventory, targets=tuple(targets))
         self.tools = self.root / "tools"
@@ -82,8 +84,8 @@ class CampaignTests(unittest.TestCase):
         self.flags = ["--cfg", "fuzzing", "-Zsanitizer=address", "-Cllvm-args=-sanitizer-coverage-level=4", "-C", "instrument-coverage"]
         self.fingerprint.write_text(json.dumps({"rustflags": self.flags, "features": "[]"}))
 
-    def campaign(self, selected=None) -> coverage.Campaign:
-        return coverage.Campaign(self.root, self.inventory, self.inventory.targets if selected is None else selected, 30)
+    def campaign(self, selected=None, partition=None) -> coverage.Campaign:
+        return coverage.Campaign(self.root, self.inventory, self.inventory.targets if selected is None else selected, 30, partition)
 
     def execute(self, measured: coverage.TargetCoverage) -> None:
         environment = measured.execute(self.binary, ["-max_total_time=30"])
@@ -125,7 +127,7 @@ class CampaignTests(unittest.TestCase):
             with self.subTest(selected=selected), self.assertRaises(native.RunnerError):
                 self.campaign(selected)
         with self.assertRaisesRegex(native.RunnerError, "positive integer"):
-            coverage.Campaign(self.root, self.inventory, (target,), 0)
+            coverage.Campaign(self.root, self.inventory, (target,), 0, None)
 
     def test_isolated_campaign_records_its_own_workspace_profile(self) -> None:
         manifest = self.root / "tools/nervix-lint/Cargo.toml"
@@ -237,6 +239,143 @@ class CampaignTests(unittest.TestCase):
             with campaign.target(self.inventory.targets[0], self.root):
                 pass
 
+    def shard_campaigns(self, plan) -> pathlib.Path:
+        """Run each shard of `plan` and copy its evidence the way CI downloads shard artifacts."""
+        evidence = self.root / "evidence"
+        for number, selected in enumerate(plan, start=1):
+            partition = {"number": number, "count": len(plan), "plan_sha256": bolero.plan_digest(plan)}
+            with self.campaign(selected, partition) as campaign:
+                for target in selected:
+                    with campaign.target(target, self.root / "target/bolero/runs" / target.id) as measured:
+                        self.execute(measured)
+                        measured.complete("#120 DONE", 30)
+                campaign.complete()
+            self.assertTrue(campaign.path.name.endswith(f"-shard-{number}-of-{len(plan)}"))
+            self.assertEqual(self.record(campaign.path)["shard"], partition)
+            shutil.copytree(campaign.path, evidence / f"shard-{number}" / campaign.path.name,
+                            ignore=shutil.ignore_patterns("profiles"))
+        return evidence
+
+    def combine(self, evidence: pathlib.Path, plan, output: str = "combined") -> pathlib.Path:
+        return coverage.combine(self.root, self.inventory, evidence, self.root / output,
+                                lambda count: plan, bolero.plan_digest)
+
+    def test_shards_of_one_plan_combine_into_one_complete_record_and_report(self) -> None:
+        plan = tuple((target,) for target in self.inventory.targets)
+        evidence = self.shard_campaigns(plan)
+        output = self.combine(evidence, plan)
+        record = self.record(output)
+        self.assertEqual(record["verdict"], "complete")
+        self.assertEqual(record["counts"], {"discovered": 2, "selected": 2, "executed": 2, "completed": 2})
+        self.assertEqual(record["selection"], [target.id for target in self.inventory.targets])
+        self.assertEqual([shard["number"] for shard in record["shards"]], [1, 2])
+        self.assertEqual(record["plan_sha256"], bolero.plan_digest(plan))
+        self.assertEqual(record["tested_sha"], "revision")
+        for number, (target,) in enumerate(plan, start=1):
+            self.assertEqual(record["targets"][target.id]["shard"], number)
+            self.assertTrue((evidence / record["targets"][target.id]["completion"]).is_file())
+        shard_report = (evidence / pathlib.Path(record["shards"][0]["record"]).parent / "lcov.info").read_text()
+        merged = (output / "lcov.info").read_text()
+        self.assertIn("DA:3,4", shard_report)
+        self.assertIn("DA:3,8", merged)
+        target = self.inventory.targets[0]
+        completion = json.loads((evidence / record["targets"][target.id]["completion"]).read_text())
+        self.assertEqual(completion["corpus"], coverage.corpus_identity(target.corpus))
+        self.assertGreater(completion["corpus"]["inputs"], 0)
+
+    def test_missing_failed_foreign_or_mismatched_shards_do_not_combine(self) -> None:
+        plan = tuple((target,) for target in self.inventory.targets)
+        evidence = self.shard_campaigns(plan)
+        records = sorted(evidence.rglob("completion.json"))
+        campaign_records = [path for path in records if "selection" in json.loads(path.read_text())]
+
+        def edited(index: int, change) -> pathlib.Path:
+            copy = self.root / f"edited-{index}-{len(list(self.root.glob('edited-*')))}"
+            shutil.copytree(evidence, copy)
+            path = copy / campaign_records[index].relative_to(evidence)
+            content = json.loads(path.read_text())
+            change(content)
+            path.write_text(json.dumps(content))
+            return copy
+
+        def remove_second(content) -> None:
+            raise AssertionError("unused")
+
+        only_first = self.root / "only-first"
+        shutil.copytree(evidence / "shard-1", only_first / "shard-1")
+        cases = {
+            "not shards 1 to 2": (only_first, plan),
+            "did not complete": (edited(1, lambda content: content.update(verdict="failed")), plan),
+            "another inventory": (edited(0, lambda content: content["inventory"].update(sha256="0" * 64)), plan),
+            "different shard counts": (edited(0, lambda content: content["shard"].update(count=3)), plan),
+            "selected": (edited(0, lambda content: content.update(selection=[])), plan),
+            "counts": (edited(1, lambda content: content["counts"].update(completed=0)), plan),
+            "another shard plan": (evidence, tuple(reversed(plan))),
+            "different runs": (edited(1, lambda content: content.update(run={"provider": "github", "run": "2", "attempt": "1"})), plan),
+            "tested": (edited(1, lambda content: content.update(tested_sha="other")), plan),
+            "without a shard plan": (edited(0, lambda content: content.update(shard=None)), plan),
+        }
+        for index, (reason, (directory, shards)) in enumerate(cases.items()):
+            with self.subTest(reason=reason):
+                with self.assertRaisesRegex(native.RunnerError, reason):
+                    self.combine(directory, shards, f"refused-{index}")
+                self.assertEqual(self.record(self.root / f"refused-{index}")["verdict"], "failed")
+        empty = self.root / "empty"
+        empty.mkdir()
+        with self.assertRaisesRegex(native.RunnerError, "no shard campaign record"):
+            self.combine(empty, plan, "refused-empty")
+        target_record = next(path for path in records if "selection" not in json.loads(path.read_text()))
+        content = json.loads(target_record.read_text())
+        content["verdict"] = "failed"
+        target_record.write_text(json.dumps(content))
+        with self.assertRaisesRegex(native.RunnerError, "no complete campaign record"):
+            self.combine(evidence, plan, "refused-target")
+        report = next(evidence.rglob("lcov.info"))
+        report.unlink()
+        with self.assertRaises(native.RunnerError):
+            self.combine(evidence, plan, "refused-report")
+
+
+class ReportMergeTests(unittest.TestCase):
+    def merge(self, *reports: str) -> str:
+        with tempfile.TemporaryDirectory() as directory:
+            paths = []
+            for index, text in enumerate(reports):
+                path = pathlib.Path(directory) / f"{index}.info"
+                path.write_text(text)
+                paths.append(path)
+            output = pathlib.Path(directory) / "merged.info"
+            coverage.merge_lcov(paths, output)
+            return output.read_text()
+
+    def test_disjoint_executions_sum_their_counters_and_recount_summaries(self) -> None:
+        first = ("TN:\nSF:src/a.rs\nFN:3,beta\nFN:1,alpha\nFNDA:2,alpha\nFNDA:0,beta\nFNF:2\nFNH:1\n"
+                 "BRDA:4,0,0,-\nBRDA:4,0,1,1\nBRF:2\nBRH:1\nDA:1,2\nDA:3,0\nLF:2\nLH:1\nend_of_record\n")
+        second = ("SF:src/a.rs\nFN:1,alpha\nFN:3,beta\nFNDA:1,alpha\nFNDA:5,beta\n"
+                  "BRDA:4,0,0,3\nBRDA:4,0,1,-\nDA:1,1\nDA:3,5\nDA:7,0\nLF:3\nLH:2\nend_of_record\n"
+                  "SF:src/b.rs\nDA:2,0\nend_of_record\n")
+        self.assertEqual(self.merge(first, second), (
+            "SF:src/a.rs\nFN:1,alpha\nFN:3,beta\nFNDA:3,alpha\nFNDA:5,beta\nFNF:2\nFNH:2\n"
+            "BRDA:4,0,0,3\nBRDA:4,0,1,1\nBRF:2\nBRH:2\n"
+            "DA:1,3\nDA:3,5\nDA:7,0\nLF:3\nLH:2\nend_of_record\n"
+            "SF:src/b.rs\nFNF:0\nFNH:0\nDA:2,0\nLF:1\nLH:0\nend_of_record\n"
+        ))
+        self.assertIn("BRDA:4,0,0,-\n", self.merge("SF:x\nBRDA:4,0,0,-\nend_of_record\n"))
+
+    def test_malformed_reports_are_refused(self) -> None:
+        for text, reason in (
+            ("DA:1,1\n", "outside a record"),
+            ("SF:a\nDA:1,1\n", "no end_of_record"),
+            ("SF:a\nSF:b\nend_of_record\n", "no end_of_record"),
+            ("end_of_record\n", "outside a record"),
+            ("SF:a\nXYZ:1\nend_of_record\n", "unsupported LCOV line"),
+            ("SF:a\nFNDA:1,ghost\nend_of_record\n", "without a function line"),
+        ):
+            with self.subTest(text=text), self.assertRaisesRegex(native.RunnerError, reason):
+                self.merge(text)
+        with self.assertRaises(ValueError):
+            self.merge("SF:a\nDA:x,1\nend_of_record\n")
+
 
 class WorkflowTests(unittest.TestCase):
     def setUp(self) -> None:
@@ -257,7 +396,8 @@ class WorkflowTests(unittest.TestCase):
                 root = pathlib.Path(directory)
                 environment = {**os.environ, "BOLERO_TESTED_SHA": "tested-revision", "GITHUB_RUN_ID": "100", "GITHUB_RUN_ATTEMPT": "2",
                                "BOLERO_EVENT_NAME": event, "BOLERO_LABELS": json.dumps(labels), "RANDOM_RESULT": "success",
-                               "FUZZ_RESULT": result, "FUZZ_REQUIRED": required, "GITHUB_OUTPUT": str(root / "outputs")}
+                               "FUZZ_RESULT": result, "COMBINED_RESULT": result, "FUZZ_REQUIRED": required,
+                               "GITHUB_OUTPUT": str(root / "outputs")}
                 executed = subprocess.run(["bash", "-e", "-c", self.script], cwd=root, env=environment, capture_output=True, text=True)
                 self.assertEqual(executed.returncode, 0, executed.stderr)
                 record = json.loads((root / "selection.json").read_text())
@@ -266,15 +406,21 @@ class WorkflowTests(unittest.TestCase):
                 self.assertEqual(record["labels"], labels)
                 self.assertEqual(record["sanitizer_required"], required == "true")
                 self.assertEqual(record["sanitizer"], result)
+                self.assertEqual(record["sanitizer_combined"], result)
                 self.assertEqual(record["verdict"], "complete")
                 self.assertIn(f"sanitizer-result={result}", (root / "outputs").read_text())
 
     def test_failed_cancelled_or_missing_required_jobs_do_not_publish_complete_selection(self) -> None:
-        for random, fuzz, required in (("failure", "success", "true"), ("cancelled", "skipped", "false"),
-                                       ("success", "failure", "true"), ("success", "cancelled", "true"), ("success", "skipped", "true"),
-                                       ("success", "success", "false")):
-            with self.subTest(random=random, fuzz=fuzz, required=required), tempfile.TemporaryDirectory() as directory:
-                environment = {**os.environ, "RANDOM_RESULT": random, "FUZZ_RESULT": fuzz, "FUZZ_REQUIRED": required}
+        for random, fuzz, combined, required in (
+            ("failure", "success", "success", "true"), ("cancelled", "skipped", "skipped", "false"),
+            ("success", "failure", "skipped", "true"), ("success", "cancelled", "skipped", "true"),
+            ("success", "skipped", "skipped", "true"), ("success", "success", "success", "false"),
+            ("success", "success", "failure", "true"), ("success", "success", "skipped", "true"),
+            ("success", "skipped", "success", "false"),
+        ):
+            with self.subTest(random=random, fuzz=fuzz, combined=combined, required=required), tempfile.TemporaryDirectory() as directory:
+                environment = {**os.environ, "RANDOM_RESULT": random, "FUZZ_RESULT": fuzz, "COMBINED_RESULT": combined,
+                               "FUZZ_REQUIRED": required}
                 result = subprocess.run(["bash", "-e", "-c", self.script], cwd=directory, env=environment, capture_output=True)
                 self.assertNotEqual(result.returncode, 0)
                 self.assertFalse((pathlib.Path(directory) / "selection.json").exists())
@@ -288,6 +434,42 @@ class WorkflowTests(unittest.TestCase):
         self.assertIn("if: inputs.event-name == 'pull_request' && contains(fromJSON(inputs.labels-json || '[]'), 'fuzz')", self.workflow)
         self.assertIn("name: coverage-bolero-fuzz", self.workflow)
         self.assertIn("just coverage-bolero 30", self.workflow)
+
+    def job(self, name: str) -> str:
+        sections = re.split(r"^  (?=[a-z][a-z-]*:\n)", self.workflow, flags=re.M)
+        found = [section for section in sections if section.startswith(f"{name}:\n")]
+        self.assertEqual(len(found), 1, name)
+        return found[0]
+
+    def test_sanitizer_shards_run_the_plan_and_one_job_proves_the_whole_inventory_ran(self) -> None:
+        label = "if: inputs.event-name == 'pull_request' && contains(fromJSON(inputs.labels-json || '[]'), 'fuzz')"
+        shards = self.job("bolero-fuzz")
+        self.assertIn(label, shards)
+        self.assertIn("name: bolero-fuzz (${{ matrix.shard }} of ${{ strategy.job-total }})", shards)
+        values = re.search(r"^\s+shard: \[(.+)\]$", shards, re.M)
+        self.assertIsNotNone(values)
+        count = len(values[1].split(","))
+        self.assertEqual([int(value) for value in values[1].split(",")], list(range(1, count + 1)))
+        self.assertIn("just validate-bolero", shards)
+        self.assertIn("just prepare-bolero-shard ${{ matrix.shard }}/${{ strategy.job-total }}", shards)
+        self.assertIn("just coverage-bolero 30 ${{ matrix.shard }}/${{ strategy.job-total }}", shards)
+        # Only the server preparation is held to one Cargo build job.
+        self.assertEqual(shards.count('CARGO_BUILD_JOBS: "1"'), 1)
+        preparation = shards.split("- name: Prepare this shard's declared server harnesses")[1].split("- name:")[0]
+        self.assertIn('CARGO_BUILD_JOBS: "1"', preparation)
+        self.assertIn("python3 scripts/record_runner_load.py", shards)
+        evidence = shards.split("name: bolero-fuzz-evidence-${{ matrix.shard }}")[1].split("- name:")[0]
+        self.assertIn("!target/native-coverage/bolero-fuzz/**/profiles/", evidence)
+        self.assertEqual(len(bolero.shard_plan(bolero.load_inventory(), count)), count)
+        combined = self.job("bolero-fuzz-combined")
+        self.assertIn(label, combined)
+        self.assertIn("needs: [bolero-fuzz]", combined)
+        self.assertIn("pattern: bolero-fuzz-evidence-*", combined)
+        self.assertIn("just combine-bolero-fuzz target/bolero-fuzz-shards target/native-coverage/bolero-fuzz/combined", combined)
+        self.assertIn("name: coverage-bolero-fuzz\n", combined)
+        gate = self.job("bolero-gate")
+        self.assertIn("needs: [bolero-random, bolero-fuzz, bolero-fuzz-combined]", gate)
+        self.assertIn("COMBINED_RESULT: ${{ needs.bolero-fuzz-combined.result }}", gate)
 
 
 if __name__ == "__main__":
