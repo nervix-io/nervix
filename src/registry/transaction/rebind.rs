@@ -6,6 +6,11 @@
 //! - **Depends on.** Captured resource uploads, the simulated model prefix and registry mutations.
 //! - **Must not know.** Consensus, persistence, sessions, Tokio or runtime execution.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(decisions, reason = "owns the decisions boundary declared above")
+)]
+
 use std::collections::BTreeSet;
 
 use error_stack::Report;

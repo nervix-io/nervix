@@ -5,6 +5,11 @@
 //! - **Depends on.** Validated correlator plans, Arrow batches and bound domain execution time.
 //! - **Must not know.** NSPL parsing, placement decisions or connector transports.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(data_plane, reason = "owns the data plane boundary declared above")
+)]
+
 use arrow_buffer::{BooleanBuffer, BooleanBufferBuilder};
 use error_stack::{Report, ResultExt as _};
 
@@ -1300,6 +1305,10 @@ pub(super) async fn handle_correlator_timeout_action(
 }
 
 #[cfg(test)]
+#[cfg_attr(
+    nervix_lint,
+    nervix::layer(harness, reason = "test module remains outside product execution")
+)]
 mod tests {
     use ahash::HashMap;
     use nervix_models::ParseAsType;

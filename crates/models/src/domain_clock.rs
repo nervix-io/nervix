@@ -7,6 +7,11 @@
 //! - **Depends on.** Timestamp and serialization primitives.
 //! - **Must not know.** Runtime tasks, consensus, notifications, sleeps or transport behavior.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(vocabulary, reason = "owns the vocabulary boundary declared above")
+)]
+
 use std::{fmt, num::NonZeroU64, str::FromStr, time::Duration};
 
 use error_stack::{Report, ResultExt as _};

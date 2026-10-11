@@ -5,6 +5,11 @@
 //! - **Depends on.** Metrics registration and numeric conversions.
 //! - **Must not know.** Checkpoint keys, consensus retention or maintenance scheduling.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(engine, reason = "owns the infrastructure boundary declared above")
+)]
+
 use meticulous::ResultExt as _;
 use nervix_approx_into::ApproxInto as _;
 use prometheus::{Gauge, IntCounter, Registry, core::Collector};

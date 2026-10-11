@@ -5,6 +5,11 @@
 //! - **Depends on.** Captured Models, schedules, and transaction impact vocabulary.
 //! - **Must not know.** Runtime branch tasks, consensus proposals, or interconnect commands.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(decisions, reason = "owns the decisions boundary declared above")
+)]
+
 use error_stack::Report;
 use nervix_models::{
     AttributedGateBoundary, AttributedImpactNode, CanonicalImpactSet, CommandExecutionReference,

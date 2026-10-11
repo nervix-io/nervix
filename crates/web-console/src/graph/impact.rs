@@ -15,6 +15,11 @@
 //! the graph as it was, as it will be, or with its changes marked only selects among items that
 //! are already placed, so switching between those views never moves anything.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(edge, reason = "owns the edges boundary declared above")
+)]
+
 use std::collections::{BTreeMap, BTreeSet};
 
 use nervix_models::{

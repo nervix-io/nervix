@@ -21,6 +21,18 @@
 //! accepted the connection. The insert's request timeout covers the connection, lookup included,
 //! because the driver makes it while the insert waits for its result.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(
+        engine,
+        reason = "owns the engines and infrastructure boundary declared above"
+    )
+)]
+#![cfg_attr(
+    nervix_lint,
+    nervix::input(plans, reason = "the host supplies a validated connector plan")
+)]
+
 use std::{ops::Range, time::Duration};
 
 use ::clickhouse::{Client as ClickHouseClient, error::Error as ClickHouseError};
@@ -486,9 +498,17 @@ impl RowSink for ClickHouseSink {
 }
 
 #[cfg(test)]
+#[cfg_attr(
+    nervix_lint,
+    nervix::layer(harness, reason = "test module remains outside product execution")
+)]
 mod connection_tests;
 
 #[cfg(test)]
+#[cfg_attr(
+    nervix_lint,
+    nervix::layer(harness, reason = "test module remains outside product execution")
+)]
 mod tests {
     use arrow_array::{
         Array as _, BinaryArray, FixedSizeListArray, Float32Array, Int64Array, ListArray,

@@ -8,6 +8,11 @@
 //! - **Must not know.** Consensus, entity gates, the interconnect, or how a reset is coordinated.
 //!   Coordinating one is the control plane's, and a branch task only asks.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(data_plane, reason = "owns the data plane boundary declared above")
+)]
+
 use nervix_interconnect::WasmStateResetTarget;
 use nervix_models::WasmStateGeneration;
 
@@ -299,6 +304,10 @@ impl Runtime {
 }
 
 #[cfg(test)]
+#[cfg_attr(
+    nervix_lint,
+    nervix::layer(harness, reason = "test module remains outside product execution")
+)]
 mod tests {
     use std::collections::BTreeSet;
 

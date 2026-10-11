@@ -6,6 +6,11 @@
 //! - **Depends on.** Shared coordination identities and persisted runtime-state entries.
 //! - **Must not know.** Schedule planning, interconnect transport, or state activation policy.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(data_plane, reason = "owns the data plane boundary declared above")
+)]
+
 use super::*;
 
 #[derive(Debug)]

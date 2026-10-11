@@ -6,6 +6,11 @@
 //! - **Depends on.** The application scheduling decisions and the shared application test fixtures.
 //! - **Must not know.** Runtime execution, consensus storage or edge protocols.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(harness, reason = "owns the test harness boundary declared above")
+)]
+
 use std::{collections::BTreeSet, time::Duration};
 
 use nervix_consensus::{GossipNode, GossipState};

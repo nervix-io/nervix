@@ -8,6 +8,11 @@
 //! - **Depends on.** The format compiler and the time zones it measures zone directives in.
 //! - **Must not know.** Arrow arrays, kernels, or row errors.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(harness, reason = "owns the test harness boundary declared above")
+)]
+
 use super::{
     DatetimeField, DatetimeFormat, DatetimeParser, FormatDefect, FormatItem, ParseFormat,
     ParserZoneMismatch, ReadItem, compile_items,

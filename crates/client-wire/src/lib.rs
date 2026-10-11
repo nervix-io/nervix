@@ -19,6 +19,11 @@
 //! - **Must not know.** The server's registry, runtime or consensus, the parser, Arrow — a batch is
 //!   bytes here, never columns — or any client's dispatch, reconnection or subscription state.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(edge, reason = "owns the edges boundary declared above")
+)]
+
 include!(concat!(env!("OUT_DIR"), "/flatbuffers/session_module.rs"));
 
 use generated::nervix::session as wire;

@@ -7,6 +7,11 @@
 //! - **Must not know.** How the registry walks a graph to compute a fingerprint, or how a runtime
 //!   keys the state it stores by one.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(vocabulary, reason = "owns the vocabulary boundary declared above")
+)]
+
 use std::fmt;
 
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};

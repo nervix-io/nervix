@@ -11,6 +11,14 @@
 //! A redirect never guesses. While no leader is known it names none, and while discovery has not
 //! established one of the leader's endpoints that endpoint stays absent.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(
+        control_plane,
+        reason = "owns the control plane boundary declared above"
+    )
+)]
+
 use error_stack::Report;
 use nervix_consensus::ConsensusError;
 use nervix_models::ClusterNodeName;

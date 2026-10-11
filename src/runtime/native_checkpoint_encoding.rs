@@ -5,6 +5,11 @@
 //! - **Depends on.** The state codec and the caller's admitted writer and memory reservation.
 //! - **Must not know.** Archive records, placement, restoration authority, or database keys.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(data_plane, reason = "owns the data plane boundary declared above")
+)]
+
 use std::marker::PhantomData;
 
 use nervix_execution::Cancellation;

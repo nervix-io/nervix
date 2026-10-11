@@ -9,6 +9,11 @@
 //! - **Must not know.** Session transport, subscription lifecycle, relay scheduling, persistence,
 //!   acknowledgements, or internal relay and interconnect serialization.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(edge, reason = "owns the edges boundary declared above")
+)]
+
 use std::{collections::BTreeMap, num::NonZeroUsize};
 
 use arrow_array::{

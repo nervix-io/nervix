@@ -6,6 +6,11 @@
 //! - **Depends on.** The authenticated interconnect test fixture and entity-gate wire requests.
 //! - **Must not know.** Runtime graph construction or control-plane scheduling.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(harness, reason = "owns the test harness boundary declared above")
+)]
+
 use super::*;
 
 #[nervix_primitives::test]

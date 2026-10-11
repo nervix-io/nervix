@@ -5,6 +5,11 @@
 //! - **Depends on.** Validated clock periods, timestamps and durations.
 //! - **Must not know.** Runtime lifecycle, notification delivery or connector behavior.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(vocabulary, reason = "owns the vocabulary boundary declared above")
+)]
+
 #[cfg(target_pointer_width = "64")]
 use std::num::NonZeroU64;
 use std::time::Duration;

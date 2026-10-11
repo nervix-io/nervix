@@ -21,6 +21,11 @@
 //! received. It then sends the newest accepted tick of that installation. State frames wait for
 //! room; each tick holds one replaceable control slot.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(edge, reason = "owns the edges boundary declared above")
+)]
+
 use ahash::HashMap;
 use meticulous::OptionExt as _;
 use nervix_client_wire::{

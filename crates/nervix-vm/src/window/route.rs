@@ -8,6 +8,14 @@
 //! - **Depends on.** The window lowering and the VM compiler.
 //! - **Must not know.** Relays, branches, accumulator state, or when a window emits.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(
+        engine,
+        reason = "owns the engines and infrastructure boundary declared above"
+    )
+)]
+
 use std::collections::BTreeMap;
 
 use arrow_schema::{DataType, Field, Schema};
@@ -512,6 +520,10 @@ fn explicit_output_options(options: &CompileOptions) -> CompileOptions {
 }
 
 #[cfg(test)]
+#[cfg_attr(
+    nervix_lint,
+    nervix::layer(harness, reason = "test module remains outside product execution")
+)]
 mod tests {
     use super::*;
     use crate::window::lower_window_assignments;

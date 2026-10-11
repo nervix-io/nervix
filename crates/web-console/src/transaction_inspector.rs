@@ -8,6 +8,11 @@
 //! - **Depends on.** The client wire request channel, report vocabulary, and impact projection.
 //! - **Must not know.** How inspection is planned or persisted, or the live graph's geometry.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(edge, reason = "owns the edges boundary declared above")
+)]
+
 use std::collections::BTreeMap;
 
 use leptos::{ev, prelude::*};

@@ -14,6 +14,10 @@
 
 #![cfg_attr(
     nervix_lint,
+    nervix::layer(edge, reason = "owns the edges boundary declared above")
+)]
+#![cfg_attr(
+    nervix_lint,
     nervix::context(
         outside,
         reason = "native client session and attachment ownership belongs to the client edge"
@@ -103,4 +107,8 @@ pub fn split_query_statements(query: &str) -> error_stack::Result<Vec<&str>, Que
 }
 
 #[cfg(test)]
+#[cfg_attr(
+    nervix_lint,
+    nervix::layer(harness, reason = "test module remains outside product execution")
+)]
 mod tests;

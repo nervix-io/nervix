@@ -9,6 +9,11 @@
 //! - **Must not know.** What expires, or why. The caller decides the order; the map holds no clock,
 //!   no branch and no Nervix type.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(primitives, reason = "owns the primitives boundary declared above")
+)]
+
 use std::{borrow::Borrow, fmt, hash::Hash, ptr};
 
 use ahash::HashMap;

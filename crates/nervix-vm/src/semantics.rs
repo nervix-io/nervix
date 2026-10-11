@@ -11,6 +11,14 @@
 //! - **Must not know.** How execution walks Arrow buffers, registers or batches, and anything about
 //!   relays, branches, connectors or the registry.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(
+        engine,
+        reason = "owns the engines and infrastructure boundary declared above"
+    )
+)]
+
 use std::ops::{BitAnd, BitOr, BitXor, Not};
 
 use arrow_schema::{DataType, Field, TimeUnit};

@@ -7,6 +7,11 @@
 //! - **Depends on.** The runtime's endpoint dispatch and its signaling protocols.
 //! - **Must not know.** Transactions, scheduling or how an ingested payload is processed.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(edge, reason = "owns the edges boundary declared above")
+)]
+
 use std::{convert::Infallible, time::Duration};
 
 use error_stack::{Report, ResultExt};

@@ -15,6 +15,11 @@
 //! codec with jaq transformations is packed on the node's extension workers, inside the same job
 //! that runs its transformations.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(data_plane, reason = "owns the data plane boundary declared above")
+)]
+
 use std::num::NonZeroUsize;
 
 use error_stack::Report;
@@ -336,6 +341,10 @@ fn subdivide<M, O, F>(
 }
 
 #[cfg(test)]
+#[cfg_attr(
+    nervix_lint,
+    nervix::layer(harness, reason = "test module remains outside product execution")
+)]
 mod tests {
     use std::cell::RefCell;
 

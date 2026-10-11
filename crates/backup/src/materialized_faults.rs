@@ -5,6 +5,11 @@
 //! - **Depends on.** Current record validators, restore reader and synthetic archive inputs.
 //! - **Must not know.** Runtime assignment, native containers or restore installation.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(harness, reason = "owns the test harness boundary declared above")
+)]
+
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_models::Timestamp;
 

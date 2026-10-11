@@ -9,6 +9,10 @@
 
 #![cfg_attr(
     nervix_lint,
+    nervix::layer(data_plane, reason = "owns the data plane boundary declared above")
+)]
+#![cfg_attr(
+    nervix_lint,
     nervix::context(
         lifecycle,
         reason = "clock bindings are resolved when a domain, task or branch is installed"
@@ -1203,6 +1207,10 @@ impl Runtime {
 mod tests;
 
 #[cfg(all(test, feature = "shuttle"))]
+#[cfg_attr(
+    nervix_lint,
+    nervix::layer(harness, reason = "test module remains outside product execution")
+)]
 mod shuttle_lifecycle_tests {
     use std::collections::BTreeMap;
 

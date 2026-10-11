@@ -1,12 +1,20 @@
 //! Applying a batch of parsed statements to the cluster's models.
 //!
-//! Layer: control plane.
+//! Layer: edges.
 //!
 //! - **Owns.** The mutation batch, the statement dispatch behind it, and the command results a
 //!   session reads back.
 //! - **Depends on.** The registry to plan and validate, consensus to replicate, and the runtime to
 //!   reconcile what a committed model changes.
 //! - **Must not know.** How a listener delivered the statement.
+
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(
+        edge,
+        reason = "session adapter dispatches parsed client statements to mutation owners"
+    )
+)]
 
 use std::collections::BTreeSet;
 
@@ -2436,6 +2444,10 @@ impl SessionServiceImpl {
 }
 
 #[cfg(test)]
+#[cfg_attr(
+    nervix_lint,
+    nervix::layer(harness, reason = "test module remains outside product execution")
+)]
 mod tests {
     use nervix_client_wire::CommandRequest;
     use nervix_models::{

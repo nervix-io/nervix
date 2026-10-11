@@ -9,6 +9,11 @@
 //! - **Depends on.** The VM frontend, compiler and runtime entry points.
 //! - **Must not know.** How a document is parsed or a value converted.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(harness, reason = "owns the test harness boundary declared above")
+)]
+
 use arrow_array::{Array, BooleanArray, Int64Array, ListArray, StringArray};
 use arrow_schema::{DataType, Field, Schema};
 use nervix_primitives::sync::StdArc;

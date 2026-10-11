@@ -7,6 +7,11 @@
 //! - **Depends on.** The composed statement grammar and the vocabulary Models.
 //! - **Must not know.** Validation, persistence or runtime execution.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(harness, reason = "owns the test harness boundary declared above")
+)]
+
 use nervix_models::{
     AckMode, AlterRelay, AlterRelayOperation, ClusterNodeName, CordonNode, CorrelatorName,
     DeduplicatorName, DescribeRelay, DrainNode, DropModel, DropNode, EmitterName, EndpointName,

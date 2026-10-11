@@ -8,6 +8,14 @@
 //!   executor, which admits, charges and cancels an execution that leaves the caller's task.
 //! - **Must not know.** Domains, branches, runtime clock installation or physical deadlines.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(
+        engine,
+        reason = "owns the engines and infrastructure boundary declared above"
+    )
+)]
+
 use std::{cell::OnceCell, fmt, fmt::Write as _, num::NonZeroUsize, ops::Range};
 
 use ahash::{HashMap, HashMapExt};

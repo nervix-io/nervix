@@ -7,6 +7,11 @@
 //! - **Depends on.** The VM's window route compiler and the schema and binding rules.
 //! - **Must not know.** How a window executes, emits or keeps its state.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(decisions, reason = "owns the decisions boundary declared above")
+)]
+
 use ahash::HashSet;
 use arrow_schema::DataType;
 use error_stack::Report;

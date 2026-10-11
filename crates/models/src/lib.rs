@@ -14,6 +14,11 @@
 //! `ClusterSchedule`, `DomainState`, `ResourceVersionStatus` and their neighbours — which belongs to
 //! consensus, and the interconnect's wire values in `remote`, which belong to the transport.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(vocabulary, reason = "owns the vocabulary boundary declared above")
+)]
+
 mod archived_count;
 #[cfg(feature = "arrow")]
 mod arrow_types;

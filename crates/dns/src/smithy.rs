@@ -11,6 +11,14 @@
 //! Smithy hands the hook to `hyper-util`'s `HttpConnector`, which dials a literal IPv4 or IPv6 host
 //! without asking it and applies the URL's port to every address it answers.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(
+        engine,
+        reason = "owns the engines and infrastructure boundary declared above"
+    )
+)]
+
 use std::net::IpAddr;
 
 use aws_smithy_runtime_api::client::dns::{DnsFuture, ResolveDns, ResolveDnsError};

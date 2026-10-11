@@ -15,6 +15,11 @@
 //! cluster summary and snapshot at once and then periodically, and a session that selected none
 //! receives neither.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(edge, reason = "owns the edges boundary declared above")
+)]
+
 use std::{num::NonZeroU64, time::Duration};
 
 use arch_into::ArchInto as _;

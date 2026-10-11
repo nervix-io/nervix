@@ -536,6 +536,10 @@ watermark, alter tick progress, or supply domain time to execution. The reposito
 check declares this module as the browser observation owner; other console modules receive its UTC
 sample instead of reading the wall clock themselves.
 
+The source check masks `cfg(test)` module bodies through the shared Rust scanner, including modules
+with source contracts or additional attributes. It preserves line coordinates and product code
+after each fixture module. A harness layer contract alone grants no clock permission to product code.
+
 ## Recovery And Distributed Guarantees
 
 The paced mapping, lifecycle generation, and authority fence recover from consensus state. Tick

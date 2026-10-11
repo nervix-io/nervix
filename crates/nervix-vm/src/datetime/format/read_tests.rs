@@ -9,6 +9,11 @@
 //! - **Depends on.** The format reader and writer, compiled parsers, and zones.
 //! - **Must not know.** Registers, programs, or how a failure is recorded as a row error.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(harness, reason = "owns the test harness boundary declared above")
+)]
+
 use std::str::FromStr as _;
 
 use arrow_array::{StringArray, TimestampNanosecondArray};

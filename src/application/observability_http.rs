@@ -6,6 +6,11 @@
 //! - **Depends on.** The application handle it reads health and metrics from.
 //! - **Must not know.** Session commands, transactions or cluster coordination.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(edge, reason = "owns the edges boundary declared above")
+)]
+
 use std::convert::Infallible;
 
 use error_stack::{Report, ResultExt};

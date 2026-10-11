@@ -8,6 +8,14 @@
 //!   incarnation-aware progress observations.
 //! - **Must not know.** Session transports, NSPL syntax, runtime tasks, or data-plane payloads.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(
+        control_plane,
+        reason = "owns the control plane boundary declared above"
+    )
+)]
+
 use std::collections::BTreeSet;
 
 use error_stack::Report;

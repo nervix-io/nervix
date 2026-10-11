@@ -6,6 +6,11 @@
 //! - **Depends on.** Every subsystem whose state the node holds.
 //! - **Must not know.** How any of that state is used; the subsystems own their own behaviour.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(data_plane, reason = "owns the data plane boundary declared above")
+)]
+
 use super::{schedule_apply::AppliedRuntimeRecoveryExpansions, *};
 
 pub const DEFAULT_TEMP_DIR: &str = "/tmp";

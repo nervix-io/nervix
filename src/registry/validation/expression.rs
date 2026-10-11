@@ -7,6 +7,11 @@
 //! - **Depends on.** The Models and the VM's program representation.
 //! - **Must not know.** What any caller concludes from what it finds.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(decisions, reason = "owns the decisions boundary declared above")
+)]
+
 use ahash::{HashMap, HashSet};
 use arrow_schema::{DataType as ArrowDataType, Field as ArrowField, Schema as ArrowSchema};
 use error_stack::{Report, ResultExt};

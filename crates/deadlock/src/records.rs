@@ -5,6 +5,14 @@
 //! - **Depends on.** Bounded primitive findings and the owning evidence errors.
 //! - **Must not know.** Application locks, workload admission or detector internals.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(
+        engine,
+        reason = "owns the engines and infrastructure boundary declared above"
+    )
+)]
+
 use std::num::NonZeroU64;
 
 use error_stack::Report;

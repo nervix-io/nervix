@@ -6,6 +6,11 @@
 //! - **Depends on.** URL parsing and standard socket-address primitives.
 //! - **Must not know.** Gossip, consensus membership, name resolution or any transport.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(vocabulary, reason = "owns the vocabulary boundary declared above")
+)]
+
 use std::{fmt, net::SocketAddr, str::FromStr};
 
 use error_stack::Report;

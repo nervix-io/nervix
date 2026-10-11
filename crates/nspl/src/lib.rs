@@ -9,6 +9,11 @@
 //! - **Must not know.** The registry, the runtime, the control plane or any engine. Parsing
 //!   produces a Model and stops.
 //!
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(language, reason = "owns the language boundary declared above")
+)]
+
 pub mod backup;
 pub mod branch;
 #[cfg(test)]

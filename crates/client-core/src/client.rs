@@ -11,6 +11,11 @@
 //!   wire contract, and the language layer for splitting and classifying statements.
 //! - **Must not know.** How a frame is routed off an exchange.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(edge, reason = "owns the edges boundary declared above")
+)]
+
 use std::{collections::BTreeMap, path::PathBuf, time::Duration};
 
 use error_stack::{Report, ResultExt as _};

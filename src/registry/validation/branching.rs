@@ -7,6 +7,11 @@
 //! - **Depends on.** The branch and schema Models and the graph's edges.
 //! - **Must not know.** How a branch is materialized at runtime.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(decisions, reason = "owns the decisions boundary declared above")
+)]
+
 use std::time::Duration;
 
 use ahash::{HashMap, HashSet};
@@ -1098,6 +1103,10 @@ pub(in crate::registry) fn add_output_branch_dependency_edges(
 }
 
 #[cfg(test)]
+#[cfg_attr(
+    nervix_lint,
+    nervix::layer(harness, reason = "test module remains outside product execution")
+)]
 mod tests {
     use std::fs;
 

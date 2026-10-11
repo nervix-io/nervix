@@ -5,6 +5,14 @@
 //! - **Depends on.** Primitive order types and the evidence wire's scalar encodings.
 //! - **Must not know.** Detector configuration, source owners or the workload.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(
+        engine,
+        reason = "owns the engines and infrastructure boundary declared above"
+    )
+)]
+
 use error_stack::Report;
 use nervix_primitives::deadlock::{
     BlockedAttempt, BoundedText, LockLifetime, MAX_ORDER_EDGES, MAX_ORDER_WITNESSES, OrderEdge,

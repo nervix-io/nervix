@@ -7,6 +7,14 @@
 //! - **Depends on.** The execution budget the limits are read from.
 //! - **Must not know.** Connection lifetime, request dispatch, or what any message means.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(
+        engine,
+        reason = "owns the engines and infrastructure boundary declared above"
+    )
+)]
+
 use meticulous::OptionExt as _;
 use nervix_execution::{CpuClass, Executor, MemoryClass};
 use rkyv::{Archive, Deserialize, Serialize};

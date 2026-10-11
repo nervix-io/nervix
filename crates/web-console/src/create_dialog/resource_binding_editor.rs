@@ -6,6 +6,11 @@
 //! - **Depends on.** Shared typed choices and codec or signaling browser drafts.
 //! - **Must not know.** Upload execution, resource storage, or version resolution.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(edge, reason = "owns the edges boundary declared above")
+)]
+
 use leptos::prelude::*;
 
 use super::{

@@ -7,6 +7,14 @@
 //! - **Depends on.** Certificate identity, Rustls, and Tokio's monotonic clock.
 //! - **Must not know.** HTTP/2 pools, request routing, or runtime operations.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(
+        engine,
+        reason = "owns the engines and infrastructure boundary declared above"
+    )
+)]
+
 use std::{net::SocketAddr, time::Duration};
 
 use error_stack::Report;

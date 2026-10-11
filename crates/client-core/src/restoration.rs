@@ -22,6 +22,11 @@
 //! before publishing a new attachment. A restoration task waits for the replies of its own
 //! requests and sends a transient refusal again while the exchange stays open.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(edge, reason = "owns the edges boundary declared above")
+)]
+
 use std::time::Duration;
 
 use ahash::HashSet;

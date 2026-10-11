@@ -9,6 +9,11 @@
 //!   constants.
 //! - **Must not know.** Compilation, execution, or registers.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(harness, reason = "owns the test harness boundary declared above")
+)]
+
 use meticulous::ResultExt as _;
 use nervix_models::Expression as ModelExpression;
 

@@ -8,6 +8,11 @@
 //!   generators.
 //! - **Must not know.** Registry graph validation, scheduling, or the runtime.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(harness, reason = "owns the test harness boundary declared above")
+)]
+
 use std::collections::BTreeMap;
 
 use meticulous::ResultExt as _;

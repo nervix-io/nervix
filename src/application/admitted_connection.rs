@@ -14,6 +14,11 @@
 //! hold that wait open for as long as the client chooses. Ending the connection itself releases
 //! the wait without asking the client.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(edge, reason = "owns the edges boundary declared above")
+)]
+
 use std::{
     io,
     pin::Pin,

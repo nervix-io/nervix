@@ -20,6 +20,13 @@
 
 #![cfg_attr(
     nervix_lint,
+    nervix::layer(
+        edge,
+        reason = "the server session adapter owns its permitted parser dependency"
+    )
+)]
+#![cfg_attr(
+    nervix_lint,
     nervix::context(
         outside,
         reason = "session, transaction, authentication and resource operations belong to the \

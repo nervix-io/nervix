@@ -5,6 +5,11 @@
 //! - **Depends on.** The production source loops, source contract, quiesce control and Shuttle.
 //! - **Must not know.** Broker drivers, model planning or external payload transports.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(harness, reason = "owns the test harness boundary declared above")
+)]
+
 use nervix_connector::{IngestMessageHeaders, IngestMetadataRow};
 use nervix_model_harness::shuttle::{check_pct, check_random};
 use nervix_primitives::sync::{StdArc, mpsc, oneshot, watch};

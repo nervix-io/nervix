@@ -34,6 +34,17 @@ sink plans, processor programs, and message-error routes. The runtime binds loca
 executes that revision without reading a Model. [Execution Plans](./execution-plans.md) follows
 construction, publication, incremental application, rebuilds, and recovery end to end.
 
+Each declared layer module carries a gated `nervix::layer` source contract alongside its ownership
+documentation. The compiler uses that semantic owner through aliases, re-exports and source moves.
+Configuration Models cannot enter data-plane interfaces or bodies; connector engines explicitly
+declare that they consume plans. General infrastructure, including consensus persistence, may
+retain Models when its owning contract requires them. Parser definitions belong to the language,
+edges and harnesses; import and manifest provenance is checked separately before cfg selection.
+The session command, mutation, transaction and subscription adapters are edges, as are archive
+section encoding and restore intake. Their consensus and decision dependencies retain those layers'
+ownership. [Data-Plane Concurrency](./data-plane-concurrency.md#resolved-architecture-boundaries)
+states the finite compiler rules and their supported effects.
+
 This graph configuration is persisted with strong control-plane consistency. It is separate from runtime execution state and from the hot-path records moving through the graph.
 
 Before a transaction changes that graph, the control plane plans its ordered execution steps and

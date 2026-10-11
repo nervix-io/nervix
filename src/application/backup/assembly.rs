@@ -1,6 +1,6 @@
 //! The sections of a configuration backup, planned from one captured revision.
 //!
-//! Layer: control plane.
+//! Layer: edges.
 //!
 //! - **Owns.** Turning a configuration capture into the archive's sections in archive order — the
 //!   users, and per domain its record, its Models as canonical NSPL, and the catalog metadata and
@@ -13,6 +13,14 @@
 //! The only coupling between internal state and the archive format is the conversion here: every
 //! record is built from the capture's vocabulary values, never from a consensus or registry
 //! struct.
+
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(
+        edge,
+        reason = "archive edge translates captured vocabulary into external NSPL sections"
+    )
+)]
 
 use std::num::NonZeroU64;
 
@@ -373,6 +381,10 @@ fn record_kind<R: ArchiveRecord>(_record: &R) -> nervix_backup::RecordKind {
 }
 
 #[cfg(test)]
+#[cfg_attr(
+    nervix_lint,
+    nervix::layer(harness, reason = "test module remains outside product execution")
+)]
 mod tests {
     use std::collections::BTreeMap;
 

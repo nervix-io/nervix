@@ -5,6 +5,11 @@
 //! - **Depends on.** Shared NSPL tokens, inspection format grammar and vocabulary Models.
 //! - **Must not know.** Runtime checkpoint state, sessions or output rendering.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(language, reason = "owns the language boundary declared above")
+)]
+
 use chumsky::prelude::*;
 use meticulous::OptionExt as _;
 use nervix_models::DescribeWasmProcessor;

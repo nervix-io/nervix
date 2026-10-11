@@ -9,6 +9,11 @@
 //! - **Must not know.** When a route is bound or unbound, which the endpoint source owns; NSPL
 //!   parsing, placement policy or consensus storage.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(data_plane, reason = "owns the data plane boundary declared above")
+)]
+
 use std::borrow::Cow;
 
 use nervix_connector::{
@@ -324,6 +329,10 @@ impl Runtime {
 }
 
 #[cfg(test)]
+#[cfg_attr(
+    nervix_lint,
+    nervix::layer(harness, reason = "test module remains outside product execution")
+)]
 mod tests {
     use super::*;
 

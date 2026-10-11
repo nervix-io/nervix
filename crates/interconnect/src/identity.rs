@@ -7,6 +7,14 @@
 //! - **Depends on.** The shared cluster node name vocabulary and X.509/TLS primitives.
 //! - **Must not know.** HTTP/2 pools, request routing, or runtime operations.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(
+        engine,
+        reason = "owns the engines and infrastructure boundary declared above"
+    )
+)]
+
 use std::{io, net::IpAddr, path::Path};
 
 use error_stack::Report;

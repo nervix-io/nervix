@@ -4,6 +4,11 @@
 //! May depend on: catalog listings, typed branch keys and the interconnect envelopes.
 //! Must not know: how the catalog is kept, how a replica acts on a listing, or NSPL.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(data_plane, reason = "owns the data plane boundary declared above")
+)]
+
 use nervix_interconnect::{
     BranchCheckpointListing, BranchCheckpointPage, BranchCheckpointRevision,
 };

@@ -38,37 +38,6 @@ TEST_DIRECTORIES = frozenset({"tests", "benches", "examples"})
 # `LARGE_FILE_LINES` is split like any other, but their bodies never hold a production count up.
 TEST_FILE_SUFFIXES = ("/tests.rs", "_tests.rs", "/test_fixtures.rs")
 
-# The parser is an edge dependency: only the language crate itself, the client tools, and the
-# session adapter may name it. Everything else consumes Models.
-PARSER_EDGES = (
-    "crates/nspl/",
-    "crates/nspl-format/",
-    "crates/client-core/",
-    "crates/nervix-cli/",
-    "crates/web-console/",
-    "src/application.rs",
-    "src/application/",
-)
-
-# The data plane executes plans. It is the server's runtime together with the crates the runtime
-# drives: the branch instance lifetimes its tasks own, the checkpoint replication its replicated
-# states own, the connector contract crate and every integration crate. Code that moves out of the
-# runtime stays inside these prefixes, so a move carries its sites along and lowers no count.
-DATA_PLANE = (
-    "src/runtime/",
-    "crates/branch-instances/src/",
-    "crates/checkpoint-replication/src/",
-    "crates/connector/src/",
-    "crates/connectors/",
-)
-
-# These decision modules are where a Model is still allowed to be read while producing those plans.
-DATA_PLANE_PLANNERS = frozenset(
-    {
-        "src/runtime/emitter_start_plan.rs",
-    }
-)
-
 @dataclass(frozen=True)
 class Site:
     """One counted occurrence, addressed for a developer who has to go remove it."""
@@ -577,112 +546,6 @@ def _struct_body(code: str, start: int) -> tuple[int, int] | None:
     return None
 
 
-_PARSER_CRATE = re.compile(r"\bnervix_nspl\s*::")
-
-
-def count_parser_imports_outside_edges(files: Sequence[RustFile]) -> list[Site]:
-    sites: list[Site] = []
-    for file in product_files(files):
-        if file.path.startswith(PARSER_EDGES):
-            continue
-        for match in _PARSER_CRATE.finditer(file.product):
-            sites.append(file.site(match.start(), file.source_line(match.start())))
-    return sites
-
-
-_MODEL_PATH = re.compile(r"\bModel\s*::")
-
-
-def count_model_matches_in_data_plane(files: Sequence[RustFile]) -> list[Site]:
-    sites: list[Site] = []
-    for file in product_files(files):
-        if not file.path.startswith(DATA_PLANE) or file.path in DATA_PLANE_PLANNERS:
-            continue
-        for match in _MODEL_PATH.finditer(file.product):
-            sites.append(file.site(match.start(), file.source_line(match.start())))
-    return sites
-
-
-_DATA_PLANE_CLUSTER_AWAIT = re.compile(
-    r"\.\s*cluster\s*\.\s*[A-Za-z_][A-Za-z0-9_]*\s*\([^;]*?\)\s*\.\s*await\b",
-    re.DOTALL,
-)
-
-
-def count_data_plane_cluster_awaits(files: Sequence[RustFile]) -> list[Site]:
-    """Count data-plane calls that suspend while reading cluster state."""
-
-    sites: list[Site] = []
-    for file in product_files(files):
-        if not file.path.startswith(DATA_PLANE):
-            continue
-        for match in _DATA_PLANE_CLUSTER_AWAIT.finditer(file.product):
-            sites.append(file.site(match.start(), file.source_line(match.start())))
-    return sites
-
-
-_RWLOCK_FIELD = re.compile(
-    r"\b[A-Za-z_][A-Za-z0-9_]*\s*:\s*"
-    r"(?:(?:[A-Za-z_][A-Za-z0-9_]*\s*::\s*)*)RwLock\s*<"
-)
-_OPTION_TYPE = re.compile(
-    r"^\s*(?:(?:[A-Za-z_][A-Za-z0-9_]*\s*::\s*)*)Option\s*<"
-)
-_ARC_TYPE = re.compile(
-    r"^\s*(?:(?:[A-Za-z_][A-Za-z0-9_]*\s*::\s*)*)Arc\s*<"
-)
-_NAME_TYPE = re.compile(
-    r"(?:(?:[A-Za-z_][A-Za-z0-9_]*\s*::\s*)*)"
-    r"[A-Za-z_][A-Za-z0-9_]*Name\b"
-)
-
-
-def count_write_once_rwlock_fields(files: Sequence[RustFile]) -> list[Site]:
-    """Count write-once names and shared references stored behind an `RwLock`."""
-
-    sites: list[Site] = []
-    for file in product_files(files):
-        for structure in _STRUCT.finditer(file.product):
-            body = _struct_body(file.product, structure.end())
-            if body is None:
-                continue
-            start, end = body
-            for field in _RWLOCK_FIELD.finditer(file.product, start, end):
-                lock_arguments = generic_arguments(file.product, field.end() - 1)
-                if lock_arguments is None or len(lock_arguments) != 1:
-                    continue
-                option = lock_arguments[0]
-                option_match = _OPTION_TYPE.match(option)
-                if option_match is None:
-                    continue
-                option_arguments = generic_arguments(option, option_match.end() - 1)
-                if option_arguments is None or len(option_arguments) != 1:
-                    continue
-                value = option_arguments[0].strip()
-                is_arc = _ARC_TYPE.match(value) is not None
-                is_name = _NAME_TYPE.fullmatch(value) is not None
-                if is_arc or is_name:
-                    sites.append(file.site(field.start(), file.source_line(field.start())))
-    return sites
-
-
-_NODE_ID_BINDING = re.compile(
-    r"\b[A-Za-z0-9_]*[Nn]ode[A-Za-z0-9_]*\s*:\s*[^,;)\n{}]*\bString\b(?!\s*::)"
-)
-_NODE_ID_ALIAS = re.compile(r"\btype\s+[A-Za-z0-9_]*[Nn]ode[A-Za-z0-9_]*\s*=\s*String\s*;")
-
-
-def count_string_node_ids(files: Sequence[RustFile]) -> list[Site]:
-    """Count fields, parameters, and aliases that carry a node identity as a `String`."""
-
-    sites: list[Site] = []
-    for file in product_files(files):
-        for pattern in (_NODE_ID_BINDING, _NODE_ID_ALIAS):
-            for match in pattern.finditer(file.product):
-                sites.append(file.site(match.start(), file.source_line(match.start())))
-    return sites
-
-
 def count_files_over_3000_lines(files: Sequence[RustFile]) -> list[Site]:
     return [
         Site(file.path, 1, f"{file.lines} lines")
@@ -720,34 +583,9 @@ COUNTS: tuple[Count, ...] = (
         count_combinator_control_flow,
     ),
     Count(
-        "string_node_ids",
-        "node identities carried as `String`",
-        count_string_node_ids,
-    ),
-    Count(
         "testing_feature_struct_fields",
         'struct fields gated on `feature = "testing"`',
         count_testing_feature_struct_fields,
-    ),
-    Count(
-        "parser_imports_outside_edges",
-        "`nervix_nspl::` references outside the edges",
-        count_parser_imports_outside_edges,
-    ),
-    Count(
-        "model_matches_in_data_plane",
-        "`Model::` references in data-plane files outside the planner",
-        count_model_matches_in_data_plane,
-    ),
-    Count(
-        "data_plane_cluster_awaits",
-        "data-plane calls that await cluster state",
-        count_data_plane_cluster_awaits,
-    ),
-    Count(
-        "write_once_rwlock_fields",
-        "write-once names and shared references stored behind `RwLock`",
-        count_write_once_rwlock_fields,
     ),
 )
 
@@ -794,6 +632,11 @@ def check_synchronization(root: Path) -> None:
 
 
 def measure(root: Path) -> dict[str, list[Site]]:
+    from scripts.check_layer_provenance import check
+
+    provenance = check(root)
+    if provenance:
+        raise SystemExit("error: language import provenance failed\n" + "\n".join(provenance))
     check_synchronization(root)
     return measure_sources(root)
 

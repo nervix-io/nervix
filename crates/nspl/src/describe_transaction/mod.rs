@@ -8,6 +8,11 @@
 //! - **Must not know.** Sessions, transaction bindings, the inspection service, or how a report is
 //!   rendered.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(language, reason = "owns the language boundary declared above")
+)]
+
 use chumsky::prelude::*;
 use nervix_models::{
     DescribeTransaction, TransactionInspectionRequest, TransactionInspectionTarget,

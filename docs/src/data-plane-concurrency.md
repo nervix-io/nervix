@@ -1154,6 +1154,46 @@ inside external libraries, opaque external future implementations and unsupporte
 relationships remain outside the recognizer's claim. The checker supplies no universal ownership
 or effect proof.
 
+### Resolved architecture boundaries
+
+`nervix::layer(kind, reason = "...")` states the exact documented crate/module, type, trait, impl
+or callable owner: primitives, vocabulary, language, engine, decisions, data_plane, control_plane,
+edge or harness. The narrowest contract wins; associated implementations inherit explicit trait metadata
+and impl-self contracts. Contracts survive compiler metadata and move with their source owner.
+An unrelated trait module default cannot replace an implementation body's lexical owner.
+An engine that receives validated plans also declares `nervix::input(plans, ...)`; general
+infrastructure is not presumed to execute graph plans.
+
+`nervix::value(model|name|cluster_access, ...)` classifies exact semantic ADTs or traits. The current
+configuration Model union, shared name vocabulary and cluster observation capability carry those
+roles. `nervix::model_in_data_plane` rejects the configuration union in data-plane and plan-consuming
+interfaces or bodies, including normalized generic containers, aliases, constructors and patterns.
+An ordinary user type called Model has its own meaning. These checks do not treat every vocabulary
+field or schema descriptor as a configuration Model.
+
+`nervix::parser_dependency` diagnoses resolved language definitions outside the language, edges and
+harnesses, including imports, type/trait references, qualified calls and methods. A separate
+source/manifest validator retains the owning crate's import path before cfg selection, including
+renamed dependencies, inactive module imports and authored macro tokens. It derives language
+packages and consumer ownership from source contracts and Cargo/module declarations. Approved plain
+primitive and vocabulary re-exports keep their actual semantic owner; importing from a language
+crate still requires an allowed provenance owner even if resolution reaches a plain value.
+
+`nervix::cluster_await` diagnoses future-returning access on the classified cluster capability or
+trait when awaited from recurring data-plane execution. It follows the existing supported local
+helper/callback graph, selected concrete methods, UFCS, async closures, awaited expression wrappers
+and simple local future-binding chains. A local I/O await has no cluster role. A lifecycle cluster
+read remains lifecycle work. Dynamic/generic application dispatch needs its existing source effect
+contract; opaque external future implementations, arbitrary stored-future relationships and
+whole-program effects are not inferred. Execution graphs and recurring reachability are conservative
+within the declared local graph; annotations are reviewed architectural assertions.
+
+`nervix::node_identity`, `nervix::installed_state` and `nervix::state_contract` implement the exact
+identity and representation contracts in [Typed States](./typed-states.md#source-owned-identity-and-installation-contracts).
+All six architecture diagnostics use the same normal lint levels, exact-operation expectations and
+complete current configuration evidence as synchronization and failure rules. No count, product
+owner catalog or source-review hash grants permission.
+
 ### Diagnostics and reviewed exceptions
 
 `nervix::sync_acquisition` diagnoses an acquisition on ordinary recurring execution.
@@ -1203,13 +1243,13 @@ records the runtime ownership review; source contracts and expectations are the 
 ### Complete analysis and qualification
 
 The isolated tooling workspace uses `nightly-2026-09-17`; product builds use stable. The matrix
-analyzes ordinary workspace libraries/binaries, the server's testing capability,
+analyzes ordinary workspace libraries/binaries, the browser's wasm32 library and binary, the server's testing capability,
 server/interconnect/primitives under Shuttle, server/consensus/primitives under Loom,
 interconnect/primitives under Turmoil, and the server's library and binary, the deadlock
 diagnostics and primitives under Deloxide, where every blocking acquisition resolves to a tracked
 adapter that the rules recognize as the lock it wraps. Turmoil's runtime cfg comes only from its just recipe,
 which preserves the parent's diagnostic mode. Compilation supplies no concurrency execution
-evidence. Test targets, browser analysis and undeclared feature combinations are not claimed.
+evidence. Test targets and undeclared feature combinations are not claimed.
 Mandatory source/manifest checks retain import provenance, inactive cfg and authored macro checks.
 
 Cargo artifacts, complete side reports and declared roots must agree, including when there are
@@ -1267,10 +1307,10 @@ establishes all of the following:
 7. **Inventory.** Record a new concurrent map, or a changed frequency or disposition of an existing
    one, in the concurrent map inventory in the same change.
 
-The companion `write_once_rwlock_fields` count rejects names and shared references stored as
-`RwLock<Option<...>>`. Such a field states that readers should coordinate forever around a value
-whose actual lifecycle is publication. The current shape uses an atomic optional reference and
-deletes the lock-backed form.
+Installation-only fields declare their lifetime at the owner. The resolved installed-state rule
+rejects replaceable read-write locks in that representation, while an optional name/shared handle
+with an unstated lifetime requires explicit review. The current publication or one-time primitive
+must express the actual owner; type shape alone cannot establish a write-once lifetime.
 
 ## Execution-Sensitive Primitives
 

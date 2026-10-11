@@ -9,6 +9,11 @@
 //!   schema bindings.
 //! - **Must not know.** Archive encoding, runtime state, or how a section is captured or installed.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(decisions, reason = "owns the decisions boundary declared above")
+)]
+
 use std::{collections::BTreeMap, num::NonZeroUsize};
 
 use arrow_schema::{DataType, Field, Schema as ArrowSchema, TimeUnit};

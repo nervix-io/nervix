@@ -7,6 +7,18 @@
 //! - **Must not know.** Runtime tasks, relays, branches, schedules, Models beyond typed client
 //!   entries, or registry state.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::input(plans, reason = "connector host supplies validated plans")
+)]
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(
+        engine,
+        reason = "owns the engines and infrastructure boundary declared above"
+    )
+)]
+
 use std::num::NonZeroUsize;
 
 use ahash::HashSet;
@@ -409,6 +421,10 @@ impl SyslogClientConfig {
 }
 
 #[cfg(test)]
+#[cfg_attr(
+    nervix_lint,
+    nervix::layer(harness, reason = "test module remains outside product execution")
+)]
 mod tests {
     use nervix_models::ClientConfigEntry;
 

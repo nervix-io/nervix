@@ -8,6 +8,11 @@
 //!   harness.
 //! - **Must not know.** What a checkpoint holds, the interconnect, or stable storage.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(harness, reason = "owns the test harness boundary declared above")
+)]
+
 use std::collections::BTreeSet;
 
 use meticulous::{OptionExt as _, ResultExt as _};

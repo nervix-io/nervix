@@ -10,6 +10,11 @@
 //! - **Depends on.** The VM compiler and runtime entry points.
 //! - **Must not know.** How a datetime kernel traverses its Arrow buffers.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(harness, reason = "owns the test harness boundary declared above")
+)]
+
 use std::str::FromStr as _;
 
 use arrow_array::{Int64Array, StringArray, TimestampNanosecondArray, UInt32Array};

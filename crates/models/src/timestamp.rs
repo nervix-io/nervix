@@ -6,6 +6,11 @@
 //! - **Depends on.** Chrono and serialization primitives.
 //! - **Must not know.** Domain clocks, scheduling, runtime state or transport behavior.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(vocabulary, reason = "owns the vocabulary boundary declared above")
+)]
+
 use std::{fmt, str::FromStr, time::Duration};
 
 use chrono::{DateTime, SecondsFormat, Utc};

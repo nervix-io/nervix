@@ -5,6 +5,11 @@
 //! - **Depends on.** The production endpoint publisher and the model harness's Shuttle runner.
 //! - **Must not know.** HTTP sockets or the publication primitive's internal memory ordering.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(harness, reason = "owns the test harness boundary declared above")
+)]
+
 use meticulous::ResultExt as _;
 use nervix_model_harness::shuttle::check_interleavings;
 use nervix_models::{IngestorName, ModelKind};

@@ -7,6 +7,11 @@
 //! - **Depends on.** The argument columns of the rows a window admits and retracts.
 //! - **Must not know.** Which rows a window retains beyond their counts, or when it emits.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(data_plane, reason = "owns the data plane boundary declared above")
+)]
+
 use std::ops::Range;
 
 use arrow_array::Int64Array;

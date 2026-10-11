@@ -6,6 +6,11 @@
 //! - **Depends on.** Shared route drafts and Leptos signals.
 //! - **Must not know.** Function execution or expression lowering internals.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(edge, reason = "owns the edges boundary declared above")
+)]
+
 use leptos::prelude::*;
 
 use super::{

@@ -6,6 +6,11 @@
 //! - **Depends on.** The scheduling control plane and the server test fixture.
 //! - **Must not know.** Connector implementations or runtime execution details.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(harness, reason = "owns the test harness boundary declared above")
+)]
+
 use meticulous::ResultExt as _;
 use nervix_client_wire::CommandRequest;
 #[cfg(feature = "testing")]

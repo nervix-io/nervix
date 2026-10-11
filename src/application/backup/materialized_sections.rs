@@ -6,6 +6,14 @@
 //! - **Depends on.** Runtime column views, the bounded executor and archive-owned contracts.
 //! - **Must not know.** Native database keys, consensus activation or client framing.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(
+        control_plane,
+        reason = "owns the control plane boundary declared above"
+    )
+)]
+
 use error_stack::{Report, ResultExt as _};
 use meticulous::ResultExt as _;
 use nervix_backup::{

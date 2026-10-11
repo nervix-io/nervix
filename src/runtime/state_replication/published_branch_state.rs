@@ -5,6 +5,11 @@
 //! Must not know: how a branch task changes its live state, control-plane transactions, or edge
 //! protocols.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(data_plane, reason = "owns the data plane boundary declared above")
+)]
+
 use super::*;
 
 /// A branch-local runtime state whose branch task publishes what everything outside that task

@@ -26,6 +26,18 @@
 //! [`DnsLookupError`] in it there again. A connection is never closed because its host's answer changed or expired; the
 //! next connection uses the new answer.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::input(plans, reason = "connector host supplies validated plans")
+)]
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(
+        engine,
+        reason = "owns the engines and infrastructure boundary declared above"
+    )
+)]
+
 use std::{io, time::Duration};
 
 use error_stack::Report;
@@ -142,4 +154,8 @@ impl MqttDialer {
 }
 
 #[cfg(test)]
+#[cfg_attr(
+    nervix_lint,
+    nervix::layer(harness, reason = "test module remains outside product execution")
+)]
 mod tests;

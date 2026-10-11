@@ -7,6 +7,11 @@
 //! - **Depends on.** The UDF Models and the VM's compile options.
 //! - **Must not know.** What the compiled program does with them.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(decisions, reason = "owns the decisions boundary declared above")
+)]
+
 use nervix_models::{Model, ModelIndex};
 use nervix_roto::signatures_for as udf_signatures_for;
 use nervix_vm::CompileOptions;

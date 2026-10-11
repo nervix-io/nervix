@@ -8,6 +8,11 @@
 //! - **Depends on.** Bound domain clocks, physical deadline capabilities and relay batches.
 //! - **Must not know.** Graph planning, connector retries, source-group idle collection or sinks.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(data_plane, reason = "owns the data plane boundary declared above")
+)]
+
 use std::{future::pending, time::Duration};
 
 use error_stack::{Report, ResultExt as _};
@@ -431,6 +436,10 @@ pub(super) async fn wait_for_branch_buffer_deadline(
 }
 
 #[cfg(test)]
+#[cfg_attr(
+    nervix_lint,
+    nervix::layer(harness, reason = "test module remains outside product execution")
+)]
 mod tests {
     use super::*;
     use crate::runtime::{

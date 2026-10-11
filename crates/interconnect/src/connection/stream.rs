@@ -7,6 +7,14 @@
 //! - **Depends on.** The authenticated connection lease and bounded execution admission.
 //! - **Must not know.** Resource contents, snapshot formats, or runtime graph behavior.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(
+        engine,
+        reason = "owns the engines and infrastructure boundary declared above"
+    )
+)]
+
 use std::{future::poll_fn, time::Duration};
 
 use bytes::Bytes;

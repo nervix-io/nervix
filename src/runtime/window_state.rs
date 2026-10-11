@@ -7,6 +7,11 @@
 //!   state placement.
 //! - **Must not know.** NSPL text, connector protocols, control-plane transactions, or ACK state.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(data_plane, reason = "owns the data plane boundary declared above")
+)]
+
 use std::io::Write as _;
 
 use arrow_schema::Schema as ArrowSchema;
@@ -1174,6 +1179,10 @@ impl ReplicatedWindowProcessorState {
 }
 
 #[cfg(test)]
+#[cfg_attr(
+    nervix_lint,
+    nervix::layer(harness, reason = "test module remains outside product execution")
+)]
 mod tests {
     use arrow_array::{ArrayRef, Int64Array, RecordBatch};
     use nervix_models::ParseAsType;

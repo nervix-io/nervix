@@ -6,6 +6,11 @@
 //! - **Depends on.** Browser draft Models and presentation components.
 //! - **Must not know.** Connector execution or cluster placement.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(edge, reason = "owns the edges boundary declared above")
+)]
+
 use leptos::prelude::{GetUntracked as _, Owner, RenderHtml as _, RwSignal, Set as _, Update as _};
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_client_wire::{

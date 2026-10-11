@@ -9,6 +9,11 @@
 //! - **Must not know.** How a caller recovers; the client's own retries happen before an error is
 //!   returned.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(edge, reason = "owns the edges boundary declared above")
+)]
+
 use nervix_client_wire::{
     CancellationStage, ClientRequest, EmitterOpenRefusal, ReplyBody, RequestRejection,
 };

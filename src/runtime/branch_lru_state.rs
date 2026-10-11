@@ -6,6 +6,11 @@
 //! - **Depends on.** Typed branch identities, timestamps, and the state codec.
 //! - **Must not know.** NSPL parsing, graph scheduling, connector protocols, or record payloads.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(data_plane, reason = "owns the data plane boundary declared above")
+)]
+
 use std::{io::Write, mem::MaybeUninit};
 
 use error_stack::{Report, ResultExt as _};
@@ -393,6 +398,10 @@ pub(in crate::runtime) fn assert_lifecycle_payload_decodes_typed(payload: &[u8])
 }
 
 #[cfg(test)]
+#[cfg_attr(
+    nervix_lint,
+    nervix::layer(harness, reason = "test module remains outside product execution")
+)]
 mod tests {
     use meticulous::OptionExt as _;
 

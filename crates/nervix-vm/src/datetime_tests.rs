@@ -9,6 +9,11 @@
 //!   calendar.
 //! - **Must not know.** Registers, programs, or how a failed lane is recorded as a row error.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(harness, reason = "owns the test harness boundary declared above")
+)]
+
 use std::{num::NonZeroU64, str::FromStr as _};
 
 use arrow_array::{

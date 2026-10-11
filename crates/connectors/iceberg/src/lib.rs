@@ -17,6 +17,18 @@
 //! the successful catalog commit, and an appended row is never idempotent, as
 //! [Emitters](docs/src/emitters.md) documents.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(
+        engine,
+        reason = "owns the engines and infrastructure boundary declared above"
+    )
+)]
+#![cfg_attr(
+    nervix_lint,
+    nervix::input(plans, reason = "the host supplies a validated connector plan")
+)]
+
 mod storage;
 
 use std::{fs::File, path::PathBuf, time::Duration};
@@ -1129,6 +1141,10 @@ impl IcebergObjectStoreProperties {
 }
 
 #[cfg(test)]
+#[cfg_attr(
+    nervix_lint,
+    nervix::layer(harness, reason = "test module remains outside product execution")
+)]
 mod tests {
     use ::iceberg::{
         arrow::arrow_schema_to_schema_auto_assign_ids,

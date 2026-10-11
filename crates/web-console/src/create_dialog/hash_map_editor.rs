@@ -6,6 +6,11 @@
 //! - **Depends on.** Browser draft signals and the shared typed choice UI.
 //! - **Must not know.** Lookup loading, resource storage, or command execution.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(edge, reason = "owns the edges boundary declared above")
+)]
+
 use leptos::prelude::*;
 
 use super::{ChoiceControl, ChoiceGroup, CreateSignals, RequestSender, event_target_value};

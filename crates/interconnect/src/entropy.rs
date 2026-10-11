@@ -6,6 +6,14 @@
 //! - **Depends on.** Operating-system randomness.
 //! - **Must not know.** What an identifier fences, or how a peer uses it.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(
+        engine,
+        reason = "owns the engines and infrastructure boundary declared above"
+    )
+)]
+
 use std::fmt;
 
 use nervix_primitives::sync::StdArc;

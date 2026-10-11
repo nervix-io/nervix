@@ -9,6 +9,11 @@
 //! - **Must not know.** Guests, branches, acknowledgements or the routes that reference the pool's
 //!   columns.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(harness, reason = "owns the test harness boundary declared above")
+)]
+
 use arrow_array::RecordBatch;
 use arrow_ipc::writer::StreamWriter;
 use arrow_schema::{Field, Schema as ArrowSchema};

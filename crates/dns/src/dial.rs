@@ -7,6 +7,14 @@
 //! - **Depends on.** Tokio's monotonic clock and typed socket addresses.
 //! - **Must not know.** Connectors, interconnect peers, TLS, or protocol-specific retries.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(
+        engine,
+        reason = "owns the engines and infrastructure boundary declared above"
+    )
+)]
+
 use std::{net::SocketAddr, time::Duration};
 
 use meticulous::{OptionExt as _, ResultExt as _};

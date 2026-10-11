@@ -6,6 +6,11 @@
 //! - **Depends on.** Vocabulary Models, the activation plan and the expression VM frontend.
 //! - **Must not know.** Resource stores, compiled runtime modules, clocks or spawned tasks.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(decisions, reason = "owns the decisions boundary declared above")
+)]
+
 use std::collections::{BTreeMap, BTreeSet};
 
 use error_stack::{Report, ResultExt as _};
@@ -344,6 +349,10 @@ impl ResourceExecutionPlans {
 }
 
 #[cfg(test)]
+#[cfg_attr(
+    nervix_lint,
+    nervix::layer(harness, reason = "test module remains outside product execution")
+)]
 mod tests {
     use meticulous::{OptionExt as _, ResultExt as _};
     use nervix_models::{

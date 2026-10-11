@@ -5,6 +5,11 @@
 //! - **Depends on.** Current consensus record owners and their bounded encoder and decoder.
 //! - **Must not know.** Historical stored shapes, graph execution, or external services.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(harness, reason = "owns the test harness boundary declared above")
+)]
+
 use std::fmt::Debug;
 
 use meticulous::ResultExt as _;

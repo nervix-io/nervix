@@ -8,6 +8,11 @@
 //!   classification.
 //! - **Must not know.** Relays, branches, batches, acknowledgements, placement, or any Model.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(data_plane, reason = "owns the data plane boundary declared above")
+)]
+
 use std::{
     collections::BTreeMap,
     fmt,
@@ -532,6 +537,10 @@ impl Drop for OwnedRelayDispatchPermit {
 }
 
 #[cfg(test)]
+#[cfg_attr(
+    nervix_lint,
+    nervix::layer(harness, reason = "test module remains outside product execution")
+)]
 mod gate_tests {
     use std::time::Duration;
 
@@ -1186,6 +1195,10 @@ impl<T> fmt::Display for RelayFanoutClosed<T> {
 }
 
 #[cfg(test)]
+#[cfg_attr(
+    nervix_lint,
+    nervix::layer(harness, reason = "test module remains outside product execution")
+)]
 mod tests {
     use std::num::NonZeroUsize;
 

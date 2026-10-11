@@ -5,6 +5,11 @@
 //! - **Depends on.** Compiled expressions, Arrow values and resource lookups.
 //! - **Must not know.** NSPL parsing, scheduling or connector lifecycle.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(data_plane, reason = "owns the data plane boundary declared above")
+)]
+
 use super::*;
 
 #[derive(Debug, Error)]
@@ -588,6 +593,10 @@ pub(super) fn compile_lookup_hash_map_calls(
 }
 
 #[cfg(test)]
+#[cfg_attr(
+    nervix_lint,
+    nervix::layer(harness, reason = "test module remains outside product execution")
+)]
 mod tests {
     use ahash::HashMap;
     use nervix_models::{CreateSchema, ModelName, ParseAsType};

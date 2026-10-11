@@ -7,6 +7,14 @@
 //! - **Depends on.** The Models and the runtime reports it renders.
 //! - **Must not know.** Where the values it renders were gathered.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(
+        control_plane,
+        reason = "owns the control plane boundary declared above"
+    )
+)]
+
 use std::time::Duration;
 
 use ahash::{HashMap, HashSet};

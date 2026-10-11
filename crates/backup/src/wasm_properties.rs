@@ -5,6 +5,11 @@
 //! - **Depends on.** Production archive records, their current wire types and vocabulary generators.
 //! - **Must not know.** Guest callbacks, live ACKs or checkpoint capture/publication protocols.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(harness, reason = "owns the test harness boundary declared above")
+)]
+
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_arbitrary::{Arbitrary, Domain};
 use nervix_models::{BranchKeyFingerprint, SchemaFingerprint, WasmStateGeneration};

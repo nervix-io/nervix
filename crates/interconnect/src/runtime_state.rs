@@ -8,6 +8,14 @@
 //! - **Depends on.** The vocabulary a placement names and the typed request contract.
 //! - **Must not know.** How a runtime encodes, stores, fences or restores the state it names.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(
+        engine,
+        reason = "owns the engines and infrastructure boundary declared above"
+    )
+)]
+
 use std::time::Duration;
 
 use nervix_models::{

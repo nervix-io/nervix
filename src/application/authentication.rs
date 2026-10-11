@@ -7,6 +7,14 @@
 //! - **Depends on.** Consensus for the stored user credentials.
 //! - **Must not know.** What an authenticated caller goes on to do.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(
+        control_plane,
+        reason = "owns the control plane boundary declared above"
+    )
+)]
+
 use std::num::NonZeroU32;
 
 #[cfg(feature = "testing")]

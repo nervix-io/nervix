@@ -5,6 +5,11 @@
 //! - **Depends on.** The primitive publication boundary and connector retry vocabulary.
 //! - **Must not know.** Shared registries, graph planning, payloads or transport drivers.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(data_plane, reason = "owns the data plane boundary declared above")
+)]
+
 use nervix_primitives::{publication::ArcSwapOption, sync::StdArc};
 
 /// Healthy tasks publish no failure. The error and its retry are observed together.
@@ -71,6 +76,10 @@ impl<R: Clone + PartialEq> TaskStatus<R> {
 }
 
 #[cfg(test)]
+#[cfg_attr(
+    nervix_lint,
+    nervix::layer(harness, reason = "test module remains outside product execution")
+)]
 mod tests {
     use meticulous::OptionExt as _;
 

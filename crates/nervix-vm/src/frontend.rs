@@ -4,6 +4,14 @@
 //! - **Depends on.** The vocabulary, Arrow schemas, and the VM's program types.
 //! - **Must not know.** NSPL tokens or diagnostics, registry state, or runtime tasks.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(
+        engine,
+        reason = "owns the engines and infrastructure boundary declared above"
+    )
+)]
+
 use std::num::NonZeroU64;
 
 use ahash::{HashSet, HashSetExt};
@@ -1989,6 +1997,10 @@ fn scalar_data_type(target: &ParseAsType, span: Span) -> FrontendResult<DataType
 }
 
 #[cfg(test)]
+#[cfg_attr(
+    nervix_lint,
+    nervix::layer(harness, reason = "test module remains outside product execution")
+)]
 mod tests {
     use arrow_schema::Field;
     use nervix_models::InheritedField;

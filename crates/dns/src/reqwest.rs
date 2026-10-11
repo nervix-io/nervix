@@ -6,6 +6,14 @@
 //! - **Depends on.** The node resolver and Reqwest's public DNS traits.
 //! - **Must not know.** Connector configuration, HTTP requests, Iceberg tables, or retry policy.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(
+        engine,
+        reason = "owns the engines and infrastructure boundary declared above"
+    )
+)]
+
 use std::{error::Error, net::SocketAddr};
 
 use crate::{DnsLookupReport, DnsResolver};

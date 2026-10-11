@@ -5,6 +5,11 @@
 //! May depend on: runtime internals and an owner runtime the replica reaches in the same process.
 //! Must not know: the interconnect, production control-plane orchestration or edge protocols.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(harness, reason = "owns the test harness boundary declared above")
+)]
+
 use std::time::Duration;
 
 use nervix_models::{DomainNodeRef, ModelKind, ModelName, SchemaFingerprint, Timestamp};

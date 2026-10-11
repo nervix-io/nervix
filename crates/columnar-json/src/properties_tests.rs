@@ -8,6 +8,11 @@
 //!   `chrono` for RFC 3339 text.
 //! - **Must not know.** Codecs, connector plans or emitters.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(harness, reason = "owns the test harness boundary declared above")
+)]
+
 use arrow_array::{
     Array, ArrayRef, BinaryArray, BooleanArray, FixedSizeListArray, Float32Array, Float64Array,
     Int8Array, Int16Array, Int32Array, Int64Array, ListArray, RecordBatch, StringArray,

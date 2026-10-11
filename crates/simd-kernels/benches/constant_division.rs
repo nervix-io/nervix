@@ -5,6 +5,11 @@
 //! - **Depends on.** Production kernels and their checked integer reference.
 //! - **Must not know.** Arrow, VM programs or graph execution.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(harness, reason = "owns the test harness boundary declared above")
+)]
+
 use criterion::{Criterion, Throughput, black_box, criterion_group, criterion_main};
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_simd_kernels::{

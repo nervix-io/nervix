@@ -6,6 +6,11 @@
 //! - **Depends on.** Quiescence vocabulary and self-contained Model identities.
 //! - **Must not know.** Parsing, planning, persistence, storage, runtime execution or presentation.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(vocabulary, reason = "owns the vocabulary boundary declared above")
+)]
+
 use std::{collections::BTreeMap, num::NonZeroUsize};
 
 use error_stack::Report;

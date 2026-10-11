@@ -9,6 +9,10 @@
 
 #![cfg_attr(
     nervix_lint,
+    nervix::layer(decisions, reason = "owns the decisions boundary declared above")
+)]
+#![cfg_attr(
+    nervix_lint,
     nervix::context(
         outside,
         reason = "durable Model mutation belongs to the control-plane decision boundary"
@@ -1524,9 +1528,17 @@ fn deserialize_value(bytes: &[u8]) -> Result<Model, Report<RegistryError>> {
 const MODEL_ARCHIVE_HEADER: &[u8; 16] = b"NERVIX MODEL U64";
 
 #[cfg(test)]
+#[cfg_attr(
+    nervix_lint,
+    nervix::layer(harness, reason = "test module remains outside product execution")
+)]
 mod properties;
 
 #[cfg(test)]
+#[cfg_attr(
+    nervix_lint,
+    nervix::layer(harness, reason = "test module remains outside product execution")
+)]
 mod tests {
     use std::{collections::BTreeSet, fs};
 

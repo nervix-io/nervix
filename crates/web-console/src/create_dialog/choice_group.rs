@@ -6,6 +6,11 @@
 //! - **Depends on.** Create dialog signals and the client choice contract.
 //! - **Must not know.** Server choice resolution, browser transport, or registry internals.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(edge, reason = "owns the edges boundary declared above")
+)]
+
 use leptos::prelude::*;
 use nervix_client_wire::ChoiceValue;
 use nervix_models::ModelKind;

@@ -6,6 +6,11 @@
 //! - **Depends on.** Current VHOST Models and resource pin browser choices.
 //! - **Must not know.** Certificate validation or installation on live nodes.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(edge, reason = "owns the edges boundary declared above")
+)]
+
 use error_stack::Report;
 use nervix_models::{CreateVhost, RequestedResourceVersion, VhostName, VhostTlsResource};
 use thiserror::Error;
@@ -93,6 +98,10 @@ pub(super) enum VhostDraftError {
 }
 
 #[cfg(test)]
+#[cfg_attr(
+    nervix_lint,
+    nervix::layer(harness, reason = "test module remains outside product execution")
+)]
 mod tests {
     use meticulous::ResultExt as _;
     use nervix_models::{
