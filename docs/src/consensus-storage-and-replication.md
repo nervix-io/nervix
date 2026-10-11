@@ -158,6 +158,14 @@ The leader keeps one ordered append stream to each follower. That stream uses th
 heartbeats and leadership probes use a separate management connection so a slow or flow-controlled
 log transfer cannot consume the path that maintains the leader lease.
 
+Before opening an append stream, the network adapter consumes the caller's first request. OpenRaft
+applies its retry delay and cancellation while producing that input; even an immediate local
+admission rejection therefore passes through the caller's gate. An ended input opens no transport.
+The first request remains charged while setup runs and joins the remaining requests exactly once
+after setup succeeds. Setup retains its five-second deadline; waiting for the caller's next request
+belongs to the caller's lifecycle, rather than to connection setup. Heartbeats retain their separate
+management path and deadlines.
+
 One replication batch targets 1 MiB and stops at 1,024 entries. Commands remain whole, so the first
 command may take a batch past the target; the encoded replication operation is bounded at 2 MiB.
 Submissions and answers stay in log order. A conflict, higher vote, partial acceptance, stream

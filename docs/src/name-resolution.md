@@ -548,6 +548,11 @@ files for RabbitMQ, Redis, MQTT, Syslog, WebSocket, ClickHouse and SQS, the fixt
 in the HTTP polling, Prometheus, Sentry, OTEL, Iceberg, HTTP emitter and WebSocket client features,
 `tools/cli_session.feature`, and `runtime/client_wire_qualification.feature`.
 
+The consensus append-admission unit fixtures construct the ordinary resolver from temporary
+resolver and hosts files with an explicit loopback name-server address. Their transport rejects a
+departed target before lookup; these tests qualify the caller's retry and ended-input boundaries,
+and make no DNS-answer or network-resolution claim.
+
 The MQTT changed-answer and restart scenario requires the new post-restart payload inside a
 bounded delivery wait. Its persistent QoS 1 source may replay the preceding payload before that
 marker; the resolver qualification proves reconnecting delivery and preserves MQTT's replay

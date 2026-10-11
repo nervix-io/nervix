@@ -54,6 +54,9 @@ use tracing::debug;
 
 use crate::{LogIdOf, ProtocolReceiver, TypeConfig, validate_protocol_origin, wire};
 
+#[cfg(test)]
+mod append_setup_tests;
+
 /// How many entries one append batch may gather before the byte target stops it.
 pub(crate) const MAX_APPEND_BATCH_ENTRIES: u64 = 1024;
 /// How many submitted batches one follower may leave unacknowledged.

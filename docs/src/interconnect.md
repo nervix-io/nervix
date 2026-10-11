@@ -973,6 +973,13 @@ consensus-level window bounds a follower to 16 outstanding batches and 16 MiB of
 data. Heartbeats and elections remain on management capacity, so a full append window does not block
 leadership traffic.
 
+The consensus adapter obtains its first append request before opening the duplex transport. This
+lets the caller's retry and cancellation gate pace a setup attempt even when the transport refuses
+it immediately because its target left or its quota is full. The transport still reports that typed
+failure without a retry loop of its own. Ended input opens no connection; a retained first request
+is submitted once after the follower accepts the stream headers. The five-second setup bound starts
+after that caller gate.
+
 Elections begin with a pre-vote exchange. A voter asks whether a quorum would accept its next term
 before it persists that term or becomes a candidate. A restarted voter whose log is stale, or whose
 discovery connections are not ready yet, therefore cannot advance the term and tear down the healthy

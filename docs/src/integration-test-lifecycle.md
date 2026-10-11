@@ -1431,6 +1431,14 @@ ends with, so a wedged suite is told apart from a passing or a failing one by it
 
 ## Adding A Harness Operation
 
+The append-setup regression observes each live source's test-only setup counter before issuing a
+burst of public domain creations with one voter stopped. It checks that both survivors apply the
+burst, that attempts to the departed voter fit OpenRaft's existing 200 ms retry series plus two
+boundary attempts per source, and that the returning voter catches up. Its count bound uses the
+whole observation's elapsed time, so parallel-suite delay does not tighten the assertion. A zero
+attempt observation fails rather than claiming that pacing was exercised. The counter shares the
+probe's existing map with successful opens and is absent from the ordinary production recorder.
+
 A new operation that starts, observes, or stops something on the harness's behalf follows the same
 contract.
 

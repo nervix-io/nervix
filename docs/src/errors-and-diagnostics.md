@@ -130,6 +130,11 @@ into it exactly where that shape is constructed. That construction is the one pl
 current context is cloned or its chain rendered into a field;
 [Guarantees And Limits](#guarantees-and-limits) lists the contexts that still copy a cause as text.
 
+An ended consensus append input completes normally without a peer operation or a peer error. With
+a first request available, stream setup may return the existing typed admission, membership or
+transport failure as an unreachable-peer result. The caller's retry gate runs before that setup
+attempt, so reporting an immediate local refusal does not create an unpaced retry loop.
+
 | Boundary | Fixed shape | What crosses | Where a report resumes |
 | --- | --- | --- | --- |
 | Replicated transaction mutation | The Raft response's `TransactionMutationError` | The state machine's typed refusal, cloned from the report's current context when the response is built | The proposer creates a new report from the typed refusal |

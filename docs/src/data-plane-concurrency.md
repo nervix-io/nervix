@@ -113,6 +113,14 @@ does not model publication, async channels, network waits or the atomic verdict;
 only the tracked acquisitions the diagnostic processes executed. Generated measurements and fault
 evidence belong on the task, and a failed required attempt remains recorded.
 
+Consensus append setup consumes its caller's first request before opening the transport. The
+caller owns the async retry and cancellation gate; the adapter retains and submits that request
+once, without adding a lock or retry timer. Native admission and ended-input regressions exercise
+this boundary, and the public three-node scenario checks paced failed setup while the surviving
+quorum commits and the returning voter catches up. The test probe counts attempts and successful
+opens in its existing blocking map. Deloxide does not track the request-stream or network waits;
+the applicable Turmoil suite and real-process Chaos faults retain their separate claims.
+
 ## Relay, Transport And Source Lifetimes
 
 A concrete producer retains its branch channel handle. The relay publishes branch membership in a

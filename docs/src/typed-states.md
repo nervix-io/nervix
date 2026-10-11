@@ -53,6 +53,12 @@ identifier access and verifies offsets and counts before constructing owned valu
 
 ## Absence And Distinct States
 
+**Consensus append input.** `None` from the caller's request stream means that input has ended;
+the adapter returns an empty answer stream and opens no transport. `Some` carries the first typed
+append request, retained exactly once while setup runs. A membership, admission or transport error
+after obtaining that request remains a failure naming its peer; it is not inferred from ended
+input. The caller's retry and cancellation gate runs before this distinction is resolved.
+
 **Runtime checkpoint exchange.** A state synchronization answer uses `None` only when the
 requester already holds the owner's current revision. `Some` carries a typed revision, byte length
 and digest; zero-length checkpoint bytes remain a present checkpoint. The subsequent bulk request

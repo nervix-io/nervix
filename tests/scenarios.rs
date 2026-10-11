@@ -230,6 +230,13 @@ struct DurableCatchUpObservation {
     append_stream_opens_at_start: BTreeMap<String, u64>,
 }
 
+#[derive(Clone, Debug)]
+struct AppendSetupObservation {
+    target: String,
+    started_at: Instant,
+    attempts_at_start: BTreeMap<String, u64>,
+}
+
 struct DurableCatchUpWriter {
     cancellation: CancellationToken,
     prefix: String,
@@ -418,6 +425,7 @@ struct ScenarioWorld {
     burst_raft_retention_peak: Option<nervix_consensus::RaftLogRetention>,
     saved_raft_log_heads: BTreeMap<String, Option<u64>>,
     durable_catch_up: Option<DurableCatchUpObservation>,
+    append_setup_observation: Option<AppendSetupObservation>,
     durable_catch_up_writer: Option<DurableCatchUpWriter>,
     follower_commands_memory: Option<FollowerCommandsMemoryObservation>,
     transaction_qualification: Option<TransactionQualificationObservation>,
@@ -5897,6 +5905,69 @@ fn given_consensus_commits_take(world: &mut ScenarioWorld, node_id: String, dura
         .fault_injection
         .set_consensus_storage_commit_delay(&crate::common::cluster::node_name(&node_id), duration);
     world.consensus_commit_delays.insert(node_id, duration);
+}
+
+#[given(expr = "append-stream setup attempts toward node {string} are observed")]
+fn given_append_setup_attempts_are_observed(world: &mut ScenarioWorld, target: String) {
+    let target = expand_placeholders(world, &target);
+    let target_name = crate::common::cluster::node_name(&target);
+    let mut attempts_at_start = BTreeMap::new();
+    for source in world.cluster().node_ids() {
+        if source == target {
+            continue;
+        }
+        let attempts = world.fault_injection.consensus_append_stream_attempt_count(
+            &crate::common::cluster::node_name(&source),
+            &target_name,
+        );
+        attempts_at_start.insert(source, attempts);
+    }
+    world.append_setup_observation = Some(AppendSetupObservation {
+        target,
+        started_at: Instant::now(),
+        attempts_at_start,
+    });
+}
+
+#[then(expr = "append-stream setup attempts toward node {string} respect the caller retry delay")]
+fn then_append_setup_attempts_respect_retry_delay(world: &mut ScenarioWorld, target: String) {
+    let target = expand_placeholders(world, &target);
+    let observation = world
+        .append_setup_observation
+        .take()
+        .verified("the scenario observed append-stream setup before its writes");
+    assert_eq!(
+        target, observation.target,
+        "observe the same departed voter"
+    );
+    // OpenRaft's configured default retry series is 200ms. Permit the attempt already in flight
+    // when observation began and one boundary attempt; elapsed time absorbs parallel-suite load.
+    let maximum = u64::try_from(observation.started_at.elapsed().as_millis() / 200)
+        .assured("the bounded scenario interval fits in u64")
+        .checked_add(2)
+        .assured("the bounded attempt count leaves room for two boundary attempts");
+    let target_name = crate::common::cluster::node_name(&target);
+    let mut total_attempts = 0_u64;
+    for (source, baseline) in observation.attempts_at_start {
+        let attempts = world
+            .fault_injection
+            .consensus_append_stream_attempt_count(
+                &crate::common::cluster::node_name(&source),
+                &target_name,
+            )
+            .checked_sub(baseline)
+            .verified("setup attempt counters only increase");
+        total_attempts = total_attempts.saturating_add(attempts);
+        assert!(
+            attempts <= maximum,
+            "source '{source}' attempted {attempts} append-stream setups to departed '{target}'; \
+             the caller retry delay permits at most {maximum} in this observation"
+        );
+    }
+    assert!(
+        total_attempts > 0,
+        "the departed follower must exercise failed stream setup"
+    );
 }
 
 #[when(expr = "{int} domains named {string} are created on the leader node")]

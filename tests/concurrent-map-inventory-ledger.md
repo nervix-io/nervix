@@ -343,7 +343,7 @@ awaiting replicas offers its revision through the offset state it retains and re
 | `FaultInjectionState::executions` | registered once per testing-node startup; queried by explicit occupancy, saturation and release controls | test-only |
 | `FaultInjectionState::startup_voter_gossip` | Armed after cluster stop; direct-link controls, digest heartbeat freezing, and the first reconciliation barrier read receiver-scoped entries; release removes the entry after that pass completes | test-only startup fault observation |
 | `FaultInjectionState::guest_save_interruptions` | Armed by a guest-save backup scenario and consumed once as that entity's owner starts its selected section; never reached during ordinary product execution | test-only capture fault control |
-| Other `src/fault_injection.rs` maps, consensus `append_stream_opens`, the test DNS authority | test-only | test-only |
+| Other `src/fault_injection.rs` maps, consensus `append_stream_counts`, the test DNS authority | test-only; the consensus probe counts each setup attempt and successful open and reads only for explicit harness observations | test-only |
 
 ### Rust client attachment recovery
 

@@ -1851,8 +1851,15 @@ struct ConsensusTestProbeState {
     /// `FjallStore` retains a clone after construction so live delay and failure controls continue
     /// to reach the storage worker without borrowing this probe.
     storage_fault: StorageFault,
-    append_stream_opens: Mutex<BTreeMap<ClusterNodeName, u64>>,
+    append_stream_counts: Mutex<BTreeMap<ClusterNodeName, AppendStreamCounts>>,
     connectivity: ConnectivityFault,
+}
+
+#[cfg(feature = "testing")]
+#[derive(Debug, Default)]
+struct AppendStreamCounts {
+    attempts: u64,
+    opened: u64,
 }
 
 #[cfg(feature = "testing")]
@@ -1867,9 +1874,17 @@ impl ConsensusTestProbe {
     }
 
     pub fn append_stream_open_count(&self, target: &ClusterNodeName) -> u64 {
-        let counts = self.inner.append_stream_opens.lock();
+        let counts = self.inner.append_stream_counts.lock();
         match counts.get(target) {
-            Some(count) => *count,
+            Some(count) => count.opened,
+            None => 0,
+        }
+    }
+
+    pub fn append_stream_attempt_count(&self, target: &ClusterNodeName) -> u64 {
+        let counts = self.inner.append_stream_counts.lock();
+        match counts.get(target) {
+            Some(count) => count.attempts,
             None => 0,
         }
     }
@@ -1883,27 +1898,33 @@ impl ConsensusTestProbe {
     }
 
     fn record_append_stream_open(&self, target: &ClusterNodeName) {
-        let mut counts = self.inner.append_stream_opens.lock();
-        let current = match counts.get(target) {
-            Some(current) => *current,
-            None => 0,
-        };
-        let Some(next) = current.checked_add(1) else {
-            // At u64::MAX this is already a sufficient lower bound for every bounded append-stream
-            // assertion, so retaining it preserves the observation's meaning.
-            return;
-        };
-        counts.insert(target.clone(), next);
+        let mut counts = self.inner.append_stream_counts.lock();
+        let count = counts.entry(target.clone()).or_default();
+        count.opened = count
+            .opened
+            .checked_add(1)
+            .verified("a bounded fixture cannot exhaust its append-stream open counter");
+    }
+
+    fn record_append_stream_attempt(&self, target: &ClusterNodeName) {
+        let mut counts = self.inner.append_stream_counts.lock();
+        let count = counts.entry(target.clone()).or_default();
+        count.attempts = count
+            .attempts
+            .checked_add(1)
+            .verified("a bounded fixture cannot exhaust its append-stream attempt counter");
     }
 }
 
 trait AppendStreamOpenRecorder: Clone + Send + Sync + 'static {
     fn record_append_stream_open(&self, target: &ClusterNodeName);
+    fn record_append_stream_attempt(&self, target: &ClusterNodeName);
     fn connectivity_fault(&self) -> ConnectivityFault;
 }
 
 impl AppendStreamOpenRecorder for () {
     fn record_append_stream_open(&self, _target: &ClusterNodeName) {}
+    fn record_append_stream_attempt(&self, _target: &ClusterNodeName) {}
 
     fn connectivity_fault(&self) -> ConnectivityFault {
         ConnectivityFault::default()
@@ -1914,6 +1935,10 @@ impl AppendStreamOpenRecorder for () {
 impl AppendStreamOpenRecorder for ConsensusTestProbe {
     fn record_append_stream_open(&self, target: &ClusterNodeName) {
         ConsensusTestProbe::record_append_stream_open(self, target);
+    }
+
+    fn record_append_stream_attempt(&self, target: &ClusterNodeName) {
+        ConsensusTestProbe::record_append_stream_attempt(self, target);
     }
 
     fn connectivity_fault(&self) -> ConnectivityFault {
@@ -4348,9 +4373,6 @@ where
             + Unpin
             + 'static,
     {
-        if let Err(error) = self.connectivity.check() {
-            return Box::pin(async move { Err(RPCError::Unreachable(unreachable_err(error))) });
-        }
         match self.append_path {
             AppendPath::Heartbeat => {
                 openraft::network::stream_append_sequential(self, input, option)
@@ -4360,8 +4382,26 @@ where
                 let executor = self.executor.clone();
                 let local_node_id = self.local_node_id.clone();
                 let target = self.target.clone();
+                let connectivity = self.connectivity.clone();
                 let append_stream_open_recorder = self.append_stream_open_recorder.clone();
                 Box::pin(async move {
+                    // The caller paces retries and observes cancellation while producing input.
+                    // Consume its first request before even an immediate local setup refusal;
+                    // otherwise that refusal can reopen streams without passing the retry gate.
+                    let mut input = input;
+                    let Some(first) = input.next().await else {
+                        let answers: openraft::base::BoxStream<
+                            'static,
+                            Result<
+                                openraft::raft::StreamAppendResult<TypeConfig>,
+                                RPCError<TypeConfig>,
+                            >,
+                        > = Box::pin(futures_util::stream::empty());
+                        return Ok(answers);
+                    };
+                    connectivity.check().map_err(unreachable_err)?;
+                    append_stream_open_recorder.record_append_stream_attempt(&target);
+                    let input = futures_util::stream::iter([first]).chain(input);
                     let answers = replication::open_append_stream(
                         &interconnect,
                         &executor,

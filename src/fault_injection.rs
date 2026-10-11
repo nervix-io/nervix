@@ -45,6 +45,7 @@ use nervix_recovery::{Discarded as _, NoReceiver as _};
 
 use crate::registry::SchedulerMode;
 
+mod consensus;
 mod pause;
 mod restarted_voter;
 

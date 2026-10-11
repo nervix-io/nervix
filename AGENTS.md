@@ -96,6 +96,9 @@ behavior, and a compatibility requirement the user states explicitly for the cur
   Nervix node. Its listener is independent of leadership and placement and must remain present
   across all cluster events, including leader changes, node joins, node restarts, and recovery.
 - Selected execution state may use node-owned snapshot or replication mechanisms.
+- A consensus append-stream adapter consumes the caller's first request before attempting stream
+  setup, so the caller's retry and cancellation gates also govern immediate admission failures.
+  Ended input opens no transport; the consumed request is submitted exactly once after setup.
 - Records, batches, payload attempts, handoff state, ACK guards, ACK tokens, and ACK maps are
   in-memory hot-path state and are never persisted.
 - Connectors adapt external systems at explicit data-plane boundaries. They do not weaken internal
