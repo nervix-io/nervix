@@ -1128,8 +1128,9 @@ build and the existing tests, and nothing in it changes behavior.
   it instead of running Cargo directly.
 - Use `just test-bolero [filter]` for bounded randomized cases and checked-in corpus replay,
   `just fuzz-list` to inspect registered targets, `just fuzz <target> [duration]` or
-  `just fuzz-all [duration]` for sanitizer-backed libFuzzer, and `just fuzz-replay` /
-  `just fuzz-reduce` for saved exact inputs. Bolero commands and the dedicated Bolero workflow
+  `just fuzz-all [duration] [shard]` for sanitizer-backed libFuzzer, and `just fuzz-replay` /
+  `just fuzz-reduce` for saved exact inputs; a sanitizer finding replays only through
+  `just fuzz-replay-sanitizer`. Bolero commands and the dedicated Bolero workflow
   enforce inventory and scoped compiled discovery; `just validate-bolero` runs that check alone.
   Do not add Bolero checks to `just validate`, `just validate-ci`, or the Check workflow's
   validation job. A random seed identifies one generated case, not an entire
@@ -1143,6 +1144,8 @@ build and the existing tests, and nothing in it changes behavior.
   beside a report is successful evidence. Discovery, build probes, replay and deliberate failure
   qualification supply no campaign counters; stable and nightly raw profiles never mix.
   A failed or interrupted campaign retains its failure and cannot produce a complete aggregate.
+  Sanitizer CI runs the inventory in shards of whole harnesses, and only the combined record of
+  every shard of one plan, which `just combine-bolero-fuzz` checks, claims the whole inventory.
   Check calls the reusable Bolero workflow with its tested SHA, event and label snapshot;
   randomized checks are required and a deliberate sanitizer skip publishes no fuzz coverage.
   Keep native fuzz reports and the Python runner report distinct from ordinary coverage and CRAP.

@@ -342,13 +342,44 @@ build path that runs its campaigns. `CARGO_BUILD_JOBS=1 just prepare-archive-cou
 command for the declared server library shared by the registry and window count properties.
 Then run the registered campaigns with `just fuzz`. Preparation records its own build log and
 metadata with a 7,200-second compilation deadline; it does not count as a completed fuzz campaign.
-The sanitizer CI job runs only on PRs labeled `fuzz`, prepares that server binary with one Cargo
-build job to bound compiler memory, and allows 180 minutes for preparation, all target campaigns,
-failure qualification and artifact upload. An expected sanitizer skip contributes no execution or
-coverage evidence. The Check workflow's validation job and the Bolero randomized job
-retain their separate scopes and limits. Check calls the reusable Bolero workflow with its exact
-tested SHA, event and label snapshot. Scheduled and manual Bolero runs execute randomized checks
-and record a deliberate sanitizer skip.
+An expected sanitizer skip contributes no execution or coverage evidence. The Check workflow's
+validation job and the Bolero randomized job retain their separate scopes and limits. Check calls
+the reusable Bolero workflow with its exact tested SHA, event and label snapshot. Scheduled and
+manual Bolero runs execute randomized checks and record a deliberate sanitizer skip.
+
+### Sanitizer Shards
+
+A single job running every sanitizer campaign outgrew its limit as the inventory grew. With all
+159 targets it took 209 to 258 minutes: discovery took 27 of them, the two server sanitizer builds
+with one Cargo build job 42, and the campaigns 132. CI therefore divides the inventory into shards
+that run in parallel, each in a job of its own:
+
+- A harness, one package's test target with one feature set, is never split, so a shard builds
+  only the harnesses it runs. The inventory's `prepared_targets` names one target of each harness
+  too large for a campaign's build deadline: today the server library with its empty and `testing`
+  feature sets.
+- The plan deals the harnesses to the shards, the longest estimate first, each to the shard that
+  holds the least estimated time. A harness's estimate is its build, 30 minutes for a prepared
+  harness and 3 for any other, plus the inventory's PR duration and 15 seconds for each of its
+  targets. The plan depends only on the inventory and the shard count, so every runner computes the
+  same one, and `just fuzz-plan <count>` prints it.
+- Each shard job discovers every registered target, prepares its own declared harnesses with one
+  Cargo build job and the 7,200-second preparation deadline, and runs
+  `just coverage-bolero 30 <number>/<count>`: the runner tests, its share of the campaigns and the
+  complete failure qualification. Only the server preparation is held to one build job; discovery
+  and library builds use every core. A shard samples CPU use, steal time and used memory every five
+  seconds and adds the summary to its job summary.
+- `bolero-fuzz-combined` downloads every shard's completion evidence, without the raw profiles, and
+  runs `just combine-bolero-fuzz`. It accepts only shards 1 to N of one plan, from one workflow run
+  and attempt at the tested revision and inventory. Each must be complete, must have run exactly its
+  planned targets and must hold a complete record for each of them and a report. Together they must
+  select every registered target once. The job then writes the combined record and the merged Rust
+  source report.
+
+Each shard job allows 180 minutes. `bolero-gate` requires the randomized job, every shard and the
+combined proof when the PR carries `fuzz`, and requires all of the sanitizer jobs to be skipped
+otherwise. `tests/release-evidence.toml` holds a qualifying revision to the same checks, every shard
+of the matrix included.
 
 The fuzz profile uses one codegen unit, optimization level two and debug level one. The full
 server package uses optimization level one and no debug output to keep its instrumented build
@@ -392,9 +423,15 @@ just test-bolero
 just test-bolero nspl-model
 just fuzz nspl-model 30
 just fuzz-all 30
+just fuzz-plan 3
+just fuzz-all 30 2/3
+just prepare-bolero-shard 1/3
 just coverage-bolero 30
+just qualify-bolero
 just fuzz-replay nspl-model <saved-input>
+just fuzz-replay-sanitizer nspl-model <saved-input>
 just fuzz-reduce nspl-model <saved-input>
+just combine-bolero-fuzz <shard-evidence> <output>
 ```
 
 `just validate-bolero` compares the inventory with all workspace packages declaring
@@ -434,34 +471,50 @@ On a shared host, a cold server build can exceed the campaign runner's 30-minute
 limit. `just prepare-bolero <id>` prepares that same pinned, scoped sanitizer build with a two-hour
 limit and retains its log and preparation metadata. It does not run a campaign or record fuzz
 completion. `just prepare-archive-counts-fuzz` uses this shared path for the declared registry library harness.
-CI prepares the server library with both the empty and `testing` feature sets.
+`just prepare-bolero-shard <number>/<count>` prepares the declared harnesses one shard runs, as each
+CI shard does before its campaigns.
 The target must subsequently pass `just fuzz <id>` with the ordinary build and case
 limits; CI campaigns continue to use that bounded runner.
 
 PR CI runs a required ordinary randomized/corpus job through Check's reusable Bolero call. The
-sanitizer libFuzzer job runs only when
-the PR has the `fuzz` label, with 30 seconds of engine time per target. Both jobs use the native
+sanitizer libFuzzer shards run only when the PR has the `fuzz` label, with 30 seconds of engine
+time per target. Every job uses the native
 [CI linker](./developing-nervix.md#validation-and-tests), including sanitizer builds that supply
-their own compiler flags. Adding or removing the
-label reevaluates the jobs; the gate requires sanitizer success when the label is present and
-accepts a skipped sanitizer job otherwise. Scheduled and manual workflow runs execute the ordinary
+their own compiler flags. Adding or removing the label reevaluates the jobs, and a push to a
+labeled PR runs the shards again. Scheduled and manual workflow runs execute the ordinary
 properties. Job limits reserve additional time for compilation, artifacts and cleanup. A
 cache may seed a campaign but cannot skip a target or replace checked-in regressions. An empty
 selection, timeout, engine failure, sanitizer finding or property failure fails the job.
 
-The workspace, sanitizer-runner Python, and diagnostic coverage upload jobs use
-`.github/actions/setup-codecov` to verify the pinned CLI
-wheel's SHA-256 and Codecov publisher attestation before installing it in an isolated environment.
-The verified executable is passed to the Codecov action; OIDC authentication and fatal upload
-errors apply to all three uploads. Diagnostic coverage retains its separate flag and is excluded
-from ordinary coverage and CRAP accounting.
-
 Each fuzz run retains its corpus, crashes, log and metadata with revision, target, domain version,
-toolchain, features, flags, result and an exact-input reproduction command. Retain failure
+toolchain, features, flags, result and exact-input reproduction commands. Retain failure
 inputs before cleanup. `fuzz-replay` stages saved bytes in the target's actual crash
-directory and runs the ordinary assertion with zero randomized cases. `fuzz-reduce`
-uses libFuzzer crash minimization and verifies that minimized bytes still fail that assertion.
+directory and runs the ordinary assertion with zero randomized cases. A sanitizer finding passes
+there, because only the instrumented build detects it: `fuzz-replay-sanitizer` builds the target's
+instrumented harness and runs the exact saved bytes once, and a run's metadata records both
+commands. `fuzz-reduce` uses libFuzzer crash minimization, verifies that the minimized bytes still
+fail the instrumented target and records whether the ordinary assertion fails on them as well.
+A saved input inside a run directory replays only while it matches the digest its run's metadata
+holds. A missing, unreadable or foreign record, or changed bytes, is a corrupt replay record and
+is refused; a copy outside the run directories carries no record and replays as given.
 A random seed reproduces one generated case, not an entire entropy-driven campaign.
+
+`just qualify-bolero` proves that every way a run must fail does fail, and keeps a
+`qualification.json` naming each case, its requirement, what it observed and its evidence:
+
+- A property mismatch fails the campaign and saves its input, which then minimizes and replays.
+- An AddressSanitizer heap-buffer-overflow fails the campaign with its report, and the
+  instrumented replay of the saved input reproduces it.
+- A case past its timeout, an engine that cannot start and a campaign naming no compiled target
+  fail.
+- Compiled discovery of generated packages accepts an exact registration and fails on an ignored,
+  an unregistered and a missing property.
+- A filter, a shard plan or a campaign that would run nothing fails.
+- An input that differs from its run record, and one whose record cannot be read, are refused.
+
+The deliberately failing targets live in the standalone `tests/bolero-qualification` package,
+outside the workspace and the inventory. Every CI shard runs the qualification, so each shard's
+runner proves its own failure paths.
 
 ## Live Rust Source Coverage
 
@@ -479,7 +532,9 @@ and deliberate failure qualification also discard counters; they cannot enter a 
 report or mix stable profiles with nightly profiles.
 
 Each invocation allocates a fresh
-`target/native-coverage/bolero-fuzz/fuzz/<nightly>/<attempt>/` directory. Each selected target
+`target/native-coverage/bolero-fuzz/fuzz/<nightly>/<attempt>/` directory; a shard's attempt name
+ends in `-shard-<number>-of-<count>`, and its record names the shard and the digest of its plan.
+Each selected target
 has its own `targets/<id>/` directory there, with `profiles/%p-%m.profraw`, `executions.jsonl`,
 `lcov.info`, `export.log` and `completion.json`. The runner records the exact executable returned
 by the hashed fuzz build and its Cargo fingerprint, effective compiler flags and profile settings.
@@ -496,8 +551,10 @@ completed inputs and a successful source export. The aggregate report beside the
 completion record is complete only after all selected registered targets complete. The record
 retains the inventory digest and exact entries, selection and discovered/executed/completed
 counts, revision and whether it was modified, compiler/LLVM identity, workflow run and attempt,
-event and labels, campaign limits, input throughput and source attribution. A focused invocation
-states its selection and never claims the rest of the inventory ran.
+event and labels, campaign limits, input throughput and source attribution. Each target's record
+also identifies the checked-in corpus the campaign started from, by its input count and a digest
+of every seed's name and content. A focused invocation or a shard states its selection and never
+claims the rest of the inventory ran; only the combined record of every shard does.
 
 A crash, abort, deadline or interrupt stays failed or interrupted even if it left some counters.
 The runner retains its original corpus, crash input, logs and incomplete evidence; it does not
@@ -505,11 +562,15 @@ export those counters as a successful campaign. Failure minimization and exact r
 independent qualification, with their original failure retained. No corpus replay substitutes for
 the live measurement.
 
-CI publishes `coverage-bolero-fuzz` for live campaign reports and completion evidence,
-`bolero-runs` for corpus/crash and qualification artifacts, and `bolero-selection` for the exact
-eligible producer verdicts, including deliberate skips. `bolero-runs` also retains the Python
-runner report as `python.lcov`. Fuzz reports remain separate from ordinary
-workspace coverage and its CRAP gate. A sanitizer skip publishes no fuzz coverage artifact.
+Each CI shard publishes `coverage-bolero-fuzz-<number>` with its live campaign reports, records
+and raw profiles, `bolero-fuzz-evidence-<number>` with its records and aggregate report but no
+profiles or per-target reports, `bolero-runs-<number>` for corpus/crash and qualification artifacts with the Python
+runner report as `python.lcov`, and `runner-load-bolero-fuzz-<number>` with its CPU and memory
+samples. `coverage-bolero-fuzz` holds the combined record and the merged report, which sums the
+shards' line, function and branch counters because they ran disjoint campaigns, and
+`bolero-selection` the gate's exact producer verdicts, including deliberate skips. Fuzz reports
+remain separate from ordinary workspace coverage and its CRAP gate. A sanitizer skip publishes no
+fuzz coverage artifact.
 
 ## Adding A Target
 
@@ -518,6 +579,8 @@ and input length, and assert the complete current-value contract. Register the p
 test name, source, domain version, features, corpus, budgets and invariant in the inventory.
 Check in current-domain seeds, run `just validate-bolero`,
 `just test-bolero <id>` and `just fuzz <id> 30`, then run
-`just validate`. Both CI jobs include the target in the same change. A public product
+`just validate`. Both CI jobs include the target in the same change; the shard plan places it with
+its harness, or deals a new harness to a shard, so a target needs no shard assignment. A new harness
+whose sanitizer build exceeds a campaign's build deadline joins `prepared_targets`. A public product
 bug found this way first gets a failing focused reproducer and affected public Cucumber scenario
 before its fix.

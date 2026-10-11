@@ -14,6 +14,7 @@ import os
 import pathlib
 import re
 import tomllib
+from collections.abc import Callable
 from contextlib import contextmanager
 from typing import TYPE_CHECKING, Iterator
 
@@ -71,8 +72,22 @@ def normalize_report(path: pathlib.Path, root: pathlib.Path) -> None:
     path.write_text("".join(lines))
 
 
+def corpus_identity(directory: pathlib.Path) -> dict[str, object]:
+    """The checked-in seeds a campaign starts from, by name and content."""
+    digest = hashlib.sha256()
+    inputs = 0
+    for seed in sorted(directory.iterdir()):
+        if seed.is_file() and not seed.name.startswith("."):
+            digest.update(seed.name.encode() + b"\0" + hashlib.sha256(seed.read_bytes()).digest())
+            inputs += 1
+    return {"inputs": inputs, "sha256": digest.hexdigest()}
+
+
 class Campaign:
-    def __init__(self, root: pathlib.Path, inventory: Inventory, selected: tuple[Target, ...], duration: int) -> None:
+    def __init__(
+        self, root: pathlib.Path, inventory: Inventory, selected: tuple[Target, ...], duration: int,
+        partition: dict[str, object] | None,
+    ) -> None:
         registered = {target.id: target for target in inventory.targets}
         identities = {target.id: target for target in selected}
         if not selected or len(identities) != len(selected):
@@ -89,7 +104,10 @@ class Campaign:
         self.started = native.utc_now()
         self.run = native.run_identity(os.environ, self.started, os.getpid())
         producer = native.Producer("bolero-fuzz", "fuzz", (), "fuzz-all", ())
-        self.path = self.workspace.new_attempt(producer, inventory.nightly, self.run.attempt_name())
+        name = self.run.attempt_name()
+        if partition is not None:
+            name = f"{name}-shard-{partition['number']}-of-{partition['count']}"
+        self.path = self.workspace.new_attempt(producer, inventory.nightly, name)
         self.inventory_file = root / "tests/bolero-targets.toml"
         self.inventory_digest = hashlib.sha256(self.inventory_file.read_bytes()).hexdigest()
         self.record = native.Record(self.path / native.RECORD, {
@@ -106,6 +124,7 @@ class Campaign:
             "inventory": {"file": str(self.inventory_file.relative_to(root)), "sha256": self.inventory_digest,
                           "targets": [target_identity(target, root) for target in inventory.targets]},
             "selection": [target.id for target in selected],
+            "shard": partition,
             "counts": {"discovered": len(inventory.targets), "selected": len(selected), "executed": 0, "completed": 0},
             "bounds": {"seconds_per_target": duration, "rss_limit_mb": 2048},
             "targets": {},
@@ -203,7 +222,7 @@ class TargetCoverage:
             "producer": "bolero-fuzz", "mode": "fuzz", "verdict": "running", "stage": "build",
             "revision": campaign.record.content["revision"], "run": campaign.run.describe(),
             "toolchain": campaign.toolchain.describe(), "inventory_sha256": campaign.inventory_digest,
-            "target": target_identity(target, campaign.workspace.root),
+            "target": target_identity(target, campaign.workspace.root), "corpus": corpus_identity(target.corpus),
             "bounds": campaign.record.content["bounds"], "artifacts": campaign.workspace.display(artifacts),
         })
         self.record.write()
@@ -255,3 +274,227 @@ class TargetCoverage:
         self.record.conclude(native.Verdict.COMPLETE, native.utc_now())
         self.campaign.record.content["counts"]["completed"] += 1
         self.campaign.record.write()
+
+
+@dataclasses.dataclass(frozen=True)
+class ShardEvidence:
+    """One shard's campaign record and the directory holding its report and target records."""
+
+    directory: pathlib.Path
+    record: dict[str, object]
+
+    @property
+    def number(self) -> int:
+        return self.record["shard"]["number"]
+
+
+def shard_evidence(evidence: pathlib.Path) -> list[ShardEvidence]:
+    """Every shard campaign record below `evidence`; target records hold no selection."""
+    found = []
+    for path in sorted(evidence.rglob(native.RECORD)):
+        content = json.loads(path.read_text())
+        if content.get("producer") != "bolero-fuzz" or "selection" not in content:
+            continue
+        if not isinstance(content.get("shard"), dict):
+            raise native.RunnerError(f"{path} records a campaign without a shard plan")
+        found.append(ShardEvidence(path.parent, content))
+    if not found:
+        raise native.RunnerError(f"no shard campaign record was found under {evidence}")
+    return found
+
+
+def shared(shards: list[ShardEvidence], field: str) -> object:
+    """A field every shard of one run must record identically."""
+    values = [shard.record.get(field) for shard in shards]
+    if any(value != values[0] for value in values):
+        raise native.RunnerError(f"the shards record different {field}: {values}")
+    return values[0]
+
+
+def check_shard(
+    shard: ShardEvidence, digest: str, plan: tuple[tuple[Target, ...], ...], plan_sha256: str
+) -> None:
+    record = shard.record
+    number = shard.number
+    if record.get("verdict") != str(native.Verdict.COMPLETE):
+        raise native.RunnerError(f"shard {number} did not complete: {record.get('verdict')}")
+    if record["inventory"]["sha256"] != digest:
+        raise native.RunnerError(f"shard {number} ran another inventory than the tested revision's")
+    if record["shard"]["plan_sha256"] != plan_sha256:
+        raise native.RunnerError(f"shard {number} ran another shard plan than the inventory's")
+    expected = [target.id for target in plan[number - 1]]
+    if record["selection"] != expected:
+        raise native.RunnerError(f"shard {number} selected {record['selection']}, its plan holds {expected}")
+    counts = record["counts"]
+    if not counts["selected"] == counts["executed"] == counts["completed"] == len(expected):
+        raise native.RunnerError(f"shard {number} counts {counts} differ from its {len(expected)} targets")
+    for target_id in expected:
+        completion = shard.directory / record["targets"][target_id]["completion"]
+        if json.loads(completion.read_text()).get("verdict") != str(native.Verdict.COMPLETE):
+            raise native.RunnerError(f"shard {number}: {target_id} has no complete campaign record")
+    if not (shard.directory / native.REPORT).is_file():
+        raise native.RunnerError(f"shard {number} has no coverage report")
+
+
+def combine(
+    root: pathlib.Path, inventory: Inventory, evidence: pathlib.Path, output: pathlib.Path,
+    plan_for: Callable[[int], tuple[tuple[Target, ...], ...]],
+    plan_digest: Callable[[tuple[tuple[Target, ...], ...]], str],
+) -> pathlib.Path:
+    """Prove that one run's shard campaigns covered the whole inventory once, and merge them.
+
+    Each shard records its plan, selection and per-target completion. The combined record is
+    complete only when shards 1 to N of one plan, run at the tested revision and inventory, each
+    completed exactly their planned targets, so together they ran every registered target once.
+    """
+    inventory_file = root / "tests/bolero-targets.toml"
+    digest = hashlib.sha256(inventory_file.read_bytes()).hexdigest()
+    output.mkdir(parents=True)
+    record = native.Record(output / native.RECORD, {
+        "producer": "bolero-fuzz", "mode": "fuzz", "scope": "combined shards", "verdict": "running",
+        "stage": "combine", "started_at": native.timestamp(native.utc_now()),
+        "tested_sha": os.environ.get("BOLERO_TESTED_SHA"),
+        "inventory": {"file": str(inventory_file.relative_to(root)), "sha256": digest},
+    })
+    record.write()
+    try:
+        shards = shard_evidence(evidence)
+        counts = {shard.record["shard"]["count"] for shard in shards}
+        if len(counts) != 1:
+            raise native.RunnerError(f"the shards name different shard counts: {sorted(counts)}")
+        count = counts.pop()
+        numbers = sorted(shard.number for shard in shards)
+        if numbers != list(range(1, count + 1)):
+            raise native.RunnerError(f"shards {numbers} are not shards 1 to {count} each once")
+        plan = plan_for(count)
+        plan_sha256 = plan_digest(plan)
+        shards.sort(key=lambda shard: shard.number)
+        for shard in shards:
+            check_shard(shard, digest, plan, plan_sha256)
+        tested = shared(shards, "tested_sha")
+        if record.content["tested_sha"] is not None and tested != record.content["tested_sha"]:
+            raise native.RunnerError(f"the shards tested {tested}, not {record.content['tested_sha']}")
+        selected = [target_id for shard in shards for target_id in shard.record["selection"]]
+        if sorted(selected) != sorted(target.id for target in inventory.targets):
+            raise native.RunnerError("the shards together did not select every registered target once")
+        run = [{key: value for key, value in shard.record["run"].items() if key != "job"} for shard in shards]
+        if any(identity != run[0] for identity in run):
+            raise native.RunnerError(f"the shards come from different runs: {run}")
+        merge_lcov([shard.directory / native.REPORT for shard in shards], output / native.REPORT)
+        record.content.update({
+            "run": run[0],
+            "revision": shared(shards, "revision"),
+            "toolchain": shared(shards, "toolchain"),
+            "event": shared(shards, "event"),
+            "labels": shared(shards, "labels"),
+            "bounds": shared(shards, "bounds"),
+            "plan_sha256": plan_sha256,
+            "selection": [target.id for target in inventory.targets],
+            "counts": {"discovered": len(inventory.targets), "selected": len(selected),
+                       "executed": len(selected), "completed": len(selected)},
+            "shards": [{
+                "number": shard.number,
+                "record": str(shard.directory.relative_to(evidence) / native.RECORD),
+                "selected": len(shard.record["selection"]),
+                "started_at": shard.record.get("started_at"),
+                "finished_at": shard.record.get("finished_at"),
+            } for shard in shards],
+            "targets": {
+                target_id: {
+                    "shard": shard.number,
+                    "completion": str(shard.directory.relative_to(evidence) / shard.record["targets"][target_id]["completion"]),
+                }
+                for shard in shards for target_id in shard.record["selection"]
+            },
+        })
+        record.conclude(native.Verdict.COMPLETE, native.utc_now())
+    except BaseException as error:
+        record.content["failure"] = {"stage": "combine", "detail": str(error)}
+        record.conclude(native.Verdict.FAILED, native.utc_now())
+        raise
+    return output
+
+
+@dataclasses.dataclass
+class SourceCounts:
+    """One source file's counters, summed over every report that measured it."""
+
+    functions: dict[str, int] = dataclasses.field(default_factory=dict)
+    function_hits: dict[str, int] = dataclasses.field(default_factory=dict)
+    lines: dict[int, int] = dataclasses.field(default_factory=dict)
+    branches: dict[tuple[int, str, str], int | None] = dataclasses.field(default_factory=dict)
+
+
+SUMMARY_LINES = frozenset({"FNF", "FNH", "LF", "LH", "BRF", "BRH"})
+
+
+def merge_lcov(reports: list[pathlib.Path], output: pathlib.Path) -> None:
+    """Sum the counters of reports from separate executions into one report.
+
+    Shards run disjoint campaigns, so a line, function or branch was executed the sum of the
+    times each shard executed it. Summary lines are recomputed from the merged counters.
+    """
+    sources: dict[str, SourceCounts] = {}
+    for report in reports:
+        current: SourceCounts | None = None
+        for raw in report.read_text().splitlines():
+            line = raw.strip()
+            if not line or line.startswith("TN:"):
+                continue
+            if line == "end_of_record":
+                if current is None:
+                    raise native.RunnerError(f"{report}: end_of_record outside a record")
+                current = None
+                continue
+            kind, separator, value = line.partition(":")
+            if kind == "SF" and separator:
+                if current is not None:
+                    raise native.RunnerError(f"{report}: the record before {value} has no end_of_record")
+                current = sources.setdefault(value, SourceCounts())
+                continue
+            if current is None:
+                raise native.RunnerError(f"{report}: LCOV line outside a record: {line}")
+            if kind == "FN":
+                number, _, name = value.partition(",")
+                current.functions.setdefault(name, int(number))
+            elif kind == "FNDA":
+                hits, _, name = value.partition(",")
+                current.function_hits[name] = current.function_hits.get(name, 0) + int(hits)
+            elif kind == "DA":
+                fields = value.split(",")
+                number = int(fields[0])
+                current.lines[number] = current.lines.get(number, 0) + int(fields[1])
+            elif kind == "BRDA":
+                number, block, branch, taken = value.split(",")
+                key = (int(number), block, branch)
+                merged = current.branches.get(key)
+                # `-` marks a branch whose block never ran; any execution elsewhere replaces it.
+                if taken != "-":
+                    merged = (merged or 0) + int(taken)
+                current.branches[key] = merged
+            elif kind not in SUMMARY_LINES:
+                raise native.RunnerError(f"{report}: unsupported LCOV line: {line}")
+        if current is not None:
+            raise native.RunnerError(f"{report}: the last record has no end_of_record")
+    lines = []
+    for source in sorted(sources):
+        counts = sources[source]
+        unknown = set(counts.function_hits) - set(counts.functions)
+        if unknown:
+            raise native.RunnerError(f"{source}: function counts without a function line: {sorted(unknown)}")
+        functions = sorted(counts.functions.items(), key=lambda item: (item[1], item[0]))
+        lines.append(f"SF:{source}")
+        lines.extend(f"FN:{number},{name}" for name, number in functions)
+        lines.extend(f"FNDA:{counts.function_hits.get(name, 0)},{name}" for name, _ in functions)
+        lines.append(f"FNF:{len(functions)}")
+        lines.append(f"FNH:{sum(1 for name, _ in functions if counts.function_hits.get(name, 0) > 0)}")
+        if counts.branches:
+            for (number, block, branch), taken in sorted(counts.branches.items()):
+                lines.append(f"BRDA:{number},{block},{branch},{'-' if taken is None else taken}")
+            lines.append(f"BRF:{len(counts.branches)}")
+            lines.append(f"BRH:{sum(1 for taken in counts.branches.values() if taken)}")
+        lines.extend(f"DA:{number},{hits}" for number, hits in sorted(counts.lines.items()))
+        lines.append(f"LF:{len(counts.lines)}")
+        lines.append(f"LH:{sum(1 for hits in counts.lines.values() if hits > 0)}")
+        lines.append("end_of_record")
+    output.write_text("\n".join(lines) + "\n")

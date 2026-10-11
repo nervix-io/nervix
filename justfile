@@ -42,6 +42,14 @@ bolero-deps: build-web-console
 prepare-bolero target: bolero-deps
     BOLERO_BUILD_TIMEOUT_SECONDS=7200 python3 -m scripts.bolero prepare {{ quote(target) }}
 
+# Prepare the inventory's declared harnesses that one sanitizer shard, NUMBER/COUNT, builds.
+prepare-bolero-shard shard: bolero-deps
+    BOLERO_BUILD_TIMEOUT_SECONDS=7200 python3 -m scripts.bolero prepare-shard {{ quote(shard) }}
+
+# Show how COUNT sanitizer shards divide the inventory's harnesses and targets.
+fuzz-plan count="3":
+    python3 -m scripts.bolero plan {{ quote(count) }}
+
 # The registry and window properties share this declared server library and feature set.
 prepare-archive-counts-fuzz: (prepare-bolero "registry-archived-models")
 
@@ -57,13 +65,24 @@ fuzz-list: bolero-deps
 fuzz target duration="30": bolero-deps
     python3 -m scripts.bolero fuzz {{ quote(target) }} {{ quote(duration) }}
 
-# Run every target through sanitizer-backed libFuzzer. Duration is per target in seconds.
-fuzz-all duration="30": bolero-deps
-    python3 -m scripts.bolero fuzz-all {{ quote(duration) }}
+# Run every target, or one shard NUMBER/COUNT of them, through sanitizer-backed libFuzzer.
+# Duration is per target in seconds.
+fuzz-all duration="30" shard="1/1": bolero-deps
+    python3 -m scripts.bolero fuzz-all {{ quote(duration) }} --shard {{ quote(shard) }}
 
 # Replay the exact saved input through its ordinary property assertion.
 fuzz-replay target failure: bolero-deps
     python3 -m scripts.bolero replay {{ quote(target) }} {{ quote(failure) }}
+
+# Replay the exact saved input once through its instrumented sanitizer build, which a sanitizer
+# finding needs: the ordinary build does not detect it.
+fuzz-replay-sanitizer target failure: bolero-deps
+    python3 -m scripts.bolero replay-sanitizer {{ quote(target) }} {{ quote(failure) }}
+
+# Check that the shard campaign records under `evidence` ran every registered target once, then
+# write their combined record and merged Rust source report to `output`.
+combine-bolero-fuzz evidence output:
+    python3 -m scripts.bolero combine {{ quote(evidence) }} {{ quote(output) }}
 
 # Minimize a saved failure with libFuzzer and verify the minimized input still fails.
 fuzz-reduce target failure: bolero-deps
@@ -80,13 +99,16 @@ validate-bolero-workflow: (validate-workflows ".github/workflows/bolero.yaml")
 validate-workflows *workflows:
     go run github.com/rhysd/actionlint/cmd/actionlint@v1.7.12 {{ workflows }}
 
-# Qualify nonzero failures, saved crashes, minimization, exact replay and case timeouts.
+# Qualify every way a run must fail: a property mismatch, a sanitizer finding, a case timeout, an
+# engine failure, discovery of ignored, unregistered and missing targets, a selection of nothing
+# and a corrupt replay record, with saved inputs, minimization and exact replay.
 qualify-bolero: bolero-deps
     python3 -m scripts.bolero qualify
 
-# Exercise the inventory and runner's validation and failure paths.
+# Exercise the inventory and runner's validation and failure paths, and the runner load recorder
+# the sanitizer shards keep their measurements with.
 test-bolero-runner: build-web-console
-    python3 -m unittest scripts.tests.test_bolero scripts.tests.test_bolero_coverage
+    python3 -m unittest scripts.tests.test_bolero scripts.tests.test_bolero_coverage scripts.tests.test_record_runner_load
 
 # Measure runner edits without launching unrelated product fuzz campaigns.
 coverage-bolero-runner:
@@ -98,14 +120,14 @@ coverage-bolero-runner:
     "${coverage[@]}" lcov --data-file target/bolero/runner.coverage -o target/bolero/python-runner.lcov
 
 # Collect distinct Python runner and live Rust source reports, then qualify failure retention.
-# The duration is per product target; CI passes 30 on PRs labeled `fuzz`.
-coverage-bolero duration="2": bolero-deps
+# The duration is per product target; CI passes 30 and its shard NUMBER/COUNT on PRs labeled `fuzz`.
+coverage-bolero duration="2" shard="1/1": bolero-deps
     #!/usr/bin/env bash
     set -euo pipefail
     coverage=(uvx --from coverage==7.11.0 coverage)
     "${coverage[@]}" erase
     "${coverage[@]}" run --branch --source=scripts.bolero,scripts.bolero_coverage,scripts.build_web_console,scripts.tests.test_bolero,scripts.tests.test_bolero_coverage -m unittest scripts.tests.test_bolero scripts.tests.test_bolero_coverage
-    "${coverage[@]}" run --branch -a --source=scripts.bolero,scripts.bolero_coverage,scripts.build_web_console,scripts.tests.test_bolero,scripts.tests.test_bolero_coverage -m scripts.bolero fuzz-all {{ quote(duration) }}
+    "${coverage[@]}" run --branch -a --source=scripts.bolero,scripts.bolero_coverage,scripts.build_web_console,scripts.tests.test_bolero,scripts.tests.test_bolero_coverage -m scripts.bolero fuzz-all {{ quote(duration) }} --shard {{ quote(shard) }}
     "${coverage[@]}" run --branch -a --source=scripts.bolero,scripts.bolero_coverage,scripts.build_web_console,scripts.tests.test_bolero,scripts.tests.test_bolero_coverage -m scripts.bolero qualify
     mkdir -p target/bolero
     "${coverage[@]}" lcov -o target/bolero/python.lcov
