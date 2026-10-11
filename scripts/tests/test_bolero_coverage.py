@@ -465,6 +465,9 @@ class WorkflowTests(unittest.TestCase):
         combined = self.job("bolero-fuzz-combined")
         self.assertIn(label, combined)
         self.assertIn("needs: [bolero-fuzz]", combined)
+        # `just` evaluates the justfile's toolchain lookup through toml-cli before any recipe runs.
+        self.assertIn("tool: just@latest,toml-cli", combined)
+        self.assertIn('shell("toml get', (bolero.ROOT / "justfile").read_text())
         self.assertIn("pattern: bolero-fuzz-evidence-*", combined)
         self.assertIn("just combine-bolero-fuzz target/bolero-fuzz-shards target/native-coverage/bolero-fuzz/combined", combined)
         self.assertIn("name: coverage-bolero-fuzz\n", combined)

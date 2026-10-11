@@ -308,10 +308,11 @@ jobs:
         with:
           ref: ${{ inputs.tested-sha || github.sha }}
 
+      # The justfile reads the repository toolchain with toml-cli whenever it loads.
       - name: Install just
         uses: taiki-e/install-action@v2
         with:
-          tool: just@latest
+          tool: just@latest,toml-cli
 
       - name: Download every shard's completion evidence
         uses: actions/download-artifact@v4
