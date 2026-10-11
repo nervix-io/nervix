@@ -300,7 +300,11 @@ just test-connectors <filter>
 `just ratchet`, `just validate` and `just validate-ci` run the same source-driven compiler
 architecture gate in the isolated `tools/nervix-lint` workspace. Product builds
 remain stable. Tooling, analysis and product artifacts occupy separate target directories.
-Prepare the ordinary server build prerequisites, including `just build-web-console`.
+Install the declared toolchains with `just toolchains-install`, including the pinned analysis
+compiler's `wasm32-unknown-unknown` standard library for browser analysis. Prepare the ordinary
+server build prerequisites, including `just build-web-console`.
+When compiler reports need reanalysis, cleanup selects the configuration's target as well as its
+isolated build directory, so browser artifacts cannot remain fresh without their current reports.
 
 ```bash
 just ratchet
@@ -350,6 +354,19 @@ fixture doctests twice, and cross-worktree rejection in two isolated worktrees. 
 workspace-wrapper chains directly while caching ordinary dependencies; complete evidence is
 validated independently of that detail. Compiler semantic fixtures qualify resolved lints and
 cross-crate metadata.
+
+The same gate enforces source-owned architectural layers, configuration Model consumption,
+language references, awaited cluster access and declared identity/installation state. Declare
+`nervix::layer` at documented ownership boundaries, `nervix::input(plans, ...)` on connector engines,
+and exact `value`, `identity` and `state` roles at their semantic owners. The
+[architecture contracts](./data-plane-concurrency.md#resolved-architecture-boundaries) and
+[typed-state contracts](./typed-states.md#source-owned-identity-and-installation-contracts) state the
+supported scope. `just test-typed-ratchet-contracts <unittest selector...>` runs focused pass/fail
+compiler fixtures after preparing `just test-typed-ratchet-compiler`. `just test-ratchet-units`
+also qualifies language provenance before resolution; `python3 -m scripts.check_layer_provenance`
+prints current source/manifest violations. Calibration logs and complete matrix/coverage outputs
+belong on the owning task, not in the source tree. Compilation under a modeled mode qualifies
+recognition and supplies no concurrency execution evidence.
 
 ### Typed errors and reports
 

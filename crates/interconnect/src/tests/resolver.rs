@@ -8,6 +8,11 @@
 //!   build.
 //! - **Must not know.** What the tests that use them check.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(harness, reason = "owns the test harness boundary declared above")
+)]
+
 #[cfg(not(feature = "turmoil"))]
 use meticulous::ResultExt as _;
 use nervix_models::ClusterNodeName;

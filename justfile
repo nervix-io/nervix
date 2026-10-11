@@ -1872,7 +1872,7 @@ cargo-fmt:
 
 # Ripgrep honors the repository ignore rules, so generated target trees are not formatted.
 taplo-format:
-    rg --files --hidden --null --glob '*.toml' --glob '!**/.git/**' | xargs -0 taplo format
+    git ls-files -z --cached --others --exclude-standard '*.toml' | xargs -0 -r taplo format
 
 [parallel]
 fmt: cargo-fmt fmt-typed-ratchet taplo-format dockerfmt gherkin-fmt nspl-fmt autoinherit
@@ -1881,7 +1881,7 @@ cargo-fmt-check:
     cargo +nightly fmt --check
 
 taplo-format-check:
-    rg --files --hidden --null --glob '*.toml' --glob '!**/.git/**' | xargs -0 taplo format --check
+    git ls-files -z --cached --others --exclude-standard '*.toml' | xargs -0 -r taplo format --check
 
 [parallel]
 fmt-check: cargo-fmt-check fmt-check-typed-ratchet taplo-format-check dockerfmt-check gherkin-fmt-check nspl-fmt-check autoinherit-check
@@ -2097,7 +2097,7 @@ ratchet *args: typed-ratchet-build
 
 # Focused regression checks for the debt gate and its shared Rust source scanner.
 test-ratchet-units:
-    python3 -m unittest scripts.tests.test_ratchet
+    python3 -m unittest scripts.tests.test_ratchet scripts.tests.test_layer_provenance scripts.tests.test_clock_boundaries
 
 typed-ratchet-build:
     CARGO_TARGET_DIR={{ cargo_target_dir }}/typed-ratchet/driver cargo +nightly-2026-09-17 build --manifest-path tools/nervix-lint/Cargo.toml --package nervix-lint-driver --package nervix-lint-report
@@ -2112,8 +2112,8 @@ test-typed-ratchet-compiler:
     just typed-ratchet --fixture-mode ordinary --recompile --inventory --output {{ quote(cargo_target_dir) }}/typed-ratchet/fixture-ordinary.json
     python3 -m unittest scripts.tests.test_typed_ratchet scripts.tests.compiler_fixture_checks.CompilerFixtureTests
 
-test-typed-ratchet-contracts: typed-ratchet-build
-    python3 -m unittest scripts.tests.compiler_contract_checks
+test-typed-ratchet-contracts +tests="scripts.tests.compiler_contract_checks": typed-ratchet-build
+    python3 -m unittest {{ tests }}
 
 # Error propagation uses the actual node startup and DNS hooks, plus both simulation drivers.
 test-typed-error-runtime: build-web-console download-onnxruntime
@@ -2174,12 +2174,14 @@ test-typed-ratchet-reports:
     CARGO_TARGET_DIR={{ cargo_target_dir }}/typed-ratchet/driver cargo +nightly-2026-09-17 test --manifest-path tools/nervix-lint/Cargo.toml --package nervix-lint-report --lib
 
 fmt-typed-ratchet:
-    cargo +nightly-2026-09-17 fmt --manifest-path tools/nervix-lint/Cargo.toml --all
-    cargo +nightly-2026-09-17 fmt --manifest-path tools/nervix-lint/fixtures/Cargo.toml --all
+    cargo +nightly-2026-09-17 fmt --manifest-path tools/nervix-lint/Cargo.toml --package nervix-lint-driver --package nervix-lint-report
+    cargo +nightly-2026-09-17 fmt --manifest-path tools/nervix-lint/fixtures/Cargo.toml --package nervix-lint-fixtures
+    cargo +nightly-2026-09-17 fmt --manifest-path tools/nervix-lint/fixture-macros/Cargo.toml
 
 fmt-check-typed-ratchet:
-    cargo +nightly-2026-09-17 fmt --manifest-path tools/nervix-lint/Cargo.toml --all --check
-    cargo +nightly-2026-09-17 fmt --manifest-path tools/nervix-lint/fixtures/Cargo.toml --all --check
+    cargo +nightly-2026-09-17 fmt --manifest-path tools/nervix-lint/Cargo.toml --package nervix-lint-driver --package nervix-lint-report --check
+    cargo +nightly-2026-09-17 fmt --manifest-path tools/nervix-lint/fixtures/Cargo.toml --package nervix-lint-fixtures --check
+    cargo +nightly-2026-09-17 fmt --manifest-path tools/nervix-lint/fixture-macros/Cargo.toml --check
 
 # Tooling packages use the same bounded scheduler and command, with their pinned compiler.
 lint-typed-ratchet jobs=default_jobs: (run-with-jobs "typed-ratchet-clippy-targets" jobs)
@@ -2195,7 +2197,7 @@ coverage-typed-ratchet-python: test-typed-ratchet-compiler test-typed-ratchet-mo
     set -euo pipefail
     coverage=(uvx --from coverage==7.11.0 coverage)
     export COVERAGE_FILE="{{ cargo_target_dir }}/typed-ratchet/python.coverage"
-    "${coverage[@]}" run --branch --source=scripts.typed_ratchet,scripts.typed_lint_wrapper,scripts.ratchet,scripts.native_coverage,scripts.bolero,scripts.bolero_coverage,scripts.build_web_console,scripts.tests.test_bolero,scripts.tests.test_bolero_coverage -m unittest scripts.tests.test_typed_ratchet scripts.tests.compiler_fixture_checks scripts.tests.test_ratchet scripts.tests.test_native_coverage scripts.tests.test_bolero scripts.tests.test_bolero_coverage
+    "${coverage[@]}" run --branch --source=scripts.typed_ratchet,scripts.typed_lint_wrapper,scripts.ratchet,scripts.check_layer_provenance,scripts.check_clock_boundaries,scripts.native_coverage,scripts.bolero,scripts.bolero_coverage,scripts.build_web_console,scripts.tests.test_bolero,scripts.tests.test_bolero_coverage -m unittest scripts.tests.test_typed_ratchet scripts.tests.compiler_fixture_checks scripts.tests.test_ratchet scripts.tests.test_layer_provenance scripts.tests.test_clock_boundaries scripts.tests.test_native_coverage scripts.tests.test_bolero scripts.tests.test_bolero_coverage
     "${coverage[@]}" lcov -o "{{ cargo_target_dir }}/typed-ratchet/python.lcov"
     "${coverage[@]}" report
 
@@ -2440,7 +2442,7 @@ validate-execution-mode-conflicts:
     echo "every mode conflict, browser-target request, diagnostic mode without its capability and product binary without its form fails with its diagnostic"
 
 validate-clock-boundaries:
-    python3 scripts/check_clock_boundaries.py
+    python3 -m scripts.check_clock_boundaries
 
 # Reject `Result<_, String>` in product code. A typed error is a rule, not a count, so there is no
 # baseline to raise: any occurrence fails and names the rule.
@@ -2449,7 +2451,7 @@ validate-typed-errors:
 
 toolchains-install:
     rustup toolchain install
-    rustup toolchain install nightly-2026-09-17 --profile minimal --component rustc-dev --component rust-src --component rustfmt --component clippy --component llvm-tools
+    rustup toolchain install nightly-2026-09-17 --profile minimal --component rustc-dev --component rust-src --component rustfmt --component clippy --component llvm-tools --target wasm32-unknown-unknown
 
 # Run every test target of the NSPL language and its formatter: unit, integration, completion-walk
 # unit and documentation tests. The walk itself is a separate gate, `nspl-completion-walk`.

@@ -6,6 +6,11 @@
 //! - **Depends on.** Bound error-route plans, Arrow batches, the VM and relay delivery.
 //! - **Must not know.** Scheduled Models, NSPL parsing or route selection from declarations.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(data_plane, reason = "owns the data plane boundary declared above")
+)]
+
 use arrow_buffer::BooleanBuffer;
 
 use super::{vm_compile::RuntimeVmCompileError, *};
@@ -1069,6 +1074,10 @@ impl Runtime {
 }
 
 #[cfg(test)]
+#[cfg_attr(
+    nervix_lint,
+    nervix::layer(harness, reason = "test module remains outside product execution")
+)]
 mod tests {
     use ahash::HashMap;
     use nervix_models::{

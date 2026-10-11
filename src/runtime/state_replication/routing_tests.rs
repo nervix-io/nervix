@@ -3,6 +3,11 @@
 //! May depend on: the production routing owner and replicated state carriers.
 //! Must not know: transport implementation or control-plane transactions.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(harness, reason = "owns the test harness boundary declared above")
+)]
+
 use super::*;
 
 #[test]

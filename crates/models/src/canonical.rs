@@ -5,6 +5,11 @@
 //! - **Depends on.** Vocabulary types and their declared semantic order.
 //! - **Must not know.** Parser recovery, registry state or runtime execution.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(vocabulary, reason = "owns the vocabulary boundary declared above")
+)]
+
 use std::{fmt::Display, num::NonZeroU64};
 
 use error_stack::Report;

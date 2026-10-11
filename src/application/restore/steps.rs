@@ -15,6 +15,14 @@
 //! recorded with it in one consensus command, or idempotent under the identity the restore gives
 //! them, so a step an earlier attempt applied without recording is completed rather than repeated.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(
+        control_plane,
+        reason = "owns the control plane boundary declared above"
+    )
+)]
+
 use error_stack::Report;
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_backup::DescribedRuntimeState;

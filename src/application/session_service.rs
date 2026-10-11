@@ -9,6 +9,11 @@
 //!   client sends.
 //! - **Must not know.** How a transport frames, correlates or delivers what the pipeline returns.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(edge, reason = "owns the edges boundary declared above")
+)]
+
 use std::time::Duration;
 
 use ahash::RandomState;
@@ -1893,6 +1898,10 @@ pub(in crate::application) fn conflicting_reference(
 }
 
 #[cfg(test)]
+#[cfg_attr(
+    nervix_lint,
+    nervix::layer(harness, reason = "test module remains outside product execution")
+)]
 mod tests {
     use nervix_models::{ModelKind, NodeRef};
 

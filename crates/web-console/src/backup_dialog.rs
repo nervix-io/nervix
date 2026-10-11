@@ -18,6 +18,11 @@
 //! reference, recovers its outcome and downloads its archive. A restore is streamed beside the
 //! session, never as a command and never while the session holds a transaction.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(edge, reason = "owns the edges boundary declared above")
+)]
+
 mod archive_download;
 mod backup_draft;
 mod browser;
@@ -27,6 +32,10 @@ mod restore_draft;
 mod restore_stream;
 
 #[cfg(test)]
+#[cfg_attr(
+    nervix_lint,
+    nervix::layer(harness, reason = "test module remains outside product execution")
+)]
 mod tests;
 
 use error_stack::Report;

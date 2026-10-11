@@ -6,6 +6,14 @@
 //! - **Depends on.** The execution budget and the interconnect message vocabulary.
 //! - **Must not know.** HTTP/2 connection lifecycle, peer selection, or runtime graph semantics.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(
+        engine,
+        reason = "owns the engines and infrastructure boundary declared above"
+    )
+)]
+
 use std::num::NonZeroUsize;
 
 use arch_into::ArchInto as _;

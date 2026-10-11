@@ -6,6 +6,14 @@
 //! - **Depends on.** The authenticated request surface and typed vocabulary identities.
 //! - **Must not know.** Archive encoding, owner staging, or how a restored graph runs.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(
+        engine,
+        reason = "owns the engines and infrastructure boundary declared above"
+    )
+)]
+
 use std::time::Duration;
 
 use nervix_models::{CoordinationIdentity, DomainName, RestoreStateAuthority};

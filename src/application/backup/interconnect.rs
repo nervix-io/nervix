@@ -7,6 +7,14 @@
 //!   typed state placements.
 //! - **Must not know.** Archive encoding, database keys, or the client's backup destination.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(
+        control_plane,
+        reason = "owns the control plane boundary declared above"
+    )
+)]
+
 use std::time::Duration;
 
 use arch_into::ArchInto as _;

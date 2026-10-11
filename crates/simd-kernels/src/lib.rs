@@ -11,6 +11,11 @@
 //! - **Must not know.** Arrow, Nervix models, codecs, metric recorders, or the consumers of a
 //!   classified buffer.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(primitives, reason = "owns the primitives boundary declared above")
+)]
+
 mod admission;
 mod byte_class;
 mod checked;

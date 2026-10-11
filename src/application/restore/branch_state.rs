@@ -9,6 +9,14 @@
 //!   keyspace and window checkpoint codecs, and the bounded executor.
 //! - **Must not know.** Database keys, placement ownership or consensus activation.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(
+        control_plane,
+        reason = "owns the control plane boundary declared above"
+    )
+)]
+
 use std::time::Duration;
 
 use error_stack::{Report, ResultExt as _};

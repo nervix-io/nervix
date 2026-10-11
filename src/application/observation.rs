@@ -8,6 +8,14 @@
 //!   the interconnect to reach the node that owns each answer.
 //! - **Must not know.** How the reported state came to be.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(
+        control_plane,
+        reason = "owns the control plane boundary declared above"
+    )
+)]
+
 use std::{collections::BTreeSet, num::NonZeroU64, time::Duration};
 
 use arch_into::ArchInto;

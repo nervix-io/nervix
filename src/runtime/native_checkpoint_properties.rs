@@ -7,6 +7,11 @@
 //!   archive's streamed records, and admitted execution.
 //! - **Must not know.** Live graph tasks, publication fencing, or historical encodings.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(harness, reason = "owns the test harness boundary declared above")
+)]
+
 use std::mem::MaybeUninit;
 
 use meticulous::ResultExt as _;

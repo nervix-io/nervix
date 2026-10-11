@@ -15,6 +15,11 @@
 //! protobuf codec restores on ingestion the defaults a protobuf message does not carry. `XML`
 //! holds text a program has to parse into numbers, so it has no identity codec.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(harness, reason = "owns the test harness boundary declared above")
+)]
+
 use arrow_array::{ArrayRef, Float32Array, Float64Array, Int64Array, ListArray, RecordBatch};
 use arrow_buffer::OffsetBuffer;
 use arrow_schema::DataType;

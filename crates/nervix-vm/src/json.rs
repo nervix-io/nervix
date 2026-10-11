@@ -14,6 +14,14 @@
 //! - **Depends on.** simd-json's tape, Arrow arrays and buffers, and the `JsonPath` Model.
 //! - **Must not know.** Registers, instructions, arms, or how a program is compiled.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(
+        engine,
+        reason = "owns the engines and infrastructure boundary declared above"
+    )
+)]
+
 use std::{fmt, num::NonZeroU32};
 
 use arrow_array::{

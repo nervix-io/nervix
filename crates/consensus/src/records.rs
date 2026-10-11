@@ -5,6 +5,14 @@
 //! - **Depends on.** Vocabulary records, persistent ordered maps, and the durable batch owner.
 //! - **Must not know.** Raft transport, graph execution or domain lifecycle policy.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(
+        engine,
+        reason = "owns the engines and infrastructure boundary declared above"
+    )
+)]
+
 use std::{borrow::Borrow, collections::BTreeMap, io, num::NonZeroU64};
 
 use error_stack::Report;

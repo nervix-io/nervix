@@ -1,3 +1,10 @@
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(
+        harness,
+        reason = "test fixture construction remains outside product execution"
+    )
+)]
 //! Fixtures the runtime's unit tests share.
 //!
 //! A fixture lives here only when tests in more than one runtime module build the same

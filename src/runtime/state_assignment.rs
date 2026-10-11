@@ -5,6 +5,11 @@
 //! - **Depends on.** State identity vocabulary and the primitive publication boundary.
 //! - **Must not know.** Guest execution, persistence, transactions or replica progress.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(data_plane, reason = "owns the data plane boundary declared above")
+)]
+
 use std::collections::BTreeSet;
 
 use nervix_models::ClusterNodeName;
@@ -57,6 +62,10 @@ impl ScheduledStateAssignment {
 }
 
 #[cfg(test)]
+#[cfg_attr(
+    nervix_lint,
+    nervix::layer(harness, reason = "test module remains outside product execution")
+)]
 mod tests {
     use nervix_models::{SchemaFingerprint, WasmStateGeneration, WasmStateGenerations};
 

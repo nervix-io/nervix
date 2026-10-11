@@ -15,6 +15,11 @@
 //! - **Must not know.** Which connector sends the requests, how their bodies are encoded, or when
 //!   the emitter publishes them.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(data_plane, reason = "owns the data plane boundary declared above")
+)]
+
 use error_stack::ResultExt as _;
 use nervix_models::{
     HttpApplicationHeaders, HttpBodyMode, HttpHeaderName, HttpHeaderValue, HttpMethod, HttpOrigin,
@@ -894,6 +899,10 @@ impl RequestFieldSites {
 }
 
 #[cfg(test)]
+#[cfg_attr(
+    nervix_lint,
+    nervix::layer(harness, reason = "test module remains outside product execution")
+)]
 mod tests {
     use nervix_connector::ResolvedClientConfig;
 

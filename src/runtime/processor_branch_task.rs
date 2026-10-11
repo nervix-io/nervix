@@ -10,6 +10,10 @@
 
 #![cfg_attr(
     nervix_lint,
+    nervix::layer(data_plane, reason = "owns the data plane boundary declared above")
+)]
+#![cfg_attr(
+    nervix_lint,
     nervix::context(
         lifecycle,
         reason = "processor branch creation binds the retained plan and its branch-local \
@@ -2087,6 +2091,10 @@ pub(super) async fn shutdown_all_processor_branch_instances(
 mod dispatch_tests;
 
 #[cfg(test)]
+#[cfg_attr(
+    nervix_lint,
+    nervix::layer(harness, reason = "test module remains outside product execution")
+)]
 mod tests {
     use std::time::Duration;
 

@@ -9,6 +9,11 @@
 //!   fixture.
 //! - **Must not know.** Connector implementations or runtime execution details.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(harness, reason = "owns the test harness boundary declared above")
+)]
+
 use std::{collections::BTreeSet, time::Duration};
 
 use error_stack::Report;

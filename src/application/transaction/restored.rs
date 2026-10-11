@@ -12,6 +12,14 @@
 //! The run is planned against what the domain will be once the restore created it and imported
 //! its versions, so a plan that succeeds here is the one the restore's models step applies.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(
+        control_plane,
+        reason = "owns the control plane boundary declared above"
+    )
+)]
+
 use std::collections::BTreeSet;
 
 use error_stack::Report;

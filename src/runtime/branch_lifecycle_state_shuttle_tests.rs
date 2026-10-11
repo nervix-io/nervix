@@ -7,6 +7,11 @@
 //! - **Depends on.** The production branch lifecycle handle and the server Shuttle runner.
 //! - **Must not know.** What a checkpoint holds, the interconnect, or stable storage.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(harness, reason = "owns the test harness boundary declared above")
+)]
+
 use meticulous::ResultExt as _;
 use nervix_interconnect::RuntimeState;
 use nervix_model_harness::shuttle::check_interleavings;

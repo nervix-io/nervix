@@ -7,6 +7,10 @@
 
 #![cfg_attr(
     nervix_lint,
+    nervix::layer(harness, reason = "owns the test harness boundary declared above")
+)]
+#![cfg_attr(
+    nervix_lint,
     nervix::context(
         lifecycle,
         reason = "the test harness creates and retires independent production owners"

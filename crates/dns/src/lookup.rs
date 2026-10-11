@@ -8,6 +8,14 @@
 //! - **Depends on.** Hickory's error types and `error-stack`.
 //! - **Must not know.** Whether a caller retries, or what it would have connected to.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(
+        engine,
+        reason = "owns the engines and infrastructure boundary declared above"
+    )
+)]
+
 use std::{error::Error, fmt};
 
 use error_stack::Report;

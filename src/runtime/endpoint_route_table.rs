@@ -5,6 +5,11 @@
 //! - **Depends on.** Typed domain identities, prepared endpoint metadata, and publication primitives.
 //! - **Must not know.** Decoding, request transport, graph planning, or source task scheduling.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(data_plane, reason = "owns the data plane boundary declared above")
+)]
+
 use std::collections::BTreeMap;
 
 use ahash::{HashMap, HashMapExt as _};
@@ -26,6 +31,10 @@ pub(super) struct EndpointBinding<T> {
 }
 
 struct EndpointBindingLifetime<T> {
+    #[cfg_attr(
+        nervix_lint,
+        nervix::identity(node, reason = "endpoint intake belongs to this domain node")
+    )]
     identity: DomainNodeRef,
     intake: ArcSwapOption<T>,
 }

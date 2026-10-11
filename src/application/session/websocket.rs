@@ -13,6 +13,11 @@
 //! end the connection with the close code the codec assigns them: 1003, 1007 and 1009. A session
 //! the server ends, and one the client closes, ends with a normal close.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(edge, reason = "owns the edges boundary declared above")
+)]
+
 use std::{borrow::Cow, future::ready};
 
 use bytes::Bytes;

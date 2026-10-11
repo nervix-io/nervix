@@ -6,6 +6,11 @@
 //!   explicit execution timestamps.
 //! - **Must not know.** NSPL parsing, source-client lifecycle or persisted control state.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(data_plane, reason = "owns the data plane boundary declared above")
+)]
+
 use arrow_buffer::BooleanBuffer;
 use nervix_connector::{IngestMetadataRow, NoIngestHeaders, SourceMetadataScope};
 use nervix_models::IngestSourceKind;
@@ -570,6 +575,10 @@ impl VmFunctionInjector for IngestHeaderFunctionInjector {
 }
 
 #[cfg(test)]
+#[cfg_attr(
+    nervix_lint,
+    nervix::layer(harness, reason = "test module remains outside product execution")
+)]
 mod tests {
     use ahash::HashMap;
     use arrow_array::Array;

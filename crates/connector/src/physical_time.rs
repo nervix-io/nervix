@@ -11,6 +11,14 @@
 //! are public and visibility cannot confine them. `scripts/check_clock_boundaries.py` confines them
 //! instead: it rejects both outside their declared owners anywhere in the workspace.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(
+        engine,
+        reason = "owns the engines and infrastructure boundary declared above"
+    )
+)]
+
 use std::time::Duration;
 
 use error_stack::Report;
@@ -73,6 +81,10 @@ pub fn actual_utc_now() -> Timestamp {
 }
 
 #[cfg(test)]
+#[cfg_attr(
+    nervix_lint,
+    nervix::layer(harness, reason = "test module remains outside product execution")
+)]
 mod tests {
     use super::*;
 

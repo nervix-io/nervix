@@ -7,6 +7,14 @@
 //! - **Depends on.** Resource vocabulary and the authenticated interconnect request contract.
 //! - **Must not know.** Resource-store paths, HTTP endpoints, cluster discovery, or handler logic.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(
+        control_plane,
+        reason = "owns the control plane boundary declared above"
+    )
+)]
+
 use std::time::Duration;
 
 use nervix_interconnect::{

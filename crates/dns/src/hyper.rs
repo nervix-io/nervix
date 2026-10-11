@@ -14,6 +14,14 @@
 //! `Box<dyn std::error::Error + Send + Sync>`, and wraps it as the cause of its connection error.
 //! A [`DnsLookupReport`] meets that bound and keeps the lookup's whole report.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(
+        engine,
+        reason = "owns the engines and infrastructure boundary declared above"
+    )
+)]
+
 use std::{
     future::Future,
     net::SocketAddr,

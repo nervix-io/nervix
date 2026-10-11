@@ -7,6 +7,11 @@
 //! - **Depends on.** Statement completion.
 //! - **Must not know.** How an extraction is parsed into a Model.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(harness, reason = "owns the test harness boundary declared above")
+)]
+
 use super::suggest_statement;
 
 #[test]

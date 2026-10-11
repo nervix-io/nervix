@@ -1,6 +1,6 @@
 //! Read-only filtered views a session attaches to a relay.
 //!
-//! Layer: control plane.
+//! Layer: edges.
 //!
 //! - **Owns.** Subscription creation and deletion, the per-session subscription set and the
 //!   generation each subscription is opened with, the lifecycle every subscription moves through,
@@ -31,6 +31,14 @@
 //!
 //! A name reused after deletion opens a new generation, so frames about an earlier generation can
 //! never be taken for a later one.
+
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(
+        edge,
+        reason = "session subscription adapter owns parsed requests and client lane results"
+    )
+)]
 
 mod delivery;
 mod interest;
@@ -1631,6 +1639,10 @@ impl SessionServiceImpl {
 }
 
 #[cfg(test)]
+#[cfg_attr(
+    nervix_lint,
+    nervix::layer(harness, reason = "test module remains outside product execution")
+)]
 mod tests {
     use std::time::Duration;
 

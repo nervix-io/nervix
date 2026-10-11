@@ -5,6 +5,11 @@
 //! - **Depends on.** Shared language tokens and vocabulary models.
 //! - **Must not know.** Registry state, runtime execution or connector lifecycle.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(language, reason = "owns the language boundary declared above")
+)]
+
 use std::{
     num::{NonZeroU32, NonZeroU64, NonZeroUsize},
     ops::Range,

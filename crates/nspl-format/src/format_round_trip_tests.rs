@@ -8,6 +8,11 @@
 //!   `nervix-arbitrary`.
 //! - **Must not know.** Sessions, clusters or runtime execution.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(harness, reason = "owns the test harness boundary declared above")
+)]
+
 use nervix_arbitrary::{Arbitrary, Domain};
 use nervix_models::Statement;
 use nervix_nspl::client_statement::{ClientStatement, parse_client_statements};

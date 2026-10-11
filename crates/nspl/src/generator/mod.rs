@@ -5,6 +5,11 @@
 //! - **Depends on.** Shared NSPL grammar primitives and vocabulary models.
 //! - **Must not know.** Generator scheduling, materialized-state execution or persistence.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(language, reason = "owns the language boundary declared above")
+)]
+
 use chumsky::prelude::*;
 use meticulous::OptionExt as _;
 use nervix_models::{AlterGenerator, AlterGeneratorOperation, CreateGenerator, CreateStatement};

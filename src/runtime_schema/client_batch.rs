@@ -14,6 +14,14 @@
 //! The schema is the ingestor's own, field for field: names, order, types and nullability, with
 //! no schema or field metadata. Nothing is inferred, cast or reordered.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(
+        engine,
+        reason = "owns the engines and infrastructure boundary declared above"
+    )
+)]
+
 use std::{
     fmt,
     num::{NonZeroU64, NonZeroUsize},

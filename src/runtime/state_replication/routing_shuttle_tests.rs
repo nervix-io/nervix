@@ -3,6 +3,11 @@
 //! May depend on: the production routing owner and the Shuttle model harness.
 //! Must not know: transport framing, persisted storage or control-plane transactions.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(harness, reason = "owns the test harness boundary declared above")
+)]
+
 use nervix_model_harness::shuttle::check_interleavings;
 
 use super::{

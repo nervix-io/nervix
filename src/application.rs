@@ -20,6 +20,13 @@
 
 #![cfg_attr(
     nervix_lint,
+    nervix::layer(
+        edge,
+        reason = "the server session adapter owns its permitted parser dependency"
+    )
+)]
+#![cfg_attr(
+    nervix_lint,
     nervix::context(
         outside,
         reason = "session, transaction, authentication and resource operations belong to the \
@@ -40,8 +47,9 @@ use authentication::{DEFAULT_USER, user_credentials};
 use background_task::{
     await_background_task_shutdown, join_public_listeners, request_shutdown_on_completion,
 };
-use clap::{CommandFactory, Parser, Subcommand, ValueEnum};
-use clap_complete::{Shell, generate};
+use clap::{Parser, Subcommand, ValueEnum};
+use clap_complete::Shell;
+use cli_completions::print_completions;
 use cli_values::{parse_human_bytes, parse_human_duration, parse_trace_sample_ratio};
 use client_consumers::ClientConsumerRouter;
 use client_producers::ClientProducerRouter;
@@ -142,6 +150,7 @@ mod admitted_connection;
 mod authentication;
 mod background_task;
 mod backup;
+mod cli_completions;
 mod cli_values;
 mod client_consumers;
 mod client_producers;
@@ -2975,12 +2984,6 @@ impl Application {
 
         Ok(())
     }
-}
-
-fn print_completions(shell: Shell) {
-    let mut command = Args::command();
-    let bin_name = command.get_name().to_string();
-    generate(shell, &mut command, bin_name, &mut std::io::stdout());
 }
 
 /// What the edges expose. Everything else this module and its submodules declare is

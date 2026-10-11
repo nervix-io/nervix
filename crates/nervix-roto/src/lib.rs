@@ -8,6 +8,14 @@
 //!   compile its programs off the caller's task.
 //! - **Must not know.** Relays, branches or the graph a UDF is invoked from. It answers a call.
 //!
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(
+        engine,
+        reason = "owns the engines and infrastructure boundary declared above"
+    )
+)]
+
 use std::{cell::RefCell, fmt, panic::AssertUnwindSafe, time::Duration};
 
 use ahash::{HashMap, HashMapExt};

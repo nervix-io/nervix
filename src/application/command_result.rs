@@ -11,6 +11,14 @@
 //!   execution reference can conflict and for the diagnostics its durable records keep.
 //! - **Must not know.** How an outcome travels to a client, or how any transport encodes it.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(
+        control_plane,
+        reason = "owns the control plane boundary declared above"
+    )
+)]
+
 use std::ops::Range;
 
 use arch_into::ArchInto as _;

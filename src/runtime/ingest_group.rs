@@ -5,6 +5,11 @@
 //! - **Depends on.** Installed domain capabilities, compiled codecs and branch-local routes.
 //! - **Must not know.** NSPL parsing, consensus decisions or source transport lifecycle.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(data_plane, reason = "owns the data plane boundary declared above")
+)]
+
 use ahash::RandomState;
 use arrow_buffer::{BooleanBuffer, BooleanBufferBuilder};
 use bytes::Bytes;

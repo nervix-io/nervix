@@ -7,6 +7,11 @@
 //! - **Depends on.** Validated schedule Models and the entrypoint route planner.
 //! - **Must not know.** Runtime tasks, relay consumers, node-local resources, or placement.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(decisions, reason = "owns the decisions boundary declared above")
+)]
+
 use error_stack::Report;
 use nervix_models::{
     AckMode, CreateReingestor, InputCollectPolicy, MaterializedStateDependency,

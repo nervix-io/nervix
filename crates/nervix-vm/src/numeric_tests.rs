@@ -7,6 +7,11 @@
 //! - **Depends on.** The numeric kernels and Arrow arrays.
 //! - **Must not know.** Programs, registers or how the runtime records a failed lane.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(harness, reason = "owns the test harness boundary declared above")
+)]
+
 use std::fmt::Debug;
 
 use arrow_array::{

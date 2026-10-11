@@ -155,6 +155,7 @@ macro_rules! declare_names {
         $(
             $(#[$doc])*
             #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
+            #[cfg_attr(nervix_lint, nervix::value(name, reason = "immutable validated vocabulary name"))]
             pub struct $Name(NameText);
 
             impl Debug for $Name {
@@ -352,6 +353,7 @@ declare_names! {
     /// A built-in function called from an expression.
     BuiltinFunctionName => Allowed,
     /// A node of the Nervix cluster.
+    #[cfg_attr(nervix_lint, nervix::identity(node, reason = "validated cluster-node identity shared by all owners"))]
     ClusterNodeName => Allowed,
 
     /// A topic of an external broker.

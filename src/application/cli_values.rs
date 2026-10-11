@@ -7,6 +7,11 @@
 //! - **Depends on.** Vocabulary duration parsing, byte quantities and typed error reports.
 //! - **Must not know.** Runtime state, sessions, graph planning or deadline policy.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(edge, reason = "owns the edges boundary declared above")
+)]
+
 use std::{fmt, time::Duration};
 
 use error_stack::{Report, ResultExt as _};

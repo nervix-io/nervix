@@ -6,6 +6,14 @@
 //! - **Depends on.** The archive record envelope and vocabulary identities.
 //! - **Must not know.** Native checkpoint encodings, runtime ownership or restore placement.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(
+        engine,
+        reason = "owns the engines and infrastructure boundary declared above"
+    )
+)]
+
 use error_stack::Report;
 use nervix_models::{
     BranchKeyFingerprint, DomainName, ModelName, RemoteRuntimeRecordMetadata, SchemaFingerprint,

@@ -6,6 +6,11 @@
 //! - **Depends on.** Serialization primitives only.
 //! - **Must not know.** Sessions, consensus, parsing, command effects, or runtime application.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(vocabulary, reason = "owns the vocabulary boundary declared above")
+)]
+
 use error_stack::Report;
 use rkyv::{
     Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize,

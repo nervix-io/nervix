@@ -14,6 +14,14 @@
 //! recorded applies nothing, so a leader that resumes a restore after an earlier leader's proposal
 //! of the same step committed, or after its own reply was lost, never repeats the step's effect.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(
+        engine,
+        reason = "owns the engines and infrastructure boundary declared above"
+    )
+)]
+
 use std::{collections::BTreeSet, num::NonZeroU64};
 
 use error_stack::Report;

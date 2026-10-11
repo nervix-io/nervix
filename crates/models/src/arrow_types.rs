@@ -11,6 +11,11 @@
 //! schemas with it and the client library builds the batches it submits with it, so the two can
 //! never disagree about the representation of a type.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(vocabulary, reason = "owns the vocabulary boundary declared above")
+)]
+
 use arrow_schema::{DataType, Field, Schema, TimeUnit};
 use meticulous::ResultExt as _;
 use nervix_primitives::sync::StdArc;

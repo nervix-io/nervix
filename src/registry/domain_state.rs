@@ -7,6 +7,11 @@
 //! - **Depends on.** The validation rules, the graph types, and the vocabulary.
 //! - **Must not know.** How the graph is stored, placed or executed.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(decisions, reason = "owns the decisions boundary declared above")
+)]
+
 use ahash::{HashMap, HashMapExt};
 use error_stack::Report;
 use meticulous::{OptionExt, ResultExt};

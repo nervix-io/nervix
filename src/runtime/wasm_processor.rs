@@ -8,6 +8,10 @@
 
 #![cfg_attr(
     nervix_lint,
+    nervix::layer(data_plane, reason = "owns the data plane boundary declared above")
+)]
+#![cfg_attr(
+    nervix_lint,
     nervix::context(
         lifecycle,
         reason = "WASM task installation and reset bind retained guest-state and callback owners"
@@ -910,6 +914,10 @@ pub(super) async fn wasm_envelope_from_relay_batch(
 }
 
 #[cfg(test)]
+#[cfg_attr(
+    nervix_lint,
+    nervix::layer(harness, reason = "test module remains outside product execution")
+)]
 mod tests {
     use arrow_array::{Array, Int32Array};
     use nervix_models::{ParseAsType, WasmStateGeneration};

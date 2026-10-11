@@ -830,6 +830,10 @@ async fn flush_processor_outputs(
 }
 
 #[cfg(test)]
+#[cfg_attr(
+    nervix_lint,
+    nervix::layer(harness, reason = "test module remains outside product execution")
+)]
 mod tests {
     use nervix_models::ParseAsType;
 

@@ -12,9 +12,18 @@
 //!   canonical rendering of a Model.
 //! - **Must not know.** The server. Formatting is source in, source out.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(edge, reason = "owns the edges boundary declared above")
+)]
+
 pub mod diagnostics;
 pub mod document;
 #[cfg(test)]
+#[cfg_attr(
+    nervix_lint,
+    nervix::layer(harness, reason = "test module remains outside product execution")
+)]
 mod format_round_trip_tests;
 
 use document::{Gap, GapItem};
@@ -207,6 +216,10 @@ pub fn render_statement(
 }
 
 #[cfg(test)]
+#[cfg_attr(
+    nervix_lint,
+    nervix::layer(harness, reason = "test module remains outside product execution")
+)]
 mod tests {
     use nervix_nspl::schema::ParseFromSourceError;
 

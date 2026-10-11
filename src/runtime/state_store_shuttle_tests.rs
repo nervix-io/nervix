@@ -6,6 +6,11 @@
 //! - **Depends on.** The state assignment types and the model harness's Shuttle runner.
 //! - **Must not know.** Which runtime state an assignment governs, or what an operation does to it.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(harness, reason = "owns the test harness boundary declared above")
+)]
+
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_model_harness::shuttle::check_interleavings;
 use nervix_models::ClusterNodeName;

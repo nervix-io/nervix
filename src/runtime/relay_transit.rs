@@ -9,6 +9,10 @@
 
 #![cfg_attr(
     nervix_lint,
+    nervix::layer(data_plane, reason = "owns the data plane boundary declared above")
+)]
+#![cfg_attr(
+    nervix_lint,
     nervix::context(
         recurring,
         reason = "every batch a relay admits on this node moves through its retained transit"

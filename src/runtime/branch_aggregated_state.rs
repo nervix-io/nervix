@@ -143,6 +143,13 @@ pub(super) struct BranchAggregatedRuntimeStateSnapshot {
 pub(super) struct ReplicatedBranchAggregatedState {
     pub(super) placement: RuntimeStatePlacement,
     roles: nervix_primitives::sync::blocking::RwLock<StateReplicationRoles>,
+    #[cfg_attr(
+        nervix_lint,
+        nervix::identity(
+            node,
+            reason = "materialized branch state belongs to this physical node"
+        )
+    )]
     pub(super) physical_node_id: ClusterNodeName,
     pub(super) current_lsm: LsmSequence,
     pub(super) last_persisted_lsm: AtomicU64,

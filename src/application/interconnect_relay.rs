@@ -6,6 +6,11 @@
 //! - **Depends on.** The runtime's relay boundary and the interconnect transport.
 //! - **Must not know.** Session commands, transactions or scheduling.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(edge, reason = "owns the edges boundary declared above")
+)]
+
 use std::collections::VecDeque;
 
 use ahash::HashMap;

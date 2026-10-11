@@ -7,6 +7,11 @@
 //! - **Depends on.** Portable SIMD selection and primitive numeric types.
 //! - **Must not know.** Arrow, window plans, branches, or aggregate output types.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(primitives, reason = "owns the primitives boundary declared above")
+)]
+
 use fearless_simd::{Level, dispatch, prelude::*};
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_approx_into::{ApproxInto as _, CheckedApproxInto as _};

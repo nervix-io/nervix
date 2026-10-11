@@ -5,6 +5,11 @@
 //! - **Depends on.** Model identity vocabulary.
 //! - **Must not know.** Parser labels, source spans, registries, sessions or presentation.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(vocabulary, reason = "owns the vocabulary boundary declared above")
+)]
+
 use crate::{EmitSinkKind, IngestSourceKind, ModelKind, RelayName, SchemaName, WireSchemaName};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]

@@ -6,6 +6,14 @@
 //! - **Depends on.** Fjall, rkyv, and an admitted execution reservation.
 //! - **Must not know.** Raft scheduling, observers, or the meaning of a stored record.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(
+        engine,
+        reason = "owns the engines and infrastructure boundary declared above"
+    )
+)]
+
 use std::{
     io::{self, Write},
     num::NonZeroUsize,

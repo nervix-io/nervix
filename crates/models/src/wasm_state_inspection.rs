@@ -5,6 +5,11 @@
 //! - **Depends on.** WASM state lifetimes, resource bindings and opaque branch fingerprints.
 //! - **Must not know.** Guest bytes, checkpoint storage, synchronization or presentation.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(vocabulary, reason = "owns the vocabulary boundary declared above")
+)]
+
 use std::num::NonZeroU64;
 
 use meticulous::OptionExt as _;

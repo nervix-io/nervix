@@ -17,6 +17,14 @@
 //! rounded to an integer. A lane is therefore a scalar computation that no loop vectorizes, and the
 //! kernels skip null lanes.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(
+        engine,
+        reason = "owns the engines and infrastructure boundary declared above"
+    )
+)]
+
 use std::{fmt::Display, str::FromStr};
 
 use arrow_array::{Array, ArrowPrimitiveType, PrimitiveArray};

@@ -7,6 +7,11 @@
 //! - **Depends on.** Processor drafts, typed choice controls, and Leptos signals.
 //! - **Must not know.** Registry validation, runtime placement, or session transport internals.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(edge, reason = "owns the edges boundary declared above")
+)]
+
 use leptos::prelude::*;
 use nervix_models::AckMode;
 

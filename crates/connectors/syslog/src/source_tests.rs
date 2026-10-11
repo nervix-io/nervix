@@ -7,6 +7,11 @@
 //! - **Depends on.** The production stream frame decoder and connection reader.
 //! - **Must not know.** Codecs, runtime collectors or listener lifecycle.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(harness, reason = "owns the test harness boundary declared above")
+)]
+
 use std::{
     collections::VecDeque,
     pin::Pin,

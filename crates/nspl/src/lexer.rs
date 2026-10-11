@@ -5,6 +5,11 @@
 //! - **Depends on.** Chumsky's parser primitives.
 //! - **Must not know.** Grammars, Models, registry state or runtime execution.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(language, reason = "owns the language boundary declared above")
+)]
+
 use std::str::FromStr;
 
 use chumsky::prelude::*;

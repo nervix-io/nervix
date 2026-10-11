@@ -6,6 +6,11 @@
 //! - **Depends on.** Scheduled Models and their typed node identities.
 //! - **Must not know.** Runtime tasks, gate leases, cluster coordination or persistence.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(decisions, reason = "owns the decisions boundary declared above")
+)]
+
 use std::collections::BTreeSet;
 
 use ahash::HashSet;

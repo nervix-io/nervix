@@ -9,6 +9,14 @@
 //! - **Must not know.** How an inspection resolves its target, checks ownership or plans a report,
 //!   or how a result travels to a client.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(
+        control_plane,
+        reason = "owns the control plane boundary declared above"
+    )
+)]
+
 use nervix_models::DescribeTransaction;
 
 use super::{InspectingSession, TransactionInspectionOutcome, rendering::InspectionRendering};

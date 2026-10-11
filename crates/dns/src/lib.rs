@@ -40,6 +40,14 @@
 //! standard-error bound; the library keeps it among the causes of its own connection error, and
 //! [`DnsLookupError::find_in`] finds the typed failure there again.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(
+        engine,
+        reason = "owns the engines and infrastructure boundary declared above"
+    )
+)]
+
 use std::{
     fmt,
     net::{IpAddr, SocketAddr},

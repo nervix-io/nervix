@@ -7,6 +7,11 @@
 //! - **Depends on.** Shared route drafts, typed choices, and the ordered construction editors.
 //! - **Must not know.** Data-plane routing, buffering, or error execution.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(edge, reason = "owns the edges boundary declared above")
+)]
+
 use leptos::prelude::*;
 
 use super::{

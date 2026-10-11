@@ -11,6 +11,11 @@
 //! This crate breaks its own contract: it names nothing in Nervix, so its domain, node and schema
 //! identities are `String` where the vocabulary already has typed names for them.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(vocabulary, reason = "owns the vocabulary boundary declared above")
+)]
+
 use std::collections::BTreeMap;
 
 use ascii_dag::{Graph, LayoutConfig, RenderMode};

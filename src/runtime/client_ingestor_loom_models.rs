@@ -23,6 +23,11 @@
 //! runs the model, and `just test-loom-qualification` shows that a drain loading either count
 //! instead of reading it by read-modify-write makes it fail.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(harness, reason = "owns the test harness boundary declared above")
+)]
+
 use meticulous::ResultExt as _;
 use nervix_model_harness::{
     InvariantId,

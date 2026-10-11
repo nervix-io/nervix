@@ -6,6 +6,14 @@
 //! - **Depends on.** The cluster handle and the consensus observer.
 //! - **Must not know.** How membership or a schedule is decided.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(
+        control_plane,
+        reason = "owns the control plane boundary declared above"
+    )
+)]
+
 use std::collections::BTreeSet;
 
 use nervix_consensus::{GossipState, Observer};

@@ -7,6 +7,11 @@
 //! - **Depends on.** Typed vocabulary, expression parsing, and shared route drafts.
 //! - **Must not know.** Registry state, runtime execution, or session transport.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(edge, reason = "owns the edges boundary declared above")
+)]
+
 use std::collections::BTreeSet;
 
 use error_stack::{Report, ResultExt as _};
@@ -581,6 +586,10 @@ pub(super) enum ProcessorDraftError {
 }
 
 #[cfg(test)]
+#[cfg_attr(
+    nervix_lint,
+    nervix::layer(harness, reason = "test module remains outside product execution")
+)]
 mod tests {
     use meticulous::{OptionExt as _, ResultExt as _};
     use nervix_models::{

@@ -6,6 +6,11 @@
 //! - **Depends on.** The production XML character check and the supported SIMD levels.
 //! - **Must not know.** Which service or format requires XML characters.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(harness, reason = "owns the test harness boundary declared above")
+)]
+
 use super::*;
 use crate::supported_levels;
 

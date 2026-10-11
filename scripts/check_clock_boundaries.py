@@ -4,6 +4,8 @@
 import re
 from pathlib import Path
 
+from scripts.ratchet import RustFile, _end_of_block, blank
+
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -58,10 +60,15 @@ def product_sources() -> list[Path]:
 
 def product_source(path: Path) -> str:
     source = path.read_text(encoding="utf-8")
-    for marker in ("#[cfg(test)]\nmod tests", "#[cfg(test)]\r\nmod tests"):
-        if marker in source:
-            return source.split(marker, 1)[0]
-    return source
+    file = RustFile(str(path), source)
+    modules = re.compile(
+        r"#\s*\[\s*cfg\s*\(\s*test\s*\)\s*\]\s*"
+        r"(?:#\s*\[[^\]]*\]\s*)*"
+        r"(?:pub(?:\s*\([^)]*\))?\s+)?mod\s+[A-Za-z_][A-Za-z0-9_]*\s*\{"
+    )
+    spans = [(match.start(), _end_of_block(file.code, match.end() - 1))
+             for match in modules.finditer(file.code)]
+    return blank(source, spans)
 
 
 def reject(violations: list[str], path: Path, source: str, needle: str, reason: str) -> None:

@@ -3,6 +3,11 @@
 //! May depend on: the runtime's remote owner, typed interconnect requests and runtime test fixtures.
 //! Must not know: production scheduling or control-plane orchestration.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(harness, reason = "owns the test harness boundary declared above")
+)]
+
 use nervix_interconnect::{
     BranchCheckpointListing, BranchCheckpointListingResponse, FetchStateCheckpoint,
     StateCheckpointRead, StateSnapshotEnvelope, StateSyncRequest, StateSyncResponse,

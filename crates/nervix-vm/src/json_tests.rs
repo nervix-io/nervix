@@ -7,6 +7,11 @@
 //! - **Depends on.** The JSON scan, its declared targets and its defects.
 //! - **Must not know.** Registers, instructions, or how a program is compiled.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(harness, reason = "owns the test harness boundary declared above")
+)]
+
 use std::num::NonZeroU32;
 
 use arrow_array::{

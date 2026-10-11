@@ -24,6 +24,11 @@
 //! is spelled with `meticulous` rather than here — a receiver that cannot be gone is a guarantee,
 //! and inventing a recovery for it would hide the broken invariant instead of stating it.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(primitives, reason = "owns the primitives boundary declared above")
+)]
+
 use std::fmt::Display;
 
 use tracing::debug;

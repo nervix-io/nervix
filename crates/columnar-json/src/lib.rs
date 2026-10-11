@@ -6,6 +6,14 @@
 //! - **Depends on.** Arrow, the byte classifier and format libraries.
 //! - **Must not know.** Codecs, connector plans, emitters, graph state or Nervix models.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(
+        engine,
+        reason = "owns the engines and infrastructure boundary declared above"
+    )
+)]
+
 use std::io;
 
 use arrow_array::{

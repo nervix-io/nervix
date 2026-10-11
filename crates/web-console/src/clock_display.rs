@@ -7,6 +7,11 @@
 //! - **Must not know.** Relay subscriptions, graph execution, or how the WebSocket transports a
 //!   request.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(edge, reason = "owns the edges boundary declared above")
+)]
+
 use std::time::Duration;
 
 use leptos::prelude::*;

@@ -15,6 +15,11 @@
 //! - **Must not know.** How rows are encoded or packed into payloads, how request fields were
 //!   evaluated, which connector writes them, or when the emitter retries.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(data_plane, reason = "owns the data plane boundary declared above")
+)]
+
 use std::collections::BTreeMap;
 
 use nervix_connector::{
@@ -654,6 +659,10 @@ impl<Content: PreparedContent> PreparedPayloads<Content> {
 mod shuttle_tests;
 
 #[cfg(test)]
+#[cfg_attr(
+    nervix_lint,
+    nervix::layer(harness, reason = "test module remains outside product execution")
+)]
 mod tests {
     use std::collections::BTreeSet;
 

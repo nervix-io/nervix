@@ -9,6 +9,11 @@
 //!   boundary.
 //! - **Must not know.** Which accumulator reads a column, or which rows a window retains.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(data_plane, reason = "owns the data plane boundary declared above")
+)]
+
 use std::cmp::Ordering;
 
 use arrow_array::{
@@ -951,6 +956,10 @@ impl WindowArgumentColumns {
 }
 
 #[cfg(test)]
+#[cfg_attr(
+    nervix_lint,
+    nervix::layer(harness, reason = "test module remains outside product execution")
+)]
 mod sketch_key_tests {
     use super::*;
 

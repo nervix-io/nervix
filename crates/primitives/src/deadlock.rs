@@ -31,6 +31,11 @@
 //! - **Must not know.** What a finding means for the process that reports it: whether it is
 //!   rendered, recorded as evidence, or ends the process belongs to the sink the installer supplies.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(primitives, reason = "owns the primitives boundary declared above")
+)]
+
 use std::{fmt, num::NonZeroU64, panic::Location, time::SystemTime};
 
 use meticulous::ResultExt as _;

@@ -7,6 +7,11 @@
 //! - **Depends on.** Validated sketch plans and typed argument columns.
 //! - **Must not know.** Relays, placement, or how a branch snapshot is stored.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(data_plane, reason = "owns the data plane boundary declared above")
+)]
+
 use std::{cmp::Ordering, collections::BTreeMap};
 
 use arrow_array::{Float64Array, Int64Array};
@@ -542,6 +547,10 @@ impl FrequencyCandidates {
 }
 
 #[cfg(test)]
+#[cfg_attr(
+    nervix_lint,
+    nervix::layer(harness, reason = "test module remains outside product execution")
+)]
 mod tests {
     use super::*;
 

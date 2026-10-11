@@ -1,5 +1,13 @@
 //! Command-line entry point for the NSPL formatter.
+//! Layer: edges.
+//! - **Owns.** Filesystem and terminal adaptation of the language formatter.
+//! - **Depends on.** The language, formatter and typed diagnostics.
+//! - **Must not know.** Runtime graph execution, placement or control-plane mutation.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(edge, reason = "public client language adapter")
+)]
 use std::{
     fs,
     io::{Read, Write},

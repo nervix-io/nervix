@@ -15,6 +15,14 @@
 //! into them. A snapshot larger than one section limit becomes more sections, never one larger
 //! section, so a receiver never decodes a whole snapshot as a single value.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(
+        engine,
+        reason = "owns the engines and infrastructure boundary declared above"
+    )
+)]
+
 #[path = "materialized_checkpoint_reader.rs"]
 mod checkpoint_reader;
 
@@ -1666,6 +1674,10 @@ fn estimated_identity_bytes(branch: Option<&BranchKey>) -> u64 {
 }
 
 #[cfg(test)]
+#[cfg_attr(
+    nervix_lint,
+    nervix::layer(harness, reason = "test module remains outside product execution")
+)]
 mod tests {
     use std::num::NonZeroU32;
 

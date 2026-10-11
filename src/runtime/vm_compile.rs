@@ -9,6 +9,11 @@
 //! plans. Some processor compile functions still receive semantic Models directly instead of
 //! validated execution plans.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(data_plane, reason = "owns the data plane boundary declared above")
+)]
+
 use error_stack::ResultExt as _;
 
 use super::*;
@@ -1659,6 +1664,10 @@ pub(super) fn relay_schema_for_routing(
 }
 
 #[cfg(test)]
+#[cfg_attr(
+    nervix_lint,
+    nervix::layer(harness, reason = "test module remains outside product execution")
+)]
 mod tests {
     use ahash::{HashMap, HashSet};
     use nervix_models::{CreateSchema, ModelName, ParseAsType, Timestamp};

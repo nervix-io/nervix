@@ -1777,6 +1777,12 @@ resolved Rust diagnostics:
 | `nervix::discarded_outcome` | A `let` wildcard, unused statement or resolved `drop` consuming a `Result`, report, owning collection or transparent wrapper states its handling or recovery class. |
 | `nervix::bare_panic` | A resolved inherent `Option` or `Result` `unwrap`/`expect` uses `meticulous` to state its guarantee. |
 
+The same driver emits the source-owned layer, Model, language, awaited cluster, identity and
+installation-state diagnostics described in
+[Data-Plane Concurrency](./data-plane-concurrency.md#resolved-architecture-boundaries). They reject
+compiler-visible architectural contract violations and share the exact-operation expectation
+checks. They do not classify a product operation's error or replace its contextual report.
+
 Aliases, renamed imports, borrowed failure definitions, associated types, generic substitutions,
 inferred closures and boxed future/stream contracts use compiler types and trait obligations.
 A same-named method on an

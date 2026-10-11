@@ -8,6 +8,11 @@
 //! - **Depends on.** Vocabulary Models and names, and the create dialog's selected references.
 //! - **Must not know.** Registry state, session transport, or how references are looked up.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(edge, reason = "owns the edges boundary declared above")
+)]
+
 use std::num::NonZeroUsize;
 
 use error_stack::Report;
@@ -190,6 +195,10 @@ pub(super) enum RelayDraftError {
 }
 
 #[cfg(test)]
+#[cfg_attr(
+    nervix_lint,
+    nervix::layer(harness, reason = "test module remains outside product execution")
+)]
 mod tests {
     use std::num::NonZeroUsize;
 

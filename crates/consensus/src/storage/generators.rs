@@ -8,6 +8,11 @@
 //! - **Depends on.** The consensus record types and the vocabulary generators.
 //! - **Must not know.** Storage, Raft scheduling or transport.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(harness, reason = "owns the test harness boundary declared above")
+)]
+
 use std::{
     collections::{BTreeMap, BTreeSet},
     num::NonZeroUsize,

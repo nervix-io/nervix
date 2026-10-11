@@ -7,6 +7,11 @@
 //! - **Depends on.** The active graph it reads and the placement plan that constrains it.
 //! - **Must not know.** How an assignment is applied or executed.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(decisions, reason = "owns the decisions boundary declared above")
+)]
+
 use std::cmp::Reverse;
 
 use ahash::{HashMap, HashMapExt, HashSet, HashSetExt};

@@ -19,6 +19,14 @@
 //! - **Depends on.** The authenticated connection lease and bounded execution admission.
 //! - **Must not know.** What the frames carry, or why a caller keeps a stream open.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(
+        engine,
+        reason = "owns the engines and infrastructure boundary declared above"
+    )
+)]
+
 use std::{future::poll_fn, marker::PhantomData, pin::Pin, time::Duration};
 
 use arch_into::ArchInto as _;

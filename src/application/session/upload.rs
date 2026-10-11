@@ -13,6 +13,11 @@
 //! An upload is answered with a typed failure for everything its own frames can get wrong. Only a
 //! failure of the transport itself ends the stream with the transport's own error.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(edge, reason = "owns the edges boundary declared above")
+)]
+
 use std::num::NonZeroU64;
 
 use arch_into::ArchInto as _;

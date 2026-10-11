@@ -13,6 +13,11 @@
 //! - **Must not know.** Which external system receives the records, or when the emitter publishes
 //!   them.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(data_plane, reason = "owns the data plane boundary declared above")
+)]
+
 use async_trait::async_trait;
 use nervix_connector::{RecordSink, SinkLifecycle, SinkRecord, SinkRecordPosition};
 use nervix_execution::{Cancellation, Cancelled, CpuClass, ExecutionError, MemoryClass};
@@ -645,6 +650,10 @@ async fn pack_pending_rows(
 }
 
 #[cfg(test)]
+#[cfg_attr(
+    nervix_lint,
+    nervix::layer(harness, reason = "test module remains outside product execution")
+)]
 mod tests {
     use std::collections::VecDeque;
 

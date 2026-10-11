@@ -11,6 +11,10 @@
 
 #![cfg_attr(
     nervix_lint,
+    nervix::layer(data_plane, reason = "owns the data plane boundary declared above")
+)]
+#![cfg_attr(
+    nervix_lint,
     nervix::context(
         lifecycle,
         reason = "branch task construction and teardown retain the branch state; admitted \
@@ -2312,6 +2316,10 @@ pub(super) async fn flush_branch_junction(
 }
 
 #[cfg(test)]
+#[cfg_attr(
+    nervix_lint,
+    nervix::layer(harness, reason = "test module remains outside product execution")
+)]
 mod tests {
     use nervix_interconnect::EntityGatePurpose;
     use nervix_models::{IngestorName, ModelKind, ModelName, NodeRef, ParseAsType, RelayName};

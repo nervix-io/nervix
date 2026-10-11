@@ -17,6 +17,11 @@
 //! events close. Losing a link ends every producer forwarded over it with `OwnerLost`, after its
 //! batches the owning node cannot have admitted are answered as not admitted.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(edge, reason = "owns the edges boundary declared above")
+)]
+
 mod link;
 
 use std::num::NonZeroU64;

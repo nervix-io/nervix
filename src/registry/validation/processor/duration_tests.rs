@@ -6,6 +6,11 @@
 //! - **Depends on.** Processor decisions, registry storage and the registry test fixtures.
 //! - **Must not know.** How the runtime plans or executes a processor.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(harness, reason = "owns the test harness boundary declared above")
+)]
+
 use std::fs;
 
 use nervix_models::{InputCollectPolicy, Model};

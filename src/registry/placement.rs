@@ -7,6 +7,11 @@
 //! - **Depends on.** The active graph and the Models the rules name.
 //! - **Must not know.** Which cluster member a plan ends up assigning.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(decisions, reason = "owns the decisions boundary declared above")
+)]
+
 use std::{cmp::Ordering, collections::VecDeque, num::NonZeroU64};
 
 use ahash::{HashMap, HashMapExt, HashSet};

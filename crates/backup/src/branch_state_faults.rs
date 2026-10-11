@@ -5,6 +5,11 @@
 //! - **Depends on.** Current record validators, the restore reader and synthetic archive inputs.
 //! - **Must not know.** Runtime keyspaces or windows, native checkpoints or restore installation.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(harness, reason = "owns the test harness boundary declared above")
+)]
+
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_models::{BranchKeyFingerprint, Timestamp};
 

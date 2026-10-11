@@ -6,6 +6,11 @@
 //! - **Must not know.** NSPL parsing, control-plane transactions, connector protocols, or
 //!   persisted payloads.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(data_plane, reason = "owns the data plane boundary declared above")
+)]
+
 use std::{hash::Hash, num::NonZeroUsize, time::Duration};
 
 use indexmap::IndexMap;
@@ -273,6 +278,10 @@ where
 }
 
 #[cfg(test)]
+#[cfg_attr(
+    nervix_lint,
+    nervix::layer(harness, reason = "test module remains outside product execution")
+)]
 mod tests {
     use std::{num::NonZeroUsize, time::Duration};
 

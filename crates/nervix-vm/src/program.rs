@@ -5,6 +5,14 @@
 //!   resolves when it is lowered: time zones and compiled datetime formats.
 //! - **Must not know.** NSPL tokens, parser diagnostics, Models, or the execution graph.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(
+        engine,
+        reason = "owns the engines and infrastructure boundary declared above"
+    )
+)]
+
 use std::{
     cmp::Ordering,
     fmt,

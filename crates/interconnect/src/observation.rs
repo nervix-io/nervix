@@ -15,6 +15,14 @@
 //! drift from what the transport is actually doing. Only events that leave no standing state
 //! behind are counted here.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(
+        engine,
+        reason = "owns the engines and infrastructure boundary declared above"
+    )
+)]
+
 use std::time::Duration;
 
 use meticulous::ResultExt as _;

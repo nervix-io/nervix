@@ -15,6 +15,14 @@
 //! resumes and releases the lease before transferring that domain's staged sections into the
 //! final archive. Configuration-only and live captures have their own explicit cut semantics.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(
+        control_plane,
+        reason = "owns the control plane boundary declared above"
+    )
+)]
+
 mod assembly;
 mod branch_state_sections;
 pub(in crate::application) mod interconnect;

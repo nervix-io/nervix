@@ -15,6 +15,11 @@
 //! - **Must not know.** What a request means, how its outcome is routed, or how a lost exchange is
 //!   recovered.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(edge, reason = "owns the edges boundary declared above")
+)]
+
 use std::{collections::VecDeque, fmt::Display, num::NonZeroU64};
 
 use ahash::{HashMap, HashSet};

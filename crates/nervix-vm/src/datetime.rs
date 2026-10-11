@@ -27,6 +27,14 @@
 //! month or year under the rules of an IANA zone has a length that depends on the lane, so those
 //! kernels compute lane by lane.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(
+        engine,
+        reason = "owns the engines and infrastructure boundary declared above"
+    )
+)]
+
 use arrow_arith::temporal::{DatePart as ArrowDatePart, date_part as arrow_date_part};
 use arrow_array::{
     Array, ArrowPrimitiveType, Int8Array, Int16Array, Int32Array, Int64Array, PrimitiveArray,

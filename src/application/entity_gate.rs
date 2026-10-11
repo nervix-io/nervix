@@ -7,6 +7,14 @@
 //! - **Depends on.** The interconnect to reach every node and the runtime for the local gate.
 //! - **Must not know.** Why the caller is altering the entity.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(
+        control_plane,
+        reason = "owns the control plane boundary declared above"
+    )
+)]
+
 use std::{collections::BTreeSet, time::Duration};
 
 use arch_into::ArchInto;

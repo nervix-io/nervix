@@ -33,6 +33,10 @@ use crate::{DomainName, ModelKind, ModelName};
     RkyvSerialize,
     RkyvDeserialize,
 )]
+#[cfg_attr(
+    nervix_lint,
+    nervix::identity(node, reason = "typed graph-node kind and identifier")
+)]
 pub struct NodeRef {
     pub kind: ModelKind,
     pub identifier: ModelName,
@@ -74,8 +78,16 @@ impl PartialOrd for NodeRef {
 
 /// One node as the domain that owns it addresses it.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[cfg_attr(
+    nervix_lint,
+    nervix::identity(node, reason = "typed domain and graph-node identity")
+)]
 pub struct DomainNodeRef {
     pub domain: DomainName,
+    #[cfg_attr(
+        nervix_lint,
+        nervix::identity(node, reason = "domain-owned graph identity component")
+    )]
     pub node: NodeRef,
 }
 

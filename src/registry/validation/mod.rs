@@ -9,6 +9,11 @@
 //! - **Depends on.** The vocabulary, the VM's type system, and the graph being built.
 //! - **Must not know.** How a validated Model is stored, placed or executed.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(decisions, reason = "owns the decisions boundary declared above")
+)]
+
 pub(in crate::registry) mod branching;
 pub(in crate::registry) mod connector;
 pub(in crate::registry) mod expression;

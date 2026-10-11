@@ -8,6 +8,11 @@
 //!   domain, and a single-worker executor.
 //! - **Must not know.** Broker drivers or the source loops that call the host.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(harness, reason = "owns the test harness boundary declared above")
+)]
+
 use futures_util::FutureExt as _;
 use nervix_connector::{NoIngestHeaders, SourcePollMessage};
 use nervix_execution::CpuClass;

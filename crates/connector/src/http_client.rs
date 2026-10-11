@@ -9,6 +9,14 @@
 //!   and `reqwest`.
 //! - **Must not know.** Which connector sends requests through the client, or what it sends.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(
+        engine,
+        reason = "owns the engines and infrastructure boundary declared above"
+    )
+)]
+
 use std::time::Duration;
 
 use error_stack::{Report, ResultExt as _};
@@ -110,6 +118,10 @@ impl<'a> HttpClientConfig<'a> {
 }
 
 #[cfg(test)]
+#[cfg_attr(
+    nervix_lint,
+    nervix::layer(harness, reason = "test module remains outside product execution")
+)]
 mod tests {
     use nervix_dns::{DnsConfiguration, DnsConfigurationError};
     use nervix_models::ClientConfigEntry;

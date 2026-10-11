@@ -9,6 +9,11 @@
 //! - **Must not know.** What a checkpoint holds, how it is persisted, announced, fetched or
 //!   installed, schedules, the interconnect, or NSPL.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(data_plane, reason = "owns the data plane boundary declared above")
+)]
+
 use std::{
     num::{NonZeroU64, NonZeroUsize},
     ops::Bound::{Excluded, Unbounded},

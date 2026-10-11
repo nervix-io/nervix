@@ -6,6 +6,14 @@
 //! - **Depends on.** Cluster observation, consensus topology and the registry scheduler decision.
 //! - **Must not know.** Transaction syntax, persistence, runtime activation or commit progress.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(
+        control_plane,
+        reason = "owns the control plane boundary declared above"
+    )
+)]
+
 use std::collections::BTreeSet;
 
 use error_stack::Report;

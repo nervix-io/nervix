@@ -12,6 +12,14 @@
 //! - **Must not know.** What a request carries, how a sink encodes, measures or writes it, or
 //!   which destination a narrower limit comes from.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(
+        engine,
+        reason = "owns the engines and infrastructure boundary declared above"
+    )
+)]
+
 use std::{
     num::{NonZeroU64, NonZeroUsize},
     ops::Range,
@@ -232,6 +240,10 @@ impl RowRequestLimits {
 }
 
 #[cfg(test)]
+#[cfg_attr(
+    nervix_lint,
+    nervix::layer(harness, reason = "test module remains outside product execution")
+)]
 mod tests {
     use std::cell::RefCell;
 

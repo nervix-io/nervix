@@ -9,6 +9,11 @@
 //! - **Must not know.** NSPL parsing, placement policy, connector clients, or how stable storage
 //!   and replicas are reached.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(data_plane, reason = "owns the data plane boundary declared above")
+)]
+
 use error_stack::ResultExt as _;
 use nervix_wasm::WasmGuestReportExt as _;
 
@@ -301,6 +306,10 @@ pub(super) fn wasm_callback_decided_tokens(outputs: &[WasmMaterializedOutput]) -
 }
 
 #[cfg(test)]
+#[cfg_attr(
+    nervix_lint,
+    nervix::layer(harness, reason = "test module remains outside product execution")
+)]
 mod tests {
     use nervix_primitives::time::timeout;
 

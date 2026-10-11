@@ -7,6 +7,11 @@
 //! - **Depends on.** Window models, branch declarations and the VM's sketch reservation contract.
 //! - **Must not know.** Runtime tasks, snapshots or transport.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(decisions, reason = "owns the decisions boundary declared above")
+)]
+
 use error_stack::Report;
 use nervix_models::{
     CreateWindowProcessor, DomainName, ModelIndex, ModelName, RelayName, WindowStateLimit,

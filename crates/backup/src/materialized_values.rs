@@ -5,6 +5,11 @@
 //! - **Depends on.** Current archive contracts, vocabulary generators and the external Arrow writer.
 //! - **Must not know.** Runtime containers, ownership assignment or restore installation.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(harness, reason = "owns the test harness boundary declared above")
+)]
+
 use arrow_array::{
     ArrayRef, BinaryArray, Float64Array, Int64Array, ListArray, RecordBatch, StringArray,
     types::Int64Type,

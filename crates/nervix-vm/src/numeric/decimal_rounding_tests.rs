@@ -8,6 +8,11 @@
 //! - **Depends on.** The decimal rounding kernels and Arrow arrays.
 //! - **Must not know.** Programs, registers or how the runtime records a failed lane.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(harness, reason = "owns the test harness boundary declared above")
+)]
+
 use arrow_array::{
     Array, Float32Array, Float64Array, Int8Array, Int64Array, UInt8Array, UInt64Array,
     types::{

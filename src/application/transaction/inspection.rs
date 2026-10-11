@@ -9,6 +9,14 @@
 //!   and the transaction planner for an open transaction's coherent read.
 //! - **Must not know.** How an inspection request arrives, or how its report is rendered.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(
+        control_plane,
+        reason = "owns the control plane boundary declared above"
+    )
+)]
+
 use std::collections::BTreeMap;
 
 use error_stack::{Report, ResultExt as _};

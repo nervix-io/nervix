@@ -7,6 +7,14 @@
 //! - **Depends on.** Execution admission and the vocabulary carried by internal operations.
 //! - **Must not know.** Runtime graphs, schedules, or the semantic outcome of an operation.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(
+        engine,
+        reason = "owns the engines and infrastructure boundary declared above"
+    )
+)]
+
 use std::{collections::BTreeMap, io, net::SocketAddr, time::Duration};
 
 use error_stack::Report;

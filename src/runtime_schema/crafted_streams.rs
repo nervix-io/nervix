@@ -10,6 +10,11 @@
 //! - **Depends on.** Arrow's IPC message definitions and the FlatBuffers builder.
 //! - **Must not know.** The decoders a test hands a stream to.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(harness, reason = "owns the test harness boundary declared above")
+)]
+
 use arrow_array::{ArrayRef, Int64Array, StringArray};
 use arrow_ipc::{
     Buffer, DictionaryEncoding, DictionaryEncodingArgs, Endianness, Field, FieldArgs, FieldNode,

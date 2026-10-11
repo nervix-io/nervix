@@ -9,6 +9,14 @@
 //! - **Must not know.** The Arrow columns the host projects these rows into, or the VM namespaces
 //!   programs read them through.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(
+        engine,
+        reason = "owns the engines and infrastructure boundary declared above"
+    )
+)]
+
 /// Transport headers of one source message, visited in arrival order.
 ///
 /// Connectors implement this over their own borrowed message so a group's header builders

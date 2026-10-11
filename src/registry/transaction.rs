@@ -6,6 +6,11 @@
 //! - **Depends on.** Captured vocabulary state and registry mutation/graph decisions.
 //! - **Must not know.** Consensus, Tokio, locks, sessions, persistence or runtime execution.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(decisions, reason = "owns the decisions boundary declared above")
+)]
+
 use std::collections::{BTreeMap, BTreeSet};
 
 use error_stack::Report;

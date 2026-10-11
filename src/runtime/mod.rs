@@ -14,6 +14,11 @@
 //! Schedule application, processor tasks, entrypoints, emitters and message-error delivery consume
 //! complete typed revisions and prepared plans. This module also holds connector host composition.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(data_plane, reason = "owns the data plane boundary declared above")
+)]
+
 use std::{
     collections::{BTreeMap, BTreeSet, VecDeque},
     num::{NonZeroU64, NonZeroUsize},
@@ -77,15 +82,22 @@ use nervix_models::{
     WasmStateGeneration, WasmStateResetScope,
 };
 #[cfg(test)]
-use nervix_models::{
-    ClusterSchedule, CreateIngestor, CreateReingestor, CreateRelay, DomainSchedule, IngestSource,
-    Model, OutputBranch, ScheduledNode, ScheduledNodes,
-};
+#[cfg_attr(
+    nervix_lint,
+    nervix::layer(
+        harness,
+        reason = "runtime tests construct configuration before planning"
+    )
+)]
+mod fixture_vocabulary {
+    pub(super) use nervix_models::{
+        ClusterSchedule, CreateClientHttp, CreateClientPrometheus, CreateClientRabbitMq,
+        CreateEmitter, CreateIngestor, CreateReingestor, CreateRelay, DomainSchedule,
+        EmitterPublishingMode, IngestSource, Model, OutputBranch, ScheduledNode, ScheduledNodes,
+    };
+}
 #[cfg(test)]
-use nervix_models::{
-    CreateClientHttp, CreateClientPrometheus, CreateClientRabbitMq, CreateEmitter,
-    EmitterPublishingMode,
-};
+use fixture_vocabulary::*;
 use nervix_primitives::{
     collections::DashMap,
     publication::{ArcSwap, ArcSwapOption, Cache},
@@ -256,6 +268,10 @@ mod native_checkpoint_encoding;
 #[doc(hidden)]
 pub mod native_checkpoint_inspection;
 #[cfg(test)]
+#[cfg_attr(
+    nervix_lint,
+    nervix::layer(harness, reason = "test module remains outside product execution")
+)]
 mod native_checkpoint_properties;
 mod node;
 mod node_settings;
@@ -307,6 +323,10 @@ mod state_store;
 mod subscription_interests;
 mod subscription_predicate;
 #[cfg(test)]
+#[cfg_attr(
+    nervix_lint,
+    nervix::layer(harness, reason = "test module remains outside product execution")
+)]
 mod test_fixtures;
 
 pub(crate) use backup_state::{
@@ -677,6 +697,10 @@ use window_state::{
 use crate::registry::{PlannedModel, branched_node_specs_from_models};
 
 #[cfg(test)]
+#[cfg_attr(
+    nervix_lint,
+    nervix::layer(harness, reason = "test module remains outside product execution")
+)]
 pub(crate) mod report_observer;
 mod vm_compile;
 mod vm_input;

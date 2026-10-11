@@ -7,6 +7,11 @@
 //! - **Depends on.** Typed choice wire values and the current processor draft.
 //! - **Must not know.** Registry implementation or how a server pages candidates.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(edge, reason = "owns the edges boundary declared above")
+)]
+
 use leptos::prelude::GetUntracked;
 use nervix_client_wire::{ChoiceSelection, ChoiceTarget, ChoiceValue};
 use nervix_models::{ModelKind, NodeRef, RelayName};

@@ -621,6 +621,10 @@ pub(super) fn vm_typed_batch_selected_rows_to_runtime_batch(
 }
 
 #[cfg(test)]
+#[cfg_attr(
+    nervix_lint,
+    nervix::layer(harness, reason = "test module remains outside product execution")
+)]
 mod tests {
     use super::*;
 

@@ -13,6 +13,14 @@
 //! because recording is where the effect is decided. So attempts that race, or a new leader that
 //! resumes after an old one's proposal still committed, never apply one step's effect twice.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(
+        control_plane,
+        reason = "owns the control plane boundary declared above"
+    )
+)]
+
 use std::{collections::BTreeSet, future::Future};
 
 use nervix_models::{RestoreStep, RestoreStepOutcome, RestoreStepReport};

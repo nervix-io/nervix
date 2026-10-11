@@ -6,6 +6,14 @@
 //! - **Must not know.** Which run, workload or process the evidence came from, or how a supervisor
 //!   aggregates several files.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(
+        engine,
+        reason = "owns the engines and infrastructure boundary declared above"
+    )
+)]
+
 use std::fmt;
 
 use meticulous::OptionExt as _;
