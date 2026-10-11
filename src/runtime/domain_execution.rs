@@ -263,9 +263,37 @@ pub(super) struct RuntimeDomainState {
     pub(super) status: nervix_models::DomainStatus,
     pub(super) start_version: u64,
     pub(super) last_start: nervix_models::DomainStartPoint,
+    /// The committed paced mapping of the installed generation; absent while it has none.
+    pub(super) mapping: Option<nervix_models::DomainClockState>,
     pub(super) clock_authority: DomainClockAuthority,
+    /// The committed runtime revision whose lifecycle this entry holds. Graph installation and
+    /// the domain clock owner each install only a newer revision's lifecycle, so whichever
+    /// finishes second never restores what the other superseded.
+    pub(super) lifecycle_revision: u64,
     pub(super) clock: DomainClockLifecycle,
     pub(super) progress: watch::Sender<Option<ObservedDomainTick>>,
+}
+
+impl RuntimeDomainState {
+    /// Whether this installed lifecycle is the committed `state` in everything but the authority
+    /// fence.
+    fn holds_lifecycle_of(&self, state: &DomainState) -> bool {
+        self.config == state.config
+            && self.status == state.status
+            && self.start_version == state.start_version
+            && self.last_start == state.last_start
+            && self.mapping == state.clock
+    }
+}
+
+/// Whether every domain clock a node holds is the committed one of a runtime revision.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CommittedClockInstallation {
+    /// Every committed domain clock, authority fence included, is installed on this node.
+    Complete,
+    /// A domain's generation, status, configuration, start point or mapping changed, or a domain
+    /// was added or removed, and only graph installation installs that change.
+    AwaitingGraphInstallation,
 }
 
 impl Runtime {
@@ -352,11 +380,37 @@ impl Runtime {
             .keys()
             .map(|domain| (domain.clone(), authority.clone()))
             .collect::<BTreeMap<_, _>>();
-        self.sync_committed_domains(domains, &authorities);
+        let revision = self.next_test_lifecycle_revision();
+        self.sync_committed_domains(revision, domains, &authorities);
     }
 
+    /// The committed revision a test installation stands for: newer than every lifecycle this
+    /// runtime holds, as each revision a node installs is newer than the ones it installed before.
+    #[cfg(test)]
+    fn next_test_lifecycle_revision(&self) -> u64 {
+        let newest = self
+            .inner
+            .domains
+            .iter()
+            .map(|entry| entry.lifecycle_revision)
+            .max();
+        let Some(newest) = newest else {
+            return 1;
+        };
+        newest
+            .checked_add(1)
+            .assured("a test installs far fewer than u64::MAX revisions")
+    }
+
+    /// Installs the committed domain lifecycles of runtime `revision`, as graph installation does
+    /// before it installs that revision's work.
+    ///
+    /// A domain whose lifecycle this node holds from a newer committed revision keeps it: the
+    /// domain clock owner installs a reassigned authority fence ahead of graph installation, which
+    /// may still be applying an older revision.
     pub(super) fn sync_committed_domains(
         &self,
+        revision: u64,
         domains: &BTreeMap<DomainName, DomainState>,
         authorities: &BTreeMap<DomainName, DomainClockAuthority>,
     ) {
@@ -367,23 +421,30 @@ impl Runtime {
             .map(|entry| entry.key().clone())
             .collect::<Vec<_>>()
         {
-            if !domains.contains_key(&domain) {
-                if let Some((_, removed)) = self.inner.domains.remove(&domain) {
-                    removed.clock.mark_missing();
-                }
-                self.inner.domain_routings.remove(&domain);
-                self.inner.domain_instantiation_errors.remove(&domain);
-                self.inner.in_flight_by_domain.remove(&domain);
-                self.inner
-                    .frozen_ownership_handoff_entities
-                    .retain(|key, _| key.domain != domain);
-                self.inner
-                    .in_flight_by_ingestor
-                    .retain(|key, _| key.domain != domain);
-                self.inner.generator_activity_by_domain.remove(&domain);
-                if let Some((_, force_flush)) = self.inner.force_flush_by_domain.remove(&domain) {
-                    force_flush.close();
-                }
+            if domains.contains_key(&domain) {
+                continue;
+            }
+            // A newer committed revision still holds a domain whose lifecycle comes from it.
+            let Some((_, removed)) = self
+                .inner
+                .domains
+                .remove_if(&domain, |_, state| state.lifecycle_revision < revision)
+            else {
+                continue;
+            };
+            removed.clock.mark_missing();
+            self.inner.domain_routings.remove(&domain);
+            self.inner.domain_instantiation_errors.remove(&domain);
+            self.inner.in_flight_by_domain.remove(&domain);
+            self.inner
+                .frozen_ownership_handoff_entities
+                .retain(|key, _| key.domain != domain);
+            self.inner
+                .in_flight_by_ingestor
+                .retain(|key, _| key.domain != domain);
+            self.inner.generator_activity_by_domain.remove(&domain);
+            if let Some((_, force_flush)) = self.inner.force_flush_by_domain.remove(&domain) {
+                force_flush.close();
             }
         }
 
@@ -400,17 +461,24 @@ impl Runtime {
                     status: state.status.clone(),
                     start_version: state.start_version,
                     last_start: state.last_start.clone(),
+                    mapping: state.clock.clone(),
                     clock_authority: authority.clone(),
+                    lifecycle_revision: revision,
                     clock,
                     progress: watch::channel(None).0,
                 }
             });
+            if entry.lifecycle_revision > revision {
+                continue;
+            }
             let generation_changed = entry.start_version != state.start_version;
             entry.config = state.config.clone();
             entry.status = state.status.clone();
             entry.start_version = state.start_version;
             entry.last_start = state.last_start.clone();
+            entry.mapping = state.clock.clone();
             entry.clock_authority = authority.clone();
+            entry.lifecycle_revision = revision;
             entry.clock.synchronize(state, &authority);
             if generation_changed || matches!(state.status, nervix_models::DomainStatus::Stopped) {
                 entry.progress.send_replace(None);
@@ -421,6 +489,64 @@ impl Runtime {
                 .checked_add(1)
                 .assured("a node cannot apply 2^64 domain status changes");
         });
+    }
+
+    /// Installs the authority fences committed runtime `revision` assigns, ahead of this node's
+    /// graph installation of that revision.
+    ///
+    /// Reassigning an authority keeps the generation and mapping, so the replacement can produce
+    /// progress and every receiver can accept it as soon as the reassignment commits, even while
+    /// graph installation here waits on a node that left. A domain whose generation, status,
+    /// configuration, start point or mapping differs from the committed one, a committed domain
+    /// this node does not hold yet, and a domain the revision removed all wait for graph
+    /// installation, which installs a revision's lifecycles before its work.
+    pub(crate) fn install_committed_clock_authorities(
+        &self,
+        revision: u64,
+        domains: &BTreeMap<DomainName, DomainState>,
+        authorities: &BTreeMap<DomainName, DomainClockAuthority>,
+    ) -> CommittedClockInstallation {
+        let mut installation = CommittedClockInstallation::Complete;
+        let mut fences_changed = false;
+        for (domain, state) in domains {
+            let Some(mut entry) = self.inner.domains.get_mut(domain) else {
+                installation = CommittedClockInstallation::AwaitingGraphInstallation;
+                continue;
+            };
+            if entry.lifecycle_revision >= revision {
+                continue;
+            }
+            if !entry.holds_lifecycle_of(state) {
+                installation = CommittedClockInstallation::AwaitingGraphInstallation;
+                continue;
+            }
+            let authority = authorities
+                .get(domain)
+                .cloned()
+                .unwrap_or_else(DomainClockAuthority::initial);
+            if entry.clock_authority != authority {
+                entry.clock_authority = authority.clone();
+                entry.clock.synchronize(state, &authority);
+                fences_changed = true;
+            }
+            entry.lifecycle_revision = revision;
+        }
+        let removed_domain_installed = self
+            .inner
+            .domains
+            .iter()
+            .any(|entry| !domains.contains_key(entry.key()));
+        if removed_domain_installed {
+            installation = CommittedClockInstallation::AwaitingGraphInstallation;
+        }
+        if fences_changed {
+            self.inner.domain_status_changed.send_modify(|version| {
+                *version = version
+                    .checked_add(1)
+                    .assured("a node cannot apply 2^64 domain status changes");
+            });
+        }
+        installation
     }
 
     pub(in crate::runtime) async fn rebuild_domain_execution(
@@ -807,14 +933,14 @@ mod tests {
     use std::collections::BTreeMap;
 
     use nervix_models::{
-        AckMode, BranchSelection, CodecWireFormat, CreateBranch, CreateCodec, CreateEndpoint,
-        CreateGenerator, CreateLookup, CreateReingestor, CreateRelay, CreateSchema,
-        CreateSignalingProtocol, CreateVhost, CreateWireSchema, DomainClockState, DomainConfig,
-        DomainPace, DomainState, DomainStatus, DomainTick, DomainTimeRate, EndpointType,
-        FlushPolicy, JsonType, MaterializedRelayState, MessageErrorPolicy, Model, OutputBranch,
-        ParseAsType, ProcessorInputs, ProcessorOutput, ProcessorOutputs, RelayBranching,
-        SchemaField, SchemaFingerprint, SignalingProtocolOnConnect, SignalingWireFormat, Timestamp,
-        WireSchemaField,
+        AckMode, BranchSelection, ClusterNodeIdentity, ClusterNodeIncarnation, CodecWireFormat,
+        CreateBranch, CreateCodec, CreateEndpoint, CreateGenerator, CreateLookup, CreateReingestor,
+        CreateRelay, CreateSchema, CreateSignalingProtocol, CreateVhost, CreateWireSchema,
+        DomainClockState, DomainConfig, DomainPace, DomainState, DomainStatus, DomainTick,
+        DomainTimeRate, EndpointType, FlushPolicy, JsonType, MaterializedRelayState,
+        MessageErrorPolicy, Model, OutputBranch, ParseAsType, ProcessorInputs, ProcessorOutput,
+        ProcessorOutputs, RelayBranching, SchemaField, SchemaFingerprint,
+        SignalingProtocolOnConnect, SignalingWireFormat, Timestamp, WireSchemaField,
     };
     use nonzero_ext::nonzero;
 
@@ -870,11 +996,112 @@ mod tests {
             (&mut installed).now_or_never().is_none(),
             "a node that has installed nothing waits"
         );
-        runtime.sync_committed_domains(&BTreeMap::new(), &BTreeMap::new());
+        runtime.sync_committed_domains(1, &BTreeMap::new(), &BTreeMap::new());
         assert!(
             installed.now_or_never().is_some(),
             "installing the committed state releases the wait, even when it holds no domain"
         );
+    }
+
+    fn installed_paced_generation() -> DomainState {
+        let mut state = paced_domain_state("paced");
+        state.start_version = 1;
+        state.clock = Some(DomainClockState::new(
+            Timestamp::now(),
+            Timestamp::from_unix_nanos(0),
+            DomainTimeRate::ONE,
+        ));
+        state
+    }
+
+    fn replacement_of(lost: &DomainClockAuthority) -> DomainClockAuthority {
+        lost.checked_reassign(Some(ClusterNodeIdentity::new(
+            named::<ClusterNodeName>("replacement"),
+            ClusterNodeIncarnation::new(1),
+        )))
+        .assured("the fixture authority revision is far below its bound")
+    }
+
+    #[test]
+    fn a_reassigned_authority_installs_ahead_of_graph_installation_and_stays_installed() {
+        let runtime = Runtime::new();
+        let clock_domain = domain("paced");
+        let domains = BTreeMap::from([(clock_domain.clone(), installed_paced_generation())]);
+        let lost = test_domain_clock_authority();
+        let replacement = replacement_of(&lost);
+        let lost_authorities = BTreeMap::from([(clock_domain.clone(), lost.clone())]);
+        runtime.sync_committed_domains(1, &domains, &lost_authorities);
+
+        let installation = runtime.install_committed_clock_authorities(
+            3,
+            &domains,
+            &BTreeMap::from([(clock_domain.clone(), replacement.clone())]),
+        );
+
+        assert_eq!(installation, CommittedClockInstallation::Complete);
+        assert!(runtime.has_domain_clock_authority(&clock_domain, 1, &replacement));
+        // A graph installation of an older revision neither restores the superseded authority nor
+        // removes a domain the newer revision holds.
+        runtime.sync_committed_domains(2, &domains, &lost_authorities);
+        assert!(runtime.has_domain_clock_authority(&clock_domain, 1, &replacement));
+        runtime.sync_committed_domains(2, &BTreeMap::new(), &BTreeMap::new());
+        assert!(runtime.has_domain_clock_authority(&clock_domain, 1, &replacement));
+        // A newer graph installation replaces it as usual.
+        runtime.sync_committed_domains(4, &domains, &lost_authorities);
+        assert!(runtime.has_domain_clock_authority(&clock_domain, 1, &lost));
+    }
+
+    #[test]
+    fn lifecycle_changes_beside_a_reassignment_wait_for_graph_installation() {
+        let runtime = Runtime::new();
+        let clock_domain = domain("paced");
+        let installed = installed_paced_generation();
+        let lost = test_domain_clock_authority();
+        let replacement = replacement_of(&lost);
+        let replacements = BTreeMap::from([(clock_domain.clone(), replacement.clone())]);
+        runtime.sync_committed_domains(
+            1,
+            &BTreeMap::from([(clock_domain.clone(), installed.clone())]),
+            &BTreeMap::from([(clock_domain.clone(), lost.clone())]),
+        );
+
+        // A new generation is installed with the graph that executes under it.
+        let mut restarted = installed.clone();
+        restarted.start_version = 2;
+        let installation = runtime.install_committed_clock_authorities(
+            2,
+            &BTreeMap::from([(clock_domain.clone(), restarted)]),
+            &replacements,
+        );
+        assert_eq!(
+            installation,
+            CommittedClockInstallation::AwaitingGraphInstallation
+        );
+        assert!(runtime.has_domain_clock_authority(&clock_domain, 1, &lost));
+
+        // So is a domain this node does not hold yet, while the domain it holds still takes its
+        // replacement fence.
+        let added = domain("added");
+        let with_added = BTreeMap::from([
+            (clock_domain.clone(), installed.clone()),
+            (added.clone(), paced_domain_state("added")),
+        ]);
+        let installation =
+            runtime.install_committed_clock_authorities(3, &with_added, &replacements);
+        assert_eq!(
+            installation,
+            CommittedClockInstallation::AwaitingGraphInstallation
+        );
+        assert!(runtime.has_domain_clock_authority(&clock_domain, 1, &replacement));
+
+        // And so is the removal of a domain it holds.
+        let installation =
+            runtime.install_committed_clock_authorities(4, &BTreeMap::new(), &BTreeMap::new());
+        assert_eq!(
+            installation,
+            CommittedClockInstallation::AwaitingGraphInstallation
+        );
+        assert!(runtime.has_domain_clock_authority(&clock_domain, 1, &replacement));
     }
 
     #[test]
@@ -1047,6 +1274,7 @@ mod tests {
             DomainTimeRate::ONE,
         ));
         runtime.sync_committed_domains(
+            1,
             &BTreeMap::from([(clock_domain.clone(), state)]),
             &BTreeMap::new(),
         );

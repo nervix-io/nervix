@@ -1,9 +1,10 @@
-//! Holding domain clock progress before delivery and starting a mapping with wall time elapsed.
+//! Holding and refusing domain clock work: progress before delivery, a mapping's initial elapsed
+//! wall time, and a leader's authority proposals.
 //!
 //! Layer: test harness, outside the product layer order.
 //!
-//! - **Owns.** Domain- and node-scoped holds of an authority's progress before its delivery, and a
-//!   domain's initial elapsed wall time.
+//! - **Owns.** Domain- and node-scoped holds of an authority's progress before its delivery, a
+//!   domain's initial elapsed wall time, and node-scoped refusals of an authority proposal.
 //! - **Depends on.** Typed domain and node names and the fault harness's existing pause primitive.
 //! - **Must not know.** Authority selection, consensus, or how the runtime installs a clock.
 
@@ -155,6 +156,34 @@ impl FaultInjection {
         {
             pause.mark_delivered();
         }
+    }
+
+    /// Refuses the next domain-clock authority reconciliation `node` proposes as leader, as Raft
+    /// refuses a write from a leader whose quorum has not yet acknowledged its leadership.
+    pub fn reject_next_domain_clock_authority_proposal_on(&self, node: ClusterNodeName) {
+        self.inner
+            .domain_clock_authority_proposal_rejections
+            .insert(node, ());
+    }
+
+    /// Whether the refusal armed for `node` still waits for that node's next authority proposal.
+    pub fn domain_clock_authority_proposal_rejection_is_armed(
+        &self,
+        node: &ClusterNodeName,
+    ) -> bool {
+        self.inner
+            .domain_clock_authority_proposal_rejections
+            .contains_key(node)
+    }
+
+    pub(crate) fn take_domain_clock_authority_proposal_rejection(
+        &self,
+        node: &ClusterNodeName,
+    ) -> bool {
+        self.inner
+            .domain_clock_authority_proposal_rejections
+            .remove(node)
+            .is_some()
     }
 
     fn domain_clock_progress_pause(&self, point: &DomainClockProgressPausePoint) -> Arc<TestPause> {

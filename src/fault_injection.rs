@@ -182,6 +182,9 @@ struct FaultInjectionState {
     /// Runtime and harness waiters clone a pause so it remains alive after its map guard drops.
     domain_clock_progress_pauses:
         DashMap<DomainClockProgressPausePoint, Arc<TestPause>, RandomState>,
+    /// One-shot, node-scoped refusals of the next domain-clock authority reconciliation the node
+    /// proposes as leader, consumed before the proposal reaches Raft.
+    domain_clock_authority_proposal_rejections: DashMap<ClusterNodeName, (), RandomState>,
     /// A WASM processor branch holds its next guest-state checkpoint at one window, so a scenario
     /// can end the node while the checkpoint is exactly that far.
     wasm_checkpoint_pauses: DashMap<WasmCheckpointPausePoint, Arc<TestPause>, RandomState>,
@@ -328,6 +331,7 @@ enum RemoteAcknowledgementLoss {
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 enum CommandPausePoint {
     Admission(ClusterNodeName),
+    RuntimeInstallation(ClusterNodeName),
     RuntimePreparation(ClusterNodeName),
     ReferenceLookup(ClusterNodeName),
     DurableAdmission(ClusterNodeName),
@@ -429,6 +433,7 @@ impl Default for FaultInjection {
                 ownership_handoff_preparation_pauses: DashMap::default(),
                 ownership_handoff_prepare_response_pauses: DashMap::default(),
                 domain_clock_progress_pauses: DashMap::default(),
+                domain_clock_authority_proposal_rejections: DashMap::default(),
                 wasm_checkpoint_pauses: DashMap::default(),
                 domain_clock_initial_elapsed: DashMap::default(),
                 state_replica_polling_paused: AtomicBool::new(false),
@@ -1318,6 +1323,21 @@ impl FaultInjection {
         self.arm_command_pause(CommandPausePoint::Admission(node_id));
     }
 
+    /// Holds the next runtime installation the node begins, inside its installation sequence and
+    /// before it synchronizes any domain lifecycle or schedule of the admitted revision.
+    pub fn pause_runtime_installation_on(&self, node_id: ClusterNodeName) {
+        self.arm_command_pause(CommandPausePoint::RuntimeInstallation(node_id));
+    }
+
+    pub async fn wait_for_runtime_installation_pause(&self, node_id: &ClusterNodeName) {
+        self.wait_for_command_pause(&CommandPausePoint::RuntimeInstallation(node_id.clone()))
+            .await;
+    }
+
+    pub fn release_runtime_installation_pause(&self, node_id: &ClusterNodeName) {
+        self.release_command_pause(&CommandPausePoint::RuntimeInstallation(node_id.clone()));
+    }
+
     pub fn pause_runtime_preparation_on(&self, node_id: ClusterNodeName) {
         self.arm_command_pause(CommandPausePoint::RuntimePreparation(node_id));
     }
@@ -2111,6 +2131,11 @@ impl FaultInjection {
 
     pub(crate) async fn pause_command_admission_if_armed(&self, node_id: &ClusterNodeName) {
         self.pause_command_if_armed(CommandPausePoint::Admission(node_id.clone()))
+            .await;
+    }
+
+    pub(crate) async fn pause_runtime_installation_if_armed(&self, node_id: &ClusterNodeName) {
+        self.pause_command_if_armed(CommandPausePoint::RuntimeInstallation(node_id.clone()))
             .await;
     }
 

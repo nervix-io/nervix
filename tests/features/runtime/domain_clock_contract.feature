@@ -225,6 +225,75 @@ Feature: Domain clock contract regressions
     And domain clock progress for domain "{{domain}}" on node "node-2" resumes
     Then within "10s" the clock session receives a tick with an id higher than before owner loss
 
+  @domain_clock_takeover
+  @deloxide_stress
+  Scenario: A survivor takes the clock over from an authority that led consensus while the survivor's runtime installation waits
+    Given the production sticky scheduler is configured
+    And a 3 node nervix cluster is started
+    And the active domain is "authority_domain"
+    And the leader node is configured with these NSPL commands
+      """
+      CREATE PACED DOMAIN {{domain}} WITH PERIOD 100ms SKEW 10ms;
+      START AT '2000-01-01T00:00:00Z' TIME RATE 4.0;
+      """
+    And domain clock progress for domain "{{domain}}" on node "node-2" is paused before delivery
+    Then domain clock progress for domain "{{domain}}" on node "node-2" reaches the delivery pause within the authority observation budget
+    When leadership is transferred from node "node-1" to node "node-2"
+    Then node "node-2" eventually reports leader "node-2"
+    Given the next domain clock authority proposal of node "node-1" is rejected for lost leadership
+    And the next domain clock authority proposal of node "node-3" is rejected for lost leadership
+    When runtime installation on node "node-1" is paused
+    And application health probes from node "node-1" to node "node-2" fail
+    And application health probes from node "node-3" to node "node-2" fail
+    Then node "node-1" eventually reports interconnect to "node-2" as "unavailable"
+    And node "node-3" eventually reports interconnect to "node-2" as "unavailable"
+    When consensus connectivity for node "node-2" is blocked
+    And gossip exchanges involving node "node-2" are blocked with a "5s" send delay
+    Given a clock session is opened on node "node-3"
+    When the clock session attaches to the clock of domain "{{domain}}"
+    Then the clock session is attached at generation 1 to a paced clock with period "100ms", skew "10ms", logical origin "2000-01-01T00:00:00Z" and time rate "4"
+    And within "10s" the clock session receives 2 increasing ticks for generation 1 with period "100ms" and time rate "4"
+    And node "node-1" reaches its runtime installation pause
+    When runtime installation on node "node-1" is released
+    And gossip exchanges involving node "node-2" are restored
+    And consensus connectivity for node "node-2" is restored
+    And application health probes from node "node-1" to node "node-2" are restored
+    And application health probes from node "node-3" to node "node-2" are restored
+    And domain clock progress for domain "{{domain}}" on node "node-2" resumes
+    Then within "10s" the clock session receives a tick with an id higher than before owner loss
+
+  @domain_clock_takeover
+  @deloxide_stress
+  Scenario: A survivor receives replacement clock ticks while its own runtime preparation waits
+    Given the production sticky scheduler is configured
+    And a 3 node nervix cluster is started
+    And the active domain is "authority_domain"
+    And the leader node is configured with these NSPL commands
+      """
+      CREATE PACED DOMAIN {{domain}} WITH PERIOD 100ms SKEW 10ms;
+      START AT '2000-01-01T00:00:00Z' TIME RATE 4.0;
+      """
+    And domain clock progress for domain "{{domain}}" on node "node-2" is paused before delivery
+    Then domain clock progress for domain "{{domain}}" on node "node-2" reaches the delivery pause within the authority observation budget
+    When runtime preparation on node "node-3" is paused
+    And application health probes from node "node-1" to node "node-2" fail
+    And application health probes from node "node-3" to node "node-2" fail
+    Then node "node-1" eventually reports interconnect to "node-2" as "unavailable"
+    When consensus connectivity for node "node-2" is blocked
+    And gossip exchanges involving node "node-2" are blocked with a "5s" send delay
+    Then node "node-3" reaches its runtime preparation pause
+    Given a clock session is opened on node "node-3"
+    When the clock session attaches to the clock of domain "{{domain}}"
+    Then the clock session is attached at generation 1 to a paced clock with period "100ms", skew "10ms", logical origin "2000-01-01T00:00:00Z" and time rate "4"
+    And within "10s" the clock session receives 2 increasing ticks for generation 1 with period "100ms" and time rate "4"
+    When runtime preparation on node "node-3" is released
+    And gossip exchanges involving node "node-2" are restored
+    And consensus connectivity for node "node-2" is restored
+    And application health probes from node "node-1" to node "node-2" are restored
+    And application health probes from node "node-3" to node "node-2" are restored
+    And domain clock progress for domain "{{domain}}" on node "node-2" resumes
+    Then within "10s" the clock session receives a tick with an id higher than before owner loss
+
   @domain_clock_authority
   @clock_attachment_owner_loss
   Scenario: Nonleader clock-owner loss preserves the committed mapping

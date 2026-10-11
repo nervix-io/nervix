@@ -257,6 +257,10 @@ pub(in crate::application) fn apply_current_cluster_runtime_state(
             let Some(installation) = admission.begin_installation(shutdown).await else {
                 return Ok(());
             };
+            #[cfg(feature = "testing")]
+            runtime
+                .pause_runtime_installation_if_armed(local_node_id)
+                .await;
             let Some(state) = admission.runtime_state(consensus, shutdown).await else {
                 return Ok(());
             };
