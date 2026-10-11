@@ -401,6 +401,43 @@ def compiled_targets(
     return found
 
 
+def discover_package(
+    package: str, manifest: pathlib.Path, targets: tuple[Target, ...]
+) -> list[tuple[str, dict[str, Any]]]:
+    """Compare one package's source macros and compiled targets with its registered targets."""
+    source_functions = static_targets(manifest)
+    registered_functions = {
+        target.test.split("::")[-1]: target.source
+        for target in targets
+    }
+    if source_functions != registered_functions:
+        raise BoleroError(
+            f"{package}: source macros {source_functions} differ from inventory "
+            f"{registered_functions}"
+        )
+    test_targets = {target.test_target for target in targets}
+    compiled = []
+    for test_target in sorted(test_targets):
+        features = tuple(sorted({
+            feature
+            for target in targets
+            if target.test_target == test_target
+            for feature in target.features
+        }))
+        names = listed_tests(package, test_target, ignored=False, features=features, manifest=manifest)
+        ignored = listed_tests(package, test_target, ignored=True, features=features, manifest=manifest)
+        if ignored:
+            raise BoleroError(f"{package}: ignored Bolero targets: {ignored}")
+        found = compiled_targets(package, test_target, features=features, manifest=manifest)
+        if Counter(names) != Counter(item["test_name"] for item in found):
+            raise BoleroError(
+                f"{package}: listed Bolero tests {names} differ from compiled targets "
+                f"{[item['test_name'] for item in found]}"
+            )
+        compiled.extend((test_target, item) for item in found)
+    return compiled
+
+
 def discover(inventory: Inventory) -> None:
     manifests = package_manifests()
     expected_packages = {target.package for target in inventory.targets}
@@ -415,40 +452,8 @@ def discover(inventory: Inventory) -> None:
     }
     compiled = []
     for package, manifest in sorted(manifests.items()):
-        source_functions = static_targets(manifest)
-        registered_functions = {
-            target.test.split("::")[-1]: target.source
-            for target in inventory.targets
-            if target.package == package
-        }
-        if source_functions != registered_functions:
-            raise BoleroError(
-                f"{package}: source macros {source_functions} differ from inventory "
-                f"{registered_functions}"
-            )
-        test_targets = {
-            target.test_target
-            for target in inventory.targets
-            if target.package == package
-        }
-        for test_target in sorted(test_targets):
-            features = tuple(sorted({
-                feature
-                for target in inventory.targets
-                if target.package == package and target.test_target == test_target
-                for feature in target.features
-            }))
-            names = listed_tests(package, test_target, ignored=False, features=features, manifest=manifest)
-            ignored = listed_tests(package, test_target, ignored=True, features=features, manifest=manifest)
-            if ignored:
-                raise BoleroError(f"{package}: ignored Bolero targets: {ignored}")
-            targets = compiled_targets(package, test_target, features=features, manifest=manifest)
-            if Counter(names) != Counter(item["test_name"] for item in targets):
-                raise BoleroError(
-                    f"{package}: listed Bolero tests {names} differ from compiled targets "
-                    f"{[item['test_name'] for item in targets]}"
-                )
-            compiled.extend((test_target, item) for item in targets)
+        targets = tuple(target for target in inventory.targets if target.package == package)
+        compiled.extend(discover_package(package, manifest, targets))
     identities = [
         (item["package_name"], test_target, item["test_name"])
         for test_target, item in compiled
