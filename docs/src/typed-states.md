@@ -268,6 +268,11 @@ identity sets: all live voters and eligible placement destinations. Termination 
 cordoned voter leaves both sets unchanged; losing or restarting that voter changes its live
 identity and invalidates the plan. Schedule and transaction publication validate the composed
 destination set and retain the independent consensus topology fence.
+The snapshot also retains the terminating live voters independently for destination diagnostics.
+After membership and liveness, relocation reports that process state before a committed cordon.
+Its terminating set is a captured diagnostic fact, while publication continues to fence the
+composed destination identities; termination of an already cordoned former owner still changes
+no eligible destination.
 
 ## External Encodings And Conversion Failure
 

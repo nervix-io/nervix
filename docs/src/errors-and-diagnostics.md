@@ -236,6 +236,16 @@ subsections after the boundary table follow this order.
 | Native client and its edges | A call that could not connect, was refused or cancelled, was answered outside the protocol, or lost its session (`ClientError`), above the transport status, the codec's report, a local archive's I/O error, or the failure that left a command or upload uncertain | Retry, recover the session, recover an uncertain command or upload by its reference or identity, or display the whole chain; the CLI and the C binding classify from the current context. |
 | Control plane and public edges | Transaction and lifecycle results, command dispositions, session diagnostics, and HTTP response selection | Return a recoverable command outcome or an appropriate response to a client or operator. |
 
+### Cluster Availability Reports
+
+`SHOW CLUSTER STATUS` keeps gossip visibility and effective member unavailability separate. A Raft
+member missing from the raw live gossip set gets a visibility warning. Its unavailable-member
+warning comes from the cluster's effective availability snapshot, which retains an established
+peer while its health observation still bridges a gossip lapse. The reason names application
+health when that owner excludes the peer, or Chitchat when gossip excludes it after the retained
+observation ages out. A client observing the warning therefore sees the same availability owner
+that controls member removal. The report is an observation; the mutation checks availability again.
+
 ### Vocabulary Models
 
 The vocabulary is the innermost owner, and its Model operations report the same way. An alteration
@@ -1082,10 +1092,12 @@ advertisement is an unchanged planning input. A changed live incarnation or elig
 still reports `SchedulePlanningStale::Eligibility`; changed membership or cordons is rejected
 by the separate topology fence.
 
-Relocation validates membership and liveness, then reports a committed cordon as
-`RelocationError::DestinationCordoned`. A remaining placement exclusion reports
-`DestinationTerminating`. The cordon-filtered destination set does not classify a live cordoned
-voter as terminating.
+Relocation validates membership and liveness, then reports a captured terminating incarnation as
+`RelocationError::DestinationTerminating`, then a committed cordon as `DestinationCordoned`.
+The planning snapshot captures termination independently from the composed placement destination
+set, so a cordon cannot be interpreted as termination and a terminating cordoned voter retains its
+termination reason. These diagnostic facts do not add a publication fence for an already excluded
+former owner.
 
 A handoff confirms closed admission while its local admitted work and flush can still be pending.
 The coordinator's exact-operation drain query retains the pending node and counts; exhaustion

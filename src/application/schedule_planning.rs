@@ -80,6 +80,8 @@ pub(in crate::application) struct DomainSchedulePlanningSnapshot {
     voters: SortedSet<ClusterNodeName>,
     cordoned: Vec<ClusterNodeName>,
     live_identities: BTreeSet<ClusterNodeIdentity>,
+    /// Captured process state for diagnostics, independent of the placement publication fence.
+    terminating_node_ids: BTreeSet<ClusterNodeName>,
     placement_candidate_identities: BTreeSet<ClusterNodeIdentity>,
     live_voters: SortedSet<ClusterNodeName>,
     cluster_nodes: SortedSet<ClusterNodeName>,
@@ -179,11 +181,8 @@ impl DomainSchedulePlanningSnapshot {
             .collect()
     }
 
-    pub(in crate::application) fn placement_candidate_node_ids(&self) -> BTreeSet<ClusterNodeName> {
-        self.placement_candidate_identities
-            .iter()
-            .map(|identity| identity.node_id().clone())
-            .collect()
+    pub(in crate::application) fn terminating_node_ids(&self) -> &BTreeSet<ClusterNodeName> {
+        &self.terminating_node_ids
     }
 
     pub(in crate::application) fn live_identities(&self) -> &BTreeSet<ClusterNodeIdentity> {
@@ -314,6 +313,12 @@ impl SessionServiceImpl {
             DomainSchedulePlanningSnapshot::eligibility_inputs(&availability, &voters, cordoned);
         let live_node_ids = availability.live_node_ids();
         let placement_candidate_node_ids = availability.placement_candidate_node_ids();
+        let terminating_node_ids = availability
+            .latest_nodes_by_id()
+            .into_values()
+            .filter(|node| node.terminating && live_identities.contains(&node.identity()))
+            .map(|node| node.node_id)
+            .collect();
         let live_voters: SortedSet<ClusterNodeName> = live_node_ids
             .into_iter()
             .filter(|node| voters.contains(node))
@@ -334,6 +339,7 @@ impl SessionServiceImpl {
             voters,
             cordoned: cordoned.to_vec(),
             live_identities,
+            terminating_node_ids,
             placement_candidate_identities,
             live_voters,
             cluster_nodes,
@@ -445,7 +451,7 @@ mod tests {
         service
             .inner
             .consensus
-            .set_node_cordoned(local_node, true)
+            .set_node_cordoned(local_node.clone(), true)
             .await
             .assured("the drain's cordon commits before planning");
         let inputs = service
@@ -460,7 +466,15 @@ mod tests {
         assert!(planning.cluster_nodes().is_empty());
         assert!(planning.placement_candidate_identities().is_empty());
         assert_eq!(planning.live_identities().len(), 1);
+        assert!(planning.terminating_node_ids().is_empty());
         service.inner.cluster.mark_local_terminating().await;
+        let current = service
+            .capture_domain_schedule_planning_snapshot(&inputs)
+            .await;
+        assert_eq!(
+            current.terminating_node_ids(),
+            &BTreeSet::from([local_node])
+        );
 
         service
             .validate_domain_planning_inputs(&inputs)

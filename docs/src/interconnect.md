@@ -115,6 +115,13 @@ The failure detector retains dead process identities separately from the live pe
 Raft member removal uses the newest observed live or dead identity to fence the stopped process;
 dead identities alone never make a peer eligible for membership admission. Scheduling can retain an
 already established health target while gossip liveness lapses, as described below.
+Explicit member removal is checked against the mutation owner's effective availability, including
+that retained health target. Gossip absence can precede effective unavailability. Removal
+qualification establishes the target on both surviving voters and observes effective unavailability
+through each public membership warning before issuing the mutation, so either voter can own the
+leader's check. The warning uses the effective availability snapshot, while gossip visibility is
+reported separately. Its reason names application health when that owner excludes the peer, or
+Chitchat when gossip excludes it after the retained health observation has aged out.
 
 Connections are directed. Both nodes in a pair build their own outbound connections because some
 operations, including relay acknowledgements and cluster events, travel back over the receiver's

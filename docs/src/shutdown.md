@@ -170,6 +170,9 @@ Both filters compose when the scheduler chooses an owner: a candidate must be a 
 that is neither cordoned nor a terminating incarnation. `RELOCATE` and `DESCRIBE RELOCATION` apply
 the same checks in a fixed order and name the first one that fails — not a Raft member, then not a
 live Raft voter, then `node '<node_id>' is terminating`, then `node '<node_id>' is cordoned`.
+The planning snapshot retains terminating live voters separately from the composed destination
+set. A committed cordon cannot classify a live process as terminating, and a process with both
+states retains its termination reason.
 
 The planning fence uses those composed destination candidates. After the drain's cordon commits,
 observing the former owner's terminating advertisement does not invalidate its pending move:
