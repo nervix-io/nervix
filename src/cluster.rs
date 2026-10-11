@@ -72,6 +72,8 @@ const KEY_SUBSCRIPTION_INTEREST_PREFIX: &str = "subscription_interest:";
 const KEY_AUTHORITATIVE_REVISION_APPLIED: &str = "authoritative_revision_applied";
 const KEY_RUNTIME_REVISION_PREPARED: &str = "runtime_revision_prepared";
 const KEY_RUNTIME_REVISION_READY: &str = "runtime_revision_ready";
+/// The runtime revision through which every domain clock the node holds is the committed one.
+const KEY_DOMAIN_CLOCK_REVISION_INSTALLED: &str = "domain_clock_revision_installed";
 /// How many cluster changes a session can fall behind before the bus drops the oldest.
 const CLUSTER_EVENT_CAPACITY: usize = 256;
 const GOSSIP_QUEUE_CAPACITY: usize = 1024;
@@ -1640,6 +1642,22 @@ impl ClusterHandle {
         revision: u64,
     ) -> BTreeSet<ClusterNodeIdentity> {
         self.nodes_at_revision(KEY_RUNTIME_REVISION_READY, revision)
+            .await
+    }
+
+    /// Advertises that every domain clock this node holds, authority fence included, is the
+    /// committed one of runtime `revision`.
+    pub async fn set_local_domain_clock_revision_installed(&self, revision: u64) {
+        self.set_local_revision(KEY_DOMAIN_CLOCK_REVISION_INSTALLED, revision)
+            .await;
+    }
+
+    /// The incarnations whose domain clocks match runtime `revision` or a later one.
+    pub async fn nodes_with_domain_clocks_installed(
+        &self,
+        revision: u64,
+    ) -> BTreeSet<ClusterNodeIdentity> {
+        self.nodes_at_revision(KEY_DOMAIN_CLOCK_REVISION_INSTALLED, revision)
             .await
     }
 

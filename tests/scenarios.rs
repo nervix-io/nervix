@@ -10421,6 +10421,35 @@ async fn when_directed_health_probes_fail(
         .fail_health_responses_between(&probing_node_id, &responding_node_id);
 }
 
+#[when(expr = "runtime installation on node {string} is paused")]
+async fn when_runtime_installation_is_paused(world: &mut ScenarioWorld, node_id: String) {
+    let node_id = expand_placeholders(world, &node_id);
+    world
+        .fault_injection
+        .pause_runtime_installation_on(crate::common::cluster::node_name(&node_id));
+}
+
+#[then(expr = "node {string} reaches its runtime installation pause")]
+async fn then_runtime_installation_is_paused(world: &mut ScenarioWorld, node_id: String) {
+    let node_id = expand_placeholders(world, &node_id);
+    nervix_primitives::time::timeout(
+        Duration::from_secs(10),
+        world
+            .fault_injection
+            .wait_for_runtime_installation_pause(&crate::common::cluster::node_name(&node_id)),
+    )
+    .await
+    .expect("runtime installation did not reach its pause");
+}
+
+#[when(expr = "runtime installation on node {string} is released")]
+async fn when_runtime_installation_is_released(world: &mut ScenarioWorld, node_id: String) {
+    let node_id = expand_placeholders(world, &node_id);
+    world
+        .fault_injection
+        .release_runtime_installation_pause(&crate::common::cluster::node_name(&node_id));
+}
+
 #[when(expr = "runtime preparation on node {string} is paused")]
 async fn when_runtime_preparation_is_paused(world: &mut ScenarioWorld, node_id: String) {
     let node_id = expand_placeholders(world, &node_id);
@@ -11687,6 +11716,22 @@ async fn given_domain_clock_progress_is_paused_on_node(
     world
         .fault_injection
         .pause_domain_clock_progress_on(domain, crate::common::cluster::node_name(&node_id));
+}
+
+#[given(
+    expr = "the next domain clock authority proposal of node {string} is rejected for lost \
+            leadership"
+)]
+async fn given_next_domain_clock_authority_proposal_is_rejected(
+    world: &mut ScenarioWorld,
+    node_id: String,
+) {
+    let node_id = expand_placeholders(world, &node_id);
+    world
+        .fault_injection
+        .reject_next_domain_clock_authority_proposal_on(crate::common::cluster::node_name(
+            &node_id,
+        ));
 }
 
 #[then(

@@ -28,12 +28,13 @@ name = "release-images"
 [[method]]
 checks = [
   "bolero / bolero-random",
-  "bolero / bolero-fuzz",
+  "bolero / bolero-fuzz-combined",
   "bolero / bolero-gate",
 ]
-description = "Every registered property's randomized and corpus run, and its sanitizer-backed fuzz campaign"
+description = "Every registered property's randomized and corpus run, its sanitizer-backed fuzz campaign in every shard, and the proof that the shards ran every target once"
 label = "fuzz"
 name = "bolero"
+sharded = ["bolero / bolero-fuzz"]
 
 [[method]]
 checks = ["loom"]

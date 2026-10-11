@@ -367,11 +367,13 @@ use domain_clock::{
 };
 #[cfg(test)]
 use domain_execution::DomainRouting;
+pub(crate) use domain_execution::{
+    CommittedClockInstallation, DomainRoutingCache, SharedDomainRouting,
+};
 use domain_execution::{
     DomainExecution, DomainRoutingError, DomainRoutingSnapshot, ObservedDomainTick,
     RuntimeDomainState,
 };
-pub(crate) use domain_execution::{DomainRoutingCache, SharedDomainRouting};
 use domain_rebuild::branch_relays_from_plans;
 use emitter_buffer::{
     DeliveredAcknowledgements, EmitterBatchBuffer, EmitterBufferedMessages, EmitterPublication,

@@ -1048,6 +1048,16 @@ impl Runtime {
     }
 
     #[cfg(feature = "testing")]
+    pub(crate) fn take_domain_clock_authority_proposal_rejection(
+        &self,
+        node: &nervix_models::ClusterNodeName,
+    ) -> bool {
+        self.inner
+            .fault_injection
+            .take_domain_clock_authority_proposal_rejection(node)
+    }
+
+    #[cfg(feature = "testing")]
     pub(crate) fn mark_domain_clock_progress_delivered(
         &self,
         domain: &DomainName,
@@ -1317,9 +1327,10 @@ mod shuttle_lifecycle_tests {
             publish_model_tick(&publishing, &published_name, 1, 1);
             thread::yield_now();
             publish_model_tick(&publishing, &published_name, 1, 2);
-            publishing.sync_committed_domains(&domains, &BTreeMap::new());
+            publishing.sync_committed_domains(2, &domains, &BTreeMap::new());
             thread::yield_now();
             publishing.sync_committed_domains(
+                3,
                 &domains,
                 &BTreeMap::from([(published_name.clone(), test_domain_clock_authority())]),
             );
@@ -1868,7 +1879,7 @@ mod shuttle_lifecycle_tests {
             let name = domain(MODEL_DOMAIN);
             let domains = BTreeMap::from([(name.clone(), running_generation(1, ORIGIN))]);
             let authorities = BTreeMap::from([(name, test_domain_clock_authority())]);
-            installing.sync_committed_domains(&domains, &authorities);
+            installing.sync_committed_domains(1, &domains, &authorities);
         });
         shuttle::future::block_on(runtime.committed_domains_installed());
         let Some(observer) = runtime.observe_domain_clock(&domain(MODEL_DOMAIN)) else {

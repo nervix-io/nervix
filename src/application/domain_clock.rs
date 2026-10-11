@@ -12,6 +12,7 @@ use std::{collections::BTreeSet, time::Duration};
 use ahash::{HashMap, HashMapExt};
 use futures_util::{StreamExt, stream::FuturesUnordered};
 use meticulous::{OptionExt as _, ResultExt as _};
+use nervix_consensus::{ConsensusError, ConsensusRuntimeState};
 use nervix_interconnect::DomainClockProgressRequest;
 use nervix_models::{
     ClusterNodeIdentity, ClusterNodeName, DomainClockAdvancement, DomainClockAuthority,
@@ -25,9 +26,26 @@ use nervix_primitives::{
 use tracing::{debug, warn};
 
 use super::{background_task::BackgroundTask, session_service::SessionServiceImpl};
-use crate::{domain_clock_authority::DomainClockAuthorityCandidates, task_shutdown::JoinShutdown};
+use crate::{
+    domain_clock_authority::DomainClockAuthorityCandidates, runtime::CommittedClockInstallation,
+    task_shutdown::JoinShutdown,
+};
 
 const DOMAIN_CLOCK_PROGRESS_RETRY_BACKOFF: Duration = Duration::from_millis(200);
+/// How long a leader waits before proposing again an authority reassignment that did not commit.
+/// A newly elected leader refuses writes until its quorum acknowledges it, so the first proposal
+/// it makes on taking over can fail while the next one commits.
+const DOMAIN_CLOCK_AUTHORITY_RETRY_INTERVAL: Duration = Duration::from_millis(200);
+
+/// Whether the leader's latest reconciliation pass committed every authority its selection
+/// requires.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DomainClockAuthorityReconciliation {
+    /// Every committed authority matches the selection, or this node does not lead.
+    Settled,
+    /// A reassignment did not commit, so the leader proposes again after the retry interval.
+    Owed,
+}
 
 impl crate::runtime::Runtime {
     fn report_domain_clock_failure(
@@ -169,22 +187,23 @@ impl DomainClockProgressDeliveries {
         &mut self,
         service: &SessionServiceImpl,
         spec: &DomainClockTaskSpec,
-        minimum_runtime_revision: u64,
+        clock_revision: u64,
         latest: Option<&DomainClockProgress>,
         shutdown: &CancellationToken,
         domain_id: &DomainName,
     ) {
         let gossip = service.inner.cluster.availability_state().await;
-        // Preparation installs the peer's mapping and authority fence before graph activation
-        // waits for the rest of the cluster. Each peer can receive progress independently.
-        let prepared = service
+        // A peer advertises the revision once its domain clocks, authority fences included, match
+        // it. It installs a reassigned fence ahead of its graph installation, so a peer whose graph
+        // installation waits on a node that left still receives progress.
+        let installed = service
             .inner
             .cluster
-            .nodes_prepared_for_runtime_revision(minimum_runtime_revision)
+            .nodes_with_domain_clocks_installed(clock_revision)
             .await;
         let mut desired = gossip
             .live_identities()
-            .intersection(&prepared)
+            .intersection(&installed)
             .cloned()
             .collect::<BTreeSet<_>>();
         desired.remove(&spec.authority);
@@ -304,10 +323,10 @@ impl DomainClockRetirements {
 pub(in crate::application) async fn reconcile_domain_clock_tasks(
     service: &SessionServiceImpl,
     shutdown: &CancellationToken,
+    state: &ConsensusRuntimeState,
     tasks: &mut HashMap<DomainName, DomainClockTask>,
     retirements: &mut DomainClockRetirements,
 ) {
-    let state = service.inner.consensus.current_runtime_state().await;
     let local_identity = service.inner.cluster.local_node_identity().await;
 
     let mut desired = HashMap::<DomainName, DomainClockTaskSpec>::new();
@@ -373,13 +392,13 @@ pub(in crate::application) async fn reconcile_domain_clock_tasks(
         let task_domain_id = domain_id.clone();
         let task_token = token.clone();
         let task_spec = spec.clone();
-        let minimum_runtime_revision = state.revision;
+        let clock_revision = state.revision;
         let handle = nervix_primitives::task::spawn(async move {
             run_domain_clock(
                 task_service,
                 task_domain_id,
                 task_spec,
-                minimum_runtime_revision,
+                clock_revision,
                 task_token,
             )
             .await;
@@ -404,6 +423,7 @@ pub(in crate::application) async fn run_domain_clock_authority_reconciliation(
     let mut topology_changes = service.inner.consensus.subscribe_topology();
     let mut domain_changes = service.inner.consensus.subscribe_domains();
     let mut cluster_state = service.inner.cluster.subscribe_state_changes().await;
+    let mut reconciliation = DomainClockAuthorityReconciliation::Settled;
 
     loop {
         nervix_primitives::task::consume_budget().await;
@@ -412,11 +432,19 @@ pub(in crate::application) async fn run_domain_clock_authority_reconciliation(
         // ready and causes a second predicate evaluation instead of losing that transition.
         let cluster_change = cluster_state.wait_for_change_or_next_unavailability();
         tokio::pin!(cluster_change);
-        if service.inner.consensus.current_leader().await.as_ref()
-            == Some(service.inner.consensus.local_node_id())
-        {
-            service.reconcile_domain_clock_authorities().await;
+        let leads = service.inner.consensus.current_leader().await.as_ref()
+            == Some(service.inner.consensus.local_node_id());
+        if leads {
+            reconciliation = service
+                .reconcile_domain_clock_authorities(reconciliation)
+                .await;
+        } else {
+            reconciliation = DomainClockAuthorityReconciliation::Settled;
         }
+        // A refused proposal changes nothing this loop observes, so a reassignment that did not
+        // commit is proposed again after the retry interval rather than at the next change.
+        let retry = sleep(DOMAIN_CLOCK_AUTHORITY_RETRY_INTERVAL);
+        tokio::pin!(retry);
         nervix_primitives::select! {
             _ = shutdown.cancelled() => break,
             open = topology_changes.changed() => {
@@ -428,6 +456,7 @@ pub(in crate::application) async fn run_domain_clock_authority_reconciliation(
                 "the consensus store retains its domain sender for the server lifetime",
             ),
             _ = &mut cluster_change => {}
+            _ = &mut retry, if reconciliation == DomainClockAuthorityReconciliation::Owed => {}
         }
     }
 }
@@ -436,7 +465,7 @@ async fn run_domain_clock(
     service: SessionServiceImpl,
     domain_id: DomainName,
     spec: DomainClockTaskSpec,
-    minimum_runtime_revision: u64,
+    clock_revision: u64,
     shutdown: CancellationToken,
 ) {
     let mut cluster_state = service.inner.cluster.subscribe_state_changes().await;
@@ -459,7 +488,7 @@ async fn run_domain_clock(
             .reconcile(
                 &service,
                 &spec,
-                minimum_runtime_revision,
+                clock_revision,
                 latest_progress.as_ref(),
                 &shutdown,
                 &domain_id,
@@ -684,9 +713,32 @@ impl SessionServiceImpl {
             .owner_for(domain_id)
     }
 
-    async fn reconcile_domain_clock_authorities(&self) {
+    /// Installs the authority fences of the committed `state` ahead of graph installation, then
+    /// advertises its runtime revision once every domain clock on this node matches it.
+    pub(in crate::application) async fn install_committed_domain_clocks(
+        &self,
+        state: &ConsensusRuntimeState,
+    ) {
+        let installation = self.inner.runtime.install_committed_clock_authorities(
+            state.revision,
+            &state.domains,
+            &state.domain_clock_authorities,
+        );
+        if let CommittedClockInstallation::Complete = installation {
+            self.inner
+                .cluster
+                .set_local_domain_clock_revision_installed(state.revision)
+                .await;
+        }
+    }
+
+    async fn reconcile_domain_clock_authorities(
+        &self,
+        previous: DomainClockAuthorityReconciliation,
+    ) -> DomainClockAuthorityReconciliation {
         let state = self.inner.consensus.current_runtime_state().await;
         let candidates = self.domain_clock_authority_candidates().await;
+        let mut reconciliation = DomainClockAuthorityReconciliation::Settled;
         for (domain_id, domain) in state.domains {
             nervix_primitives::task::consume_budget().await;
             if matches!(domain.config.pace, DomainPace::Unpaced)
@@ -703,24 +755,58 @@ impl SessionServiceImpl {
             if expected.owner() == owner.as_ref() {
                 continue;
             }
-            if let Err(error) = self
-                .inner
-                .consensus
-                .reconcile_domain_clock_authority(
+            let proposal = self
+                .propose_domain_clock_authority(
                     domain_id.clone(),
                     domain.start_version,
                     expected,
                     owner,
                 )
-                .await
-            {
-                warn!(
+                .await;
+            let Err(error) = proposal else {
+                continue;
+            };
+            reconciliation = DomainClockAuthorityReconciliation::Owed;
+            // The retry recurs every interval while the failure lasts, so only the first failure
+            // after a settled pass warns.
+            match previous {
+                DomainClockAuthorityReconciliation::Settled => warn!(
                     domain = domain_id.as_str(),
                     error = %format_args!("{error:#}"),
-                    "failed to reconcile committed domain-clock authority"
-                );
+                    "failed to reconcile committed domain-clock authority; retrying"
+                ),
+                DomainClockAuthorityReconciliation::Owed => debug!(
+                    domain = domain_id.as_str(),
+                    error = %format_args!("{error:#}"),
+                    "domain-clock authority reconciliation is still failing; retrying"
+                ),
             }
         }
+        reconciliation
+    }
+
+    /// Proposes one compare-and-set reassignment of a domain's committed clock authority.
+    async fn propose_domain_clock_authority(
+        &self,
+        domain_id: DomainName,
+        expected_start_version: u64,
+        expected: DomainClockAuthority,
+        owner: Option<ClusterNodeIdentity>,
+    ) -> error_stack::Result<(), ConsensusError> {
+        #[cfg(feature = "testing")]
+        if self
+            .inner
+            .runtime
+            .take_domain_clock_authority_proposal_rejection(self.inner.consensus.local_node_id())
+        {
+            return Err(error_stack::Report::new(ConsensusError::LeadershipLost {
+                leader_id: None,
+            }));
+        }
+        self.inner
+            .consensus
+            .reconcile_domain_clock_authority(domain_id, expected_start_version, expected, owner)
+            .await
     }
 
     pub(in crate::application) fn handle_domain_clock_progress(
@@ -786,5 +872,163 @@ mod tests {
             );
             assert_eq!(logs.next(message).fields["error"], chain);
         }
+    }
+
+    /// The committed authority of `domain` once `owner` holds it at a revision newer than `after`,
+    /// or nothing if that does not happen within ten seconds.
+    #[cfg(feature = "testing")]
+    async fn committed_owner_after(
+        service: &SessionServiceImpl,
+        domain: &DomainName,
+        owner: &ClusterNodeIdentity,
+        after: nervix_models::DomainClockAuthorityRevision,
+        domain_changes: &mut watch::Receiver<u64>,
+    ) -> Option<DomainClockAuthority> {
+        let committed = nervix_primitives::time::timeout(Duration::from_secs(10), async {
+            loop {
+                nervix_primitives::task::consume_budget().await;
+                let state = service.inner.consensus.current_runtime_state().await;
+                if let Some(authority) = state.domain_clock_authorities.get(domain)
+                    && authority.owner() == Some(owner)
+                    && authority.revision().get() > after.get()
+                {
+                    return authority.clone();
+                }
+                domain_changes
+                    .changed()
+                    .await
+                    .assured("the consensus store retains its domain sender for its lifetime");
+            }
+        })
+        .await;
+        committed.ok()
+    }
+
+    /// A leader whose proposal Raft refuses, as it refuses a write before a newly elected leader's
+    /// quorum acknowledges it, proposes again without waiting for any other cluster change.
+    #[cfg(feature = "testing")]
+    #[nervix_primitives::test]
+    async fn leader_retries_an_authority_reassignment_its_leadership_refused() {
+        use nervix_models::{ClusterNodeIncarnation, DomainStartPoint, DomainTimeRate};
+        use nervix_recovery::Discarded as _;
+
+        use crate::application::test_fixtures::{
+            TestService, build_test_service_with_fault_injection,
+        };
+
+        let fault_injection = crate::FaultInjection::default();
+        let TestService {
+            service,
+            registry,
+            path,
+        } = build_test_service_with_fault_injection(true, fault_injection.clone()).await;
+        let domain = DomainName::parse("default").assured("the test domain name is valid");
+        let departed = ClusterNodeIdentity::new(
+            ClusterNodeName::parse("departed").assured("the fixture node name is valid"),
+            ClusterNodeIncarnation::new(1),
+        );
+        let origin = Timestamp::from_unix_nanos(0);
+        service
+            .inner
+            .consensus
+            .start_domain(
+                domain.clone(),
+                DomainStartPoint::At {
+                    timestamp: origin,
+                    time_rate: DomainTimeRate::ONE,
+                },
+                Some(DomainClockState::new(
+                    current_timestamp(),
+                    origin,
+                    DomainTimeRate::ONE,
+                )),
+                Some(departed.clone()),
+                None,
+            )
+            .await
+            .assured("the single-node leader commits the start it proposes");
+        // Gossip publishes the local node once after it starts. Waiting for that publication leaves
+        // no cluster change after the refusal, so only a retry can reassign the authority.
+        let mut live_nodes = service.inner.cluster.subscribe_live_node_states().await;
+        nervix_primitives::time::timeout(Duration::from_secs(10), async {
+            loop {
+                nervix_primitives::task::consume_budget().await;
+                if !live_nodes.borrow_and_update().is_empty() {
+                    return;
+                }
+                live_nodes
+                    .changed()
+                    .await
+                    .assured("the cluster handle retains its gossip sender for its lifetime");
+            }
+        })
+        .await
+        .assured("gossip publishes the local node within its first rounds");
+        let local = service.inner.cluster.local_node_identity().await;
+        let mut domain_changes = service.inner.consensus.subscribe_domains();
+        let shutdown = CancellationToken::new();
+        let reconciliation = nervix_primitives::task::spawn(
+            run_domain_clock_authority_reconciliation(service.clone(), shutdown.clone()),
+        );
+        // The running leader first replaces the departed authority with itself. Its first passes
+        // also consume the changes it observed when it subscribed.
+        let settled = committed_owner_after(
+            &service,
+            &domain,
+            &local,
+            nervix_models::DomainClockAuthorityRevision::INITIAL,
+            &mut domain_changes,
+        )
+        .await
+        .assured("the running leader replaces the departed authority with itself");
+
+        // A reassignment back to the departed node is the last change the loop observes. Raft
+        // then refuses the leader's next proposal, so only a retry can restore its authority.
+        fault_injection.reject_next_domain_clock_authority_proposal_on(local.node_id().clone());
+        let state = service.inner.consensus.current_runtime_state().await;
+        let start_version = state
+            .domains
+            .get(&domain)
+            .assured("the started domain remains committed")
+            .start_version;
+        service
+            .inner
+            .consensus
+            .reconcile_domain_clock_authority(
+                domain.clone(),
+                start_version,
+                settled.clone(),
+                Some(departed.clone()),
+            )
+            .await
+            .assured("the single-node leader commits the reassignment it proposes");
+        let departed_revision = settled
+            .revision()
+            .checked_next()
+            .assured("the fixture authority revision is far below its bound");
+        let restored = committed_owner_after(
+            &service,
+            &domain,
+            &local,
+            departed_revision,
+            &mut domain_changes,
+        )
+        .await;
+        shutdown.cancel();
+        reconciliation
+            .await
+            .assured("the reconciliation ends without panicking once its shutdown is cancelled");
+
+        assert!(
+            restored.is_some(),
+            "the leader never reassigned the authority after Raft refused its proposal"
+        );
+        assert!(
+            !fault_injection.domain_clock_authority_proposal_rejection_is_armed(local.node_id()),
+            "the refusal was never consumed, so the test did not exercise a refused proposal"
+        );
+        drop(service);
+        drop(registry);
+        std::fs::remove_dir_all(path).discarded("the throwaway test database may already be gone");
     }
 }

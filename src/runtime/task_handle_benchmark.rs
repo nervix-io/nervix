@@ -111,7 +111,7 @@ impl TaskHandleBenchmark {
                 nervix_models::ClusterNodeIncarnation::new(1),
             ),
         );
-        runtime.sync_committed_domains(&domains, &BTreeMap::from([(domain.clone(), authority)]));
+        runtime.sync_committed_domains(1, &domains, &BTreeMap::from([(domain.clone(), authority)]));
         let entity = DomainNodeRef::node_in(domain.clone(), ModelKind::Ingestor, ingestor.clone());
         let placement = RuntimeStatePlacement {
             domain: domain.clone(),
