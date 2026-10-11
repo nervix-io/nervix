@@ -7,6 +7,10 @@
 
 #![cfg_attr(
     nervix_lint,
+    nervix::layer(engine, reason = "owns the infrastructure boundary declared above")
+)]
+#![cfg_attr(
+    nervix_lint,
     nervix::context(
         lifecycle,
         reason = "generation storage runs in admitted checkpoint and restore storage jobs"

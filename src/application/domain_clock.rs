@@ -7,6 +7,14 @@
 //! - **Depends on.** Consensus for the recorded authority and typed interconnect progress requests.
 //! - **Must not know.** What a domain does with the time it is given.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(
+        control_plane,
+        reason = "owns the control plane boundary declared above"
+    )
+)]
+
 use std::{collections::BTreeSet, time::Duration};
 
 use ahash::{HashMap, HashMapExt};

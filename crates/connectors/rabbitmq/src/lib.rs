@@ -28,6 +28,18 @@
 //! The sink does not remember the limit a refusal named, and checks no later message against it:
 //! the broker's setting may change, and a message is rejected only on the broker's own answer.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(
+        engine,
+        reason = "owns the engines and infrastructure boundary declared above"
+    )
+)]
+#![cfg_attr(
+    nervix_lint,
+    nervix::input(plans, reason = "the host supplies a validated connector plan")
+)]
+
 mod channel_closure;
 mod connection;
 mod source;
@@ -699,6 +711,10 @@ impl RecordSink for RabbitMqSink {
 }
 
 #[cfg(test)]
+#[cfg_attr(
+    nervix_lint,
+    nervix::layer(harness, reason = "test module remains outside product execution")
+)]
 mod tests {
     use lapin::{ChannelState, ErrorKind, message::Delivery};
     use meticulous::ResultExt as _;

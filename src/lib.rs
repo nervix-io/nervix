@@ -21,6 +21,14 @@
 //! its own crate under `crates/connectors/` behind the `nervix-connector` contract, leaving this
 //! crate to compose them. Until then the module headers are where the boundary is written down.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(
+        control_plane,
+        reason = "server composition defaults to coordination; modules declare their inner or \
+                  edge boundary"
+    )
+)]
 #![recursion_limit = "256"]
 
 #[cfg(all(feature = "testing", not(debug_assertions)))]

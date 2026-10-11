@@ -8,6 +8,11 @@
 //! - **Must not know.** Where a snapshot is stored, how replicas synchronize it, or which operation
 //!   publishes a transition.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(vocabulary, reason = "owns the vocabulary boundary declared above")
+)]
+
 use std::{collections::BTreeMap, fmt, fmt::Write as _, num::NonZeroU64};
 
 use meticulous::{OptionExt as _, ResultExt as _};

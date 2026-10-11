@@ -6,6 +6,14 @@
 //! - **Depends on.** Archive-owned records, the runtime snapshot codec and bounded executor.
 //! - **Must not know.** Database keys, placement ownership or consensus activation.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(
+        control_plane,
+        reason = "owns the control plane boundary declared above"
+    )
+)]
+
 use ahash::HashSetExt as _;
 use error_stack::{Report, ResultExt as _};
 use meticulous::{OptionExt as _, ResultExt as _};

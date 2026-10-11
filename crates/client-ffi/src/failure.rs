@@ -13,6 +13,11 @@
 //! behind it, becomes the message a host displays, and its classification becomes the kind a host
 //! branches on.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(edge, reason = "owns the edges boundary declared above")
+)]
+
 use error_stack::Report;
 use meticulous::OptionExt as _;
 use nervix_client_core::{

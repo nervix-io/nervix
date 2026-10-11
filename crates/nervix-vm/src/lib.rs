@@ -9,6 +9,14 @@
 //! - **Must not know.** Relays, branches, connectors, schedules or the registry. It runs one
 //!   program against the bindings it was handed.
 //!
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(
+        engine,
+        reason = "owns the engines and infrastructure boundary declared above"
+    )
+)]
+
 /// Expands a consumer over the ordinary scalar types stored in typed VM registers.
 ///
 /// Datetime and generic arrays have distinct Arrow type and ownership rules, so their handling
@@ -116,6 +124,10 @@ pub use semantics::{
 };
 
 #[cfg(test)]
+#[cfg_attr(
+    nervix_lint,
+    nervix::layer(harness, reason = "test module remains outside product execution")
+)]
 mod test_support {
     use crate::{
         SemanticScopePolicy, lower_route_construction,

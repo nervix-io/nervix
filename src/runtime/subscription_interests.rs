@@ -5,6 +5,11 @@
 //! - **Depends on.** Vocabulary identities and ordinary collections.
 //! - **Must not know.** Gossip drivers, cluster coordination, NSPL or session framing.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(data_plane, reason = "owns the data plane boundary declared above")
+)]
+
 use std::collections::BTreeMap;
 
 use nervix_models::{ClusterNodeIdentity, ClusterNodeIncarnation, ClusterNodeName};

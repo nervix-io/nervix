@@ -1,11 +1,19 @@
 //! A session's staged configuration, from the first queued statement to the replicated commit.
 //!
-//! Layer: control plane.
+//! Layer: edges.
 //!
 //! - **Owns.** The transaction lifecycle, the binding a session holds, statement preflight, the
 //!   replicated commit and the quiescence it recovers from.
 //! - **Depends on.** Consensus for the replicated transaction and the registry for mutation plans.
 //! - **Must not know.** How the models a commit applies are executed.
+
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(
+        edge,
+        reason = "session transaction adapter dispatches parsed statements to consensus"
+    )
+)]
 
 use std::{
     collections::{BTreeMap, BTreeSet},

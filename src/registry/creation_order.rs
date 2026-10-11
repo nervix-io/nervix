@@ -16,6 +16,11 @@
 //! the one reference without an edge, so every kind that can hold an expression is ranked after the
 //! hash maps, and the rank breaks every remaining tie before the name does.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(decisions, reason = "owns the decisions boundary declared above")
+)]
+
 use std::collections::BTreeSet;
 
 use ahash::{HashMap, HashMapExt as _};

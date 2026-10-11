@@ -7,6 +7,14 @@
 //!   and vocabulary identities.
 //! - **Must not know.** The runtime's stored key encoding or how the archive reaches a client.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(
+        control_plane,
+        reason = "owns the control plane boundary declared above"
+    )
+)]
+
 use error_stack::ResultExt as _;
 use nervix_backup::{ArchiveRecord, SectionContent, SectionPath, StateField, WasmStateDescriptor};
 use nervix_execution::MemoryClass;

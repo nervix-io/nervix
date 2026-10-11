@@ -12,6 +12,11 @@
 //! The report goes to standard output and progress to standard error, only when standard error is
 //! a terminal. Every restore that did not complete ends the process with a nonzero status.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(edge, reason = "owns the edges boundary declared above")
+)]
+
 use std::io::{IsTerminal as _, Write as _};
 
 use error_stack::{Report as StackReport, ResultExt as _};
@@ -398,6 +403,10 @@ fn report_json(restore: &Restore, outcome: &CommandOutcome, report: &RestoreRepo
 }
 
 #[cfg(test)]
+#[cfg_attr(
+    nervix_lint,
+    nervix::layer(harness, reason = "test module remains outside product execution")
+)]
 mod tests {
     use meticulous::OptionExt as _;
 

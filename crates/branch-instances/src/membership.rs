@@ -9,6 +9,11 @@
 //! - **Must not know.** What a branch instance holds, who observes the membership, relays,
 //!   payloads, or NSPL.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(data_plane, reason = "owns the data plane boundary declared above")
+)]
+
 use std::{
     fmt,
     hash::Hash,

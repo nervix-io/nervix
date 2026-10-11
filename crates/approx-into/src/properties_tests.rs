@@ -7,6 +7,11 @@
 //! - **Depends on.** The conversions of this crate and the standard library's float bits.
 //! - **Must not know.** Anything in Nervix, as the crate itself does not.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(harness, reason = "owns the test harness boundary declared above")
+)]
+
 use meticulous::ResultExt as _;
 
 use crate::{ApproxInto as _, CheckedApproxInto as _};

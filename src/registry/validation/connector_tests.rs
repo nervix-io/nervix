@@ -7,6 +7,11 @@
 //! - **Depends on.** The connector validation and the registry test fixtures.
 //! - **Must not know.** How a connector is instantiated or driven.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(harness, reason = "owns the test harness boundary declared above")
+)]
+
 use std::fs;
 
 use nervix_models::{

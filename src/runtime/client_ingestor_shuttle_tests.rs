@@ -8,6 +8,11 @@
 //!   roots and their trackers, and the model harness's Shuttle runner.
 //! - **Must not know.** Sessions, the interconnect, or the graph behind the admission worker.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(harness, reason = "owns the test harness boundary declared above")
+)]
+
 use std::{
     collections::{BTreeMap, BTreeSet},
     num::{NonZeroU32, NonZeroU64, NonZeroUsize},

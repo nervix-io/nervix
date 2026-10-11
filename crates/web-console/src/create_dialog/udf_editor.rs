@@ -7,6 +7,11 @@
 //! - **Depends on.** Browser UDF and shared schema type drafts and model-owned type variants.
 //! - **Must not know.** Roto compilation, test execution, or registry validation.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(edge, reason = "owns the edges boundary declared above")
+)]
+
 use leptos::prelude::*;
 use nervix_models::{ParseAsType, UdfLanguage};
 

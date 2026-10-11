@@ -9,6 +9,14 @@
 //! - **Must not know.** Which listeners, control-plane services, or runtime tasks observe each
 //!   lifecycle signal.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(
+        control_plane,
+        reason = "owns the control plane boundary declared above"
+    )
+)]
+
 use std::time::Duration;
 
 use meticulous::{OptionExt as _, ResultExt as _};

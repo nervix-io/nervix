@@ -34,6 +34,13 @@ through their sessions; it has no connector crate, because the session protocol 
 and its host is the client ingestor endpoint described under
 [Integration-specific boundaries](#integration-specific-boundaries).
 
+The contract and integration engines declare `nervix::input(plans, reason = "...")` alongside their
+source-owned `nervix::layer(engine, ...)` contracts. Resolved configuration Model types, constructors
+and matches are rejected in their interfaces and bodies even though other infrastructure engines
+may own persisted Models. Module contracts travel with source moves. The compiler and independent
+language import/dependency checks run through `just ratchet`; these classifications introduce no
+runtime policy or connector lifecycle change.
+
 The contract and every integration crate take their execution-sensitive primitives from
 `nervix-primitives`: synchronization, tasks, the timers and monotonic instants their deadlines and
 backoff are measured with, and every socket a connector opens itself. A modeled build therefore

@@ -9,6 +9,11 @@
 //! - **Depends on.** The datetime kernels, their zones, and jiff as the reference calendar.
 //! - **Must not know.** Registers, programs, or how a failed lane is recorded as a row error.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(harness, reason = "owns the test harness boundary declared above")
+)]
+
 use std::str::FromStr as _;
 
 use arrow_array::{Array, Int64Array, TimestampNanosecondArray, UInt64Array};

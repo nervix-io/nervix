@@ -18,6 +18,14 @@
 //! output instead, because their container is written, or transformed, as one value. These values
 //! exist only while one buffered batch is being encoded; the retained records stay Arrow rows.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(
+        engine,
+        reason = "owns the engines and infrastructure boundary declared above"
+    )
+)]
+
 use std::{
     io::{self, Write as _},
     num::NonZeroUsize,

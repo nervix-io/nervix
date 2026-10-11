@@ -8,6 +8,13 @@
 
 #![cfg_attr(
     nervix_lint,
+    nervix::layer(
+        control_plane,
+        reason = "owns the control plane boundary declared above"
+    )
+)]
+#![cfg_attr(
+    nervix_lint,
     nervix::context(
         lifecycle,
         reason = "stopped-domain restore storage is admitted lifecycle work"

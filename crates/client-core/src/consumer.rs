@@ -12,6 +12,11 @@
 //! attachment takes it over instead of asking for another batch, so a cancelled wait never strands
 //! an assigned attempt until its ACK timeout.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(edge, reason = "owns the edges boundary declared above")
+)]
+
 use std::{
     collections::{BTreeMap, VecDeque},
     time::Duration,

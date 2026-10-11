@@ -8,6 +8,14 @@
 //! - **Depends on.** Arrow arrays and the Arrow `Datum` contract.
 //! - **Must not know.** Registers, instructions, programs, or which kernel reads an operand.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(
+        engine,
+        reason = "owns the engines and infrastructure boundary declared above"
+    )
+)]
+
 use std::iter;
 
 use arrow_array::{

@@ -10,6 +10,14 @@
 //! Only entries a durable snapshot already covers are ever purged, so a failed or incomplete
 //! snapshot build leaves every entry the node still needs in place.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(
+        engine,
+        reason = "owns the engines and infrastructure boundary declared above"
+    )
+)]
+
 use std::time::Duration;
 
 use nervix_primitives::time::{MissedTickBehavior, interval};

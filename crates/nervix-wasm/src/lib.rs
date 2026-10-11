@@ -11,6 +11,14 @@
 //! - **Must not know.** NSPL, the registry, the execution graph, or where a guest's output is
 //!   routed. It calls a guest and returns what the guest produced.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(
+        engine,
+        reason = "owns the engines and infrastructure boundary declared above"
+    )
+)]
+
 use std::{
     convert::Infallible,
     num::NonZeroU64,

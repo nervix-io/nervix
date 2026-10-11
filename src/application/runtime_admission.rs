@@ -7,6 +7,14 @@
 //! - **Depends on.** Consensus observation, Tokio synchronization, and process shutdown.
 //! - **Must not know.** Runtime graph internals, connector implementations, or scheduling policy.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(
+        control_plane,
+        reason = "owns the control plane boundary declared above"
+    )
+)]
+
 use std::time::Duration;
 
 use error_stack::ResultExt as _;

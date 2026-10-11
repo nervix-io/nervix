@@ -8,6 +8,11 @@
 //!   the model harness's Shuttle runner.
 //! - **Must not know.** Guest execution, stable storage, or how a replica reaches the owner.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(harness, reason = "owns the test harness boundary declared above")
+)]
+
 // Unmodeled atomics are not Shuttle scheduling points, so each record below changes in the same
 // scheduling step as the operation it records.
 use nervix_model_harness::shuttle::check_interleavings;

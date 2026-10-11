@@ -15,6 +15,14 @@
 //! seals the section's exact length and digest. The record's serializer scratch, one resolver per
 //! entry, is charged to `restore_metadata` beside the checkpoint.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(
+        control_plane,
+        reason = "owns the control plane boundary declared above"
+    )
+)]
+
 use std::{cell::Cell, io::Write, mem::MaybeUninit};
 
 use arch_into::ArchInto as _;

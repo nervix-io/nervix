@@ -7,6 +7,11 @@
 //! - **Depends on.** The marker the crate root stores in product structs.
 //! - **Must not know.** The harness that replaces it in a test build.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(data_plane, reason = "owns the data plane boundary declared above")
+)]
+
 #[cfg(not(feature = "testing"))]
 use std::time::Duration;
 

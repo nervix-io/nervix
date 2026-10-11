@@ -8,6 +8,14 @@
 //! - **Must not know.** How a version was uploaded, replicated or referenced. Those are
 //!   control-plane use cases; this store installs bytes and reports what is installed.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(
+        engine,
+        reason = "owns the engines and infrastructure boundary declared above"
+    )
+)]
+
 use std::{
     borrow::Cow,
     collections::BTreeMap,

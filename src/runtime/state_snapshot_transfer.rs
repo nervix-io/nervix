@@ -13,6 +13,14 @@
 //! state nor encodes anything for it. Only a requester that needs bytes opens the bulk stream, and
 //! that stream carries no application framing beside the sealed container itself.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(
+        control_plane,
+        reason = "owns the control plane boundary declared above"
+    )
+)]
+
 use std::time::Duration;
 
 use nervix_interconnect::{

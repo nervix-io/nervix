@@ -17,6 +17,11 @@
 //! never checked again: its effects are in place, so the domain it created or the users it imported
 //! are the restore's own rather than a conflict.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(decisions, reason = "owns the decisions boundary declared above")
+)]
+
 use std::{
     collections::{BTreeMap, BTreeSet},
     num::NonZeroU64,
@@ -548,6 +553,10 @@ fn pin_model(
 }
 
 #[cfg(test)]
+#[cfg_attr(
+    nervix_lint,
+    nervix::layer(harness, reason = "test module remains outside product execution")
+)]
 mod tests {
     use meticulous::ResultExt as _;
     use nervix_backup::{

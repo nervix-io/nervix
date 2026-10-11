@@ -8,6 +8,11 @@
 //! - **Must not know.** How a transaction is inspected, planned, persisted, transported or
 //!   presented.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(vocabulary, reason = "owns the vocabulary boundary declared above")
+)]
+
 use error_stack::Report;
 use meticulous::OptionExt as _;
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};

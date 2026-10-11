@@ -16,6 +16,14 @@
 //!   over values, never learned by calling the parser, so the vocabulary's own properties can use
 //!   these generators without a language dependency.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(
+        harness,
+        reason = "bounded properties construct current semantic values"
+    )
+)]
+
 mod client;
 mod codec;
 mod control;

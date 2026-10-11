@@ -5,6 +5,13 @@
 
 #![cfg_attr(
     nervix_lint,
+    nervix::layer(
+        harness,
+        reason = "compiler calibration remains outside product execution"
+    )
+)]
+#![cfg_attr(
+    nervix_lint,
     nervix::context(
         lifecycle,
         reason = "compiler API calibration invokes these examples during installation"
@@ -21,7 +28,10 @@ pub use error_stack;
 pub use futures_core;
 use indexmap::IndexMap;
 pub use meticulous;
-pub use nervix_primitives::expect_lint;
+pub use nervix_primitives::{
+    expect_lint,
+    sync::{Arc as SharedValue, blocking::RwLock as StateLock},
+};
 pub use nervix_recovery;
 use nervix_recovery::Discarded as _;
 pub use thiserror;

@@ -10,6 +10,18 @@
 //!   resolver, typed client configuration entries, `error-stack`, Tokio, `rumqttc` and `url`.
 //! - **Must not know.** Runtime collectors, relays, branches, schedules, registry state, or NSPL.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::input(plans, reason = "connector host supplies validated plans")
+)]
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(
+        engine,
+        reason = "owns the engines and infrastructure boundary declared above"
+    )
+)]
+
 use std::{
     collections::VecDeque,
     num::{NonZeroU64, NonZeroUsize},
@@ -585,6 +597,10 @@ impl BrokerSourceConnector for MqttSource {
 }
 
 #[cfg(test)]
+#[cfg_attr(
+    nervix_lint,
+    nervix::layer(harness, reason = "test module remains outside product execution")
+)]
 mod tests {
     use meticulous::OptionExt as _;
     use nervix_dns::{DnsLookupError, DnsLookupFailure};

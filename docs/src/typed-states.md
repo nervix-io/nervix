@@ -24,6 +24,40 @@ what has already been established. Runtime code executes the plan; it does not r
 or infer a state from a display label. Shared identities live in the vocabulary so every layer
 uses the same meaning for a domain, branch, node, timestamp, or schema fingerprint.
 
+### Source-owned identity and installation contracts
+
+Gate these reviewable contracts with `cfg_attr(nervix_lint, ...)`:
+
+```rust,ignore
+#[cfg_attr(nervix_lint, nervix::identity(node, reason = "destination cluster member"))]
+destination: ClusterNodeName,
+
+#[cfg_attr(nervix_lint, nervix::state(installed, reason = "constructed before branch admission"))]
+branches: OnceLock<NamedBranches>,
+```
+
+`identity(node, ...)` marks shared vocabulary identity types, and declares an identity requirement
+on an exact field, parameter, type alias or function return. The compiler resolves aliases and
+normalizes types. References, arrays/slices, Option, Vec, Box and shared Arc wrappers carry their
+typed identity; Result checks its success type. A tuple or unrelated container containing a typed
+node does not make another string member an identity. Identity types must belong to the vocabulary.
+The current vocabulary includes cluster node names, process-incarnation identities, graph node
+references and domain node references. Ordinary labels and external pass-through strings carry no
+identity requirement merely because their identifier contains `node`.
+
+`state(installed, ...)` describes a field's installation lifetime and forbids a resolved RwLock
+anywhere in its normalized representation, including aliases and outer wrappers. Immutable
+construction, one-time initialization or an appropriate publication primitive preserves the owning
+lifetime. A field containing `RwLock<Option<name or shared handle>>` without a state contract emits
+`nervix::state_contract` for review. Its type cannot establish whether the value is installed once
+or replaced repeatedly. A genuinely replaceable field declares `state(mutable, ...)` with the
+replacement's actual owner and reason. The annotation proves neither a runtime lifetime nor a
+publication ordering; affected runtime corrections still need their owner tests and models.
+
+These are ordinary compiler diagnostics in the complete architecture gate, without numeric
+allowances or a filename-based identity policy. The [developer guide](./developing-nervix.md#compiler-architecture-gate)
+describes qualification and evidence.
+
 The representation depends on the question being asked:
 
 | Question | Representation | Boundary obligation |

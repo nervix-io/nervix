@@ -6,6 +6,11 @@
 //! - **Depends on.** Placement vocabulary, assignment capabilities and execution primitives.
 //! - **Must not know.** Brokers, graph scheduling, NSPL or transfer framing.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(data_plane, reason = "owns the data plane boundary declared above")
+)]
+
 use std::{collections::BTreeMap, num::NonZeroU64, time::Duration};
 
 use ahash::HashMap;
@@ -1174,6 +1179,10 @@ pub(in crate::runtime) fn assert_offset_payload_decodes_typed(payload: &[u8]) {
 }
 
 #[cfg(test)]
+#[cfg_attr(
+    nervix_lint,
+    nervix::layer(harness, reason = "test module remains outside product execution")
+)]
 mod tests {
     use ahash::HashMap;
     use nervix_models::{ClusterNodeName, DomainName, ModelKind, ModelName};

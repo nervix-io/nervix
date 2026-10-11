@@ -10,6 +10,11 @@
 //! - **Depends on.** The VM compiler, the runtime's conversion kernel and its entry points.
 //! - **Must not know.** How Arrow converts a value.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(harness, reason = "owns the test harness boundary declared above")
+)]
+
 use arrow_array::{
     BooleanArray, Float32Array, Float64Array, Int8Array, Int16Array, Int32Array, Int64Array,
     StringArray, TimestampNanosecondArray, UInt8Array, UInt64Array,

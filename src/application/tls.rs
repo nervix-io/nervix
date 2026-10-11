@@ -8,6 +8,11 @@
 //!   vhosts.
 //! - **Must not know.** What travels over a connection once it is established.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(edge, reason = "owns the edges boundary declared above")
+)]
+
 use std::{
     collections::BTreeMap,
     io,
@@ -530,6 +535,13 @@ struct HttpsListenerCertificatesInner {
     /// Also held by the application, which starts and shuts it down.
     cluster: Arc<ClusterHandle>,
     /// Read by the HTTPS listener for every connection it accepts.
+    #[cfg_attr(
+        nervix_lint,
+        nervix::state(
+            mutable,
+            reason = "serialized HTTPS revision installation replaces the handshake configuration"
+        )
+    )]
     server_config: RwLock<Option<StdArc<ServerConfig>>>,
     /// Serializes installations with the VHOSTs they replace.
     installation: AsyncMutex<ListenerInstallation>,

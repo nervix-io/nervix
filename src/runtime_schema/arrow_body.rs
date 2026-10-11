@@ -14,6 +14,14 @@
 //! once and shared: every destination and every retry sends the same allocation, charged once, and
 //! reserves its own outstanding-delivery bytes separately.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(
+        engine,
+        reason = "owns the engines and infrastructure boundary declared above"
+    )
+)]
+
 use std::num::NonZeroUsize;
 
 use arch_into::ArchInto as _;

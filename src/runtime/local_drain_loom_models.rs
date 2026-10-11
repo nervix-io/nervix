@@ -18,6 +18,11 @@
 //! `just test-loom` runs the models, and `just test-loom-qualification` shows that weakening the
 //! release or the acquire each model depends on makes it fail.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(harness, reason = "owns the test harness boundary declared above")
+)]
+
 use meticulous::ResultExt as _;
 use nervix_model_harness::{
     InvariantId,

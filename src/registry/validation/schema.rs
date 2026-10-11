@@ -7,6 +7,11 @@
 //! - **Depends on.** The schema Models and the VM's type system.
 //! - **Must not know.** Which model asked for the comparison.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(decisions, reason = "owns the decisions boundary declared above")
+)]
+
 use arrow_schema::{
     DataType as ArrowDataType, Field as ArrowField, Schema as ArrowSchema,
     TimeUnit as ArrowTimeUnit,

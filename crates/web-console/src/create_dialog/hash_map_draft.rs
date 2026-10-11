@@ -7,6 +7,11 @@
 //! - **Depends on.** Typed semantic names, the resource pin draft, and the current lookup Model.
 //! - **Must not know.** Resource loading, codec execution, or version resolution at application.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(edge, reason = "owns the edges boundary declared above")
+)]
+
 use error_stack::Report;
 use nervix_models::{
     CodecName, CreateLookup, FieldName, LookupName, ModelKind, NodeRef, RequestedResourceVersion,
@@ -126,6 +131,10 @@ pub(super) enum HashMapDraftError {
 }
 
 #[cfg(test)]
+#[cfg_attr(
+    nervix_lint,
+    nervix::layer(harness, reason = "test module remains outside product execution")
+)]
 mod tests {
     use meticulous::ResultExt as _;
     use nervix_models::{

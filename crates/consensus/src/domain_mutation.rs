@@ -5,6 +5,14 @@
 //! - **Depends on.** Vocabulary identities used by commands and transactions.
 //! - **Must not know.** Sessions, runtime activation, scheduling policy, or mutation execution.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(
+        engine,
+        reason = "owns the engines and infrastructure boundary declared above"
+    )
+)]
+
 use std::fmt;
 
 use nervix_models::{CommandExecutionReference, DomainName};

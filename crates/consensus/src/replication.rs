@@ -28,6 +28,14 @@
 //! belonging to a stream the leader has already torn down are released with the stream rather than
 //! staying queued behind it.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(
+        engine,
+        reason = "owns the engines and infrastructure boundary declared above"
+    )
+)]
+
 use std::{pin::pin, time::Duration};
 
 use arch_into::ArchInto as _;

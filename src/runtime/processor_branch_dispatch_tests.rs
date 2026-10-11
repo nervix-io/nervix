@@ -7,6 +7,11 @@
 //! - **Depends on.** The production processor dispatch path and the runtime's test fixtures.
 //! - **Must not know.** Production control-plane orchestration or external connector behavior.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(harness, reason = "owns the test harness boundary declared above")
+)]
+
 use nervix_models::{ModelKind, ModelName, NodeRef, ParseAsType, RelayName};
 use nervix_primitives::sync::mpsc;
 

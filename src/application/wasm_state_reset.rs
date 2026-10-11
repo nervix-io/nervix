@@ -8,6 +8,14 @@
 //!   that replaces branch-local guest instances.
 //! - **Must not know.** Guest memory layout, checkpoint bytes, relay queues, or NSPL syntax.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(
+        control_plane,
+        reason = "owns the control plane boundary declared above"
+    )
+)]
+
 use std::collections::BTreeSet;
 
 use error_stack::{Report, ResultExt as _};

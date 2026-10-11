@@ -23,6 +23,11 @@
 //! `just test-loom-qualification` shows that weakening the rebind's read of the admission count,
 //! or the release an operation makes when it finishes, makes them fail.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(harness, reason = "owns the test harness boundary declared above")
+)]
+
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_model_harness::{
     InvariantId,

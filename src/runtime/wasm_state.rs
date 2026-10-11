@@ -11,6 +11,11 @@
 //! - **Must not know.** How a checkpoint reaches stable storage or a replica, guest execution, or
 //!   which acknowledgements a completed checkpoint releases.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(data_plane, reason = "owns the data plane boundary declared above")
+)]
+
 use std::{collections::BTreeSet, num::NonZeroU64};
 
 use meticulous::{OptionExt as _, ResultExt as _};
@@ -537,6 +542,10 @@ impl ReplicatedWasmProcessorState {
 }
 
 #[cfg(test)]
+#[cfg_attr(
+    nervix_lint,
+    nervix::layer(harness, reason = "test module remains outside product execution")
+)]
 mod tests {
     use nervix_models::{
         DomainName, FieldName, ModelKind, ModelName, SchemaFingerprint, WasmStateGeneration,

@@ -13,6 +13,11 @@
 //! bytes and its mask is one word, bit zero naming its first byte, whatever the register width of
 //! the selected level.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(primitives, reason = "owns the primitives boundary declared above")
+)]
+
 use std::{marker::PhantomData, ops::RangeInclusive};
 
 use fearless_simd::{Level, dispatch, prelude::*, u8x16};

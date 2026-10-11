@@ -14,6 +14,11 @@
 //! - **Must not know.** Which connector writes a payload, how rows are encoded or packed, or how the
 //!   emitter task schedules its attempts.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(harness, reason = "owns the test harness boundary declared above")
+)]
+
 // Unmodeled atomics are not Shuttle scheduling points, so each record below changes in the same
 // scheduling step as the operation it records. The emitter's own counts are the production owner's
 // state, so they are the selected, modeled atomics.

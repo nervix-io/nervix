@@ -7,6 +7,11 @@
 //! - **Depends on.** The production request state and the interconnect Shuttle runner.
 //! - **Must not know.** Sockets, peers, or what a registered handler answers.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(harness, reason = "owns the test harness boundary declared above")
+)]
+
 use std::{collections::BTreeSet, marker::PhantomData, time::Duration};
 
 use meticulous::{OptionExt as _, ResultExt as _};

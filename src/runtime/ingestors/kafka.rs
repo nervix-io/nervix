@@ -9,6 +9,11 @@
 //! - **Must not know.** The Kafka driver, NSPL parsing, registry validation, or placement
 //!   computation.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(data_plane, reason = "owns the data plane boundary declared above")
+)]
+
 use async_trait::async_trait;
 use error_stack::{Report, ResultExt as _};
 use nervix_connector::{SourceAckPolicy, SourceConnector, SourcePlan};
@@ -357,6 +362,10 @@ impl KafkaIngestorStartPlan {
 }
 
 #[cfg(test)]
+#[cfg_attr(
+    nervix_lint,
+    nervix::layer(harness, reason = "test module remains outside product execution")
+)]
 mod tests {
     use nervix_primitives::time::timeout;
 

@@ -5,6 +5,11 @@
 //! - **Depends on.** Production archive validation, current wire records and synthetic values.
 //! - **Must not know.** Historical formats, private databases or runtime installation algorithms.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(harness, reason = "owns the test harness boundary declared above")
+)]
+
 use std::fmt::Debug;
 
 use error_stack::Report;

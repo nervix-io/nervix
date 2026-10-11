@@ -6,6 +6,11 @@
 //! - **Depends on.** The node's volatile emitter endpoint and the interconnect duplex contract.
 //! - **Must not know.** Session request frames, NSPL text, or graph processing.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(edge, reason = "owns the edges boundary declared above")
+)]
+
 use std::{num::NonZeroU64, time::Duration};
 
 use bytes::Bytes;

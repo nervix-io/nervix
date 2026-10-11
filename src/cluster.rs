@@ -11,6 +11,13 @@
 
 #![cfg_attr(
     nervix_lint,
+    nervix::layer(
+        engine,
+        reason = "owns the engines and infrastructure boundary declared above"
+    )
+)]
+#![cfg_attr(
+    nervix_lint,
     nervix::context(
         outside,
         reason = "gossip membership and management health coordinate topology outside record \
@@ -80,6 +87,10 @@ const GOSSIP_OUTGOING_QUEUE_CAPACITY: usize = 4;
 /// Leaves room for the typed request fields inside the 64-KiB management-event limit.
 const MAX_GOSSIP_MESSAGE_BYTES: usize = 60 * 1024;
 
+#[cfg_attr(
+    nervix_lint,
+    nervix::value(cluster_access, reason = "gossip membership and cluster observations")
+)]
 pub struct ClusterHandle {
     local_incarnation: nervix_models::ClusterNodeIncarnation,
     chitchat: StdArc<nervix_primitives::unmodeled::sync::Mutex<Chitchat>>,
@@ -804,6 +815,10 @@ impl ClusterStateWatcher {
 #[derive(Clone)]
 pub struct ClusterSettings {
     pub cluster_id: String,
+    #[cfg_attr(
+        nervix_lint,
+        nervix::identity(node, reason = "configured cluster member identity")
+    )]
     pub node_id: ClusterNodeName,
     pub grpc_listen_addr: SocketAddr,
     pub client_advertise_url: NodeServiceUrl,

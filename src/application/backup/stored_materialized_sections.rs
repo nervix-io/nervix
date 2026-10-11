@@ -5,6 +5,14 @@
 //! - **Depends on.** Typed checkpoint readers, current archive contracts and committed placements.
 //! - **Must not know.** Database keys, native framing, row decoding or runtime publication.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(
+        control_plane,
+        reason = "owns the control plane boundary declared above"
+    )
+)]
+
 use error_stack::{Report, ResultExt as _};
 use meticulous::ResultExt as _;
 use nervix_backup::{

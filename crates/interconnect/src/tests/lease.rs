@@ -7,6 +7,11 @@
 //!   counter the test binary installs.
 //! - **Must not know.** What an operation sends over the leased stream.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(harness, reason = "owns the test harness boundary declared above")
+)]
+
 use super::*;
 use crate::connection::StreamLease;
 

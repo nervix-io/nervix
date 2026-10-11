@@ -8,6 +8,14 @@
 //! - **Depends on.** Kernel operands and Arrow's integer arrays.
 //! - **Must not know.** Registers, programs, or what a builtin counts or positions with a value.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(
+        engine,
+        reason = "owns the engines and infrastructure boundary declared above"
+    )
+)]
+
 use std::num::NonZeroUsize;
 
 use arch_into::ArchInto as _;

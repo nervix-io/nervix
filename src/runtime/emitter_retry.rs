@@ -8,6 +8,11 @@
 //! - **Must not know.** What the emitter publishes, which connector it publishes through, or the
 //!   domain clock its flush cadence reads.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(data_plane, reason = "owns the data plane boundary declared above")
+)]
+
 use error_stack::ResultExt as _;
 use nervix_connector::{
     SinkAcknowledgements, SinkRetryDelay,
@@ -247,6 +252,10 @@ pub(super) fn emitter_retry_delay(
 }
 
 #[cfg(test)]
+#[cfg_attr(
+    nervix_lint,
+    nervix::layer(harness, reason = "test module remains outside product execution")
+)]
 mod tests {
     use nervix_connector::{ParsedRetryPolicy, SinkPublishError};
 

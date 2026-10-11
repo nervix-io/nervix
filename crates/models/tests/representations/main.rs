@@ -9,6 +9,11 @@
 //! - **Depends on.** The vocabulary and the generators of `nervix-arbitrary`.
 //! - **Must not know.** The language, persistence owners above the vocabulary, or runtime state.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(harness, reason = "owns the test harness boundary declared above")
+)]
+
 mod batch_limits;
 mod domain_clock;
 mod identities;

@@ -17,6 +17,11 @@
 //! does not retain it either, answers from the backup's durable outcome: the archive was already
 //! downloaded, or its node no longer holds it.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(edge, reason = "owns the edges boundary declared above")
+)]
+
 use std::pin::Pin;
 
 use error_stack::Report;

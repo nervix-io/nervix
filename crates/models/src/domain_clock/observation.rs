@@ -6,6 +6,11 @@
 //! - **Depends on.** Validated clock periods, skews, mappings and timestamps.
 //! - **Must not know.** How a node installs, publishes or delivers the clock, or any transport.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(vocabulary, reason = "owns the vocabulary boundary declared above")
+)]
+
 use std::fmt;
 
 use super::{DomainClockPeriod, DomainClockSkew, DomainClockState};

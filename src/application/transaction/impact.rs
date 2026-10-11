@@ -6,6 +6,14 @@
 //! - **Depends on.** The transaction impact vocabulary.
 //! - **Must not know.** Consensus persistence, runtime gate mechanics or presentation.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(
+        control_plane,
+        reason = "owns the control plane boundary declared above"
+    )
+)]
+
 use meticulous::OptionExt as _;
 use nervix_models::{
     ActualExecutionStepImpact, ActualQuiescence, ExecutionStepImpactReport, ImpactDiagnostic,

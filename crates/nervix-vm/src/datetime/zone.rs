@@ -14,6 +14,14 @@
 //! same local times wherever it runs. A zone is resolved once, when a call is lowered, and execution
 //! only reads the rules that resolution produced.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(
+        engine,
+        reason = "owns the engines and infrastructure boundary declared above"
+    )
+)]
+
 use std::{
     cmp::Ordering,
     fmt,

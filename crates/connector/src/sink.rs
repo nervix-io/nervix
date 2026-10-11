@@ -13,6 +13,14 @@
 //! - **Must not know.** Runtime batches, relays, branches, schedules, registry state, error-policy
 //!   implementations, or any connector driver.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(
+        engine,
+        reason = "owns the engines and infrastructure boundary declared above"
+    )
+)]
+
 use std::{num::NonZeroUsize, path::PathBuf, time::Duration};
 
 use arrow_array::RecordBatch;

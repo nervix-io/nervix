@@ -41,6 +41,14 @@
 //! charge ownership apply in every build mode, and this executor is the only caller of the CPU-job
 //! mechanism.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(
+        engine,
+        reason = "owns the engines and infrastructure boundary declared above"
+    )
+)]
+
 mod cancellation;
 mod executor;
 mod limits;

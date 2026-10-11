@@ -10,6 +10,14 @@
 //! - **Must not know.** NSPL syntax, routes, schemas or connectors. It never resolves a host,
 //!   fetches a URL or consults a public-suffix list.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(
+        engine,
+        reason = "owns the engines and infrastructure boundary declared above"
+    )
+)]
+
 use std::num::NonZeroUsize;
 
 use arrow_array::{

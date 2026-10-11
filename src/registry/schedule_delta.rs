@@ -7,6 +7,11 @@
 //! - **Depends on.** Scheduled vocabulary and model-change classification.
 //! - **Must not know.** Runtime tasks, control-plane coordination, persistence or presentation.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(decisions, reason = "owns the decisions boundary declared above")
+)]
+
 use nervix_models::{
     DomainSchedule, DynamicModelUpdate, ModelKind, NodeRef, QuiesceLevel, ScheduledNode,
     WasmStateResetPhase,

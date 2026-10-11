@@ -5,6 +5,14 @@
 //! - **Depends on.** The transport owner, vocabulary identities and primitive publications.
 //! - **Must not know.** Runtime graphs, scheduling or connector behavior.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(
+        engine,
+        reason = "owns the engines and infrastructure boundary declared above"
+    )
+)]
+
 use super::*;
 
 impl TransportState {

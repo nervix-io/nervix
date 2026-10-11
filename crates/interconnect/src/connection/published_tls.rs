@@ -7,6 +7,14 @@
 //! - **Depends on.** The TLS configuration bundle and the primitive boundary's publication.
 //! - **Must not know.** Connections, slots, certificate files, or how a replacement is detected.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(
+        engine,
+        reason = "owns the engines and infrastructure boundary declared above"
+    )
+)]
+
 use meticulous::OptionExt as _;
 use nervix_primitives::{publication::ArcSwap, sync::StdArc};
 

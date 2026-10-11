@@ -5,6 +5,14 @@
 //! - **Depends on.** Replicated transaction plan vocabulary and keyed consensus records.
 //! - **Must not know.** Planning, runtime execution, parsing or presentation.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(
+        engine,
+        reason = "owns the engines and infrastructure boundary declared above"
+    )
+)]
+
 use std::io;
 
 use error_stack::Report;

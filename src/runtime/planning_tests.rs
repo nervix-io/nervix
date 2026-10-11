@@ -1,8 +1,18 @@
 //! Direct tests for the data-plane processor plan materializer and binder.
 //!
+//! Layer: test harness outside the product layer order.
+//!
 //! Owns: planner fixtures and assertions for typed runtime plans.
 //! May depend on: the parent planning module and test-only model constructors.
 //! Must not know: live control-plane state or external connector implementations.
+
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(
+        harness,
+        reason = "tests typed processor plan construction and binding"
+    )
+)]
 
 use std::num::NonZeroU32;
 

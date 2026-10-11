@@ -9,4 +9,9 @@
 //!   layer for editor completion, and the vocabulary.
 //! - **Must not know.** The server's internals. Every value it shows arrived over the session API.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(edge, reason = "owns the edges boundary declared above")
+)]
+
 pub mod graph;

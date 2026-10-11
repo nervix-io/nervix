@@ -7,6 +7,11 @@
 //! - **Depends on.** The runtime ingest grouping implementation and its test fixtures.
 //! - **Must not know.** Production control-plane orchestration or external connector behavior.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(harness, reason = "owns the test harness boundary declared above")
+)]
+
 use std::time::Duration;
 
 use ahash::HashMap;

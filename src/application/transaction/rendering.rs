@@ -8,6 +8,11 @@
 //! - **Depends on.** The inspection envelope and the impact report vocabulary.
 //! - **Must not know.** How the report was read, planned or transported, or which session asked.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(edge, reason = "owns the edges boundary declared above")
+)]
+
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_models::{
     ActualExecutionStepImpact, ConcreteBranchCoverage, ExecutionStepImpactReport,

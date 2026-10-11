@@ -9,6 +9,11 @@
 //! - **Must not know.** Which sink or codec a policy is declared on, how a batch is packed, encoded
 //!   or measured, or how a connector publishes it.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(vocabulary, reason = "owns the vocabulary boundary declared above")
+)]
+
 use std::{
     fmt,
     num::{NonZeroU32, NonZeroU64},

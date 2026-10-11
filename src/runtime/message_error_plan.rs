@@ -6,6 +6,11 @@
 //! - **Depends on.** Typed route specs, the VM and installed runtime capabilities.
 //! - **Must not know.** Scheduled Models or how an error route was declared in NSPL.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(data_plane, reason = "owns the data plane boundary declared above")
+)]
+
 use error_stack::ResultExt as _;
 
 use super::{message_error::MessageErrorHandlingError, vm_compile::RuntimeVmCompileContext, *};
@@ -110,6 +115,10 @@ impl BoundMessageErrorRoutes {
 }
 
 #[cfg(test)]
+#[cfg_attr(
+    nervix_lint,
+    nervix::layer(harness, reason = "test module remains outside product execution")
+)]
 mod tests {
     use std::num::NonZeroUsize;
 

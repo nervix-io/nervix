@@ -6,6 +6,14 @@
 //! - **Depends on.** The vocabulary the subjects quote and the runtime state kinds they address.
 //! - **Must not know.** Which operation asked, or what the asking node does about the answer.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(
+        engine,
+        reason = "owns the engines and infrastructure boundary declared above"
+    )
+)]
+
 use std::fmt;
 
 use nervix_models::{ClusterNodeIdentity, DomainName, ModelKind, ModelName, NodeRef, RelayName};

@@ -7,6 +7,11 @@
 //! - **Depends on.** The vocabulary the variants quote.
 //! - **Must not know.** How a caller reports or recovers from a refusal.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(decisions, reason = "owns the decisions boundary declared above")
+)]
+
 use std::fmt;
 
 use error_stack::{Context, Report};

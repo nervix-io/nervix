@@ -7,6 +7,14 @@
 //! - **Depends on.** The registry's active graph, the resource store and the VM's type inference.
 //! - **Must not know.** How a validated model is scheduled or executed.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(
+        control_plane,
+        reason = "owns the control plane boundary declared above"
+    )
+)]
+
 use std::time::Duration;
 
 use ahash::{HashMap, HashSet};

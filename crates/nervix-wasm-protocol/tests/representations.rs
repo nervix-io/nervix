@@ -5,6 +5,11 @@
 //! - **Depends on.** The production protocol and its verified decoders.
 //! - **Must not know.** Guest execution, live acknowledgements or checkpoint publication.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(harness, reason = "owns the test harness boundary declared above")
+)]
+
 use flatbuffers::FlatBufferBuilder;
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_arbitrary::WasmValues;

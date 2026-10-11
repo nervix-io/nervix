@@ -19,6 +19,11 @@
 //! its complete download releases the server's copy. A delivery that fails after that keeps the
 //! staged archive, the only copy left, and reports it under the backup's execution reference.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(edge, reason = "owns the edges boundary declared above")
+)]
+
 use std::{
     fs::File,
     io::{self, BufReader, Read as _, Write},
@@ -1089,6 +1094,10 @@ fn resource_version_json(version: &DescribedResourceVersion) -> Value {
 }
 
 #[cfg(test)]
+#[cfg_attr(
+    nervix_lint,
+    nervix::layer(harness, reason = "test module remains outside product execution")
+)]
 mod tests {
     use std::os::fd::OwnedFd;
 

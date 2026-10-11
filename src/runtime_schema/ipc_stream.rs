@@ -27,6 +27,14 @@
 //! continuation marker. The end-of-stream marker ends the stream, unless the caller admits a
 //! stream whose writer closed it after a whole message instead, as the Arrow format allows.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(
+        engine,
+        reason = "owns the engines and infrastructure boundary declared above"
+    )
+)]
+
 use std::{io::Cursor, num::NonZeroUsize};
 
 use arrow_ipc::{

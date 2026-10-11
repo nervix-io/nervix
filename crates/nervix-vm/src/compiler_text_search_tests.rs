@@ -6,6 +6,11 @@
 //! - **Depends on.** The VM compiler and semantic NSPL expression parser.
 //! - **Must not know.** Runtime Arrow buffer layout.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(harness, reason = "owns the test harness boundary declared above")
+)]
+
 use arrow_schema::{DataType, Field, Schema};
 use nervix_primitives::sync::StdArc;
 

@@ -8,6 +8,18 @@
 //!   Tokio, the node resolver, and the AWS SQS SDK.
 //! - **Must not know.** Runtime collectors, relays, branches, schedules, registry state, or NSPL.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::input(plans, reason = "connector host supplies validated plans")
+)]
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(
+        engine,
+        reason = "owns the engines and infrastructure boundary declared above"
+    )
+)]
+
 use std::{borrow::Cow, fmt::Debug};
 
 use async_trait::async_trait;
@@ -344,6 +356,10 @@ impl BrokerSourceConnector for SqsSource {
 }
 
 #[cfg(test)]
+#[cfg_attr(
+    nervix_lint,
+    nervix::layer(harness, reason = "test module remains outside product execution")
+)]
 mod tests {
     use aws_sdk_sqs::{error::ConnectorError, types::error::QueueDoesNotExist};
 

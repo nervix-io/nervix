@@ -8,6 +8,11 @@
 //! - **Depends on.** The connector Models and the schema rules.
 //! - **Must not know.** How a connector is instantiated or driven.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(decisions, reason = "owns the decisions boundary declared above")
+)]
+
 use std::time::Duration;
 
 use ahash::{HashMap, HashMapExt, HashSet, HashSetExt};

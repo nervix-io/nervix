@@ -6,6 +6,11 @@
 //! - **Depends on.** Shared NSPL tokens and validated domain vocabulary models.
 //! - **Must not know.** Registry state, consensus, runtime clocks or execution tasks.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(language, reason = "owns the language boundary declared above")
+)]
+
 use chumsky::prelude::*;
 use meticulous::OptionExt as _;
 use nervix_models::{

@@ -7,6 +7,11 @@
 //! - **Depends on.** The argument definition and the stores it opens.
 //! - **Must not know.** What the configured node goes on to run.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(edge, reason = "owns the edges boundary declared above")
+)]
+
 use std::{
     net::SocketAddr,
     path::{Path, PathBuf},

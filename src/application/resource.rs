@@ -7,6 +7,14 @@
 //! - **Depends on.** The resource store for bytes and the interconnect to publish and fetch them.
 //! - **Must not know.** What a model does with the resource once it is installed.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(
+        control_plane,
+        reason = "owns the control plane boundary declared above"
+    )
+)]
+
 use std::{collections::BTreeMap, path::Path};
 
 use ahash::HashMap;
@@ -1193,6 +1201,10 @@ impl SessionServiceImpl {
 }
 
 #[cfg(test)]
+#[cfg_attr(
+    nervix_lint,
+    nervix::layer(harness, reason = "test module remains outside product execution")
+)]
 mod tests {
     use meticulous::{OptionExt as _, ResultExt as _};
     #[cfg(feature = "testing")]

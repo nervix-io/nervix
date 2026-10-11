@@ -5,6 +5,11 @@
 //! - **Depends on.** Production wire codecs and vocabulary test generators.
 //! - **Must not know.** Runtime Arrow arrays, service dispatch or live external systems.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(harness, reason = "owns the test harness boundary declared above")
+)]
+
 use nervix_models::{
     AckWindow, ClientAttachmentId, ClientConsumerLimits, ClientEndpointContract,
     ClientProducerDescription, ClientProducerGrant, ClientProducerPolicy, ClientSubmissionOutcome,

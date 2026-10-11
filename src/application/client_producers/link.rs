@@ -25,6 +25,11 @@
 //! `OwnerLost`, which leaves only the cleared batches of unknown outcome; the owning node detaches
 //! them, and admitted work continues in its graph.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(edge, reason = "owns the edges boundary declared above")
+)]
+
 use std::{collections::BTreeMap, num::NonZeroU64, time::Duration};
 
 use ahash::{HashMap, RandomState};

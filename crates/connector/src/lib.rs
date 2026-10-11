@@ -28,6 +28,18 @@
 //! connector reads a Model. Capabilities the registry validates live in the vocabulary, where
 //! validation reads them without naming a connector crate.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(
+        engine,
+        reason = "owns the engines and infrastructure boundary declared above"
+    )
+)]
+#![cfg_attr(
+    nervix_lint,
+    nervix::input(plans, reason = "the host supplies a validated connector plan")
+)]
+
 mod client_config;
 mod http_client;
 mod ingest_metadata;

@@ -6,6 +6,11 @@
 //! - **Depends on.** Self-contained model primitives.
 //! - **Must not know.** Parsing, planning, persistence, runtime buffers or coordination.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(vocabulary, reason = "owns the vocabulary boundary declared above")
+)]
+
 use std::num::NonZeroUsize;
 
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};

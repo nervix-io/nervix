@@ -8,6 +8,11 @@
 //!   vocabulary generators.
 //! - **Must not know.** Coordination policy, replication, or schedule publication.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(harness, reason = "owns the test harness boundary declared above")
+)]
+
 use nervix_arbitrary::{Arbitrary, Domain};
 
 use super::{key_properties::generated_placement, *};

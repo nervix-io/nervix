@@ -6,6 +6,18 @@
 //! - **Depends on.** Iceberg's storage contract, OpenDAL, and the node DNS resolver.
 //! - **Must not know.** Runtime tasks, branches, schedules, or registry state.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::input(plans, reason = "connector host supplies validated plans")
+)]
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(
+        engine,
+        reason = "owns the engines and infrastructure boundary declared above"
+    )
+)]
+
 use ahash::HashMap;
 use async_trait::async_trait;
 use bytes::Bytes;
@@ -540,6 +552,10 @@ fn azure_relative_path<'a>(path: &'a str, url: &Url) -> Result<&'a str> {
 }
 
 #[cfg(test)]
+#[cfg_attr(
+    nervix_lint,
+    nervix::layer(harness, reason = "test module remains outside product execution")
+)]
 mod tests {
     use std::time::Duration;
 

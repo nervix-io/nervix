@@ -7,6 +7,11 @@
 //! - **Depends on.** The bounded writer.
 //! - **Must not know.** Any encoder that writes through it.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(harness, reason = "owns the test harness boundary declared above")
+)]
+
 use std::{io::Write as _, num::NonZeroUsize};
 
 use meticulous::OptionExt as _;

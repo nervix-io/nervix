@@ -11,6 +11,11 @@
 //! The counts are Shuttle's atomics, so every read and adjustment is a scheduling point, and a
 //! check reaches a move between any two reads of the observation.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(harness, reason = "owns the test harness boundary declared above")
+)]
+
 use meticulous::ResultExt as _;
 use nervix_model_harness::shuttle::check_random_and_pct;
 use nervix_primitives::sync::Arc;

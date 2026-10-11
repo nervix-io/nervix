@@ -37,6 +37,14 @@
 //! computes, such as `sin` or `log2`, is an opaque call per lane that no loop vectorizes, so those
 //! kernels read validity a word at a time and compute valid lanes only.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(
+        engine,
+        reason = "owns the engines and infrastructure boundary declared above"
+    )
+)]
+
 use std::ops::{Add, Div, Mul, Neg, Rem, Sub};
 
 use arch_into::ArchInto as _;

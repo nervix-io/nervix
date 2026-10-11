@@ -13,6 +13,10 @@
 
 #![cfg_attr(
     nervix_lint,
+    nervix::layer(data_plane, reason = "owns the data plane boundary declared above")
+)]
+#![cfg_attr(
+    nervix_lint,
     nervix::context(
         lifecycle,
         reason = "sink task installation binds retained handles before executing its recurring \
@@ -1959,6 +1963,10 @@ impl EmitterBatchContext<'_> {
 }
 
 #[cfg(test)]
+#[cfg_attr(
+    nervix_lint,
+    nervix::layer(harness, reason = "test module remains outside product execution")
+)]
 mod tests {
     use super::*;
     use crate::runtime::test_fixtures::{input_batch, sink_context};

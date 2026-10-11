@@ -5,6 +5,11 @@
 //! - **Depends on.** The production relay boundary, dispatch gate, ACK tree, and Shuttle runner.
 //! - **Must not know.** NSPL, placement policy, or connector internals.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(harness, reason = "owns the test harness boundary declared above")
+)]
+
 use std::time::Duration;
 
 use nervix_model_harness::shuttle::check_random;

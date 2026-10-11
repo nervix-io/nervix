@@ -5,6 +5,11 @@
 //! - **Depends on.** Resource names, Model references and resource-version vocabulary.
 //! - **Must not know.** NSPL parsing, resource catalogs, transaction planning or runtime changes.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(vocabulary, reason = "owns the vocabulary boundary declared above")
+)]
+
 use meticulous::OptionExt as _;
 use rkyv::{
     Archive, Deserialize as RkyvDeserialize, Place, Serialize as RkyvSerialize,

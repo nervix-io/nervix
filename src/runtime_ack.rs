@@ -9,6 +9,11 @@
 //! - **Must not know.** What is being acknowledged. It counts outstanding work, and ack state is
 //!   hot-path memory that is never persisted.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(data_plane, reason = "owns the data plane boundary declared above")
+)]
+
 use meticulous::OptionExt as _;
 use nervix_primitives::sync::{
     Arc,

@@ -7,6 +7,10 @@
 
 #![cfg_attr(
     nervix_lint,
+    nervix::layer(primitives, reason = "owns the primitives boundary declared above")
+)]
+#![cfg_attr(
+    nervix_lint,
     nervix::context(
         outside,
         reason = "diagnostic backend bookkeeping; consumer acquisitions are checked at their \

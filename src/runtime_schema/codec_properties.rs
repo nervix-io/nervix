@@ -15,6 +15,11 @@
 //! JAQ-native or protobuf codec carries through unchanged programs are held by
 //! `transforming_codec_properties`.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(harness, reason = "owns the test harness boundary declared above")
+)]
+
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_arbitrary::{Arbitrary, Domain, Entropy};
 use nervix_models::{

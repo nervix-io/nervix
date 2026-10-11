@@ -5,6 +5,11 @@
 //! - **Depends on.** Scheduled vocabulary, expression lowering and the pure planning decisions.
 //! - **Must not know.** Runtime tasks, node-local resources, locks or application progress.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(decisions, reason = "owns the decisions boundary declared above")
+)]
+
 use std::collections::BTreeMap;
 
 use error_stack::{Report, ResultExt as _};

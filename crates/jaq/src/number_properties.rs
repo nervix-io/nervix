@@ -12,6 +12,11 @@
 //! crosses the conversions held here. `XML` and `RAW` hold text rather than numbers and stay
 //! outside this module.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(harness, reason = "owns the test harness boundary declared above")
+)]
+
 use bytes::Bytes;
 use meticulous::{OptionExt as _, ResultExt as _};
 use serde_json::{Map as JsonMap, Number as JsonNumber, Value as JsonValue, json};

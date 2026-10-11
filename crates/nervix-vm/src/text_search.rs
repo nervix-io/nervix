@@ -6,6 +6,14 @@
 //! - **Depends on.** Arrow arrays, the linear-time Aho-Corasick matcher, and VM row errors.
 //! - **Must not know.** NSPL Models, graph ownership, branches, or external connectors.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(
+        engine,
+        reason = "owns the engines and infrastructure boundary declared above"
+    )
+)]
+
 use std::{
     hash::{Hash, Hasher},
     num::NonZeroUsize,

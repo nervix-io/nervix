@@ -6,6 +6,11 @@
 //! - **Depends on.** The submission slots and the client's Shuttle runner.
 //! - **Must not know.** Exchanges, frames, or how an outcome was decided.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(harness, reason = "owns the test harness boundary declared above")
+)]
+
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_model_harness::shuttle::check_random_and_pct;
 use nervix_primitives::sync::Arc;

@@ -7,6 +7,11 @@
 //! - **Depends on.** The Models a mutation carries and the graph it is planned against.
 //! - **Must not know.** How the store persists a plan or how the runtime applies it.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(decisions, reason = "owns the decisions boundary declared above")
+)]
+
 use ahash::{HashMap, HashSet};
 use nervix_models::{
     AlterDeduplicator, AlterEmitter, AlterGenerator, AlterIngestor, AlterJunction, AlterPlacement,

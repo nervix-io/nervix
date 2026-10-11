@@ -17,6 +17,14 @@
 //! is complete, or the registry and every restore reading it otherwise. A stream a client abandons
 //! midway therefore releases what it reserved and nothing else, and a retry stages its own copy.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(
+        control_plane,
+        reason = "owns the control plane boundary declared above"
+    )
+)]
+
 use std::{collections::BTreeMap, future::Future};
 
 use arch_into::ArchInto as _;

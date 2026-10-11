@@ -7,6 +7,11 @@
 //! - **Depends on.** Typed resource names and requested resource versions.
 //! - **Must not know.** Resource storage, upload execution, or version resolution at apply time.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(edge, reason = "owns the edges boundary declared above")
+)]
+
 use error_stack::Report;
 use nervix_models::{RequestedResourceVersion, ResourceName};
 use thiserror::Error;

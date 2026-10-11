@@ -7,6 +7,11 @@
 //! - **Depends on.** The command-line arguments, the node resolver and telemetry transport hooks.
 //! - **Must not know.** What any other module records.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(edge, reason = "owns the edges boundary declared above")
+)]
+
 use std::{
     fs::OpenOptions,
     future::Future,

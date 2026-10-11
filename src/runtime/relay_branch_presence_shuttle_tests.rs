@@ -8,6 +8,11 @@
 //!   and the model harness's Shuttle runner.
 //! - **Must not know.** Relay buffers, fan-out, metrics, or how batches reach the owner.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(harness, reason = "owns the test harness boundary declared above")
+)]
+
 // Unmodeled atomics are not Shuttle scheduling points, so each step record below changes in the
 // same scheduling step as the publication it records.
 use std::time::Duration;

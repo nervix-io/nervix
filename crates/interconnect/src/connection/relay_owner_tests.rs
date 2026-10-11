@@ -5,6 +5,11 @@
 //! - **Depends on.** Current relay metadata, bounded permits and the primitive boundary.
 //! - **Must not know.** Runtime graphs, serialized live ACKs or external connectors.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(harness, reason = "owns the test harness boundary declared above")
+)]
+
 use nervix_models::{ClusterNodeIdentity, ClusterNodeIncarnation};
 
 use super::*;

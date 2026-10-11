@@ -15,6 +15,14 @@
 //! they arrive and are read back one bounded section at a time, so no step of a transfer holds a
 //! whole snapshot in memory.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(
+        engine,
+        reason = "owns the engines and infrastructure boundary declared above"
+    )
+)]
+
 mod encoding;
 mod pieces;
 

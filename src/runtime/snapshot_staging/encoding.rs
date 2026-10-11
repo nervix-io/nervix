@@ -5,6 +5,14 @@
 //! - **Depends on.** Staging quota and the executor's caller-owned memory reservation.
 //! - **Must not know.** Checkpoint shapes, graph placement, or restore authority.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(
+        engine,
+        reason = "owns the engines and infrastructure boundary declared above"
+    )
+)]
+
 use std::io::{self, BufWriter, Write};
 
 use error_stack::{Report, ResultExt as _};
@@ -234,6 +242,10 @@ impl Write for EncodingWriter<'_> {
 }
 
 #[cfg(test)]
+#[cfg_attr(
+    nervix_lint,
+    nervix::layer(harness, reason = "test module remains outside product execution")
+)]
 mod tests {
     use nervix_execution::{ChargedBytes, ExecutionConfig, Executor, MemoryClass};
 

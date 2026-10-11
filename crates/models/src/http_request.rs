@@ -7,6 +7,11 @@
 //! - **Depends on.** The URL Standard parser and semantic error vocabulary.
 //! - **Must not know.** NSPL parsing, registry state, Arrow batches or connector I/O.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(vocabulary, reason = "owns the vocabulary boundary declared above")
+)]
+
 use std::collections::BTreeMap;
 
 use error_stack::Report;

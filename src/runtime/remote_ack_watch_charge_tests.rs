@@ -7,6 +7,11 @@
 //! - **Depends on.** The production charge owner and the default execution budgets.
 //! - **Must not know.** The interconnect, relays or the rows a watch reports.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(harness, reason = "owns the test harness boundary declared above")
+)]
+
 use futures_util::FutureExt as _;
 use nervix_execution::MemoryBudgetSnapshot;
 

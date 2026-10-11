@@ -10,6 +10,11 @@
 //! This module only exists with the `benchmarks` feature. Its public surface exposes benchmark
 //! operations and what they produced, never Nervix runtime carriers.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(harness, reason = "owns the test harness boundary declared above")
+)]
+
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_models::{
     CodecJaqFormat, CodecJaqTransformations, CodecWireFormat, CreateCodec, CreateSchema,

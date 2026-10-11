@@ -9,6 +9,11 @@
 //! - **Must not know.** When the emitter publishes, how it buffers or retries, or how a batch is
 //!   encoded or mapped.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(data_plane, reason = "owns the data plane boundary declared above")
+)]
+
 use error_stack::ResultExt as _;
 use nervix_connector::{HttpRequestSink, RecordSink, RowRequestSink, RowSink, SinkStartResult};
 use nervix_connector_clickhouse::{ClickHouseSink, ClickHouseSinkConfig};
@@ -489,6 +494,10 @@ impl EmitterSinkStarter {
 }
 
 #[cfg(test)]
+#[cfg_attr(
+    nervix_lint,
+    nervix::layer(harness, reason = "test module remains outside product execution")
+)]
 mod tests {
     use nervix_connector::{ParsedRetryPolicy, ResolvedClientConfig, SinkStartError};
     use nervix_models::ClientConfigEntry;
