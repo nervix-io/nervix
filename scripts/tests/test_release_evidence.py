@@ -131,8 +131,10 @@ class InventoryTests(unittest.TestCase):
             kind = "deloxide-order" if caller.endswith("diagnostic") else "ordinary"
             names.add(f"{caller} / {suite} {kind} verdict")
             self.assertIn(f"image-kind: {kind}", workflows["docker-build.yaml"])
-        self.assertIn("bolero-random", names)
-        names.update(f"bolero / {job}" for job in ("bolero-random", "bolero-fuzz", "bolero-gate"))
+        # Check calls the reusable Bolero workflow as its `bolero` job, so its checks carry that prefix.
+        bolero = re.findall(r"^    name: (.+)$", workflows["bolero.yaml"], re.M)
+        self.assertIn("bolero-random", bolero)
+        names.update(f"bolero / {name.strip()}" for name in bolero)
         for method in methods.values():
             for check in method.checks:
                 with self.subTest(method=method.name, check=check):

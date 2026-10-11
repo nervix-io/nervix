@@ -1,10 +1,12 @@
 # One entry for every compiled Bolero property. Paths are Bolero 0.13.4's actual
 # source-adjacent work directories, so ordinary cargo test replays corpus files.
 [tool]
-campaign_fuzz_seconds = 300
 cargo_bolero = "0.13.4"
 nightly = "nightly-2026-09-17"
 pr_fuzz_seconds = 30
+# One target of each harness whose sanitizer build CI prepares first, with one Cargo build job and
+# the preparation deadline: the server library is too large for a campaign's build deadline.
+prepared_targets = ["registry-archived-models", "client-arrow-rows"]
 sanitizer = "address"
 
 [[target]]
