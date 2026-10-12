@@ -64,35 +64,70 @@ enum KafkaOffsetTransferError {
     AdmissionSize { length: u64 },
 }
 
-fn checkpoint_header(
-    header: &[u8],
-    after: u64,
-    described: u64,
-) -> error_stack::Result<(u64, [u8; 32]), KafkaOffsetTransferError> {
-    let header: &[u8; HEADER_BYTES] = header.try_into().map_err(|_| {
-        Report::new(KafkaOffsetTransferError::HeaderLength {
-            actual: header.len(),
-            expected: HEADER_BYTES,
-        })
-    })?;
-    let received = u64::from_le_bytes(
-        header[..8]
-            .try_into()
-            .assured("the revision occupies eight header bytes"),
-    );
-    if received <= after || received < described {
-        return Err(Report::new(KafkaOffsetTransferError::Revision {
-            received,
-            after,
-            described,
-        }));
+/// The fixed header at the front of a received checkpoint stream, gathered from however many
+/// chunks carry it. Every byte a chunk holds after the header's last one is checkpoint payload.
+struct ReceivedHeader {
+    bytes: [u8; HEADER_BYTES],
+    /// How many of the header's bytes arrived, never more than `HEADER_BYTES`.
+    arrived: usize,
+}
+
+impl ReceivedHeader {
+    fn new() -> Self {
+        Self {
+            bytes: [0; HEADER_BYTES],
+            arrived: 0,
+        }
     }
-    Ok((
-        received,
-        header[8..]
-            .try_into()
-            .assured("the digest occupies thirty-two header bytes"),
-    ))
+
+    /// Takes the bytes `chunk` opens with that the header still lacks, and returns how many it
+    /// took. The rest of `chunk` is payload.
+    fn take(&mut self, chunk: &[u8]) -> usize {
+        let missing = HEADER_BYTES
+            .checked_sub(self.arrived)
+            .assured("the header takes only the bytes it lacks, so it never exceeds its length");
+        let taken = missing.min(chunk.len());
+        let end = self
+            .arrived
+            .checked_add(taken)
+            .verified("taken is at most what the header lacks, keeping the end within its length");
+        self.bytes[self.arrived..end].copy_from_slice(&chunk[..taken]);
+        self.arrived = end;
+        taken
+    }
+
+    /// The revision and digest of the complete header, when its revision advances `after` and
+    /// retains the `described` revision.
+    fn checkpoint(
+        &self,
+        after: u64,
+        described: u64,
+    ) -> error_stack::Result<(u64, [u8; 32]), KafkaOffsetTransferError> {
+        if self.arrived != HEADER_BYTES {
+            return Err(Report::new(KafkaOffsetTransferError::HeaderLength {
+                actual: self.arrived,
+                expected: HEADER_BYTES,
+            }));
+        }
+        let received = u64::from_le_bytes(
+            self.bytes[..8]
+                .try_into()
+                .assured("the revision occupies eight header bytes"),
+        );
+        if received <= after || received < described {
+            return Err(Report::new(KafkaOffsetTransferError::Revision {
+                received,
+                after,
+                described,
+            }));
+        }
+        Ok((
+            received,
+            self.bytes[8..]
+                .try_into()
+                .assured("the digest occupies thirty-two header bytes"),
+        ))
+    }
 }
 
 impl Runtime {
@@ -287,18 +322,15 @@ impl Runtime {
             .await
             .change_context_lazy(failure)?;
         tracing::debug!(%placement, after_lsm, described_lsm, length, "receiving native Kafka offset checkpoint");
-        let mut header = [0_u8; HEADER_BYTES];
-        let mut header_read = 0;
+        let mut header = ReceivedHeader::new();
         while let Some(chunk) = body.next_chunk().await.change_context_lazy(failure)? {
             nervix_primitives::task::consume_budget().await;
-            let copied = (HEADER_BYTES - header_read).min(chunk.len());
-            header[header_read..header_read + copied].copy_from_slice(&chunk.as_ref()[..copied]);
-            header_read += copied;
-            if copied < chunk.len() {
+            let taken = header.take(&chunk);
+            if taken < chunk.len() {
                 writer
                     .write_chunk(
                         chunk
-                            .slice(copied, chunk.len())
+                            .slice(taken, chunk.len())
                             .assured("the payload slice stays inside this admitted chunk"),
                     )
                     .await
@@ -306,7 +338,8 @@ impl Runtime {
             }
         }
         drop(body);
-        let (lsm, digest) = checkpoint_header(&header[..header_read], after_lsm, described_lsm)
+        let (lsm, digest) = header
+            .checkpoint(after_lsm, described_lsm)
             .change_context_lazy(failure)?;
         tracing::debug!(%placement, lsm, length, "received native Kafka offset checkpoint");
         let mut staged = writer.finish(digest).await.change_context_lazy(failure)?;
@@ -367,16 +400,26 @@ impl Runtime {
 mod tests {
     use super::*;
 
+    /// The header a receiver gathers from `stream` delivered in one chunk.
+    fn received(stream: &[u8]) -> ReceivedHeader {
+        let mut header = ReceivedHeader::new();
+        header.take(stream);
+        header
+    }
+
     #[test]
     fn kafka_offset_header_requires_a_complete_advancing_described_checkpoint() {
         let mut header = 11_u64.to_le_bytes().to_vec();
         let digest = [71; 32];
         header.extend_from_slice(&digest);
         assert_eq!(
-            checkpoint_header(&header, 9, 10).assured("the captured checkpoint advanced"),
+            received(&header)
+                .checkpoint(9, 10)
+                .assured("the captured checkpoint advanced"),
             (11, digest)
         );
-        let incomplete = checkpoint_header(&header[..39], 9, 10)
+        let incomplete = received(&header[..39])
+            .checkpoint(9, 10)
             .err()
             .assured("a partial header is refused");
         assert!(matches!(
@@ -386,7 +429,8 @@ mod tests {
                 expected: 40
             }
         ));
-        let unchanged = checkpoint_header(&header, 11, 11)
+        let unchanged = received(&header)
+            .checkpoint(11, 11)
             .err()
             .assured("an unchanged checkpoint is refused");
         assert!(matches!(
@@ -397,7 +441,8 @@ mod tests {
                 described: 11
             }
         ));
-        let superseded = checkpoint_header(&header, 9, 12)
+        let superseded = received(&header)
+            .checkpoint(9, 12)
             .err()
             .assured("a checkpoint preceding its description is refused");
         assert!(matches!(
