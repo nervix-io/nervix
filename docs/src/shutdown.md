@@ -706,7 +706,11 @@ publication; the replica's assignment token still fences installation if ownersh
 Consensus stops Raft and then waits for its storage to reach an idle barrier, which proves every
 earlier durable write has returned and released the store, before its dedicated database handle is
 dropped. The registry and runtime database is released separately after the services that hold its
-handles. Terminal teardown does not finish until both database locks have been released. See
+handles. Terminal teardown does not finish until both database locks have been released. A build
+with the `testing` feature is the exception: its fault injection keeps an observer of each running
+node's consensus state, so an in-process test node's consensus database closes only once the
+scenario harness gives that registration back, after the node has stopped; see
+[Integration Test Lifecycle](./integration-test-lifecycle.md#cluster-teardown). See
 [Consensus Storage And Replication](./consensus-storage-and-replication.md) for the write, replay,
 retention, and snapshot contracts behind this barrier.
 
