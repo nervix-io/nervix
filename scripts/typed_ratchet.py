@@ -20,7 +20,7 @@ import tomllib
 import uuid
 from typing import Any
 
-from scripts.ratchet import RustFile
+from scripts.rust_source import RustFile
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 TOOLCHAIN = "nightly-2026-09-17"
