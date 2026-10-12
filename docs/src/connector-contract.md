@@ -254,6 +254,14 @@ failure beneath it. A successful pooled channel may outlive an answer's TTL; a n
 resolves again through the node resolver. OTEL HTTP protobuf continues to use the shared Reqwest
 path described above.
 
+The native prepared-request check uses a real loopback DNS authority and gRPC receiver. It
+observes an initial negative answer without delivering or rejecting the prepared log record,
+publishes the receiver's address, and requires another DNS question and exactly one accepted
+request with the original prepared bytes inside ten seconds. The public one- and three-node
+outline also checks log and trace exports after clearing an unavailable sink and a negative DNS
+answer. These are bounded recovery observations, not a simulation of Tonic or a guarantee about
+every external collector's availability.
+
 ```mermaid
 sequenceDiagram
     participant NSPL as NSPL and Models

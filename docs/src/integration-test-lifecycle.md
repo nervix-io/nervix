@@ -543,6 +543,11 @@ node stopped. The OTEL metric scenario observes one successful export from each 
 owner before checking Collector output. HTTP intake acceptance does not establish sink export,
 and the per-owner counters retain exact progress assertions for both HTTP and gRPC.
 
+The OTEL Collector content wait keeps its ten-second observation bound. If that bound expires,
+its failure includes the last command output and a collector log snapshot, or the snapshot's
+read error. A collector timeout alone does not establish that the emitter lost a record or failed
+to export it; retained diagnostics and a new attempt remain separate evidence.
+
 A scenario step can also read status inside a window of its own, passing that window as the phase
 deadline. Where the window bounds how long something is watched rather than how long one read may
 take, every read keeps a full request timeout instead.

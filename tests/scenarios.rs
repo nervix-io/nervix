@@ -26502,10 +26502,14 @@ async fn then_otel_collector_eventually_contains(world: &mut ScenarioWorld, expe
         {
             return;
         }
-        assert!(
-            Instant::now() < deadline,
-            "timed out waiting for OpenTelemetry Collector to contain {expected:?}"
-        );
+        if Instant::now() >= deadline {
+            let logs = world.dependencies.otel_collector_logs().await;
+            panic!(
+                "timed out waiting for OpenTelemetry Collector to contain {expected:?}; last \
+                 command output: {:?}; collector output:\n{logs:?}",
+                world.last_command_output
+            );
+        }
         nervix_primitives::time::sleep(Duration::from_millis(50)).await;
     }
 }
