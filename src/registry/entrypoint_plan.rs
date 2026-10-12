@@ -11,6 +11,11 @@
 //! - **Must not know.** Runtime tasks, node-local lookups, UDF executors, materialized-state
 //!   bindings, connectors, or how the scheduler places a node.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(decisions, reason = "owns the decisions boundary declared above")
+)]
+
 use std::{collections::BTreeMap, num::NonZeroUsize, time::Duration};
 
 use arrow_schema::Schema;

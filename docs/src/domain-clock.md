@@ -104,9 +104,9 @@ selecting a different authority.
    storing a paced mapping or authority.
 5. Every node applies the resulting control-plane revision to its local domain-clock lifecycle
    before materializing executable work from that revision.
-6. The selected authority produces progress once its own runtime has installed the mapping and
-   authority fence. It delivers progress to each live peer after that peer reports preparation of
-   the required runtime revision, which installs its mapping and fence before graph activation.
+6. The selected authority produces progress once its own node has installed the mapping and
+   authority fence. It delivers progress to each live peer after that peer advertises that it
+   installed the domain clocks of the required revision; neither waits for graph activation.
 
 The mapping is therefore available before a graph task can bind its clock. A node joining later
 installs the existing mapping, logical origin, rate, generation, and authority fence. Its join time
@@ -151,6 +151,13 @@ node incarnation causes the leader to select and commit another eligible incarna
 eligible, the authority becomes unassigned and the paced clock is unavailable for execution until
 an owner is committed again; the mapping itself remains replicated.
 
+A reconciliation proposal that does not commit is proposed again 200 milliseconds later, for as
+long as the node remains leader, without waiting for another change in domain state, Raft topology
+or availability. A newly elected leader refuses writes until a quorum acknowledges its leadership,
+so the first proposal it makes on taking over can be refused. When the lost authority also held
+consensus leadership, the survivors first elect a leader, and that leader's reconciliation commits
+the replacement on a later attempt rather than when some unrelated state next changes.
+
 Application-health probes finish their bounded attempts despite concurrent gossip updates. This
 allows continuous failures to exclude a stopped authority even after its advertised endpoint has
 changed; a stale healthy observation must not leave it indefinitely eligible for clock production.
@@ -168,9 +175,20 @@ An obsolete producer is cancelled and retired before that node starts a successo
 domain. The old task retains its immutable fence while it exits, so even an in-flight delivery
 cannot impersonate the replacement authority.
 
-An unrelated node's pending installation or graph activation does not hold back the installed
-authority. After reassignment, that authority reconstructs the frontier from the unchanged mapping;
-each receiver's own installation controls when it can receive progress.
+Every node installs a committed reassignment ahead of its graph installation. The node's domain
+clock owner applies each committed revision directly: when a domain's installed generation, status,
+configuration, start point and mapping already equal the committed ones, it installs the committed
+authority fence at once, which starts or retires the local producer and fences received progress.
+Graph installation can wait on a node that left, for example while a forced failover drains a relay
+toward it, and it does not hold back the clock takeover on the replacement authority or on any
+receiver. Every other lifecycle change, such as a new generation, a stop, or an added or removed
+domain, remains with graph installation, which installs a revision's lifecycles before its work.
+Each node records the committed revision whose lifecycle each domain holds and never replaces it
+with an older revision's, so a graph installation that completes after a newer fence was installed
+cannot restore the superseded authority.
+
+After reassignment, the replacement authority reconstructs the frontier from the unchanged mapping;
+each receiver's own installation of the fence controls when it can receive progress.
 
 ## Tick Production And Progress Delivery
 
@@ -194,17 +212,23 @@ identity, tick id, logical boundary, authority UTC observation, and period. The 
 the report to its own runtime directly. Remote delivery uses the typed `domain_clock_progress`
 HTTP/2 management request described by [Cluster Interconnect](./interconnect.md#domain-clock-progress).
 
-For each prepared remote node and domain, the producer owns one delivery loop with at most one request
-in flight and one replaceable pending report. Publishing another tick overwrites the pending value,
-so a fast clock or slow peer cannot create an unbounded queue. A node-wide progress subquota bounds
-concurrent attempts independently of health, relay admission, cancellation, and terminal outcomes.
+For each installed remote node and domain, the producer owns one delivery loop with at most one
+request in flight and one replaceable pending report. Publishing another tick overwrites the pending
+value, so a fast clock or slow peer cannot create an unbounded queue. A node-wide progress subquota
+bounds concurrent attempts independently of health, relay admission, cancellation, and terminal
+outcomes.
 
-Targets must be both live and prepared for the runtime revision that installed the generation and
-authority fence. Preparation precedes the cluster's graph-activation barrier; a target need not
-wait for other nodes to prepare or activate before receiving progress. A new or reconnected target
-receives the producer's newest retained report when its own preparation is advertised. Each request
-has a two-second physical deadline. Failure waits on a 200-millisecond physical backoff and then
-retries the newest report. Cancelling the authority stops an in-flight request and its backoff.
+Targets must be live and must advertise that their domain clocks match the committed runtime
+revision the producer started from, or a later one. Each node's domain clock owner follows every
+committed domain and schedule change, and it advertises a runtime revision once every domain clock
+the node holds, authority fence included, equals that revision's committed lifecycle. It advertises
+neither graph preparation nor activation, so a target whose graph installation waits still receives
+progress. A lifecycle change that only graph installation installs, such as a new generation of
+another domain, holds the advertisement until graph installation installs it. A new or reconnected
+target receives the producer's newest retained report when its advertisement reaches the required
+revision. Each request has a two-second physical deadline. Failure waits on a 200-millisecond
+physical backoff and then retries the newest report. Cancelling the authority stops an in-flight
+request and its backoff.
 
 A process stop request does not cancel clock authority reconciliation, progress production,
 progress delivery, or local installation. Those services remain active during application drain
@@ -512,6 +536,10 @@ watermark, alter tick progress, or supply domain time to execution. The reposito
 check declares this module as the browser observation owner; other console modules receive its UTC
 sample instead of reading the wall clock themselves.
 
+The source check masks `cfg(test)` module bodies through the shared Rust scanner, including modules
+with source contracts or additional attributes. It preserves line coordinates and product code
+after each fixture module. A harness layer contract alone grants no clock permission to product code.
+
 ## Recovery And Distributed Guarantees
 
 The paced mapping, lifecycle generation, and authority fence recover from consensus state. Tick
@@ -524,8 +552,8 @@ This produces the following failure behavior:
 | Event | Result |
 | --- | --- |
 | Leader transfer | The committed mapping and authority remain unchanged unless the effective candidate set also requires reconciliation |
-| Authority loss or restart | Consensus advances the authority revision and assigns another live voter incarnation; the mapping and lifecycle generation stay fixed |
-| Node join or reconnect | The node installs the committed generation before execution and receives the newest retained progress after readiness |
+| Authority loss or restart | Consensus advances the authority revision and assigns another live voter incarnation; the mapping and lifecycle generation stay fixed. When the authority also led consensus, the survivors elect a leader first. Every node installs the new fence ahead of its graph installation |
+| Node join or reconnect | The node installs the committed generation before execution and receives the newest retained progress once it advertises its installed domain clocks |
 | Session attach before a restarted node installs | The attach waits for the node's first installation of the committed domains, so it never reports a committed domain as missing |
 | Delayed old progress | Generation, revision, identity, and authenticated-peer checks discard it |
 | `STOP` followed by `START` | Stop revokes the authority; start increments the generation and commits a new mapping and fence |

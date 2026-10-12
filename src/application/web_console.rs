@@ -9,6 +9,11 @@
 //! - **Must not know.** What a session request, a download or a restore does once the WebSocket
 //!   carries it.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(edge, reason = "owns the edges boundary declared above")
+)]
+
 use std::{
     convert::Infallible,
     io,

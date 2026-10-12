@@ -8,6 +8,14 @@
 //! - **Must not know.** How a reset is coordinated, which guest state it replaces, or how a refused
 //!   lifetime's recovery budget is decided.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(
+        engine,
+        reason = "owns the engines and infrastructure boundary declared above"
+    )
+)]
+
 use std::time::Duration;
 
 use nervix_models::{

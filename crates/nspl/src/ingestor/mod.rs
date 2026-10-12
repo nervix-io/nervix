@@ -5,6 +5,11 @@
 //! - **Depends on.** Shared NSPL grammar primitives and connector vocabulary models.
 //! - **Must not know.** Connector clients, runtime polling or broker state.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(language, reason = "owns the language boundary declared above")
+)]
+
 use std::num::NonZeroU64;
 
 use chumsky::prelude::*;

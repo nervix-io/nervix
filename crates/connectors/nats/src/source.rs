@@ -8,6 +8,18 @@
 //!   Tokio and `async-nats`.
 //! - **Must not know.** Runtime collectors, relays, branches, schedules, registry state, or NSPL.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::input(plans, reason = "connector host supplies validated plans")
+)]
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(
+        engine,
+        reason = "owns the engines and infrastructure boundary declared above"
+    )
+)]
+
 use async_nats::{Client as NatsClient, Message as NatsMessage, Subscriber};
 use async_trait::async_trait;
 use error_stack::{Report, ResultExt as _};
@@ -245,6 +257,10 @@ impl BrokerSourceConnector for NatsSource {
 }
 
 #[cfg(test)]
+#[cfg_attr(
+    nervix_lint,
+    nervix::layer(harness, reason = "test module remains outside product execution")
+)]
 mod tests {
     use super::*;
 

@@ -7,6 +7,14 @@
 //! - **Depends on.** The vocabulary's advertised endpoints and the interconnect's peer resolver.
 //! - **Must not know.** Which operation a caller sends to the target it selects.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(
+        engine,
+        reason = "owns the engines and infrastructure boundary declared above"
+    )
+)]
+
 use std::{net::SocketAddr, time::Duration};
 
 use error_stack::Report;

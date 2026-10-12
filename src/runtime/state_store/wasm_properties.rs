@@ -5,6 +5,11 @@
 //! - **Depends on.** Production storage codecs, typed placements and vocabulary generators.
 //! - **Must not know.** Guest callbacks, live ACK guards or concurrent checkpoint publication.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(harness, reason = "owns the test harness boundary declared above")
+)]
+
 use nervix_arbitrary::{Arbitrary, Domain, WasmValues};
 
 use super::{

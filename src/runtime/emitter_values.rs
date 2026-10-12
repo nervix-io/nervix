@@ -12,6 +12,11 @@
 //! - **Must not know.** Which external system consumes the mapped rows, how it divides a write into
 //!   requests, or how it encodes them.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(data_plane, reason = "owns the data plane boundary declared above")
+)]
+
 use async_trait::async_trait;
 use error_stack::ResultExt as _;
 use nervix_connector::{
@@ -696,6 +701,10 @@ impl ProjectedValueRows {
 }
 
 #[cfg(test)]
+#[cfg_attr(
+    nervix_lint,
+    nervix::layer(harness, reason = "test module remains outside product execution")
+)]
 mod tests {
     use std::collections::VecDeque;
 

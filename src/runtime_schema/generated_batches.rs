@@ -16,6 +16,11 @@
 //! sends is the Arrow array the generator built, shared by reference: a view keeps the offsets of
 //! the larger batch it was cut from, so a carrier meets columns whose data does not start at zero.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(harness, reason = "owns the test harness boundary declared above")
+)]
+
 use std::num::NonZeroU32;
 
 use arrow_array::{

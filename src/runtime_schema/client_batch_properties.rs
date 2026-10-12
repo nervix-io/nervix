@@ -8,6 +8,11 @@
 //!   encoder and the node's client batch decoder.
 //! - **Must not know.** Producers, sessions, ingestors or what happens to an accepted batch.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(harness, reason = "owns the test harness boundary declared above")
+)]
+
 use std::num::{NonZeroU64, NonZeroUsize};
 
 use arrow_array::RecordBatch;

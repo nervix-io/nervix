@@ -40,6 +40,11 @@
 //! - **Must not know.** The host, the server, the Models or NSPL. It is compiled into user guests
 //!   and ships on its own.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(edge, reason = "owns the edges boundary declared above")
+)]
+
 pub mod abi;
 mod context;
 mod envelope;

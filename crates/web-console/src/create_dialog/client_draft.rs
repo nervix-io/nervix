@@ -7,6 +7,11 @@
 //! - **Depends on.** Current client Models and typed resource and signaling references.
 //! - **Must not know.** Connector initialization, external service provisioning, or graph planning.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(edge, reason = "owns the edges boundary declared above")
+)]
+
 use std::num::NonZeroU32;
 
 use error_stack::Report;
@@ -323,6 +328,10 @@ pub(super) enum ClientDraftError {
 }
 
 #[cfg(test)]
+#[cfg_attr(
+    nervix_lint,
+    nervix::layer(harness, reason = "test module remains outside product execution")
+)]
 mod tests {
     use meticulous::ResultExt as _;
     use nervix_models::{

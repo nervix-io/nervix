@@ -7,6 +7,14 @@
 //! - **Depends on.** The typed request contract.
 //! - **Must not know.** How a leader plans a drain, which work it moves, or when a node stops.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(
+        engine,
+        reason = "owns the engines and infrastructure boundary declared above"
+    )
+)]
+
 use std::time::Duration;
 
 use rkyv::{Archive, Deserialize, Serialize};

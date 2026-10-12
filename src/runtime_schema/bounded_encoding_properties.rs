@@ -9,6 +9,11 @@
 //!   framing, and the codec's row encoder, batch members and batch containers.
 //! - **Must not know.** Emitters, how a candidate that did not fit is divided, or sinks.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(harness, reason = "owns the test harness boundary declared above")
+)]
+
 use std::num::NonZeroU64;
 
 use meticulous::{OptionExt as _, ResultExt as _};

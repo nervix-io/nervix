@@ -8,6 +8,13 @@ name = "ordinary"
 packages = []
 
 [[configuration]]
+kinds = ["lib", "bin"]
+manifest = "Cargo.toml"
+name = "browser"
+packages = ["nervix-web-console"]
+target = "wasm32-unknown-unknown"
+
+[[configuration]]
 features = ["testing"]
 manifest = "Cargo.toml"
 name = "testing"

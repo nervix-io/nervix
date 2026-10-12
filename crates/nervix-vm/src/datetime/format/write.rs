@@ -16,6 +16,14 @@
 //! any zone, is one template. Only items whose width varies, such as `%B`, and the offset and
 //! abbreviation of a zone whose offset changes are written item by item.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(
+        engine,
+        reason = "owns the engines and infrastructure boundary declared above"
+    )
+)]
+
 use arrow_array::{Array, StringArray, TimestampNanosecondArray};
 use arrow_buffer::{Buffer, OffsetBuffer, ScalarBuffer};
 use jiff::{civil::DateTime, tz::Offset};

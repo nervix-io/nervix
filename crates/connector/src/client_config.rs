@@ -11,6 +11,14 @@
 //! - **Must not know.** How a resource mount is resolved, how retry backoff is scheduled, or any
 //!   connector's driver.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(
+        engine,
+        reason = "owns the engines and infrastructure boundary declared above"
+    )
+)]
+
 use std::{collections::BTreeMap, fs, path::PathBuf, time::Duration};
 
 use error_stack::Report;
@@ -194,6 +202,10 @@ pub fn next_retry_delay(current: Duration, policy: ParsedRetryPolicy) -> Duratio
 }
 
 #[cfg(test)]
+#[cfg_attr(
+    nervix_lint,
+    nervix::layer(harness, reason = "test module remains outside product execution")
+)]
 mod tests {
     use super::*;
 

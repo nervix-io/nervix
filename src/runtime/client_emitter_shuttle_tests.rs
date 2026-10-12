@@ -6,6 +6,11 @@
 //! - **Depends on.** The production consumer budget and the server's Shuttle runner.
 //! - **Must not know.** Session frames, scheduling decisions, or an emitter's Arrow contents.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(harness, reason = "owns the test harness boundary declared above")
+)]
+
 use std::{num::NonZeroU64, time::Duration};
 
 use bytes::Bytes;

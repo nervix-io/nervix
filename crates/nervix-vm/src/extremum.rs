@@ -14,6 +14,14 @@
 //! above every other value and treat both zeros as equal. Among equal values the earliest argument
 //! is selected. `clamp` is a range operation instead, so it compares exactly as `<` and `>` do.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(
+        engine,
+        reason = "owns the engines and infrastructure boundary declared above"
+    )
+)]
+
 use arrow_array::{Array, ArrayRef, ArrowPrimitiveType, BooleanArray, PrimitiveArray};
 use arrow_buffer::BooleanBuffer;
 use arrow_ord::cmp::{gt, lt};

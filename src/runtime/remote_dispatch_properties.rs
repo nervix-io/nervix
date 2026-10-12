@@ -10,6 +10,11 @@
 //! - **Must not know.** The transport that carries a payload, which the interconnect's own wire
 //!   properties cover, or the relay the rows are dispatched into.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(harness, reason = "owns the test harness boundary declared above")
+)]
+
 use meticulous::ResultExt as _;
 use nervix_arbitrary::{Arbitrary, Domain};
 use nervix_interconnect::{RelayDelivery, RelayPayload};

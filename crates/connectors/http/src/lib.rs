@@ -10,6 +10,18 @@
 //! - **Must not know.** Domain clocks, runtime collectors, relays, branches, schedules, registry
 //!   state, or placement computation.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(
+        engine,
+        reason = "owns the engines and infrastructure boundary declared above"
+    )
+)]
+#![cfg_attr(
+    nervix_lint,
+    nervix::input(plans, reason = "the host supplies a validated connector plan")
+)]
+
 mod sink;
 
 use async_trait::async_trait;
@@ -141,6 +153,10 @@ impl HttpSource {
 }
 
 #[cfg(test)]
+#[cfg_attr(
+    nervix_lint,
+    nervix::layer(harness, reason = "test module remains outside product execution")
+)]
 mod tests {
     use super::*;
 

@@ -730,6 +730,10 @@ fn truncate_on_char_boundary(mut value: String, max_bytes: usize) -> String {
 }
 
 #[cfg(test)]
+#[cfg_attr(
+    nervix_lint,
+    nervix::layer(harness, reason = "test module remains outside product execution")
+)]
 mod tests {
     use nervix_models::{
         CreateSignalingProtocol, DurationTextError, ModelName, ResourceName,

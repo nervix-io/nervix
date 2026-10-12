@@ -7,6 +7,14 @@
 //! - **Depends on.** The store's database and executor.
 //! - **Must not know.** What the writes it makes durable hold, who waits for them, or replicas.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(
+        engine,
+        reason = "owns the engines and infrastructure boundary declared above"
+    )
+)]
+
 use error_stack::{Report, ResultExt as _};
 use fjall::PersistMode;
 use meticulous::OptionExt as _;
@@ -247,6 +255,10 @@ impl RuntimeStateStore {
 mod shuttle_tests;
 
 #[cfg(test)]
+#[cfg_attr(
+    nervix_lint,
+    nervix::layer(harness, reason = "test module remains outside product execution")
+)]
 mod tests {
     use super::{super::tests::open_store, *};
 

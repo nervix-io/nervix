@@ -6,6 +6,11 @@
 //! - **Depends on.** Vocabulary Models, names, and the model-owned scalar and wire type catalogs.
 //! - **Must not know.** Registry state, session transport, or canonical NSPL parsing.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(edge, reason = "owns the edges boundary declared above")
+)]
+
 use std::{
     collections::BTreeSet,
     num::{NonZeroU32, NonZeroU64},
@@ -452,6 +457,10 @@ pub(super) enum SchemaDraftError {
 }
 
 #[cfg(test)]
+#[cfg_attr(
+    nervix_lint,
+    nervix::layer(harness, reason = "test module remains outside product execution")
+)]
 mod tests {
     use std::num::NonZeroU32;
 

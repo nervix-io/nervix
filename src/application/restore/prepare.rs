@@ -1,6 +1,6 @@
 //! Receiving a restore's archive, verifying it, and planning the restore before anything changes.
 //!
-//! Layer: control plane.
+//! Layer: edges.
 //!
 //! - **Owns.** Staging a restore stream's archive in this node's staging area, reading and
 //!   verifying every section of it off the async workers, parsing each domain's models, planning
@@ -9,6 +9,14 @@
 //! - **Depends on.** The staging area, the archive format's reader, the language layer, and the
 //!   decision layer's restore and transaction planners.
 //! - **Must not know.** How a plan is applied, or which transport carried the stream.
+
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(
+        edge,
+        reason = "archive intake edge parses external NSPL before decision-layer planning"
+    )
+)]
 
 mod branch_keys;
 mod metadata;
@@ -748,6 +756,10 @@ fn line_at(text: &str, offset: usize) -> usize {
 }
 
 #[cfg(test)]
+#[cfg_attr(
+    nervix_lint,
+    nervix::layer(harness, reason = "test module remains outside product execution")
+)]
 mod tests {
 
     use super::*;

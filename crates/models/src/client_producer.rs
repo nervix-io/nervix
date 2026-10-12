@@ -13,6 +13,11 @@
 //! batch. Transport receipt is never an outcome: a batch is either not admitted, completed, failed
 //! after admission, or of unknown outcome.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(vocabulary, reason = "owns the vocabulary boundary declared above")
+)]
+
 use std::{
     fmt,
     num::{NonZeroU32, NonZeroU64},

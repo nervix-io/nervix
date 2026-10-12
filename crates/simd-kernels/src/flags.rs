@@ -11,6 +11,11 @@
 //! stores without leaving its vector registers. Packing those bytes is a vector compare and a
 //! bitmask extraction per register, so no lane is shifted into its word one at a time.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(primitives, reason = "owns the primitives boundary declared above")
+)]
+
 use fearless_simd::{Level, dispatch, prelude::*};
 
 use crate::LEVEL;

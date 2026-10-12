@@ -8,6 +8,11 @@
 //!   row views.
 //! - **Must not know.** Archive records or paths, capture fencing, or restore placement.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(data_plane, reason = "owns the data plane boundary declared above")
+)]
+
 use std::ops::Range;
 
 use arrow_schema::Schema as ArrowSchema;
@@ -538,6 +543,10 @@ impl WindowCheckpointBuilder {
 }
 
 #[cfg(test)]
+#[cfg_attr(
+    nervix_lint,
+    nervix::layer(harness, reason = "test module remains outside product execution")
+)]
 mod tests {
     use arrow_array::{ArrayRef, BooleanArray, Int64Array, StringArray};
     use meticulous::ResultExt as _;

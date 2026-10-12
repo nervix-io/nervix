@@ -6,6 +6,14 @@
 //! - **Depends on.** Transaction consensus state, runtime revision application and impact Models.
 //! - **Must not know.** Session protocol presentation or transaction planning.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(
+        control_plane,
+        reason = "owns the control plane boundary declared above"
+    )
+)]
+
 use std::time::Duration;
 
 use error_stack::{Report, ResultExt as _};

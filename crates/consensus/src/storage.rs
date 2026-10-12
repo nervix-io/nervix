@@ -5,6 +5,14 @@
 //! - **Depends on.** The bounded executor, Fjall, and the replicated vocabulary.
 //! - **Must not know.** Network transport, graph execution or application lifecycle policy.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(
+        engine,
+        reason = "owns the engines and infrastructure boundary declared above"
+    )
+)]
+
 use std::{
     collections::BTreeSet,
     fmt, io,

@@ -8,6 +8,11 @@
 //!   a graph node, and the pooled connector crates.
 //! - **Must not know.** How a batch is mapped, how a row is encoded, or what a sink writes.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(data_plane, reason = "owns the data plane boundary declared above")
+)]
+
 use async_trait::async_trait;
 use nervix_connector::{SinkPublishError, SinkPublishResult};
 use nervix_connector_mongodb::{MongoDbClient, MongoDbClientSource};

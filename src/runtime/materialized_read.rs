@@ -7,6 +7,10 @@
 
 #![cfg_attr(
     nervix_lint,
+    nervix::layer(data_plane, reason = "owns the data plane boundary declared above")
+)]
+#![cfg_attr(
+    nervix_lint,
     nervix::context(
         recurring,
         reason = "materialized dependencies are read repeatedly by the concrete branch processing \
@@ -1102,6 +1106,10 @@ impl<'runtime> MaterializedStateWait<'runtime> {
 }
 
 #[cfg(all(test, feature = "shuttle"))]
+#[cfg_attr(
+    nervix_lint,
+    nervix::layer(harness, reason = "test module remains outside product execution")
+)]
 mod shuttle_tests {
     use nervix_model_harness::shuttle::check_random_and_pct;
     use nervix_primitives::sync::atomic::AtomicBool;
@@ -1149,6 +1157,10 @@ mod shuttle_tests {
 }
 
 #[cfg(test)]
+#[cfg_attr(
+    nervix_lint,
+    nervix::layer(harness, reason = "test module remains outside product execution")
+)]
 mod tests {
     use std::time::Duration;
 

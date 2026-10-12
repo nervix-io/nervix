@@ -8,6 +8,14 @@
 //! - **Must not know.** Which ingestors exist, what they are connected to, or what a message is. It
 //!   watches one number and applies one decision through the runtime's own control.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(
+        control_plane,
+        reason = "owns the control plane boundary declared above"
+    )
+)]
+
 use std::time::Duration;
 
 use arch_into::ArchInto as _;

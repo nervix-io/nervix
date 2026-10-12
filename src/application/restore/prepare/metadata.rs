@@ -5,6 +5,14 @@
 //! - **Depends on.** The current archive manifest and the bounded executor.
 //! - **Must not know.** Native checkpoint encoding, generation publication, or database keys.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(
+        control_plane,
+        reason = "owns the control plane boundary declared above"
+    )
+)]
+
 use std::{
     cell::Cell,
     io::{self, Read},

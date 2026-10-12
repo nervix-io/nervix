@@ -7,6 +7,11 @@
 //!   deduplicators, correlators, windows, inferencers, generators and WASM guests.
 //! - **Depends on.** The schema rules, the expression walk, and the VM's type inference.
 //! - **Must not know.** How a processor executes.
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(decisions, reason = "owns the decisions boundary declared above")
+)]
+
 use ahash::{HashMap, HashSet, HashSetExt};
 use error_stack::Report;
 use meticulous::ResultExt;
@@ -1693,10 +1698,22 @@ pub(in crate::registry) fn validate_generator_output(
 #[path = "processor/bytes_tests.rs"]
 mod bytes_tests;
 #[cfg(test)]
+#[cfg_attr(
+    nervix_lint,
+    nervix::layer(harness, reason = "test module remains outside product execution")
+)]
 mod duration_tests;
 #[cfg(test)]
+#[cfg_attr(
+    nervix_lint,
+    nervix::layer(harness, reason = "test module remains outside product execution")
+)]
 mod vm_report_tests;
 #[cfg(test)]
+#[cfg_attr(
+    nervix_lint,
+    nervix::layer(harness, reason = "test module remains outside product execution")
+)]
 mod tests {
     use std::fs;
 

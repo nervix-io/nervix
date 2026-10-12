@@ -8,6 +8,11 @@
 //! - **Depends on.** The NSPL parser, the VM frontend, compiler and runtime entry points.
 //! - **Must not know.** How the kernels traverse their Arrow buffers.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(harness, reason = "owns the test harness boundary declared above")
+)]
+
 use arrow_array::{BooleanArray, Float64Array, Int32Array, Int64Array, StringArray};
 use arrow_schema::{DataType, Field, Schema};
 use nervix_models::Timestamp;

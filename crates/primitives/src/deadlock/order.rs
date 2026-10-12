@@ -5,6 +5,11 @@
 //! - **Depends on.** The shared run-local identities and bounded source sites.
 //! - **Must not know.** The application, review policy, recording or process exit.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(primitives, reason = "owns the primitives boundary declared above")
+)]
+
 use std::{
     cmp::Ordering,
     collections::{BTreeMap, BTreeSet},

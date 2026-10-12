@@ -9,6 +9,11 @@
 //! - **Must not know.** Sessions, how an archive is assembled, transferred, read or restored, or
 //!   where a client writes or reads it.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(language, reason = "owns the language boundary declared above")
+)]
+
 use chumsky::prelude::*;
 use nervix_models::{
     Backup, BackupCapture, BackupResources, BackupScope, DescribeBackup, ExistingUserPolicy,

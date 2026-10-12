@@ -8,6 +8,11 @@
 //!   state's owner declares for tests.
 //! - **Must not know.** Replication, assignment authority, or the tasks that publish snapshots.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(harness, reason = "owns the test harness boundary declared above")
+)]
+
 use nervix_arbitrary::{Arbitrary, Domain};
 
 use super::*;

@@ -9,6 +9,11 @@
 //! - **Must not know.** The archive's encoding, how an archive travels to the leader or is staged
 //!   there, or how a step reaches consensus.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(vocabulary, reason = "owns the vocabulary boundary declared above")
+)]
+
 use std::{fmt, num::NonZeroU64};
 
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};

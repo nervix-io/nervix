@@ -6,6 +6,11 @@
 //! - **Depends on.** Browser drafts, typed choices, and the dialog component.
 //! - **Must not know.** Browser transport or runtime codec and handshake execution.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(edge, reason = "owns the edges boundary declared above")
+)]
+
 use leptos::prelude::*;
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_client_wire::{ChoiceTarget, ChoiceValue};

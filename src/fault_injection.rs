@@ -35,7 +35,7 @@ use nervix_models::{
 use nervix_primitives::{
     collections::DashMap,
     sync::{
-        Arc, CancellationToken,
+        Arc,
         atomic::{AtomicBool, AtomicUsize, Ordering},
         blocking::{Mutex, RwLock},
         broadcast, mpsc, oneshot, watch,
@@ -45,8 +45,10 @@ use nervix_recovery::{Discarded as _, NoReceiver as _};
 
 use crate::registry::SchedulerMode;
 
+mod domain_clock;
 mod restarted_voter;
 
+use domain_clock::DomainClockProgressPausePoint;
 use restarted_voter::StartupVoterGossip;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -180,6 +182,9 @@ struct FaultInjectionState {
     /// Runtime and harness waiters clone a pause so it remains alive after its map guard drops.
     domain_clock_progress_pauses:
         DashMap<DomainClockProgressPausePoint, Arc<TestPause>, RandomState>,
+    /// One-shot, node-scoped refusals of the next domain-clock authority reconciliation the node
+    /// proposes as leader, consumed before the proposal reaches Raft.
+    domain_clock_authority_proposal_rejections: DashMap<ClusterNodeName, (), RandomState>,
     /// A WASM processor branch holds its next guest-state checkpoint at one window, so a scenario
     /// can end the node while the checkpoint is exactly that far.
     wasm_checkpoint_pauses: DashMap<WasmCheckpointPausePoint, Arc<TestPause>, RandomState>,
@@ -326,6 +331,7 @@ enum RemoteAcknowledgementLoss {
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 enum CommandPausePoint {
     Admission(ClusterNodeName),
+    RuntimeInstallation(ClusterNodeName),
     RuntimePreparation(ClusterNodeName),
     ReferenceLookup(ClusterNodeName),
     DurableAdmission(ClusterNodeName),
@@ -375,12 +381,6 @@ struct WasmCheckpointPausePoint {
     domain: DomainName,
     processor: ModelName,
     window: WasmCheckpointWindow,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-struct DomainClockProgressPausePoint {
-    domain: String,
-    node: Option<ClusterNodeName>,
 }
 
 #[derive(Clone, Debug)]
@@ -433,6 +433,7 @@ impl Default for FaultInjection {
                 ownership_handoff_preparation_pauses: DashMap::default(),
                 ownership_handoff_prepare_response_pauses: DashMap::default(),
                 domain_clock_progress_pauses: DashMap::default(),
+                domain_clock_authority_proposal_rejections: DashMap::default(),
                 wasm_checkpoint_pauses: DashMap::default(),
                 domain_clock_initial_elapsed: DashMap::default(),
                 state_replica_polling_paused: AtomicBool::new(false),
@@ -1322,6 +1323,21 @@ impl FaultInjection {
         self.arm_command_pause(CommandPausePoint::Admission(node_id));
     }
 
+    /// Holds the next runtime installation the node begins, inside its installation sequence and
+    /// before it synchronizes any domain lifecycle or schedule of the admitted revision.
+    pub fn pause_runtime_installation_on(&self, node_id: ClusterNodeName) {
+        self.arm_command_pause(CommandPausePoint::RuntimeInstallation(node_id));
+    }
+
+    pub async fn wait_for_runtime_installation_pause(&self, node_id: &ClusterNodeName) {
+        self.wait_for_command_pause(&CommandPausePoint::RuntimeInstallation(node_id.clone()))
+            .await;
+    }
+
+    pub fn release_runtime_installation_pause(&self, node_id: &ClusterNodeName) {
+        self.release_command_pause(&CommandPausePoint::RuntimeInstallation(node_id.clone()));
+    }
+
     pub fn pause_runtime_preparation_on(&self, node_id: ClusterNodeName) {
         self.arm_command_pause(CommandPausePoint::RuntimePreparation(node_id));
     }
@@ -1780,40 +1796,6 @@ impl FaultInjection {
         pause.release();
     }
 
-    pub fn pause_domain_clock_progress(&self, domain: impl Into<String>) {
-        self.inner.domain_clock_progress_pauses.insert(
-            DomainClockProgressPausePoint {
-                domain: domain.into().to_ascii_lowercase(),
-                node: None,
-            },
-            Arc::new(TestPause::default()),
-        );
-    }
-
-    pub fn set_domain_clock_initial_elapsed(&self, domain: DomainName, elapsed: Duration) {
-        self.inner
-            .domain_clock_initial_elapsed
-            .insert(domain, elapsed);
-    }
-
-    pub(crate) fn take_domain_clock_initial_elapsed(
-        &self,
-        domain: &DomainName,
-    ) -> Option<Duration> {
-        let (_, elapsed) = self.inner.domain_clock_initial_elapsed.remove(domain)?;
-        Some(elapsed)
-    }
-
-    pub fn pause_domain_clock_progress_on(&self, domain: impl Into<String>, node: ClusterNodeName) {
-        self.inner.domain_clock_progress_pauses.insert(
-            DomainClockProgressPausePoint {
-                domain: domain.into().to_ascii_lowercase(),
-                node: Some(node),
-            },
-            Arc::new(TestPause::default()),
-        );
-    }
-
     /// Hold the next guest-state checkpoint of `processor` at `window`, on whichever node and branch
     /// reaches it first. The pause is one-shot: every later checkpoint passes the window, including
     /// the checkpoints of a node that restarted while the first one was held.
@@ -1909,57 +1891,6 @@ impl FaultInjection {
         self.inner
             .state_replica_installation_failing
             .store(false, Ordering::Release);
-    }
-
-    pub async fn wait_for_domain_clock_progress_pause(&self, domain: &str) {
-        let point = DomainClockProgressPausePoint {
-            domain: domain.to_ascii_lowercase(),
-            node: None,
-        };
-        let pause = self.domain_clock_progress_pause(&point);
-        pause.wait_until_reached().await;
-    }
-
-    pub async fn wait_for_domain_clock_progress_pause_on(
-        &self,
-        domain: &str,
-        node: &ClusterNodeName,
-    ) {
-        let point = DomainClockProgressPausePoint {
-            domain: domain.to_ascii_lowercase(),
-            node: Some(node.clone()),
-        };
-        let pause = self.domain_clock_progress_pause(&point);
-        pause.wait_until_reached().await;
-    }
-
-    pub async fn release_domain_clock_progress(&self, domain: &str) {
-        let point = DomainClockProgressPausePoint {
-            domain: domain.to_ascii_lowercase(),
-            node: None,
-        };
-        let pause = self.domain_clock_progress_pause(&point);
-        pause.release();
-        pause.wait_until_delivered().await;
-        self.inner.domain_clock_progress_pauses.remove(&point);
-    }
-
-    pub async fn release_domain_clock_progress_on(&self, domain: &str, node: &ClusterNodeName) {
-        let point = DomainClockProgressPausePoint {
-            domain: domain.to_ascii_lowercase(),
-            node: Some(node.clone()),
-        };
-        let pause = self.domain_clock_progress_pause(&point);
-        pause.release();
-        pause.wait_until_delivered().await;
-        self.inner.domain_clock_progress_pauses.remove(&point);
-    }
-
-    pub fn release_all_domain_clock_progress(&self) {
-        for pause in &self.inner.domain_clock_progress_pauses {
-            pause.release();
-        }
-        self.inner.domain_clock_progress_pauses.clear();
     }
 
     pub fn set_syslog_ingestor_bind_ip(&self, node_id: ClusterNodeName, host: IpAddr) {
@@ -2200,6 +2131,11 @@ impl FaultInjection {
 
     pub(crate) async fn pause_command_admission_if_armed(&self, node_id: &ClusterNodeName) {
         self.pause_command_if_armed(CommandPausePoint::Admission(node_id.clone()))
+            .await;
+    }
+
+    pub(crate) async fn pause_runtime_installation_if_armed(&self, node_id: &ClusterNodeName) {
+        self.pause_command_if_armed(CommandPausePoint::RuntimeInstallation(node_id.clone()))
             .await;
     }
 
@@ -2674,57 +2610,6 @@ impl FaultInjection {
             .remove(&key);
     }
 
-    pub(crate) async fn pause_domain_clock_progress_if_armed(
-        &self,
-        domain: &DomainName,
-        node: &ClusterNodeName,
-        shutdown: &CancellationToken,
-    ) -> bool {
-        let exact = DomainClockProgressPausePoint {
-            domain: domain.as_str().to_ascii_lowercase(),
-            node: Some(node.clone()),
-        };
-        let any_node = DomainClockProgressPausePoint {
-            domain: domain.as_str().to_ascii_lowercase(),
-            node: None,
-        };
-        let pause = if let Some(pause) = self.inner.domain_clock_progress_pauses.get(&exact) {
-            pause.value().clone()
-        } else if let Some(pause) = self.inner.domain_clock_progress_pauses.get(&any_node) {
-            pause.value().clone()
-        } else {
-            return false;
-        };
-        pause.reach();
-        nervix_primitives::select! {
-            _ = shutdown.cancelled() => false,
-            _ = pause.wait_until_released() => true,
-        }
-    }
-
-    pub(crate) fn mark_domain_clock_progress_delivered(
-        &self,
-        domain: &DomainName,
-        node: &ClusterNodeName,
-    ) {
-        let exact = DomainClockProgressPausePoint {
-            domain: domain.as_str().to_ascii_lowercase(),
-            node: Some(node.clone()),
-        };
-        let any_node = DomainClockProgressPausePoint {
-            domain: domain.as_str().to_ascii_lowercase(),
-            node: None,
-        };
-        if let Some(pause) = self
-            .inner
-            .domain_clock_progress_pauses
-            .get(&exact)
-            .or_else(|| self.inner.domain_clock_progress_pauses.get(&any_node))
-        {
-            pause.mark_delivered();
-        }
-    }
-
     pub(crate) fn syslog_ingestor_bind_addr(
         &self,
         node_id: &ClusterNodeName,
@@ -2937,13 +2822,6 @@ impl FaultInjection {
     fn wasm_checkpoint_pause(&self, point: &WasmCheckpointPausePoint) -> Arc<TestPause> {
         let Some(pause) = self.inner.wasm_checkpoint_pauses.get(point) else {
             panic!("WASM checkpoint pause at {point:?} is not armed");
-        };
-        pause.value().clone()
-    }
-
-    fn domain_clock_progress_pause(&self, point: &DomainClockProgressPausePoint) -> Arc<TestPause> {
-        let Some(pause) = self.inner.domain_clock_progress_pauses.get(point) else {
-            panic!("domain clock progress pause for '{point:?}' is not armed");
         };
         pause.value().clone()
     }

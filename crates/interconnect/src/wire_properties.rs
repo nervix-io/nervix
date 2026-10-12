@@ -10,6 +10,11 @@
 //!   generators.
 //! - **Must not know.** Runtime branches, Arrow decoding or the transport's connection lifecycle.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(harness, reason = "owns the test harness boundary declared above")
+)]
+
 use std::{collections::VecDeque, num::NonZeroUsize};
 
 use meticulous::{OptionExt as _, ResultExt as _};

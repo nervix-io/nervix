@@ -7,6 +7,11 @@
 //! - **Depends on.** Source vocabulary, typed names, and selected browser references.
 //! - **Must not know.** Connector drivers, registry snapshots, or runtime quiescence.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(edge, reason = "owns the edges boundary declared above")
+)]
+
 use std::num::NonZeroU64;
 
 use error_stack::Report;
@@ -583,6 +588,10 @@ pub(super) enum IngestSourceDraftError {
 }
 
 #[cfg(test)]
+#[cfg_attr(
+    nervix_lint,
+    nervix::layer(harness, reason = "test module remains outside product execution")
+)]
 mod tests {
     use meticulous::ResultExt as _;
     use nervix_models::{

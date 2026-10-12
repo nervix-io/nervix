@@ -6,6 +6,11 @@
 //! - **Depends on.** Vocabulary names, timestamps, clock values and primitive collections.
 //! - **Must not know.** Parser recovery state, registry validation, scheduling or runtime tasks.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(vocabulary, reason = "owns the vocabulary boundary declared above")
+)]
+
 use std::{
     collections::BTreeMap,
     marker::PhantomData,
@@ -1196,6 +1201,7 @@ macro_rules! declare_models {
             RkyvSerialize,
             RkyvDeserialize,
         )]
+        #[cfg_attr(nervix_lint, nervix::value(model, reason = "public configuration union converted into validated execution plans"))]
         pub enum Model<Version = u64> {
             $($Variant($Model $(<$Version>)?),)+
         }

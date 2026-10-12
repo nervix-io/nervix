@@ -10,6 +10,11 @@
 //!   checkpoint replication.
 //! - **Must not know.** Branch tasks, schedules, how a checkpoint is persisted or fetched, or NSPL.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(data_plane, reason = "owns the data plane boundary declared above")
+)]
+
 use ahash::{HashMap, HashSet};
 use imbl::{GenericHashMap, shared_ptr::DefaultSharedPtr};
 use meticulous::OptionExt as _;
@@ -207,6 +212,13 @@ pub(super) struct AnnouncedCheckpoint {
 pub(super) struct BranchLifecycleCheckpoint {
     snapshot: PersistedRuntimeStateEntry,
     /// Decoded from the snapshot the first time a reader needs it, and never again.
+    #[cfg_attr(
+        nervix_lint,
+        nervix::state(
+            installed,
+            reason = "branch topology is installed once before admission"
+        )
+    )]
     branches: OnceLock<NamedBranches>,
 }
 

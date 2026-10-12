@@ -9,6 +9,11 @@
 //!   the create dialog's selected references.
 //! - **Must not know.** Subscription tabs, session transport, or how references are looked up.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(edge, reason = "owns the edges boundary declared above")
+)]
+
 use error_stack::{Report, ResultExt as _};
 use meticulous::ResultExt as _;
 use nervix_models::{
@@ -174,6 +179,10 @@ pub(super) enum SubscriptionDraftError {
 }
 
 #[cfg(test)]
+#[cfg_attr(
+    nervix_lint,
+    nervix::layer(harness, reason = "test module remains outside product execution")
+)]
 mod tests {
     use meticulous::{OptionExt as _, ResultExt as _};
     use nervix_models::{

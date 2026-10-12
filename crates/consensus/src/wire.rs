@@ -6,6 +6,14 @@
 //! - **Depends on.** OpenRaft, shared Raft records, and the interconnect request primitive.
 //! - **Must not know.** HTTP/2 framing, durable storage, peer addresses, or control-plane policy.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(
+        engine,
+        reason = "owns the engines and infrastructure boundary declared above"
+    )
+)]
+
 use std::{io, time::Duration};
 
 use nervix_interconnect::{

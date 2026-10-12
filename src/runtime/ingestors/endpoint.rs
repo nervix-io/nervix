@@ -10,6 +10,11 @@
 //!   dispatch, all of which the host owns; NSPL parsing, registry validation, or placement
 //!   computation.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(data_plane, reason = "owns the data plane boundary declared above")
+)]
+
 use async_trait::async_trait;
 use error_stack::ResultExt as _;
 use nervix_connector::{
@@ -167,6 +172,10 @@ impl EndpointIngestorStartPlan {
 }
 
 #[cfg(test)]
+#[cfg_attr(
+    nervix_lint,
+    nervix::layer(harness, reason = "test module remains outside product execution")
+)]
 pub(super) mod tests {
     use std::collections::BTreeMap;
 

@@ -8,6 +8,14 @@
 //!   provider, and the bundled and host trust stores.
 //! - **Must not know.** Which connector or driver the configuration is built for.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(
+        engine,
+        reason = "owns the engines and infrastructure boundary declared above"
+    )
+)]
+
 use error_stack::{Report, ResultExt as _};
 use nervix_primitives::sync::StdArc;
 use nervix_recovery::Discarded as _;
@@ -181,6 +189,10 @@ impl<'a> RustlsClientConfigSource<'a> {
 }
 
 #[cfg(test)]
+#[cfg_attr(
+    nervix_lint,
+    nervix::layer(harness, reason = "test module remains outside product execution")
+)]
 mod tests {
     use super::*;
 

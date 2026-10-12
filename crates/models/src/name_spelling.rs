@@ -12,6 +12,11 @@
 //! wherever a keyword could stand. Every other word, a statement keyword such as `to`, `on` or `by`
 //! included, is an ordinary name inside an expression.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(vocabulary, reason = "owns the vocabulary boundary declared above")
+)]
+
 use std::borrow::Cow;
 
 /// Where an expression or a route construction writes a name, which decides the words that cannot

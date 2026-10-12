@@ -5,6 +5,11 @@
 //! - **Depends on.** Arrow, the production subscription adapter, wire views and vocabulary.
 //! - **Must not know.** Session scheduling, live services or an alternative payload carrier.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(harness, reason = "owns the test harness boundary declared above")
+)]
+
 use std::num::{NonZeroU32, NonZeroUsize};
 
 use arrow_array::{

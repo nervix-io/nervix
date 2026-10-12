@@ -6,6 +6,11 @@
 //! - **Depends on.** Canonical NSPL rendering and BLAKE3.
 //! - **Must not know.** How a window keeps, archives or restores its state.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(vocabulary, reason = "owns the vocabulary boundary declared above")
+)]
+
 use std::fmt;
 
 use crate::{CanonicalNsplError, CreateWindowProcessor};

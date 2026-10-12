@@ -7,6 +7,11 @@
 //! - **Depends on.** Shared route drafts and typed input field choices.
 //! - **Must not know.** Runtime field projection or registry validation.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(edge, reason = "owns the edges boundary declared above")
+)]
+
 use leptos::prelude::*;
 
 use super::{

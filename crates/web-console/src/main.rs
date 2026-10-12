@@ -1,3 +1,13 @@
+//! Browser application edge.
+//! Layer: edges.
+//! - **Owns.** Navigation, session orchestration, forms and rendered client results.
+//! - **Depends on.** The client protocol, vocabulary and language for client-side parsing.
+//! - **Must not know.** Server runtime ownership, placement or consensus implementation.
+
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(edge, reason = "public client language adapter")
+)]
 use std::{
     cmp::Ordering,
     collections::{BTreeMap, BTreeSet, VecDeque, btree_map::Entry},
@@ -7826,6 +7836,10 @@ impl TermLineKind {
 }
 
 #[cfg(test)]
+#[cfg_attr(
+    nervix_lint,
+    nervix::layer(harness, reason = "test module remains outside product execution")
+)]
 mod tests {
     use leptos::prelude::Owner;
     use nervix_client_wire::{

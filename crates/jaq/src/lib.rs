@@ -12,6 +12,14 @@
 //! - **Must not know.** Schemas, relays or branches. Its callers decide what a program means; this
 //!   crate only runs it.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(
+        engine,
+        reason = "owns the engines and infrastructure boundary declared above"
+    )
+)]
+
 use std::{fmt::Display, io, str::FromStr};
 
 use bytes::Bytes;

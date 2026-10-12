@@ -21,6 +21,14 @@
 //! release that finishes late cannot withdraw the interest of a subscription that attached after
 //! it.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(
+        control_plane,
+        reason = "owns the control plane boundary declared above"
+    )
+)]
+
 use std::num::NonZeroUsize;
 
 use ahash::RandomState;

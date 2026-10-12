@@ -6,6 +6,11 @@
 //! - **Depends on.** The production durability barrier and the model harness's Shuttle runner.
 //! - **Must not know.** The database a synchronization flushes, or what the writes hold.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(harness, reason = "owns the test harness boundary declared above")
+)]
+
 // Unmodeled atomics are not Shuttle scheduling points, so each record below changes in the same
 // scheduling step as the operation it records.
 use error_stack::Report;

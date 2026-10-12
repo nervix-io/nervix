@@ -6,6 +6,11 @@
 //! - **Depends on.** Vocabulary Models, the domain activation plan and the VM frontend.
 //! - **Must not know.** Runtime delivery tasks, node-local VM bindings or relay services.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(decisions, reason = "owns the decisions boundary declared above")
+)]
+
 use error_stack::{Report, ResultExt as _};
 use nervix_models::{
     CodecName, DomainName, FlushPolicy, IngestorInput, MessageErrorPolicy, Model, NodeRef,
@@ -310,6 +315,10 @@ impl MessageErrorRouteSpecs {
 }
 
 #[cfg(test)]
+#[cfg_attr(
+    nervix_lint,
+    nervix::layer(harness, reason = "test module remains outside product execution")
+)]
 mod tests {
     use nervix_models::{DomainName, ModelKind, ModelName, ParseAsType, SchemaField, Statement};
 

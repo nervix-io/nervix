@@ -5,6 +5,11 @@
 //! - **Depends on.** Prepared divisors and portable SIMD registers.
 //! - **Must not know.** Arrow, validity or a caller's rounding units.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(primitives, reason = "owns the primitives boundary declared above")
+)]
+
 use fearless_simd::{Level, dispatch, prelude::*};
 use meticulous::{OptionExt as _, ResultExt as _};
 

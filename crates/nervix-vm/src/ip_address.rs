@@ -10,6 +10,14 @@
 //! - **Must not know.** NSPL syntax, routes, schemas or connectors. It never resolves a name or
 //!   reaches the network.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(
+        engine,
+        reason = "owns the engines and infrastructure boundary declared above"
+    )
+)]
+
 use std::{
     fmt::Write as _,
     net::{IpAddr, Ipv4Addr, Ipv6Addr},

@@ -14,6 +14,11 @@
 //! allocating: scalars are written to its out-parameters and the domain name is borrowed from the
 //! event for as long as a reference to it is held.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(edge, reason = "owns the edges boundary declared above")
+)]
+
 use std::mem::ManuallyDrop;
 
 use nervix_client_core::{

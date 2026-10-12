@@ -5,6 +5,11 @@
 //! - **Depends on.** Typed schedule models and runtime-state activation capabilities.
 //! - **Must not know.** Persistence mechanisms, asynchronous tasks or connector behavior.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(decisions, reason = "owns the decisions boundary declared above")
+)]
+
 use super::*;
 
 impl ForcedRuntimeStateRecoveryAuthorization {

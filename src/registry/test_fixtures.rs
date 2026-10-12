@@ -1,3 +1,10 @@
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(
+        harness,
+        reason = "test fixture construction remains outside product execution"
+    )
+)]
 //! Fixtures the registry's unit tests share.
 //!
 //! A fixture lives here only when tests in more than one registry module build the

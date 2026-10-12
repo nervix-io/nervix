@@ -6,6 +6,11 @@
 //! - **Depends on.** The vocabulary its variants quote and typed engine failures it retains.
 //! - **Must not know.** How a caller reports or recovers from a failure.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(data_plane, reason = "owns the data plane boundary declared above")
+)]
+
 use super::*;
 
 /// Why a runtime entry point failed. Each variant is a context of an `error_stack` report, and the

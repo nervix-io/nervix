@@ -11,6 +11,14 @@
 //! - **Must not know.** Anything in Nervix, deliberately. Guests link this crate, so a Model or a
 //!   name type named here would pull the server's vocabulary into every guest.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(
+        engine,
+        reason = "owns the engines and infrastructure boundary declared above"
+    )
+)]
+
 use error_stack::{Report, Result};
 use flatbuffers::{Allocator, FlatBufferBuilder, WIPOffset};
 use meticulous::{OptionExt as _, ResultExt as _};

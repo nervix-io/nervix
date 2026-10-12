@@ -10,6 +10,14 @@
 //! - **Depends on.** The regex engine and the `regex` error vocabulary the VM reports.
 //! - **Must not know.** Registers, batches, row errors, or which rows a pattern applies to.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(
+        engine,
+        reason = "owns the engines and infrastructure boundary declared above"
+    )
+)]
+
 use std::collections::hash_map::Entry;
 
 use ahash::{HashMap, HashMapExt};

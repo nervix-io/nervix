@@ -8,6 +8,14 @@
 //!   bounded executor and archive-owned contracts.
 //! - **Must not know.** Native checkpoint encodings, consensus activation or client framing.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(
+        control_plane,
+        reason = "owns the control plane boundary declared above"
+    )
+)]
+
 use meticulous::ResultExt as _;
 use nervix_backup::{
     ArchiveRecord, BRANCH_STATE_GROUP_BYTES, DeduplicatorStateDescriptor, DelayedHistogramRemoval,

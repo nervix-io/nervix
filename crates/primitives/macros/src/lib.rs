@@ -14,6 +14,11 @@
 //! - **Depends on.** The compiler's procedural macro interface.
 //! - **Must not know.** Which runtime a mode selects; `nervix-primitives` resolves that.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(primitives, reason = "owns the primitives boundary declared above")
+)]
+
 use proc_macro::{Delimiter, Group, Ident, Literal, Punct, Spacing, Span, TokenStream, TokenTree};
 
 /// The module of `nervix-primitives` that re-exports the selected runtime's attributes and the

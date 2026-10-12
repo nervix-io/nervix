@@ -162,7 +162,10 @@ class ConfigurationTests(unittest.TestCase):
 
     def test_declared_modes_and_malformed_configuration(self) -> None:
         configurations = typed_ratchet.load_configurations(ROOT)
-        self.assertEqual({item.name for item in configurations}, {"ordinary", "testing", "shuttle", "loom", "turmoil", "deloxide", "deloxide-order", "deloxide-stress", "deloxide-binaries", "deloxide-order-binaries", "deloxide-stress-binaries"})
+        self.assertEqual({item.name for item in configurations}, {"ordinary", "browser", "testing", "shuttle", "loom", "turmoil", "deloxide", "deloxide-order", "deloxide-stress", "deloxide-binaries", "deloxide-order-binaries", "deloxide-stress-binaries"})
+        browser = next(item for item in configurations if item.name == "browser")
+        self.assertEqual(browser.target, "wasm32-unknown-unknown")
+        self.assertEqual(browser.kinds, ("lib", "bin"))
         with tempfile.TemporaryDirectory() as directory:
             root = pathlib.Path(directory)
             path = root / TOOLING / "configurations.toml"
@@ -275,6 +278,16 @@ class RunnerExecutionTests(CompletionTests):
             Runner.clean_authored_artifacts(self.runner, self.configuration, self.expected, self.root / "isolated")
         self.assertIn(str(self.root / "isolated"), command.call_args.args[0])
         self.assertIn("example", command.call_args.args[0])
+        self.assertEqual(command.call_args.kwargs["env"]["RUSTC_WRAPPER"], "kache")
+
+    def test_cross_target_reanalysis_cleans_the_analyzed_target(self) -> None:
+        configuration = Configuration("browser", "Cargo.toml", ("example",), target="wasm32-unknown-unknown")
+        with mock.patch("scripts.typed_ratchet.command") as command:
+            Runner.clean_authored_artifacts(self.runner, configuration, self.expected, self.root / "isolated")
+        arguments = command.call_args.args[0]
+        self.assertIn("--target", arguments)
+        self.assertEqual(arguments[arguments.index("--target") + 1], configuration.target)
+        self.assertEqual(arguments[arguments.index("--target-dir") + 1], str(self.root / "isolated"))
         self.assertEqual(command.call_args.kwargs["env"]["RUSTC_WRAPPER"], "kache")
 
     def test_required_gate_rejects_warnings_and_inventory_records_them(self) -> None:

@@ -7,6 +7,11 @@
 //! - **Depends on.** The schema rules and the graph's edges.
 //! - **Must not know.** How an error record is emitted at runtime.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(decisions, reason = "owns the decisions boundary declared above")
+)]
+
 use ahash::{HashMap, HashSet};
 use error_stack::Report;
 use nervix_models::{
@@ -436,6 +441,10 @@ pub(in crate::registry) fn add_output_message_error_policy_edges(
 }
 
 #[cfg(test)]
+#[cfg_attr(
+    nervix_lint,
+    nervix::layer(harness, reason = "test module remains outside product execution")
+)]
 mod tests {
     use std::fs;
 

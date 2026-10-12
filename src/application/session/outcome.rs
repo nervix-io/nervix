@@ -7,6 +7,11 @@
 //! - **Depends on.** The control-plane result types and the client wire contract.
 //! - **Must not know.** How a reply is framed, correlated or sent.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(edge, reason = "owns the edges boundary declared above")
+)]
+
 use std::ops::Range;
 
 use nervix_client_wire::{

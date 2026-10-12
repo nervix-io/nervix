@@ -11,6 +11,10 @@
 
 #![cfg_attr(
     nervix_lint,
+    nervix::layer(edge, reason = "interactive terminal language adapter")
+)]
+#![cfg_attr(
+    nervix_lint,
     nervix::context(
         outside,
         reason = "CLI session and terminal coordination belong to the client edge"
@@ -1764,6 +1768,10 @@ fn diagnostic_range(source: &str, span: Option<SourceSpan>) -> Option<Range<usiz
 }
 
 #[cfg(test)]
+#[cfg_attr(
+    nervix_lint,
+    nervix::layer(harness, reason = "test module remains outside product execution")
+)]
 mod tests {
     use meticulous::{OptionExt as _, ResultExt as _};
 

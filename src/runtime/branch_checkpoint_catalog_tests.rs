@@ -4,6 +4,11 @@
 //! May depend on: the catalog and typed branch keys.
 //! Must not know: replicas, the interconnect, or how a checkpoint is stored.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(harness, reason = "owns the test harness boundary declared above")
+)]
+
 use nervix_models::SchemaFingerprint;
 
 use super::*;

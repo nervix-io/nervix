@@ -5,6 +5,11 @@
 //! - **Depends on.** The vocabulary's atomic timestamp and the model harness's Shuttle runner.
 //! - **Must not know.** What a timestamp marks, or any runtime protocol.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(harness, reason = "owns the test harness boundary declared above")
+)]
+
 use nervix_model_harness::shuttle::check_random;
 use nervix_models::{AtomicTimestamp, Timestamp};
 use shuttle::current::context_switches;

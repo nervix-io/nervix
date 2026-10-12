@@ -11,6 +11,11 @@
 //! - **Must not know.** How the request fields were evaluated, which endpoint the sink sends to, or
 //!   when the emitter retries.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(data_plane, reason = "owns the data plane boundary declared above")
+)]
+
 use async_trait::async_trait;
 use nervix_connector::{HttpRequestSink, SinkLifecycle, SinkRecordPosition};
 
@@ -173,6 +178,10 @@ impl EmitterSink for PreparedRequestSink {
 }
 
 #[cfg(test)]
+#[cfg_attr(
+    nervix_lint,
+    nervix::layer(harness, reason = "test module remains outside product execution")
+)]
 mod tests {
     use std::collections::VecDeque;
 

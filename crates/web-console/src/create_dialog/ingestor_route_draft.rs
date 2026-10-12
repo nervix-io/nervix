@@ -7,6 +7,11 @@
 //! - **Depends on.** Typed route Models, expression parsing, and selected browser references.
 //! - **Must not know.** Relay execution, registry state, or connector acknowledgements.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(edge, reason = "owns the edges boundary declared above")
+)]
+
 use error_stack::{Report, ResultExt as _};
 use nervix_models::{
     Assignment, AssignmentTarget, BranchName, BuiltinFunctionName, FieldName, FlushPolicy,
@@ -553,6 +558,10 @@ pub(super) enum IngestRouteDraftError {
 }
 
 #[cfg(test)]
+#[cfg_attr(
+    nervix_lint,
+    nervix::layer(harness, reason = "test module remains outside product execution")
+)]
 mod tests {
     use meticulous::ResultExt as _;
     use nervix_models::{

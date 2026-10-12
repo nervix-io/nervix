@@ -7,6 +7,11 @@
 //! - **Depends on.** Shared schema type drafts and the semantic UDF Model.
 //! - **Must not know.** Roto compilation, test execution, or registry application.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(edge, reason = "owns the edges boundary declared above")
+)]
+
 use std::collections::BTreeSet;
 
 use error_stack::Report;
@@ -134,6 +139,10 @@ pub(super) enum UdfDraftError {
 }
 
 #[cfg(test)]
+#[cfg_attr(
+    nervix_lint,
+    nervix::layer(harness, reason = "test module remains outside product execution")
+)]
 mod tests {
     use meticulous::ResultExt as _;
     use nervix_models::{CreateStatement, Model, ParseAsType, Statement};

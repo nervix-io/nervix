@@ -5,6 +5,11 @@
 //! - **Depends on.** Current archive records and the dev-only vocabulary generator.
 //! - **Must not know.** Consensus membership, execution plans, live attempts or capture fencing.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(harness, reason = "owns the test harness boundary declared above")
+)]
+
 use std::num::NonZeroU64;
 
 use meticulous::{OptionExt as _, ResultExt as _};

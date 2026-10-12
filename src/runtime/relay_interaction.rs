@@ -28,6 +28,11 @@
 //! lifecycle code must stop graph sources and prove relay buffers, node work, and force-flush
 //! obligations are quiescent before broadcasting the terminal watch value.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(data_plane, reason = "owns the data plane boundary declared above")
+)]
+
 use std::{future::pending, task::Poll};
 
 use ahash::{HashSet, HashSetExt};
@@ -1006,6 +1011,10 @@ async fn wait_for_collection_deadlines(
 }
 
 #[cfg(test)]
+#[cfg_attr(
+    nervix_lint,
+    nervix::layer(harness, reason = "test module remains outside product execution")
+)]
 mod tests {
     use std::num::NonZeroUsize;
 

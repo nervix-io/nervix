@@ -6,6 +6,11 @@
 //! - **Depends on.** Validated node names and serialization primitives.
 //! - **Must not know.** Gossip membership, consensus, transport authentication or runtime tasks.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(vocabulary, reason = "owns the vocabulary boundary declared above")
+)]
+
 use std::fmt;
 
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
@@ -60,19 +65,38 @@ impl fmt::Display for ClusterNodeIncarnation {
     RkyvSerialize,
     RkyvDeserialize,
 )]
+#[cfg_attr(
+    nervix_lint,
+    nervix::identity(node, reason = "shared process-incarnation identity")
+)]
 pub struct ClusterNodeIdentity {
+    #[cfg_attr(
+        nervix_lint,
+        nervix::identity(node, reason = "cluster node identity component")
+    )]
     node_id: ClusterNodeName,
     incarnation: ClusterNodeIncarnation,
 }
 
 impl ClusterNodeIdentity {
-    pub const fn new(node_id: ClusterNodeName, incarnation: ClusterNodeIncarnation) -> Self {
+    pub const fn new(
+        #[cfg_attr(
+            nervix_lint,
+            nervix::identity(node, reason = "cluster node identity component")
+        )]
+        node_id: ClusterNodeName,
+        incarnation: ClusterNodeIncarnation,
+    ) -> Self {
         Self {
             node_id,
             incarnation,
         }
     }
 
+    #[cfg_attr(
+        nervix_lint,
+        nervix::identity(node, reason = "typed cluster node accessor")
+    )]
     pub const fn node_id(&self) -> &ClusterNodeName {
         &self.node_id
     }

@@ -309,6 +309,8 @@ class Runner:
     def clean_authored_artifacts(self, configuration: Configuration, expected: dict[str, Any], build: pathlib.Path) -> None:
         packages = sorted({target["package"] for target in expected.values()})
         args = ["cargo", f"+{TOOLCHAIN}", "clean", "--manifest-path", configuration.manifest, "--target-dir", str(build)]
+        if configuration.target:
+            args.extend(["--target", configuration.target])
         for package in packages:
             args.extend(["--package", package])
         # Only this isolated analysis build's authored artifacts are discarded. Dependency

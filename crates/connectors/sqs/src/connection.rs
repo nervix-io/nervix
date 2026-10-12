@@ -16,6 +16,18 @@
 //! the configured endpoint before the connector resolves its host, so the signature, the `Host`
 //! header and the certificate check all name that host, whichever address accepted the connection.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::input(plans, reason = "connector host supplies validated plans")
+)]
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(
+        engine,
+        reason = "owns the engines and infrastructure boundary declared above"
+    )
+)]
+
 use std::{error::Error, fmt::Debug};
 
 use aws_sdk_sqs::{config::SharedHttpClient, error::SdkError};

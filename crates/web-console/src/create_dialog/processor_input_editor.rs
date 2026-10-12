@@ -7,6 +7,11 @@
 //! - **Depends on.** Shared processor drafts and typed choice controls.
 //! - **Must not know.** Runtime input collection or registry implementation.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(edge, reason = "owns the edges boundary declared above")
+)]
+
 use leptos::prelude::*;
 use nervix_models::InputCollectPolicy;
 

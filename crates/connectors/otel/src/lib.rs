@@ -11,6 +11,18 @@
 //! - **Must not know.** Runtime batches, relays, branches, schedules, registry state, or another
 //!   connector implementation.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(
+        engine,
+        reason = "owns the engines and infrastructure boundary declared above"
+    )
+)]
+#![cfg_attr(
+    nervix_lint,
+    nervix::input(plans, reason = "the host supplies a validated connector plan")
+)]
+
 use std::{io::Write, num::NonZeroU64, ops::Range, str::FromStr, time::Duration};
 
 use ahash::{HashMap, HashMapExt as _, HashSet, HashSetExt as _};
@@ -2424,9 +2436,17 @@ fn any_value_at(array: &ArrayRef, row: usize) -> OtelValueResult<Option<AnyValue
 }
 
 #[cfg(test)]
+#[cfg_attr(
+    nervix_lint,
+    nervix::layer(harness, reason = "test module remains outside product execution")
+)]
 mod prepared_request_tests;
 
 #[cfg(test)]
+#[cfg_attr(
+    nervix_lint,
+    nervix::layer(harness, reason = "test module remains outside product execution")
+)]
 mod tests {
     use nervix_dns::{DnsConfiguration, NameServers};
     use nervix_test_environment::dns_authority::{DnsAnswer, DnsAuthority};

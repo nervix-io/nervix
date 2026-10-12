@@ -17,6 +17,11 @@
 //! noncharacters as three byte masks shifted onto the sequence's last byte, carrying a block's
 //! last two lanes into the next block.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(primitives, reason = "owns the primitives boundary declared above")
+)]
+
 use std::ops::RangeInclusive;
 
 use error_stack::Report;

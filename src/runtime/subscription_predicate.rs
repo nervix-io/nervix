@@ -9,6 +9,11 @@
 //! - **Must not know.** Subscription lifecycle, sampling, delivery, branch values, materialized
 //!   state, output construction, or side effects.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(data_plane, reason = "owns the data plane boundary declared above")
+)]
+
 use error_stack::ResultExt as _;
 
 use super::*;
@@ -140,6 +145,10 @@ pub(crate) async fn execute_subscription_predicate_on_record(
 }
 
 #[cfg(test)]
+#[cfg_attr(
+    nervix_lint,
+    nervix::layer(harness, reason = "test module remains outside product execution")
+)]
 mod tests {
     use super::*;
     use crate::runtime::test_fixtures::{expression, named, test_schema};

@@ -16,6 +16,11 @@
 //! Declaring a different definition, or withdrawing the relay, therefore closes every subscriber
 //! first; each drains what it already received and then sees its receiver end.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(data_plane, reason = "owns the data plane boundary declared above")
+)]
+
 use nervix_primitives::sync::atomic::fence;
 
 use super::*;
@@ -153,6 +158,10 @@ impl RelaySubscriptions {
 }
 
 #[cfg(test)]
+#[cfg_attr(
+    nervix_lint,
+    nervix::layer(harness, reason = "test module remains outside product execution")
+)]
 mod tests {
     use nervix_models::{CreateSchema, SchemaField};
 
@@ -269,6 +278,10 @@ mod tests {
 }
 
 #[cfg(all(test, feature = "shuttle"))]
+#[cfg_attr(
+    nervix_lint,
+    nervix::layer(harness, reason = "test module remains outside product execution")
+)]
 mod shuttle_tests {
     use meticulous::ResultExt as _;
     use nervix_model_harness::shuttle::check_random_and_pct;

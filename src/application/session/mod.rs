@@ -28,6 +28,11 @@
 //! effects continue and only the wait for them ends. When the session ends, no reply follows for a
 //! request still in flight, and a request not yet admitted never begins.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(edge, reason = "owns the edges boundary declared above")
+)]
+
 pub(in crate::application) mod admission;
 mod clock_attachments;
 mod console_calls;
@@ -45,6 +50,10 @@ mod upload;
 pub(in crate::application) mod websocket;
 
 #[cfg(test)]
+#[cfg_attr(
+    nervix_lint,
+    nervix::layer(harness, reason = "test module remains outside product execution")
+)]
 mod tests;
 
 use std::collections::BTreeMap;

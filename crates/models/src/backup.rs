@@ -8,6 +8,11 @@
 //! - **Must not know.** The archive's encoding, how a backup reads cluster state, where an archive
 //!   is staged, or how a client stores it.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(vocabulary, reason = "owns the vocabulary boundary declared above")
+)]
+
 use std::{fmt, num::NonZeroU64, time::Duration};
 
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};

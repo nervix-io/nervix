@@ -7,6 +7,14 @@
 //! - **Depends on.** Current checkpoint shapes and Fjall snapshot reads.
 //! - **Must not know.** Archive records, schemas or runtime activation.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(
+        engine,
+        reason = "owns the engines and infrastructure boundary declared above"
+    )
+)]
+
 use std::io::{self, Cursor, Read};
 
 use super::{
@@ -322,6 +330,10 @@ impl ListedCheckpoint {
 }
 
 #[cfg(test)]
+#[cfg_attr(
+    nervix_lint,
+    nervix::layer(harness, reason = "test module remains outside product execution")
+)]
 pub(super) mod tests {
     use nervix_interconnect::backup::RestoreStateInventory;
 

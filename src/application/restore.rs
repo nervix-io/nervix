@@ -18,6 +18,14 @@
 //! and never applies a recorded step twice. Only the node a client streamed the archive to holds
 //! it; a leader without it waits for the client to send it again.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(
+        control_plane,
+        reason = "owns the control plane boundary declared above"
+    )
+)]
+
 mod archives;
 mod branch_state;
 mod materialized;

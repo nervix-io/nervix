@@ -74,6 +74,55 @@ class CompilerContractTests(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0, result.stderr)
         self.assertIn("nervix::lifecycle_call", result.stderr)
 
+    def test_resolved_architecture_and_state_boundaries(self) -> None:
+        for name, diagnostic in (
+            ("architecture_model", "nervix::model_in_data_plane"),
+            ("architecture_language", "nervix::parser_dependency"),
+            ("architecture_cluster", "nervix::cluster_await"),
+            ("architecture_identity", "nervix::node_identity"),
+            ("architecture_state", "nervix::installed_state"),
+        ):
+            with self.subTest(name=name):
+                result = self.compile(name)
+                self.assertNotEqual(result.returncode, 0, result.stderr)
+                self.assertIn(diagnostic, result.stderr.replace("-", "_"))
+
+    def test_architecture_contracts_cover_indirection_and_review(self) -> None:
+        for name, diagnostic in (
+            ("architecture_cluster_binding", "nervix::cluster_await"),
+            ("architecture_cluster_trait", "nervix::cluster_await"),
+            ("architecture_trait_scope", "nervix::model_in_data_plane"),
+            ("architecture_input", "nervix::model_in_data_plane"),
+            ("architecture_language_method", "nervix::parser_dependency"),
+            ("architecture_language_alias", "nervix::parser_dependency"),
+            ("architecture_identity_input", "nervix::node_identity"),
+            ("architecture_identity_mixed", "nervix::node_identity"),
+            ("architecture_state_review", "nervix::state_contract"),
+            ("architecture_contract_invalid", "nervix::invalid_contract"),
+            ("architecture_unfulfilled", "expectation is unfulfilled"),
+        ):
+            with self.subTest(name=name):
+                result = self.compile(name)
+                self.assertNotEqual(result.returncode, 0, result.stderr)
+                self.assertIn(diagnostic, result.stderr.replace("-", "_"))
+        for name in ("architecture_allowed", "architecture_expected", "architecture_projection"):
+            with self.subTest(name=name):
+                result = self.compile(name)
+                self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_architecture_metadata_survives_reexports_and_source_moves(self) -> None:
+        target = pathlib.Path(os.environ.get("CARGO_TARGET_DIR", ROOT / "target"))
+        result = self.compile("architecture_metadata", crate_name="callee")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        metadata = target / "typed-ratchet/contracts/architecture_metadata/libcallee.rmeta"
+        with tempfile.TemporaryDirectory() as directory:
+            source = pathlib.Path(directory) / "relocated.rs"
+            source.write_text((ROOT / "tools/nervix-lint/fixtures/tests/semantics/architecture_metadata_use.rs").read_text())
+            result = self.compile("architecture_metadata_use", "--extern=callee=" + str(metadata), source=source, source_root=source.parent)
+            self.assertNotEqual(result.returncode, 0, result.stderr)
+            self.assertIn("nervix::model_in_data_plane", result.stderr.replace("-", "_"))
+            self.assertIn("nervix::parser_dependency", result.stderr.replace("-", "_"))
+
     def test_typed_error_and_outcome_diagnostics(self) -> None:
         for name, diagnostic in (
             ("error_nested_alias", "nervix::bare_error_signature"),

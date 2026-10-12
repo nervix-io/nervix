@@ -311,6 +311,28 @@ source contract, the sink contract, or both, from `nervix-connector` in `crates/
 `just ratchet` and the clock-boundary check treat the connector crates as data plane, so code that
 moves into them keeps its counts and its clock rules.
 
+The compiler's architecture rules use source-owned `nervix::layer` contracts matching each
+documented layer boundary, gated with `cfg_attr(nervix_lint, ...)`. Keep that contract with a
+module when it moves. Connector engines and their contract also declare `nervix::input(plans,
+reason = "...")`; their layer does not grant permission to consume configuration Models.
+The public configuration union declares `nervix::value(model, ...)`, shared name types declare
+`nervix::value(name, ...)`, and the cluster observation capability declares
+`nervix::value(cluster_access, ...)`. These are reviewed semantic roles, not spelling conventions.
+Resolved references and normalized interface/body types enforce the Model and language
+boundaries; recurring data-plane call edges diagnose awaited cluster access. Language dependency
+and inactive import provenance remain a separate source/manifest check.
+
+Declare `nervix::identity(node, ...)` on the shared vocabulary identity types and on fields,
+parameters, aliases or return interfaces whose value is a node identity. A mixed aggregate does
+not become an identity merely because one member is typed. Declare `nervix::state(installed,
+...)` on installation-only fields; a resolved RwLock anywhere in their representation fails.
+`RwLock<Option<name or shared handle>>` without a lifetime contract requires an explicit review;
+it does not prove write-once behavior. Genuinely replaceable fields declare `state(mutable, ...)`
+with their actual lifetime reason. [Typed States](docs/src/typed-states.md#source-owned-identity-and-installation-contracts)
+and [Data-Plane Concurrency](docs/src/data-plane-concurrency.md#resolved-architecture-boundaries)
+own the exact scope and limitations. No owner catalog, count allowance or filename exception
+substitutes for these source contracts.
+
 ### Execution-sensitive primitives
 
 `nervix-primitives` in `crates/primitives` selects every execution-sensitive primitive for the
@@ -1106,8 +1128,9 @@ build and the existing tests, and nothing in it changes behavior.
   it instead of running Cargo directly.
 - Use `just test-bolero [filter]` for bounded randomized cases and checked-in corpus replay,
   `just fuzz-list` to inspect registered targets, `just fuzz <target> [duration]` or
-  `just fuzz-all [duration]` for sanitizer-backed libFuzzer, and `just fuzz-replay` /
-  `just fuzz-reduce` for saved exact inputs. Bolero commands and the dedicated Bolero workflow
+  `just fuzz-all [duration] [shard]` for sanitizer-backed libFuzzer, and `just fuzz-replay` /
+  `just fuzz-reduce` for saved exact inputs; a sanitizer finding replays only through
+  `just fuzz-replay-sanitizer`. Bolero commands and the dedicated Bolero workflow
   enforce inventory and scoped compiled discovery; `just validate-bolero` runs that check alone.
   Do not add Bolero checks to `just validate`, `just validate-ci`, or the Check workflow's
   validation job. A random seed identifies one generated case, not an entire
@@ -1121,20 +1144,20 @@ build and the existing tests, and nothing in it changes behavior.
   beside a report is successful evidence. Discovery, build probes, replay and deliberate failure
   qualification supply no campaign counters; stable and nightly raw profiles never mix.
   A failed or interrupted campaign retains its failure and cannot produce a complete aggregate.
+  Sanitizer CI runs the inventory in shards of whole harnesses, and only the combined record of
+  every shard of one plan, which `just combine-bolero-fuzz` checks, claims the whole inventory.
   Check calls the reusable Bolero workflow with its tested SHA, event and label snapshot;
   randomized checks are required and a deliberate sanitizer skip publishes no fuzz coverage.
   Keep native fuzz reports and the Python runner report distinct from ordinary coverage and CRAP.
 - Use `just validate` for formatting and validation.
 - Architecture debt is counted and only decreases. `just ratchet` counts oversized files, `as`
   casts outside imports and qualified paths, `saturating_*` and `wrapping_*` calls outside the time
-  API, control flow written as `Option` and `Result` combinator chains, node identities carried as
-  `String`, struct fields gated on
-  `cfg(feature = "testing")`, parser references outside the language edges, and `Model` references
-  in the data plane. It records `write_once_rwlock_fields` for names and shared references held as
-  `RwLock<Option<...>>` fields. CI fails when a structural count exceeds `debt-baseline.json`.
+  API, control flow written as `Option` and `Result` combinator chains, and struct fields gated on
+  `cfg(feature = "testing")`. CI fails when a structural count exceeds `debt-baseline.json`.
   A change may lower a count and never raise one. When a count falls, run `just ratchet --update`
   and commit the baseline; `just ratchet --show <count>` lists its sites.
-- Synchronization, failure signatures, discarded outcomes and canonical panic APIs use real Nervix
+- Model consumption, language dependencies, recurring cluster awaits, declared node identities,
+  installation state, synchronization, failure signatures, discarded outcomes and canonical panic APIs use real Nervix
   compiler diagnostics across the complete declared configuration
   matrix. Finite API recognition is Rust code; execution contexts and reviewed exceptions belong
   beside their source owners. Gate them with `cfg_attr(nervix_lint, ...)`. Contracts state actual

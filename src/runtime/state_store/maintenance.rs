@@ -7,6 +7,10 @@
 
 #![cfg_attr(
     nervix_lint,
+    nervix::layer(engine, reason = "owns the infrastructure boundary declared above")
+)]
+#![cfg_attr(
+    nervix_lint,
     nervix::context(
         lifecycle,
         reason = "restore accounting and reclamation run as admitted storage maintenance"
@@ -331,6 +335,10 @@ fn next_namespace(
 mod active_chunk_tests;
 
 #[cfg(test)]
+#[cfg_attr(
+    nervix_lint,
+    nervix::layer(harness, reason = "test module remains outside product execution")
+)]
 pub(in crate::runtime::state_store) mod tests {
     use nervix_interconnect::backup::RestoreStateInventory;
 

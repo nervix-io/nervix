@@ -5,6 +5,11 @@
 //! - **Depends on.** The Rust session client and the C ABI's handle and failure conventions.
 //! - **Must not know.** How grammar candidates or transaction snapshots are computed.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(edge, reason = "owns the edges boundary declared above")
+)]
+
 use nervix_client_core::{AutocompleteOutcome, SuggestionKind, SuggestionStatus};
 
 use crate::{

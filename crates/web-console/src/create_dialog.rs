@@ -10,6 +10,11 @@
 //! - **Must not know.** Registry state, command execution internals, subscription tabs, or how the
 //!   server resolves a choice.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(edge, reason = "owns the edges boundary declared above")
+)]
+
 use std::collections::BTreeMap;
 
 use error_stack::{Report, ResultExt as _};
@@ -71,6 +76,10 @@ mod udf_editor;
 mod vhost_draft;
 mod vhost_editor;
 #[cfg(test)]
+#[cfg_attr(
+    nervix_lint,
+    nervix::layer(harness, reason = "test module remains outside product execution")
+)]
 mod visual_forms_tests;
 
 use choice_group::ChoiceGroup;
@@ -2431,4 +2440,8 @@ fn event_target_checked(event: &ev::Event) -> bool {
 }
 
 #[cfg(test)]
+#[cfg_attr(
+    nervix_lint,
+    nervix::layer(harness, reason = "test module remains outside product execution")
+)]
 mod tests;

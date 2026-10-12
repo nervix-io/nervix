@@ -5,6 +5,14 @@
 //! - **Depends on.** The shared atomic primitive boundary.
 //! - **Must not know.** Connections, wire encodings, runtime graphs or admission permits.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(
+        engine,
+        reason = "owns the engines and infrastructure boundary declared above"
+    )
+)]
+
 use nervix_primitives::sync::atomic::{AtomicU8, Ordering};
 
 const PENDING: u8 = 0;

@@ -17,6 +17,14 @@
 //!   The records are shaped by the archive's contract rather than by any internal store, and the
 //!   conversions into them are the only place an internal shape reaches the format.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(
+        engine,
+        reason = "owns the engines and infrastructure boundary declared above"
+    )
+)]
+
 #[cfg(test)]
 #[global_allocator]
 static TEST_ALLOCATIONS: alloc_count::AllocCounter = alloc_count::AllocCounter(std::alloc::System);

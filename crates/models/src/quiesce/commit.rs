@@ -5,6 +5,11 @@
 //! - **Depends on.** Transaction impact identities and control-plane Models.
 //! - **Must not know.** Planning, persistence, consensus or runtime execution.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(vocabulary, reason = "owns the vocabulary boundary declared above")
+)]
+
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 use serde::{Deserialize, Serialize};
 

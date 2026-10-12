@@ -6,6 +6,11 @@
 //! - **Depends on.** Client browser drafts and the shared typed choice component.
 //! - **Must not know.** Connector drivers, external credentials, or runtime startup.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(edge, reason = "owns the edges boundary declared above")
+)]
+
 use leptos::prelude::*;
 
 use super::{

@@ -8,6 +8,14 @@
 //!   omitted RFC 3164 years.
 //! - **Must not know.** Domains, runtime clocks, schedules or connector lifecycle.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(
+        engine,
+        reason = "owns the engines and infrastructure boundary declared above"
+    )
+)]
+
 use std::{fmt, ops::RangeInclusive};
 
 use ahash::HashSet;

@@ -9,6 +9,11 @@
 //! - **Must not know.** The ZeroMQ driver, socket lifecycle, NSPL parsing, registry validation,
 //!   or placement computation.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(data_plane, reason = "owns the data plane boundary declared above")
+)]
+
 use nervix_connector_zeromq::{ZeroMqSource, ZeroMqSourcePlan};
 
 use super::{

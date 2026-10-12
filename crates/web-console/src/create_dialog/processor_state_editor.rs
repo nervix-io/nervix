@@ -6,6 +6,11 @@
 //! - **Depends on.** Processor drafts, typed relay and field choices, and ordered SET controls.
 //! - **Must not know.** Materialized view storage or branch scheduling.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(edge, reason = "owns the edges boundary declared above")
+)]
+
 use leptos::prelude::*;
 
 use super::{

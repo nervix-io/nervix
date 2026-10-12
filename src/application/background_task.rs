@@ -8,6 +8,11 @@
 //!   shutdown deadline that bounds every wait.
 //! - **Must not know.** What any supervised task does.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(edge, reason = "owns the edges boundary declared above")
+)]
+
 use std::time::Duration;
 
 use error_stack::Report;

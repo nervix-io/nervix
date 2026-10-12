@@ -10,6 +10,11 @@
 //! - **Depends on.** The VM compiler and runtime entry points.
 //! - **Must not know.** How the runtime narrows operands or scatters results.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(harness, reason = "owns the test harness boundary declared above")
+)]
+
 use arrow_array::{
     Array, BooleanArray, Float64Array, Int64Array, StringArray, UInt8Array,
     builder::{Int64Builder, ListBuilder, StringBuilder},

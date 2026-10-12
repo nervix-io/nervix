@@ -20,6 +20,11 @@
 //! wakeup. `just test-loom` runs them, and `just test-loom-qualification` shows that weakening the
 //! decisive ordering of each makes it fail.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(harness, reason = "owns the test harness boundary declared above")
+)]
+
 use std::num::NonZeroUsize;
 
 use meticulous::{OptionExt as _, ResultExt as _};

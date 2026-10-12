@@ -7,6 +7,11 @@
 //! - **Depends on.** The runtime's answers and the interconnect's typed requests.
 //! - **Must not know.** How the runtime keeps, catalogues or encodes the state it answers from.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(edge, reason = "owns the edges boundary declared above")
+)]
+
 use error_stack::ResultExt as _;
 use nervix_interconnect::{
     BranchCheckpointListingRequest, BranchCheckpointListingResponse, DescribeKafkaOffsets,

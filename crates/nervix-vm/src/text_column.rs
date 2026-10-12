@@ -7,6 +7,14 @@
 //! - **Depends on.** Arrow's byte array builders.
 //! - **Must not know.** Registers, programs, spans, or how a refused value is reported.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(
+        engine,
+        reason = "owns the engines and infrastructure boundary declared above"
+    )
+)]
+
 use std::num::NonZeroUsize;
 
 use arrow_array::{

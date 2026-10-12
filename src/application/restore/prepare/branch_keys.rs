@@ -10,6 +10,14 @@
 //!   branch declarations, and the runtime's typed branch key.
 //! - **Must not know.** Checkpoint encoding, staging, placement or publication.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(
+        control_plane,
+        reason = "owns the control plane boundary declared above"
+    )
+)]
+
 use std::{
     collections::{BTreeMap, hash_map::Entry},
     fmt,

@@ -11,6 +11,11 @@
 //! - **Must not know.** Which sink crate a connector comes from, how its input is encoded or
 //!   mapped, or how the emitter task receives its input.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(data_plane, reason = "owns the data plane boundary declared above")
+)]
+
 use async_trait::async_trait;
 use error_stack::ResultExt as _;
 use nervix_connector::{
@@ -936,6 +941,10 @@ pub(super) async fn finish_rejected_records(
 }
 
 #[cfg(test)]
+#[cfg_attr(
+    nervix_lint,
+    nervix::layer(harness, reason = "test module remains outside product execution")
+)]
 mod tests {
     use nervix_connector::{ParsedRetryPolicy, SinkCommitReport, SinkPublishResult, SinkRecordId};
 

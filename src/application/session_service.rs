@@ -9,6 +9,11 @@
 //!   client sends.
 //! - **Must not know.** How a transport frames, correlates or delivers what the pipeline returns.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(edge, reason = "owns the edges boundary declared above")
+)]
+
 use std::time::Duration;
 
 use ahash::RandomState;
@@ -257,6 +262,10 @@ pub(in crate::application) fn apply_current_cluster_runtime_state(
             let Some(installation) = admission.begin_installation(shutdown).await else {
                 return Ok(());
             };
+            #[cfg(feature = "testing")]
+            runtime
+                .pause_runtime_installation_if_armed(local_node_id)
+                .await;
             let Some(state) = admission.runtime_state(consensus, shutdown).await else {
                 return Ok(());
             };
@@ -1889,6 +1898,10 @@ pub(in crate::application) fn conflicting_reference(
 }
 
 #[cfg(test)]
+#[cfg_attr(
+    nervix_lint,
+    nervix::layer(harness, reason = "test module remains outside product execution")
+)]
 mod tests {
     use nervix_models::{ModelKind, NodeRef};
 

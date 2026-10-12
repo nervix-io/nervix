@@ -7,6 +7,11 @@
 //! - **Depends on.** `arc-swap` and the runtime state sequence.
 //! - **Must not know.** What a generation holds, how it is encoded, or where it is persisted.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(data_plane, reason = "owns the data plane boundary declared above")
+)]
+
 use nervix_primitives::{
     publication::ArcSwap,
     sync::{

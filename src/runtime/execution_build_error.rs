@@ -6,6 +6,11 @@
 //! - **Depends on.** The vocabulary its variants name and the reports of the steps it keeps beneath.
 //! - **Must not know.** How a caller reports or recovers from a failed build.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(data_plane, reason = "owns the data plane boundary declared above")
+)]
+
 use std::fmt;
 
 use super::*;
@@ -199,6 +204,10 @@ impl fmt::Display for DrainDescription<'_> {
 }
 
 #[cfg(test)]
+#[cfg_attr(
+    nervix_lint,
+    nervix::layer(harness, reason = "test module remains outside product execution")
+)]
 mod tests {
     use super::*;
     use crate::runtime::test_fixtures::{domain, named};

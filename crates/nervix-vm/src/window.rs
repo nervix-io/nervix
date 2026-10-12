@@ -5,6 +5,14 @@
 //! - **Depends on.** The vocabulary and the VM's program frontend.
 //! - **Must not know.** NSPL tokens or diagnostics, registry state, or runtime tasks.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(
+        engine,
+        reason = "owns the engines and infrastructure boundary declared above"
+    )
+)]
+
 mod route;
 
 use std::{num::NonZeroUsize, time::Duration};
@@ -1119,6 +1127,10 @@ fn collect_expr_field_refs<'a>(expr: &'a Expr, refs: &mut Vec<&'a FieldRef>) {
 }
 
 #[cfg(test)]
+#[cfg_attr(
+    nervix_lint,
+    nervix::layer(harness, reason = "test module remains outside product execution")
+)]
 mod tests {
     use nonzero_ext::nonzero;
 

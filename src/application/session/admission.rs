@@ -7,6 +7,11 @@
 //! - **Depends on.** Tokio's notification primitive.
 //! - **Must not know.** What a request does once admitted, or how its replies travel.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(edge, reason = "owns the edges boundary declared above")
+)]
+
 use nervix_primitives::sync::{
     Notify,
     atomic::{AtomicU8, Ordering},

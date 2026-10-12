@@ -6,6 +6,11 @@
 //! - **Depends on.** VHOST browser drafts and shared typed choices.
 //! - **Must not know.** HTTPS listener installation or certificate loading.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(edge, reason = "owns the edges boundary declared above")
+)]
+
 use leptos::prelude::*;
 
 use super::{

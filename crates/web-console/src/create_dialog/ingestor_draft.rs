@@ -7,6 +7,11 @@
 //! - **Depends on.** Typed vocabulary, expression parsing, and source and route drafts.
 //! - **Must not know.** Connector execution, registry validation, or command transport.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(edge, reason = "owns the edges boundary declared above")
+)]
+
 use error_stack::{Report, ResultExt as _};
 use nervix_models::{
     CodecName, CreateIngestor, FieldName, GeneralErrorPolicy, IngestTimestampSource, IngestorInput,
@@ -276,6 +281,10 @@ pub(super) enum IngestorDraftError {
 }
 
 #[cfg(test)]
+#[cfg_attr(
+    nervix_lint,
+    nervix::layer(harness, reason = "test module remains outside product execution")
+)]
 mod tests {
     use meticulous::{OptionExt as _, ResultExt as _};
     use nervix_models::{
