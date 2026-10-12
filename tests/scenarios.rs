@@ -5909,6 +5909,19 @@ fn given_consensus_commits_take(world: &mut ScenarioWorld, node_id: String, dura
     world.consensus_commit_delays.insert(node_id, duration);
 }
 
+#[given(expr = "the next start of node {string} has an occupied observability port")]
+async fn given_next_start_has_an_occupied_observability_port(
+    world: &mut ScenarioWorld,
+    node_id: String,
+) {
+    let node_id = expand_placeholders(world, &node_id);
+    world
+        .cluster_mut()
+        .occupy_observability_port_for_start(&node_id)
+        .await
+        .assured("a stopped follower's observability port can be held for its next startup");
+}
+
 #[given(expr = "append-stream setup attempts toward node {string} are observed")]
 fn given_append_setup_attempts_are_observed(world: &mut ScenarioWorld, target: String) {
     let target = expand_placeholders(world, &target);
@@ -6169,7 +6182,7 @@ async fn when_node_starts_durable_catch_up(
     // sampler skips scrapes the starting node has not answered yet.
     let metrics_url = world
         .cluster()
-        .observability_metrics_url(&follower)
+        .observability_metrics_stream(&follower)
         .unwrap_or_else(|error| {
             panic!("failed to resolve the catch-up follower's metrics endpoint: {error}")
         });

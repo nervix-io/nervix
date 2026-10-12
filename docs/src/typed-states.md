@@ -67,6 +67,12 @@ The representation depends on the question being asked:
 | Is a present value valid? | A validated type or a fallible conversion | Reject invalid input where the owner has enough context to explain it. |
 | Can a physical format encode the state? | A private wire, storage, Arrow, or atomic encoding | Decode at the boundary and expose typed operations to callers. |
 
+Consensus replication replies have explicit initial-probe, ordered-stream and finished phases.
+Leading empty requests confirm a log boundary over management capacity; the first data request
+transfers the remaining input to one ordered stream. Empty commit updates then remain in that
+stream's order. A failed or rejected initial probe ends its input, so no data stream can follow an
+unconfirmed boundary. These phases are volatile protocol state and are never persisted.
+
 A pure conversion refusal is an ordinary typed outcome, even when it implements
 `std::error::Error` for a parsing trait. Its owner states that contract at the exact error type
 with reason-bearing `nervix::error_boundary(outcome, ...)` metadata. A contextual operation failure
@@ -635,6 +641,12 @@ name. It requires lowercase stored text and retains the typed `NameError` beneat
 format failure.
 
 ## Qualification Evidence
+
+The integration harness's startup owner classifies a failed attempt once into a terminal outcome
+or a transient retry carrying its listener family. A listener bind failure names the addresses to
+replace; a readiness timeout names all listeners. The launcher applies that decision after cleanup
+within the same absolute startup budget. See [Integration Test Lifecycle](./integration-test-lifecycle.md)
+for its occupied-listener regression and endpoint observation.
 
 The [typed states qualification ledger](https://github.com/nervix-io/nervix/blob/main/tests/typed-states-qualification-ledger.md)
 maps each confirmed finding to its owning change, current source path, unit test, public Cucumber

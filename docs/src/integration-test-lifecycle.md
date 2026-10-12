@@ -356,6 +356,19 @@ The boundary between them is kept in four places.
   stopping the writer finishes its admitted command before counting completed writes: the response
   can arrive after all voters have already applied that command. The fixture still checks the
   storage-derived catch-up bound, append-stream limit and commands-memory budget.
+  A listener bind failure retries only that listener family: the gRPC pair, HTTP, HTTPS,
+  observability, web console, or interconnect. A readiness timeout may still move all listeners
+  within the same startup budget. A changed interconnect address remains reserved while a peer
+  may dial it. Metrics sampling follows the actual observability endpoint before the next launch.
+  The durable catch-up scenario deliberately occupies the stopped follower's observability port
+  until cleanup of its first startup attempt, so a metrics bind collision cannot silently turn
+  the measured catch-up into an interconnect address and membership change.
+  The planned Kafka handoff scenario installs its subscription and emitter stall, publishes and
+  flushes both branch records, and then starts intake. Both records are therefore available to
+  its first parallel batch. The source host waits for that batch's attached ACKs before polling
+  the next batch; separate publications after intake starts do not establish one batch.
+  `just coverage-harness-liveness <report>` measures the ordinary startup and other harness owner
+  regressions through the configured compiler cache and preserves the current workspace profiles.
 - **Test defaults.** An in-process node's shutdown timeout defaults to four minutes rather than the
   product's `50s`, which leaves the bounded shutdown phases scenarios configure by default room to
   finish, so only a scenario about the deadline reaches it. A server process runs with the product
@@ -624,15 +637,16 @@ After an attempt fails, the harness classifies the failure, cleans up, and recor
 | Failure | Classification |
 | --- | --- |
 | The harness could not launch the node: an address it could not parse, the test certificate authority, or the node's database directory | Terminal: the harness's own configuration, which the next launch repeats |
-| Readiness did not arrive before the attempt's deadline | Transient: the resource pressure the budget exists for |
-| The node's task ended with an application error binding its gRPC, HTTP, HTTPS, observability, or web console listen address, or starting the interconnect listener | Transient: another process took the port first, and fresh ports resolve it |
+| Readiness did not arrive before the attempt's deadline | Transient, selecting all listeners: the resource pressure the budget exists for |
+| The node's task ended with an application error binding its gRPC, HTTP, HTTPS, observability, or web console listen address, or starting the interconnect listener | Transient, selecting that listener family: another process took the port first, and its fresh addresses resolve it |
 | The task ended with any other application error, a clean exit, a panic, or a cancellation | Terminal: the node decided it from its configuration, its stored state, or its own code |
 
 Cleanup requests the node's stop and waits for its task within a 5-second slice of what the budget
 has left. A node that never became ready has no drain to finish, so the product's shutdown deadline
 plays no part here. A node whose task ended inside the slice gives back its consensus fault
-registration, and after a transient failure it moves to seven freshly allocated ports, so a launch
-that lost a port race does not repeat it, and the harness pauses one second before launching again.
+registration, and after a transient failure it moves the selected listeners to freshly allocated
+ports. A bind failure preserves unrelated addresses; a readiness timeout selects all seven ports.
+The harness pauses one second before launching again.
 
 A node still stopping when the slice passes is never launched again. It still holds its database
 and its listeners, and it will until its own shutdown has finished, so a fresh launch into the same

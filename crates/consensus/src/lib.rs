@@ -4356,10 +4356,10 @@ where
 
     /// Carry appends on the path this client was built for.
     ///
-    /// A replication client opens one ordered stream to its follower and pipelines every batch
-    /// over it, under the stream's own idle bound rather than OpenRaft's heartbeat-derived soft
-    /// TTL. A heartbeat client keeps OpenRaft's one-probe-at-a-time shape and deadline on the
-    /// management pool, where a saturated append stream cannot reach it.
+    /// A replication client sends initial empty probes on management capacity, then opens one
+    /// ordered stream for its first data batch and subsequent commit updates. That stream uses
+    /// its own idle bound rather than OpenRaft's heartbeat-derived soft TTL. A heartbeat client
+    /// keeps the one-probe-at-a-time shape on the independent management pool.
     fn stream_append<'s, S>(
         &'s mut self,
         input: S,
@@ -4385,39 +4385,10 @@ where
                 openraft::network::stream_append_sequential(self, input, option)
             }
             AppendPath::Replication => {
-                let interconnect = self.interconnect.clone();
-                let executor = self.executor.clone();
-                let local_node_id = self.local_node_id.clone();
-                let target = self.target.clone();
-                let connectivity = self.connectivity.clone();
-                let append_stream_open_recorder = self.append_stream_open_recorder.clone();
+                let client = self.clone();
                 Box::pin(async move {
-                    // The caller paces retries and observes cancellation while producing input.
-                    // Consume its first request before even an immediate local setup refusal;
-                    // otherwise that refusal can reopen streams without passing the retry gate.
-                    let mut input = input;
-                    let Some(first) = input.next().await else {
-                        let answers: openraft::base::BoxStream<
-                            'static,
-                            Result<
-                                openraft::raft::StreamAppendResult<TypeConfig>,
-                                RPCError<TypeConfig>,
-                            >,
-                        > = Box::pin(futures_util::stream::empty());
-                        return Ok(answers);
-                    };
-                    connectivity.check().map_err(unreachable_err)?;
-                    append_stream_open_recorder.record_append_stream_attempt(&target);
-                    let input = futures_util::stream::iter([first]).chain(input);
-                    let answers = replication::open_append_stream(
-                        &interconnect,
-                        &executor,
-                        &local_node_id,
-                        &target,
-                        input,
-                    )
-                    .await?;
-                    append_stream_open_recorder.record_append_stream_open(&target);
+                    let answers: openraft::base::BoxStream<'s, _> =
+                        client.replication_answers(input, option).await?;
                     Ok(answers)
                 })
             }

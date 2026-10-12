@@ -353,6 +353,14 @@ test-web-console:
 test-harness-liveness *args: tests-deps
     cargo test --features testing --test harness_liveness -- {{ args }}
 
+# Measure the ordinary harness owners without clearing the current workspace profiles.
+coverage-harness-liveness output *args: tests-deps
+    cargo llvm-cov --no-clean --features testing --test harness_liveness --no-default-ignore-filename-regex --lcov --output-path {{ quote(output) }} -- {{ args }}
+
+# Measure native consensus transport regressions through the configured compiler cache.
+coverage-consensus output *args:
+    cargo llvm-cov --no-clean --package nervix-consensus --features testing --lib --no-default-ignore-filename-regex --lcov --output-path {{ quote(output) }} -- {{ args }}
+
 test-scenarios-reuse *args: tests-deps
     #!/usr/bin/env bash
     set -euo pipefail

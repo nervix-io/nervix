@@ -130,6 +130,12 @@ into it exactly where that shape is constructed. That construction is the one pl
 current context is cloned or its chain rendered into a field;
 [Guarantees And Limits](#guarantees-and-limits) lists the contexts that still copy a cause as text.
 
+Leading empty consensus probes return their matching boundary, conflict or higher vote through
+the existing management response. A conflict, higher vote or incomplete acceptance ends that input
+before data-stream admission. A management request failure uses the same unreachable-peer error
+as a heartbeat; subsequent data-stream setup failures remain transport failures. Neither path
+retries inside the adapter or changes the caller's retry gate.
+
 An ended consensus append input completes normally without a peer operation or a peer error. With
 a first request available, stream setup may return the existing typed admission, membership or
 transport failure as an unreachable-peer result. The caller's retry gate runs before that setup

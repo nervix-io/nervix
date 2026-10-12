@@ -161,10 +161,13 @@ log transfer cannot consume the path that maintains the leader lease.
 Before opening an append stream, the network adapter consumes the caller's first request. OpenRaft
 applies its retry delay and cancellation while producing that input; even an immediate local
 admission rejection therefore passes through the caller's gate. An ended input opens no transport.
-The first request remains charged while setup runs and joins the remaining requests exactly once
-after setup succeeds. Setup retains its five-second deadline; waiting for the caller's next request
-belongs to the caller's lifecycle, rather than to connection setup. Heartbeats retain their separate
-management path and deadlines.
+Leading empty requests, including finite catch-up probes, use the management heartbeat operation
+and its deadline. Each answer confirms that request's previous-log boundary; a conflict, higher
+vote or incomplete acceptance ends that input before any data stream opens. The first request that
+carries entries remains charged while stream setup runs and joins the remaining requests exactly
+once after setup succeeds. Subsequent empty commit updates stay on that ordered stream alongside
+data batches. Setup retains its five-second deadline; waiting for the caller's next request belongs
+to the caller's lifecycle, rather than to connection setup.
 
 One replication batch targets 1 MiB and stops at 1,024 entries. Commands remain whole, so the first
 command may take a batch past the target; the encoded replication operation is bounded at 2 MiB.
@@ -196,8 +199,10 @@ limited byte rate can therefore preserve its append stream across many five-seco
 The native writer checks both a moving and a stalled receiver. The public rate-limited follower
 scenario sends opaque TLS bytes through a bounded test proxy at 32768 bytes per second and checks
 the applied domain backlog within its assertion bound and the bytes carried by the paced path.
-Append stream openings are diagnostic observations, including initial catch-up probes; the scenario
-changes no product deadline.
+Append stream openings observe actual data-stream setup; initial empty probes do not open those
+streams. Native transport regressions cover finite probes, the transition to data, ordered empty
+commit updates and rejected probes. The public catch-up scenarios retain their stream-count and
+time assertions and change no product deadline.
 
 Heartbeats keep the shorter deadline derived from the configured heartbeat interval, capped at five
 seconds. With the default 250 ms heartbeat, the current soft deadline is 187.5 ms. Replication

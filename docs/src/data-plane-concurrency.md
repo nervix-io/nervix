@@ -113,6 +113,12 @@ does not model publication, async channels, network waits or the atomic verdict;
 only the tracked acquisitions the diagnostic processes executed. Generated measurements and fault
 evidence belong on the task, and a failed required attempt remains recorded.
 
+Leading empty consensus append probes use management capacity. One task owns their replies and
+the transition to an ordered data stream; subsequent empty commit updates stay on that stream.
+Rejected probes end the input before data admission. This transition adds no shared map, lock or
+memory-ordering claim. Native real-transport and public catch-up checks cover it; Deloxide does
+not track these async network waits.
+
 Consensus append setup consumes its caller's first request before opening the transport. The
 caller owns the async retry and cancellation gate; the adapter retains and submits that request
 once, without adding a lock or retry timer. Native admission and ended-input regressions exercise

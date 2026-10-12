@@ -979,9 +979,12 @@ leadership traffic.
 The consensus adapter obtains its first append request before opening the duplex transport. This
 lets the caller's retry and cancellation gate pace a setup attempt even when the transport refuses
 it immediately because its target left or its quota is full. The transport still reports that typed
-failure without a retry loop of its own. Ended input opens no connection; a retained first request
-is submitted once after the follower accepts the stream headers. The five-second setup bound starts
-after that caller gate.
+failure without a retry loop of its own. Ended input opens no connection. Leading empty requests
+use the management heartbeat operation, including a finite probe that ends before data is ready;
+its answer preserves the previous-log match, conflict or higher vote. The first nonempty request
+opens replication and is submitted once after the follower accepts the stream headers. Empty
+commit updates following that data remain ordered on the same duplex stream. The five-second setup
+bound starts after the caller gate; the management probe retains its heartbeat-derived deadline.
 
 Elections begin with a pre-vote exchange. A voter asks whether a quorum would accept its next term
 before it persists that term or becomes a candidate. A restarted voter whose log is stale, or whose

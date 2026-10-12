@@ -120,7 +120,7 @@ use super::{
     },
     node_startup::{
         ATTEMPT_READINESS_BUDGET, AttemptCleanup, NODE_STARTUP_BUDGET, NodeStartup, StartableNode,
-        cluster_startup_budget,
+        StartupPorts, cluster_startup_budget,
     },
     peer_addressing::{
         ClusterDns, FixtureAnswer, InterconnectAddress, PeerAddressing, PublishedNode,
@@ -429,7 +429,7 @@ fn observability_metric_reaches(
 /// window rather than an instant inside it. Scrape failures are skipped rather than ending the
 /// sampling, because a node that is busy answering the work under test is the case being measured.
 pub(crate) async fn sample_peak_observability_metric(
-    url: String,
+    mut url: watch::Receiver<String>,
     metric_name: String,
     label_fragments: Vec<String>,
     cancellation: nervix_primitives::sync::CancellationToken,
@@ -438,7 +438,8 @@ pub(crate) async fn sample_peak_observability_metric(
     let mut peak = 0.0_f64;
     loop {
         nervix_primitives::task::consume_budget().await;
-        if let Ok(response) = client.get(&url).send().await
+        let current_url = url.borrow_and_update().clone();
+        if let Ok(response) = client.get(&current_url).send().await
             && let Ok(body) = response.text().await
         {
             for line in body.lines() {
@@ -458,6 +459,11 @@ pub(crate) async fn sample_peak_observability_metric(
         }
         nervix_primitives::select! {
             () = cancellation.cancelled() => return peak,
+            changed = url.changed() => {
+                if changed.is_err() {
+                    return peak;
+                }
+            }
             () = sleep(POLL_INTERVAL) => {}
         }
     }
@@ -1183,6 +1189,28 @@ impl Cluster {
         handle.stop().await
     }
 
+    /// Hold a stopped node's metrics listener until its next failed startup has been cleaned up.
+    pub(crate) async fn occupy_observability_port_for_start(
+        &mut self,
+        node_id: &str,
+    ) -> io::Result<()> {
+        let handle = self.nodes.get_mut(node_id).ok_or_else(|| {
+            io::Error::new(io::ErrorKind::NotFound, format!("unknown node '{node_id}'"))
+        })?;
+        if !matches!(
+            handle.task.state(),
+            NodeTaskState::NotStarted | NodeTaskState::Terminal(_)
+        ) || handle.startup_listener_collision.is_some()
+        {
+            return Err(io::Error::other(
+                "a startup port collision needs one stopped node",
+            ));
+        }
+        handle.startup_listener_collision =
+            Some(TokioTcpListener::bind((HOST, handle.spec.observability_port)).await?);
+        Ok(())
+    }
+
     /// How the last stop of `node_id` that a scenario requested and waited for ended, or `None`
     /// when no such stop has finished its phases.
     pub(crate) fn last_shutdown_outcome(&self, node_id: &str) -> Option<ShutdownOutcome> {
@@ -1816,6 +1844,17 @@ impl Cluster {
             "http://{}/metrics",
             handle.spec.observability_addr()
         ))
+    }
+
+    /// Follow the actual metrics listener through a bounded startup retry.
+    pub(crate) fn observability_metrics_stream(
+        &self,
+        node_id: &str,
+    ) -> io::Result<watch::Receiver<String>> {
+        let handle = self.nodes.get(node_id).ok_or_else(|| {
+            io::Error::new(io::ErrorKind::NotFound, format!("unknown node '{node_id}'"))
+        })?;
+        Ok(handle.metrics_endpoint.subscribe())
     }
 
     /// Read one series once, for a value a scenario compares others against rather than waits for.
@@ -3070,6 +3109,8 @@ impl Cluster {
 #[derive(Debug)]
 struct NodeHandle {
     spec: NodeSpec,
+    metrics_endpoint: watch::Sender<String>,
+    startup_listener_collision: Option<TokioTcpListener>,
     fault_injection: FaultInjection,
     config: TestClusterConfig,
     task: OwnedNodeTask,
@@ -3089,8 +3130,12 @@ impl NodeHandle {
         config: TestClusterConfig,
         roots: Arc<ClusterRoots>,
     ) -> Self {
+        let (metrics_endpoint, _) =
+            watch::channel(format!("http://{}/metrics", spec.observability_addr()));
         Self {
             spec,
+            metrics_endpoint,
+            startup_listener_collision: None,
             fault_injection,
             config,
             task: OwnedNodeTask::not_started(),
@@ -3353,6 +3398,7 @@ impl StartableNode for NodeHandle {
     async fn clean_up(&mut self, cleanup: PhaseDeadline) -> AttemptCleanup {
         self.request_stop();
         let outcome = AttemptCleanup::from(self.task.wait(cleanup).await);
+        self.startup_listener_collision = None;
         match outcome {
             AttemptCleanup::StillStopping => {}
             AttemptCleanup::NothingLaunched | AttemptCleanup::Stopped(_) => {
@@ -3364,8 +3410,11 @@ impl StartableNode for NodeHandle {
         outcome
     }
 
-    fn move_to_fresh_ports(&mut self) -> io::Result<()> {
-        self.spec.reallocate_ports()
+    fn move_to_fresh_ports(&mut self, ports: StartupPorts) -> io::Result<()> {
+        self.spec.reallocate_ports(ports)?;
+        self.metrics_endpoint
+            .send_replace(format!("http://{}/metrics", self.spec.observability_addr()));
+        Ok(())
     }
 }
 
@@ -3577,16 +3626,34 @@ impl NodeSpec {
         self.interconnect_host = address.advertised_host;
     }
 
-    fn reallocate_ports(&mut self) -> io::Result<()> {
-        self.release_ports();
-        let ports = NodePorts::allocate()?;
-        self.grpc_port = ports.grpc;
-        self.grpc_https_port = ports.grpc_https;
-        self.http_port = ports.http;
-        self.https_port = ports.https;
-        self.observability_port = ports.observability;
-        self.web_console_port = ports.web_console;
-        self.interconnect_port = ports.interconnect;
+    fn reallocate_ports(&mut self, selection: StartupPorts) -> io::Result<()> {
+        let prior_interconnect = self.interconnect_port;
+        let listeners = match selection {
+            StartupPorts::All => vec![
+                &mut self.grpc_port,
+                &mut self.grpc_https_port,
+                &mut self.http_port,
+                &mut self.https_port,
+                &mut self.observability_port,
+                &mut self.web_console_port,
+                &mut self.interconnect_port,
+            ],
+            StartupPorts::Grpc => vec![&mut self.grpc_port, &mut self.grpc_https_port],
+            StartupPorts::Http => vec![&mut self.http_port],
+            StartupPorts::Https => vec![&mut self.https_port],
+            StartupPorts::Observability => vec![&mut self.observability_port],
+            StartupPorts::WebConsole => vec![&mut self.web_console_port],
+            StartupPorts::Interconnect => vec![&mut self.interconnect_port],
+        };
+        let replacements = next_ports(listeners.len())?;
+        for (listener, replacement) in listeners.into_iter().zip(replacements) {
+            // A peer can still dial a published address after this node has stopped. Retain its
+            // reservation, as an explicit interconnect address move does, until the run ends.
+            if *listener != prior_interconnect {
+                release_test_ports(&[*listener]);
+            }
+            *listener = replacement;
+        }
         Ok(())
     }
 
@@ -3612,7 +3679,7 @@ impl NodeSpec {
     }
 
     /// Return this node's ports to the pool. Every caller reaches here with the node down: two
-    /// teardown paths, and the startup retry for a node that never bound them. That is what makes
+    /// teardown paths. That is what makes
     /// the release safe, not the stop itself, so a caller that releases while a peer may still dial
     /// the address belongs elsewhere.
     fn release_ports(&mut self) {
