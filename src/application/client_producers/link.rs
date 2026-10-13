@@ -86,7 +86,7 @@ const FORWARDED_OPEN_DEADLINE: Duration = Duration::from_secs(20);
 const OWNER_LINK_ANSWER_CAPACITY: usize = 64;
 
 /// Opens the link a serving node keeps to one owning node.
-#[derive(Debug, Clone, Archive, RkyvSerialize, RkyvDeserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Archive, RkyvSerialize, RkyvDeserialize)]
 pub(super) struct OpenClientProducerLink {
     /// The node that opens the link, which the owning node checks against the peer it
     /// authenticated.
@@ -104,7 +104,7 @@ impl InterconnectDuplexRequest for OpenClientProducerLink {
 }
 
 /// What a serving node sends over its link, each naming the producer it concerns by its key.
-#[derive(Debug, Archive, RkyvSerialize, RkyvDeserialize)]
+#[derive(Debug, PartialEq, Eq, Archive, RkyvSerialize, RkyvDeserialize)]
 pub(super) enum ClientProducerLinkItem {
     Open {
         key: u64,
@@ -135,7 +135,7 @@ pub(super) enum ClientProducerLinkItem {
 }
 
 /// What an owning node answers over a link.
-#[derive(Debug, Archive, RkyvSerialize, RkyvDeserialize)]
+#[derive(Debug, PartialEq, Eq, Archive, RkyvSerialize, RkyvDeserialize)]
 pub(super) enum ClientProducerLinkEvent {
     Opened {
         key: u64,
@@ -993,3 +993,7 @@ async fn forward_events(
 #[cfg(test)]
 #[path = "link_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "link_properties.rs"]
+mod properties;

@@ -2020,6 +2020,81 @@ test_target = "lib"
 
 [[target]]
 case_timeout_seconds = 10
+corpus = "src/application/client_producers/__fuzz__/application__client_producers__link__properties__bolero_producer_link_frames_reach_the_other_end_whole/corpus"
+domain_version = 1
+features = []
+id = "client-producer-link-frames"
+invariant = "Every message that opens a client producer link, every frame its serving node sends and every answer of its owning node, with the schema, limits, batch bytes, clearance, producer description, refusal, outcome, admission state or end reason it carries, reaches the other end whole through the bounded duplex codec under the relay class and payload limit, and nothing stays charged."
+manifest = "Cargo.toml"
+max_input_bytes = 2048
+package = "nervix-server"
+random_iterations = 256
+source = "src/application/client_producers/link_properties.rs"
+test = "application::client_producers::link::properties::bolero_producer_link_frames_reach_the_other_end_whole"
+test_target = "lib"
+
+[[target]]
+case_timeout_seconds = 10
+corpus = "src/application/client_producers/__fuzz__/application__client_producers__link__properties__bolero_damaged_producer_link_frames_fail_typed_or_decode_to_a_frame/corpus"
+domain_version = 1
+features = []
+id = "client-producer-link-frames-malformed"
+invariant = "A truncated, bit-flipped, overwritten, shortened or trailed frame of a client producer link, a frame read as another direction's type, and arbitrary bytes fail with the codec's typed decode failure, never as work the node could not admit or execute, or decode to a frame that encodes and decodes back to itself, and either way nothing stays charged."
+manifest = "Cargo.toml"
+max_input_bytes = 2048
+package = "nervix-server"
+random_iterations = 256
+source = "src/application/client_producers/link_properties.rs"
+test = "application::client_producers::link::properties::bolero_damaged_producer_link_frames_fail_typed_or_decode_to_a_frame"
+test_target = "lib"
+
+[[target]]
+case_timeout_seconds = 10
+corpus = "src/application/__fuzz__/application__client_consumers__properties__bolero_consumer_stream_frames_reach_the_other_end_whole/corpus"
+domain_version = 1
+features = []
+id = "client-consumer-stream-frames"
+invariant = "Every message that opens a client consumer stream, every frame its serving node sends and every answer of its owning node, with the schema, limits, settlement reference and answer, emitter description, refusal, delivery identity, source, branch fingerprint, row count, instant and length, chunk bytes or settlement outcome it carries, reaches the other end whole through the bounded duplex codec under the relay class and payload limit, and nothing stays charged."
+manifest = "Cargo.toml"
+max_input_bytes = 2048
+package = "nervix-server"
+random_iterations = 256
+source = "src/application/client_consumers_properties.rs"
+test = "application::client_consumers::properties::bolero_consumer_stream_frames_reach_the_other_end_whole"
+test_target = "lib"
+
+[[target]]
+case_timeout_seconds = 10
+corpus = "src/application/__fuzz__/application__client_consumers__properties__bolero_damaged_consumer_stream_frames_fail_typed_or_decode_to_a_frame/corpus"
+domain_version = 1
+features = []
+id = "client-consumer-stream-frames-malformed"
+invariant = "A truncated, bit-flipped, overwritten, shortened or trailed frame of a client consumer stream, a frame read as another direction's type, and arbitrary bytes fail with the codec's typed decode failure, never as work the node could not admit or execute, or decode to a frame that encodes and decodes back to itself, and either way nothing stays charged."
+manifest = "Cargo.toml"
+max_input_bytes = 2048
+package = "nervix-server"
+random_iterations = 256
+source = "src/application/client_consumers_properties.rs"
+test = "application::client_consumers::properties::bolero_damaged_consumer_stream_frames_fail_typed_or_decode_to_a_frame"
+test_target = "lib"
+
+[[target]]
+case_timeout_seconds = 10
+corpus = "src/runtime/__fuzz__/runtime__emitter_client__properties__bolero_client_emitter_deliveries_decode_to_the_delivered_rows/corpus"
+domain_version = 1
+features = []
+id = "client-emitter-deliveries"
+invariant = "The rows a client emitter sink writes for one delivery decode in the client library to the Arrow schema of exactly the fields the emitter declares and to every delivered row, value and null in order, with floats by their bits, and the same bytes are refused under one row more or fewer and under fields of another optionality, order or number."
+manifest = "Cargo.toml"
+max_input_bytes = 2048
+package = "nervix-server"
+random_iterations = 128
+source = "src/runtime/emitter_client_properties.rs"
+test = "runtime::emitter_client::properties::bolero_client_emitter_deliveries_decode_to_the_delivered_rows"
+test_target = "lib"
+
+[[target]]
+case_timeout_seconds = 10
 corpus = "src/runtime_schema/__fuzz__/runtime_schema__codec_properties__bolero_non_finite_floats_follow_the_json_projection/corpus"
 domain_version = 1
 features = []
