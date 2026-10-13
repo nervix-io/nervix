@@ -32,6 +32,7 @@ mod completion;
 mod connector;
 mod domain_clock;
 mod duration_text;
+mod emitter;
 mod emitter_batch;
 mod expression;
 mod http_request;
@@ -43,6 +44,7 @@ mod name_spelling;
 mod names;
 mod node_endpoint;
 mod node_ref;
+mod processor;
 mod quiesce;
 mod rebind_resource;
 mod remote;
@@ -50,6 +52,7 @@ mod reset_wasm_state;
 mod resource;
 mod resource_binding;
 mod restore;
+mod schedule;
 mod schema;
 mod schema_fingerprint;
 mod statement;
@@ -137,6 +140,10 @@ pub use domain_clock::{
     DomainClockState, DomainClockTickObservation, DomainTimeRate, PacedDomainClock,
 };
 pub use duration_text::{DurationTextError, parse_duration_text};
+pub use emitter::{
+    AckMode, AlterEmitter, AlterEmitterError, AlterEmitterOperation, CreateEmitter,
+    EmitterBatchContractError, EmitterBody, EmitterPublishingMode,
+};
 pub use emitter_batch::{
     BatchMessageLimit, ByteSizeUnit, EmitterBatchLimitError, EmitterBatchPolicy,
     EmitterBatchRequirement, PayloadSizeLimit,
@@ -171,6 +178,19 @@ pub use node_endpoint::{
     NodeEndpoint, NodeEndpointParseError, NodeServiceUrl, NodeServiceUrlParseError,
 };
 pub use node_ref::{DomainNodeRef, NodeRef};
+pub use processor::{
+    AlterDeduplicator, AlterDeduplicatorError, AlterDeduplicatorOperation, AlterJunction,
+    AlterJunctionError, AlterProcessorError, AlterProcessorOperation, AlterReingestor,
+    AlterReingestorError, AlterReorderer, AlterReordererError, AlterReordererOperation,
+    CorrelationTimeoutAction, CorrelationTimeoutPolicy, CorrelatorMatchPolicy, CreateCorrelator,
+    CreateDeduplicator, CreateInferencer, CreateJunction, CreateReingestor, CreateReorderer,
+    CreateWasmProcessor, CreateWindowProcessor, FlushPolicy, InferencerExecutionMode,
+    InferencerTensorDeclaration, InferencerTensorDimension, InferencerTensorElementType,
+    InferencerTensorMapping, InferencerTensorRepresentation, InferencerTensorSchema,
+    InferencerTensorSchemaError, InputCollectPolicy, ProcessorInputWhere, ProcessorInputs,
+    ProcessorOutput, ProcessorOutputs, WasmProcessorLimits, WasmRejectedStatePolicy, WindowBound,
+    WindowStateLimit,
+};
 pub use quiesce::{
     ActivationAction, ActivationImpact, ActualExecutionStepImpact, ActualQuiescence,
     AffectedTopology, AttributedGateBoundary, AttributedImpactNode, BranchKeyFingerprint,
@@ -216,6 +236,11 @@ pub use restore::{
     RestoreScope, RestoreState, RestoreStateAuthority, RestoreStep, RestoreStepOutcome,
     RestoreStepReport, RestoredDomain, RestoredUsers,
 };
+pub use schedule::{
+    ClusterSchedule, DomainSchedule, KafkaPartitionSchedule, OwnershipStateComponent,
+    OwnershipStateRecoveryOutcome, OwnershipStateReset, OwnershipStateResetCause,
+    OwnershipTransition, PlacementGroupSchedule, ScheduledModel, ScheduledNode, ScheduledNodes,
+};
 pub use schema::{
     AlterSchema, AlterSchemaError, AlterSchemaOperation, AlterWireSchema, AlterWireSchemaError,
     AlterWireSchemaOperation, AvroType, CborType, CreateAvroWireSchema, CreateCborWireSchema,
@@ -224,43 +249,28 @@ pub use schema::{
 };
 pub use schema_fingerprint::SchemaFingerprint;
 pub use statement::{
-    AckMode, AckWindow, AlterDeduplicator, AlterDeduplicatorError, AlterDeduplicatorOperation,
-    AlterDomain, AlterEmitter, AlterEmitterError, AlterEmitterOperation, AlterGenerator,
-    AlterGeneratorError, AlterGeneratorOperation, AlterIngestor, AlterIngestorError,
-    AlterIngestorOperation, AlterJunction, AlterJunctionError, AlterPlacement, AlterPlacementError,
-    AlterPlacementOperation, AlterProcessorError, AlterProcessorOperation, AlterReingestor,
-    AlterReingestorError, AlterRelay, AlterRelayError, AlterRelayOperation, AlterReorderer,
-    AlterReordererError, AlterReordererOperation, BranchEviction, BranchSelection, ClusterSchedule,
-    CodecBatchContainer, CodecEncoding, CodecEncodingRule, CodecJaqFormat, CodecJaqTransformations,
-    CodecProtobufConfig, CodecWireFormat, CordonNode, CorrelationTimeoutAction,
-    CorrelationTimeoutPolicy, CorrelatorMatchPolicy, CreateBranch, CreateCodec, CreateCorrelator,
-    CreateDeduplicator, CreateDomain, CreateEmitter, CreateEndpoint, CreateGenerator,
-    CreateInferencer, CreateIngestor, CreateJunction, CreateLookup, CreatePlacement,
-    CreateReingestor, CreateRelay, CreateReorderer, CreateResource, CreateSignalingProtocol,
-    CreateStatement, CreateSubscription, CreateUser, CreateVhost, CreateWasmProcessor,
-    CreateWindowProcessor, DeleteSubscription, DescribeCorrelator, DescribeDeduplicator,
-    DescribeDomain, DescribeEmitter, DescribeEndpoint, DescribeIngestor, DescribeJunction,
-    DescribeLookup, DescribePlacement, DescribeReingestor, DescribeRelay, DescribeReorderer,
-    DescribeResource, DescribeTransaction, DescribeUdf, DescribeWasmProcessor,
-    DescribeWindowProcessor, DomainConfig, DomainPace, DomainSchedule, DomainStartPoint,
-    DomainState, DomainStatus, DomainTick, DrainNode, DropModel, DropNode,
-    EmitterBatchContractError, EmitterBody, EmitterPublishingMode, EndpointType, ErrorPolicies,
-    FlushPolicy, GeneralErrorPolicy, InferencerExecutionMode, InferencerTensorDeclaration,
-    InferencerTensorDimension, InferencerTensorElementType, InferencerTensorMapping,
-    InferencerTensorRepresentation, InferencerTensorSchema, InferencerTensorSchemaError,
-    IngestTimestampSource, InputCollectPolicy, InspectionFormat, KafkaPartitionSchedule,
-    LookupQuery, MaterializedRelayState, MessageErrorPolicy, Model, ModelKind,
-    OwnershipStateComponent, OwnershipStateRecoveryOutcome, OwnershipStateReset,
-    OwnershipStateResetCause, OwnershipTransition, PlacementGroupSchedule, PlacementPolicy,
-    ProcessorInputWhere, ProcessorInputs, ProcessorOutput, ProcessorOutputs, RelayBranching,
-    Relocation, RelocationMember, RelocationPreferenceOverride, RelocationPreferenceStrategy,
-    RelocationSelection, ResolvedBranching, ResolvedCodecWireFormat, RetryPolicy, ScheduledModel,
-    ScheduledNode, ScheduledNodes, ShowClusterStatus, ShowCreate, ShowIngestors, ShowPlacements,
-    ShowRelayMaterializedState, ShowTransactions, ShowUdfs, SignalingProtobufConfig,
-    SignalingProtocolOnConnect, SignalingStep, SignalingWaitStep, SignalingWireFormat, StartDomain,
-    Statement, StopDomain, SubscriptionBinding, SubscriptionDeliveryBehavior, SubscriptionLiteral,
-    UncordonNode, UniquelyKindedModel, UploadResource, VhostTlsResource, WasmProcessorLimits,
-    WasmRejectedStatePolicy, WindowBound, WindowStateLimit, WireSchemaLookup, default_relay_buffer,
+    AckWindow, AlterDomain, AlterGenerator, AlterGeneratorError, AlterGeneratorOperation,
+    AlterIngestor, AlterIngestorError, AlterIngestorOperation, AlterPlacement, AlterPlacementError,
+    AlterPlacementOperation, AlterRelay, AlterRelayError, AlterRelayOperation, BranchEviction,
+    BranchSelection, CodecBatchContainer, CodecEncoding, CodecEncodingRule, CodecJaqFormat,
+    CodecJaqTransformations, CodecProtobufConfig, CodecWireFormat, CordonNode, CreateBranch,
+    CreateCodec, CreateDomain, CreateEndpoint, CreateGenerator, CreateIngestor, CreateLookup,
+    CreatePlacement, CreateRelay, CreateResource, CreateSignalingProtocol, CreateStatement,
+    CreateSubscription, CreateUser, CreateVhost, DeleteSubscription, DescribeCorrelator,
+    DescribeDeduplicator, DescribeDomain, DescribeEmitter, DescribeEndpoint, DescribeIngestor,
+    DescribeJunction, DescribeLookup, DescribePlacement, DescribeReingestor, DescribeRelay,
+    DescribeReorderer, DescribeResource, DescribeTransaction, DescribeUdf, DescribeWasmProcessor,
+    DescribeWindowProcessor, DomainConfig, DomainPace, DomainStartPoint, DomainState, DomainStatus,
+    DomainTick, DrainNode, DropModel, DropNode, EndpointType, ErrorPolicies, GeneralErrorPolicy,
+    IngestTimestampSource, InspectionFormat, LookupQuery, MaterializedRelayState,
+    MessageErrorPolicy, Model, ModelKind, PlacementPolicy, RelayBranching, Relocation,
+    RelocationMember, RelocationPreferenceOverride, RelocationPreferenceStrategy,
+    RelocationSelection, ResolvedBranching, ResolvedCodecWireFormat, RetryPolicy,
+    ShowClusterStatus, ShowCreate, ShowIngestors, ShowPlacements, ShowRelayMaterializedState,
+    ShowTransactions, ShowUdfs, SignalingProtobufConfig, SignalingProtocolOnConnect, SignalingStep,
+    SignalingWaitStep, SignalingWireFormat, StartDomain, Statement, StopDomain,
+    SubscriptionBinding, SubscriptionDeliveryBehavior, SubscriptionLiteral, UncordonNode,
+    UniquelyKindedModel, UploadResource, VhostTlsResource, WireSchemaLookup, default_relay_buffer,
 };
 pub use timestamp::{AtomicTimestamp, Timestamp, TimestampError};
 pub use udf::{CreateUdf, UdfArgument, UdfLanguage, UdfReturn};
