@@ -174,11 +174,14 @@ pub fn create_signaling_protocol_parser<'src>() -> impl Parser<
         .boxed()
         .then_ignore(kw(Identifier::Timeout))
         .then(duration_lit().try_map(|timeout, span| {
-            parse_duration_text(&timeout)
-                .map(|_| timeout.clone())
-                .map_err(|error| {
-                    Rich::custom(span, format!("invalid duration '{timeout}': {error}"))
-                })
+            let mapping_input = parse_duration_text(&timeout).map(|_| timeout.clone());
+            match mapping_input {
+                Ok(mapped_value) => Ok(mapped_value),
+                Err(error) => Err(Rich::custom(
+                    span,
+                    format!("invalid duration '{timeout}': {error}"),
+                )),
+            }
         }))
         .then_ignore(tok(Token::Semicolon).or_not())
         .map(

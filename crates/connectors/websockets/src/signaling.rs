@@ -304,9 +304,10 @@ impl CompiledSignalingProtocol {
         // operator wrote, not at an offset within some phase.
         let mut counts = ClauseCounts::default();
         let compile = |clause: &'static str, index: usize, program: &str| {
-            StatefulJaqProgram::compile(program)
-                .map(Arc::new)
-                .map_err(|error| {
+            let mapping_input = StatefulJaqProgram::compile(program).map(Arc::new);
+            match mapping_input {
+                Ok(mapped_value) => Ok(mapped_value),
+                Err(error) => Err({
                     let reason = error.current_context().to_string();
                     error.change_context(SignalingProtocolCompileError::InvalidJaqProgram {
                         protocol: name.to_string(),
@@ -314,7 +315,8 @@ impl CompiledSignalingProtocol {
                         index,
                         reason,
                     })
-                })
+                }),
+            }
         };
 
         let mut steps = Vec::with_capacity(on_connect.steps.len());
@@ -357,14 +359,20 @@ impl CompiledSignalingProtocol {
             .map(|(index, matcher)| compile("FAIL JAQ", index + 1, matcher))
             .collect::<error_stack::Result<Vec<_>, _>>()?;
 
-        let timeout = parse_duration_text(&on_connect.timeout).map_err(|error| {
-            let reason = error.to_string();
-            error.change_context(SignalingProtocolCompileError::InvalidTimeout {
-                protocol: name.to_string(),
-                timeout: on_connect.timeout.clone(),
-                reason,
-            })
-        })?;
+        let timeout = {
+            let mapping_input = parse_duration_text(&on_connect.timeout);
+            match mapping_input {
+                Ok(mapped_value) => Ok(mapped_value),
+                Err(error) => Err({
+                    let reason = error.to_string();
+                    error.change_context(SignalingProtocolCompileError::InvalidTimeout {
+                        protocol: name.to_string(),
+                        timeout: on_connect.timeout.clone(),
+                        reason,
+                    })
+                }),
+            }
+        }?;
 
         Ok(Self {
             wire,
@@ -395,25 +403,29 @@ impl CompiledSignalingProtocol {
                 if format.is_binary() {
                     return Ok(Message::Binary(encoded));
                 }
-                String::from_utf8(encoded)
-                    .map(Message::Text)
-                    .map_err(|source| {
-                        Report::new(SignalingFrameEncodeError::Text {
+                {
+                    let mapping_input = String::from_utf8(encoded).map(Message::Text);
+                    match mapping_input {
+                        Ok(mapped_value) => Ok(mapped_value),
+                        Err(source) => Err(Report::new(SignalingFrameEncodeError::Text {
                             format: format.name(),
                         })
-                        .attach_printable(source.to_string())
-                    })
+                        .attach_printable(source.to_string())),
+                    }
+                }
             }
             // The protobuf failure keeps its codec error as the frame beneath it, so the detail is
             // the whole chain.
-            CompiledSignalingWire::Protobuf { send, .. } => encode_protobuf_payload(send, &value)
-                .map(Message::Binary)
-                .map_err(|source| {
-                    Report::new(SignalingFrameEncodeError::Protobuf {
+            CompiledSignalingWire::Protobuf { send, .. } => {
+                let mapping_input = encode_protobuf_payload(send, &value).map(Message::Binary);
+                match mapping_input {
+                    Ok(mapped_value) => Ok(mapped_value),
+                    Err(source) => Err(Report::new(SignalingFrameEncodeError::Protobuf {
                         message: send.full_name().to_string(),
                     })
-                    .attach_printable(format!("{source:#}"))
-                }),
+                    .attach_printable(format!("{source:#}"))),
+                }
+            }
         }
     }
 
@@ -537,23 +549,33 @@ impl WebsocketSignalingSession {
                 CompiledSignalingStep::Send(programs) => {
                     for program in programs {
                         sent += 1;
-                        let value = program
-                            .run_single(JsonValue::Null, &session.state)
-                            .map_err(|error| {
-                                let reason = error.current_context().to_string();
-                                error.change_context(WebsocketSignalingError::SendProgram {
-                                    index: sent,
-                                    reason,
-                                })
-                            })?;
-                        let frame = self.protocol.encode_frame(value).map_err(|error| {
-                            let reason = signaling_frame_encode_error_message(&error);
-                            error.change_context(WebsocketSignalingError::SendEncode {
-                                index: sent,
-                                format: self.protocol.format_name(),
-                                reason,
-                            })
-                        })?;
+                        let value = {
+                            let mapping_input = program.run_single(JsonValue::Null, &session.state);
+                            match mapping_input {
+                                Ok(mapped_value) => Ok(mapped_value),
+                                Err(error) => Err({
+                                    let reason = error.current_context().to_string();
+                                    error.change_context(WebsocketSignalingError::SendProgram {
+                                        index: sent,
+                                        reason,
+                                    })
+                                }),
+                            }
+                        }?;
+                        let frame = {
+                            let mapping_input = self.protocol.encode_frame(value);
+                            match mapping_input {
+                                Ok(mapped_value) => Ok(mapped_value),
+                                Err(error) => Err({
+                                    let reason = signaling_frame_encode_error_message(&error);
+                                    error.change_context(WebsocketSignalingError::SendEncode {
+                                        index: sent,
+                                        format: self.protocol.format_name(),
+                                        reason,
+                                    })
+                                }),
+                            }
+                        }?;
                         websocket.send(frame).await.map_err(|error| {
                             Report::new(WebsocketSignalingError::Send(Box::new(error)))
                         })?;
@@ -668,13 +690,19 @@ fn merge_capture(
     value: &JsonValue,
     state: &mut JsonValue,
 ) -> error_stack::Result<(), WebsocketSignalingError> {
-    let captured = capture.run_single(value.clone(), state).map_err(|error| {
-        let reason = error.current_context().to_string();
-        error.change_context(WebsocketSignalingError::Capture {
-            capture: capture.source().to_string(),
-            reason,
-        })
-    })?;
+    let captured = {
+        let mapping_input = capture.run_single(value.clone(), state);
+        match mapping_input {
+            Ok(mapped_value) => Ok(mapped_value),
+            Err(error) => Err({
+                let reason = error.current_context().to_string();
+                error.change_context(WebsocketSignalingError::Capture {
+                    capture: capture.source().to_string(),
+                    reason,
+                })
+            }),
+        }
+    }?;
     let JsonValue::Object(captured) = captured else {
         return Err(Report::new(WebsocketSignalingError::Capture {
             capture: capture.source().to_string(),

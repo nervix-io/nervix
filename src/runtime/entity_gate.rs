@@ -18,7 +18,11 @@ pub const DEFAULT_DOMAIN_DRAIN_TIMEOUT: Duration = Duration::from_secs(60);
 pub const fn branch_task_stop_timeout(domain_drain_timeout: Duration) -> Duration {
     // Saturation is the meaning: a drain timeout configured near `Duration::MAX` already asks to
     // wait for as long as the process runs, and no grace can extend that further.
-    domain_drain_timeout.saturating_add(PROCESSOR_BRANCH_TASK_SHUTDOWN_GRACE)
+    nervix_primitives::expect_lint!(
+        nervix::clamped_arithmetic,
+        "a drain already at Duration MAX cannot be extended by task grace",
+        domain_drain_timeout.saturating_add(PROCESSOR_BRANCH_TASK_SHUTDOWN_GRACE)
+    )
 }
 
 pub(in crate::runtime) const OWNERSHIP_HANDOFF_FREEZE_RECHECK_INTERVAL: Duration =

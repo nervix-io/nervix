@@ -1130,11 +1130,10 @@ impl FaultInjection {
 
     /// Fill every worker of `class` on `node_id` and return once every occupying job is running.
     pub async fn occupy_execution(&self, node_id: &ClusterNodeName, class: CpuClass) {
-        let node = self
-            .inner
-            .executions
-            .get(node_id)
-            .unwrap_or_else(|| panic!("node '{node_id}' has not registered its executor"));
+        let node = match self.inner.executions.get(node_id) {
+            Some(node) => node,
+            None => panic!("node '{node_id}' has not registered its executor"),
+        };
         let executor = node.executor.clone();
         let holders = node.holders.clone();
         drop(node);
@@ -1178,13 +1177,10 @@ impl FaultInjection {
     /// once the class refuses the next job it is handed.
     pub async fn saturate_execution(&self, node_id: &ClusterNodeName, class: CpuClass) {
         self.occupy_execution(node_id, class).await;
-        let executor = self
-            .inner
-            .executions
-            .get(node_id)
-            .unwrap_or_else(|| panic!("node '{node_id}' has not registered its executor"))
-            .executor
-            .clone();
+        let executor = match self.inner.executions.get(node_id) {
+            Some(node) => node.executor.clone(),
+            None => panic!("node '{node_id}' has not registered its executor"),
+        };
         let capacity = executor.snapshot().cpu_class(class).queue_capacity;
         for _ in 0..capacity {
             let reservation = executor
@@ -1212,13 +1208,11 @@ impl FaultInjection {
     /// Release every worker a scenario occupied on `node_id`, of every class. The jobs that waited
     /// behind them then run empty.
     pub fn release_execution(&self, node_id: &ClusterNodeName) {
-        self.inner
-            .executions
-            .get(node_id)
-            .unwrap_or_else(|| panic!("node '{node_id}' has not registered its executor"))
-            .holders
-            .lock()
-            .clear();
+        let node = match self.inner.executions.get(node_id) {
+            Some(node) => node,
+            None => panic!("node '{node_id}' has not registered its executor"),
+        };
+        node.holders.lock().clear();
     }
 
     pub fn arm_health_response_pause(

@@ -1,5 +1,5 @@
 //! Repository tooling, outside the product layer order.
-//! Owns: the pinned compiler callback and resolved synchronization acquisition pass.
+//! Owns: the pinned compiler callback, resolved architecture diagnostics and acquisition reports.
 //! Depends on: rustc internals, the report vocabulary and the primitive boundary.
 //! Must not know: manually maintained answers about product source or runtime graph execution.
 
@@ -38,6 +38,7 @@ use rustc_interface::interface;
 use rustc_lint::{LateContext, LateLintPass};
 use rustc_lint_defs::impl_lint_pass;
 
+mod api;
 mod architecture;
 mod contracts;
 mod errors;
@@ -63,7 +64,7 @@ struct AcquisitionPass {
     report: Arc<Mutex<CompilerReport>>,
 }
 
-impl_lint_pass!(AcquisitionPass => [SYNC_ACQUISITION, LIFECYCLE_CALL, UNKNOWN_EFFECT, INVALID_CONTRACT, errors::BARE_ERROR_SIGNATURE, errors::DISCARDED_OUTCOME, errors::BARE_PANIC, architecture::MODEL_IN_DATA_PLANE, architecture::PARSER_DEPENDENCY, architecture::CLUSTER_AWAIT, architecture::NODE_IDENTITY, architecture::INSTALLED_STATE, architecture::STATE_CONTRACT]);
+impl_lint_pass!(AcquisitionPass => [SYNC_ACQUISITION, LIFECYCLE_CALL, UNKNOWN_EFFECT, INVALID_CONTRACT, errors::BARE_ERROR_SIGNATURE, errors::DISCARDED_OUTCOME, errors::BARE_PANIC, architecture::MODEL_IN_DATA_PLANE, architecture::PARSER_DEPENDENCY, architecture::CLUSTER_AWAIT, architecture::NODE_IDENTITY, architecture::INSTALLED_STATE, architecture::STATE_CONTRACT, api::CLAMPED_ARITHMETIC, api::COMBINATOR_CONTROL_FLOW]);
 
 struct PassInputs {
     root: PathBuf,
@@ -347,6 +348,7 @@ impl<'tcx> LateLintPass<'tcx> for AcquisitionPass {
         if self.authored(cx, expression.span) {
             self.architecture.expression(cx, expression, &mut self.flow);
             self.errors.expression(cx, expression, &mut self.flow);
+            api::expression(cx, expression, &mut self.flow);
         }
         if let ExprKind::Closure(closure) = expression.kind {
             let authored = self.authored(cx, expression.span);
@@ -548,6 +550,8 @@ impl Callbacks for Analysis {
                 architecture::NODE_IDENTITY,
                 architecture::INSTALLED_STATE,
                 architecture::STATE_CONTRACT,
+                api::CLAMPED_ARITHMETIC,
+                api::COMBINATOR_CONTROL_FLOW,
             ]);
             let inputs = IntoDynSyncSend(PassInputs {
                 root: root.clone(),
@@ -684,6 +688,8 @@ fn main() -> anyhow::Result<()> {
                 "-Wnervix::node_identity",
                 "-Wnervix::installed_state",
                 "-Wnervix::state_contract",
+                "-Wnervix::clamped_arithmetic",
+                "-Wnervix::combinator_control_flow",
             ]
             .map(String::from),
         );

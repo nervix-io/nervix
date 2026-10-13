@@ -363,27 +363,32 @@ fn effective_wasm_output_filter_map_schema(
     )?);
     bindings.extend(lookup_hash_map_bindings(lookup_fields));
 
-    compile_program_with_options_for_bindings_with_sensitivity(
-        &parsed,
-        output_arrow_schema,
-        schema_sensitivity_for_internal_schema(output_schema),
-        bindings,
-        udf_compile_options(
-            models,
-            CompileOptions {
-                output_mode: OutputMode::ExplicitOnly,
-                ..CompileOptions::default()
-            },
-        ),
-    )
-    .map_err(|error| {
-        let message = error.current_context().message.clone();
-        error.change_context(RegistryError::InvalidModel {
-            domain: domain.as_str().to_string(),
-            identifier: identifier.as_str().to_string(),
-            reason: format!("FILTER-MAP compile failed: {}", message),
-        })
-    })?;
+    {
+        let mapping_input = compile_program_with_options_for_bindings_with_sensitivity(
+            &parsed,
+            output_arrow_schema,
+            schema_sensitivity_for_internal_schema(output_schema),
+            bindings,
+            udf_compile_options(
+                models,
+                CompileOptions {
+                    output_mode: OutputMode::ExplicitOnly,
+                    ..CompileOptions::default()
+                },
+            ),
+        );
+        match mapping_input {
+            Ok(mapped_value) => Ok(mapped_value),
+            Err(error) => Err({
+                let message = error.current_context().message.clone();
+                error.change_context(RegistryError::InvalidModel {
+                    domain: domain.as_str().to_string(),
+                    identifier: identifier.as_str().to_string(),
+                    reason: format!("FILTER-MAP compile failed: {}", message),
+                })
+            }),
+        }
+    }?;
     Ok(output_schema.clone())
 }
 
@@ -551,24 +556,29 @@ fn validate_window_route_where(
         "window route WHERE",
     )?);
     bindings.extend(lookup_hash_map_bindings(lookup_fields));
-    compile_program_with_options_for_bindings_with_sensitivity(
-        &parsed,
-        output_arrow_schema,
-        schema_sensitivity_for_internal_schema(output_schema),
-        bindings,
-        udf_compile_options(models, CompileOptions::default()),
-    )
-    .map_err(|error| {
-        let message = error.current_context().message.clone();
-        error.change_context(RegistryError::InvalidModel {
-            domain: domain.as_str().to_string(),
-            identifier: identifier.as_str().to_string(),
-            reason: format!(
-                "window output '{}' WHERE compile failed: {}",
-                output.relay, message
-            ),
-        })
-    })?;
+    {
+        let mapping_input = compile_program_with_options_for_bindings_with_sensitivity(
+            &parsed,
+            output_arrow_schema,
+            schema_sensitivity_for_internal_schema(output_schema),
+            bindings,
+            udf_compile_options(models, CompileOptions::default()),
+        );
+        match mapping_input {
+            Ok(mapped_value) => Ok(mapped_value),
+            Err(error) => Err({
+                let message = error.current_context().message.clone();
+                error.change_context(RegistryError::InvalidModel {
+                    domain: domain.as_str().to_string(),
+                    identifier: identifier.as_str().to_string(),
+                    reason: format!(
+                        "window output '{}' WHERE compile failed: {}",
+                        output.relay, message
+                    ),
+                })
+            }),
+        }
+    }?;
     Ok(())
 }
 
@@ -581,13 +591,17 @@ pub(in crate::registry) fn parse_window_bound_duration(
     let Some(duration) = duration else {
         return Ok(());
     };
-    parse_duration_text(duration).map(|_| ()).map_err(|error| {
-        Report::new(RegistryError::InvalidModel {
-            domain: domain.as_str().to_string(),
-            identifier: identifier.as_str().to_string(),
-            reason: format!("invalid window {bound_name} duration '{duration}': {error}"),
-        })
-    })
+    {
+        let mapping_input = parse_duration_text(duration).map(|_| ());
+        match mapping_input {
+            Ok(mapped_value) => Ok(mapped_value),
+            Err(error) => Err(Report::new(RegistryError::InvalidModel {
+                domain: domain.as_str().to_string(),
+                identifier: identifier.as_str().to_string(),
+                reason: format!("invalid window {bound_name} duration '{duration}': {error}"),
+            })),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -896,21 +910,26 @@ fn validate_where_program_for_scoped_internal_schemas(
     )?);
     bindings.extend(lookup_hash_map_bindings(lookup_fields));
 
-    compile_program_with_options_for_bindings_with_sensitivity(
-        &parsed,
-        arrow_schema_for_internal_schema(first_schema),
-        schema_sensitivity_for_internal_schema(first_schema),
-        bindings,
-        udf_compile_options(models, compile_options),
-    )
-    .map_err(|error| {
-        let message = error.current_context().message.clone();
-        error.change_context(RegistryError::InvalidModel {
-            domain: domain.as_str().to_string(),
-            identifier: identifier.as_str().to_string(),
-            reason: format!("{clause_name} compile failed: {}", message),
-        })
-    })?;
+    {
+        let mapping_input = compile_program_with_options_for_bindings_with_sensitivity(
+            &parsed,
+            arrow_schema_for_internal_schema(first_schema),
+            schema_sensitivity_for_internal_schema(first_schema),
+            bindings,
+            udf_compile_options(models, compile_options),
+        );
+        match mapping_input {
+            Ok(mapped_value) => Ok(mapped_value),
+            Err(error) => Err({
+                let message = error.current_context().message.clone();
+                error.change_context(RegistryError::InvalidModel {
+                    domain: domain.as_str().to_string(),
+                    identifier: identifier.as_str().to_string(),
+                    reason: format!("{clause_name} compile failed: {}", message),
+                })
+            }),
+        }
+    }?;
     Ok(())
 }
 
@@ -975,27 +994,32 @@ pub(in crate::registry) fn effective_processor_output_filter_map_schema(
     )?);
     bindings.extend(lookup_hash_map_bindings(lookup_fields));
 
-    compile_program_with_options_for_bindings_with_sensitivity(
-        &parsed,
-        arrow_schema_for_internal_schema(output_schema),
-        schema_sensitivity_for_internal_schema(output_schema),
-        bindings,
-        udf_compile_options(
-            models,
-            CompileOptions {
-                output_mode: OutputMode::ExplicitOnly,
-                ..CompileOptions::default()
-            },
-        ),
-    )
-    .map_err(|error| {
-        let message = error.current_context().message.clone();
-        error.change_context(RegistryError::InvalidModel {
-            domain: domain.as_str().to_string(),
-            identifier: identifier.as_str().to_string(),
-            reason: format!("FILTER-MAP compile failed: {}", message),
-        })
-    })?;
+    {
+        let mapping_input = compile_program_with_options_for_bindings_with_sensitivity(
+            &parsed,
+            arrow_schema_for_internal_schema(output_schema),
+            schema_sensitivity_for_internal_schema(output_schema),
+            bindings,
+            udf_compile_options(
+                models,
+                CompileOptions {
+                    output_mode: OutputMode::ExplicitOnly,
+                    ..CompileOptions::default()
+                },
+            ),
+        );
+        match mapping_input {
+            Ok(mapped_value) => Ok(mapped_value),
+            Err(error) => Err({
+                let message = error.current_context().message.clone();
+                error.change_context(RegistryError::InvalidModel {
+                    domain: domain.as_str().to_string(),
+                    identifier: identifier.as_str().to_string(),
+                    reason: format!("FILTER-MAP compile failed: {}", message),
+                })
+            }),
+        }
+    }?;
 
     Ok(output_schema.clone())
 }
@@ -1156,21 +1180,26 @@ fn validate_correlate_where_for_internal_schemas(
         readonly_binding_for_internal_schema("right", right_schema),
     ];
 
-    compile_program_with_options_for_bindings_with_sensitivity(
-        &parsed,
-        arrow_schema_for_internal_schema(first_schema),
-        schema_sensitivity_for_internal_schema(first_schema),
-        bindings,
-        udf_compile_options(models, CompileOptions::default()),
-    )
-    .map_err(|error| {
-        let message = error.current_context().message.clone();
-        error.change_context(RegistryError::InvalidModel {
-            domain: domain.as_str().to_string(),
-            identifier: identifier.as_str().to_string(),
-            reason: format!("CORRELATE WHERE compile failed: {}", message),
-        })
-    })?;
+    {
+        let mapping_input = compile_program_with_options_for_bindings_with_sensitivity(
+            &parsed,
+            arrow_schema_for_internal_schema(first_schema),
+            schema_sensitivity_for_internal_schema(first_schema),
+            bindings,
+            udf_compile_options(models, CompileOptions::default()),
+        );
+        match mapping_input {
+            Ok(mapped_value) => Ok(mapped_value),
+            Err(error) => Err({
+                let message = error.current_context().message.clone();
+                error.change_context(RegistryError::InvalidModel {
+                    domain: domain.as_str().to_string(),
+                    identifier: identifier.as_str().to_string(),
+                    reason: format!("CORRELATE WHERE compile failed: {}", message),
+                })
+            }),
+        }
+    }?;
 
     Ok(())
 }
@@ -1264,30 +1293,35 @@ pub(in crate::registry) fn validate_correlator_output(
         &local_namespaces,
         "correlator output",
     )?);
-    let compiled = compile_program_with_options_for_bindings_with_sensitivity(
-        &parsed,
-        output_arrow_schema.clone(),
-        schema_sensitivity_for_internal_schema(output_schema),
-        bindings,
-        udf_compile_options(
-            models,
-            CompileOptions {
-                output_mode: OutputMode::ExplicitOnly,
-                ..CompileOptions::default()
-            },
-        ),
-    )
-    .map_err(|error| {
-        let message = error.current_context().message.clone();
-        error.change_context(RegistryError::InvalidModel {
-            domain: domain.as_str().to_string(),
-            identifier: identifier.as_str().to_string(),
-            reason: format!(
-                "correlator TO output '{}' compile failed: {}",
-                output.relay, message
+    let compiled = {
+        let mapping_input = compile_program_with_options_for_bindings_with_sensitivity(
+            &parsed,
+            output_arrow_schema.clone(),
+            schema_sensitivity_for_internal_schema(output_schema),
+            bindings,
+            udf_compile_options(
+                models,
+                CompileOptions {
+                    output_mode: OutputMode::ExplicitOnly,
+                    ..CompileOptions::default()
+                },
             ),
-        })
-    })?;
+        );
+        match mapping_input {
+            Ok(mapped_value) => Ok(mapped_value),
+            Err(error) => Err({
+                let message = error.current_context().message.clone();
+                error.change_context(RegistryError::InvalidModel {
+                    domain: domain.as_str().to_string(),
+                    identifier: identifier.as_str().to_string(),
+                    reason: format!(
+                        "correlator TO output '{}' compile failed: {}",
+                        output.relay, message
+                    ),
+                })
+            }),
+        }
+    }?;
 
     for field in compiled.output_schema.fields() {
         let Some(target) = output_arrow_schema
@@ -1418,22 +1452,27 @@ pub(in crate::registry) fn ensure_inferencer_input_mappings(
                 reason: format!("inference input '{}' is invalid: {reason}", mapping.tensor),
             })
         })?;
-        let inferred = infer_set_expr_types_for_bindings_with_udfs(
-            &parsed,
-            [writable_binding_for_internal_schema("input", input_schema)],
-            udf_compile_options(models, CompileOptions::default()).udf_signatures,
-        )
-        .map_err(|error| {
-            let message = error.current_context().message.clone();
-            error.change_context(RegistryError::InvalidModel {
-                domain: domain.as_str().to_string(),
-                identifier: identifier.as_str().to_string(),
-                reason: format!(
-                    "inference input '{}' compile failed: {}",
-                    mapping.tensor, message
-                ),
-            })
-        })?;
+        let inferred = {
+            let mapping_input = infer_set_expr_types_for_bindings_with_udfs(
+                &parsed,
+                [writable_binding_for_internal_schema("input", input_schema)],
+                udf_compile_options(models, CompileOptions::default()).udf_signatures,
+            );
+            match mapping_input {
+                Ok(mapped_value) => Ok(mapped_value),
+                Err(error) => Err({
+                    let message = error.current_context().message.clone();
+                    error.change_context(RegistryError::InvalidModel {
+                        domain: domain.as_str().to_string(),
+                        identifier: identifier.as_str().to_string(),
+                        reason: format!(
+                            "inference input '{}' compile failed: {}",
+                            mapping.tensor, message
+                        ),
+                    })
+                }),
+            }
+        }?;
         let Some(inferred) = inferred.first() else {
             return Err(Report::new(RegistryError::InvalidModel {
                 domain: domain.as_str().to_string(),
@@ -1517,27 +1556,32 @@ pub(in crate::registry) fn validate_inferencer_output_filter_map(
     )?);
     bindings.extend(lookup_hash_map_bindings(lookup_fields));
 
-    compile_program_with_options_for_bindings_with_sensitivity(
-        &parsed,
-        output_arrow_schema,
-        schema_sensitivity_for_internal_schema(output_schema),
-        bindings,
-        udf_compile_options(
-            models,
-            CompileOptions {
-                output_mode: OutputMode::ExplicitOnly,
-                ..CompileOptions::default()
-            },
-        ),
-    )
-    .map_err(|error| {
-        let message = error.current_context().message.clone();
-        error.change_context(RegistryError::InvalidModel {
-            domain: domain.as_str().to_string(),
-            identifier: identifier.as_str().to_string(),
-            reason: format!("FILTER-MAP compile failed: {}", message),
-        })
-    })?;
+    {
+        let mapping_input = compile_program_with_options_for_bindings_with_sensitivity(
+            &parsed,
+            output_arrow_schema,
+            schema_sensitivity_for_internal_schema(output_schema),
+            bindings,
+            udf_compile_options(
+                models,
+                CompileOptions {
+                    output_mode: OutputMode::ExplicitOnly,
+                    ..CompileOptions::default()
+                },
+            ),
+        );
+        match mapping_input {
+            Ok(mapped_value) => Ok(mapped_value),
+            Err(error) => Err({
+                let message = error.current_context().message.clone();
+                error.change_context(RegistryError::InvalidModel {
+                    domain: domain.as_str().to_string(),
+                    identifier: identifier.as_str().to_string(),
+                    reason: format!("FILTER-MAP compile failed: {}", message),
+                })
+            }),
+        }
+    }?;
 
     Ok(())
 }
@@ -1667,30 +1711,35 @@ pub(in crate::registry) fn validate_generator_output(
             branch_schema,
         ));
     }
-    compile_program_with_options_for_bindings_with_sensitivity(
-        &parsed,
-        output_arrow_schema,
-        schema_sensitivity_for_internal_schema(output_schema),
-        bindings,
-        udf_compile_options(
-            models,
-            CompileOptions {
-                output_mode: OutputMode::ExplicitOnly,
-                ..CompileOptions::default()
-            },
-        ),
-    )
-    .map_err(|error| {
-        let message = error.current_context().message.clone();
-        error.change_context(RegistryError::InvalidModel {
-            domain: domain.as_str().to_string(),
-            identifier: identifier.as_str().to_string(),
-            reason: format!(
-                "generator output '{}' compile failed: {}",
-                output.relay, message
+    {
+        let mapping_input = compile_program_with_options_for_bindings_with_sensitivity(
+            &parsed,
+            output_arrow_schema,
+            schema_sensitivity_for_internal_schema(output_schema),
+            bindings,
+            udf_compile_options(
+                models,
+                CompileOptions {
+                    output_mode: OutputMode::ExplicitOnly,
+                    ..CompileOptions::default()
+                },
             ),
-        })
-    })?;
+        );
+        match mapping_input {
+            Ok(mapped_value) => Ok(mapped_value),
+            Err(error) => Err({
+                let message = error.current_context().message.clone();
+                error.change_context(RegistryError::InvalidModel {
+                    domain: domain.as_str().to_string(),
+                    identifier: identifier.as_str().to_string(),
+                    reason: format!(
+                        "generator output '{}' compile failed: {}",
+                        output.relay, message
+                    ),
+                })
+            }),
+        }
+    }?;
     Ok(())
 }
 

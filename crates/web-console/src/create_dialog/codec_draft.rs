@@ -211,10 +211,17 @@ impl CodecFormatDraft {
                 batch_message,
                 transformations,
             } => {
-                let binding = binding.build().map_err(|error| {
-                    let context = CodecDraftError::Resource(error.current_context().clone());
-                    error.change_context(context)
-                })?;
+                let binding = {
+                    let mapping_input = binding.build();
+                    match mapping_input {
+                        Ok(mapped_value) => Ok(mapped_value),
+                        Err(error) => Err({
+                            let context =
+                                CodecDraftError::Resource(error.current_context().clone());
+                            error.change_context(context)
+                        }),
+                    }
+                }?;
                 if message.trim().is_empty() {
                     return Err(Report::new(CodecDraftError::MessageRequired));
                 }

@@ -394,17 +394,22 @@ impl Application {
         let replica_count = self.replica_count;
         let state_snapshot_interval = self.state_snapshot_interval;
         let restore_staging_max_bytes = self.restore_staging_max_bytes;
-        let memory_pressure_controller = self
-            .memory_pressure
-            .map(MemoryPressureController::new)
-            .transpose()
-            .map_err(|error| {
-                error!(
-                    error = format!("{error:#}"),
-                    "failed to initialize memory pressure monitor"
-                );
-                error.change_context(AppError::InitMemoryPressureMonitor)
-            })?;
+        let memory_pressure_controller = {
+            let mapping_input = self
+                .memory_pressure
+                .map(MemoryPressureController::new)
+                .transpose();
+            match mapping_input {
+                Ok(mapped_value) => Ok(mapped_value),
+                Err(error) => Err({
+                    error!(
+                        error = format!("{error:#}"),
+                        "failed to initialize memory pressure monitor"
+                    );
+                    error.change_context(AppError::InitMemoryPressureMonitor)
+                }),
+            }
+        }?;
         let db_path = self.db_path.clone();
         let temp_dir = self.temp_dir.clone();
         let resource_store_limits = self.resource_store_limits;
@@ -412,10 +417,14 @@ impl Application {
         let shutdown = shutdown_coordinator.drain_support_token();
         let fault_injection = self.fault_injection.clone();
         let grpc_tls_server_config = if grpc_mode.is_tls() {
-            Some(load_grpc_tls_server_config().await.map_err(|error| {
-                error!(?error, "failed to build grpc tls server config");
-                error
-            })?)
+            let config = match load_grpc_tls_server_config().await {
+                Ok(config) => config,
+                Err(error) => {
+                    error!(?error, "failed to build grpc tls server config");
+                    return Err(error);
+                }
+            };
+            Some(config)
         } else {
             None
         };
@@ -425,14 +434,14 @@ impl Application {
                     let Some(_) = web_console_https_listen_addr else {
                         return Err(Report::new(AppError::MissingWebConsoleHttpsListenAddress));
                     };
-                    Some(
-                        load_web_console_tls_server_config(cert_path, key_path).map_err(
-                            |error| {
-                                error!(?error, "failed to build web console tls server config");
-                                error
-                            },
-                        )?,
-                    )
+                    let config = match load_web_console_tls_server_config(cert_path, key_path) {
+                        Ok(config) => config,
+                        Err(error) => {
+                            error!(?error, "failed to build web console tls server config");
+                            return Err(error);
+                        }
+                    };
+                    Some(config)
                 }
                 (Some(_), None) => {
                     return Err(Report::new(AppError::MissingWebConsoleTlsPrivateKey));
@@ -535,36 +544,51 @@ impl Application {
                 }
             },
         );
-        let runtime = Runtime::with_persistence_and_temp_dir(
-            executor,
-            Some(dns.clone()),
-            Some(db.clone()),
-            state_snapshot_interval,
-            fault_injection.clone(),
-            temp_dir.clone(),
-            restore_staging_max_bytes,
-        )
-        .map_err(|error| {
-            error!(
-                error = format!("{error:#}"),
-                "failed to initialize runtime persistence"
+        let runtime = {
+            let mapping_input = Runtime::with_persistence_and_temp_dir(
+                executor,
+                Some(dns.clone()),
+                Some(db.clone()),
+                state_snapshot_interval,
+                fault_injection.clone(),
+                temp_dir.clone(),
+                restore_staging_max_bytes,
             );
-            error.change_context(AppError::OpenRuntimeState)
-        })?;
-        let resource_store = StdArc::new(
-            ResourceStore::open_with_limits(
+            match mapping_input {
+                Ok(mapped_value) => Ok(mapped_value),
+                Err(error) => Err({
+                    error!(
+                        error = format!("{error:#}"),
+                        "failed to initialize runtime persistence"
+                    );
+                    error.change_context(AppError::OpenRuntimeState)
+                }),
+            }
+        }?;
+        let resource_store = StdArc::new({
+            let mapping_input = ResourceStore::open_with_limits(
                 db_path.join("resources"),
                 runtime.executor().clone(),
                 resource_store_limits,
-            ).map_err(|err| {
-                error!(db_path = db_path.display().to_string(), error = %err, "failed to open resource store");
-                Report::new(AppError::OpenResourceStore)
-            })?,
-        );
-        resource_store.cleanup_abandoned_staging().await.map_err(|err| {
-            error!(db_path = db_path.display().to_string(), error = %err, "failed to clean resource staging paths");
-            Report::new(AppError::OpenResourceStore)
-        })?;
+            );
+            match mapping_input {
+                Ok(mapped_value) => Ok(mapped_value),
+                Err(err) => Err({
+                    error!(db_path = db_path.display().to_string(), error = %err, "failed to open resource store");
+                    Report::new(AppError::OpenResourceStore)
+                }),
+            }
+        }?);
+        {
+            let mapping_input = resource_store.cleanup_abandoned_staging().await;
+            match mapping_input {
+                Ok(mapped_value) => Ok(mapped_value),
+                Err(err) => Err({
+                    error!(db_path = db_path.display().to_string(), error = %err, "failed to clean resource staging paths");
+                    Report::new(AppError::OpenResourceStore)
+                }),
+            }
+        }?;
         let mut startup = ApplicationStartup {
             db,
             consensus_path: ApplicationStartup::consensus_database_path(&db_path),
@@ -1819,13 +1843,18 @@ impl Application {
                         request.name.clone(),
                     );
                     let result = match service.handle_lookup_request(request).await {
-                        Ok(Some(record)) => record
-                            .encode_arrow_ipc(service.inner.runtime.executor())
-                            .await
-                            .map(|body| Some(body.to_vec()))
-                            .map_err(|error| {
-                                RemoteOperationFailure::failed(subject, error.to_string())
-                            }),
+                        Ok(Some(record)) => {
+                            let mapping_input = record
+                                .encode_arrow_ipc(service.inner.runtime.executor())
+                                .await
+                                .map(|body| Some(body.to_vec()));
+                            match mapping_input {
+                                Ok(mapped_value) => Ok(mapped_value),
+                                Err(error) => {
+                                    Err(RemoteOperationFailure::failed(subject, error.to_string()))
+                                }
+                            }
+                        }
                         Ok(None) => Ok(None),
                         Err(failure) => Err(failure),
                     };

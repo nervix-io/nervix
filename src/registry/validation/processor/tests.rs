@@ -2,6 +2,10 @@
 //! Owns: current processor validation regressions.
 //! Depends on: registry decisions, Models and expression validation.
 //! Must not know: runtime execution internals.
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(harness, reason = "owns processor validation regression tests")
+)]
 
 use std::fs;
 

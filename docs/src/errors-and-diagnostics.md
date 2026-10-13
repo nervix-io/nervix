@@ -1,5 +1,11 @@
 # Errors And Diagnostics
 
+The [architecture rule matrix](architecture-enforcement.md) records the compiler contracts for
+failure signatures, discarded outcomes, canonical panic operations and Option/Result control
+flow. Expanding an error projection into an explicit Result branch preserves its complete report,
+context and recovery disposition. The source parser reports malformed authored Rust through a
+typed path/location context over the original parse cause; rendering includes that cause once.
+
 Nervix gives a failure its meaning at the boundary that can decide what went wrong. That meaning
 travels through the graph as a semantic error and an `error-stack` report. A public edge renders a
 diagnostic only after it has made the decision the error permits. Ordinary control outcomes, such

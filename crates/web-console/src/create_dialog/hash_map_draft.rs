@@ -80,10 +80,16 @@ impl HashMapDraft {
     ) -> error_stack::Result<CreateLookup<RequestedResourceVersion>, HashMapDraftError> {
         let name = LookupName::parse(self.name.trim())
             .map_err(|_| Report::new(HashMapDraftError::Name))?;
-        let pin = self.pin.build().map_err(|error| {
-            let context = error.current_context().clone();
-            error.change_context(HashMapDraftError::ResourcePin(context))
-        })?;
+        let pin = {
+            let mapping_input = self.pin.build();
+            match mapping_input {
+                Ok(mapped_value) => Ok(mapped_value),
+                Err(error) => Err({
+                    let context = error.current_context().clone();
+                    error.change_context(HashMapDraftError::ResourcePin(context))
+                }),
+            }
+        }?;
         let codec = match &self.codec {
             None => return Err(Report::new(HashMapDraftError::CodecRequired)),
             Some(selected) => selected

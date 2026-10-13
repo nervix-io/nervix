@@ -1076,7 +1076,12 @@ where
     fn assign_columns_x(&mut self) {
         // One gutter sits between each adjacent pair of columns, so a graph with no columns
         // has no gutters.
-        let mut lanes = vec![0_usize; self.columns.len().saturating_sub(1)];
+        let gutters = nervix_primitives::expect_lint!(
+            nervix::clamped_arithmetic,
+            "an empty column sequence has zero adjacent gutters",
+            self.columns.len().saturating_sub(1)
+        );
+        let mut lanes = vec![0_usize; gutters];
         for segment in &self.segments {
             let gutter = self.slots[segment.from].column;
             if gutter < lanes.len() {

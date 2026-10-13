@@ -964,26 +964,32 @@ fn concrete_next_offsets_from_assignment(
     for (partition, offset) in offsets {
         let next_offset = match offset {
             Offset::Offset(value) => *value,
-            Offset::Beginning => consumer
-                .fetch_watermarks(topic, *partition, Duration::from_secs(5))
-                .map(|(low, _)| low)
-                .map_err(|source| {
-                    Report::new(KafkaSourceError::FetchWatermarks {
+            Offset::Beginning => {
+                let mapping_input = consumer
+                    .fetch_watermarks(topic, *partition, Duration::from_secs(5))
+                    .map(|(low, _)| low);
+                match mapping_input {
+                    Ok(mapped_value) => Ok(mapped_value),
+                    Err(source) => Err(Report::new(KafkaSourceError::FetchWatermarks {
                         topic: topic.to_string(),
                         partition: *partition,
                     })
-                    .attach_printable(source.to_string())
-                })?,
-            Offset::End | Offset::Invalid => consumer
-                .fetch_watermarks(topic, *partition, Duration::from_secs(5))
-                .map(|(_, high)| high)
-                .map_err(|source| {
-                    Report::new(KafkaSourceError::FetchWatermarks {
+                    .attach_printable(source.to_string())),
+                }
+            }?,
+            Offset::End | Offset::Invalid => {
+                let mapping_input = consumer
+                    .fetch_watermarks(topic, *partition, Duration::from_secs(5))
+                    .map(|(_, high)| high);
+                match mapping_input {
+                    Ok(mapped_value) => Ok(mapped_value),
+                    Err(source) => Err(Report::new(KafkaSourceError::FetchWatermarks {
                         topic: topic.to_string(),
                         partition: *partition,
                     })
-                    .attach_printable(source.to_string())
-                })?,
+                    .attach_printable(source.to_string())),
+                }
+            }?,
             Offset::Stored | Offset::OffsetTail(_) => {
                 return Err(Report::new(KafkaSourceError::UnsupportedDomainOffset {
                     topic: topic.to_string(),

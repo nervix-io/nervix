@@ -36,13 +36,13 @@ class RustFile:
 
     `code` has comments and literal contents blanked, `literals` keeps literal contents so
     attribute values stay readable, and `product` additionally blanks `#[cfg(test)]` items. All
-    three have the same length as the source, so an offset means the same byte in each.
+    three have the same character length as the source, so Python character offsets agree.
     """
 
     def __init__(self, path: str, source: str) -> None:
         self.path = path
         self.source = source
-        self.lines = source.count("\n")
+        self.lines = source.count("\n") + int(bool(source) and not source.endswith("\n"))
         comments, literals = scan_spans(source)
         self.literals = blank(source, comments)
         self.code = blank(self.literals, literals)
@@ -296,13 +296,13 @@ def load_files(root: Path) -> list[RustFile]:
     """Load every tracked Rust file that belongs to the workspace's own sources."""
 
     completed = subprocess.run(
-        ["git", "-C", str(root), "ls-files", "-z", "--", "*.rs"],
+        ["git", "-C", str(root), "ls-files", "-z", "--cached", "--others", "--exclude-standard", "--", "*.rs"],
         capture_output=True,
         check=True,
         text=True,
     )
     files: list[RustFile] = []
-    for path in sorted(entry for entry in completed.stdout.split("\0") if entry):
+    for path in sorted(set(entry for entry in completed.stdout.split("\0") if entry)):
         if TEST_DIRECTORIES.intersection(PurePosixPath(path).parts[:-1]):
             continue
         files.append(RustFile(path, (root / path).read_text(encoding="utf-8")))
