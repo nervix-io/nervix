@@ -688,8 +688,9 @@ void nx_domain_clock_release(nx_domain_clock *clock);
 nx_fields *nx_fields_new(void);
 /* Adds a field whose type starts with `type`, an nx_type. A scalar type completes the field; a
    LIST or FIXED_LIST needs its element next, from nx_fields_element. `length` is a FIXED_LIST's
-   element count, from 1 to INT32_MAX, and zero for every other type. Adding a field while the
-   last one lacks its element fails with NX_ERROR_INVALID_ARGUMENT. */
+   element count, from 1 to INT32_MAX, and zero for every other type. `name` follows Nervix's name
+   rule, and its ASCII letters are folded to lower case, as a schema reads them back. Adding a
+   field while the last one lacks its element fails with NX_ERROR_INVALID_ARGUMENT. */
 nx_error *nx_fields_add(nx_fields *fields, const uint8_t *name, size_t name_len, int32_t type,
                         uint32_t length, bool nullable, bool sensitive);
 /* Adds the element of the innermost list of the last field, with nx_fields_add's `type` and

@@ -266,6 +266,36 @@ test_target = "lib"
 
 [[target]]
 case_timeout_seconds = 10
+corpus = "crates/client-ffi/src/tests/__fuzz__/tests__field_descriptors__bolero_host_field_descriptions_round_trip_through_the_binding/corpus"
+domain_version = 1
+features = []
+id = "client-ffi-field-descriptors"
+invariant = "Every field a host describes level by level, of every scalar inside 0 to 32 LIST and FIXED_LIST levels of 1 to INT32_MAX elements, nullable or not, sensitive or not and named by the whole name rule in any letter case, becomes the original canonical field, and reads back through the field and level accessors as its canonical host description."
+manifest = "Cargo.toml"
+max_input_bytes = 2048
+package = "nervix-client-ffi"
+random_iterations = 256
+source = "crates/client-ffi/src/tests/field_descriptors.rs"
+test = "tests::field_descriptors::bolero_host_field_descriptions_round_trip_through_the_binding"
+test_target = "lib"
+
+[[target]]
+case_timeout_seconds = 10
+corpus = "crates/client-ffi/src/tests/__fuzz__/tests__field_descriptors__bolero_invalid_field_descriptions_are_refused_without_changing_the_list/corpus"
+domain_version = 1
+features = []
+id = "client-ffi-field-descriptors-malformed"
+invariant = "Every unknown type, length on a scalar or LIST level, FIXED_LIST of no or more than INT32_MAX elements, 33rd list, name the rule refuses, element without an open field and field added before the open one's element fails as an invalid argument and leaves the list as the accepted calls built it; an open last field leaves the list incomplete, and reads past a field's innermost level or past the last field fail as invalid arguments."
+manifest = "Cargo.toml"
+max_input_bytes = 4096
+package = "nervix-client-ffi"
+random_iterations = 256
+source = "crates/client-ffi/src/tests/field_descriptors.rs"
+test = "tests::field_descriptors::bolero_invalid_field_descriptions_are_refused_without_changing_the_list"
+test_target = "lib"
+
+[[target]]
+case_timeout_seconds = 10
 corpus = "crates/branch-instances/src/__fuzz__/membership__tests__bolero_owned_branches_publish_exactly_the_current_owners_membership/corpus"
 domain_version = 1
 features = []

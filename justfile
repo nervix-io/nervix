@@ -1109,7 +1109,7 @@ test-coverage-feature +features: tests-deps
 # public-scenario coverage collected by `test-coverage-feature`.
 test-coverage-client-packages:
     cargo llvm-cov --no-report --all-targets \
-        --package nervix-client-core --package nervix-client-wire \
+        --package nervix-client-core --package nervix-client-wire --package nervix-client-ffi \
         --package nervix-models --package nervix-cli --package nervix-web-console
 
 # Add focused backup, wire, state, and primitive tests to a backup feature's coverage profile.
