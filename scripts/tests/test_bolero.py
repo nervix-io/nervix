@@ -306,6 +306,8 @@ class InventoryTests(unittest.TestCase):
             "console-pending-backups",
             "console-pending-backups-malformed",
             "console-restore-drafts",
+            "runtime-window-sketch-panes",
+            "kafka-partition-offsets",
         })
         self.assertEqual({target.package for target in inventory.targets}, {
             "nervix-client-wire",
@@ -324,6 +326,7 @@ class InventoryTests(unittest.TestCase):
             "nervix-simd-kernels",
             "nervix-checkpoint-replication",
             "nervix-connector-syslog",
+            "nervix-connector-kafka",
             "nervix-paced-simulation",
             "nervix-wasm-protocol",
             "nervix-wasm",

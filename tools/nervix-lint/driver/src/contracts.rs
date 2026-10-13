@@ -121,6 +121,21 @@ pub fn context(tcx: TyCtxt<'_>, mut definition: DefId) -> Option<Context> {
     }
 }
 
+/// The declared contract, or recurring reachability from a recurring caller.
+pub fn effective_context(
+    tcx: TyCtxt<'_>,
+    owner: LocalDefId,
+    recurring: &HashSet<LocalDefId>,
+) -> Option<Context> {
+    let declared = context(tcx, owner.to_def_id());
+    if recurring.contains(&owner) && !declared.as_ref().is_some_and(Context::is_recurring) {
+        return Some(Context::Recurring {
+            reason: "reachable from a recurring source contract".into(),
+        });
+    }
+    declared
+}
+
 /// Module/crate frequency defaults seed analysis; a supported local caller can refine them.
 /// A callable, trait, impl or type's lifecycle contract is an installation boundary instead.
 fn lifecycle_boundary(tcx: TyCtxt<'_>, mut definition: DefId) -> bool {
@@ -533,6 +548,17 @@ impl Flow {
         self.nodes.iter().copied()
     }
 
+    /// Local bodies whose supported calls resolve to `target`.
+    pub fn callers(&self, target: LocalDefId) -> usize {
+        let mut count = 0;
+        for callees in self.edges.values() {
+            if callees.contains(&target) {
+                count += 1;
+            }
+        }
+        count
+    }
+
     pub fn callees(&self, owner: LocalDefId) -> impl Iterator<Item = LocalDefId> + '_ {
         self.edges.get(&owner).into_iter().flatten().copied()
     }
@@ -573,16 +599,7 @@ impl Flow {
             self.count_expectation(cx, &mut expectations, node, lint);
         }
         for operation in &self.acquisitions {
-            let declared = context(cx.tcx, operation.owner.to_def_id());
-            let actual = if recurring.contains(&operation.owner)
-                && !declared.as_ref().is_some_and(Context::is_recurring)
-            {
-                Some(Context::Recurring {
-                    reason: "reachable from a recurring source contract".into(),
-                })
-            } else {
-                declared
-            };
+            let actual = effective_context(cx.tcx, operation.owner, &recurring);
             let finding = &mut findings[operation.finding];
             finding.context = actual.clone();
             match actual {

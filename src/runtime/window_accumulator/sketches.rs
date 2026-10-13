@@ -101,6 +101,18 @@ impl PaneSketches {
         self.panes.clear();
     }
 
+    /// The sketch of `pane`, which the pane's first admitted row creates.
+    fn pane(&mut self, pane: i64) -> &mut WindowSketch {
+        self.panes
+            .entry(pane)
+            .or_insert_with(|| WindowSketch::new(self.config))
+    }
+
+    #[cfg(feature = "benchmarks")]
+    pub(super) fn pane_count(&self) -> usize {
+        self.panes.len()
+    }
+
     #[cfg_attr(
         nervix_lint,
         nervix::dispatch(reason = "the caller supplies the branch-retained row and pane \
@@ -121,13 +133,7 @@ impl PaneSketches {
                         let pane = self
                             .layout
                             .pane_of(rows.retained_row(position).timestamp.unix_nanos());
-                        if let Some(sketch) = self.panes.get_mut(&pane) {
-                            sketch.admit_key(key);
-                        } else {
-                            let mut sketch = WindowSketch::new(self.config);
-                            sketch.admit_key(key);
-                            self.panes.insert(pane, sketch);
-                        }
+                        self.pane(pane).admit_key(key);
                     });
                 }
                 WindowSketchConfig::Quantile { .. } => {
@@ -141,13 +147,7 @@ impl PaneSketches {
                         let value = argument
                             .number_at(row)
                             .verified("quantile accepts numeric arguments");
-                        if let Some(sketch) = self.panes.get_mut(&pane) {
-                            sketch.admit_number(value);
-                        } else {
-                            let mut sketch = WindowSketch::new(self.config);
-                            sketch.admit_number(value);
-                            self.panes.insert(pane, sketch);
-                        }
+                        self.pane(pane).admit_number(value);
                     }
                 }
             }
@@ -553,6 +553,219 @@ impl FrequencyCandidates {
 )]
 mod tests {
     use super::*;
+
+    /// Retained rows in admission order, standing in for the window's retained queue.
+    struct Retained(Vec<WindowRow>);
+
+    impl RetainedWindowRows for Retained {
+        fn retained(&self) -> usize {
+            self.0.len()
+        }
+
+        fn retained_row(&self, position: usize) -> &WindowRow {
+            &self.0[position]
+        }
+    }
+
+    /// One generated step of a sketch window: admit a batch of rows, or step past the oldest.
+    #[derive(Debug, bolero::TypeGenerator)]
+    enum PaneStep {
+        Admit {
+            #[generator(bolero::generator::produce_with::<Vec<PaneRow>>().len(0_usize..=24))]
+            rows: Vec<PaneRow>,
+        },
+        Retract {
+            count: u8,
+        },
+    }
+
+    /// A generated row: the pane it falls in, its position within the pane and its argument.
+    #[derive(Debug, Clone, Copy, bolero::TypeGenerator)]
+    struct PaneRow {
+        pane: u8,
+        offset: u8,
+        value: Option<i8>,
+    }
+
+    /// A generated window: which sketch it keeps and the steps it takes.
+    #[derive(Debug, bolero::TypeGenerator)]
+    struct PaneCase {
+        sketch: u8,
+        #[generator(bolero::generator::produce_with::<Vec<PaneStep>>().len(0_usize..=12))]
+        steps: Vec<PaneStep>,
+    }
+
+    const PANE_NANOS: i64 = 1_000;
+
+    fn layout() -> WindowPaneLayout {
+        WindowPaneLayout {
+            pane_nanos: PANE_NANOS,
+            maximum_panes: 8,
+        }
+    }
+
+    fn config(selector: u8) -> WindowSketchConfig {
+        let capacity = NonZeroUsize::new(32).verified("32 is not zero");
+        match selector % 3 {
+            0 => WindowSketchConfig::Distinct { precision: 4 },
+            1 => WindowSketchConfig::Quantile { capacity },
+            _ => WindowSketchConfig::TopK {
+                k: NonZeroUsize::new(2).verified("2 is not zero"),
+                capacity,
+            },
+        }
+    }
+
+    /// The single-demand plan of the sketch aggregate `config` keeps over an `I64` argument.
+    fn plan(config: WindowSketchConfig) -> WindowAccumulatorPlan {
+        let (set, output) = match config {
+            WindowSketchConfig::Distinct { .. } => (
+                "SET x = APPROX_COUNT_DISTINCT(input.latency, 4)",
+                ParseAsType::I64,
+            ),
+            WindowSketchConfig::Quantile { .. } => (
+                "SET x = APPROX_QUANTILE(input.latency, 50, 32)",
+                ParseAsType::F64,
+            ),
+            WindowSketchConfig::TopK { .. } => (
+                "SET x = APPROX_TOP_K(input.latency, 2, 32)",
+                ParseAsType::Vec {
+                    element: Box::new(ParseAsType::I64),
+                },
+            ),
+        };
+        crate::runtime::test_fixtures::window_plan(set, ParseAsType::I64, &[("x", output)])
+    }
+
+    /// Append one argument batch's rows to the retained queue.
+    fn append(retained: &mut Retained, plan: &WindowAccumulatorPlan, rows: &[PaneRow]) {
+        let values: Int64Array = rows.iter().map(|row| row.value.map(i64::from)).collect();
+        let array: ArrayRef = StdArc::new(values);
+        let arguments = Arc::new(
+            WindowArgumentColumns::new(plan, vec![WindowArguments::Single(array)], rows.len())
+                .verified("the generated column has the plan's argument type and row count"),
+        );
+        for (row, generated) in rows.iter().enumerate() {
+            let nanos = i64::from(generated.pane) * PANE_NANOS + i64::from(generated.offset) * 3;
+            let sequence = u64::try_from(retained.0.len()).assured("test windows hold few rows");
+            retained.0.push(WindowRow {
+                sequence,
+                timestamp: Timestamp::from_unix_nanos(nanos),
+                arguments: Arc::clone(&arguments),
+                row,
+            });
+        }
+    }
+
+    /// Each pane holds an empty sketch that admitted the pane's retained rows in order.
+    fn reference(config: WindowSketchConfig, retained: &Retained) -> BTreeMap<i64, WindowSketch> {
+        let mut panes = BTreeMap::new();
+        for position in 0..retained.retained() {
+            let row = retained.retained_row(position);
+            let argument = row.arguments.demand(0).first();
+            let pane = layout().pane_of(row.timestamp.unix_nanos());
+            match config {
+                WindowSketchConfig::Quantile { .. } => {
+                    if let Some(value) = argument.number_at(row.row) {
+                        panes
+                            .entry(pane)
+                            .or_insert_with(|| WindowSketch::new(config))
+                            .admit_number(value);
+                    }
+                }
+                WindowSketchConfig::Distinct { .. } | WindowSketchConfig::TopK { .. } => {
+                    if let Some(key) = argument.sketch_key(row.row) {
+                        panes
+                            .entry(pane)
+                            .or_insert_with(|| WindowSketch::new(config))
+                            .admit_key(&key);
+                    }
+                }
+            }
+        }
+        panes
+    }
+
+    /// Debug renders every register, centroid and candidate count, and f64 values round trip.
+    fn rendered(panes: &BTreeMap<i64, WindowSketch>) -> String {
+        format!("{panes:?}")
+    }
+
+    /// Admitting rows in runs and stepping past the oldest rows leaves every pane equal to an empty
+    /// sketch that admitted exactly that pane's retained rows, in order: a pane is created by its
+    /// first admitted row, once, and no pane exists without a contributing row.
+    #[test]
+    fn bolero_pane_sketches_equal_per_pane_admission() {
+        bolero::check!()
+            .with_iterations(256)
+            .with_max_len(1024)
+            .with_type::<PaneCase>()
+            .for_each(|case| {
+                let config = config(case.sketch);
+                let plan = plan(config);
+                let mut sketches = PaneSketches::new(config, layout());
+                let mut retained = Retained(Vec::new());
+                for step in &case.steps {
+                    match step {
+                        PaneStep::Admit { rows } => {
+                            let start = retained.retained();
+                            append(&mut retained, &plan, rows);
+                            sketches.admit(0, &retained, start..retained.retained());
+                        }
+                        PaneStep::Retract { count } => {
+                            let removed = usize::from(*count).min(retained.retained());
+                            sketches.retain_after(0, &retained, removed);
+                            retained.0.drain(..removed);
+                        }
+                    }
+                    assert_eq!(
+                        rendered(&sketches.panes),
+                        rendered(&reference(config, &retained))
+                    );
+                }
+            });
+    }
+
+    #[test]
+    fn a_pane_sketch_is_created_by_its_first_row_and_admits_every_later_row() {
+        for selector in 0..3 {
+            let config = config(selector);
+            let plan = plan(config);
+            let mut sketches = PaneSketches::new(config, layout());
+            let mut retained = Retained(Vec::new());
+            let rows = [
+                PaneRow {
+                    pane: 2,
+                    offset: 0,
+                    value: Some(7),
+                },
+                PaneRow {
+                    pane: 2,
+                    offset: 1,
+                    value: Some(7),
+                },
+                PaneRow {
+                    pane: 3,
+                    offset: 0,
+                    value: None,
+                },
+                PaneRow {
+                    pane: 2,
+                    offset: 2,
+                    value: Some(-3),
+                },
+            ];
+            append(&mut retained, &plan, &rows);
+            sketches.admit(0, &retained, 0..2);
+            sketches.admit(0, &retained, 2..4);
+            // An absent argument contributes nothing, so its pane never gets a sketch.
+            assert_eq!(sketches.panes.keys().copied().collect::<Vec<_>>(), vec![2]);
+            assert_eq!(
+                rendered(&sketches.panes),
+                rendered(&reference(config, &retained))
+            );
+        }
+    }
 
     #[test]
     fn hll_merges_registers_and_tracks_distinct_count_with_bounded_error() {
