@@ -578,6 +578,14 @@ schedule, activation fails and leaves every saved checkpoint unchanged. State is
 the accepted decision either stages a recreated inventory or reports a reset for every state
 component the entity owns.
 
+The destination first waits for the execution schedule it validates to finish installing, within
+the existing five-second preparation deadline. Lifecycle state can be published before the graph,
+so recovery also orders its schedule read after local application completes. A missing startup
+execution is a wait for installation, rather than evidence that the replica lacks checkpoints.
+An installed schedule with a different fingerprint still refuses preparation. Expiry identifies
+the domain and scheduled entity as an installation deadline failure; the existing failed-preparation
+recreation policy remains in effect.
+
 A forced recovery of a WASM processor starts a new guest-state generation for every branch in the
 same schedule publication, and activation publishes the staged checkpoints in that generation. The
 former owner's saves, and those of any replica that missed the recovery, belong to the generation it

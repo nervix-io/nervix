@@ -367,8 +367,14 @@ The boundary between them is kept in four places.
   flushes both branch records, and then starts intake. Both records are therefore available to
   its first parallel batch. The source host waits for that batch's attached ACKs before polling
   the next batch; separate publications after intake starts do not establish one batch.
-  `just coverage-harness-liveness <report>` measures the ordinary startup and other harness owner
-  regressions through the configured compiler cache and preserves the current workspace profiles.
+  `just coverage-harness-liveness-workspace <report>` measures the ordinary startup and other
+  harness owner regressions through the configured compiler cache and preserves the current
+  workspace profiles.
+  The forced-recovery startup fixture holds the promoted replica's initial installation across a
+  whole-cluster restart. After the cluster rejoins, it makes the former owner's application health
+  unavailable. The destination records its missing schedule before releasing the held installation
+  once, so the regression reaches that boundary without spending the recovery budget between
+  scenario steps. Public placement, recovery outcome and both branches' output remain the verdict.
 - **Test defaults.** An in-process node's shutdown timeout defaults to four minutes rather than the
   product's `50s`, which leaves the bounded shutdown phases scenarios configure by default room to
   finish, so only a scenario about the deadline reaches it. A server process runs with the product

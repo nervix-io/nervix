@@ -320,6 +320,7 @@ enum RemoteAcknowledgementLoss {
 enum CommandPausePoint {
     Admission(ClusterNodeName),
     RuntimeInstallation(ClusterNodeName),
+    ForcedRecoveryMissingSchedule(ClusterNodeName),
     RuntimePreparation(ClusterNodeName),
     ReferenceLookup(ClusterNodeName),
     DurableAdmission(ClusterNodeName),
@@ -1326,6 +1327,34 @@ impl FaultInjection {
 
     pub fn release_runtime_installation_pause(&self, node_id: &ClusterNodeName) {
         self.release_command_pause(&CommandPausePoint::RuntimeInstallation(node_id.clone()));
+    }
+
+    /// Resume a held initial installation only after forced recovery observes its missing
+    /// schedule. The observation precedes release, so the fixture never races two scenario steps
+    /// against the recovery budget.
+    pub fn resume_installation_after_missing_recovery_schedule(&self, node_id: ClusterNodeName) {
+        self.arm_command_pause(CommandPausePoint::ForcedRecoveryMissingSchedule(node_id));
+    }
+
+    pub async fn wait_for_missing_recovery_schedule(&self, node_id: &ClusterNodeName) {
+        self.wait_for_command_pause(&CommandPausePoint::ForcedRecoveryMissingSchedule(
+            node_id.clone(),
+        ))
+        .await;
+    }
+
+    pub(crate) fn missing_recovery_schedule_if_armed(&self, node_id: &ClusterNodeName) {
+        let point = CommandPausePoint::ForcedRecoveryMissingSchedule(node_id.clone());
+        let pause = match self.inner.command_pauses.get(&point) {
+            Some(pause) => pause.value().clone(),
+            None => return,
+        };
+        if pause.claimed.swap(true, Ordering::AcqRel) {
+            return;
+        }
+        pause.reach();
+        self.release_runtime_installation_pause(node_id);
+        // Keep the one-shot observation until the scenario observes it or finishes cleanup.
     }
 
     pub fn pause_runtime_preparation_on(&self, node_id: ClusterNodeName) {

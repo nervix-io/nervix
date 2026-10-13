@@ -489,6 +489,7 @@ class InventoryTests(unittest.TestCase):
             "tests/features/cluster/backup_wait.feature",
             "tests/features/cluster/backup_metadata.feature",
             "tests/features/cluster/backup_guest_saves.feature",
+            "tests/features/cluster/forced_recovery_schedule.feature",
             "tests/features/runtime/large_wasm_state_replication.feature",
             "tests/features/runtime/window_processor.feature",
         }
@@ -523,7 +524,7 @@ class InventoryTests(unittest.TestCase):
         self.assertEqual(set(stressed), expected)
         self.assertEqual(sum(workload.examples or 0 for workload in inventory.workloads_of("stress-scenarios", "deloxide-stress")), 42)
         self.assertEqual(sum(workload.examples or 0 for workload in inventory.workloads_of("stress-paced-simulation", "deloxide-stress")), 36)
-        self.assertEqual(sum(workload.examples or 0 for workload in inventory.workloads_of("stress-restore-scenarios", "deloxide-stress-restore")), 47)
+        self.assertEqual(sum(workload.examples or 0 for workload in inventory.workloads_of("stress-restore-scenarios", "deloxide-stress-restore")), 48)
         stress_ids = {workload.id for workload in inventory.workloads.values() if workload.id.startswith("stress.")}
         for path, owner in inventory.owners.items():
             with self.subTest(owner=path):
