@@ -820,6 +820,21 @@ test = "runtime::state_store::backup::tests::bolero_restore_staging_and_publicat
 test_target = "lib"
 
 [[target]]
+case_timeout_seconds = 30
+corpus = "src/runtime/state_store/__fuzz__/runtime__state_store__maintenance__staged_usage_properties__bolero_a_kept_staging_measurement_equals_a_fresh_one_after_any_history/corpus"
+domain_version = 1
+features = []
+id = "restore-staging-kept-measurement"
+invariant = "After any history of staging, staging that fails its digest or is cut short, retries, sweeps, publication and reopening over two domains and three generations, the measurement of unpublished restore staging a store kept equals the one a fresh read of every staged entry gives."
+manifest = "Cargo.toml"
+max_input_bytes = 96
+package = "nervix-server"
+random_iterations = 96
+source = "src/runtime/state_store/staged_usage_properties_tests.rs"
+test = "runtime::state_store::maintenance::staged_usage_properties::bolero_a_kept_staging_measurement_equals_a_fresh_one_after_any_history"
+test_target = "lib"
+
+[[target]]
 case_timeout_seconds = 10
 corpus = "crates/simd-kernels/src/__fuzz__/division__tests__bolero_constant_division_matches_checked_operations_at_every_level/corpus"
 domain_version = 1
