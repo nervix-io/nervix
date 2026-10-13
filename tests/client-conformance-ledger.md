@@ -191,8 +191,9 @@ subscription ending, and client requests with a present-zero and an absent optio
 preview fingerprint, and the largest request identity. It also covers the domain clock attachment:
 the attach and detach requests, a paced clock attached at the largest generation with the extreme
 signed timestamps and a time rate read by its bits, clock frames in the stopped, uninstalled and
-unpaced states, every refusal of an attach and a detach, and the end of an attachment with its
-typed reason. A tick frame carries its generation, id, boundary, authority UTC observation, and
+unpaced states, every refusal of an attach, a detach of a clock the session does not follow, and
+the end of an attachment with its typed reason.
+A tick frame carries its generation, id, boundary, authority UTC observation, and
 serving node logical reading through the Rust, Go, and TypeScript readers. Producers are covered by
 the open, submit, and close requests with a batch carried as opaque bytes, an opened producer with
 its description under a parallel window, a refused open, a closed producer, a submission of

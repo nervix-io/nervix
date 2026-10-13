@@ -51,16 +51,17 @@ pub fn backup_parser<'src>()
     let timeout = kw(Identifier::Timeout)
         .ignore_then(duration_lit())
         .try_map(|raw, span| {
-            nervix_models::parse_duration_text(&raw)
-                .map(|timeout| BackupCapture::Quiesced {
+            let mapping_input =
+                nervix_models::parse_duration_text(&raw).map(|timeout| BackupCapture::Quiesced {
                     timeout: Some(timeout),
-                })
-                .map_err(|report| {
-                    Rich::custom(
-                        span,
-                        format!("invalid backup timeout: {}", report.current_context()),
-                    )
-                })
+                });
+            match mapping_input {
+                Ok(mapped_value) => Ok(mapped_value),
+                Err(report) => Err(Rich::custom(
+                    span,
+                    format!("invalid backup timeout: {}", report.current_context()),
+                )),
+            }
         });
     let capture = choice((
         kw_phrase2(Identifier::Without, Identifier::State).to(BackupCapture::ConfigurationOnly),

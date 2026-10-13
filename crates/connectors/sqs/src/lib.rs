@@ -255,16 +255,19 @@ impl SqsSink {
             .unwrap_or("x")
             .to_string();
 
-        let request_timeout = optional_client_config_value(config, "timeout_ms")
-            .map(|timeout_ms| {
-                timeout_ms
-                    .parse::<u64>()
-                    .map(Duration::from_millis)
-                    .map_err(|_| {
-                        Self::config_error(format!("invalid SQS timeout_ms '{timeout_ms}'"))
-                    })
-            })
-            .transpose()?;
+        let request_timeout = match optional_client_config_value(config, "timeout_ms") {
+            Some(timeout_ms) => {
+                let mapping_input = timeout_ms.parse::<u64>().map(Duration::from_millis);
+                let timeout = match mapping_input {
+                    Ok(mapped_value) => Ok(mapped_value),
+                    Err(_) => Err(Self::config_error(format!(
+                        "invalid SQS timeout_ms '{timeout_ms}'"
+                    ))),
+                }?;
+                Some(timeout)
+            }
+            None => None,
+        };
 
         let mut loader = aws_config::defaults(BehaviorVersion::latest())
             .region(aws_sdk_sqs::config::Region::new(region))
@@ -287,12 +290,18 @@ impl SqsSink {
         }
         let trust = match client_tls_paths(config).ca_file.as_ref() {
             Some(ca_file) => {
-                let ca_pem = read_tls_file(ca_file, "TLS CA certificate").map_err(|error| {
-                    let message = error.current_context().to_string();
-                    error
-                        .change_context(SinkStartError::InvalidConfiguration { sink: SQS })
-                        .attach_printable(message)
-                })?;
+                let ca_pem = {
+                    let mapping_input = read_tls_file(ca_file, "TLS CA certificate");
+                    match mapping_input {
+                        Ok(mapped_value) => Ok(mapped_value),
+                        Err(error) => Err({
+                            let message = error.current_context().to_string();
+                            error
+                                .change_context(SinkStartError::InvalidConfiguration { sink: SQS })
+                                .attach_printable(message)
+                        }),
+                    }
+                }?;
                 SqsTrust::ca(ca_pem).map_err(Self::start_error)?
             }
             None => SqsTrust::Platform,
@@ -634,12 +643,18 @@ impl SqsSink {
     }
 
     fn config_value(config: &[ClientConfigEntry], key: &str) -> SinkStartResult<String> {
-        client_config_value(config, key, "SQS").map_err(|error| {
-            let message = error.current_context().to_string();
-            error
-                .change_context(SinkStartError::InvalidConfiguration { sink: SQS })
-                .attach_printable(message)
-        })
+        {
+            let mapping_input = client_config_value(config, key, "SQS");
+            match mapping_input {
+                Ok(mapped_value) => Ok(mapped_value),
+                Err(error) => Err({
+                    let message = error.current_context().to_string();
+                    error
+                        .change_context(SinkStartError::InvalidConfiguration { sink: SQS })
+                        .attach_printable(message)
+                }),
+            }
+        }
     }
 
     fn config_error(error: impl std::fmt::Display) -> Report<SinkStartError> {

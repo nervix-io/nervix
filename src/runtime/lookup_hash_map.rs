@@ -370,19 +370,22 @@ pub(super) fn rewrite_lookup_hash_map_expr(
                         span: expr.span,
                     }));
                 };
-                let lookup_field_type = lookup_runtime
-                    .schema
-                    .arrow_schema()
-                    .field_with_name(&lookup_field)
-                    .map(|field| field.data_type().clone())
-                    .map_err(|error| {
-                        Report::new(LookupHashMapError::FieldUnavailable {
+                let lookup_field_type = {
+                    let mapping_input = lookup_runtime
+                        .schema
+                        .arrow_schema()
+                        .field_with_name(&lookup_field)
+                        .map(|field| field.data_type().clone());
+                    match mapping_input {
+                        Ok(mapped_value) => Ok(mapped_value),
+                        Err(error) => Err(Report::new(LookupHashMapError::FieldUnavailable {
                             lookup: lookup.clone(),
                             field: lookup_field.clone(),
                             span: expr.span,
                         })
-                        .attach_printable(error)
-                    })?;
+                        .attach_printable(error)),
+                    }
+                }?;
                 // Deduplication over the calls lowered so far in this one program. The
                 // comparison includes the key expression, which has no hash or ordering, so the
                 // bound is the LOOKUP_HASH_MAP calls written in the program being compiled.

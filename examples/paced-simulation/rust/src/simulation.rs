@@ -626,15 +626,26 @@ impl Planner {
 
     /// Encodes the readings of one tick as the producer's batch.
     fn prepare(&self, tick: u64, readings: Vec<Reading>) -> Result<Prepared, Report<RunError>> {
-        let record_batch = readings::record_batch(self.producer.arrow_schema(), &readings)
-            .map_err(|error| {
-                let reason = error.to_string();
-                Report::new(error).change_context(RunError::Batch { tick, reason })
-            })?;
-        let batch = self.producer.batch(&record_batch).map_err(|failure| {
-            let reason = failure.current_context().to_string();
-            failure.change_context(RunError::Batch { tick, reason })
-        })?;
+        let record_batch = {
+            let mapping_input = readings::record_batch(self.producer.arrow_schema(), &readings);
+            match mapping_input {
+                Ok(mapped_value) => Ok(mapped_value),
+                Err(error) => Err({
+                    let reason = error.to_string();
+                    Report::new(error).change_context(RunError::Batch { tick, reason })
+                }),
+            }
+        }?;
+        let batch = {
+            let mapping_input = self.producer.batch(&record_batch);
+            match mapping_input {
+                Ok(mapped_value) => Ok(mapped_value),
+                Err(failure) => Err({
+                    let reason = failure.current_context().to_string();
+                    failure.change_context(RunError::Batch { tick, reason })
+                }),
+            }
+        }?;
         let bytes = u64::try_from(batch.len()).assured("a batch's length fits u64");
         let grant = self.producer.description().grant;
         if bytes > grant.max_batch_bytes.get() {

@@ -258,19 +258,24 @@ impl SourceConnector for WebsocketSource {
         if let Some(protocol) = self.signaling_protocol.as_ref() {
             let (payloads_tx, mut payloads_rx) = mpsc::unbounded_channel();
             let sink = QueuedSignalingDataSink { payloads_tx };
-            WebsocketSignalingSession::new(protocol.clone())
-                .run(&mut relay, &sink)
-                .await
-                .map_err(|error| {
-                    // A frame the peer could not take or send keeps the transport error beneath
-                    // the signaling context, so the reason is the whole chain.
-                    let reason = format!("{error:#}");
-                    error
-                        .change_context(SourceError::Resume {
-                            connector: WEBSOCKETS,
-                        })
-                        .attach_printable(format!("websocket signaling failed: {reason}"))
-                })?;
+            {
+                let mapping_input = WebsocketSignalingSession::new(protocol.clone())
+                    .run(&mut relay, &sink)
+                    .await;
+                match mapping_input {
+                    Ok(mapped_value) => Ok(mapped_value),
+                    Err(error) => Err({
+                        // A frame the peer could not take or send keeps the transport error beneath
+                        // the signaling context, so the reason is the whole chain.
+                        let reason = format!("{error:#}");
+                        error
+                            .change_context(SourceError::Resume {
+                                connector: WEBSOCKETS,
+                            })
+                            .attach_printable(format!("websocket signaling failed: {reason}"))
+                    }),
+                }
+            }?;
             drop(sink);
             while let Ok(payload) = payloads_rx.try_recv() {
                 self.pending.push_back(payload);

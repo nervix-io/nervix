@@ -78,19 +78,24 @@ pub(in crate::registry) fn deduplicator_key_types(
         })
     })?;
     let bindings = vec![writable_binding_for_internal_schema("input", input_schema)];
-    let key_types = infer_set_expr_types_for_bindings_with_udfs(
-        &parsed,
-        bindings,
-        udf_compile_options(models, CompileOptions::default()).udf_signatures,
-    )
-    .map_err(|error| {
-        let message = error.current_context().message.clone();
-        error.change_context(RegistryError::InvalidModel {
-            domain: domain.as_str().to_string(),
-            identifier: identifier.as_str().to_string(),
-            reason: format!("DEDUPLICATE ON compile failed: {}", message),
-        })
-    })?;
+    let key_types = {
+        let mapping_input = infer_set_expr_types_for_bindings_with_udfs(
+            &parsed,
+            bindings,
+            udf_compile_options(models, CompileOptions::default()).udf_signatures,
+        );
+        match mapping_input {
+            Ok(mapped_value) => Ok(mapped_value),
+            Err(error) => Err({
+                let message = error.current_context().message.clone();
+                error.change_context(RegistryError::InvalidModel {
+                    domain: domain.as_str().to_string(),
+                    identifier: identifier.as_str().to_string(),
+                    reason: format!("DEDUPLICATE ON compile failed: {}", message),
+                })
+            }),
+        }
+    }?;
     if key_types.len() != deduplicator.deduplicate_on.len() {
         return Err(Report::new(RegistryError::InvalidModel {
             domain: domain.as_str().to_string(),

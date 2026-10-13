@@ -776,29 +776,32 @@ impl SessionServiceImpl {
             .await;
         let live_voters = planning.live_voters();
         let cluster_nodes = planning.cluster_nodes();
-        let mut next_schedule = self.inner.registry.active_graph(domain).map(|graph| {
-            #[cfg(feature = "testing")]
-            let mut schedule = graph.schedule_for_domain_with_mode(
-                domain,
-                cluster_nodes,
-                self.inner.replica_count,
-                alter.policy,
-                self.inner.runtime.scheduler_mode(),
-            );
-            #[cfg(not(feature = "testing"))]
-            let mut schedule = graph.schedule_for_domain(
-                domain,
-                cluster_nodes,
-                self.inner.replica_count,
-                alter.policy,
-            );
-            Self::merge_existing_schedule_data(
-                &mut schedule,
-                previous_schedule.as_ref(),
-                live_voters,
-            );
-            schedule
-        });
+        let mut next_schedule = match self.inner.registry.active_graph(domain) {
+            Some(graph) => {
+                #[cfg(feature = "testing")]
+                let mut schedule = graph.schedule_for_domain_with_mode(
+                    domain,
+                    cluster_nodes,
+                    self.inner.replica_count,
+                    alter.policy,
+                    self.inner.runtime.scheduler_mode(),
+                );
+                #[cfg(not(feature = "testing"))]
+                let mut schedule = graph.schedule_for_domain(
+                    domain,
+                    cluster_nodes,
+                    self.inner.replica_count,
+                    alter.policy,
+                );
+                Self::merge_existing_schedule_data(
+                    &mut schedule,
+                    previous_schedule.as_ref(),
+                    live_voters,
+                );
+                Some(schedule)
+            }
+            None => None,
+        };
         if let Some(next_schedule) = next_schedule.as_mut() {
             mark_complete_ownership_transitions(previous_schedule.as_ref(), next_schedule);
         }

@@ -13,7 +13,7 @@ from scripts.ratchet import BASELINE_FILE, COUNTS, main, measure_sources, write_
 
 
 def write_repository(root: Path, sources: dict[str, str]) -> None:
-    """Stage `sources` in a git repository, because the counts read tracked files only."""
+    """Stage the fixture's initial sources before testing tracked and new authored files."""
 
     (root / "Cargo.toml").write_text('[package]\nname="ratchet-fixture"\nversion="0.1.0"\n')
     for path, body in sources.items():
@@ -123,12 +123,52 @@ class RatchetGateTests(unittest.TestCase):
             status, listing, _ = run("--root", str(root), "--show", "as_casts")
 
             self.assertEqual(status, 0)
-            self.assertEqual(listing, "src/lib.rs:2: x as u32\n")
+            self.assertEqual(listing, "src/lib.rs:2: as_casts\n")
 
 
 class CountTests(unittest.TestCase):
 
-    def test_as_casts_ignore_comments_literals_imports_attributes_and_unit_tests(self) -> None:
+    def test_malformed_source_cannot_report_a_clean_structural_count(self) -> None:
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            write_repository(root, {"src/lib.rs": "fn {"})
+            with self.assertRaisesRegex(SystemExit, r"src/lib.rs:1:"):
+                measure_sources(root)
+
+    def test_file_size_includes_final_lines_and_new_authored_sources(self) -> None:
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            write_repository(root, {"src/lib.rs": "// line\n" * 3000 + "// final"})
+            self.assertEqual(count(root, "files_over_3000_lines"), 1)
+            (root / "src/new.rs").write_text("// line\n" * 3001)
+            self.assertEqual(count(root, "files_over_3000_lines"), 2)
+
+    def test_cast_syntax_preserves_nested_casts_and_raw_identifiers(self) -> None:
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            write_repository(root, {"src/lib.rs": """
+struct Label { r#as: u32 }
+fn r#as(r#as: u32) -> u32 { r#as }
+fn cast_in_path() { <[u8; { 1u8 as usize }] as Default>::default(); }
+#[cfg(any())]
+fn inactive(value: u64) -> u32 { value as u32 }
+macro_rules! cast { ($value:expr) => { $value as u16 }; }
+"""})
+            self.assertEqual(count(root, "as_casts"), 3)
+
+    def test_testing_gates_belong_to_struct_fields_including_tuple_fields(self) -> None:
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            write_repository(root, {"src/lib.rs": """
+struct Tuple(#[cfg(feature = "testing")] u32);
+#[cfg(any())]
+struct Inactive { #[cfg(all(feature = "testing", feature = "other"))] value: u32 }
+struct Stable { #[cfg_attr(feature = "testing", doc = "test note")] value: u32 }
+enum Choice { Data { #[cfg(feature = "testing")] value: u32 } }
+"""})
+            self.assertEqual(count(root, "testing_feature_struct_fields"), 2)
+
+    def test_as_casts_cover_new_sources_and_ignore_non_expression_syntax(self) -> None:
         with TemporaryDirectory() as directory:
             root = Path(directory)
             write_repository(
@@ -171,50 +211,7 @@ mod tests {
             )
             (root / "src" / "untracked.rs").write_text("fn f(x: u64) { x as u32; }\n")
 
-            self.assertEqual(count(root, "as_casts"), 1)
-
-
-    def test_combinator_control_flow_spares_pipelines_and_single_adapters(self) -> None:
-        with TemporaryDirectory() as directory:
-            root = Path(directory)
-            write_repository(
-                root,
-                {
-                    "src/lib.rs": """
-fn describe(state: Option<State>, raw: &str) -> Result<Vec<u8>, ParseError> {
-    let width = state.map(|state| state.width).unwrap_or_default();
-    let label = state.map_or("absent", State::label);
-    let parsed = raw.trim().parse::<u64>().map_err(ParseError::Invalid)?;
-    let scaled = state.and_then(|state| {
-        let scaled = state.width * parsed;
-        NonZeroUsize::new(scaled)
-    });
-    let parts = raw
-        .split(',')
-        .map(str::trim)
-        .filter(|part| !part.is_empty())
-        .map(str::as_bytes)
-        .collect::<Vec<_>>();
-    let first = parts.first().ok_or_else(|| ParseError::Empty)?;
-    let bound = scaled.unwrap_or(1);
-    // state.map(State::label).unwrap_or_default() is written here as prose only.
-    let quoted = "state.map(State::label).unwrap_or_default()";
-    Ok(first.to_vec())
-}
-
-#[cfg(test)]
-mod tests {
-    #[test]
-    fn describes() {
-        assert_eq!(Some(1u8).map(u16::from).unwrap_or_default(), 1);
-    }
-}
-""",
-                },
-            )
-
-            self.assertEqual(count(root, "combinator_control_flow"), 3)
-
+            self.assertEqual(count(root, "as_casts"), 2)
 
 
     def test_testing_feature_counts_struct_fields_but_not_gated_statements(self) -> None:

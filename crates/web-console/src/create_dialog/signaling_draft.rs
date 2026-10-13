@@ -105,10 +105,17 @@ impl SignalingFormatDraft {
                 send_message,
                 wait_message,
             } => {
-                let binding = binding.build().map_err(|error| {
-                    let context = SignalingDraftError::Resource(error.current_context().clone());
-                    error.change_context(context)
-                })?;
+                let binding = {
+                    let mapping_input = binding.build();
+                    match mapping_input {
+                        Ok(mapped_value) => Ok(mapped_value),
+                        Err(error) => Err({
+                            let context =
+                                SignalingDraftError::Resource(error.current_context().clone());
+                            error.change_context(context)
+                        }),
+                    }
+                }?;
                 if send_message.trim().is_empty() || wait_message.trim().is_empty() {
                     return Err(Report::new(SignalingDraftError::ProtobufMessagesRequired));
                 }

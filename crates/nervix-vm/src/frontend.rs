@@ -468,21 +468,20 @@ pub fn lower_transforming_route(
         RequiredFieldTarget::Output,
         route_span,
     )?;
-    normalized.where_clause = construction
-        .where_clause
-        .as_ref()
-        .map(|expression| {
+    normalized.where_clause = match construction.where_clause.as_ref() {
+        Some(expression) => {
             let span = operation_span(normalized.assignments.len());
-            resolve_transforming_expression(
+            Some(resolve_transforming_expression(
                 expression,
                 &initialized,
                 input_schema,
                 output_schema,
                 true,
                 span,
-            )
-        })
-        .transpose()?;
+            )?)
+        }
+        None => None,
+    };
     normalized.invocations = construction
         .invocations
         .iter()
@@ -1857,21 +1856,27 @@ impl DatetimeFunctionName {
             }
             None => None,
         };
-        DatetimeParser::new(format, local_time).map_err(|mismatch| {
-            let format = written.to_string();
-            let kind = match mismatch {
-                ParserZoneMismatch::ZoneWithOffset => {
-                    FrontendErrorKind::ParseFormatWithOffsetAndZone { format }
-                }
-                ParserZoneMismatch::ZoneWithUnixTime => {
-                    FrontendErrorKind::ParseFormatWithUnixTimeAndZone { format }
-                }
-                ParserZoneMismatch::MissingZone => {
-                    FrontendErrorKind::ParseFormatWithoutZone { format }
-                }
-            };
-            FrontendError::report(span, kind)
-        })
+        {
+            let mapping_input = DatetimeParser::new(format, local_time);
+            match mapping_input {
+                Ok(mapped_value) => Ok(mapped_value),
+                Err(mismatch) => Err({
+                    let format = written.to_string();
+                    let kind = match mismatch {
+                        ParserZoneMismatch::ZoneWithOffset => {
+                            FrontendErrorKind::ParseFormatWithOffsetAndZone { format }
+                        }
+                        ParserZoneMismatch::ZoneWithUnixTime => {
+                            FrontendErrorKind::ParseFormatWithUnixTimeAndZone { format }
+                        }
+                        ParserZoneMismatch::MissingZone => {
+                            FrontendErrorKind::ParseFormatWithoutZone { format }
+                        }
+                    };
+                    FrontendError::report(span, kind)
+                }),
+            }
+        }
     }
 
     /// How a call resolves local times its zone skips or repeats, rejecting them when it does not

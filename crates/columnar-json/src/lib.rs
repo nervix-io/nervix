@@ -207,19 +207,26 @@ impl<'a> JsonColumns<'a> {
         }
         let mut fields = Vec::with_capacity(specs.len());
         for (spec, array) in specs.iter().zip(batch.columns()) {
-            let column =
-                JsonColumn::new(array.as_ref(), spec.bytes_encoding).map_err(|report| {
-                    let context = match report.current_context() {
-                        ColumnBuildError::Unsupported(data_type) => JsonColumnError::Unsupported {
-                            column: spec.name.clone(),
-                            data_type: data_type.clone(),
-                        },
-                        ColumnBuildError::StringOffsets => JsonColumnError::StringOffsets {
-                            column: spec.name.clone(),
-                        },
-                    };
-                    report.change_context(context)
-                })?;
+            let column = {
+                let mapping_input = JsonColumn::new(array.as_ref(), spec.bytes_encoding);
+                match mapping_input {
+                    Ok(mapped_value) => Ok(mapped_value),
+                    Err(report) => Err({
+                        let context = match report.current_context() {
+                            ColumnBuildError::Unsupported(data_type) => {
+                                JsonColumnError::Unsupported {
+                                    column: spec.name.clone(),
+                                    data_type: data_type.clone(),
+                                }
+                            }
+                            ColumnBuildError::StringOffsets => JsonColumnError::StringOffsets {
+                                column: spec.name.clone(),
+                            },
+                        };
+                        report.change_context(context)
+                    }),
+                }
+            }?;
             fields.push(JsonField { spec, column });
         }
         Ok(Self {

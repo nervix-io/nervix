@@ -1743,10 +1743,13 @@ impl RuntimeStateStore {
             .latest
             .prefix(domain_prefix)
             .map(|item| {
-                let key = item
-                    .key()
-                    .map(|key| key.as_ref().to_vec())
-                    .map_err(|_| RuntimePersistenceError::ReadValue)?;
+                let key = {
+                    let mapping_input = item.key().map(|key| key.as_ref().to_vec());
+                    match mapping_input {
+                        Ok(mapped_value) => Ok(mapped_value),
+                        Err(_) => Err(RuntimePersistenceError::ReadValue),
+                    }
+                }?;
                 let (_, stored) = physical_placement(&key)?;
                 Ok((stored.kind == transition.entity.kind()
                     && stored.identifier == *transition.entity.identifier())
@@ -1893,10 +1896,13 @@ impl RuntimeStateStore {
             .latest
             .prefix(domain_prefix)
             .map(|item| {
-                let key = item
-                    .key()
-                    .map(|key| key.as_ref().to_vec())
-                    .map_err(|_| RuntimePersistenceError::ReadValue)?;
+                let key = {
+                    let mapping_input = item.key().map(|key| key.as_ref().to_vec());
+                    match mapping_input {
+                        Ok(mapped_value) => Ok(mapped_value),
+                        Err(_) => Err(RuntimePersistenceError::ReadValue),
+                    }
+                }?;
                 let (_, stored) = physical_placement(&key)?;
                 Ok((stored.kind == kind && stored.identifier == *identifier).then_some(key))
             })
@@ -2083,10 +2089,13 @@ impl RuntimeStateStore {
         let domain_prefix = namespace.prefix(domain);
         let mut stale_latest_keys = Vec::new();
         for item in self.latest.prefix(domain_prefix) {
-            let key = item
-                .key()
-                .map(|key| key.as_ref().to_vec())
-                .map_err(|_| RuntimePersistenceError::ReadValue)?;
+            let key = {
+                let mapping_input = item.key().map(|key| key.as_ref().to_vec());
+                match mapping_input {
+                    Ok(mapped_value) => Ok(mapped_value),
+                    Err(_) => Err(RuntimePersistenceError::ReadValue),
+                }
+            }?;
             let (_, stored) = physical_placement(&key)?;
             let node = NodeRef {
                 kind: stored.kind,

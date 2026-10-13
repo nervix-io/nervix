@@ -883,6 +883,21 @@ test_target = "lib"
 
 [[target]]
 case_timeout_seconds = 10
+corpus = "tools/nervix-lint/report/src/source/__fuzz__/source__tests__bolero_source_syntax_preserves_casts_and_gates/corpus"
+domain_version = 1
+features = []
+id = "typed-source-syntax"
+invariant = "Bounded current Rust syntax preserves every cast and struct gate, excludes names and retains complete source input/site representations."
+manifest = "tools/nervix-lint/Cargo.toml"
+max_input_bytes = 32
+package = "nervix-lint-report"
+random_iterations = 256
+source = "tools/nervix-lint/report/src/source/tests.rs"
+test = "source::tests::bolero_source_syntax_preserves_casts_and_gates"
+test_target = "lib"
+
+[[target]]
+case_timeout_seconds = 10
 corpus = "src/runtime/__fuzz__/runtime__task_status__tests__bolero_status_sequences_publish_complete_transitions/corpus"
 domain_version = 1
 features = []

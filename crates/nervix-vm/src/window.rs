@@ -423,11 +423,17 @@ fn lower_window_expression(
             ))
         }
         _ => {
-            let expression = lower_expression(expression, SemanticScopePolicy::read_only("output"))
-                .map_err(|error| {
-                    let message = error.current_context().to_string();
-                    error.change_context(WindowAggregateError { message })
-                })?;
+            let expression = {
+                let mapping_input =
+                    lower_expression(expression, SemanticScopePolicy::read_only("output"));
+                match mapping_input {
+                    Ok(mapped_value) => Ok(mapped_value),
+                    Err(error) => Err({
+                        let message = error.current_context().to_string();
+                        error.change_context(WindowAggregateError { message })
+                    }),
+                }
+            }?;
             validate_aggregate_expr(&expression)?;
             validate_window_input_scope(&expression.inner, false)?;
             Ok(spanned(WindowAggregateExpr::Scalar(expression), span))

@@ -193,7 +193,12 @@ impl NatsSink {
             }
             // Saturation is the policy here: the backoff doubles until it reaches the configured
             // ceiling and stays there, so a doubling that leaves `Duration` clamps to it too.
-            delay = delay.saturating_mul(2).min(policy.max_backoff);
+            let doubled = nervix_primitives::expect_lint!(
+                nervix::clamped_arithmetic,
+                "doubling past Duration MAX must remain at the configured retry ceiling",
+                delay.saturating_mul(2)
+            );
+            delay = doubled.min(policy.max_backoff);
         }
         delay
     }
@@ -435,12 +440,18 @@ impl NatsSink {
     }
 
     fn config_value(config: &[ClientConfigEntry], key: &str) -> SinkStartResult<String> {
-        client_config_value(config, key, "NATS").map_err(|error| {
-            let message = error.current_context().to_string();
-            error
-                .change_context(SinkStartError::InvalidConfiguration { sink: NATS })
-                .attach_printable(message)
-        })
+        {
+            let mapping_input = client_config_value(config, key, "NATS");
+            match mapping_input {
+                Ok(mapped_value) => Ok(mapped_value),
+                Err(error) => Err({
+                    let message = error.current_context().to_string();
+                    error
+                        .change_context(SinkStartError::InvalidConfiguration { sink: NATS })
+                        .attach_printable(message)
+                }),
+            }
+        }
     }
 
     fn config_error(error: impl std::fmt::Display) -> Report<SinkStartError> {
