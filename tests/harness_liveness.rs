@@ -4,12 +4,12 @@
 //!
 //! - **Owns.** Registration of the focused node-liveness, node-startup, phase-deadline,
 //!   status-request, port-pool, cluster-teardown, scenario-phase, suite-watchdog, Redis-client,
-//!   HTTP-receiver and gRPC-receiver regressions with Rust's test runner, and the stand-in nodes and
-//!   clients those regressions talk to.
+//!   HTTP-receiver, materialized-state diagnostic and gRPC-receiver regressions with Rust's test
+//!   runner, and the stand-in nodes and clients those regressions talk to.
 //! - **Depends on.** The node-liveness, node-startup, phase-deadline, status-request, port-pool,
-//!   cluster-teardown, scenario-phase, suite-watchdog, Redis-client, HTTP-receiver and
-//!   gRPC-receiver harness modules, and the client wire session protocol the stand-in nodes answer
-//!   status requests with.
+//!   cluster-teardown, scenario-phase, suite-watchdog, Redis-client, HTTP-receiver, gRPC-receiver
+//!   and materialized-state diagnostic harness modules, and the client wire session
+//!   protocol the stand-in nodes answer status requests with.
 //! - **Must not know.** Scenario state or production node lifecycle policy.
 
 #[path = "common/cluster_teardown.rs"]
@@ -18,6 +18,10 @@ mod cluster_teardown;
 mod grpc_receiver;
 #[path = "common/http_receiver.rs"]
 mod http_receiver;
+#[path = "common/materialized_state_diagnostics.rs"]
+mod materialized_state_diagnostics;
+#[path = "common/materialized_state_diagnostics_tests.rs"]
+mod materialized_state_diagnostics_tests;
 #[path = "common/node_liveness.rs"]
 mod node_liveness;
 #[path = "common/node_startup.rs"]
