@@ -1488,19 +1488,23 @@ signature. Its 28 stops by `the cluster is restarted` took 130.5 seconds at the 
 the slowest, 2.3 seconds inside the watchdog, where the plain diagnostic build of the same revision
 took 0.9 and 39.6. Of its 129 node stops, 69 never reported the end of terminal teardown. Three
 things made a stop that slow, and CPU contention is what turned them into a failure: the run shared
-a 40-CPU host whose one-minute load stayed between 41 and 53.
+a 40-CPU host whose one-minute load was 47 at the median and between 28 and 75.
 
-- **Every node swept its whole acknowledgement registry every second.** The remote
-  acknowledgement silence sweep took a guard for each of a node's 16,384 correlation positions
-  whether or not the node had forwarded anything, and a stress build enters Deloxide's one detector
-  twice for each of them. Runtime teardown joins the sweep task, which observes its cancellation
-  only between sweeps, so a stopping node waited for a sweep that every other node of its process
-  was slowing down. The sweep now visits only the positions a node's deliveries and admissions have
-  claimed; see [Terminal Teardown](./shutdown.md#terminal-teardown).
+- **Every node swept its whole acknowledgement registry every second, and a sweep that overran
+  the second could not be cancelled.** The remote acknowledgement silence sweep took a guard for
+  each of a node's 16,384 correlation positions whether or not the node had forwarded anything, and
+  a stress build enters Deloxide's one detector twice for each of them. On that host one sweep took
+  longer than the second between sweeps. Its task then found the next tick already due and went
+  from one sweep into the next without waiting, and the cancellation that runtime teardown joins the
+  task with is observed only when the task waits. The run's first cleanups show it: four nodes that
+  had served for under ten seconds logged nothing through 59 seconds of terminal teardown while the
+  process kept three CPUs busy. The sweep now visits only the positions a node's deliveries and
+  admissions have claimed, which keeps it far inside its second; see
+  [Terminal Teardown](./shutdown.md#terminal-teardown).
 - **Nodes the harness gave up on kept running.** A cleanup that reached its deadline aborted the
   node's root task, which ended that one future and left every task the node had spawned, its
-  sweep among them, running for the rest of the process. Those are the stops that never reported
-  the end of their teardown. The harness never aborts a node now, as
+  sweep among them, running for the rest of the process. A node aborted this way never reported
+  the end of its teardown. The harness never aborts a node now, as
   [Node Tasks And Readiness](#node-tasks-and-readiness) describes.
 - **A stopping domain waited for its generators one at a time.** When every node of a cluster stops
   at once, a generator that is reading its source relay from another node, or publishing to one,
@@ -1540,7 +1544,7 @@ stopped is waited for until its five-second dispatch deadline has passed. A repl
 that is fetching or acknowledging a checkpoint when its owner stops does not observe the stop, and
 such tasks are aborted one after another, two seconds each. The node's generators share their two
 seconds. In `Every node stopping at once ends its generators together`, the slowest node of the
-three-node cluster took between 2.0 and 12.0 seconds to stop in nine runs of the ordinary build.
+three-node cluster took between 2.0 and 12.0 seconds to stop in ten runs of the ordinary build.
 Before the generators shared their grace it took between 22.0 and 30.1 seconds in five of six runs,
 and 8.1 in the sixth, where two of the nodes had no generator waiting on a peer.
 
