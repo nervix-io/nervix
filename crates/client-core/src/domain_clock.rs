@@ -1621,6 +1621,10 @@ mod shuttle_tests {
                                 .restoration_step(&domain(), ClockRestorationScope::Interrupted);
                             match step {
                                 ClockRestorationStep::Attach(attempt) => {
+                                    // The production restoration registers the request's waiter
+                                    // and encodes its frame between deciding and sending, while
+                                    // the caller's detach goes on.
+                                    nervix_primitives::task::yield_now().await;
                                     requests
                                         .send(ClockRequest::Attach)
                                         .await
