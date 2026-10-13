@@ -16,7 +16,40 @@ import tempfile
 import unittest
 from unittest import mock
 
-from scripts import bolero, build_web_console
+from scripts import bolero, bolero_rustc, build_web_console
+
+
+class SourceLocationBuildTests(unittest.TestCase):
+    def test_location_parser_keeps_sanitizer_and_engine_instrumentation(self) -> None:
+        for gate in (["--cfg", "fuzzing"], ["--cfg=fuzzing"]):
+            arguments = ["--crate-name", "proc_macro2", "--cfg", 'feature="span-locations"',
+                         *gate, "--cfg", "fuzzing_libfuzzer", "-Zsanitizer=address",
+                         "-Cinstrument-coverage", "--cfg", 'feature="proc-macro"']
+            actual = bolero_rustc.compiler_arguments(arguments)
+            self.assertEqual(actual, ["--crate-name", "proc_macro2", "--cfg",
+                                     'feature="span-locations"', "--cfg", "fuzzing_libfuzzer",
+                                     "-Zsanitizer=address", "-Cinstrument-coverage", "--cfg",
+                                     'feature="proc-macro"'])
+
+    def test_other_dependency_and_harness_configurations_are_unchanged(self) -> None:
+        for arguments in (["--crate-name", "nervix_lint_report", "--cfg", "fuzzing"],
+                          ["--crate-name", "proc_macro2", "--cfg", "fuzzing"],
+                          ["-vV"],
+                          ["--crate-name", "proc_macro2", '--cfg=feature="span-locations"', "--cfg"]):
+            self.assertEqual(bolero_rustc.compiler_arguments(arguments), arguments)
+
+    def test_compiler_adapter_executes_the_selected_compiler(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            compiler = pathlib.Path(directory) / "selected-rustc"
+            compiler.write_text(f"#!{sys.executable}\nimport json,sys\nprint(json.dumps(sys.argv[1:]))\n")
+            compiler.chmod(0o700)
+            result = subprocess.run([sys.executable, str(bolero.ROOT / "scripts/bolero_rustc.py"),
+                "--crate-name", "proc_macro2", '--cfg=feature="span-locations"',
+                "--cfg=fuzzing", "--cfg=fuzzing_libfuzzer", "-Zsanitizer=address"],
+                env={**os.environ, "NERVIX_BOLERO_RUSTC": str(compiler)},
+                capture_output=True, text=True, check=True)
+            self.assertEqual(json.loads(result.stdout), ["--crate-name", "proc_macro2",
+                '--cfg=feature="span-locations"', "--cfg=fuzzing_libfuzzer", "-Zsanitizer=address"])
 
 
 class ConsoleAssetTests(unittest.TestCase):
@@ -134,7 +167,7 @@ class InventoryTests(unittest.TestCase):
             "restore-installation-wire",
             "stopping-node-drain-wire",
             "restore-installation-storage",
-            "typed-report", "typed-source-contract", "typed-site-union",
+            "typed-report", "typed-source-contract", "typed-site-union", "typed-source-syntax",
             "nspl-statement",
             "nspl-statement-text",
             "nspl-expression-text",

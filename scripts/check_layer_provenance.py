@@ -17,7 +17,7 @@ from pathlib import Path, PurePosixPath
 
 from scripts.check_primitive_boundary import (UseTreeError, binary_roots, load_packages,
                                               tracked_files, use_leaves)
-from scripts.ratchet import RustFile, _end_of_block, _end_of_item
+from scripts.rust_source import RustFile, _end_of_block, _end_of_item
 
 
 PERMITTED = frozenset({"language", "edge", "harness"})

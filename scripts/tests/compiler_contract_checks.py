@@ -13,6 +13,52 @@ from scripts.typed_ratchet import ROOT, TOOLCHAIN, Runner
 
 
 class CompilerContractTests(unittest.TestCase):
+    def test_resolved_arithmetic_and_combinator_contracts(self) -> None:
+        for name, diagnostic in (("api_arithmetic", "nervix::clamped_arithmetic"),
+                                 ("api_combinator", "nervix::combinator_control_flow")):
+            with self.subTest(name=name):
+                result = self.compile(name)
+                self.assertNotEqual(result.returncode, 0, result.stderr)
+                self.assertIn(diagnostic, result.stderr.replace("-", "_"))
+
+    def test_api_definitions_expectations_and_structured_diagnostics(self) -> None:
+        for name in ("api_allowed", "api_expected"):
+            with self.subTest(name=name):
+                result = self.compile(name)
+                self.assertEqual(result.returncode, 0, result.stderr)
+        for name, diagnostic in (("api_aliases", "nervix::clamped_arithmetic"),
+                                 ("api_branch_alias", "nervix::combinator_control_flow"),
+                                 ("api_invalid", "Nervix exceptions require a reason_bearing expect"),
+                                 ("api_unfulfilled", "expectation is unfulfilled"),
+                                 ("api_wide", "covers 2 distinct operations")):
+            with self.subTest(name=name):
+                result = self.compile(name)
+                self.assertNotEqual(result.returncode, 0, result.stderr)
+                self.assertIn(diagnostic, result.stderr.replace("-", "_"))
+        for name, code, expected in (("api_arithmetic", "nervix::clamped_arithmetic", 2),
+                                     ("api_combinator", "nervix::combinator_control_flow", 2),
+                                     ("api_invalid", "nervix::invalid_contract", 2)):
+            with self.subTest(name=name):
+                result = self.compile(name, "--error-format=json")
+                diagnostics = [json.loads(line) for line in result.stderr.splitlines() if line.startswith("{")]
+                findings = [item for item in diagnostics if (item.get("code") or {}).get("code") == code]
+                self.assertEqual(len(findings), expected, result.stderr)
+                source = (ROOT / "tools/nervix-lint/fixtures/tests/semantics" / (name + ".rs")).read_bytes()
+                snippets = set()
+                for finding in findings:
+                    primary = [span for span in finding["spans"] if span["is_primary"]]
+                    self.assertEqual(len(primary), 1)
+                    self.assertTrue(primary[0]["file_name"].endswith(name + ".rs"))
+                    self.assertGreater(primary[0]["byte_end"], primary[0]["byte_start"])
+                    snippets.add(source[primary[0]["byte_start"]:primary[0]["byte_end"]].decode())
+                if name == "api_arithmetic":
+                    self.assertEqual(snippets, {"wrapping_add", "saturating_mul"})
+                elif name == "api_combinator":
+                    self.assertEqual(snippets, {
+                        "Option::unwrap_or(Option::map(value, |item| item + 1), 0)",
+                        "value.map(|item| { let next = item + 1; next })",
+                    })
+
     def test_stable_accepts_gated_contracts_and_expression_expectations(self) -> None:
         source = (ROOT / "tools/nervix-lint/fixtures/tests/semantics/expected_expression.rs").read_text()
         # Stable qualification needs stable metadata, so this syntax probe supplies a plain value.

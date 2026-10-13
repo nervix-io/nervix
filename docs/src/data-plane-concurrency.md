@@ -1224,6 +1224,13 @@ packages and consumer ownership from source contracts and Cargo/module declarati
 primitive and vocabulary re-exports keep their actual semantic owner; importing from a language
 crate still requires an allowed provenance owner even if resolution reaches a plain value.
 
+The complete [architecture rule matrix](architecture-enforcement.md) separates these resolved
+contracts from compiler-independent source properties. Integer/Duration clamping and
+Option/Result control-flow diagnostics use the same source-local exception machinery and legal
+configuration coverage; they do not classify a custom method by its name. Their serial analysis
+does not supply concurrency execution evidence. Explicit Result branches preserve the same
+reports and delivery outcomes when a caller expands an adapter sequence.
+
 `nervix::cluster_await` diagnoses future-returning access on the classified cluster capability or
 trait when awaited from recurring data-plane execution. It follows the existing supported local
 helper/callback graph, selected concrete methods, UFCS, async closures, awaited expression wrappers

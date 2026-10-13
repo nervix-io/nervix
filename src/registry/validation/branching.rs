@@ -262,27 +262,32 @@ pub(in crate::registry) fn ensure_output_branch(
         "branch SET",
     )?);
     bindings.extend(lookup_hash_map_bindings(lookup_fields));
-    compile_program_with_options_for_bindings_with_sensitivity(
-        &parsed,
-        arrow_schema_for_internal_schema(branch_schema),
-        schema_sensitivity_for_internal_schema(branch_schema),
-        bindings,
-        udf_compile_options(
-            models,
-            CompileOptions {
-                output_mode: OutputMode::ExplicitOnly,
-                ..CompileOptions::default()
-            },
-        ),
-    )
-    .map_err(|error| {
-        let message = error.current_context().message.clone();
-        error.change_context(RegistryError::InvalidModel {
-            domain: domain.as_str().to_string(),
-            identifier: identifier.as_str().to_string(),
-            reason: format!("branch SET compile failed: {}", message),
-        })
-    })?;
+    {
+        let mapping_input = compile_program_with_options_for_bindings_with_sensitivity(
+            &parsed,
+            arrow_schema_for_internal_schema(branch_schema),
+            schema_sensitivity_for_internal_schema(branch_schema),
+            bindings,
+            udf_compile_options(
+                models,
+                CompileOptions {
+                    output_mode: OutputMode::ExplicitOnly,
+                    ..CompileOptions::default()
+                },
+            ),
+        );
+        match mapping_input {
+            Ok(mapped_value) => Ok(mapped_value),
+            Err(error) => Err({
+                let message = error.current_context().message.clone();
+                error.change_context(RegistryError::InvalidModel {
+                    domain: domain.as_str().to_string(),
+                    identifier: identifier.as_str().to_string(),
+                    reason: format!("branch SET compile failed: {}", message),
+                })
+            }),
+        }
+    }?;
     Ok(())
 }
 

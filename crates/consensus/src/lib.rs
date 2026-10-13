@@ -2213,11 +2213,18 @@ impl Consensus {
                         .connectivity
                         .check()
                         .map_err(wire::ConsensusRequestError::raft)?;
-                    receiver
-                        .runtime_admission_read()
-                        .await
-                        .map(|read_log_id| read_log_id.log_id().clone().into())
-                        .map_err(wire::ConsensusRequestError::raft)
+                    {
+                        let mapping_input = receiver
+                            .runtime_admission_read()
+                            .await
+                            .map(|read_log_id| read_log_id.log_id().clone().into());
+                        match mapping_input {
+                            Ok(mapped_value) => Ok(mapped_value),
+                            Err(mapping_error) => {
+                                Err((wire::ConsensusRequestError::raft)(mapping_error))
+                            }
+                        }
+                    }
                 }
             })?;
 
@@ -2244,11 +2251,18 @@ impl Consensus {
                             return Err(wire::ConsensusRequestError::invalid_request(error));
                         }
                     };
-                    receiver
-                        .append_entries(request)
-                        .await
-                        .map(wire::AppendEntriesResponseRecord::from)
-                        .map_err(wire::ConsensusRequestError::raft)
+                    {
+                        let mapping_input = receiver
+                            .append_entries(request)
+                            .await
+                            .map(wire::AppendEntriesResponseRecord::from);
+                        match mapping_input {
+                            Ok(mapped_value) => Ok(mapped_value),
+                            Err(mapping_error) => {
+                                Err((wire::ConsensusRequestError::raft)(mapping_error))
+                            }
+                        }
+                    }
                 }
             })?;
 
@@ -2292,11 +2306,18 @@ impl Consensus {
                         "a pre-vote request",
                     )
                     .map_err(wire::ConsensusRequestError::invalid_origin)?;
-                    receiver
-                        .pre_vote(request.0.into_request())
-                        .await
-                        .map(wire::VoteResponseRecord::from)
-                        .map_err(wire::ConsensusRequestError::raft)
+                    {
+                        let mapping_input = receiver
+                            .pre_vote(request.0.into_request())
+                            .await
+                            .map(wire::VoteResponseRecord::from);
+                        match mapping_input {
+                            Ok(mapped_value) => Ok(mapped_value),
+                            Err(mapping_error) => {
+                                Err((wire::ConsensusRequestError::raft)(mapping_error))
+                            }
+                        }
+                    }
                 }
             })?;
 
@@ -2317,11 +2338,18 @@ impl Consensus {
                         "a vote request",
                     )
                     .map_err(wire::ConsensusRequestError::invalid_origin)?;
-                    receiver
-                        .vote(request.0.into_request())
-                        .await
-                        .map(wire::VoteResponseRecord::from)
-                        .map_err(wire::ConsensusRequestError::raft)
+                    {
+                        let mapping_input = receiver
+                            .vote(request.0.into_request())
+                            .await
+                            .map(wire::VoteResponseRecord::from);
+                        match mapping_input {
+                            Ok(mapped_value) => Ok(mapped_value),
+                            Err(mapping_error) => {
+                                Err((wire::ConsensusRequestError::raft)(mapping_error))
+                            }
+                        }
+                    }
                 }
             })?;
 
@@ -2396,11 +2424,18 @@ impl Consensus {
                         .connectivity
                         .check()
                         .map_err(wire::ConsensusRequestError::raft)?;
-                    receiver
-                        .finish_snapshot_transfer(context.peer_node_id(), request.transfer_id)
-                        .await
-                        .map(wire::SnapshotResponseRecord::from)
-                        .map_err(wire::ConsensusRequestError::snapshot_transfer)
+                    {
+                        let mapping_input = receiver
+                            .finish_snapshot_transfer(context.peer_node_id(), request.transfer_id)
+                            .await
+                            .map(wire::SnapshotResponseRecord::from);
+                        match mapping_input {
+                            Ok(mapped_value) => Ok(mapped_value),
+                            Err(mapping_error) => Err(
+                                (wire::ConsensusRequestError::snapshot_transfer)(mapping_error),
+                            ),
+                        }
+                    }
                 }
             })?;
 
@@ -2421,11 +2456,18 @@ impl Consensus {
                         "a leadership transfer",
                     )
                     .map_err(wire::ConsensusRequestError::invalid_origin)?;
-                    receiver
-                        .transfer_leader(request.into_request())
-                        .await
-                        .map(wire::TransferLeadershipResponse::from)
-                        .map_err(wire::ConsensusRequestError::raft)
+                    {
+                        let mapping_input = receiver
+                            .transfer_leader(request.into_request())
+                            .await
+                            .map(wire::TransferLeadershipResponse::from);
+                        match mapping_input {
+                            Ok(mapped_value) => Ok(mapped_value),
+                            Err(mapping_error) => {
+                                Err((wire::ConsensusRequestError::raft)(mapping_error))
+                            }
+                        }
+                    }
                 }
             })?;
 
@@ -3768,12 +3810,13 @@ impl Administrator {
             self.inner.local_node_id.clone(),
             BasicNode::new(self.inner.interconnect_advertise_addr.to_string()),
         );
-        self.inner
-            .raft
-            .initialize(nodes)
-            .await
-            .map(|_| ())
-            .map_err(|error| Report::new(error).change_context(ConsensusError::Startup))?;
+        {
+            let mapping_input = self.inner.raft.initialize(nodes).await.map(|_| ());
+            match mapping_input {
+                Ok(mapped_value) => Ok(mapped_value),
+                Err(error) => Err(Report::new(error).change_context(ConsensusError::Startup)),
+            }
+        }?;
         self.inner.events.report(format!(
             "raft initialized with single-node membership {}",
             self.inner.local_node_id
@@ -4339,18 +4382,28 @@ where
     ) -> Result<AppendEntriesResponse<TypeConfig>, RPCError<TypeConfig>> {
         self.connectivity.check().map_err(unreachable_err)?;
         let record = wire::AppendEntriesRecord::from_request(rpc);
-        let response = self
-            .interconnect
-            .request_with_timeout(
-                &self.target,
-                wire::HeartbeatRequest(record),
-                replication::heartbeat_deadline(&option),
-            )
-            .await
-            .map_err(io_error)
-            .map_err(unreachable_err)?
-            .map_err(io_error)
-            .map_err(unreachable_err)?;
+        let response = {
+            let mapping_input = {
+                let mapping_input = self
+                    .interconnect
+                    .request_with_timeout(
+                        &self.target,
+                        wire::HeartbeatRequest(record),
+                        replication::heartbeat_deadline(&option),
+                    )
+                    .await
+                    .map_err(io_error);
+                match mapping_input {
+                    Ok(mapped_value) => Ok(mapped_value),
+                    Err(mapping_error) => Err((unreachable_err)(mapping_error)),
+                }
+            }?
+            .map_err(io_error);
+            match mapping_input {
+                Ok(mapped_value) => Ok(mapped_value),
+                Err(mapping_error) => Err((unreachable_err)(mapping_error)),
+            }
+        }?;
         Ok(response.into_response())
     }
 
@@ -4402,17 +4455,28 @@ where
     ) -> Result<VoteResponse<TypeConfig>, RPCError<TypeConfig>> {
         self.connectivity.check().map_err(unreachable_err)?;
         let rpc_timeout = option.hard_ttl();
-        let response = self
-            .interconnect
-            .request_with_timeout(
-                &self.target,
-                wire::RequestVote(wire::VoteRequestRecord::from_request(rpc)),
-                rpc_timeout,
-            )
-            .await
-            .map_err(io_error)
-            .map_err(unreachable_err)?;
-        let response = response.map_err(io_error).map_err(unreachable_err)?;
+        let response = {
+            let mapping_input = self
+                .interconnect
+                .request_with_timeout(
+                    &self.target,
+                    wire::RequestVote(wire::VoteRequestRecord::from_request(rpc)),
+                    rpc_timeout,
+                )
+                .await
+                .map_err(io_error);
+            match mapping_input {
+                Ok(mapped_value) => Ok(mapped_value),
+                Err(mapping_error) => Err((unreachable_err)(mapping_error)),
+            }
+        }?;
+        let response = {
+            let mapping_input = response.map_err(io_error);
+            match mapping_input {
+                Ok(mapped_value) => Ok(mapped_value),
+                Err(mapping_error) => Err((unreachable_err)(mapping_error)),
+            }
+        }?;
         Ok(response.into_response())
     }
 
@@ -4423,17 +4487,28 @@ where
     ) -> Result<VoteResponse<TypeConfig>, RPCError<TypeConfig>> {
         self.connectivity.check().map_err(unreachable_err)?;
         let rpc_timeout = option.hard_ttl();
-        let response = self
-            .interconnect
-            .request_with_timeout(
-                &self.target,
-                wire::RequestPreVote(wire::VoteRequestRecord::from_request(rpc)),
-                rpc_timeout,
-            )
-            .await
-            .map_err(io_error)
-            .map_err(unreachable_err)?;
-        let response = response.map_err(io_error).map_err(unreachable_err)?;
+        let response = {
+            let mapping_input = self
+                .interconnect
+                .request_with_timeout(
+                    &self.target,
+                    wire::RequestPreVote(wire::VoteRequestRecord::from_request(rpc)),
+                    rpc_timeout,
+                )
+                .await
+                .map_err(io_error);
+            match mapping_input {
+                Ok(mapped_value) => Ok(mapped_value),
+                Err(mapping_error) => Err((unreachable_err)(mapping_error)),
+            }
+        }?;
+        let response = {
+            let mapping_input = response.map_err(io_error);
+            match mapping_input {
+                Ok(mapped_value) => Ok(mapped_value),
+                Err(mapping_error) => Err((unreachable_err)(mapping_error)),
+            }
+        }?;
         Ok(response.into_response())
     }
 
@@ -4455,42 +4530,61 @@ where
         + 'static,
         option: RPCOption,
     ) -> Result<SnapshotResponse<TypeConfig>, StreamingError<TypeConfig>> {
-        self.connectivity
-            .check()
-            .map_err(unreachable_err)
-            .map_err(StreamingError::from)?;
+        {
+            let mapping_input = self.connectivity.check().map_err(unreachable_err);
+            match mapping_input {
+                Ok(mapped_value) => Ok(mapped_value),
+                Err(mapping_error) => Err((StreamingError::from)(mapping_error)),
+            }
+        }?;
         let rpc_timeout = option.hard_ttl();
         let deadline = Instant::now().checked_add(rpc_timeout).ok_or_else(|| {
             StreamingError::from(unreachable_err(io::Error::other(
                 "snapshot deadline exceeds the monotonic clock range",
             )))
         })?;
-        let transfer_id = self
-            .snapshot_transfer_ids
-            .allocate()
-            .map_err(unreachable_err)
-            .map_err(StreamingError::from)?;
+        let transfer_id = {
+            let mapping_input = self
+                .snapshot_transfer_ids
+                .allocate()
+                .map_err(unreachable_err);
+            match mapping_input {
+                Ok(mapped_value) => Ok(mapped_value),
+                Err(mapping_error) => Err((StreamingError::from)(mapping_error)),
+            }
+        }?;
         let Snapshot { meta, snapshot } = snapshot;
         let manifest = snapshot.manifest().clone();
         let chunk_bytes = snapshot_chunk_bytes(self.executor.limits());
         let transfer = async {
-            self.interconnect
-                .request_with_timeout(
-                    &self.target,
-                    wire::BeginSnapshotTransfer::from_parts(
-                        transfer_id,
-                        vote,
-                        meta,
-                        manifest.section_count,
-                        manifest.total_bytes,
-                    ),
-                    snapshot_request_timeout(deadline).map_err(unreachable_err)?,
-                )
-                .await
-                .map_err(io_error)
-                .map_err(unreachable_err)?
-                .map_err(io_error)
-                .map_err(unreachable_err)?;
+            {
+                let mapping_input = {
+                    let mapping_input = self
+                        .interconnect
+                        .request_with_timeout(
+                            &self.target,
+                            wire::BeginSnapshotTransfer::from_parts(
+                                transfer_id,
+                                vote,
+                                meta,
+                                manifest.section_count,
+                                manifest.total_bytes,
+                            ),
+                            snapshot_request_timeout(deadline).map_err(unreachable_err)?,
+                        )
+                        .await
+                        .map_err(io_error);
+                    match mapping_input {
+                        Ok(mapped_value) => Ok(mapped_value),
+                        Err(mapping_error) => Err((unreachable_err)(mapping_error)),
+                    }
+                }?
+                .map_err(io_error);
+                match mapping_input {
+                    Ok(mapped_value) => Ok(mapped_value),
+                    Err(mapping_error) => Err((unreachable_err)(mapping_error)),
+                }
+            }?;
 
             for section_index in 0..manifest.section_count {
                 nervix_primitives::task::consume_budget().await;
@@ -4503,23 +4597,34 @@ where
                 let mut offset = 0_u64;
                 for chunk in section.chunks(chunk_bytes) {
                     nervix_primitives::task::consume_budget().await;
-                    self.interconnect
-                        .request_with_timeout(
-                            &self.target,
-                            wire::SnapshotChunk {
-                                transfer_id,
-                                section_index,
-                                section_bytes,
-                                offset,
-                                bytes: chunk.to_vec(),
-                            },
-                            snapshot_request_timeout(deadline).map_err(unreachable_err)?,
-                        )
-                        .await
-                        .map_err(io_error)
-                        .map_err(unreachable_err)?
-                        .map_err(io_error)
-                        .map_err(unreachable_err)?;
+                    {
+                        let mapping_input = {
+                            let mapping_input = self
+                                .interconnect
+                                .request_with_timeout(
+                                    &self.target,
+                                    wire::SnapshotChunk {
+                                        transfer_id,
+                                        section_index,
+                                        section_bytes,
+                                        offset,
+                                        bytes: chunk.to_vec(),
+                                    },
+                                    snapshot_request_timeout(deadline).map_err(unreachable_err)?,
+                                )
+                                .await
+                                .map_err(io_error);
+                            match mapping_input {
+                                Ok(mapped_value) => Ok(mapped_value),
+                                Err(mapping_error) => Err((unreachable_err)(mapping_error)),
+                            }
+                        }?
+                        .map_err(io_error);
+                        match mapping_input {
+                            Ok(mapped_value) => Ok(mapped_value),
+                            Err(mapping_error) => Err((unreachable_err)(mapping_error)),
+                        }
+                    }?;
                     let chunk_len = u64::try_from(chunk.len())
                         .assured("supported targets have a pointer width no larger than u64");
                     offset = offset
@@ -4528,18 +4633,29 @@ where
                 }
             }
 
-            self.interconnect
-                .request_with_timeout(
-                    &self.target,
-                    wire::FinishSnapshotTransfer { transfer_id },
-                    snapshot_request_timeout(deadline).map_err(unreachable_err)?,
-                )
-                .await
-                .map_err(io_error)
-                .map_err(unreachable_err)?
-                .map(wire::SnapshotResponseRecord::into_response)
-                .map_err(io_error)
-                .map_err(unreachable_err)
+            {
+                let response = {
+                    let mapping_input = self
+                        .interconnect
+                        .request_with_timeout(
+                            &self.target,
+                            wire::FinishSnapshotTransfer { transfer_id },
+                            snapshot_request_timeout(deadline).map_err(unreachable_err)?,
+                        )
+                        .await
+                        .map_err(io_error);
+                    match mapping_input {
+                        Ok(mapped_value) => Ok(mapped_value),
+                        Err(mapping_error) => Err((unreachable_err)(mapping_error)),
+                    }
+                }?;
+                let response = response.map(wire::SnapshotResponseRecord::into_response);
+                let mapping_input = response.map_err(io_error);
+                match mapping_input {
+                    Ok(mapped_value) => Ok(mapped_value),
+                    Err(mapping_error) => Err((unreachable_err)(mapping_error)),
+                }
+            }
         };
         tokio::pin!(transfer);
         tokio::pin!(cancel);
@@ -4556,20 +4672,29 @@ where
     ) -> Result<TransferLeaderResponse<TypeConfig>, RPCError<TypeConfig>> {
         self.connectivity.check().map_err(unreachable_err)?;
         let rpc_timeout = option.hard_ttl();
-        let response = self
-            .interconnect
-            .request_with_timeout(
-                &self.target,
-                wire::TransferLeadership::from_request(req),
-                rpc_timeout,
-            )
-            .await
-            .map_err(io_error)
-            .map_err(unreachable_err)?;
-        Ok(response
-            .map(wire::TransferLeadershipResponse::into_response)
-            .map_err(io_error)
-            .map_err(unreachable_err)?)
+        let response = {
+            let mapping_input = self
+                .interconnect
+                .request_with_timeout(
+                    &self.target,
+                    wire::TransferLeadership::from_request(req),
+                    rpc_timeout,
+                )
+                .await
+                .map_err(io_error);
+            match mapping_input {
+                Ok(mapped_value) => Ok(mapped_value),
+                Err(mapping_error) => Err((unreachable_err)(mapping_error)),
+            }
+        }?;
+        Ok({
+            let response = response.map(wire::TransferLeadershipResponse::into_response);
+            let mapping_input = response.map_err(io_error);
+            match mapping_input {
+                Ok(mapped_value) => Ok(mapped_value),
+                Err(mapping_error) => Err((unreachable_err)(mapping_error)),
+            }
+        }?)
     }
 }
 

@@ -392,28 +392,33 @@ fn validate_message_error_policy(
         &local_namespaces,
         "message-error SET",
     )?);
-    compile_program_with_options_for_bindings_with_sensitivity(
-        &parsed,
-        arrow_schema_for_internal_schema(error_output),
-        schema_sensitivity_for_internal_schema(error_output),
-        bindings,
-        udf_compile_options(
-            models,
-            CompileOptions {
-                output_mode: OutputMode::ExplicitOnly,
-                allow_header_reads: schemas.allow_header_reads,
-                ..CompileOptions::default()
-            },
-        ),
-    )
-    .map_err(|error| {
-        let message = error.current_context().message.clone();
-        error.change_context(RegistryError::InvalidModel {
-            domain: domain.as_str().to_string(),
-            identifier: identifier.as_str().to_string(),
-            reason: format!("message-error SET compile failed: {}", message),
-        })
-    })?;
+    {
+        let mapping_input = compile_program_with_options_for_bindings_with_sensitivity(
+            &parsed,
+            arrow_schema_for_internal_schema(error_output),
+            schema_sensitivity_for_internal_schema(error_output),
+            bindings,
+            udf_compile_options(
+                models,
+                CompileOptions {
+                    output_mode: OutputMode::ExplicitOnly,
+                    allow_header_reads: schemas.allow_header_reads,
+                    ..CompileOptions::default()
+                },
+            ),
+        );
+        match mapping_input {
+            Ok(mapped_value) => Ok(mapped_value),
+            Err(error) => Err({
+                let message = error.current_context().message.clone();
+                error.change_context(RegistryError::InvalidModel {
+                    domain: domain.as_str().to_string(),
+                    identifier: identifier.as_str().to_string(),
+                    reason: format!("message-error SET compile failed: {}", message),
+                })
+            }),
+        }
+    }?;
     Ok(())
 }
 

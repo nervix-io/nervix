@@ -4,7 +4,7 @@
 import re
 from pathlib import Path
 
-from scripts.ratchet import RustFile, _end_of_block, blank
+from scripts.rust_source import RustFile, _end_of_block, blank
 
 
 ROOT = Path(__file__).resolve().parents[1]

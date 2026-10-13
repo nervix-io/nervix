@@ -68,10 +68,16 @@ impl VhostDraft {
             return Err(Report::new(VhostDraftError::Hostname { entry: 1 }));
         }
         let tls = if self.tls_enabled {
-            let pin = self.tls.build().map_err(|error| {
-                let context = VhostDraftError::Tls(error.current_context().clone());
-                error.change_context(context)
-            })?;
+            let pin = {
+                let mapping_input = self.tls.build();
+                match mapping_input {
+                    Ok(mapped_value) => Ok(mapped_value),
+                    Err(error) => Err({
+                        let context = VhostDraftError::Tls(error.current_context().clone());
+                        error.change_context(context)
+                    }),
+                }
+            }?;
             Some(VhostTlsResource {
                 resource: pin.resource,
                 version: pin.version,

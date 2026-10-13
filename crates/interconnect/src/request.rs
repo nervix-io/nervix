@@ -1590,36 +1590,43 @@ impl Transport {
                 request: M::NAME.to_string(),
                 payload,
             });
-            let response = self
-                .inner
-                .round_trip_control(node, request, M::SUBQUOTA, timeout_duration)
-                .await
-                .map_err(|error| {
-                    let request_error = match error.current_context() {
-                        super::TransportError::ShuttingDown => RequestError::ShuttingDown {
-                            node: node.clone(),
-                            request: M::NAME,
-                        },
-                        super::TransportError::RequestTimeout { .. }
-                        | super::TransportError::ProgressTimeout { .. } => RequestError::Timeout {
-                            node: node.clone(),
-                            request: M::NAME,
-                            timeout: timeout_duration,
-                        },
-                        super::TransportError::PoolExhausted => {
-                            RequestError::ConnectionCapacityExhausted {
+            let response = {
+                let mapping_input = self
+                    .inner
+                    .round_trip_control(node, request, M::SUBQUOTA, timeout_duration)
+                    .await;
+                match mapping_input {
+                    Ok(mapped_value) => Ok(mapped_value),
+                    Err(error) => Err({
+                        let request_error = match error.current_context() {
+                            super::TransportError::ShuttingDown => RequestError::ShuttingDown {
                                 node: node.clone(),
                                 request: M::NAME,
+                            },
+                            super::TransportError::RequestTimeout { .. }
+                            | super::TransportError::ProgressTimeout { .. } => {
+                                RequestError::Timeout {
+                                    node: node.clone(),
+                                    request: M::NAME,
+                                    timeout: timeout_duration,
+                                }
                             }
-                        }
-                        cause => RequestError::Transport {
-                            node: node.clone(),
-                            request: M::NAME,
-                            reason: cause.to_string(),
-                        },
-                    };
-                    error.change_context(request_error)
-                })?;
+                            super::TransportError::PoolExhausted => {
+                                RequestError::ConnectionCapacityExhausted {
+                                    node: node.clone(),
+                                    request: M::NAME,
+                                }
+                            }
+                            cause => RequestError::Transport {
+                                node: node.clone(),
+                                request: M::NAME,
+                                reason: cause.to_string(),
+                            },
+                        };
+                        error.change_context(request_error)
+                    }),
+                }
+            }?;
             let (response, _response_reservation) = response.into_parts();
             let ControlEnvelope::Response(response) = response else {
                 return Err(Report::new(RequestError::ResponseMismatch {
@@ -1635,12 +1642,16 @@ impl Transport {
             }
             match response.result {
                 Ok(payload) => {
-                    M::Response::decode_rkyv(self.inner.executor().clone(), M::CLASS, payload)
-                        .await
-                        .map(|(response, _response_payload_reservation)| response)
-                        .map_err(|error| {
-                            error.change_context(RequestError::Decode { request: M::NAME })
-                        })
+                    let mapping_input =
+                        M::Response::decode_rkyv(self.inner.executor().clone(), M::CLASS, payload)
+                            .await
+                            .map(|(response, _response_payload_reservation)| response);
+                    match mapping_input {
+                        Ok(mapped_value) => Ok(mapped_value),
+                        Err(error) => {
+                            Err(error.change_context(RequestError::Decode { request: M::NAME }))
+                        }
+                    }
                 }
                 Err(failure) => Err(Report::new(RequestError::RemoteRejected {
                     node: node.clone(),

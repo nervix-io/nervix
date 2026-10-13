@@ -57,7 +57,12 @@ impl RuntimeReconnectBackoff {
         let delay = self.next;
         // Saturation is the policy here: the backoff doubles until it reaches the configured
         // ceiling and stays there, so a doubling that leaves `Duration` clamps to that ceiling.
-        self.next = self.next.saturating_mul(2).min(self.max);
+        let doubled = nervix_primitives::expect_lint!(
+            nervix::clamped_arithmetic,
+            "retry doubling clamps to the configured ceiling even beyond Duration MAX",
+            self.next.saturating_mul(2)
+        );
+        self.next = doubled.min(self.max);
         delay
     }
 

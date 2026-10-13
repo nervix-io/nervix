@@ -575,9 +575,13 @@ impl IcebergSink {
                         .write(&batch)
                         .map_err(|error| staged(&error, &path))?;
                     writer.finish().map_err(|error| staged(&error, &path))?;
-                    std::fs::metadata(&path)
-                        .map(|metadata| metadata.len())
-                        .map_err(|error| staged(&error, &path))
+                    {
+                        let mapping_input = std::fs::metadata(&path).map(|metadata| metadata.len());
+                        match mapping_input {
+                            Ok(mapped_value) => Ok(mapped_value),
+                            Err(error) => Err(staged(&error, &path)),
+                        }
+                    }
                 },
             )
             .await

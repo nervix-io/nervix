@@ -82,9 +82,12 @@ pub fn create_placement_parser<'src>()
         .then_ignore(tok(Token::Semicolon).or_not())
         .try_map(
             |(((((if_not_exists, name), from), to), policy), rank), span| {
-                CreatePlacement::new(name, from, to, policy, rank)
-                    .map(|placement| CreateStatement::new(placement, if_not_exists))
-                    .map_err(|error| Rich::custom(span, error.to_string()))
+                let mapping_input = CreatePlacement::new(name, from, to, policy, rank)
+                    .map(|placement| CreateStatement::new(placement, if_not_exists));
+                match mapping_input {
+                    Ok(mapped_value) => Ok(mapped_value),
+                    Err(error) => Err(Rich::custom(span, error.to_string())),
+                }
             },
         )
         .boxed()
