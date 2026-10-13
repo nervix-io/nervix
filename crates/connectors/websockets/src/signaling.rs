@@ -758,6 +758,17 @@ fn truncate_on_char_boundary(mut value: String, max_bytes: usize) -> String {
 }
 
 #[cfg(test)]
+#[path = "signaling/representation_tests.rs"]
+#[cfg_attr(
+    nervix_lint,
+    nervix::layer(
+        harness,
+        reason = "conversion properties stay outside product execution"
+    )
+)]
+mod representation_tests;
+
+#[cfg(test)]
 #[cfg_attr(
     nervix_lint,
     nervix::layer(harness, reason = "test module remains outside product execution")
