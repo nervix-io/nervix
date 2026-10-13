@@ -410,18 +410,22 @@ pub(super) fn referenced_materialized_stream_bindings(
         let field_interests = ordered_fields
             .iter()
             .map(|name| {
-                spec.schema
-                    .index_of(name)
-                    .map(|column_index| MaterializedFieldInterest {
-                        name: name.clone(),
-                        column_index,
-                    })
-                    .map_err(|_| {
-                        Report::new(RuntimeVmCompileError::MissingMaterializedField {
+                let mapping_input =
+                    spec.schema
+                        .index_of(name)
+                        .map(|column_index| MaterializedFieldInterest {
+                            name: name.clone(),
+                            column_index,
+                        });
+                match mapping_input {
+                    Ok(mapped_value) => Ok(mapped_value),
+                    Err(_) => Err(Report::new(
+                        RuntimeVmCompileError::MissingMaterializedField {
                             relay: relay.clone(),
                             field: name.clone(),
-                        })
-                    })
+                        },
+                    )),
+                }
             })
             .collect::<RuntimeVmCompileResult<Vec<_>>>()?;
         bindings.push(

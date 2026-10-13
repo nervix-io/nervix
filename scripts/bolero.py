@@ -804,13 +804,25 @@ def scoped_build_env(target: Target, path: pathlib.Path) -> dict[str, str]:
         raise BoleroError("rustup is required for the pinned sanitizer toolchain")
     directory = path / "scope-bin"
     directory.mkdir()
+    # Kache identifies compiler mode by the rustc executable name. Retain that name for the
+    # run-local adapter, and retain its exact source in the campaign evidence.
+    compiler_adapter = directory / "rustc"
+    compiler_adapter.write_bytes(pathlib.Path(__file__).with_name("bolero_rustc.py").read_bytes())
+    compiler_adapter.chmod(0o700)
     adapter = directory / "rustup"
     adapter.write_text(
         f"#!{sys.executable}\n"
-        "import os,sys\n"
+        "import hashlib,os,pathlib,subprocess,sys\n"
         "args=sys.argv[1:]\n"
         "if len(args)>=4 and args[0]=='run' and args[2:4]==['cargo','test']:\n"
         f"    args[4:4]={cargo_target_args(target.test_target)!r}\n"
+        f"    compiler_adapter={str(compiler_adapter)!r}\n"
+        f"    os.environ['NERVIX_BOLERO_RUSTC']=subprocess.check_output([{rustup!r},'which','--toolchain',args[1],'rustc'],text=True).strip()\n"
+        "    os.environ['RUSTC']=compiler_adapter\n"
+        "    identity=hashlib.sha256(pathlib.Path(compiler_adapter).read_bytes()).hexdigest()[:16]\n"
+        "    if '--target-dir' in args:\n"
+        "        index=args.index('--target-dir')+1\n"
+        "        args[index]+='-locations-'+identity\n"
         f"os.execv({rustup!r},[{rustup!r},*args])\n"
     )
     adapter.chmod(0o700)

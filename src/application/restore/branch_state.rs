@@ -193,13 +193,18 @@ async fn decode_group(
     schema: &StdArc<arrow_schema::Schema>,
     mismatch: BranchStateRestoreError,
 ) -> Result<RuntimeRecordBatch, Report<BranchStateRestoreError>> {
-    let bytes = archive
-        .read_bounded_section(runtime, section, BRANCH_STATE_GROUP_BYTES)
-        .await
-        .map_err(|error| {
-            let context = BranchStateRestoreError::from(error.current_context());
-            error.change_context(context)
-        })?;
+    let bytes = {
+        let mapping_input = archive
+            .read_bounded_section(runtime, section, BRANCH_STATE_GROUP_BYTES)
+            .await;
+        match mapping_input {
+            Ok(mapped_value) => Ok(mapped_value),
+            Err(error) => Err({
+                let context = BranchStateRestoreError::from(error.current_context());
+                error.change_context(context)
+            }),
+        }
+    }?;
     decode_bytes(runtime, bytes, schema, mismatch).await
 }
 
@@ -210,22 +215,27 @@ async fn decode_bytes(
     schema: &StdArc<arrow_schema::Schema>,
     mismatch: BranchStateRestoreError,
 ) -> Result<RuntimeRecordBatch, Report<BranchStateRestoreError>> {
-    RuntimeRecordBatch::decode_arrow_snapshot_section(
-        runtime.executor(),
-        StdArc::clone(schema),
-        bytes,
-    )
-    .await
-    .map_err(|error| {
-        let context = match error.current_context() {
-            ArrowBodyError::Admission | ArrowBodyError::Execution => {
-                BranchStateRestoreError::Admission
-            }
-            ArrowBodyError::Cancelled => BranchStateRestoreError::Cancelled,
-            _ => mismatch,
-        };
-        error.change_context(context)
-    })
+    {
+        let mapping_input = RuntimeRecordBatch::decode_arrow_snapshot_section(
+            runtime.executor(),
+            StdArc::clone(schema),
+            bytes,
+        )
+        .await;
+        match mapping_input {
+            Ok(mapped_value) => Ok(mapped_value),
+            Err(error) => Err({
+                let context = match error.current_context() {
+                    ArrowBodyError::Admission | ArrowBodyError::Execution => {
+                        BranchStateRestoreError::Admission
+                    }
+                    ArrowBodyError::Cancelled => BranchStateRestoreError::Cancelled,
+                    _ => mismatch,
+                };
+                error.change_context(context)
+            }),
+        }
+    }
 }
 
 /// Charges what a decoded group keeps alive while it converts. The charge is refused rather than
@@ -305,11 +315,17 @@ async fn convert_keyspace(
                 QueueAdmission::WaitForPlace,
                 charge,
                 move |_charge, cancellation| {
-                    keys.admit_group(batch.batch(), cancellation)
-                        .map_err(|error| {
-                            let context = BranchStateRestoreError::from(error.current_context());
-                            error.change_context(context)
-                        })?;
+                    {
+                        let mapping_input = keys.admit_group(batch.batch(), cancellation);
+                        match mapping_input {
+                            Ok(mapped_value) => Ok(mapped_value),
+                            Err(error) => Err({
+                                let context =
+                                    BranchStateRestoreError::from(error.current_context());
+                                error.change_context(context)
+                            }),
+                        }
+                    }?;
                     Ok::<_, Report<BranchStateRestoreError>>(keys)
                 },
             )
@@ -350,13 +366,18 @@ async fn read_rows(
     section: &DescribedSection,
     schema: &StdArc<arrow_schema::Schema>,
 ) -> Result<ArchivedRows, Report<BranchStateRestoreError>> {
-    let bytes = archive
-        .read_bounded_section(runtime, section, BRANCH_STATE_GROUP_BYTES)
-        .await
-        .map_err(|error| {
-            let context = BranchStateRestoreError::from(error.current_context());
-            error.change_context(context)
-        })?;
+    let bytes = {
+        let mapping_input = archive
+            .read_bounded_section(runtime, section, BRANCH_STATE_GROUP_BYTES)
+            .await;
+        match mapping_input {
+            Ok(mapped_value) => Ok(mapped_value),
+            Err(error) => Err({
+                let context = BranchStateRestoreError::from(error.current_context());
+                error.change_context(context)
+            }),
+        }
+    }?;
     let batch = decode_bytes(
         runtime,
         bytes.clone(),
@@ -436,10 +457,16 @@ async fn convert_window(
         )
         .await?;
     }
-    checkpoint.finish().await.map_err(|error| {
-        let context = BranchStateRestoreError::from(error.current_context());
-        error.change_context(context)
-    })
+    {
+        let mapping_input = checkpoint.finish().await;
+        match mapping_input {
+            Ok(mapped_value) => Ok(mapped_value),
+            Err(error) => Err({
+                let context = BranchStateRestoreError::from(error.current_context());
+                error.change_context(context)
+            }),
+        }
+    }
 }
 
 /// Seals one group's input rows into `checkpoint`, reading and decoding them again whenever the
@@ -475,10 +502,16 @@ async fn try_seal_input_rows(
     let retained = retain_group(runtime, &input.batch)?;
     let admitted = checkpoint.admit_input(input).await;
     drop(retained);
-    admitted.map_err(|error| {
-        let context = BranchStateRestoreError::from(error.current_context());
-        error.change_context(context)
-    })
+    {
+        let mapping_input = admitted;
+        match mapping_input {
+            Ok(mapped_value) => Ok(mapped_value),
+            Err(error) => Err({
+                let context = BranchStateRestoreError::from(error.current_context());
+                error.change_context(context)
+            }),
+        }
+    }
 }
 
 /// Seals the argument columns of the group `pending` names into `checkpoint`, reading and decoding
@@ -517,10 +550,16 @@ async fn try_seal_argument_columns(
     let retained = retain_group(runtime, &arguments.batch)?;
     let admitted = checkpoint.admit_arguments(pending, arguments).await;
     drop(retained);
-    admitted.map_err(|error| {
-        let context = BranchStateRestoreError::from(error.current_context());
-        error.change_context(context)
-    })
+    {
+        let mapping_input = admitted;
+        match mapping_input {
+            Ok(mapped_value) => Ok(mapped_value),
+            Err(error) => Err({
+                let context = BranchStateRestoreError::from(error.current_context());
+                error.change_context(context)
+            }),
+        }
+    }
 }
 
 /// The archived aggregate state of each demand, checked against the restored window's demands:

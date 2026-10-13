@@ -1,5 +1,11 @@
 # Errors And Diagnostics
 
+The [architecture rule matrix](architecture-enforcement.md) records the compiler contracts for
+failure signatures, discarded outcomes, canonical panic operations and Option/Result control
+flow. Expanding an error projection into an explicit Result branch preserves its complete report,
+context and recovery disposition. The source parser reports malformed authored Rust through a
+typed path/location context over the original parse cause; rendering includes that cause once.
+
 Nervix gives a failure its meaning at the boundary that can decide what went wrong. That meaning
 travels through the graph as a semantic error and an `error-stack` report. A public edge renders a
 diagnostic only after it has made the decision the error permits. Ordinary control outcomes, such
@@ -220,9 +226,9 @@ subsections after the boundary table follow this order.
 | Language | `ParseFromSourceError` for the lexer and parser, `FormatError` for the formatter | A report whose context holds the stage, the rejected text and every diagnostic's byte span |
 | Engines and infrastructure | The VM's `CompileError`, `RuntimeError` and row errors; `UdfError`; `JaqProgramError` and `JaqFormatError`; `CodecError`; the WASM `ProtocolError`, `GuestError` and `WasmGuestError`; the connector contract's `SourceError`, `SinkStartError` and `SinkPublishError` above each connector's own errors; `ConsensusError` and `StorageFailure`; the interconnect's `TransportError`, `RequestError` and `RemoteOperationFailure`; `DnsConfigurationError` and `DnsLookupError`; `AdmissionError` and `ExecutionError`; `ArchiveWriteError` and `ArchiveReadError` | A report, a typed per-row or per-record outcome, or a typed class of a remote result. An engine decides nothing about the graph, so its errors name no node policy |
 | Decisions | `RegistryError`, `RelocationPlanError`, `RestorePlanError` and `TransactionPlanningError` | A report that names the node, route, operation and fields of the refused model or plan |
-| Data plane | `RuntimeError` above `ExecutionBuildError`; `IngestorStartError`, `EmitterStartError` and `GeneratorError`; `PlannedGeneralError`, `RouteOutputError`, `RelayProcessorError` and the other node contexts; `RuntimePersistenceError` | A report for the node's policy, with the acknowledgements of the work that failed, or a structured message error for a route |
+| Data plane | `RuntimeError` above `ExecutionBuildError`; `IngestorStartError`, `EmitterStartError` and `GeneratorError`; `PlannedGeneralError`, `RouteOutputError`, `RelayProcessorError` and the other node contexts; `RuntimePersistenceError`; the domain clock's `DomainClockAccessError` and `DomainClockWaitError` | A report for the node's policy, with the acknowledgements of the work that failed, or a structured message error for a route |
 | Control plane | `AppError`, `DomainAlterError`, `BackupError`, `RestoreRefusal` and the transaction and lifecycle errors | A report the session edge turns into a command result |
-| Edges | The session service's `GrpcAuthenticationError`, `SessionTransactionBindingError` and `SnapshotEncodingError`; `ClientError`; the CLI's and the benchmark command's own contexts | A command disposition, a status, an `NX_ERROR_*` kind, or the rendered chain |
+| Edges | The session service's `GrpcAuthenticationError`, `SessionTransactionBindingError` and `SnapshotEncodingError`; `ClientError` and the Rust client's `DomainClockReadError`; the CLI's and the benchmark command's own contexts | A command disposition, a status, an `NX_ERROR_*` kind, or the rendered chain |
 
 ### Boundaries
 
@@ -1295,28 +1301,46 @@ failure and the step's impact diagnostic render the whole chain.
 
 ### Domain Clock Attachment
 
-A domain clock attachment answers with its own typed disposition rather than a command disposition,
-and every refusal names the domain it concerns. An attach is `Attached` with the observed clock,
-`AlreadyAttached` when the session already follows that domain's clock, `DomainNotFound` when the
-committed domains the serving node installed hold no such domain, or `Failed` when the request could
-not run; a detach is `Detached`, `NotAttached` when the session does not follow that clock, or
-`Failed`. A node that is still starting answers an attach only once it has installed the committed
-domains, so `DomainNotFound` never reflects a restart. While the session holds a transaction, both
-fail with the session-local refusal that other session-scoped statements receive. The server ends
-an attachment with a frame whose typed reason is
-`DomainRemoved`, and the Rust client reports a lost session as an interruption of each clock it
-follows before it attaches again. An attach the new session refuses or leaves unanswered is not an
-error of any call: the Rust client reports it as a typed restoration failure carrying the refusal's
+A domain clock attachment answers with its own typed disposition rather than a command disposition.
+An attach is `Attached` with the observed clock, `AlreadyAttached` when the session already follows
+that domain's clock, `DomainNotFound` when the committed domains the serving node installed hold no
+such domain, or `Failed`; a detach is `Detached`, `NotAttached` when the session does not follow
+that clock, or `Failed`. Every disposition but `Failed` names its domain. `Failed` carries only its
+message, and the server answers it only while the session holds a transaction. A node that is still
+starting answers an attach only once it has installed the committed domains, so `DomainNotFound`
+never reflects a restart. While the session holds a transaction, both fail with the session-local
+refusal that other session-scoped statements receive. The server ends an attachment with a frame
+whose typed reason is `DomainRemoved`, and the Rust client reports a lost session as an interruption
+of each clock it follows before it attaches again. An attach the new session refuses is not an error
+of any call: the Rust client reports it as a typed restoration failure carrying the refusal's
 message and the wait before it tries again, and reports a refused subscription reopening the same
-way. Each disposition's message is display text for a client that prints it; a client decides from
-the variant. The Rust client's `execute` turns any disposition but `Attached` or `Detached` into a
-`Failed` command outcome carrying that message, and its clock helper reports a stopped or
-uninstalled clock, or a projection outside the timestamp range, as a typed `DomainClockReadError`.
-See [Domain Clock Attachment](./sessions.md#domain-clock-attachment).
+way. An attach the new session leaves unanswered past the request timeout ends that session instead,
+and the next session attaches the clock again; one it answers `DomainNotFound` ends the attachment
+as the server would. In the shared C binding a restoration failure carries only its domain, without
+the message or the wait. Each disposition's message is display text for a client that prints it; a
+client decides from the variant. The Rust client's `execute` turns any disposition but `Attached` or
+`Detached` into a `Failed` command outcome carrying that message, and its clock helper reports a
+stopped or uninstalled clock, or a projection outside the timestamp range, as a typed
+`DomainClockReadError`. When `execute` runs either statement, it fails with `NoActiveDomain` while
+no domain is selected and refuses the statement as client-local while a transaction is active,
+before it sends a request. Waiting for the next clock event returns a failure to reopen a session
+while the followed clocks keep waiting to be restored. The same statements sent as command text are
+refused as session-local commands that need their own request. See [Domain Clock
+Attachment](./sessions.md#domain-clock-attachment).
+
+On the serving node, a state, tick or end frame that does not fit the session's frame limit is not
+sent and is logged as a warning: delivery waits for the next state or tick, and an end it could not
+send still ends the attachment. Accepting clock progress fails only for a domain the node does not
+hold, and a report that does not match the committed fence, or is not newer than the accepted tick,
+is ignored without an error. That failure reaches the node's sessions as the error notice
+`failed to apply domain clock progress for '<domain>'` with its whole chain, and its log as a
+warning.
 
 The CLI's `domain-clock` subcommand classifies attach refusals from those variants. A missing
-domain and an already attached clock have distinct typed CLI errors; other attach and detach
-refusals retain the server's message. It exits nonzero for a refusal. Transport or session failures
+domain and an already attached clock have distinct typed CLI errors. An attach or detach answered
+`Failed` is `ClockAttachRefused` or `ClockDetachRefused` with the server's message attached to the
+report, and exits nonzero; a detach answered `NotAttached` succeeds, because the clock is not
+followed either way. Transport or session failures
 while attaching, reading events, or detaching retain their underlying report beneath the CLI
 operation that failed.
 

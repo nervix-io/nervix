@@ -579,21 +579,33 @@ impl MqttSink {
     }
 
     fn config_value(config: &[ClientConfigEntry], key: &str) -> SinkStartResult<String> {
-        client_config_value(config, key, "MQTT").map_err(|error| {
-            let message = error.current_context().to_string();
-            error
-                .change_context(SinkStartError::InvalidConfiguration { sink: MQTT })
-                .attach_printable(message)
-        })
+        {
+            let mapping_input = client_config_value(config, key, "MQTT");
+            match mapping_input {
+                Ok(mapped_value) => Ok(mapped_value),
+                Err(error) => Err({
+                    let message = error.current_context().to_string();
+                    error
+                        .change_context(SinkStartError::InvalidConfiguration { sink: MQTT })
+                        .attach_printable(message)
+                }),
+            }
+        }
     }
 
     fn read_tls_file(path: &std::path::PathBuf, label: &str) -> SinkStartResult<Vec<u8>> {
-        read_tls_file(path, label).map_err(|error| {
-            let message = error.current_context().to_string();
-            error
-                .change_context(SinkStartError::InvalidConfiguration { sink: MQTT })
-                .attach_printable(message)
-        })
+        {
+            let mapping_input = read_tls_file(path, label);
+            match mapping_input {
+                Ok(mapped_value) => Ok(mapped_value),
+                Err(error) => Err({
+                    let message = error.current_context().to_string();
+                    error
+                        .change_context(SinkStartError::InvalidConfiguration { sink: MQTT })
+                        .attach_printable(message)
+                }),
+            }
+        }
     }
 
     fn config_error(error: impl std::fmt::Display) -> Report<SinkStartError> {

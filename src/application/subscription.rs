@@ -896,51 +896,83 @@ pub(in crate::application) fn parse_subscription_literal(
             Ok(RuntimeValue::String(v.clone()))
         }
         (ParseAsType::Datetime, SubscriptionLiteral::String(v)) => {
-            chrono::DateTime::parse_from_rfc3339(v)
-                .map(RuntimeValue::Datetime)
-                .map_err(|_| bad(ExpectedSubscriptionLiteral::Datetime))
+            let mapping_input = chrono::DateTime::parse_from_rfc3339(v).map(RuntimeValue::Datetime);
+            match mapping_input {
+                Ok(mapped_value) => Ok(mapped_value),
+                Err(_) => Err(bad(ExpectedSubscriptionLiteral::Datetime)),
+            }
         }
         (ParseAsType::Bool, SubscriptionLiteral::Bool(v)) => Ok(RuntimeValue::Bool(*v)),
-        (ParseAsType::U8, SubscriptionLiteral::Number(v)) => v
-            .parse()
-            .map(RuntimeValue::U8)
-            .map_err(|_| bad(ExpectedSubscriptionLiteral::Numeric)),
-        (ParseAsType::I8, SubscriptionLiteral::Number(v)) => v
-            .parse()
-            .map(RuntimeValue::I8)
-            .map_err(|_| bad(ExpectedSubscriptionLiteral::Numeric)),
-        (ParseAsType::U16, SubscriptionLiteral::Number(v)) => v
-            .parse()
-            .map(RuntimeValue::U16)
-            .map_err(|_| bad(ExpectedSubscriptionLiteral::Numeric)),
-        (ParseAsType::I16, SubscriptionLiteral::Number(v)) => v
-            .parse()
-            .map(RuntimeValue::I16)
-            .map_err(|_| bad(ExpectedSubscriptionLiteral::Numeric)),
-        (ParseAsType::U32, SubscriptionLiteral::Number(v)) => v
-            .parse()
-            .map(RuntimeValue::U32)
-            .map_err(|_| bad(ExpectedSubscriptionLiteral::Numeric)),
-        (ParseAsType::I32, SubscriptionLiteral::Number(v)) => v
-            .parse()
-            .map(RuntimeValue::I32)
-            .map_err(|_| bad(ExpectedSubscriptionLiteral::Numeric)),
-        (ParseAsType::U64, SubscriptionLiteral::Number(v)) => v
-            .parse()
-            .map(RuntimeValue::U64)
-            .map_err(|_| bad(ExpectedSubscriptionLiteral::Numeric)),
-        (ParseAsType::I64, SubscriptionLiteral::Number(v)) => v
-            .parse()
-            .map(RuntimeValue::I64)
-            .map_err(|_| bad(ExpectedSubscriptionLiteral::Numeric)),
-        (ParseAsType::F32, SubscriptionLiteral::Number(v)) => v
-            .parse()
-            .map(RuntimeValue::F32)
-            .map_err(|_| bad(ExpectedSubscriptionLiteral::Numeric)),
-        (ParseAsType::F64, SubscriptionLiteral::Number(v)) => v
-            .parse()
-            .map(RuntimeValue::F64)
-            .map_err(|_| bad(ExpectedSubscriptionLiteral::Numeric)),
+        (ParseAsType::U8, SubscriptionLiteral::Number(v)) => {
+            let mapping_input = v.parse().map(RuntimeValue::U8);
+            match mapping_input {
+                Ok(mapped_value) => Ok(mapped_value),
+                Err(_) => Err(bad(ExpectedSubscriptionLiteral::Numeric)),
+            }
+        }
+        (ParseAsType::I8, SubscriptionLiteral::Number(v)) => {
+            let mapping_input = v.parse().map(RuntimeValue::I8);
+            match mapping_input {
+                Ok(mapped_value) => Ok(mapped_value),
+                Err(_) => Err(bad(ExpectedSubscriptionLiteral::Numeric)),
+            }
+        }
+        (ParseAsType::U16, SubscriptionLiteral::Number(v)) => {
+            let mapping_input = v.parse().map(RuntimeValue::U16);
+            match mapping_input {
+                Ok(mapped_value) => Ok(mapped_value),
+                Err(_) => Err(bad(ExpectedSubscriptionLiteral::Numeric)),
+            }
+        }
+        (ParseAsType::I16, SubscriptionLiteral::Number(v)) => {
+            let mapping_input = v.parse().map(RuntimeValue::I16);
+            match mapping_input {
+                Ok(mapped_value) => Ok(mapped_value),
+                Err(_) => Err(bad(ExpectedSubscriptionLiteral::Numeric)),
+            }
+        }
+        (ParseAsType::U32, SubscriptionLiteral::Number(v)) => {
+            let mapping_input = v.parse().map(RuntimeValue::U32);
+            match mapping_input {
+                Ok(mapped_value) => Ok(mapped_value),
+                Err(_) => Err(bad(ExpectedSubscriptionLiteral::Numeric)),
+            }
+        }
+        (ParseAsType::I32, SubscriptionLiteral::Number(v)) => {
+            let mapping_input = v.parse().map(RuntimeValue::I32);
+            match mapping_input {
+                Ok(mapped_value) => Ok(mapped_value),
+                Err(_) => Err(bad(ExpectedSubscriptionLiteral::Numeric)),
+            }
+        }
+        (ParseAsType::U64, SubscriptionLiteral::Number(v)) => {
+            let mapping_input = v.parse().map(RuntimeValue::U64);
+            match mapping_input {
+                Ok(mapped_value) => Ok(mapped_value),
+                Err(_) => Err(bad(ExpectedSubscriptionLiteral::Numeric)),
+            }
+        }
+        (ParseAsType::I64, SubscriptionLiteral::Number(v)) => {
+            let mapping_input = v.parse().map(RuntimeValue::I64);
+            match mapping_input {
+                Ok(mapped_value) => Ok(mapped_value),
+                Err(_) => Err(bad(ExpectedSubscriptionLiteral::Numeric)),
+            }
+        }
+        (ParseAsType::F32, SubscriptionLiteral::Number(v)) => {
+            let mapping_input = v.parse().map(RuntimeValue::F32);
+            match mapping_input {
+                Ok(mapped_value) => Ok(mapped_value),
+                Err(_) => Err(bad(ExpectedSubscriptionLiteral::Numeric)),
+            }
+        }
+        (ParseAsType::F64, SubscriptionLiteral::Number(v)) => {
+            let mapping_input = v.parse().map(RuntimeValue::F64);
+            match mapping_input {
+                Ok(mapped_value) => Ok(mapped_value),
+                Err(_) => Err(bad(ExpectedSubscriptionLiteral::Numeric)),
+            }
+        }
         _ => Err(bad(match ty {
             ParseAsType::String | ParseAsType::Datetime => ExpectedSubscriptionLiteral::String,
             ParseAsType::Bool => ExpectedSubscriptionLiteral::Boolean,

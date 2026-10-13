@@ -139,10 +139,14 @@ independently of the prompt and are printed above it:
 [events] domain clock [simulation] tick: generation 3, id 12, boundary 2030-01-01T00:00:01.100Z, authority UTC 2026-09-27T00:00:00Z, node logical 2030-01-01T00:00:01.120Z
 ```
 
-A domain clock line follows every state change or accepted tick after the attach reply. A slow
-client may skip tick ids because its pending tick is replaced by the newest one. When the server ends an
-attachment, or the session holding it is interrupted and the clock is attached again on the next
-session, the line reads `[events] domain clock [<domain>] notice: ...` with the reason.
+A domain clock line follows each newer state or accepted tick after the attach reply. A state or
+tick that changes again before it is delivered or read is replaced by the newest one, so a slow
+client can skip states and tick ids. Between prompts the REPL holds at most 128 event lines, each
+cut at 8 KiB with `… [line truncated]`; lines that arrive while it is full are dropped, and
+`[events] notice: <n> event lines were omitted because terminal output could not keep up` reports
+how many. When the server ends an attachment, or the session holding it is interrupted and the clock
+is attached again on the next session, the line reads `[events] domain clock [<domain>] notice: ...`
+with the reason.
 
 The REPL prints these lines when it draws its next prompt: after the statement that is running
 finishes, or when you press Enter on an empty line.
@@ -163,7 +167,7 @@ session refuses one, a notice line reports the server's message and when the nex
 
 ```text
 [events] subscription [watch] notice: opening the subscription again failed: stream 'orders' does not exist in domain 'quickstart'; the next attempt follows in 2s
-[events] domain clock [simulation] notice: attaching the clock again failed: session-scoped and client-local statements cannot be queued in a transaction; the next attempt follows in 1s
+[events] domain clock [simulation] notice: attaching the clock again failed: session-scoped and client-local statements cannot be queued in a transaction; the next attempt follows in 2s
 ```
 
 `DELETE SUBSCRIPTION` of a subscription no open session holds, because its session ended or the new
@@ -217,13 +221,15 @@ attached to the clock of domain 'simulation': generation 1, paced: period 1s, sk
 ```
 
 A second attach is refused because the session already follows that clock, and a detach without an
-attachment is refused because it does not. The CLI attaches the clocks it follows again after a
-reconnect. See [Domain Clock Attachment](sessions.md#domain-clock-attachment). Read-only statements, subscriptions, `CREATE DOMAIN`, `CREATE USER`, and node
-administration are also rejected while queueing transaction content. `DESCRIBE TRANSACTION` is the
-exception: while a transaction is open it reads that transaction's impact report without queueing
-anything or consuming an operation number, so the next queued statement keeps the number it would
-have had. It must be submitted on its own. With an id it reads another transaction of the same user
-and leaves the prompt, the active domain, and the attached transaction as they were:
+attachment is refused because it does not. `USE` does not detach a clock, so the REPL can follow the
+clocks of several domains at once, and the CLI attaches the clocks it follows again after a
+reconnect. See [Domain Clock Attachment](sessions.md#domain-clock-attachment). Read-only statements,
+subscriptions, `CREATE DOMAIN`, `CREATE USER`, and node administration are also rejected while
+queueing transaction content. `DESCRIBE TRANSACTION` is the exception: while a transaction is open
+it reads that transaction's impact report without queueing anything or consuming an operation
+number, so the next queued statement keeps the number it would have had. It must be submitted on its
+own. With an id it reads another transaction of the same user and leaves the prompt, the active
+domain, and the attached transaction as they were:
 
 ```bash
 nervix-cli --domain production --command \
@@ -405,7 +411,10 @@ observers can parse them. Every line has one of these forms:
 Within a line:
 
 - In the attach reply, state, and tick lines, fields are separated by `, ` and appear in the order
-  shown. Each field is its name, one space, and its value.
+  shown. Each field but the state is its name, one space, and its value, and a name can contain
+  spaces, as `logical origin`, `UTC anchor`, `time rate`, `authority UTC` and `node logical` do.
+  The state is `stopped`, `uninstalled`, `unpaced`, or `paced:` followed by one space and the
+  period field.
 - `<n>` is an unsigned decimal integer. The generation counts the domain's `START`s, and tick ids
   number the ticks of a generation from one: a tick's boundary is the logical origin plus the id
   minus one periods.
@@ -428,10 +437,13 @@ new session. A node that is still starting answers the attach once it has instal
 committed domains, so a restart never ends the attachment. When the new session refuses the attach
 for another reason, a notice line reports it and when the client tries again on that session.
 
-The server ends an attachment when the domain no longer exists on the serving node; the end line is
-the last clock line and the command exits with status `0`, as it does after Ctrl-C detaches the
-clock. A refused attach, including a missing domain, prints the typed reason on stderr and exits
-nonzero, as does a lost session the client cannot replace within its retry deadline.
+The server ends an attachment when the domain no longer exists on the serving node, and a new
+session that no longer has the domain ends it the same way. `<reason>` then reads
+`the domain no longer exists on the serving node`. The end line is the last clock line and the
+command exits with status `0`, as it does after Ctrl-C detaches the clock or finds it already
+detached. A failed connection, a refused attach, including a missing domain, and a refused detach
+print the typed reason on stderr and exit nonzero, as does a lost session the client cannot replace
+within its retry deadline.
 
 ## Cluster Node Administration
 

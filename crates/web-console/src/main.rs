@@ -6859,10 +6859,10 @@ impl GraphViewNode {
     /// stands on the group's border rather than within it, which is the same rule the layout
     /// applies when it decides which items a group's bands contain.
     fn group_branch(&self) -> Option<&str> {
-        self.branch
-            .as_ref()
-            .filter(|_| !self.role.constructs_branches() && !self.role.collapses_branches())
-            .map(|branch| branch.name.as_str())
+        if self.role.constructs_branches() || self.role.collapses_branches() {
+            return None;
+        }
+        self.branch.as_ref().map(|branch| branch.name.as_str())
     }
 
     fn command_kind(&self) -> &'static str {

@@ -363,15 +363,21 @@ pub(in crate::registry) fn validate_direct_values_sensitivity(
         readonly_binding_for_internal_schema("message", input_schema),
     ];
     let udf_signatures = udf_compile_options(models, CompileOptions::default()).udf_signatures;
-    let inferred = infer_set_expr_types_for_bindings_with_udfs(&program, bindings, udf_signatures)
-        .map_err(|error| {
-            let message = error.current_context().message.clone();
-            error.change_context(RegistryError::InvalidModel {
-                domain: domain.as_str().to_string(),
-                identifier: identifier.as_str().to_string(),
-                reason: format!("emitter VALUES type inference failed: {}", message),
-            })
-        })?;
+    let inferred = {
+        let mapping_input =
+            infer_set_expr_types_for_bindings_with_udfs(&program, bindings, udf_signatures);
+        match mapping_input {
+            Ok(mapped_value) => Ok(mapped_value),
+            Err(error) => Err({
+                let message = error.current_context().message.clone();
+                error.change_context(RegistryError::InvalidModel {
+                    domain: domain.as_str().to_string(),
+                    identifier: identifier.as_str().to_string(),
+                    reason: format!("emitter VALUES type inference failed: {}", message),
+                })
+            }),
+        }
+    }?;
     for (index, field) in inferred.iter().enumerate() {
         if !field.sensitive {
             continue;
@@ -639,31 +645,37 @@ pub(in crate::registry) fn validate_sqs_fifo_group_expression(
         "SQS FIFO GROUP expression",
     )?);
     bindings.extend(lookup_hash_map_bindings(lookup_fields));
-    compile_program_with_options_for_bindings_with_sensitivity(
-        &parsed,
-        output_arrow_schema,
-        schema_sensitivity_for_internal_schema(&output_schema),
-        bindings,
-        udf_compile_options(
-            models,
-            CompileOptions {
-                output_mode: OutputMode::ExplicitOnly,
-                allow_sensitive_output: false,
-                ..CompileOptions::default()
-            },
-        ),
-    )
-    .map_err(|error| {
-        let message = error.current_context().message.clone();
-        error.change_context(RegistryError::InvalidModel {
-            domain: domain.as_str().to_string(),
-            identifier: identifier.as_str().to_string(),
-            reason: format!(
-                "SQS FIFO GROUP expression requires an exact non-sensitive STRING value: {}",
-                message
+    {
+        let mapping_input = compile_program_with_options_for_bindings_with_sensitivity(
+            &parsed,
+            output_arrow_schema,
+            schema_sensitivity_for_internal_schema(&output_schema),
+            bindings,
+            udf_compile_options(
+                models,
+                CompileOptions {
+                    output_mode: OutputMode::ExplicitOnly,
+                    allow_sensitive_output: false,
+                    ..CompileOptions::default()
+                },
             ),
-        })
-    })?;
+        );
+        match mapping_input {
+            Ok(mapped_value) => Ok(mapped_value),
+            Err(error) => Err({
+                let message = error.current_context().message.clone();
+                error.change_context(RegistryError::InvalidModel {
+                    domain: domain.as_str().to_string(),
+                    identifier: identifier.as_str().to_string(),
+                    reason: format!(
+                        "SQS FIFO GROUP expression requires an exact non-sensitive STRING value: \
+                         {}",
+                        message
+                    ),
+                })
+            }),
+        }
+    }?;
 
     Ok(())
 }
@@ -754,31 +766,36 @@ pub(in crate::registry) fn validate_http_request_expressions(
         "HTTP request expression",
     )?);
     bindings.extend(lookup_hash_map_bindings(lookup_fields));
-    compile_program_with_options_for_bindings_with_sensitivity(
-        &parsed,
-        output_arrow_schema,
-        schema_sensitivity_for_internal_schema(&output_schema),
-        bindings,
-        udf_compile_options(
-            models,
-            CompileOptions {
-                output_mode: OutputMode::ExplicitOnly,
-                allow_sensitive_output: false,
-                ..CompileOptions::default()
-            },
-        ),
-    )
-    .map_err(|error| {
-        let message = error.current_context().message.clone();
-        error.change_context(RegistryError::InvalidModel {
-            domain: domain.as_str().to_string(),
-            identifier: identifier.as_str().to_string(),
-            reason: format!(
-                "HTTP METHOD and PATH require exact non-sensitive STRING values: {}",
-                message
+    {
+        let mapping_input = compile_program_with_options_for_bindings_with_sensitivity(
+            &parsed,
+            output_arrow_schema,
+            schema_sensitivity_for_internal_schema(&output_schema),
+            bindings,
+            udf_compile_options(
+                models,
+                CompileOptions {
+                    output_mode: OutputMode::ExplicitOnly,
+                    allow_sensitive_output: false,
+                    ..CompileOptions::default()
+                },
             ),
-        })
-    })?;
+        );
+        match mapping_input {
+            Ok(mapped_value) => Ok(mapped_value),
+            Err(error) => Err({
+                let message = error.current_context().message.clone();
+                error.change_context(RegistryError::InvalidModel {
+                    domain: domain.as_str().to_string(),
+                    identifier: identifier.as_str().to_string(),
+                    reason: format!(
+                        "HTTP METHOD and PATH require exact non-sensitive STRING values: {}",
+                        message
+                    ),
+                })
+            }),
+        }
+    }?;
 
     Ok(())
 }
@@ -994,14 +1011,14 @@ pub(in crate::registry) fn ensure_signaling_protocol_is_valid(
     }
 
     let compile = |clause: &str, index: usize, program: &str| {
-        StatefulJaqProgram::compile(program)
-            .map(|_| ())
-            .map_err(|error| {
-                invalid(format!(
-                    "signaling protocol {clause} program #{} is invalid: {error}",
-                    index + 1
-                ))
-            })
+        let mapping_input = StatefulJaqProgram::compile(program).map(|_| ());
+        match mapping_input {
+            Ok(mapped_value) => Ok(mapped_value),
+            Err(error) => Err(invalid(format!(
+                "signaling protocol {clause} program #{} is invalid: {error}",
+                index + 1
+            ))),
+        }
     };
     for (index, program) in protocol.on_connect.sends().enumerate() {
         compile("SEND JAQ", index, program)?;
@@ -1208,28 +1225,33 @@ pub(in crate::registry) fn effective_ingestor_output_filter_map_schema(
     )?);
     bindings.extend(lookup_hash_map_bindings(lookup_fields));
 
-    compile_program_with_options_for_bindings_with_sensitivity(
-        &parsed,
-        arrow_schema_for_internal_schema(output_schema),
-        schema_sensitivity_for_internal_schema(output_schema),
-        bindings,
-        udf_compile_options(
-            models,
-            CompileOptions {
-                output_mode: OutputMode::ExplicitOnly,
-                allow_header_reads: true,
-                ..CompileOptions::default()
-            },
-        ),
-    )
-    .map_err(|error| {
-        let message = error.current_context().message.clone();
-        error.change_context(RegistryError::InvalidModel {
-            domain: domain.as_str().to_string(),
-            identifier: identifier.as_str().to_string(),
-            reason: format!("FILTER-MAP compile failed: {}", message),
-        })
-    })?;
+    {
+        let mapping_input = compile_program_with_options_for_bindings_with_sensitivity(
+            &parsed,
+            arrow_schema_for_internal_schema(output_schema),
+            schema_sensitivity_for_internal_schema(output_schema),
+            bindings,
+            udf_compile_options(
+                models,
+                CompileOptions {
+                    output_mode: OutputMode::ExplicitOnly,
+                    allow_header_reads: true,
+                    ..CompileOptions::default()
+                },
+            ),
+        );
+        match mapping_input {
+            Ok(mapped_value) => Ok(mapped_value),
+            Err(error) => Err({
+                let message = error.current_context().message.clone();
+                error.change_context(RegistryError::InvalidModel {
+                    domain: domain.as_str().to_string(),
+                    identifier: identifier.as_str().to_string(),
+                    reason: format!("FILTER-MAP compile failed: {}", message),
+                })
+            }),
+        }
+    }?;
 
     Ok(output_schema.clone())
 }
@@ -1391,33 +1413,38 @@ pub(in crate::registry) fn effective_emitter_filter_map_schema(
         (EmitSink::Http { .. } | EmitSink::Client { .. }, true) => SchemaSensitivity::default(),
         _ => schema_sensitivity_for_internal_schema(output_schema),
     };
-    compile_program_with_options_for_bindings_with_sensitivity(
-        &parsed,
-        output_arrow_schema,
-        output_sensitivity,
-        body_bindings,
-        udf_compile_options(
-            models,
-            CompileOptions {
-                output_mode: if codec_route {
-                    OutputMode::ExplicitOnly
-                } else {
-                    OutputMode::PassthroughByName
+    {
+        let mapping_input = compile_program_with_options_for_bindings_with_sensitivity(
+            &parsed,
+            output_arrow_schema,
+            output_sensitivity,
+            body_bindings,
+            udf_compile_options(
+                models,
+                CompileOptions {
+                    output_mode: if codec_route {
+                        OutputMode::ExplicitOnly
+                    } else {
+                        OutputMode::PassthroughByName
+                    },
+                    allow_sensitive_output: false,
+                    allow_header_writes: true,
+                    ..CompileOptions::default()
                 },
-                allow_sensitive_output: false,
-                allow_header_writes: true,
-                ..CompileOptions::default()
-            },
-        ),
-    )
-    .map_err(|error| {
-        let message = error.current_context().message.clone();
-        error.change_context(RegistryError::InvalidModel {
-            domain: domain.as_str().to_string(),
-            identifier: identifier.as_str().to_string(),
-            reason: format!("FILTER-MAP compile failed: {}", message),
-        })
-    })?;
+            ),
+        );
+        match mapping_input {
+            Ok(mapped_value) => Ok(mapped_value),
+            Err(error) => Err({
+                let message = error.current_context().message.clone();
+                error.change_context(RegistryError::InvalidModel {
+                    domain: domain.as_str().to_string(),
+                    identifier: identifier.as_str().to_string(),
+                    reason: format!("FILTER-MAP compile failed: {}", message),
+                })
+            }),
+        }
+    }?;
 
     Ok(output_schema.clone())
 }

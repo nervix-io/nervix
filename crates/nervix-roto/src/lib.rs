@@ -1066,14 +1066,21 @@ impl CompiledUdf {
             argument_arrays = argument_arrays
                 .into_iter()
                 .map(|argument| {
-                    nullif(argument.as_ref(), &mask).map_err(|error| {
-                        let message =
-                            format!("failed to hide strict-propagation rows from the UDF: {error}");
-                        Report::new(error).change_context(RuntimeError::InjectedFunctionFailed {
-                            function: self.program.name.to_string(),
-                            message,
-                        })
-                    })
+                    let mapping_input = nullif(argument.as_ref(), &mask);
+                    match mapping_input {
+                        Ok(mapped_value) => Ok(mapped_value),
+                        Err(error) => Err({
+                            let message = format!(
+                                "failed to hide strict-propagation rows from the UDF: {error}"
+                            );
+                            Report::new(error).change_context(
+                                RuntimeError::InjectedFunctionFailed {
+                                    function: self.program.name.to_string(),
+                                    message,
+                                },
+                            )
+                        }),
+                    }
                 })
                 .collect::<Result<Vec<_>, _>>()?;
         }
@@ -1105,19 +1112,25 @@ impl CompiledUdf {
                 "the caller installs the call state before entering the guest and takes it here",
             )
         });
-        let output = call.map_err(|panic| {
-            let message = if let Some(message) = panic.downcast_ref::<&str>() {
-                format!("Roto execution trapped: {message}")
-            } else if let Some(message) = panic.downcast_ref::<String>() {
-                format!("Roto execution trapped: {message}")
-            } else {
-                "Roto execution trapped".to_string()
-            };
-            Report::new(RuntimeError::InjectedFunctionFailed {
-                function: self.program.name.to_string(),
-                message,
-            })
-        })?;
+        let output = {
+            let mapping_input = call;
+            match mapping_input {
+                Ok(mapped_value) => Ok(mapped_value),
+                Err(panic) => Err({
+                    let message = if let Some(message) = panic.downcast_ref::<&str>() {
+                        format!("Roto execution trapped: {message}")
+                    } else if let Some(message) = panic.downcast_ref::<String>() {
+                        format!("Roto execution trapped: {message}")
+                    } else {
+                        "Roto execution trapped".to_string()
+                    };
+                    Report::new(RuntimeError::InjectedFunctionFailed {
+                        function: self.program.name.to_string(),
+                        message,
+                    })
+                }),
+            }
+        }?;
         if started.elapsed() > self.watchdog {
             return Err(Report::new(RuntimeError::InjectedFunctionFailed {
                 function: self.program.name.to_string(),
@@ -1142,13 +1155,20 @@ impl CompiledUdf {
         }
         let output = if propagation.iter().any(|masked| *masked) {
             let mask = BooleanArray::from(propagation.clone());
-            nullif(output.as_ref(), &mask).map_err(|error| {
-                let message = format!("failed to apply required-argument null mask: {error}");
-                Report::new(error).change_context(RuntimeError::InjectedFunctionFailed {
-                    function: self.program.name.to_string(),
-                    message,
-                })
-            })?
+            {
+                let mapping_input = nullif(output.as_ref(), &mask);
+                match mapping_input {
+                    Ok(mapped_value) => Ok(mapped_value),
+                    Err(error) => Err({
+                        let message =
+                            format!("failed to apply required-argument null mask: {error}");
+                        Report::new(error).change_context(RuntimeError::InjectedFunctionFailed {
+                            function: self.program.name.to_string(),
+                            message,
+                        })
+                    }),
+                }
+            }?
         } else {
             output
         };
@@ -1389,12 +1409,17 @@ fn compile_udf(
     if package.run_tests().is_err() {
         return Err(Report::new(UdfError::TestsFailed));
     }
-    let entry = package
-        .get_function::<fn(Val<UdfArgs>) -> Val<AnyColumn>>("__nervix_entry")
-        .map_err(|error| {
-            let reason = error.to_string();
-            Report::new(error).change_context(UdfError::Signature(reason))
-        })?;
+    let entry = {
+        let mapping_input =
+            package.get_function::<fn(Val<UdfArgs>) -> Val<AnyColumn>>("__nervix_entry");
+        match mapping_input {
+            Ok(mapped_value) => Ok(mapped_value),
+            Err(error) => Err({
+                let reason = error.to_string();
+                Report::new(error).change_context(UdfError::Signature(reason))
+            }),
+        }
+    }?;
     Ok(CompiledUdf {
         program: model,
         entry,

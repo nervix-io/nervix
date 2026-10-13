@@ -9,6 +9,7 @@ use indexmap::{IndexMap, map::Entry};
 use serde::{Deserialize, Serialize};
 
 pub mod rules;
+pub mod source;
 
 #[derive(Debug, thiserror::Error)]
 pub enum ReportError {

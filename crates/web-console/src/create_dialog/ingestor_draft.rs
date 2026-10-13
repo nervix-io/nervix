@@ -203,10 +203,16 @@ impl IngestorDraft {
     pub(super) fn build(&self) -> error_stack::Result<CreateIngestor, IngestorDraftError> {
         let name = IngestorName::parse(self.name.trim())
             .map_err(|_| Report::new(IngestorDraftError::Name))?;
-        let source = self.source.build().map_err(|error| {
-            let context = error.current_context().clone();
-            error.change_context(IngestorDraftError::Source(context))
-        })?;
+        let source = {
+            let mapping_input = self.source.build();
+            match mapping_input {
+                Ok(mapped_value) => Ok(mapped_value),
+                Err(error) => Err({
+                    let context = error.current_context().clone();
+                    error.change_context(IngestorDraftError::Source(context))
+                }),
+            }
+        }?;
         let decode_using_codec = match &self.codec {
             Some(codec) => codec
                 .current_name()
@@ -225,13 +231,19 @@ impl IngestorDraft {
         }
         let mut routes = Vec::new();
         for (index, route) in self.routes.iter().enumerate() {
-            routes.push(route.build().map_err(|error| {
-                let context = error.current_context().clone();
-                error.change_context(IngestorDraftError::Route {
-                    index: index + 1,
-                    cause: context,
-                })
-            })?);
+            routes.push({
+                let mapping_input = route.build();
+                match mapping_input {
+                    Ok(mapped_value) => Ok(mapped_value),
+                    Err(error) => Err({
+                        let context = error.current_context().clone();
+                        error.change_context(IngestorDraftError::Route {
+                            index: index + 1,
+                            cause: context,
+                        })
+                    }),
+                }
+            }?);
         }
         let general_error_policy = self
             .general_error

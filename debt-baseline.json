@@ -1,7 +1,5 @@
 {
   "as_casts": 3,
-  "clamped_arithmetic": 8,
-  "combinator_control_flow": 0,
   "files_over_3000_lines": 10,
   "testing_feature_struct_fields": 0
 }

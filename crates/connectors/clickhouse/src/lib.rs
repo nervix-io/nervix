@@ -293,18 +293,18 @@ impl ClickHouseSink {
         let invalid = || Report::new(SinkStartError::InvalidConfiguration { sink: CLICKHOUSE });
         let addr = client_config_value(config, "addr", "ClickHouse")
             .map_err(|error| invalid().attach_printable(error.to_string()))?;
-        let request_timeout = optional_client_config_value(config, "timeout_ms")
-            .map(|timeout_ms| {
-                timeout_ms
-                    .parse::<u64>()
-                    .map(Duration::from_millis)
-                    .map_err(|_| {
-                        invalid().attach_printable(format!(
-                            "invalid ClickHouse timeout_ms '{timeout_ms}'"
-                        ))
-                    })
-            })
-            .transpose()?;
+        let request_timeout = match optional_client_config_value(config, "timeout_ms") {
+            Some(timeout_ms) => {
+                let mapping_input = timeout_ms.parse::<u64>().map(Duration::from_millis);
+                let timeout = match mapping_input {
+                    Ok(mapped_value) => Ok(mapped_value),
+                    Err(_) => Err(invalid()
+                        .attach_printable(format!("invalid ClickHouse timeout_ms '{timeout_ms}'"))),
+                }?;
+                Some(timeout)
+            }
+            None => None,
+        };
         let tls_config = RustlsClientConfigSource::new(config)
             .build()
             .map_err(|error| invalid().attach_printable(error.to_string()))?;

@@ -68,17 +68,22 @@ async fn read_section(
     section: &DescribedSection,
     limit: u64,
 ) -> Result<ChargedBytes, Report<MaterializedRestoreError>> {
-    archive
-        .read_bounded_section(runtime, section, limit)
-        .await
-        .map_err(|error| {
-            let context = match error.current_context() {
-                ArchiveSectionReadError::TooLong { .. } => MaterializedRestoreError::SectionLength,
-                ArchiveSectionReadError::Admission => MaterializedRestoreError::Admission,
-                ArchiveSectionReadError::Read => MaterializedRestoreError::Storage,
-            };
-            error.change_context(context)
-        })
+    {
+        let mapping_input = archive.read_bounded_section(runtime, section, limit).await;
+        match mapping_input {
+            Ok(mapped_value) => Ok(mapped_value),
+            Err(error) => Err({
+                let context = match error.current_context() {
+                    ArchiveSectionReadError::TooLong { .. } => {
+                        MaterializedRestoreError::SectionLength
+                    }
+                    ArchiveSectionReadError::Admission => MaterializedRestoreError::Admission,
+                    ArchiveSectionReadError::Read => MaterializedRestoreError::Storage,
+                };
+                error.change_context(context)
+            }),
+        }
+    }
 }
 
 async fn stage_piece(
@@ -214,22 +219,27 @@ pub(super) async fn prepare_materialized_checkpoint(
         pieces.push(stage_piece(runtime, decoded.0).await?);
         let columns =
             read_section(runtime, archive, &group.columns, MATERIALIZED_COLUMNS_BYTES).await?;
-        let batch = RuntimeRecordBatch::decode_arrow_snapshot_section(
-            executor,
-            schema.clone(),
-            columns.clone(),
-        )
-        .await
-        .map_err(|error| {
-            let context = match error.current_context() {
-                ArrowBodyError::Admission | ArrowBodyError::Execution => {
-                    MaterializedRestoreError::Admission
-                }
-                ArrowBodyError::Cancelled => MaterializedRestoreError::Cancelled,
-                _ => MaterializedRestoreError::Columns,
-            };
-            error.change_context(context)
-        })?;
+        let batch = {
+            let mapping_input = RuntimeRecordBatch::decode_arrow_snapshot_section(
+                executor,
+                schema.clone(),
+                columns.clone(),
+            )
+            .await;
+            match mapping_input {
+                Ok(mapped_value) => Ok(mapped_value),
+                Err(error) => Err({
+                    let context = match error.current_context() {
+                        ArrowBodyError::Admission | ArrowBodyError::Execution => {
+                            MaterializedRestoreError::Admission
+                        }
+                        ArrowBodyError::Cancelled => MaterializedRestoreError::Cancelled,
+                        _ => MaterializedRestoreError::Columns,
+                    };
+                    error.change_context(context)
+                }),
+            }
+        }?;
         if u64::try_from(batch.batch().num_rows()).ok() != Some(group.record_count) {
             return Err(Report::new(MaterializedRestoreError::RecordCount));
         }

@@ -314,12 +314,17 @@ impl SyslogClientConfig {
     pub fn tls_client_config(
         &self,
     ) -> error_stack::Result<StdArc<rustls::ClientConfig>, SyslogConfigError> {
-        RustlsClientConfigSource::new(&self.entries)
-            .build_with_default_roots()
-            .map_err(|error| {
-                let reason = error.to_string();
-                error.change_context(SyslogConfigError::TlsMaterial { reason })
-            })
+        {
+            let mapping_input =
+                RustlsClientConfigSource::new(&self.entries).build_with_default_roots();
+            match mapping_input {
+                Ok(mapped_value) => Ok(mapped_value),
+                Err(error) => Err({
+                    let reason = error.to_string();
+                    error.change_context(SyslogConfigError::TlsMaterial { reason })
+                }),
+            }
+        }
     }
 
     pub fn tls_server_config(
@@ -339,25 +344,40 @@ impl SyslogClientConfig {
                 key: "tls_key_file",
             })
         })?;
-        let cert_pem =
-            read_tls_file(cert_file, "Syslog TLS server certificate").map_err(|error| {
-                let reason = error.to_string();
-                error.change_context(SyslogConfigError::TlsMaterial { reason })
-            })?;
-        let key_pem =
-            read_tls_file(key_file, "Syslog TLS server private key").map_err(|error| {
-                let reason = error.to_string();
-                error.change_context(SyslogConfigError::TlsMaterial { reason })
-            })?;
-        let certs = CertificateDer::pem_slice_iter(&cert_pem)
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(|error| {
-                let reason = format!(
-                    "invalid Syslog client config key 'tls_cert_file' '{}': {error}",
-                    cert_file.display()
-                );
-                Report::new(error).change_context(SyslogConfigError::TlsMaterial { reason })
-            })?;
+        let cert_pem = {
+            let mapping_input = read_tls_file(cert_file, "Syslog TLS server certificate");
+            match mapping_input {
+                Ok(mapped_value) => Ok(mapped_value),
+                Err(error) => Err({
+                    let reason = error.to_string();
+                    error.change_context(SyslogConfigError::TlsMaterial { reason })
+                }),
+            }
+        }?;
+        let key_pem = {
+            let mapping_input = read_tls_file(key_file, "Syslog TLS server private key");
+            match mapping_input {
+                Ok(mapped_value) => Ok(mapped_value),
+                Err(error) => Err({
+                    let reason = error.to_string();
+                    error.change_context(SyslogConfigError::TlsMaterial { reason })
+                }),
+            }
+        }?;
+        let certs = {
+            let mapping_input =
+                CertificateDer::pem_slice_iter(&cert_pem).collect::<Result<Vec<_>, _>>();
+            match mapping_input {
+                Ok(mapped_value) => Ok(mapped_value),
+                Err(error) => Err({
+                    let reason = format!(
+                        "invalid Syslog client config key 'tls_cert_file' '{}': {error}",
+                        cert_file.display()
+                    );
+                    Report::new(error).change_context(SyslogConfigError::TlsMaterial { reason })
+                }),
+            }
+        }?;
         if certs.is_empty() {
             return Err(Report::new(SyslogConfigError::TlsMaterial {
                 reason: format!(
@@ -366,56 +386,91 @@ impl SyslogClientConfig {
                 ),
             }));
         }
-        let key = PrivateKeyDer::from_pem_slice(&key_pem).map_err(|error| {
-            let reason = format!(
-                "invalid Syslog client config key 'tls_key_file' '{}': {error}",
-                key_file.display()
-            );
-            Report::new(error).change_context(SyslogConfigError::TlsMaterial { reason })
-        })?;
-        let builder = ServerConfig::builder();
-        let config = if let Some(ca_file) = tls.ca_file.as_ref() {
-            let ca_pem =
-                read_tls_file(ca_file, "Syslog TLS client CA certificate").map_err(|error| {
-                    let reason = error.to_string();
-                    error.change_context(SyslogConfigError::TlsMaterial { reason })
-                })?;
-            let mut roots = RootCertStore::empty();
-            for cert in CertificateDer::pem_slice_iter(&ca_pem) {
-                let cert = cert.map_err(|error| {
+        let key = {
+            let mapping_input = PrivateKeyDer::from_pem_slice(&key_pem);
+            match mapping_input {
+                Ok(mapped_value) => Ok(mapped_value),
+                Err(error) => Err({
                     let reason = format!(
-                        "invalid Syslog client config key 'tls_ca_file' '{}': {error}",
-                        ca_file.display()
+                        "invalid Syslog client config key 'tls_key_file' '{}': {error}",
+                        key_file.display()
                     );
                     Report::new(error).change_context(SyslogConfigError::TlsMaterial { reason })
-                })?;
-                roots.add(cert).map_err(|error| {
-                    let reason = format!(
-                        "invalid Syslog client config key 'tls_ca_file' '{}': {error}",
-                        ca_file.display()
-                    );
-                    Report::new(error).change_context(SyslogConfigError::TlsMaterial { reason })
-                })?;
+                }),
             }
-            let verifier = WebPkiClientVerifier::builder(StdArc::new(roots))
-                .build()
-                .map_err(|error| {
-                    let reason = format!(
-                        "invalid Syslog client config key 'tls_ca_file' '{}': {error}",
-                        ca_file.display()
-                    );
+        }?;
+        let builder = ServerConfig::builder();
+        let config = {
+            let mapping_input = if let Some(ca_file) = tls.ca_file.as_ref() {
+                let ca_pem = {
+                    let mapping_input = read_tls_file(ca_file, "Syslog TLS client CA certificate");
+                    match mapping_input {
+                        Ok(mapped_value) => Ok(mapped_value),
+                        Err(error) => Err({
+                            let reason = error.to_string();
+                            error.change_context(SyslogConfigError::TlsMaterial { reason })
+                        }),
+                    }
+                }?;
+                let mut roots = RootCertStore::empty();
+                for cert in CertificateDer::pem_slice_iter(&ca_pem) {
+                    let cert = {
+                        let mapping_input = cert;
+                        match mapping_input {
+                            Ok(mapped_value) => Ok(mapped_value),
+                            Err(error) => Err({
+                                let reason = format!(
+                                    "invalid Syslog client config key 'tls_ca_file' '{}': {error}",
+                                    ca_file.display()
+                                );
+                                Report::new(error)
+                                    .change_context(SyslogConfigError::TlsMaterial { reason })
+                            }),
+                        }
+                    }?;
+                    {
+                        let mapping_input = roots.add(cert);
+                        match mapping_input {
+                            Ok(mapped_value) => Ok(mapped_value),
+                            Err(error) => Err({
+                                let reason = format!(
+                                    "invalid Syslog client config key 'tls_ca_file' '{}': {error}",
+                                    ca_file.display()
+                                );
+                                Report::new(error)
+                                    .change_context(SyslogConfigError::TlsMaterial { reason })
+                            }),
+                        }
+                    }?;
+                }
+                let verifier = {
+                    let mapping_input = WebPkiClientVerifier::builder(StdArc::new(roots)).build();
+                    match mapping_input {
+                        Ok(mapped_value) => Ok(mapped_value),
+                        Err(error) => Err({
+                            let reason = format!(
+                                "invalid Syslog client config key 'tls_ca_file' '{}': {error}",
+                                ca_file.display()
+                            );
+                            Report::new(error)
+                                .change_context(SyslogConfigError::TlsMaterial { reason })
+                        }),
+                    }
+                }?;
+                builder
+                    .with_client_cert_verifier(verifier)
+                    .with_single_cert(certs, key)
+            } else {
+                builder.with_no_client_auth().with_single_cert(certs, key)
+            };
+            match mapping_input {
+                Ok(mapped_value) => Ok(mapped_value),
+                Err(error) => Err({
+                    let reason = format!("invalid Syslog TLS server identity: {error}");
                     Report::new(error).change_context(SyslogConfigError::TlsMaterial { reason })
-                })?;
-            builder
-                .with_client_cert_verifier(verifier)
-                .with_single_cert(certs, key)
-        } else {
-            builder.with_no_client_auth().with_single_cert(certs, key)
-        }
-        .map_err(|error| {
-            let reason = format!("invalid Syslog TLS server identity: {error}");
-            Report::new(error).change_context(SyslogConfigError::TlsMaterial { reason })
-        })?;
+                }),
+            }
+        }?;
         Ok(StdArc::new(config))
     }
 }

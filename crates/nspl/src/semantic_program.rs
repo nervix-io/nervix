@@ -662,9 +662,11 @@ fn expression<'src>()
 fn assignment_target<'src>()
 -> impl Parser<'src, &'src [Token], AssignmentTarget, extra::Err<ParseError<'src>>> + Clone {
     let quoted = quoted_name().try_map(|raw: String, span| {
-        FieldName::try_from(raw.as_str())
-            .map(AssignmentTarget::bare)
-            .map_err(|error| Rich::custom(span, error.to_string()))
+        let mapping_input = FieldName::try_from(raw.as_str()).map(AssignmentTarget::bare);
+        match mapping_input {
+            Ok(mapped_value) => Ok(mapped_value),
+            Err(error) => Err(Rich::custom(span, error.to_string())),
+        }
     });
     let plain = raw_identifier()
         .then(
@@ -673,9 +675,13 @@ fn assignment_target<'src>()
                 .or_not(),
         )
         .try_map(|(first, field), span| match field {
-            None => FieldName::try_from(first.as_str())
-                .map(AssignmentTarget::bare)
-                .map_err(|error| Rich::custom(span, error.to_string())),
+            None => {
+                let mapping_input = FieldName::try_from(first.as_str()).map(AssignmentTarget::bare);
+                match mapping_input {
+                    Ok(mapped_value) => Ok(mapped_value),
+                    Err(error) => Err(Rich::custom(span, error.to_string())),
+                }
+            }
             Some(field) => {
                 let scope = match first.to_ascii_lowercase().as_str() {
                     "message" => AssignmentTargetScope::Message,

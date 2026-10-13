@@ -144,6 +144,7 @@ own Cucumber, Shuttle, Loom, Turmoil and external Chaos evidence.
 | `typed-report` | `nervix-lint-report` complete compiler-report serialization equality | bounded current findings, spans, expansions and completion metadata, v1 | 256 | 32 bytes |
 | `typed-source-contract` | `nervix-lint-report` complete source-contract parsing equality | bounded current execution-contract annotations, v1 | 256 | 32 bytes |
 | `typed-site-union` | `nervix-lint-report` authored-site deduplication preserves every configuration | repeated ordinary/modeled findings over bounded current sites, v1 | 256 | 32 bytes |
+| `typed-source-syntax` | `nervix-lint-report` exact cast/field counts and complete source/site representation equality | bounded inactive Rust casts, testing-gated tuple fields, raw identifiers and Unicode comments with exact locations, v1 | 256 | 32 bytes |
 | `expiry-map-operations` | `nervix-expiry-map` operation sequences against an `IndexMap` reference: iteration order, lengths, oldest entry, lookups, shared key allocations and one drop per value | up to 480 weighted insert, shared insert, keyed and oldest removal, lookup, shared-key copy and clear steps over 96 keys, v1 | 256 | 1024 bytes |
 | `vm-decimal-rounding-floats` | `nervix-vm` `round(value, digits)` over `F64` and `F32` columns against the exact decimal expansion, the identity on values holding no more digits, symmetry about zero and lane null and failure classification | any bit pattern, values rounded within their own digits, decimal-looking values and exact binary ties, counts near, within and beyond the bound, v1 | 256 | 1024 bytes |
 | `vm-decimal-rounding-integers` | `nervix-vm` integer rounding against a 128-bit reference, overflow failures, lane nulls and digit columns of every integer type clamped to the bound | every integer width, values anywhere and beside both limits, counts near, within and beyond the bound, v1 | 256 | 1024 bytes |
@@ -500,6 +501,13 @@ therefore records a run-local Rustup adapter that forwards the declared `--lib`,
 selector to its Cargo test calls and forwards toolchain/version queries unchanged. It preserves the
 toolchain, features, sanitizer flags and compiler wrapper. Library properties compile and execute only their
 registered harness; they do not compile or invoke the server's Cucumber executable.
+The adapter selects the pinned compiler through `scripts/bolero_rustc.py`, still beneath the
+configured kache wrapper. For `proc-macro2` with `span-locations`, that compiler adapter removes
+only its generic `cfg(fuzzing)`: the dependency otherwise deliberately replaces source locations
+with zero, violating the source parser's contract and collapsing distinct findings. Sanitizer,
+coverage and libFuzzer flags remain intact, and every other crate keeps its configuration. The
+adapter's content digest separates build directories. The source-location property and saved
+regression corpus assert the same exact locations in ordinary and sanitizer execution.
 On a shared host, a cold server build can exceed the campaign runner's 30-minute compilation
 limit. `just prepare-bolero <id>` prepares that same pinned, scoped sanitizer build with a two-hour
 limit and retains its log and preparation metadata. It does not run a campaign or record fuzz

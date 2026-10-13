@@ -189,8 +189,9 @@ archive; see [Restore Streams](#restore-streams).
   MUST expect `CancelOutcome` under the cancellation's identity and, when that outcome is
   `Requested`, the target's own terminal reply as well, in either order. That reply is
   `RequestCancelled` or the target's ordinary reply. `BeforeAdmission` means the target has no
-  effect. `AfterAdmission` means its effect continues and is recovered by its execution reference. A
-  client MUST NOT present a cancellation as undoing anything.
+  effect. `AfterAdmission` means its effect continues and is recovered by its execution reference,
+  except that a domain clock attach answered so attaches nothing (K-1). A client MUST NOT present a
+  cancellation as undoing anything.
 - **C-10.** A client that stops waiting without sending `CancelRequest` MUST treat the request
   exactly as a cancellation after admission: the effect may happen, and a command's outcome is
   recovered by its execution reference.
@@ -462,7 +463,11 @@ payload, infinity, and nullable and sensitive branch key fields.
   `DetachDomainClockRequest`, each naming the domain. It follows each domain at most once. It MUST
   handle every disposition: `DomainClockAttached` with the clock, `DomainClockAlreadyAttached`,
   `DomainNotFound`, and `RequestFailed` for an attach; `DomainClockDetached`,
-  `DomainClockNotAttached`, and `RequestFailed` for a detach.
+  `DomainClockNotAttached`, and `RequestFailed` for a detach. `DomainClockNotAttached` means the
+  session does not follow that clock, and the client MUST stop following it as it does after
+  `DomainClockDetached`. An attach answered `RequestCancelled` attaches nothing, so the client MUST
+  NOT follow the clock on its account; a detach answered `RequestCancelled` with `AfterAdmission`
+  has detached.
 - **K-2.** A client MUST apply the clock in the attach reply before any state or tick frame for
   that domain. The attach reply's state, or a later `DomainClockObserved` for a changed generation,
   MUST be applied before a `DomainClockTicked` of that generation. It MUST ignore frames about a
@@ -475,19 +480,24 @@ payload, infinity, and nullable and sensitive branch key fields.
   tick. It MUST discard unread ticks when it detaches or loses the session.
 - **K-4.** A client MUST read the tick generation and id as nonzero unsigned 64-bit integers; its
   logical boundary, authority UTC observation, and serving-node logical reading are signed 64-bit
-  Unix nanoseconds. Period and skew are unsigned 64-bit nanoseconds, and the time rate is a positive
-  finite double. The serving-node reading anchors the tick when the client's UTC differs from the
-  cluster's. [Domains And Time](./domains-and-time.md#following-a-domain-clock) defines the
+  Unix nanoseconds. A clock's generation is an unsigned 64-bit integer that is zero before the
+  domain's first `START`. Period and skew are unsigned 64-bit nanoseconds, the period is nonzero,
+  and the time rate is a required positive finite double. `DomainClockAttachmentEnded` always
+  carries its reason. The serving-node reading anchors the tick when the client's UTC differs from
+  the cluster's. [Domains And Time](./domains-and-time.md#following-a-domain-clock) defines the
   projection a client computes from a paced clock.
 - **K-5.** After it loses a session, a client that follows clocks MUST attach them again, and MUST
   NOT assume it saw the changes or ticks made in between. It MUST clear the old tick frontier until
   the new attachment reports accepted progress. It MUST treat `DomainClockAlreadyAttached` as the
-  session holding the attachment, and read the clock from that session's frames. A node that is
+  session holding the attachment, keep the clock it last received without a tick, and read the
+  clock from that session's later frames. A node that is
   still starting answers such an attach only once it has installed the committed domains, so
   `DomainNotFound` in reply means the domain no longer exists, and the client MUST end the
   attachment as `DomainClockAttachmentEnded` would. When the session refuses the attach for any
-  other reason or leaves it unanswered, the client MUST keep the attachment interrupted rather than
-  drop the domain, and SHOULD send the attach again on that session after a growing wait.
+  other reason, the client MUST keep the attachment interrupted rather than drop the domain, and
+  SHOULD send the attach again on that session after a growing wait. An attach the session leaves
+  unanswered past the client's request timeout ends that session, as any request that outlives the
+  timeout does, and the client attaches the clock again on its next session.
 
 ## Producers
 
@@ -717,11 +727,12 @@ and these rules:
   recovers the backup's outcome and downloads its archive while the server retains it.
 - **B-9.** A host MUST release every `nx_clock_event` that `nx_session_next_clock_event` or
   `nx_clock_event_retain` returns exactly once, and MAY release it on any thread. It MUST treat
-  `NX_CLOCK_EVENT_INTERRUPTED` as a gap in that domain's clock: the state event that follows
-  reports the clock the restored attachment found, and the changes and ticks in between are not
-  reported. It MUST treat `NX_CLOCK_EVENT_RESTORATION_FAILED` as a refused attempt to attach that
-  domain's clock again, which the session repeats. [Rust Client Library](./client-library.md#through-the-shared-c-binding) lists the
-  accessors of each event kind.
+  `NX_CLOCK_EVENT_INTERRUPTED` as a gap in that domain's clock: the changes and ticks in between are
+  not reported, and the clock the restored attachment found arrives as the next state event, or,
+  when the new session already held the attachment, with that session's later events. It MUST treat
+  `NX_CLOCK_EVENT_RESTORATION_FAILED` as a refused attempt to attach that domain's clock again,
+  which the session repeats; that event carries only its kind and domain. [Rust Client
+  Library](./client-library.md#through-the-shared-c-binding) lists the accessors of each event kind.
 - **B-10.** A host that runs `RESTORE` through `nx_session_execute` streams the archive the
   statement names, and reads what the restore's report says with `nx_outcome_restore`. After an
   error that names the restore's execution reference, the host MUST execute the same `nx_execution`
@@ -915,8 +926,10 @@ are not UUIDv7, which E-1 allows only for reads.
 | `tests/client_conformance/java/Probe.java` | The binding through the Foreign Function and Memory API, with arena-owned events |
 | `tests/client_conformance/ruby/probe.rb` | The binding through Fiddle, with collector-driven release |
 
-Run with the `clock` argument, each binding probe follows a paced domain clock instead: it attaches,
-reads the state and the first tick of the generation the scenario starts, and detaches. Run with the
+Run with the `clock` argument, each binding probe follows a paced domain clock instead: it attaches
+to a running clock, reads the clock the attach reported and its projections before it uses a tick,
+follows a `STOP` and `START` into the next generation and the attachment the binding restores after
+the scenario cuts its session, and detaches. Run with the
 `io` argument, it opens a producer and a consumer, builds typed batches column by column, reads
 their output one level at a time, and retries, rejects, and acknowledges it across a session the
 scenario cuts.

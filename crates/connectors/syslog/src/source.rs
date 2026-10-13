@@ -569,7 +569,11 @@ impl StreamFrameDecoder {
         self.buffer.drain(..self.cursor);
         self.cursor = 0;
         // The buffer is filled to at most `cap` bytes, so a longer one has no room left.
-        let remaining = cap.saturating_sub(self.buffer.len());
+        let remaining = nervix_primitives::expect_lint!(
+            nervix::clamped_arithmetic,
+            "a full or oversized framing buffer has zero remaining capacity",
+            cap.saturating_sub(self.buffer.len())
+        );
         if remaining == 0 {
             return Err(Report::new(SyslogFrameError::OversizedBufferedFrame {
                 maximum: self.max_message_size,

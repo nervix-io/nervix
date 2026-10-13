@@ -118,7 +118,7 @@ from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
 from typing import Iterator, Mapping, Sequence
 
-from scripts.ratchet import RustFile, Site
+from scripts.rust_source import RustFile, Site
 
 RULE = "primitive boundary"
 OWNER = "nervix-primitives"

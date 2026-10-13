@@ -8,8 +8,10 @@ version.workspace = true
 anyhow.workspace = true
 error-stack.workspace = true
 indexmap.workspace = true
+proc-macro2.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+syn.workspace = true
 thiserror.workspace = true
 
 [dev-dependencies]

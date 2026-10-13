@@ -202,16 +202,18 @@ impl RedisPubSubSourcePlan {
         tls: Option<&StdArc<rustls::ClientConfig>>,
         budget: &ConnectionBudget,
     ) -> RedisPubSubSourceResult<ConnectedStream> {
-        let addresses = self
-            .dns
-            .resolve(host, port, budget.remaining())
-            .await
-            .map_err(|error| {
-                let lookup = error.current_context();
-                let host = lookup.name().to_string();
-                let failure = lookup.failure();
-                error.change_context(RedisPubSubSourceError::Resolve { host, failure })
-            })?;
+        let addresses = {
+            let mapping_input = self.dns.resolve(host, port, budget.remaining()).await;
+            match mapping_input {
+                Ok(mapped_value) => Ok(mapped_value),
+                Err(error) => Err({
+                    let lookup = error.current_context();
+                    let host = lookup.name().to_string();
+                    let failure = lookup.failure();
+                    error.change_context(RedisPubSubSourceError::Resolve { host, failure })
+                }),
+            }
+        }?;
         let mut last_failure = None;
         for attempt in budget.attempts(&addresses) {
             nervix_primitives::task::consume_budget().await;

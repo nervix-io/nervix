@@ -747,14 +747,17 @@ impl Compiler {
                 continue;
             }
             for field in binding.schema.fields() {
-                let reg = RegisterType::from_data_type(field.data_type()).map(|ty| {
-                    let reg = layouts.alloc(RegisterSpace::Input, ty);
-                    inputs.push(InputBinding {
-                        column_index: input_index,
-                        reg,
-                    });
-                    reg
-                });
+                let reg = match RegisterType::from_data_type(field.data_type()) {
+                    Some(ty) => {
+                        let reg = layouts.alloc(RegisterSpace::Input, ty);
+                        inputs.push(InputBinding {
+                            column_index: input_index,
+                            reg,
+                        });
+                        Some(reg)
+                    }
+                    None => None,
+                };
                 input_fields.push(Field::new(
                     if single_binding {
                         field.name().clone()

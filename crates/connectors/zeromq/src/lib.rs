@@ -65,12 +65,18 @@ impl ZeroMqSink {
     }
 
     fn addr_from_config(config: &[ClientConfigEntry]) -> SinkStartResult<String> {
-        client_config_value(config, "addr", "ZeroMQ").map_err(|error| {
-            let message = error.current_context().to_string();
-            error
-                .change_context(SinkStartError::InvalidConfiguration { sink: ZEROMQ })
-                .attach_printable(message)
-        })
+        {
+            let mapping_input = client_config_value(config, "addr", "ZeroMQ");
+            match mapping_input {
+                Ok(mapped_value) => Ok(mapped_value),
+                Err(error) => Err({
+                    let message = error.current_context().to_string();
+                    error
+                        .change_context(SinkStartError::InvalidConfiguration { sink: ZEROMQ })
+                        .attach_printable(message)
+                }),
+            }
+        }
     }
 
     fn bind_from_config(config: &[ClientConfigEntry]) -> bool {

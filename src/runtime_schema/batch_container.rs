@@ -407,12 +407,16 @@ fn run_batch_transformation(
         };
         values.push(value.clone());
     }
-    program
-        .run_single(JsonValue::Array(values))
-        .map_err(|error| {
-            let context = BatchContainerError::from(error.current_context());
-            error.change_context(context)
-        })
+    {
+        let mapping_input = program.run_single(JsonValue::Array(values));
+        match mapping_input {
+            Ok(mapped_value) => Ok(mapped_value),
+            Err(error) => Err({
+                let context = BatchContainerError::from(error.current_context());
+                error.change_context(context)
+            }),
+        }
+    }
 }
 
 /// The default container of a jaq-native format: an array for the formats with a top-level

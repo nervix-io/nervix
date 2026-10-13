@@ -1044,14 +1044,14 @@ pub fn duration_lit<'src>()
             .then(word_raw())
             .map(|(number, unit)| format!("{number}{unit}"))
             .try_map(|raw, span| {
-                nervix_models::parse_duration_text(&raw)
-                    .map(|_| raw.clone())
-                    .map_err(|report| {
-                        Rich::custom(
-                            span,
-                            format!("invalid duration '{raw}': {}", report.current_context()),
-                        )
-                    })
+                let mapping_input = nervix_models::parse_duration_text(&raw).map(|_| raw.clone());
+                match mapping_input {
+                    Ok(mapped_value) => Ok(mapped_value),
+                    Err(report) => Err(Rich::custom(
+                        span,
+                        format!("invalid duration '{raw}': {}", report.current_context()),
+                    )),
+                }
             }),
         unknown_word(),
     ))
@@ -1076,10 +1076,14 @@ pub fn byte_size_lit<'src>()
         word_raw(),
     ))
     .try_map(|value, span| {
-        value
-            .parse::<ubyte::ByteUnit>()
-            .map(|_| value)
-            .map_err(|error| Rich::custom(span, format!("invalid byte_size_literal: {error}")))
+        let mapping_input = value.parse::<ubyte::ByteUnit>().map(|_| value);
+        match mapping_input {
+            Ok(mapped_value) => Ok(mapped_value),
+            Err(error) => Err(Rich::custom(
+                span,
+                format!("invalid byte_size_literal: {error}"),
+            )),
+        }
     })
     .labelled("byte_size_literal")
     .boxed()
