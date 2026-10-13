@@ -14,6 +14,7 @@ blake3 = { workspace = true }
 clap = { workspace = true, features = ["derive", "env"] }
 error-stack = { workspace = true }
 hickory-proto = { workspace = true }
+memchr = { workspace = true }
 meticulous = { workspace = true }
 nervix-primitives = { workspace = true, features = ["native"] }
 nervix-recovery = { workspace = true }

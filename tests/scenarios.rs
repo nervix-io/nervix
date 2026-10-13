@@ -113,11 +113,12 @@ use crate::common::{
     },
     cluster_teardown::CLUSTER_TEARDOWN_BUDGET,
     dependencies::{
-        CLICKHOUSE_ADDR, CLICKHOUSE_TLS_ADDR, DependencyEndpoints, ICEBERG_REST_ADDR, KAFKA_ADDR,
-        KAFKA_DOCKER_ADDR, KAFKA_DOCKER_NETWORK, MOCK_HTTP_ADDR, MOCK_WS_ADDR, MOCK_WSS_ADDR,
-        MONGODB_ADDR, MONGODB_TLS_ADDR, MQTT_ADDR, MQTT_TLS_ADDR, MYSQL_ADDR, MYSQL_TLS_ADDR,
-        POSTGRES_ADDR, POSTGRES_TLS_ADDR, PULSAR_ADDR, RABBITMQ_ADDR, RABBITMQ_TLS_ADDR,
-        REDIS_ADDR, REDIS_TLS_ADDR, RUSTFS_ADDR, SQS_ENDPOINT, SQS_TLS_ENDPOINT, TestDependencies,
+        CLICKHOUSE_ADDR, CLICKHOUSE_TLS_ADDR, CollectorWait, DependencyEndpoints,
+        ICEBERG_REST_ADDR, KAFKA_ADDR, KAFKA_DOCKER_ADDR, KAFKA_DOCKER_NETWORK, MOCK_HTTP_ADDR,
+        MOCK_WS_ADDR, MOCK_WSS_ADDR, MONGODB_ADDR, MONGODB_TLS_ADDR, MQTT_ADDR, MQTT_TLS_ADDR,
+        MYSQL_ADDR, MYSQL_TLS_ADDR, POSTGRES_ADDR, POSTGRES_TLS_ADDR, PULSAR_ADDR, RABBITMQ_ADDR,
+        RABBITMQ_TLS_ADDR, REDIS_ADDR, REDIS_TLS_ADDR, RUSTFS_ADDR, SQS_ENDPOINT, SQS_TLS_ENDPOINT,
+        TestDependencies,
     },
     grpc_receiver::{CapturedCall, GrpcAnswer, GrpcReceiver},
     http_receiver::{
@@ -26488,112 +26489,31 @@ async fn then_quickwit_index_eventually_contains(
     }
 }
 
+/// How long a scenario waits for text in the OpenTelemetry Collector's followed output.
+const OTEL_COLLECTOR_CONTENT_BOUND: Duration = Duration::from_secs(10);
+
 #[then(expr = "OpenTelemetry Collector eventually contains {string}")]
 async fn then_otel_collector_eventually_contains(world: &mut ScenarioWorld, expected: String) {
     let expected = expand_placeholders(world, &expected);
-    let started = Instant::now();
-    let deadline = started + Duration::from_secs(10);
-    let mut observation_count = 0_usize;
-    let mut slow_observations = Vec::new();
-    let mut slowest_lock_wait = Duration::ZERO;
-    let mut slowest_read = Duration::ZERO;
-    loop {
-        nervix_primitives::task::consume_budget().await;
-        let requested = Instant::now();
-        let observation = world
-            .dependencies
-            .otel_collector_observation(&expected)
-            .await
-            .expect("OpenTelemetry Collector logs must be readable");
-        observation_count = observation_count
-            .checked_add(1)
-            .assured("a ten-second wait cannot make usize::MAX observations");
-        let slow = Duration::from_millis(100);
-        if observation.lock_wait >= slow || observation.read >= slow {
-            slow_observations.push(format!(
-                "+{:?} lock={:?} read={:?}",
-                requested.duration_since(started),
-                observation.lock_wait,
-                observation.read
-            ));
-        }
-        slowest_lock_wait = slowest_lock_wait.max(observation.lock_wait);
-        slowest_read = slowest_read.max(observation.read);
-        if observation.contains {
-            append_cucumber_log_line(&format!(
-                "otel collector observed {expected:?} after {:?}: {observation_count} \
-                 observations, slowest lock={slowest_lock_wait:?} read={slowest_read:?}, slower \
-                 than 100ms: {slow_observations:?}",
-                Instant::now().duration_since(started)
-            ));
-            return;
-        }
-        if Instant::now() >= deadline {
-            let last = format!(
-                "+{:?} lock={:?} read={:?}",
-                requested.duration_since(started),
-                observation.lock_wait,
-                observation.read
-            );
-            let diagnostics = otel_collector_timeout_diagnostics(world, &expected).await;
-            let logs = world.dependencies.otel_collector_logs().await;
-            panic!(
-                "timed out waiting for OpenTelemetry Collector to contain {expected:?}; \
-                 {observation_count} observations, last {last}, slower than 100ms: \
-                 {slow_observations:?}; {diagnostics}; last command output: {:?}; collector \
-                 output:\n{logs:?}",
-                world.last_command_output
-            );
-        }
-        nervix_primitives::time::sleep(Duration::from_millis(50)).await;
-    }
-}
-
-/// What a Collector timeout leaves to explain it: whether one more observation finds the needle,
-/// and every emitter's published counters and status on every node of the scenario's cluster.
-async fn otel_collector_timeout_diagnostics(world: &ScenarioWorld, expected: &str) -> String {
-    let mut diagnostics = Vec::new();
-    let final_observation = world
+    let output = world
         .dependencies
-        .otel_collector_observation(expected)
+        .otel_collector_output()
+        .expect("the scenario started the OpenTelemetry Collector")
+        .clone();
+    let wait = output
+        .wait_for(&expected, OTEL_COLLECTOR_CONTENT_BOUND)
         .await;
-    diagnostics.push(format!("final observation: {final_observation:?}"));
-    for node_id in world.cluster().node_ids() {
-        let metrics = world
-            .cluster()
-            .observability_metrics_text(&node_id, Duration::from_secs(5))
-            .await;
-        let metrics = match metrics {
-            Ok(metrics) => metrics,
-            Err(error) => {
-                diagnostics.push(format!("node {node_id} metrics unavailable: {error}"));
-                continue;
-            }
-        };
-        let mut emitters = BTreeSet::new();
-        for line in metrics.lines() {
-            if !line.starts_with("nervix_messages_total")
-                || !line.contains("target_kind=\"EMITTER\"")
-            {
-                continue;
-            }
-            diagnostics.push(format!("node {node_id}: {line}"));
-            if let Some(target) = line.split("target=\"").nth(1)
-                && let Some(name) = target.split('"').next()
-            {
-                emitters.insert(name.to_string());
-            }
-        }
-        for emitter in emitters {
-            let described =
-                run_nspl_commands_on_node(world, &node_id, &format!("DESCRIBE EMITTER {emitter};"))
-                    .await;
-            diagnostics.push(format!(
-                "node {node_id} DESCRIBE EMITTER {emitter}: {described:?}"
-            ));
-        }
-    }
-    diagnostics.join("; ")
+    let ended = match wait {
+        CollectorWait::Found => return,
+        CollectorWait::Elapsed => format!("its {OTEL_COLLECTOR_CONTENT_BOUND:?} bound passed"),
+        CollectorWait::FollowerStopped => "the follower stopped reading it".to_string(),
+    };
+    let missed = output.missed(&expected, &world.test_id);
+    panic!(
+        "timed out waiting for OpenTelemetry Collector to contain {expected:?}: {ended}; \
+         {missed}; last command output: {:?}",
+        world.last_command_output
+    );
 }
 
 #[then(
@@ -26618,15 +26538,16 @@ async fn then_otel_collector_receives_split_exports(
         .filter(|member| !member.is_empty())
         .collect::<Vec<_>>();
     assert_eq!(members.len(), 3, "the step names exactly three members");
-    let deadline = Instant::now() + Duration::from_secs(10);
+    let output = world
+        .dependencies
+        .otel_collector_output()
+        .expect("the scenario started the OpenTelemetry Collector")
+        .clone();
+    let deadline = Instant::now() + OTEL_COLLECTOR_CONTENT_BOUND;
     let export_boundary = format!("\tinfo\t{heading}\t");
     loop {
         nervix_primitives::task::consume_budget().await;
-        let logs = world
-            .dependencies
-            .otel_collector_logs()
-            .await
-            .expect("OpenTelemetry Collector logs must be readable");
+        let logs = output.text();
         let mut two_record_export = None;
         let mut one_record_export = None;
         let mut observed = Vec::new();

@@ -173,10 +173,15 @@ up to three more times with a new port selection. It also removes the failed con
 attempts are exhausted, so a scenario retry does not collide with its name. Other startup failures
 reach the scenario directly.
 
-The OpenTelemetry Collector dependency exposes its stdout and stderr to scenario assertions. A
-batching scenario reads the Collector's debug exporter output to check the number and order of
-records in each received export request, using unique test markers to distinguish simultaneous
-scenarios sharing that container.
+The OpenTelemetry Collector dependency exposes its stdout and stderr to scenario assertions through
+one follower that the suite-owned environment starts with the container. The follower streams both
+outputs from the container's start into an in-memory transcript of at most 1 GiB per output, and
+every scenario observes that transcript without the environment's lock or another read of the
+container's logs. A Docker logs read answers with the output as it stood when the read began, and
+the Collector's output grows for the whole run, so no assertion re-reads it. The environment stops
+the follower before it tears the container down. A batching scenario reads the Collector's debug
+exporter output to check the number and order of records in each received export request, using
+unique test markers to distinguish simultaneous scenarios sharing that container.
 
 The raw session fixture records domain-clock replies and frames in the order it reads them. A wait
 for a detach reply can queue ticks that arrived before the reply; the post-detach assertion checks
@@ -545,10 +550,17 @@ node stopped. The OTEL metric scenario observes one successful export from each 
 owner before checking Collector output. HTTP intake acceptance does not establish sink export,
 and the per-owner counters retain exact progress assertions for both HTTP and gRPC.
 
-The OTEL Collector content wait keeps its ten-second observation bound. If that bound expires,
-its failure includes the last command output and a collector log snapshot, or the snapshot's
-read error. A collector timeout alone does not establish that the emitter lost a record or failed
-to export it; retained diagnostics and a new attempt remain separate evidence.
+The OTEL Collector content wait keeps its ten-second bound, from the step's start to the text's
+appearance in the followed transcript, counting output printed before the step began. Each look
+searches only what arrived since the previous look, plus the bytes an occurrence could span across
+it, and every append wakes the wait, so the text is seen as soon as the follower reads it. No look
+re-reads the whole output, so a record delivered within the bound cannot be missed by a long read
+that began before the delivery and ended after the bound. If the bound expires, or the follower
+stops first, the failure reports whether the text arrived after the wait ended, how far the follower
+has read each output and how it stopped, the latest 200 Collector lines that name the scenario's
+test identifier, and the last command output. A collector timeout alone does not establish that the
+emitter lost a record or failed to export it; retained diagnostics and a new attempt remain separate
+evidence.
 
 A scenario step can also read status inside a window of its own, passing that window as the phase
 deadline. Where the window bounds how long something is watched rather than how long one read may
