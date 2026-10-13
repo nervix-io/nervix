@@ -43,7 +43,7 @@ use super::{
 const HEADER_BYTES: usize = 40;
 const CHUNK_BYTES: u64 = 64 * 1024;
 
-#[derive(Debug, Error)]
+#[derive(Debug, PartialEq, Eq, Error)]
 enum KafkaOffsetTransferError {
     #[error(
         "Kafka offset stream declares {declared} bytes; a checkpoint requires at least {minimum}"
@@ -398,6 +398,10 @@ impl Runtime {
     nervix::layer(harness, reason = "test module remains outside product execution")
 )]
 mod tests {
+    use std::num::NonZeroUsize;
+
+    use nervix_arbitrary::{Arbitrary, Domain};
+
     use super::*;
 
     /// The header a receiver gathers from `stream` delivered in one chunk.
@@ -405,6 +409,206 @@ mod tests {
         let mut header = ReceivedHeader::new();
         header.take(stream);
         header
+    }
+
+    /// What a receiver makes of a stream delivered in chunks: the verdict on its header, and
+    /// every byte it forwarded as payload, in order.
+    struct Reassembled {
+        checkpoint: error_stack::Result<(u64, [u8; 32]), KafkaOffsetTransferError>,
+        payload: Vec<u8>,
+    }
+
+    /// Feeds `chunks` through the receiver's header the way the transfer loop does, forwarding
+    /// what each chunk holds after the header's last byte.
+    fn reassemble<'stream>(
+        chunks: impl IntoIterator<Item = &'stream [u8]>,
+        after: u64,
+        described: u64,
+    ) -> Reassembled {
+        let mut header = ReceivedHeader::new();
+        let mut payload = Vec::new();
+        for chunk in chunks {
+            let taken = header.take(chunk);
+            payload.extend_from_slice(&chunk[taken..]);
+        }
+        Reassembled {
+            checkpoint: header.checkpoint(after, described),
+            payload,
+        }
+    }
+
+    /// `stream` cut into chunks of generated lengths, with empty chunks between them, as a
+    /// transport may deliver it.
+    fn generated_chunks<'stream>(
+        arbitrary: &mut Arbitrary<'_>,
+        stream: &'stream [u8],
+    ) -> Vec<&'stream [u8]> {
+        let mut chunks = Vec::new();
+        let mut rest = stream;
+        while let Some(remaining) = NonZeroUsize::new(rest.len()) {
+            if arbitrary.entropy().flag() {
+                chunks.push(&rest[..0]);
+            }
+            let length = arbitrary.entropy().positive_count(remaining);
+            let (chunk, tail) = rest.split_at(length);
+            chunks.push(chunk);
+            rest = tail;
+        }
+        chunks
+    }
+
+    /// Asserts that `reassembled` reached the `expected` verdict, a refusal compared by its typed
+    /// context, and forwarded exactly `payload`.
+    fn assert_reassembled(
+        reassembled: Reassembled,
+        expected: &Result<(u64, [u8; 32]), KafkaOffsetTransferError>,
+        payload: &[u8],
+    ) {
+        match (reassembled.checkpoint, expected) {
+            (Ok(actual), Ok(expected)) => assert_eq!(actual, *expected),
+            (Err(report), Err(expected)) => assert_eq!(report.current_context(), expected),
+            (actual, expected) => panic!("the receiver reached {actual:?} instead of {expected:?}"),
+        }
+        assert_eq!(reassembled.payload, payload);
+    }
+
+    /// Asserts that `stream` reaches the `expected` verdict and forwards exactly `payload` when it
+    /// is cut at every position, and when it is cut into generated chunks.
+    fn assert_every_split_reassembles(
+        arbitrary: &mut Arbitrary<'_>,
+        stream: &[u8],
+        after: u64,
+        described: u64,
+        expected: &Result<(u64, [u8; 32]), KafkaOffsetTransferError>,
+        payload: &[u8],
+    ) {
+        for split in 0..=stream.len() {
+            let (first, second) = stream.split_at(split);
+            let reassembled = reassemble([first, second], after, described);
+            assert_reassembled(reassembled, expected, payload);
+        }
+        let chunks = generated_chunks(arbitrary, stream);
+        let reassembled = reassemble(chunks, after, described);
+        assert_reassembled(reassembled, expected, payload);
+    }
+
+    /// The verdict the header's layout gives `stream`: a stream that ends inside the forty-byte
+    /// header is too short, a revision its first eight bytes spell that does not advance `after`
+    /// or precedes `described` is stale, and any other header names that revision and the digest
+    /// in its remaining thirty-two bytes.
+    fn header_verdict(
+        stream: &[u8],
+        after: u64,
+        described: u64,
+    ) -> Result<(u64, [u8; 32]), KafkaOffsetTransferError> {
+        let Some(header) = stream.get(..HEADER_BYTES) else {
+            return Err(KafkaOffsetTransferError::HeaderLength {
+                actual: stream.len(),
+                expected: HEADER_BYTES,
+            });
+        };
+        let mut revision = [0; 8];
+        revision.copy_from_slice(&header[..8]);
+        let received = u64::from_le_bytes(revision);
+        if received <= after || received < described {
+            return Err(KafkaOffsetTransferError::Revision {
+                received,
+                after,
+                described,
+            });
+        }
+        let mut digest = [0; 32];
+        digest.copy_from_slice(&header[8..]);
+        Ok((received, digest))
+    }
+
+    /// A revision one below `revision`, `revision` itself or one above it where those exist, or any
+    /// revision, so both sides of every comparison a header's revision meets are reached.
+    fn beside(arbitrary: &mut Arbitrary<'_>, revision: u64) -> u64 {
+        match arbitrary.entropy().byte() % 4 {
+            0 => revision.checked_sub(1).unwrap_or(revision),
+            1 => revision,
+            2 => revision.checked_add(1).unwrap_or(revision),
+            _ => arbitrary.entropy().any_u64(),
+        }
+    }
+
+    /// A checkpoint's header and payload, cut at every position and into generated chunks with
+    /// empty ones between them, reassemble into the revision and digest the header carries and
+    /// exactly the payload behind it.
+    #[test]
+    fn bolero_checkpoint_headers_reassemble_at_every_split() {
+        bolero::check!()
+            .with_iterations(256)
+            .with_max_len(1024)
+            .for_each(|bytes: &[u8]| {
+                let mut arbitrary = Arbitrary::new(bytes, Domain::Vocabulary);
+                // A transferred checkpoint advances the revision the replica holds and retains the
+                // one its owner described, so its revision is never zero.
+                let revision = arbitrary.entropy().boundary_biased(1..=u64::MAX);
+                let held = revision
+                    .checked_sub(1)
+                    .verified("the revision was drawn from one upwards");
+                let after = arbitrary.entropy().boundary_biased(0..=held);
+                let described = arbitrary.entropy().boundary_biased(0..=revision);
+                let digest = arbitrary.digest();
+                let mut payload = Vec::new();
+                for _ in 0..arbitrary.entropy().count(128) {
+                    payload.push(arbitrary.entropy().byte());
+                }
+                let mut stream = revision.to_le_bytes().to_vec();
+                stream.extend_from_slice(&digest);
+                stream.extend_from_slice(&payload);
+                assert_every_split_reassembles(
+                    &mut arbitrary,
+                    &stream,
+                    after,
+                    described,
+                    &Ok((revision, digest)),
+                    &payload,
+                );
+            });
+    }
+
+    /// Streams of any bytes, cut at every position and into generated chunks, are refused with the
+    /// typed length refusal when they end inside the header and with the typed revision refusal
+    /// when the revision they spell does not advance the held one or precedes the described one.
+    /// Any other stream yields the revision and digest its header spells, and every stream
+    /// forwards exactly the bytes behind its header.
+    #[test]
+    fn bolero_short_and_stale_checkpoint_headers_are_refused_at_every_split() {
+        bolero::check!()
+            .with_iterations(256)
+            .with_max_len(1024)
+            .for_each(|bytes: &[u8]| {
+                let mut arbitrary = Arbitrary::new(bytes, Domain::Vocabulary);
+                // Half the streams end inside the header.
+                let length = if arbitrary.entropy().flag() {
+                    arbitrary.entropy().count(HEADER_BYTES - 1)
+                } else {
+                    HEADER_BYTES + arbitrary.entropy().count(64)
+                };
+                let mut stream = Vec::with_capacity(length);
+                for _ in 0..length {
+                    stream.push(arbitrary.entropy().byte());
+                }
+                let spelled = match stream.first_chunk::<8>() {
+                    Some(revision) => u64::from_le_bytes(*revision),
+                    None => arbitrary.entropy().any_u64(),
+                };
+                let after = beside(&mut arbitrary, spelled);
+                let described = beside(&mut arbitrary, spelled);
+                let expected = header_verdict(&stream, after, described);
+                let forwarded = &stream[HEADER_BYTES.min(stream.len())..];
+                assert_every_split_reassembles(
+                    &mut arbitrary,
+                    &stream,
+                    after,
+                    described,
+                    &expected,
+                    forwarded,
+                );
+            });
     }
 
     #[test]
